@@ -7,9 +7,10 @@ Accepted as the initial implementation direction.
 ## Context
 
 Yakitori is a from-scratch coding-agent harness. The project will learn from
-Codex, opencode, Claude Code, Gemini CLI, Qwen Code, Kimi Code, Mistral Vibe,
-Aider, Cline, Kiro, OpenHands, and cloud agents such as Jules and GitHub
-Copilot coding agent.
+Codex, opencode, Claude Code public documentation and observable behavior,
+ChinaSiro/claude-code-sourcemap as an unofficial research reference, Gemini CLI,
+Qwen Code, Kimi Code, Mistral Vibe, Aider, Cline, Kiro, OpenHands, and cloud
+agents such as Jules and GitHub Copilot coding agent.
 
 These projects have overlapping product goals, but they expose different
 implementation primitives. Yakitori needs a small first core that can grow

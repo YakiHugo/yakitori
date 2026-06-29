@@ -13,6 +13,7 @@ Allowed local references:
 
 - `.references/public/opencode`
 - `.references/public/codex`
+- `.references/public/claude-code-sourcemap`
 - Public Claude Code documentation and observable product behavior
 
 ## Branch Names
@@ -205,17 +206,47 @@ Keep changes small unless they are mechanical.
 
 ## Current Commands
 
-The project has not chosen its package manager, runtime layout, or test runner
-yet. When those decisions are made, replace this section with exact commands.
+Install:
 
-Expected future command sections:
+```sh
+pnpm install
+```
 
-- Install
-- Format
-- Typecheck
-- Test
-- Run server
-- Run GUI
+Format:
+
+```sh
+pnpm format
+```
+
+Typecheck:
+
+```sh
+pnpm typecheck
+```
+
+Test:
+
+```sh
+pnpm test
+```
+
+Check:
+
+```sh
+pnpm check
+```
+
+Build:
+
+```sh
+pnpm build
+```
+
+Run Vite dev server:
+
+```sh
+pnpm dev
+```
 
 ## UI Changes
 
