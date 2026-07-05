@@ -60,6 +60,7 @@ describe("kernel events", () => {
     expect(envelope).toMatchObject({
       sessionId,
       seq: 1,
+      version: 1,
       type: EventType.InputAdmitted,
       createdAt: "2026-07-06T00:00:00.000Z",
       data: event.data,
@@ -84,7 +85,26 @@ describe("kernel events", () => {
     ).toThrow(RangeError)
   })
 
-  it("keeps event data narrowed by event type", () => {
+  it("rejects non-positive event versions", () => {
+    const sessionId = createSessionId()
+    const event = {
+      type: EventType.SessionCreated,
+      data: {
+        title: "Yakitori",
+      },
+    } satisfies KernelEvent
+
+    expect(() =>
+      createEventEnvelope({
+        sessionId,
+        seq: 1,
+        version: 0,
+        event,
+      }),
+    ).toThrow(RangeError)
+  })
+
+  it("keeps event data narrowed by event type in event consumers", () => {
     const sessionId = createSessionId()
     const turnId = createTurnId()
     const itemId = createItemId()
@@ -139,7 +159,7 @@ describe("kernel events", () => {
       "tool:{\"ok\":true,\"files\":3}",
     ])
     expect(envelope.type).toBe(EventType.ToolCompleted)
-    expect(envelope.data.output).toEqual({ ok: true, files: 3 })
+    expect(envelope.data).toEqual(toolCompletedEvent.data)
   })
 })
 

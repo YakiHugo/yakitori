@@ -334,41 +334,45 @@ export type KernelEvent =
   | ToolFailedEvent
   | ToolCancelledEvent
 
-export type EventEnvelope<Event extends KernelEvent = KernelEvent> =
-  Event extends KernelEvent
-    ? {
-        readonly id: EventId
-        readonly sessionId: SessionId
-        readonly seq: number
-        readonly type: Event["type"]
-        readonly createdAt: string
-        readonly data: Event["data"]
-      }
-    : never
-
-export type EventEnvelopeInput<Event extends KernelEvent> = {
+export type EventEnvelope = {
+  readonly id: EventId
   readonly sessionId: SessionId
   readonly seq: number
-  readonly event: Event
+  readonly version: number
+  readonly type: EventType
+  readonly createdAt: string
+  readonly data: KernelEvent["data"]
+}
+
+export type EventEnvelopeInput = {
+  readonly sessionId: SessionId
+  readonly seq: number
+  readonly event: KernelEvent
+  readonly version?: number
   readonly id?: EventId
   readonly createdAt?: string
 }
 
-export function createEventEnvelope<Event extends KernelEvent>(
-  input: EventEnvelopeInput<Event>,
-): EventEnvelope<Event> {
+export function createEventEnvelope(input: EventEnvelopeInput): EventEnvelope {
   assertEventSequence(input.seq)
+  assertEventVersion(input.version ?? 1)
   return {
     id: input.id ?? createEventId(),
     sessionId: input.sessionId,
     seq: input.seq,
+    version: input.version ?? 1,
     type: input.event.type,
     createdAt: input.createdAt ?? new Date().toISOString(),
     data: input.event.data,
-  } as EventEnvelope<Event>
+  }
 }
 
 function assertEventSequence(seq: number): void {
   if (Number.isInteger(seq) && seq > 0) return
   throw new RangeError("Event sequence must be a positive integer.")
+}
+
+function assertEventVersion(version: number): void {
+  if (Number.isInteger(version) && version > 0) return
+  throw new RangeError("Event version must be a positive integer.")
 }

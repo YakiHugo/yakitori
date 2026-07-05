@@ -1,5 +1,3 @@
-type Brand<Value, Name extends string> = Value & { readonly __brand: Name }
-
 export const IdPrefix = {
   Event: "event",
   Input: "input",
@@ -12,13 +10,15 @@ export const IdPrefix = {
 
 export type IdPrefix = (typeof IdPrefix)[keyof typeof IdPrefix]
 
-export type EventId = Brand<string, "EventId">
-export type InputId = Brand<string, "InputId">
-export type ItemId = Brand<string, "ItemId">
-export type PermissionRequestId = Brand<string, "PermissionRequestId">
-export type SessionId = Brand<string, "SessionId">
-export type ToolCallId = Brand<string, "ToolCallId">
-export type TurnId = Brand<string, "TurnId">
+export type EventId = string & { readonly __brand: "EventId" }
+export type InputId = string & { readonly __brand: "InputId" }
+export type ItemId = string & { readonly __brand: "ItemId" }
+export type PermissionRequestId = string & {
+  readonly __brand: "PermissionRequestId"
+}
+export type SessionId = string & { readonly __brand: "SessionId" }
+export type ToolCallId = string & { readonly __brand: "ToolCallId" }
+export type TurnId = string & { readonly __brand: "TurnId" }
 
 export type KernelId =
   | EventId
@@ -29,57 +29,38 @@ export type KernelId =
   | ToolCallId
   | TurnId
 
-export type IdForPrefix<Prefix extends IdPrefix> =
-  Prefix extends typeof IdPrefix.Event
-    ? EventId
-    : Prefix extends typeof IdPrefix.Input
-      ? InputId
-      : Prefix extends typeof IdPrefix.Item
-        ? ItemId
-        : Prefix extends typeof IdPrefix.PermissionRequest
-          ? PermissionRequestId
-          : Prefix extends typeof IdPrefix.Session
-            ? SessionId
-            : Prefix extends typeof IdPrefix.ToolCall
-              ? ToolCallId
-              : Prefix extends typeof IdPrefix.Turn
-                ? TurnId
-                : never
-
-export function createId<Prefix extends IdPrefix>(
-  prefix: Prefix,
-): IdForPrefix<Prefix> {
-  return `${prefix}_${globalThis.crypto.randomUUID()}` as IdForPrefix<Prefix>
-}
-
 export function createEventId(): EventId {
-  return createId(IdPrefix.Event)
+  return createPrefixedId(IdPrefix.Event) as EventId
 }
 
 export function createInputId(): InputId {
-  return createId(IdPrefix.Input)
+  return createPrefixedId(IdPrefix.Input) as InputId
 }
 
 export function createItemId(): ItemId {
-  return createId(IdPrefix.Item)
+  return createPrefixedId(IdPrefix.Item) as ItemId
 }
 
 export function createPermissionRequestId(): PermissionRequestId {
-  return createId(IdPrefix.PermissionRequest)
+  return createPrefixedId(IdPrefix.PermissionRequest) as PermissionRequestId
 }
 
 export function createSessionId(): SessionId {
-  return createId(IdPrefix.Session)
+  return createPrefixedId(IdPrefix.Session) as SessionId
 }
 
 export function createToolCallId(): ToolCallId {
-  return createId(IdPrefix.ToolCall)
+  return createPrefixedId(IdPrefix.ToolCall) as ToolCallId
 }
 
 export function createTurnId(): TurnId {
-  return createId(IdPrefix.Turn)
+  return createPrefixedId(IdPrefix.Turn) as TurnId
 }
 
 export function isIdWithPrefix(value: string, prefix: IdPrefix): boolean {
   return value.startsWith(`${prefix}_`)
+}
+
+function createPrefixedId(prefix: IdPrefix): string {
+  return `${prefix}_${globalThis.crypto.randomUUID()}`
 }
