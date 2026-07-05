@@ -1,0 +1,130 @@
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { describe, expect, it } from "vitest"
+import {
+  createEventEnvelope,
+  createInputId,
+  createJsonlEventStore,
+  createSessionId,
+  EventType,
+  InputRole,
+  type EventStore,
+  type KernelEvent,
+  type SessionId,
+} from "../../src/index.ts"
+
+describe("jsonl event store", () => {
+  it("returns no events for a missing session log", async () => {
+    await withStore(async (context) => {
+      expect(await context.store.readEvents(createSessionId())).toEqual([])
+    })
+  })
+
+  it("appends and reads events in session order", async () => {
+    await withStore(async (context) => {
+      const sessionId = createSessionId()
+      const created = await context.store.appendEvent(
+        sessionId,
+        sessionCreatedEvent(),
+      )
+      const admitted = await context.store.appendEvent(
+        sessionId,
+        inputAdmittedEvent(),
+      )
+
+      expect(created.seq).toBe(1)
+      expect(admitted.seq).toBe(2)
+      expect(await context.store.readEvents(sessionId)).toEqual([
+        created,
+        admitted,
+      ])
+      expect(
+        await readFile(eventsPath(context.rootDir, sessionId), "utf8"),
+      ).toBe(`${JSON.stringify(created)}\n${JSON.stringify(admitted)}\n`)
+    })
+  })
+
+  it("rejects invalid jsonl content", async () => {
+    await withStore(async (context) => {
+      const sessionId = createSessionId()
+
+      await mkdir(sessionDir(context.rootDir, sessionId), { recursive: true })
+      await writeFile(eventsPath(context.rootDir, sessionId), "{not json}\n")
+
+      await expect(context.store.readEvents(sessionId)).rejects.toThrow(
+        "Invalid event JSON at line 1.",
+      )
+    })
+  })
+
+  it("rejects event logs with sequence gaps", async () => {
+    await withStore(async (context) => {
+      const sessionId = createSessionId()
+      const envelope = createEventEnvelope({
+        sessionId,
+        seq: 2,
+        event: sessionCreatedEvent(),
+      })
+
+      await mkdir(sessionDir(context.rootDir, sessionId), { recursive: true })
+      await writeFile(
+        eventsPath(context.rootDir, sessionId),
+        `${JSON.stringify(envelope)}\n`,
+      )
+
+      await expect(context.store.readEvents(sessionId)).rejects.toThrow(
+        "Event sequence must be gap-free. Expected 1, got 2.",
+      )
+    })
+  })
+})
+
+async function withStore(
+  run: (context: {
+    readonly rootDir: string
+    readonly store: EventStore
+  }) => Promise<void>,
+): Promise<void> {
+  const rootDir = await mkdtemp(join(tmpdir(), "yakitori-"))
+
+  try {
+    await run({
+      rootDir,
+      store: createJsonlEventStore({ rootDir }),
+    })
+  } finally {
+    await rm(rootDir, { recursive: true, force: true })
+  }
+}
+
+function sessionCreatedEvent(): KernelEvent {
+  return {
+    type: EventType.SessionCreated,
+    data: {
+      title: "Yakitori",
+    },
+  }
+}
+
+function inputAdmittedEvent(): KernelEvent {
+  return {
+    type: EventType.InputAdmitted,
+    data: {
+      inputId: createInputId(),
+      role: InputRole.User,
+      content: {
+        kind: "text",
+        text: "start the kernel",
+      },
+    },
+  }
+}
+
+function sessionDir(rootDir: string, sessionId: SessionId): string {
+  return join(rootDir, "sessions", sessionId)
+}
+
+function eventsPath(rootDir: string, sessionId: SessionId): string {
+  return join(sessionDir(rootDir, sessionId), "events.jsonl")
+}
