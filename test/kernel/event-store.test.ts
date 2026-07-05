@@ -45,6 +45,19 @@ describe("jsonl event store", () => {
     })
   })
 
+  it("appends event batches with contiguous sequence numbers", async () => {
+    await withStore(async (context) => {
+      const sessionId = createSessionId()
+      const events = await context.store.appendEvents(sessionId, [
+        sessionCreatedEvent(),
+        inputAdmittedEvent(),
+      ])
+
+      expect(events.map((event) => event.seq)).toEqual([1, 2])
+      expect(await context.store.readEvents(sessionId)).toEqual(events)
+    })
+  })
+
   it("rejects invalid jsonl content", async () => {
     await withStore(async (context) => {
       const sessionId = createSessionId()

@@ -10,6 +10,10 @@ import type { SessionId } from "./ids.ts"
 
 export type EventStore = {
   appendEvent(sessionId: SessionId, event: KernelEvent): Promise<EventEnvelope>
+  appendEvents(
+    sessionId: SessionId,
+    events: readonly KernelEvent[],
+  ): Promise<EventEnvelope[]>
   readEvents(sessionId: SessionId): Promise<EventEnvelope[]>
 }
 
@@ -24,27 +28,47 @@ export function createJsonlEventStore(
 
   return {
     async appendEvent(sessionId, event) {
-      // The session runner serializes writes; this store validates order but does not lock.
-      const events = await readEventsFromFile(rootDir, sessionId)
-      const envelope = createEventEnvelope({
-        sessionId,
-        seq: nextSeq(events),
-        event,
-      })
-
-      await mkdir(sessionDir(rootDir, sessionId), { recursive: true })
-      await appendFile(
-        eventsPath(rootDir, sessionId),
-        `${JSON.stringify(envelope)}\n`,
-        "utf8",
-      )
+      const envelopes = await appendEventsToFile(rootDir, sessionId, [event])
+      const envelope = envelopes.at(0)
+      if (!envelope) throw new Error("Expected one appended event.")
       return envelope
+    },
+
+    appendEvents(sessionId, events) {
+      return appendEventsToFile(rootDir, sessionId, events)
     },
 
     readEvents(sessionId) {
       return readEventsFromFile(rootDir, sessionId)
     },
   }
+}
+
+async function appendEventsToFile(
+  rootDir: string,
+  sessionId: SessionId,
+  eventsToAppend: readonly KernelEvent[],
+): Promise<EventEnvelope[]> {
+  if (eventsToAppend.length === 0) return []
+
+  // The session runner serializes writes; this store validates order but does not lock.
+  const existingEvents = await readEventsFromFile(rootDir, sessionId)
+  const nextSequence = nextSeq(existingEvents)
+  const envelopes = eventsToAppend.map((event, index) =>
+    createEventEnvelope({
+      sessionId,
+      seq: nextSequence + index,
+      event,
+    }),
+  )
+
+  await mkdir(sessionDir(rootDir, sessionId), { recursive: true })
+  await appendFile(
+    eventsPath(rootDir, sessionId),
+    `${envelopes.map((envelope) => JSON.stringify(envelope)).join("\n")}\n`,
+    "utf8",
+  )
+  return envelopes
 }
 
 async function readEventsFromFile(

@@ -334,15 +334,15 @@ export type KernelEvent =
   | ToolFailedEvent
   | ToolCancelledEvent
 
-export type EventEnvelope = {
+type EventEnvelopeBase = {
   readonly id: EventId
   readonly sessionId: SessionId
   readonly seq: number
   readonly version: number
-  readonly type: EventType
   readonly createdAt: string
-  readonly data: KernelEvent["data"]
 }
+
+export type EventEnvelope = EventEnvelopeBase & KernelEvent
 
 export type EventEnvelopeInput = {
   readonly sessionId: SessionId
@@ -361,9 +361,8 @@ export function createEventEnvelope(input: EventEnvelopeInput): EventEnvelope {
     sessionId: input.sessionId,
     seq: input.seq,
     version: input.version ?? 1,
-    type: input.event.type,
     createdAt: input.createdAt ?? new Date().toISOString(),
-    data: input.event.data,
+    ...input.event,
   }
 }
 
