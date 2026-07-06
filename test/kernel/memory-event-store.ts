@@ -3,11 +3,10 @@ import {
   type EventEnvelope,
   type EventStore,
   type KernelEvent,
-  type SessionId,
 } from "../../src/index.ts"
 
 export function createMemoryEventStore(): EventStore {
-  const sessions = new Map<SessionId, EventEnvelope[]>()
+  const sessions = new Map<string, EventEnvelope[]>()
 
   return {
     async appendEvent(sessionId, event) {
@@ -25,7 +24,7 @@ export function createMemoryEventStore(): EventStore {
   }
 
   async function appendEvents(
-    sessionId: SessionId,
+    sessionId: string,
     events: readonly KernelEvent[],
   ): Promise<EventEnvelope[]> {
     const existingEvents = sessions.get(sessionId) ?? []

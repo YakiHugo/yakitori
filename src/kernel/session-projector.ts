@@ -7,7 +7,6 @@ import {
   type KernelError,
   type TextContent,
 } from "./events.ts"
-import type { InputId, ItemId, SessionId, TurnId } from "./ids.ts"
 
 export const InputState = {
   Admitted: "admitted",
@@ -26,80 +25,80 @@ export type InputState = (typeof InputState)[keyof typeof InputState]
 export type TurnState = (typeof TurnState)[keyof typeof TurnState]
 
 export type SessionProjection = {
-  readonly id: SessionId
+  readonly id: string
   readonly seq: number
   readonly createdAt: string
   readonly updatedAt: string
   readonly title?: string
   readonly workingDirectory?: string
-  readonly parentSessionId?: SessionId
+  readonly parentSessionId?: string
   readonly metadata?: EventMetadata
   readonly inputs: readonly InputProjection[]
   readonly turns: readonly TurnProjection[]
 }
 
 export type InputProjection = {
-  readonly inputId: InputId
+  readonly inputId: string
   readonly role: InputRole
   readonly content: TextContent
   readonly state: InputState
   readonly admittedAt: string
   readonly updatedAt: string
-  readonly parentInputId?: InputId
-  readonly turnId?: TurnId
+  readonly parentInputId?: string
+  readonly turnId?: string
   readonly cancelledReason?: string
   readonly metadata?: EventMetadata
 }
 
 export type TurnProjection = {
-  readonly turnId: TurnId
-  readonly inputId: InputId
+  readonly turnId: string
+  readonly inputId: string
   readonly state: TurnState
   readonly startedAt: string
   readonly updatedAt: string
-  readonly parentTurnId?: TurnId
-  readonly outputItemId?: ItemId
+  readonly parentTurnId?: string
+  readonly outputItemId?: string
   readonly error?: KernelError
   readonly cancelledReason?: string
   readonly metadata?: EventMetadata
 }
 
 export type SessionProjector = {
-  project(sessionId: SessionId): Promise<SessionProjection | undefined>
+  project(sessionId: string): Promise<SessionProjection | undefined>
 }
 
 type MutableSessionProjection = {
-  id: SessionId
+  id: string
   seq: number
   createdAt: string
   updatedAt: string
   title?: string
   workingDirectory?: string
-  parentSessionId?: SessionId
+  parentSessionId?: string
   metadata?: EventMetadata
 }
 
 type MutableInputProjection = {
-  inputId: InputId
+  inputId: string
   role: InputRole
   content: TextContent
   state: InputState
   admittedAt: string
   updatedAt: string
-  parentInputId?: InputId
-  turnId?: TurnId
+  parentInputId?: string
+  turnId?: string
   cancelledReason?: string
   metadata?: EventMetadata
 }
 
 type MutableTurnProjection = {
-  turnId: TurnId
-  inputId: InputId
+  turnId: string
+  inputId: string
   state: TurnState
   startedAt: string
   updatedAt: string
-  parentTurnId?: TurnId
-  outputItemId?: ItemId
+  parentTurnId?: string
+  outputItemId?: string
   error?: KernelError
   cancelledReason?: string
   metadata?: EventMetadata
@@ -128,8 +127,8 @@ export function projectSession(
   }
 
   const session = createInitialSessionProjection(firstEvent)
-  const inputs = new Map<InputId, MutableInputProjection>()
-  const turns = new Map<TurnId, MutableTurnProjection>()
+  const inputs = new Map<string, MutableInputProjection>()
+  const turns = new Map<string, MutableTurnProjection>()
 
   for (const event of events.slice(1)) {
     applyEvent(session, inputs, turns, event)
@@ -161,8 +160,8 @@ function createInitialSessionProjection(
 
 function applyEvent(
   session: MutableSessionProjection,
-  inputs: Map<InputId, MutableInputProjection>,
-  turns: Map<TurnId, MutableTurnProjection>,
+  inputs: Map<string, MutableInputProjection>,
+  turns: Map<string, MutableTurnProjection>,
   event: EventEnvelope,
 ): void {
   assertNextSessionEvent(session, event)
@@ -230,7 +229,7 @@ function applySessionMetadataUpdated(
 }
 
 function applyInputAdmitted(
-  inputs: Map<InputId, MutableInputProjection>,
+  inputs: Map<string, MutableInputProjection>,
   event: Extract<
     EventEnvelope,
     { readonly type: typeof EventType.InputAdmitted }
@@ -257,7 +256,7 @@ function applyInputAdmitted(
 }
 
 function applyInputPromoted(
-  inputs: Map<InputId, MutableInputProjection>,
+  inputs: Map<string, MutableInputProjection>,
   event: Extract<
     EventEnvelope,
     { readonly type: typeof EventType.InputPromoted }
@@ -277,7 +276,7 @@ function applyInputPromoted(
 }
 
 function applyInputCancelled(
-  inputs: Map<InputId, MutableInputProjection>,
+  inputs: Map<string, MutableInputProjection>,
   event: Extract<
     EventEnvelope,
     { readonly type: typeof EventType.InputCancelled }
@@ -296,8 +295,8 @@ function applyInputCancelled(
 }
 
 function applyTurnStarted(
-  inputs: Map<InputId, MutableInputProjection>,
-  turns: Map<TurnId, MutableTurnProjection>,
+  inputs: Map<string, MutableInputProjection>,
+  turns: Map<string, MutableTurnProjection>,
   event: Extract<
     EventEnvelope,
     { readonly type: typeof EventType.TurnStarted }
@@ -324,7 +323,7 @@ function applyTurnStarted(
 }
 
 function applyTurnCompleted(
-  turns: Map<TurnId, MutableTurnProjection>,
+  turns: Map<string, MutableTurnProjection>,
   event: Extract<
     EventEnvelope,
     { readonly type: typeof EventType.TurnCompleted }
@@ -340,7 +339,7 @@ function applyTurnCompleted(
 }
 
 function applyTurnFailed(
-  turns: Map<TurnId, MutableTurnProjection>,
+  turns: Map<string, MutableTurnProjection>,
   event: Extract<EventEnvelope, { readonly type: typeof EventType.TurnFailed }>,
 ): void {
   const turn = requireActiveTurn(turns, event.data.turnId)
@@ -350,7 +349,7 @@ function applyTurnFailed(
 }
 
 function applyTurnCancelled(
-  turns: Map<TurnId, MutableTurnProjection>,
+  turns: Map<string, MutableTurnProjection>,
   event: Extract<
     EventEnvelope,
     { readonly type: typeof EventType.TurnCancelled }
@@ -379,8 +378,8 @@ function assertNextSessionEvent(
 }
 
 function requireInput(
-  inputs: Map<InputId, MutableInputProjection>,
-  inputId: InputId,
+  inputs: Map<string, MutableInputProjection>,
+  inputId: string,
 ): MutableInputProjection {
   const input = inputs.get(inputId)
   if (input) return input
@@ -388,8 +387,8 @@ function requireInput(
 }
 
 function requireActiveTurn(
-  turns: Map<TurnId, MutableTurnProjection>,
-  turnId: TurnId,
+  turns: Map<string, MutableTurnProjection>,
+  turnId: string,
 ): MutableTurnProjection {
   const turn = turns.get(turnId)
   if (!turn) throw new Error(`Turn ${turnId} has not been started.`)

@@ -10,51 +10,32 @@ export const IdPrefix = {
 
 export type IdPrefix = (typeof IdPrefix)[keyof typeof IdPrefix]
 
-export type EventId = string & { readonly __brand: "EventId" }
-export type InputId = string & { readonly __brand: "InputId" }
-export type ItemId = string & { readonly __brand: "ItemId" }
-export type PermissionRequestId = string & {
-  readonly __brand: "PermissionRequestId"
-}
-export type SessionId = string & { readonly __brand: "SessionId" }
-export type ToolCallId = string & { readonly __brand: "ToolCallId" }
-export type TurnId = string & { readonly __brand: "TurnId" }
-
-export type KernelId =
-  | EventId
-  | InputId
-  | ItemId
-  | PermissionRequestId
-  | SessionId
-  | ToolCallId
-  | TurnId
-
-export function createEventId(): EventId {
-  return createPrefixedId(IdPrefix.Event) as EventId
+export function createEventId(): string {
+  return createPrefixedId(IdPrefix.Event)
 }
 
-export function createInputId(): InputId {
-  return createPrefixedId(IdPrefix.Input) as InputId
+export function createInputId(): string {
+  return createPrefixedId(IdPrefix.Input)
 }
 
-export function createItemId(): ItemId {
-  return createPrefixedId(IdPrefix.Item) as ItemId
+export function createItemId(): string {
+  return createPrefixedId(IdPrefix.Item)
 }
 
-export function createPermissionRequestId(): PermissionRequestId {
-  return createPrefixedId(IdPrefix.PermissionRequest) as PermissionRequestId
+export function createPermissionRequestId(): string {
+  return createPrefixedId(IdPrefix.PermissionRequest)
 }
 
-export function createSessionId(): SessionId {
-  return createPrefixedId(IdPrefix.Session) as SessionId
+export function createSessionId(): string {
+  return createPrefixedId(IdPrefix.Session)
 }
 
-export function createToolCallId(): ToolCallId {
-  return createPrefixedId(IdPrefix.ToolCall) as ToolCallId
+export function createToolCallId(): string {
+  return createPrefixedId(IdPrefix.ToolCall)
 }
 
-export function createTurnId(): TurnId {
-  return createPrefixedId(IdPrefix.Turn) as TurnId
+export function createTurnId(): string {
+  return createPrefixedId(IdPrefix.Turn)
 }
 
 export function isIdWithPrefix(value: string, prefix: IdPrefix): boolean {

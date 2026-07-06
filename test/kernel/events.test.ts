@@ -18,17 +18,14 @@ import {
 } from "../../src/index.ts"
 
 describe("kernel ids", () => {
-  it("creates branded ids with readable prefixes", () => {
+  it("creates ids with readable prefixes", () => {
     expect(isIdWithPrefix(createSessionId(), IdPrefix.Session)).toBe(true)
     expect(isIdWithPrefix(createInputId(), IdPrefix.Input)).toBe(true)
     expect(isIdWithPrefix(createTurnId(), IdPrefix.Turn)).toBe(true)
     expect(isIdWithPrefix(createItemId(), IdPrefix.Item)).toBe(true)
     expect(isIdWithPrefix(createToolCallId(), IdPrefix.ToolCall)).toBe(true)
     expect(
-      isIdWithPrefix(
-        createPermissionRequestId(),
-        IdPrefix.PermissionRequest,
-      ),
+      isIdWithPrefix(createPermissionRequestId(), IdPrefix.PermissionRequest),
     ).toBe(true)
   })
 })
@@ -156,7 +153,7 @@ describe("kernel events", () => {
     expect(descriptions).toEqual([
       "item:assistant_message",
       "permission:allow",
-      "tool:{\"ok\":true,\"files\":3}",
+      'tool:{"ok":true,"files":3}',
     ])
     expect(envelope.type).toBe(EventType.ToolCompleted)
     expect(envelope.data).toEqual(toolCompletedEvent.data)

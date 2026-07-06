@@ -70,6 +70,8 @@ Examples: `feat(core): add event log`, `docs: update agent instructions`,
 - Avoid `any`.
 - Rely on type inference when possible. Add explicit types for exports,
   cross-module contracts, and clarity.
+- Keep IDs as plain `string` values. Use clear field names, prefixed ID
+  generators, and boundary validation instead of branded ID types.
 - Prefer functional array methods such as `map`, `filter`, and `flatMap` when
   they make the code clearer.
 - Add comments for non-obvious constraints and surprising behavior, not for

@@ -1,13 +1,4 @@
 import { createEventId } from "./ids.ts"
-import type {
-  EventId,
-  InputId,
-  ItemId,
-  PermissionRequestId,
-  SessionId,
-  ToolCallId,
-  TurnId,
-} from "./ids.ts"
 
 export const EventType = {
   InputAdmitted: "input.admitted",
@@ -109,7 +100,7 @@ export type SessionCreatedEvent = {
   readonly data: {
     readonly title?: string
     readonly workingDirectory?: string
-    readonly parentSessionId?: SessionId
+    readonly parentSessionId?: string
     readonly metadata?: EventMetadata
   }
 }
@@ -125,10 +116,10 @@ export type SessionMetadataUpdatedEvent = {
 export type InputAdmittedEvent = {
   readonly type: typeof EventType.InputAdmitted
   readonly data: {
-    readonly inputId: InputId
+    readonly inputId: string
     readonly role: InputRole
     readonly content: TextContent
-    readonly parentInputId?: InputId
+    readonly parentInputId?: string
     readonly metadata?: EventMetadata
   }
 }
@@ -136,15 +127,15 @@ export type InputAdmittedEvent = {
 export type InputPromotedEvent = {
   readonly type: typeof EventType.InputPromoted
   readonly data: {
-    readonly inputId: InputId
-    readonly turnId: TurnId
+    readonly inputId: string
+    readonly turnId: string
   }
 }
 
 export type InputCancelledEvent = {
   readonly type: typeof EventType.InputCancelled
   readonly data: {
-    readonly inputId: InputId
+    readonly inputId: string
     readonly reason?: string
   }
 }
@@ -152,9 +143,9 @@ export type InputCancelledEvent = {
 export type TurnStartedEvent = {
   readonly type: typeof EventType.TurnStarted
   readonly data: {
-    readonly turnId: TurnId
-    readonly inputId: InputId
-    readonly parentTurnId?: TurnId
+    readonly turnId: string
+    readonly inputId: string
+    readonly parentTurnId?: string
     readonly metadata?: EventMetadata
   }
 }
@@ -162,8 +153,8 @@ export type TurnStartedEvent = {
 export type TurnCompletedEvent = {
   readonly type: typeof EventType.TurnCompleted
   readonly data: {
-    readonly turnId: TurnId
-    readonly outputItemId?: ItemId
+    readonly turnId: string
+    readonly outputItemId?: string
     readonly metadata?: EventMetadata
   }
 }
@@ -171,7 +162,7 @@ export type TurnCompletedEvent = {
 export type TurnFailedEvent = {
   readonly type: typeof EventType.TurnFailed
   readonly data: {
-    readonly turnId: TurnId
+    readonly turnId: string
     readonly error: KernelError
   }
 }
@@ -179,7 +170,7 @@ export type TurnFailedEvent = {
 export type TurnCancelledEvent = {
   readonly type: typeof EventType.TurnCancelled
   readonly data: {
-    readonly turnId: TurnId
+    readonly turnId: string
     readonly reason?: string
   }
 }
@@ -187,11 +178,11 @@ export type TurnCancelledEvent = {
 export type ItemAppendedEvent = {
   readonly type: typeof EventType.ItemAppended
   readonly data: {
-    readonly itemId: ItemId
-    readonly turnId: TurnId
+    readonly itemId: string
+    readonly turnId: string
     readonly kind: ItemKind
     readonly content: ItemContent
-    readonly parentItemId?: ItemId
+    readonly parentItemId?: string
     readonly status?: ItemStatus
     readonly providerMetadata?: EventMetadata
   }
@@ -200,8 +191,8 @@ export type ItemAppendedEvent = {
 export type ItemUpdatedEvent = {
   readonly type: typeof EventType.ItemUpdated
   readonly data: {
-    readonly itemId: ItemId
-    readonly turnId: TurnId
+    readonly itemId: string
+    readonly turnId: string
     readonly content?: ItemContent
     readonly status?: ItemStatus
     readonly metadata?: EventMetadata
@@ -211,8 +202,8 @@ export type ItemUpdatedEvent = {
 export type ItemCompletedEvent = {
   readonly type: typeof EventType.ItemCompleted
   readonly data: {
-    readonly itemId: ItemId
-    readonly turnId: TurnId
+    readonly itemId: string
+    readonly turnId: string
     readonly status: typeof ItemStatus.Completed | typeof ItemStatus.Failed
     readonly metadata?: EventMetadata
   }
@@ -221,11 +212,11 @@ export type ItemCompletedEvent = {
 export type PermissionRequestedEvent = {
   readonly type: typeof EventType.PermissionRequested
   readonly data: {
-    readonly permissionRequestId: PermissionRequestId
-    readonly turnId: TurnId
+    readonly permissionRequestId: string
+    readonly turnId: string
     readonly action: string
     readonly subject?: string
-    readonly toolCallId?: ToolCallId
+    readonly toolCallId?: string
     readonly reason?: string
     readonly metadata?: EventMetadata
   }
@@ -234,8 +225,8 @@ export type PermissionRequestedEvent = {
 export type PermissionResolvedEvent = {
   readonly type: typeof EventType.PermissionResolved
   readonly data: {
-    readonly permissionRequestId: PermissionRequestId
-    readonly turnId: TurnId
+    readonly permissionRequestId: string
+    readonly turnId: string
     readonly behavior: PermissionBehavior
     readonly reason?: PermissionDecisionReason
     readonly metadata?: EventMetadata
@@ -245,8 +236,8 @@ export type PermissionResolvedEvent = {
 export type PermissionCancelledEvent = {
   readonly type: typeof EventType.PermissionCancelled
   readonly data: {
-    readonly permissionRequestId: PermissionRequestId
-    readonly turnId: TurnId
+    readonly permissionRequestId: string
+    readonly turnId: string
     readonly reason?: string
   }
 }
@@ -254,12 +245,12 @@ export type PermissionCancelledEvent = {
 export type ToolRequestedEvent = {
   readonly type: typeof EventType.ToolRequested
   readonly data: {
-    readonly toolCallId: ToolCallId
-    readonly turnId: TurnId
+    readonly toolCallId: string
+    readonly turnId: string
     readonly name: string
     readonly input: JsonValue
-    readonly itemId?: ItemId
-    readonly permissionRequestId?: PermissionRequestId
+    readonly itemId?: string
+    readonly permissionRequestId?: string
     readonly providerMetadata?: EventMetadata
   }
 }
@@ -267,16 +258,16 @@ export type ToolRequestedEvent = {
 export type ToolStartedEvent = {
   readonly type: typeof EventType.ToolStarted
   readonly data: {
-    readonly toolCallId: ToolCallId
-    readonly turnId: TurnId
+    readonly toolCallId: string
+    readonly turnId: string
   }
 }
 
 export type ToolProgressEvent = {
   readonly type: typeof EventType.ToolProgress
   readonly data: {
-    readonly toolCallId: ToolCallId
-    readonly turnId: TurnId
+    readonly toolCallId: string
+    readonly turnId: string
     readonly message?: string
     readonly data?: JsonValue
   }
@@ -285,10 +276,10 @@ export type ToolProgressEvent = {
 export type ToolCompletedEvent = {
   readonly type: typeof EventType.ToolCompleted
   readonly data: {
-    readonly toolCallId: ToolCallId
-    readonly turnId: TurnId
+    readonly toolCallId: string
+    readonly turnId: string
     readonly output: JsonValue
-    readonly itemId?: ItemId
+    readonly itemId?: string
     readonly metadata?: EventMetadata
   }
 }
@@ -296,8 +287,8 @@ export type ToolCompletedEvent = {
 export type ToolFailedEvent = {
   readonly type: typeof EventType.ToolFailed
   readonly data: {
-    readonly toolCallId: ToolCallId
-    readonly turnId: TurnId
+    readonly toolCallId: string
+    readonly turnId: string
     readonly error: KernelError
   }
 }
@@ -305,8 +296,8 @@ export type ToolFailedEvent = {
 export type ToolCancelledEvent = {
   readonly type: typeof EventType.ToolCancelled
   readonly data: {
-    readonly toolCallId: ToolCallId
-    readonly turnId: TurnId
+    readonly toolCallId: string
+    readonly turnId: string
     readonly reason?: string
   }
 }
@@ -335,8 +326,8 @@ export type KernelEvent =
   | ToolCancelledEvent
 
 type EventEnvelopeBase = {
-  readonly id: EventId
-  readonly sessionId: SessionId
+  readonly id: string
+  readonly sessionId: string
   readonly seq: number
   readonly version: number
   readonly createdAt: string
@@ -345,11 +336,11 @@ type EventEnvelopeBase = {
 export type EventEnvelope = EventEnvelopeBase & KernelEvent
 
 export type EventEnvelopeInput = {
-  readonly sessionId: SessionId
+  readonly sessionId: string
   readonly seq: number
   readonly event: KernelEvent
   readonly version?: number
-  readonly id?: EventId
+  readonly id?: string
   readonly createdAt?: string
 }
 

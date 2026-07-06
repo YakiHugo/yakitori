@@ -6,15 +6,14 @@ import {
   type EventEnvelope,
   type KernelEvent,
 } from "./events.ts"
-import type { SessionId } from "./ids.ts"
 
 export type EventStore = {
-  appendEvent(sessionId: SessionId, event: KernelEvent): Promise<EventEnvelope>
+  appendEvent(sessionId: string, event: KernelEvent): Promise<EventEnvelope>
   appendEvents(
-    sessionId: SessionId,
+    sessionId: string,
     events: readonly KernelEvent[],
   ): Promise<EventEnvelope[]>
-  readEvents(sessionId: SessionId): Promise<EventEnvelope[]>
+  readEvents(sessionId: string): Promise<EventEnvelope[]>
 }
 
 export type JsonlEventStoreOptions = {
@@ -46,7 +45,7 @@ export function createJsonlEventStore(
 
 async function appendEventsToFile(
   rootDir: string,
-  sessionId: SessionId,
+  sessionId: string,
   eventsToAppend: readonly KernelEvent[],
 ): Promise<EventEnvelope[]> {
   if (eventsToAppend.length === 0) return []
@@ -73,7 +72,7 @@ async function appendEventsToFile(
 
 async function readEventsFromFile(
   rootDir: string,
-  sessionId: SessionId,
+  sessionId: string,
 ): Promise<EventEnvelope[]> {
   const content = await readEventsContent(rootDir, sessionId)
   if (content === "") return []
@@ -89,7 +88,7 @@ async function readEventsFromFile(
 
 async function readEventsContent(
   rootDir: string,
-  sessionId: SessionId,
+  sessionId: string,
 ): Promise<string> {
   try {
     return await readFile(eventsPath(rootDir, sessionId), "utf8")
@@ -144,10 +143,7 @@ function parseEventEnvelope(line: string, lineNumber: number): EventEnvelope {
   return parsed as EventEnvelope
 }
 
-function assertSessionEvents(
-  sessionId: SessionId,
-  events: EventEnvelope[],
-): void {
+function assertSessionEvents(sessionId: string, events: EventEnvelope[]): void {
   for (const [index, event] of events.entries()) {
     const expectedSeq = index + 1
     if (event.sessionId !== sessionId) {
@@ -167,11 +163,11 @@ function nextSeq(events: EventEnvelope[]): number {
   return last.seq + 1
 }
 
-function sessionDir(rootDir: string, sessionId: SessionId): string {
+function sessionDir(rootDir: string, sessionId: string): string {
   return join(rootDir, "sessions", sessionId)
 }
 
-function eventsPath(rootDir: string, sessionId: SessionId): string {
+function eventsPath(rootDir: string, sessionId: string): string {
   return join(sessionDir(rootDir, sessionId), "events.jsonl")
 }
 

@@ -6,14 +6,7 @@ import {
   type EventMetadata,
   type TextContent,
 } from "./events.ts"
-import {
-  createInputId,
-  createSessionId,
-  createTurnId,
-  type InputId,
-  type SessionId,
-  type TurnId,
-} from "./ids.ts"
+import { createInputId, createSessionId, createTurnId } from "./ids.ts"
 
 export type SessionKernel = {
   createSession(input?: CreateSessionInput): Promise<CreateSessionResult>
@@ -24,37 +17,37 @@ export type SessionKernel = {
 export type CreateSessionInput = {
   readonly title?: string
   readonly workingDirectory?: string
-  readonly parentSessionId?: SessionId
+  readonly parentSessionId?: string
   readonly metadata?: EventMetadata
 }
 
 export type CreateSessionResult = {
-  readonly sessionId: SessionId
+  readonly sessionId: string
   readonly event: EventEnvelope
 }
 
 export type AdmitInputInput = {
-  readonly sessionId: SessionId
+  readonly sessionId: string
   readonly content: TextContent
   readonly role?: InputRole
-  readonly parentInputId?: InputId
+  readonly parentInputId?: string
   readonly metadata?: EventMetadata
 }
 
 export type AdmitInputResult = {
-  readonly inputId: InputId
+  readonly inputId: string
   readonly event: EventEnvelope
 }
 
 export type StartTurnInput = {
-  readonly sessionId: SessionId
-  readonly inputId: InputId
-  readonly parentTurnId?: TurnId
+  readonly sessionId: string
+  readonly inputId: string
+  readonly parentTurnId?: string
   readonly metadata?: EventMetadata
 }
 
 export type StartTurnResult = {
-  readonly turnId: TurnId
+  readonly turnId: string
   readonly events: readonly EventEnvelope[]
 }
 
@@ -143,7 +136,7 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
 
 function requireSessionCreated(
   events: readonly EventEnvelope[],
-  sessionId: SessionId,
+  sessionId: string,
 ): void {
   if (events.at(0)?.type === EventType.SessionCreated) return
   throw new Error(`Session ${sessionId} has not been created.`)
@@ -151,7 +144,7 @@ function requireSessionCreated(
 
 function requireInputReadyForTurn(
   events: readonly EventEnvelope[],
-  inputId: InputId,
+  inputId: string,
 ): void {
   requireInputAdmitted(events, inputId)
 
@@ -178,7 +171,7 @@ function requireInputReadyForTurn(
 
 function requireInputAdmitted(
   events: readonly EventEnvelope[],
-  inputId: InputId,
+  inputId: string,
 ): void {
   if (
     events.some(
@@ -195,7 +188,7 @@ function requireInputAdmitted(
 
 function requireTurnStarted(
   events: readonly EventEnvelope[],
-  turnId: TurnId,
+  turnId: string,
 ): void {
   if (
     events.some(

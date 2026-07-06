@@ -11,7 +11,6 @@ import {
   InputRole,
   type EventStore,
   type KernelEvent,
-  type SessionId,
 } from "../../src/index.ts"
 
 describe("jsonl event store", () => {
@@ -134,10 +133,10 @@ function inputAdmittedEvent(): KernelEvent {
   }
 }
 
-function sessionDir(rootDir: string, sessionId: SessionId): string {
+function sessionDir(rootDir: string, sessionId: string): string {
   return join(rootDir, "sessions", sessionId)
 }
 
-function eventsPath(rootDir: string, sessionId: SessionId): string {
+function eventsPath(rootDir: string, sessionId: string): string {
   return join(sessionDir(rootDir, sessionId), "events.jsonl")
 }
