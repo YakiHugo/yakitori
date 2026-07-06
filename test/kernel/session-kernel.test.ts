@@ -159,6 +159,40 @@ describe("session kernel", () => {
     })
   })
 
+  it("rejects starting another turn while one is active", async () => {
+    await withKernel(async (context) => {
+      const session = await context.kernel.createSession()
+      const firstInput = await context.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: {
+          kind: "text",
+          text: "first turn",
+        },
+      })
+      const secondInput = await context.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: {
+          kind: "text",
+          text: "second turn",
+        },
+      })
+
+      const firstTurn = await context.kernel.startTurn({
+        sessionId: session.sessionId,
+        inputId: firstInput.inputId,
+      })
+
+      await expect(
+        context.kernel.startTurn({
+          sessionId: session.sessionId,
+          inputId: secondInput.inputId,
+        }),
+      ).rejects.toThrow(
+        `Session ${session.sessionId} already has active turn ${firstTurn.turnId}.`,
+      )
+    })
+  })
+
   it("rejects starting a turn for unknown input", async () => {
     await withKernel(async (context) => {
       const session = await context.kernel.createSession()
