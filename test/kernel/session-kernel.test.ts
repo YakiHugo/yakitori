@@ -1,10 +1,6 @@
-import { mkdtemp, rm } from "node:fs/promises"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import {
   createInputId,
-  createJsonlEventStore,
   createSessionId,
   createSessionKernel,
   EventType,
@@ -12,6 +8,7 @@ import {
   type EventStore,
   type SessionKernel,
 } from "../../src/index.ts"
+import { createMemoryEventStore } from "./memory-event-store.ts"
 
 describe("session kernel", () => {
   it("creates a session event log", async () => {
@@ -182,15 +179,9 @@ async function withKernel(
     readonly store: EventStore
   }) => Promise<void>,
 ): Promise<void> {
-  const rootDir = await mkdtemp(join(tmpdir(), "yakitori-"))
-  const store = createJsonlEventStore({ rootDir })
-
-  try {
-    await run({
-      kernel: createSessionKernel(store),
-      store,
-    })
-  } finally {
-    await rm(rootDir, { recursive: true, force: true })
-  }
+  const store = createMemoryEventStore()
+  await run({
+    kernel: createSessionKernel(store),
+    store,
+  })
 }

@@ -1,12 +1,8 @@
-import { mkdtemp, rm } from "node:fs/promises"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import {
   createEventEnvelope,
   createInputId,
   createItemId,
-  createJsonlEventStore,
   createSessionId,
   createSessionKernel,
   createSessionProjector,
@@ -21,6 +17,7 @@ import {
   type SessionKernel,
   type SessionProjector,
 } from "../../src/index.ts"
+import { createMemoryEventStore } from "./memory-event-store.ts"
 
 describe("session projector", () => {
   it("returns no projection for an empty event log", () => {
@@ -227,18 +224,12 @@ async function withProjector(
     readonly store: EventStore
   }) => Promise<void>,
 ): Promise<void> {
-  const rootDir = await mkdtemp(join(tmpdir(), "yakitori-"))
-  const store = createJsonlEventStore({ rootDir })
-
-  try {
-    await run({
-      kernel: createSessionKernel(store),
-      projector: createSessionProjector(store),
-      store,
-    })
-  } finally {
-    await rm(rootDir, { recursive: true, force: true })
-  }
+  const store = createMemoryEventStore()
+  await run({
+    kernel: createSessionKernel(store),
+    projector: createSessionProjector(store),
+    store,
+  })
 }
 
 function requireEvent(
