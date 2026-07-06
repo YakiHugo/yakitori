@@ -1,0 +1,398 @@
+import type { EventStore } from "./event-store.ts"
+import {
+  EventType,
+  type EventEnvelope,
+  type EventMetadata,
+  type InputRole,
+  type KernelError,
+  type TextContent,
+} from "./events.ts"
+import type { InputId, ItemId, SessionId, TurnId } from "./ids.ts"
+
+export const InputState = {
+  Admitted: "admitted",
+  Cancelled: "cancelled",
+  Promoted: "promoted",
+} as const
+
+export const TurnState = {
+  Cancelled: "cancelled",
+  Completed: "completed",
+  Failed: "failed",
+  Started: "started",
+} as const
+
+export type InputState = (typeof InputState)[keyof typeof InputState]
+export type TurnState = (typeof TurnState)[keyof typeof TurnState]
+
+export type SessionProjection = {
+  readonly id: SessionId
+  readonly seq: number
+  readonly createdAt: string
+  readonly updatedAt: string
+  readonly title?: string
+  readonly workingDirectory?: string
+  readonly parentSessionId?: SessionId
+  readonly metadata?: EventMetadata
+  readonly inputs: readonly InputProjection[]
+  readonly turns: readonly TurnProjection[]
+}
+
+export type InputProjection = {
+  readonly inputId: InputId
+  readonly role: InputRole
+  readonly content: TextContent
+  readonly state: InputState
+  readonly admittedAt: string
+  readonly updatedAt: string
+  readonly parentInputId?: InputId
+  readonly turnId?: TurnId
+  readonly cancelledReason?: string
+  readonly metadata?: EventMetadata
+}
+
+export type TurnProjection = {
+  readonly turnId: TurnId
+  readonly inputId: InputId
+  readonly state: TurnState
+  readonly startedAt: string
+  readonly updatedAt: string
+  readonly parentTurnId?: TurnId
+  readonly outputItemId?: ItemId
+  readonly error?: KernelError
+  readonly cancelledReason?: string
+  readonly metadata?: EventMetadata
+}
+
+export type SessionProjector = {
+  project(sessionId: SessionId): Promise<SessionProjection | undefined>
+}
+
+type MutableSessionProjection = {
+  id: SessionId
+  seq: number
+  createdAt: string
+  updatedAt: string
+  title?: string
+  workingDirectory?: string
+  parentSessionId?: SessionId
+  metadata?: EventMetadata
+}
+
+type MutableInputProjection = {
+  inputId: InputId
+  role: InputRole
+  content: TextContent
+  state: InputState
+  admittedAt: string
+  updatedAt: string
+  parentInputId?: InputId
+  turnId?: TurnId
+  cancelledReason?: string
+  metadata?: EventMetadata
+}
+
+type MutableTurnProjection = {
+  turnId: TurnId
+  inputId: InputId
+  state: TurnState
+  startedAt: string
+  updatedAt: string
+  parentTurnId?: TurnId
+  outputItemId?: ItemId
+  error?: KernelError
+  cancelledReason?: string
+  metadata?: EventMetadata
+}
+
+export function createSessionProjector(
+  eventStore: EventStore,
+): SessionProjector {
+  return {
+    async project(sessionId) {
+      return projectSession(await eventStore.readEvents(sessionId))
+    },
+  }
+}
+
+export function projectSession(
+  events: readonly EventEnvelope[],
+): SessionProjection | undefined {
+  const firstEvent = events.at(0)
+  if (!firstEvent) return undefined
+  if (firstEvent.type !== EventType.SessionCreated) {
+    throw new Error("Session projection must start with session.created.")
+  }
+  if (firstEvent.seq !== 1) {
+    throw new Error("Session projection must start at sequence 1.")
+  }
+
+  const session = createInitialSessionProjection(firstEvent)
+  const inputs = new Map<InputId, MutableInputProjection>()
+  const turns = new Map<TurnId, MutableTurnProjection>()
+
+  for (const event of events.slice(1)) {
+    applyEvent(session, inputs, turns, event)
+  }
+
+  return {
+    ...session,
+    inputs: Array.from(inputs.values()),
+    turns: Array.from(turns.values()),
+  }
+}
+
+function createInitialSessionProjection(
+  event: Extract<
+    EventEnvelope,
+    { readonly type: typeof EventType.SessionCreated }
+  >,
+): MutableSessionProjection {
+  const session: MutableSessionProjection = {
+    id: event.sessionId,
+    seq: event.seq,
+    createdAt: event.createdAt,
+    updatedAt: event.createdAt,
+  }
+
+  applySessionCreated(session, event)
+  return session
+}
+
+function applyEvent(
+  session: MutableSessionProjection,
+  inputs: Map<InputId, MutableInputProjection>,
+  turns: Map<TurnId, MutableTurnProjection>,
+  event: EventEnvelope,
+): void {
+  assertNextSessionEvent(session, event)
+  session.seq = event.seq
+  session.updatedAt = event.createdAt
+
+  switch (event.type) {
+    case EventType.SessionCreated:
+      throw new Error("Session projection cannot contain multiple sessions.")
+    case EventType.SessionMetadataUpdated:
+      applySessionMetadataUpdated(session, event)
+      return
+    case EventType.InputAdmitted:
+      applyInputAdmitted(inputs, event)
+      return
+    case EventType.InputPromoted:
+      applyInputPromoted(inputs, event)
+      return
+    case EventType.InputCancelled:
+      applyInputCancelled(inputs, event)
+      return
+    case EventType.TurnStarted:
+      applyTurnStarted(inputs, turns, event)
+      return
+    case EventType.TurnCompleted:
+      applyTurnCompleted(turns, event)
+      return
+    case EventType.TurnFailed:
+      applyTurnFailed(turns, event)
+      return
+    case EventType.TurnCancelled:
+      applyTurnCancelled(turns, event)
+      return
+    default:
+      return
+  }
+}
+
+function applySessionCreated(
+  session: MutableSessionProjection,
+  event: Extract<
+    EventEnvelope,
+    { readonly type: typeof EventType.SessionCreated }
+  >,
+): void {
+  if (event.data.title !== undefined) session.title = event.data.title
+  if (event.data.workingDirectory !== undefined) {
+    session.workingDirectory = event.data.workingDirectory
+  }
+  if (event.data.parentSessionId !== undefined) {
+    session.parentSessionId = event.data.parentSessionId
+  }
+  if (event.data.metadata !== undefined) session.metadata = event.data.metadata
+}
+
+function applySessionMetadataUpdated(
+  session: MutableSessionProjection,
+  event: Extract<
+    EventEnvelope,
+    { readonly type: typeof EventType.SessionMetadataUpdated }
+  >,
+): void {
+  if (event.data.title !== undefined) session.title = event.data.title
+  if (event.data.metadata !== undefined) session.metadata = event.data.metadata
+}
+
+function applyInputAdmitted(
+  inputs: Map<InputId, MutableInputProjection>,
+  event: Extract<
+    EventEnvelope,
+    { readonly type: typeof EventType.InputAdmitted }
+  >,
+): void {
+  if (inputs.has(event.data.inputId)) {
+    throw new Error(`Input ${event.data.inputId} has already been admitted.`)
+  }
+
+  inputs.set(event.data.inputId, {
+    inputId: event.data.inputId,
+    role: event.data.role,
+    content: event.data.content,
+    state: InputState.Admitted,
+    admittedAt: event.createdAt,
+    updatedAt: event.createdAt,
+    ...(event.data.parentInputId === undefined
+      ? {}
+      : { parentInputId: event.data.parentInputId }),
+    ...(event.data.metadata === undefined
+      ? {}
+      : { metadata: event.data.metadata }),
+  })
+}
+
+function applyInputPromoted(
+  inputs: Map<InputId, MutableInputProjection>,
+  event: Extract<
+    EventEnvelope,
+    { readonly type: typeof EventType.InputPromoted }
+  >,
+): void {
+  const input = requireInput(inputs, event.data.inputId)
+  if (input.state === InputState.Cancelled) {
+    throw new Error(`Input ${event.data.inputId} has been cancelled.`)
+  }
+  if (input.turnId !== undefined) {
+    throw new Error(`Input ${event.data.inputId} has already been promoted.`)
+  }
+
+  input.state = InputState.Promoted
+  input.turnId = event.data.turnId
+  input.updatedAt = event.createdAt
+}
+
+function applyInputCancelled(
+  inputs: Map<InputId, MutableInputProjection>,
+  event: Extract<
+    EventEnvelope,
+    { readonly type: typeof EventType.InputCancelled }
+  >,
+): void {
+  const input = requireInput(inputs, event.data.inputId)
+  if (input.state === InputState.Promoted) {
+    throw new Error(`Input ${event.data.inputId} has already been promoted.`)
+  }
+
+  input.state = InputState.Cancelled
+  input.updatedAt = event.createdAt
+  if (event.data.reason !== undefined) {
+    input.cancelledReason = event.data.reason
+  }
+}
+
+function applyTurnStarted(
+  inputs: Map<InputId, MutableInputProjection>,
+  turns: Map<TurnId, MutableTurnProjection>,
+  event: Extract<
+    EventEnvelope,
+    { readonly type: typeof EventType.TurnStarted }
+  >,
+): void {
+  if (turns.has(event.data.turnId)) {
+    throw new Error(`Turn ${event.data.turnId} has already been started.`)
+  }
+
+  requireInput(inputs, event.data.inputId)
+  turns.set(event.data.turnId, {
+    turnId: event.data.turnId,
+    inputId: event.data.inputId,
+    state: TurnState.Started,
+    startedAt: event.createdAt,
+    updatedAt: event.createdAt,
+    ...(event.data.parentTurnId === undefined
+      ? {}
+      : { parentTurnId: event.data.parentTurnId }),
+    ...(event.data.metadata === undefined
+      ? {}
+      : { metadata: event.data.metadata }),
+  })
+}
+
+function applyTurnCompleted(
+  turns: Map<TurnId, MutableTurnProjection>,
+  event: Extract<
+    EventEnvelope,
+    { readonly type: typeof EventType.TurnCompleted }
+  >,
+): void {
+  const turn = requireActiveTurn(turns, event.data.turnId)
+  turn.state = TurnState.Completed
+  turn.updatedAt = event.createdAt
+  if (event.data.outputItemId !== undefined) {
+    turn.outputItemId = event.data.outputItemId
+  }
+  if (event.data.metadata !== undefined) turn.metadata = event.data.metadata
+}
+
+function applyTurnFailed(
+  turns: Map<TurnId, MutableTurnProjection>,
+  event: Extract<EventEnvelope, { readonly type: typeof EventType.TurnFailed }>,
+): void {
+  const turn = requireActiveTurn(turns, event.data.turnId)
+  turn.state = TurnState.Failed
+  turn.error = event.data.error
+  turn.updatedAt = event.createdAt
+}
+
+function applyTurnCancelled(
+  turns: Map<TurnId, MutableTurnProjection>,
+  event: Extract<
+    EventEnvelope,
+    { readonly type: typeof EventType.TurnCancelled }
+  >,
+): void {
+  const turn = requireActiveTurn(turns, event.data.turnId)
+  turn.state = TurnState.Cancelled
+  turn.updatedAt = event.createdAt
+  if (event.data.reason !== undefined) {
+    turn.cancelledReason = event.data.reason
+  }
+}
+
+function assertNextSessionEvent(
+  session: MutableSessionProjection,
+  event: EventEnvelope,
+): void {
+  if (event.sessionId !== session.id) {
+    throw new Error(`Event ${event.id} belongs to another session.`)
+  }
+  if (event.seq !== session.seq + 1) {
+    throw new Error(
+      `Session projection expected sequence ${session.seq + 1}, got ${event.seq}.`,
+    )
+  }
+}
+
+function requireInput(
+  inputs: Map<InputId, MutableInputProjection>,
+  inputId: InputId,
+): MutableInputProjection {
+  const input = inputs.get(inputId)
+  if (input) return input
+  throw new Error(`Input ${inputId} has not been admitted.`)
+}
+
+function requireActiveTurn(
+  turns: Map<TurnId, MutableTurnProjection>,
+  turnId: TurnId,
+): MutableTurnProjection {
+  const turn = turns.get(turnId)
+  if (!turn) throw new Error(`Turn ${turnId} has not been started.`)
+  if (turn.state === TurnState.Started) return turn
+  throw new Error(`Turn ${turnId} is already ${turn.state}.`)
+}
