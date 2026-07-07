@@ -7,8 +7,12 @@ import {
   InputRole,
   ItemKind,
   ItemStatus,
+  PermissionBehavior,
+  PermissionState,
   type EventStore,
   type SessionKernel,
+  ToolState,
+  TurnState,
 } from "../../src/index.ts"
 import { createMemoryEventStore } from "./memory-event-store.ts"
 
@@ -65,6 +69,51 @@ describe("session kernel", () => {
           },
         },
       })
+    })
+  })
+
+  it("reads and replays a session from durable events", async () => {
+    await withKernel(async (context) => {
+      const session = await context.kernel.createSession({
+        title: "Replay me",
+      })
+      const admitted = await context.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: {
+          kind: "text",
+          text: "show the session",
+        },
+      })
+      const started = await context.kernel.startTurn({
+        sessionId: session.sessionId,
+        inputId: admitted.inputId,
+      })
+
+      const read = await context.kernel.readSession({
+        sessionId: session.sessionId,
+      })
+      const replayed = await context.kernel.replaySession({
+        sessionId: session.sessionId,
+      })
+
+      expect(read.session).toMatchObject({
+        id: session.sessionId,
+        title: "Replay me",
+        seq: 4,
+        turns: [
+          {
+            turnId: started.turnId,
+            state: TurnState.Started,
+          },
+        ],
+      })
+      expect(replayed.events.map((event) => event.type)).toEqual([
+        EventType.SessionCreated,
+        EventType.InputAdmitted,
+        EventType.InputPromoted,
+        EventType.TurnStarted,
+      ])
+      expect(replayed.session).toEqual(read.session)
     })
   })
 
@@ -212,6 +261,324 @@ describe("session kernel", () => {
     })
   })
 
+  it("requests and resolves permission in an active turn", async () => {
+    await withKernel(async (context) => {
+      const session = await context.kernel.createSession()
+      const admitted = await context.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: {
+          kind: "text",
+          text: "run a checked command",
+        },
+      })
+      const started = await context.kernel.startTurn({
+        sessionId: session.sessionId,
+        inputId: admitted.inputId,
+      })
+      const requested = await context.kernel.requestPermission({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        action: "shell.exec",
+        subject: "pnpm test",
+        reason: "verify changes",
+      })
+      const resolved = await context.kernel.resolvePermission({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        permissionRequestId: requested.permissionRequestId,
+        behavior: PermissionBehavior.Allow,
+        reason: {
+          kind: "user_allowed",
+          message: "ok",
+        },
+      })
+
+      expect(requested.event).toMatchObject({
+        sessionId: session.sessionId,
+        seq: 5,
+        type: EventType.PermissionRequested,
+        data: {
+          permissionRequestId: requested.permissionRequestId,
+          turnId: started.turnId,
+          action: "shell.exec",
+          subject: "pnpm test",
+          reason: "verify changes",
+        },
+      })
+      expect(resolved.event).toMatchObject({
+        sessionId: session.sessionId,
+        seq: 6,
+        type: EventType.PermissionResolved,
+        data: {
+          permissionRequestId: requested.permissionRequestId,
+          turnId: started.turnId,
+          behavior: PermissionBehavior.Allow,
+          reason: {
+            kind: "user_allowed",
+            message: "ok",
+          },
+        },
+      })
+    })
+  })
+
+  it("records a permission-checked tool lifecycle", async () => {
+    await withKernel(async (context) => {
+      const session = await context.kernel.createSession()
+      const admitted = await context.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: {
+          kind: "text",
+          text: "check the project",
+        },
+      })
+      const started = await context.kernel.startTurn({
+        sessionId: session.sessionId,
+        inputId: admitted.inputId,
+      })
+      const permission = await context.kernel.requestPermission({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        action: "shell.exec",
+        subject: "pnpm check",
+      })
+
+      await context.kernel.resolvePermission({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        permissionRequestId: permission.permissionRequestId,
+        behavior: PermissionBehavior.Allow,
+      })
+
+      const requested = await context.kernel.requestTool({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        name: "shell.exec",
+        input: {
+          command: "pnpm check",
+        },
+        permissionRequestId: permission.permissionRequestId,
+      })
+      const toolStarted = await context.kernel.startTool({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        toolCallId: requested.toolCallId,
+      })
+      const progress = await context.kernel.recordToolProgress({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        toolCallId: requested.toolCallId,
+        message: "running",
+      })
+      const completed = await context.kernel.completeTool({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        toolCallId: requested.toolCallId,
+        output: {
+          exitCode: 0,
+        },
+      })
+
+      expect(requested.event).toMatchObject({
+        sessionId: session.sessionId,
+        seq: 7,
+        type: EventType.ToolRequested,
+        data: {
+          toolCallId: requested.toolCallId,
+          turnId: started.turnId,
+          name: "shell.exec",
+          input: {
+            command: "pnpm check",
+          },
+          permissionRequestId: permission.permissionRequestId,
+        },
+      })
+      expect(toolStarted.event.type).toBe(EventType.ToolStarted)
+      expect(progress.event).toMatchObject({
+        seq: 9,
+        type: EventType.ToolProgress,
+        data: {
+          toolCallId: requested.toolCallId,
+          message: "running",
+        },
+      })
+      expect(completed.event).toMatchObject({
+        seq: 10,
+        type: EventType.ToolCompleted,
+        data: {
+          toolCallId: requested.toolCallId,
+          output: {
+            exitCode: 0,
+          },
+        },
+      })
+    })
+  })
+
+  it("rejects starting a tool when permission was denied", async () => {
+    await withKernel(async (context) => {
+      const session = await context.kernel.createSession()
+      const admitted = await context.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: {
+          kind: "text",
+          text: "try a denied command",
+        },
+      })
+      const started = await context.kernel.startTurn({
+        sessionId: session.sessionId,
+        inputId: admitted.inputId,
+      })
+      const permission = await context.kernel.requestPermission({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        action: "shell.exec",
+        subject: "rm -rf dist",
+      })
+
+      await context.kernel.resolvePermission({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        permissionRequestId: permission.permissionRequestId,
+        behavior: PermissionBehavior.Deny,
+      })
+
+      const tool = await context.kernel.requestTool({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        name: "shell.exec",
+        input: {
+          command: "rm -rf dist",
+        },
+        permissionRequestId: permission.permissionRequestId,
+      })
+
+      await expect(
+        context.kernel.startTool({
+          sessionId: session.sessionId,
+          turnId: started.turnId,
+          toolCallId: tool.toolCallId,
+        }),
+      ).rejects.toThrow(
+        `Permission ${permission.permissionRequestId} resolved with deny.`,
+      )
+    })
+  })
+
+  it("rejects completing a turn while work is still open", async () => {
+    await withKernel(async (context) => {
+      const session = await context.kernel.createSession()
+      const admitted = await context.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: {
+          kind: "text",
+          text: "leave work open",
+        },
+      })
+      const started = await context.kernel.startTurn({
+        sessionId: session.sessionId,
+        inputId: admitted.inputId,
+      })
+      const item = await context.kernel.appendItem({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        kind: ItemKind.AssistantMessage,
+        content: {
+          kind: "text",
+          text: "not done",
+        },
+      })
+
+      await expect(
+        context.kernel.completeTurn({
+          sessionId: session.sessionId,
+          turnId: started.turnId,
+          outputItemId: item.itemId,
+        }),
+      ).rejects.toThrow(`Item ${item.itemId} is in_progress.`)
+    })
+  })
+
+  it("cancels open work before cancelling the turn", async () => {
+    await withKernel(async (context) => {
+      const session = await context.kernel.createSession()
+      const admitted = await context.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: {
+          kind: "text",
+          text: "cancel everything",
+        },
+      })
+      const started = await context.kernel.startTurn({
+        sessionId: session.sessionId,
+        inputId: admitted.inputId,
+      })
+      const item = await context.kernel.appendItem({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        kind: ItemKind.AssistantMessage,
+        content: {
+          kind: "text",
+          text: "draft",
+        },
+      })
+      const permission = await context.kernel.requestPermission({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        action: "shell.exec",
+      })
+      const tool = await context.kernel.requestTool({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        name: "shell.exec",
+        input: {
+          command: "pnpm test",
+        },
+      })
+      const cancelled = await context.kernel.cancelTurn({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        reason: "user stopped",
+      })
+      const read = await context.kernel.readSession({
+        sessionId: session.sessionId,
+      })
+
+      expect(cancelled.events.map((event) => event.type)).toEqual([
+        EventType.ToolCancelled,
+        EventType.PermissionCancelled,
+        EventType.ItemCompleted,
+        EventType.TurnCancelled,
+      ])
+      expect(read.session).toMatchObject({
+        items: [
+          {
+            itemId: item.itemId,
+            status: ItemStatus.Failed,
+          },
+        ],
+        permissions: [
+          {
+            permissionRequestId: permission.permissionRequestId,
+            state: PermissionState.Cancelled,
+          },
+        ],
+        tools: [
+          {
+            toolCallId: tool.toolCallId,
+            state: ToolState.Cancelled,
+          },
+        ],
+        turns: [
+          {
+            turnId: started.turnId,
+            state: TurnState.Cancelled,
+          },
+        ],
+      })
+    })
+  })
+
   it("completes an active turn and allows the next turn", async () => {
     await withKernel(async (context) => {
       const session = await context.kernel.createSession()
@@ -235,6 +602,11 @@ describe("session kernel", () => {
           text: "first output",
         },
       })
+      await context.kernel.completeItem({
+        sessionId: session.sessionId,
+        turnId: firstTurn.turnId,
+        itemId: output.itemId,
+      })
       const completed = await context.kernel.completeTurn({
         sessionId: session.sessionId,
         turnId: firstTurn.turnId,
@@ -257,7 +629,7 @@ describe("session kernel", () => {
 
       expect(completed.event).toMatchObject({
         sessionId: session.sessionId,
-        seq: 6,
+        seq: 7,
         type: EventType.TurnCompleted,
         data: {
           turnId: firstTurn.turnId,
@@ -267,7 +639,7 @@ describe("session kernel", () => {
           },
         },
       })
-      expect(secondTurn.events.map((event) => event.seq)).toEqual([8, 9])
+      expect(secondTurn.events.map((event) => event.seq)).toEqual([9, 10])
     })
   })
 

@@ -11,7 +11,10 @@ import {
   InputState,
   ItemKind,
   ItemStatus,
+  PermissionBehavior,
+  PermissionState,
   projectSession,
+  ToolState,
   TurnState,
   type EventEnvelope,
   type EventStore,
@@ -76,6 +79,8 @@ describe("session projector", () => {
           },
         ],
         items: [],
+        permissions: [],
+        tools: [],
         turns: [
           {
             turnId: started.turnId,
@@ -87,6 +92,8 @@ describe("session projector", () => {
               reason: "mvp",
             },
             itemIds: [],
+            permissionRequestIds: [],
+            toolCallIds: [],
           },
         ],
       })
@@ -173,6 +180,122 @@ describe("session projector", () => {
     })
   })
 
+  it("projects permission and tool lifecycle inside a turn", async () => {
+    await withProjector(async (context) => {
+      const session = await context.kernel.createSession()
+      const admitted = await context.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: {
+          kind: "text",
+          text: "run checks",
+        },
+      })
+      const started = await context.kernel.startTurn({
+        sessionId: session.sessionId,
+        inputId: admitted.inputId,
+      })
+      const permission = await context.kernel.requestPermission({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        action: "shell.exec",
+        subject: "pnpm check",
+      })
+      const resolved = await context.kernel.resolvePermission({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        permissionRequestId: permission.permissionRequestId,
+        behavior: PermissionBehavior.Allow,
+      })
+      const tool = await context.kernel.requestTool({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        name: "shell.exec",
+        input: {
+          command: "pnpm check",
+        },
+        permissionRequestId: permission.permissionRequestId,
+      })
+      await context.kernel.startTool({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        toolCallId: tool.toolCallId,
+      })
+      const progress = await context.kernel.recordToolProgress({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        toolCallId: tool.toolCallId,
+        message: "running",
+        data: {
+          phase: "test",
+        },
+      })
+      const completed = await context.kernel.completeTool({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        toolCallId: tool.toolCallId,
+        output: {
+          exitCode: 0,
+        },
+        metadata: {
+          durationMs: 12,
+        },
+      })
+
+      expect(await context.projector.project(session.sessionId)).toMatchObject({
+        id: session.sessionId,
+        seq: 10,
+        permissions: [
+          {
+            permissionRequestId: permission.permissionRequestId,
+            turnId: started.turnId,
+            action: "shell.exec",
+            subject: "pnpm check",
+            state: PermissionState.Resolved,
+            requestedAt: permission.event.createdAt,
+            updatedAt: resolved.event.createdAt,
+            behavior: PermissionBehavior.Allow,
+          },
+        ],
+        tools: [
+          {
+            toolCallId: tool.toolCallId,
+            turnId: started.turnId,
+            name: "shell.exec",
+            input: {
+              command: "pnpm check",
+            },
+            state: ToolState.Completed,
+            requestedAt: tool.event.createdAt,
+            updatedAt: completed.event.createdAt,
+            permissionRequestId: permission.permissionRequestId,
+            output: {
+              exitCode: 0,
+            },
+            progress: [
+              {
+                createdAt: progress.event.createdAt,
+                message: "running",
+                data: {
+                  phase: "test",
+                },
+              },
+            ],
+            metadata: {
+              durationMs: 12,
+            },
+          },
+        ],
+        turns: [
+          {
+            turnId: started.turnId,
+            permissionRequestIds: [permission.permissionRequestId],
+            toolCallIds: [tool.toolCallId],
+          },
+        ],
+      })
+    })
+  })
+
   it("applies session metadata updates and turn completion", async () => {
     await withProjector(async (context) => {
       const session = await context.kernel.createSession({
@@ -198,6 +321,11 @@ describe("session projector", () => {
           text: "done",
         },
       })
+      await context.kernel.completeItem({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        itemId: item.itemId,
+      })
       await context.store.appendEvent(session.sessionId, {
         type: EventType.TurnCompleted,
         data: {
@@ -220,7 +348,7 @@ describe("session projector", () => {
 
       expect(await context.projector.project(session.sessionId)).toMatchObject({
         id: session.sessionId,
-        seq: 7,
+        seq: 8,
         updatedAt: updated.createdAt,
         title: "Done",
         metadata: {
