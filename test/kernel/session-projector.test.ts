@@ -296,6 +296,51 @@ describe("session projector", () => {
     })
   })
 
+  it("rejects tool start while a tool-bound permission is pending", async () => {
+    await withProjector(async (context) => {
+      const session = await context.kernel.createSession()
+      const admitted = await context.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: {
+          kind: "text",
+          text: "start too early",
+        },
+      })
+      const started = await context.kernel.startTurn({
+        sessionId: session.sessionId,
+        inputId: admitted.inputId,
+      })
+      const tool = await context.kernel.requestTool({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        name: "shell.exec",
+        input: {
+          command: "pnpm test",
+        },
+      })
+      const permission = await context.kernel.requestPermission({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        action: "shell.exec",
+        toolCallId: tool.toolCallId,
+      })
+
+      await context.store.appendEvent(session.sessionId, {
+        type: EventType.ToolStarted,
+        data: {
+          toolCallId: tool.toolCallId,
+          turnId: started.turnId,
+        },
+      })
+
+      await expect(
+        context.projector.project(session.sessionId),
+      ).rejects.toThrow(
+        `Permission ${permission.permissionRequestId} has not been allowed.`,
+      )
+    })
+  })
+
   it("applies session metadata updates and turn completion", async () => {
     await withProjector(async (context) => {
       const session = await context.kernel.createSession({
@@ -434,6 +479,146 @@ describe("session projector", () => {
         }),
       ]),
     ).toThrow("has not been admitted")
+  })
+
+  it("rejects turn start without matching input promotion", () => {
+    const sessionId = createSessionId()
+    const inputId = createInputId()
+    const turnId = createTurnId()
+
+    expect(() =>
+      projectSession([
+        createEventEnvelope({
+          sessionId,
+          seq: 1,
+          event: {
+            type: EventType.SessionCreated,
+            data: {},
+          },
+        }),
+        createEventEnvelope({
+          sessionId,
+          seq: 2,
+          event: {
+            type: EventType.InputAdmitted,
+            data: {
+              inputId,
+              role: InputRole.User,
+              content: {
+                kind: "text",
+                text: "not promoted",
+              },
+            },
+          },
+        }),
+        createEventEnvelope({
+          sessionId,
+          seq: 3,
+          event: {
+            type: EventType.TurnStarted,
+            data: {
+              turnId,
+              inputId,
+            },
+          },
+        }),
+      ]),
+    ).toThrow(`Turn ${turnId} must start from promoted input ${inputId}.`)
+  })
+
+  it("rejects multiple active turns during replay", () => {
+    const sessionId = createSessionId()
+    const firstInputId = createInputId()
+    const firstTurnId = createTurnId()
+    const secondInputId = createInputId()
+    const secondTurnId = createTurnId()
+
+    expect(() =>
+      projectSession([
+        createEventEnvelope({
+          sessionId,
+          seq: 1,
+          event: {
+            type: EventType.SessionCreated,
+            data: {},
+          },
+        }),
+        createEventEnvelope({
+          sessionId,
+          seq: 2,
+          event: {
+            type: EventType.InputAdmitted,
+            data: {
+              inputId: firstInputId,
+              role: InputRole.User,
+              content: {
+                kind: "text",
+                text: "first",
+              },
+            },
+          },
+        }),
+        createEventEnvelope({
+          sessionId,
+          seq: 3,
+          event: {
+            type: EventType.InputPromoted,
+            data: {
+              inputId: firstInputId,
+              turnId: firstTurnId,
+            },
+          },
+        }),
+        createEventEnvelope({
+          sessionId,
+          seq: 4,
+          event: {
+            type: EventType.TurnStarted,
+            data: {
+              turnId: firstTurnId,
+              inputId: firstInputId,
+            },
+          },
+        }),
+        createEventEnvelope({
+          sessionId,
+          seq: 5,
+          event: {
+            type: EventType.InputAdmitted,
+            data: {
+              inputId: secondInputId,
+              role: InputRole.User,
+              content: {
+                kind: "text",
+                text: "second",
+              },
+            },
+          },
+        }),
+        createEventEnvelope({
+          sessionId,
+          seq: 6,
+          event: {
+            type: EventType.InputPromoted,
+            data: {
+              inputId: secondInputId,
+              turnId: secondTurnId,
+            },
+          },
+        }),
+        createEventEnvelope({
+          sessionId,
+          seq: 7,
+          event: {
+            type: EventType.TurnStarted,
+            data: {
+              turnId: secondTurnId,
+              inputId: secondInputId,
+            },
+          },
+        }),
+      ]),
+    ).toThrow(`Session already has active turn ${firstTurnId}.`)
   })
 })
 

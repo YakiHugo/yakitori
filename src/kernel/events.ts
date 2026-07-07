@@ -194,7 +194,6 @@ export type ItemUpdatedEvent = {
     readonly itemId: string
     readonly turnId: string
     readonly content?: ItemContent
-    readonly status?: ItemStatus
     readonly metadata?: EventMetadata
   }
 }

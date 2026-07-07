@@ -355,7 +355,7 @@ function applyEvent(
       applyItemCompleted(items, event)
       return
     case EventType.PermissionRequested:
-      applyPermissionRequested(permissions, turns, event)
+      applyPermissionRequested(permissions, tools, turns, event)
       return
     case EventType.PermissionResolved:
       applyPermissionResolved(permissions, turns, event)
@@ -492,7 +492,20 @@ function applyTurnStarted(
     throw new Error(`Turn ${event.data.turnId} has already been started.`)
   }
 
-  requireInput(inputs, event.data.inputId)
+  requireNoActiveTurn(turns)
+  const input = requireInput(inputs, event.data.inputId)
+  if (
+    input.state !== InputState.Promoted ||
+    input.turnId !== event.data.turnId
+  ) {
+    throw new Error(
+      `Turn ${event.data.turnId} must start from promoted input ${event.data.inputId}.`,
+    )
+  }
+  if (event.data.parentTurnId !== undefined) {
+    requireTurn(turns, event.data.parentTurnId)
+  }
+
   turns.set(event.data.turnId, {
     turnId: event.data.turnId,
     inputId: event.data.inputId,
@@ -609,7 +622,6 @@ function applyItemUpdated(
 ): void {
   const item = requireActiveItem(items, event.data.turnId, event.data.itemId)
   if (event.data.content !== undefined) item.content = event.data.content
-  if (event.data.status !== undefined) item.status = event.data.status
   if (event.data.metadata !== undefined) item.metadata = event.data.metadata
   item.updatedAt = event.createdAt
 }
@@ -629,6 +641,7 @@ function applyItemCompleted(
 
 function applyPermissionRequested(
   permissions: Map<string, MutablePermissionProjection>,
+  tools: Map<string, MutableToolProjection>,
   turns: Map<string, MutableTurnProjection>,
   event: Extract<
     EventEnvelope,
@@ -642,6 +655,9 @@ function applyPermissionRequested(
   }
 
   const turn = requireActiveTurn(turns, event.data.turnId)
+  if (event.data.toolCallId !== undefined) {
+    requireRequestedTool(tools, event.data.turnId, event.data.toolCallId)
+  }
   permissions.set(event.data.permissionRequestId, {
     permissionRequestId: event.data.permissionRequestId,
     turnId: event.data.turnId,
@@ -726,7 +742,7 @@ function applyToolRequested(
     requireItem(items, event.data.turnId, event.data.itemId)
   }
   if (event.data.permissionRequestId !== undefined) {
-    requirePermission(
+    requireUnboundPermission(
       permissions,
       event.data.turnId,
       event.data.permissionRequestId,
@@ -770,13 +786,7 @@ function applyToolStarted(
     event.data.turnId,
     event.data.toolCallId,
   )
-  if (tool.permissionRequestId !== undefined) {
-    requireAllowedPermission(
-      permissions,
-      event.data.turnId,
-      tool.permissionRequestId,
-    )
-  }
+  requireAllowedToolPermissions(permissions, event.data.turnId, tool)
 
   tool.state = ToolState.Started
   tool.updatedAt = event.createdAt
@@ -886,6 +896,15 @@ function requireInput(
   throw new Error(`Input ${inputId} has not been admitted.`)
 }
 
+function requireTurn(
+  turns: Map<string, MutableTurnProjection>,
+  turnId: string,
+): MutableTurnProjection {
+  const turn = turns.get(turnId)
+  if (turn) return turn
+  throw new Error(`Turn ${turnId} has not been started.`)
+}
+
 function requireItem(
   items: Map<string, MutableItemProjection>,
   turnId: string,
@@ -932,6 +951,18 @@ function requirePermission(
   )
 }
 
+function requireUnboundPermission(
+  permissions: Map<string, MutablePermissionProjection>,
+  turnId: string,
+  permissionRequestId: string,
+): MutablePermissionProjection {
+  const permission = requirePermission(permissions, turnId, permissionRequestId)
+  if (permission.toolCallId === undefined) return permission
+  throw new Error(
+    `Permission ${permissionRequestId} is already bound to tool ${permission.toolCallId}.`,
+  )
+}
+
 function requirePendingPermission(
   permissions: Map<string, MutablePermissionProjection>,
   turnId: string,
@@ -962,6 +993,27 @@ function requireAllowedPermission(
     )
   }
   throw new Error(`Permission ${permissionRequestId} has not been allowed.`)
+}
+
+function requireAllowedToolPermissions(
+  permissions: Map<string, MutablePermissionProjection>,
+  turnId: string,
+  tool: MutableToolProjection,
+): void {
+  const toolPermissions = Array.from(permissions.values()).filter(
+    (permission) =>
+      permission.turnId === turnId &&
+      (permission.permissionRequestId === tool.permissionRequestId ||
+        permission.toolCallId === tool.toolCallId),
+  )
+
+  for (const permission of toolPermissions) {
+    requireAllowedPermission(
+      permissions,
+      turnId,
+      permission.permissionRequestId,
+    )
+  }
 }
 
 function requireTool(
@@ -1043,8 +1095,15 @@ function requireActiveTurn(
   turns: Map<string, MutableTurnProjection>,
   turnId: string,
 ): MutableTurnProjection {
-  const turn = turns.get(turnId)
-  if (!turn) throw new Error(`Turn ${turnId} has not been started.`)
+  const turn = requireTurn(turns, turnId)
   if (turn.state === TurnState.Started) return turn
   throw new Error(`Turn ${turnId} is already ${turn.state}.`)
+}
+
+function requireNoActiveTurn(turns: Map<string, MutableTurnProjection>): void {
+  const turn = Array.from(turns.values()).find(
+    (candidate) => candidate.state === TurnState.Started,
+  )
+  if (!turn) return
+  throw new Error(`Session already has active turn ${turn.turnId}.`)
 }
