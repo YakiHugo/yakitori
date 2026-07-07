@@ -13,6 +13,7 @@ import {
   type SessionKernel,
   ToolState,
   TurnState,
+  YakitoriErrorCode,
 } from "../../src/index.ts"
 import { createMemoryEventStore } from "./memory-event-store.ts"
 
@@ -453,15 +454,22 @@ describe("session kernel", () => {
         permissionRequestId: permission.permissionRequestId,
       })
 
-      await expect(
-        context.kernel.startTool({
-          sessionId: session.sessionId,
-          turnId: started.turnId,
-          toolCallId: tool.toolCallId,
-        }),
-      ).rejects.toThrow(
+      const deniedStart = context.kernel.startTool({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        toolCallId: tool.toolCallId,
+      })
+
+      await expect(deniedStart).rejects.toThrow(
         `Permission ${permission.permissionRequestId} resolved with deny.`,
       )
+      await expect(deniedStart).rejects.toMatchObject({
+        code: YakitoriErrorCode.InvalidState,
+        details: {
+          permissionRequestId: permission.permissionRequestId,
+          behavior: PermissionBehavior.Deny,
+        },
+      })
     })
   })
 
@@ -495,15 +503,22 @@ describe("session kernel", () => {
         toolCallId: tool.toolCallId,
       })
 
-      await expect(
-        context.kernel.startTool({
-          sessionId: session.sessionId,
-          turnId: started.turnId,
-          toolCallId: tool.toolCallId,
-        }),
-      ).rejects.toThrow(
+      const pendingStart = context.kernel.startTool({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        toolCallId: tool.toolCallId,
+      })
+
+      await expect(pendingStart).rejects.toThrow(
         `Permission ${permission.permissionRequestId} has not been allowed.`,
       )
+      await expect(pendingStart).rejects.toMatchObject({
+        code: YakitoriErrorCode.InvalidState,
+        details: {
+          permissionRequestId: permission.permissionRequestId,
+          state: PermissionState.Requested,
+        },
+      })
 
       await context.kernel.resolvePermission({
         sessionId: session.sessionId,

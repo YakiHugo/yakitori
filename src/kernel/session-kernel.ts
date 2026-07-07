@@ -1,4 +1,5 @@
 import type { EventStore } from "./event-store.ts"
+import { createYakitoriError, YakitoriErrorCode } from "./errors.ts"
 import {
   EventType,
   InputRole,
@@ -738,7 +739,9 @@ async function readSessionProjection(
 ): Promise<SessionProjection> {
   const session = await readOptionalSessionProjection(eventStore, sessionId)
   if (session) return session
-  throw new Error(`Session ${sessionId} has not been created.`)
+  throw notFound(`Session ${sessionId} has not been created.`, {
+    sessionId,
+  })
 }
 
 async function readOptionalSessionProjection(
@@ -750,10 +753,16 @@ async function readOptionalSessionProjection(
 
 function requireInputReadyForTurn(input: InputProjection): void {
   if (input.state === InputState.Cancelled) {
-    throw new Error(`Input ${input.inputId} has been cancelled.`)
+    throw invalidState(`Input ${input.inputId} has been cancelled.`, {
+      inputId: input.inputId,
+      state: input.state,
+    })
   }
   if (input.state === InputState.Promoted) {
-    throw new Error(`Input ${input.inputId} has already been promoted.`)
+    throw invalidState(`Input ${input.inputId} has already been promoted.`, {
+      inputId: input.inputId,
+      state: input.state,
+    })
   }
 }
 
@@ -765,7 +774,9 @@ function requireInput(
     (candidate) => candidate.inputId === inputId,
   )
   if (input) return input
-  throw new Error(`Input ${inputId} has not been admitted.`)
+  throw notFound(`Input ${inputId} has not been admitted.`, {
+    inputId,
+  })
 }
 
 function requireTurnStarted(
@@ -775,7 +786,9 @@ function requireTurnStarted(
   const turn = session.turns.find((candidate) => candidate.turnId === turnId)
   if (turn) return turn
 
-  throw new Error(`Turn ${turnId} has not been started.`)
+  throw notFound(`Turn ${turnId} has not been started.`, {
+    turnId,
+  })
 }
 
 function requireItem(
@@ -784,9 +797,17 @@ function requireItem(
   itemId: string,
 ): ItemProjection {
   const item = session.items.find((candidate) => candidate.itemId === itemId)
-  if (!item) throw new Error(`Item ${itemId} has not been appended.`)
+  if (!item) {
+    throw notFound(`Item ${itemId} has not been appended.`, {
+      itemId,
+    })
+  }
   if (item.turnId === turnId) return item
-  throw new Error(`Item ${itemId} does not belong to turn ${turnId}.`)
+  throw invalidArgument(`Item ${itemId} does not belong to turn ${turnId}.`, {
+    itemId,
+    turnId,
+    actualTurnId: item.turnId,
+  })
 }
 
 function requireOpenItem(
@@ -796,7 +817,10 @@ function requireOpenItem(
 ): ItemProjection {
   const item = requireItem(session, turnId, itemId)
   if (item.status === ItemStatus.InProgress) return item
-  throw new Error(`Item ${itemId} is already ${item.status}.`)
+  throw invalidState(`Item ${itemId} is already ${item.status}.`, {
+    itemId,
+    status: item.status,
+  })
 }
 
 function requireCompletedItem(
@@ -806,12 +830,17 @@ function requireCompletedItem(
 ): ItemProjection {
   const item = requireItem(session, turnId, itemId)
   if (item.status === ItemStatus.Completed) return item
-  throw new Error(`Item ${itemId} is ${item.status}.`)
+  throw invalidState(`Item ${itemId} is ${item.status}.`, {
+    itemId,
+    status: item.status,
+  })
 }
 
 function requireItemUpdate(input: UpdateItemInput): void {
   if (input.content !== undefined || input.metadata !== undefined) return
-  throw new Error(`Item ${input.itemId} update has no changes.`)
+  throw invalidArgument(`Item ${input.itemId} update has no changes.`, {
+    itemId: input.itemId,
+  })
 }
 
 function requirePermission(
@@ -823,11 +852,21 @@ function requirePermission(
     (candidate) => candidate.permissionRequestId === permissionRequestId,
   )
   if (!permission) {
-    throw new Error(`Permission ${permissionRequestId} has not been requested.`)
+    throw notFound(
+      `Permission ${permissionRequestId} has not been requested.`,
+      {
+        permissionRequestId,
+      },
+    )
   }
   if (permission.turnId === turnId) return permission
-  throw new Error(
+  throw invalidArgument(
     `Permission ${permissionRequestId} does not belong to turn ${turnId}.`,
+    {
+      permissionRequestId,
+      turnId,
+      actualTurnId: permission.turnId,
+    },
   )
 }
 
@@ -838,8 +877,12 @@ function requireUnboundPermission(
 ): PermissionProjection {
   const permission = requirePermission(session, turnId, permissionRequestId)
   if (permission.toolCallId === undefined) return permission
-  throw new Error(
+  throw invalidState(
     `Permission ${permissionRequestId} is already bound to tool ${permission.toolCallId}.`,
+    {
+      permissionRequestId,
+      toolCallId: permission.toolCallId,
+    },
   )
 }
 
@@ -850,8 +893,12 @@ function requirePendingPermission(
 ): PermissionProjection {
   const permission = requirePermission(session, turnId, permissionRequestId)
   if (permission.state === PermissionState.Requested) return permission
-  throw new Error(
+  throw invalidState(
     `Permission ${permissionRequestId} is already ${permission.state}.`,
+    {
+      permissionRequestId,
+      state: permission.state,
+    },
   )
 }
 
@@ -868,11 +915,21 @@ function requireAllowedPermission(
     return permission
   }
   if (permission.state === PermissionState.Resolved) {
-    throw new Error(
+    throw invalidState(
       `Permission ${permissionRequestId} resolved with ${permission.behavior}.`,
+      {
+        permissionRequestId,
+        behavior: permission.behavior ?? null,
+      },
     )
   }
-  throw new Error(`Permission ${permissionRequestId} has not been allowed.`)
+  throw invalidState(
+    `Permission ${permissionRequestId} has not been allowed.`,
+    {
+      permissionRequestId,
+      state: permission.state,
+    },
+  )
 }
 
 function requireAllowedToolPermissions(
@@ -900,9 +957,20 @@ function requireTool(
   const tool = session.tools.find(
     (candidate) => candidate.toolCallId === toolCallId,
   )
-  if (!tool) throw new Error(`Tool ${toolCallId} has not been requested.`)
+  if (!tool) {
+    throw notFound(`Tool ${toolCallId} has not been requested.`, {
+      toolCallId,
+    })
+  }
   if (tool.turnId === turnId) return tool
-  throw new Error(`Tool ${toolCallId} does not belong to turn ${turnId}.`)
+  throw invalidArgument(
+    `Tool ${toolCallId} does not belong to turn ${turnId}.`,
+    {
+      toolCallId,
+      turnId,
+      actualTurnId: tool.turnId,
+    },
+  )
 }
 
 function requireRequestedTool(
@@ -912,7 +980,10 @@ function requireRequestedTool(
 ): ToolProjection {
   const tool = requireTool(session, turnId, toolCallId)
   if (tool.state === ToolState.Requested) return tool
-  throw new Error(`Tool ${toolCallId} is already ${tool.state}.`)
+  throw invalidState(`Tool ${toolCallId} is already ${tool.state}.`, {
+    toolCallId,
+    state: tool.state,
+  })
 }
 
 function requireStartedTool(
@@ -922,7 +993,10 @@ function requireStartedTool(
 ): ToolProjection {
   const tool = requireTool(session, turnId, toolCallId)
   if (tool.state === ToolState.Started) return tool
-  throw new Error(`Tool ${toolCallId} is already ${tool.state}.`)
+  throw invalidState(`Tool ${toolCallId} is already ${tool.state}.`, {
+    toolCallId,
+    state: tool.state,
+  })
 }
 
 function requireOpenTool(
@@ -934,12 +1008,17 @@ function requireOpenTool(
   if (tool.state === ToolState.Requested || tool.state === ToolState.Started) {
     return tool
   }
-  throw new Error(`Tool ${toolCallId} is already ${tool.state}.`)
+  throw invalidState(`Tool ${toolCallId} is already ${tool.state}.`, {
+    toolCallId,
+    state: tool.state,
+  })
 }
 
 function requireToolProgress(input: RecordToolProgressInput): void {
   if (input.message !== undefined || input.data !== undefined) return
-  throw new Error(`Tool ${input.toolCallId} progress has no changes.`)
+  throw invalidArgument(`Tool ${input.toolCallId} progress has no changes.`, {
+    toolCallId: input.toolCallId,
+  })
 }
 
 function requireNoOpenTurnWork(
@@ -950,7 +1029,12 @@ function requireNoOpenTurnWork(
     (candidate) =>
       candidate.turnId === turnId && candidate.status === ItemStatus.InProgress,
   )
-  if (item) throw new Error(`Turn ${turnId} has open item ${item.itemId}.`)
+  if (item) {
+    throw invalidState(`Turn ${turnId} has open item ${item.itemId}.`, {
+      turnId,
+      itemId: item.itemId,
+    })
+  }
 
   const permission = session.permissions.find(
     (candidate) =>
@@ -958,8 +1042,12 @@ function requireNoOpenTurnWork(
       candidate.state === PermissionState.Requested,
   )
   if (permission) {
-    throw new Error(
+    throw invalidState(
       `Turn ${turnId} has pending permission ${permission.permissionRequestId}.`,
+      {
+        turnId,
+        permissionRequestId: permission.permissionRequestId,
+      },
     )
   }
 
@@ -969,7 +1057,12 @@ function requireNoOpenTurnWork(
       (candidate.state === ToolState.Requested ||
         candidate.state === ToolState.Started),
   )
-  if (tool) throw new Error(`Turn ${turnId} has open tool ${tool.toolCallId}.`)
+  if (tool) {
+    throw invalidState(`Turn ${turnId} has open tool ${tool.toolCallId}.`, {
+      turnId,
+      toolCallId: tool.toolCallId,
+    })
+  }
 }
 
 function openTurnWorkClosureEvents(
@@ -1044,8 +1137,12 @@ function requireNoActiveTurn(session: SessionProjection): void {
     (candidate) => candidate.state === TurnState.Started,
   )
   if (!turn) return
-  throw new Error(
+  throw invalidState(
     `Session ${session.id} already has active turn ${turn.turnId}.`,
+    {
+      sessionId: session.id,
+      turnId: turn.turnId,
+    },
   )
 }
 
@@ -1055,11 +1152,38 @@ function requireActiveTurn(
 ): TurnProjection {
   const turn = requireTurnStarted(session, turnId)
   if (turn.state === TurnState.Started) return turn
-  throw new Error(`Turn ${turnId} is already ${turn.state}.`)
+  throw invalidState(`Turn ${turnId} is already ${turn.state}.`, {
+    turnId,
+    state: turn.state,
+  })
 }
 
 function requireLastEvent(events: readonly EventEnvelope[]): EventEnvelope {
   const event = events.at(-1)
   if (event) return event
-  throw new Error("Expected appended events.")
+  throw invalidState("Expected appended events.")
+}
+
+function invalidArgument(message: string, details?: EventMetadata): Error {
+  return createYakitoriError({
+    code: YakitoriErrorCode.InvalidArgument,
+    message,
+    ...(details === undefined ? {} : { details }),
+  })
+}
+
+function invalidState(message: string, details?: EventMetadata): Error {
+  return createYakitoriError({
+    code: YakitoriErrorCode.InvalidState,
+    message,
+    ...(details === undefined ? {} : { details }),
+  })
+}
+
+function notFound(message: string, details?: EventMetadata): Error {
+  return createYakitoriError({
+    code: YakitoriErrorCode.NotFound,
+    message,
+    ...(details === undefined ? {} : { details }),
+  })
 }
