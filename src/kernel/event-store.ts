@@ -1,9 +1,11 @@
 import { appendFile, mkdir, readFile } from "node:fs/promises"
 import { join } from "node:path"
+import { createYakitoriError, YakitoriErrorCode } from "./errors.ts"
 import {
   createEventEnvelope,
   EventType,
   type EventEnvelope,
+  type EventMetadata,
   InputRole,
   ItemKind,
   ItemStatus,
@@ -40,7 +42,15 @@ export function createJsonlEventStore(
         () => appendEventsToFile(rootDir, sessionId, [event]),
       )
       const envelope = envelopes.at(0)
-      if (!envelope) throw new Error("Expected one appended event.")
+      if (!envelope) {
+        throw createYakitoriError({
+          code: YakitoriErrorCode.InvalidState,
+          message: "Expected one appended event.",
+          details: {
+            sessionId,
+          },
+        })
+      }
       return envelope
     },
 
@@ -64,6 +74,8 @@ function serializeSessionAppend<T>(
   append: () => Promise<T>,
 ): Promise<T> {
   const previous = appendQueues.get(sessionId) ?? Promise.resolve()
+  // The original caller still receives its own failure; the queue only ignores it
+  // so later writes for the same session are not permanently blocked.
   const current = previous.catch(() => undefined).then(append)
   const next = current.then(
     () => undefined,
@@ -85,7 +97,6 @@ async function appendEventsToFile(
 ): Promise<EventEnvelope[]> {
   if (eventsToAppend.length === 0) return []
 
-  // The session runner serializes writes; this store validates order but does not lock.
   const existingEvents = await readEventsFromFile(rootDir, sessionId)
   const nextSequence = nextSeq(existingEvents)
   const envelopes = eventsToAppend.map((event, index) =>
@@ -138,41 +149,76 @@ function parseEventEnvelope(line: string, lineNumber: number): EventEnvelope {
   try {
     parsed = JSON.parse(line)
   } catch (error) {
-    throw new Error(`Invalid event JSON at line ${lineNumber}.`, {
+    throw invalidEventLog(`Invalid event JSON at line ${lineNumber}.`, {
+      details: {
+        lineNumber,
+      },
       cause: error,
     })
   }
 
   if (!isRecord(parsed)) {
-    throw new Error(`Invalid event envelope at line ${lineNumber}.`)
+    throw invalidEventLog(`Invalid event envelope at line ${lineNumber}.`, {
+      details: {
+        lineNumber,
+      },
+    })
   }
 
   if (typeof parsed.id !== "string") {
-    throw new Error(`Invalid event id at line ${lineNumber}.`)
+    throw invalidEventLog(`Invalid event id at line ${lineNumber}.`, {
+      details: {
+        lineNumber,
+      },
+    })
   }
 
   if (typeof parsed.sessionId !== "string") {
-    throw new Error(`Invalid event session id at line ${lineNumber}.`)
+    throw invalidEventLog(`Invalid event session id at line ${lineNumber}.`, {
+      details: {
+        lineNumber,
+      },
+    })
   }
 
   if (!isPositiveInteger(parsed.seq)) {
-    throw new Error(`Invalid event sequence at line ${lineNumber}.`)
+    throw invalidEventLog(`Invalid event sequence at line ${lineNumber}.`, {
+      details: {
+        lineNumber,
+      },
+    })
   }
 
   if (!isPositiveInteger(parsed.version)) {
-    throw new Error(`Invalid event version at line ${lineNumber}.`)
+    throw invalidEventLog(`Invalid event version at line ${lineNumber}.`, {
+      details: {
+        lineNumber,
+      },
+    })
   }
 
   if (!isEventType(parsed.type)) {
-    throw new Error(`Invalid event type at line ${lineNumber}.`)
+    throw invalidEventLog(`Invalid event type at line ${lineNumber}.`, {
+      details: {
+        lineNumber,
+      },
+    })
   }
 
   if (typeof parsed.createdAt !== "string") {
-    throw new Error(`Invalid event timestamp at line ${lineNumber}.`)
+    throw invalidEventLog(`Invalid event timestamp at line ${lineNumber}.`, {
+      details: {
+        lineNumber,
+      },
+    })
   }
 
   if (!isRecord(parsed.data)) {
-    throw new Error(`Invalid event data at line ${lineNumber}.`)
+    throw invalidEventLog(`Invalid event data at line ${lineNumber}.`, {
+      details: {
+        lineNumber,
+      },
+    })
   }
   assertEventData(parsed.type, parsed.data, lineNumber)
 
@@ -183,11 +229,26 @@ function assertSessionEvents(sessionId: string, events: EventEnvelope[]): void {
   for (const [index, event] of events.entries()) {
     const expectedSeq = index + 1
     if (event.sessionId !== sessionId) {
-      throw new Error(`Event session mismatch at sequence ${event.seq}.`)
+      throw invalidEventLog(
+        `Event session mismatch at sequence ${event.seq}.`,
+        {
+          details: {
+            expectedSessionId: sessionId,
+            actualSessionId: event.sessionId,
+            seq: event.seq,
+          },
+        },
+      )
     }
     if (event.seq !== expectedSeq) {
-      throw new Error(
+      throw invalidEventLog(
         `Event sequence must be gap-free. Expected ${expectedSeq}, got ${event.seq}.`,
+        {
+          details: {
+            expectedSeq,
+            actualSeq: event.seq,
+          },
+        },
       )
     }
   }
@@ -215,7 +276,13 @@ function assertSessionId(sessionId: string): void {
   ) {
     return
   }
-  throw new Error(`Invalid session id ${sessionId}.`)
+  throw createYakitoriError({
+    code: YakitoriErrorCode.InvalidArgument,
+    message: `Invalid session id ${sessionId}.`,
+    details: {
+      sessionId,
+    },
+  })
 }
 
 function assertEventData(
@@ -224,7 +291,30 @@ function assertEventData(
   lineNumber: number,
 ): void {
   if (isEventData(type, data)) return
-  throw new Error(`Invalid event data for ${type} at line ${lineNumber}.`)
+  throw invalidEventLog(
+    `Invalid event data for ${type} at line ${lineNumber}.`,
+    {
+      details: {
+        type,
+        lineNumber,
+      },
+    },
+  )
+}
+
+function invalidEventLog(
+  message: string,
+  input: {
+    readonly details?: EventMetadata
+    readonly cause?: unknown
+  } = {},
+): Error {
+  return createYakitoriError({
+    code: YakitoriErrorCode.InvalidEventLog,
+    message,
+    ...(input.details === undefined ? {} : { details: input.details }),
+    ...(input.cause === undefined ? {} : { cause: input.cause }),
+  })
 }
 
 function isEventData(type: EventType, data: Record<string, unknown>): boolean {

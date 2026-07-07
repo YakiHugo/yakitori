@@ -9,6 +9,7 @@ import {
   createSessionId,
   EventType,
   InputRole,
+  YakitoriErrorCode,
   type EventStore,
   type KernelEvent,
 } from "../../src/index.ts"
@@ -78,6 +79,14 @@ describe("jsonl event store", () => {
       await expect(context.store.readEvents("../../outside")).rejects.toThrow(
         "Invalid session id ../../outside.",
       )
+      await expect(
+        context.store.readEvents("../../outside"),
+      ).rejects.toMatchObject({
+        code: YakitoriErrorCode.InvalidArgument,
+        details: {
+          sessionId: "../../outside",
+        },
+      })
     })
   })
 
@@ -91,6 +100,13 @@ describe("jsonl event store", () => {
       await expect(context.store.readEvents(sessionId)).rejects.toThrow(
         "Invalid event JSON at line 1.",
       )
+      await expect(context.store.readEvents(sessionId)).rejects.toMatchObject({
+        code: YakitoriErrorCode.InvalidEventLog,
+        details: {
+          lineNumber: 1,
+        },
+        cause: expect.any(SyntaxError),
+      })
     })
   })
 
