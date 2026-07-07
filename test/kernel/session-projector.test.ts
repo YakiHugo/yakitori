@@ -16,6 +16,7 @@ import {
   projectSession,
   ToolState,
   TurnState,
+  YakitoriErrorCode,
   type EventEnvelope,
   type EventStore,
   type SessionKernel,
@@ -333,11 +334,18 @@ describe("session projector", () => {
         },
       })
 
-      await expect(
-        context.projector.project(session.sessionId),
-      ).rejects.toThrow(
+      const projected = context.projector.project(session.sessionId)
+
+      await expect(projected).rejects.toThrow(
         `Permission ${permission.permissionRequestId} has not been allowed.`,
       )
+      await expect(projected).rejects.toMatchObject({
+        code: YakitoriErrorCode.InvalidReplay,
+        details: {
+          permissionRequestId: permission.permissionRequestId,
+          state: PermissionState.Requested,
+        },
+      })
     })
   })
 

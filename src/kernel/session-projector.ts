@@ -1,4 +1,5 @@
 import type { EventStore } from "./event-store.ts"
+import { createYakitoriError, YakitoriErrorCode } from "./errors.ts"
 import {
   EventType,
   type EventEnvelope,
@@ -261,10 +262,14 @@ export function projectSession(
   const firstEvent = events.at(0)
   if (!firstEvent) return undefined
   if (firstEvent.type !== EventType.SessionCreated) {
-    throw new Error("Session projection must start with session.created.")
+    throw invalidReplay("Session projection must start with session.created.", {
+      actualType: firstEvent.type,
+    })
   }
   if (firstEvent.seq !== 1) {
-    throw new Error("Session projection must start at sequence 1.")
+    throw invalidReplay("Session projection must start at sequence 1.", {
+      actualSeq: firstEvent.seq,
+    })
   }
 
   const session = createInitialSessionProjection(firstEvent)
@@ -320,7 +325,12 @@ function applyEvent(
 
   switch (event.type) {
     case EventType.SessionCreated:
-      throw new Error("Session projection cannot contain multiple sessions.")
+      throw invalidReplay(
+        "Session projection cannot contain multiple sessions.",
+        {
+          seq: event.seq,
+        },
+      )
     case EventType.SessionMetadataUpdated:
       applySessionMetadataUpdated(session, event)
       return
@@ -422,7 +432,12 @@ function applyInputAdmitted(
   >,
 ): void {
   if (inputs.has(event.data.inputId)) {
-    throw new Error(`Input ${event.data.inputId} has already been admitted.`)
+    throw invalidReplay(
+      `Input ${event.data.inputId} has already been admitted.`,
+      {
+        inputId: event.data.inputId,
+      },
+    )
   }
 
   inputs.set(event.data.inputId, {
@@ -450,10 +465,19 @@ function applyInputPromoted(
 ): void {
   const input = requireInput(inputs, event.data.inputId)
   if (input.state === InputState.Cancelled) {
-    throw new Error(`Input ${event.data.inputId} has been cancelled.`)
+    throw invalidReplay(`Input ${event.data.inputId} has been cancelled.`, {
+      inputId: event.data.inputId,
+      state: input.state,
+    })
   }
   if (input.turnId !== undefined) {
-    throw new Error(`Input ${event.data.inputId} has already been promoted.`)
+    throw invalidReplay(
+      `Input ${event.data.inputId} has already been promoted.`,
+      {
+        inputId: event.data.inputId,
+        turnId: input.turnId,
+      },
+    )
   }
 
   input.state = InputState.Promoted
@@ -470,7 +494,13 @@ function applyInputCancelled(
 ): void {
   const input = requireInput(inputs, event.data.inputId)
   if (input.state === InputState.Promoted) {
-    throw new Error(`Input ${event.data.inputId} has already been promoted.`)
+    throw invalidReplay(
+      `Input ${event.data.inputId} has already been promoted.`,
+      {
+        inputId: event.data.inputId,
+        turnId: input.turnId ?? null,
+      },
+    )
   }
 
   input.state = InputState.Cancelled
@@ -489,7 +519,9 @@ function applyTurnStarted(
   >,
 ): void {
   if (turns.has(event.data.turnId)) {
-    throw new Error(`Turn ${event.data.turnId} has already been started.`)
+    throw invalidReplay(`Turn ${event.data.turnId} has already been started.`, {
+      turnId: event.data.turnId,
+    })
   }
 
   requireNoActiveTurn(turns)
@@ -498,8 +530,14 @@ function applyTurnStarted(
     input.state !== InputState.Promoted ||
     input.turnId !== event.data.turnId
   ) {
-    throw new Error(
+    throw invalidReplay(
       `Turn ${event.data.turnId} must start from promoted input ${event.data.inputId}.`,
+      {
+        turnId: event.data.turnId,
+        inputId: event.data.inputId,
+        inputState: input.state,
+        promotedTurnId: input.turnId ?? null,
+      },
     )
   }
   if (event.data.parentTurnId !== undefined) {
@@ -587,7 +625,12 @@ function applyItemAppended(
   >,
 ): void {
   if (items.has(event.data.itemId)) {
-    throw new Error(`Item ${event.data.itemId} has already been appended.`)
+    throw invalidReplay(
+      `Item ${event.data.itemId} has already been appended.`,
+      {
+        itemId: event.data.itemId,
+      },
+    )
   }
 
   const turn = requireActiveTurn(turns, event.data.turnId)
@@ -649,8 +692,11 @@ function applyPermissionRequested(
   >,
 ): void {
   if (permissions.has(event.data.permissionRequestId)) {
-    throw new Error(
+    throw invalidReplay(
       `Permission ${event.data.permissionRequestId} has already been requested.`,
+      {
+        permissionRequestId: event.data.permissionRequestId,
+      },
     )
   }
 
@@ -734,7 +780,12 @@ function applyToolRequested(
   >,
 ): void {
   if (tools.has(event.data.toolCallId)) {
-    throw new Error(`Tool ${event.data.toolCallId} has already been requested.`)
+    throw invalidReplay(
+      `Tool ${event.data.toolCallId} has already been requested.`,
+      {
+        toolCallId: event.data.toolCallId,
+      },
+    )
   }
 
   const turn = requireActiveTurn(turns, event.data.turnId)
@@ -878,11 +929,19 @@ function assertNextSessionEvent(
   event: EventEnvelope,
 ): void {
   if (event.sessionId !== session.id) {
-    throw new Error(`Event ${event.id} belongs to another session.`)
+    throw invalidReplay(`Event ${event.id} belongs to another session.`, {
+      eventId: event.id,
+      expectedSessionId: session.id,
+      actualSessionId: event.sessionId,
+    })
   }
   if (event.seq !== session.seq + 1) {
-    throw new Error(
+    throw invalidReplay(
       `Session projection expected sequence ${session.seq + 1}, got ${event.seq}.`,
+      {
+        expectedSeq: session.seq + 1,
+        actualSeq: event.seq,
+      },
     )
   }
 }
@@ -893,7 +952,9 @@ function requireInput(
 ): MutableInputProjection {
   const input = inputs.get(inputId)
   if (input) return input
-  throw new Error(`Input ${inputId} has not been admitted.`)
+  throw invalidReplay(`Input ${inputId} has not been admitted.`, {
+    inputId,
+  })
 }
 
 function requireTurn(
@@ -902,7 +963,9 @@ function requireTurn(
 ): MutableTurnProjection {
   const turn = turns.get(turnId)
   if (turn) return turn
-  throw new Error(`Turn ${turnId} has not been started.`)
+  throw invalidReplay(`Turn ${turnId} has not been started.`, {
+    turnId,
+  })
 }
 
 function requireItem(
@@ -911,9 +974,17 @@ function requireItem(
   itemId: string,
 ): MutableItemProjection {
   const item = items.get(itemId)
-  if (!item) throw new Error(`Item ${itemId} has not been appended.`)
+  if (!item) {
+    throw invalidReplay(`Item ${itemId} has not been appended.`, {
+      itemId,
+    })
+  }
   if (item.turnId === turnId) return item
-  throw new Error(`Item ${itemId} does not belong to turn ${turnId}.`)
+  throw invalidReplay(`Item ${itemId} does not belong to turn ${turnId}.`, {
+    itemId,
+    turnId,
+    actualTurnId: item.turnId,
+  })
 }
 
 function requireActiveItem(
@@ -923,7 +994,10 @@ function requireActiveItem(
 ): MutableItemProjection {
   const item = requireItem(items, turnId, itemId)
   if (item.status === ItemStatus.InProgress) return item
-  throw new Error(`Item ${itemId} is already ${item.status}.`)
+  throw invalidReplay(`Item ${itemId} is already ${item.status}.`, {
+    itemId,
+    status: item.status,
+  })
 }
 
 function requireCompletedItem(
@@ -933,7 +1007,10 @@ function requireCompletedItem(
 ): MutableItemProjection {
   const item = requireItem(items, turnId, itemId)
   if (item.status === ItemStatus.Completed) return item
-  throw new Error(`Item ${itemId} is ${item.status}.`)
+  throw invalidReplay(`Item ${itemId} is ${item.status}.`, {
+    itemId,
+    status: item.status,
+  })
 }
 
 function requirePermission(
@@ -943,11 +1020,21 @@ function requirePermission(
 ): MutablePermissionProjection {
   const permission = permissions.get(permissionRequestId)
   if (!permission) {
-    throw new Error(`Permission ${permissionRequestId} has not been requested.`)
+    throw invalidReplay(
+      `Permission ${permissionRequestId} has not been requested.`,
+      {
+        permissionRequestId,
+      },
+    )
   }
   if (permission.turnId === turnId) return permission
-  throw new Error(
+  throw invalidReplay(
     `Permission ${permissionRequestId} does not belong to turn ${turnId}.`,
+    {
+      permissionRequestId,
+      turnId,
+      actualTurnId: permission.turnId,
+    },
   )
 }
 
@@ -958,8 +1045,12 @@ function requireUnboundPermission(
 ): MutablePermissionProjection {
   const permission = requirePermission(permissions, turnId, permissionRequestId)
   if (permission.toolCallId === undefined) return permission
-  throw new Error(
+  throw invalidReplay(
     `Permission ${permissionRequestId} is already bound to tool ${permission.toolCallId}.`,
+    {
+      permissionRequestId,
+      toolCallId: permission.toolCallId,
+    },
   )
 }
 
@@ -970,8 +1061,12 @@ function requirePendingPermission(
 ): MutablePermissionProjection {
   const permission = requirePermission(permissions, turnId, permissionRequestId)
   if (permission.state === PermissionState.Requested) return permission
-  throw new Error(
+  throw invalidReplay(
     `Permission ${permissionRequestId} is already ${permission.state}.`,
+    {
+      permissionRequestId,
+      state: permission.state,
+    },
   )
 }
 
@@ -988,11 +1083,21 @@ function requireAllowedPermission(
     return permission
   }
   if (permission.state === PermissionState.Resolved) {
-    throw new Error(
+    throw invalidReplay(
       `Permission ${permissionRequestId} resolved with ${permission.behavior}.`,
+      {
+        permissionRequestId,
+        behavior: permission.behavior ?? null,
+      },
     )
   }
-  throw new Error(`Permission ${permissionRequestId} has not been allowed.`)
+  throw invalidReplay(
+    `Permission ${permissionRequestId} has not been allowed.`,
+    {
+      permissionRequestId,
+      state: permission.state,
+    },
+  )
 }
 
 function requireAllowedToolPermissions(
@@ -1022,9 +1127,17 @@ function requireTool(
   toolCallId: string,
 ): MutableToolProjection {
   const tool = tools.get(toolCallId)
-  if (!tool) throw new Error(`Tool ${toolCallId} has not been requested.`)
+  if (!tool) {
+    throw invalidReplay(`Tool ${toolCallId} has not been requested.`, {
+      toolCallId,
+    })
+  }
   if (tool.turnId === turnId) return tool
-  throw new Error(`Tool ${toolCallId} does not belong to turn ${turnId}.`)
+  throw invalidReplay(`Tool ${toolCallId} does not belong to turn ${turnId}.`, {
+    toolCallId,
+    turnId,
+    actualTurnId: tool.turnId,
+  })
 }
 
 function requireRequestedTool(
@@ -1034,7 +1147,10 @@ function requireRequestedTool(
 ): MutableToolProjection {
   const tool = requireTool(tools, turnId, toolCallId)
   if (tool.state === ToolState.Requested) return tool
-  throw new Error(`Tool ${toolCallId} is already ${tool.state}.`)
+  throw invalidReplay(`Tool ${toolCallId} is already ${tool.state}.`, {
+    toolCallId,
+    state: tool.state,
+  })
 }
 
 function requireStartedTool(
@@ -1044,7 +1160,10 @@ function requireStartedTool(
 ): MutableToolProjection {
   const tool = requireTool(tools, turnId, toolCallId)
   if (tool.state === ToolState.Started) return tool
-  throw new Error(`Tool ${toolCallId} is already ${tool.state}.`)
+  throw invalidReplay(`Tool ${toolCallId} is already ${tool.state}.`, {
+    toolCallId,
+    state: tool.state,
+  })
 }
 
 function requireOpenTool(
@@ -1056,7 +1175,10 @@ function requireOpenTool(
   if (tool.state === ToolState.Requested || tool.state === ToolState.Started) {
     return tool
   }
-  throw new Error(`Tool ${toolCallId} is already ${tool.state}.`)
+  throw invalidReplay(`Tool ${toolCallId} is already ${tool.state}.`, {
+    toolCallId,
+    state: tool.state,
+  })
 }
 
 function requireNoOpenTurnWork(
@@ -1069,7 +1191,12 @@ function requireNoOpenTurnWork(
     (candidate) =>
       candidate.turnId === turnId && candidate.status === ItemStatus.InProgress,
   )
-  if (item) throw new Error(`Turn ${turnId} has open item ${item.itemId}.`)
+  if (item) {
+    throw invalidReplay(`Turn ${turnId} has open item ${item.itemId}.`, {
+      turnId,
+      itemId: item.itemId,
+    })
+  }
 
   const permission = Array.from(permissions.values()).find(
     (candidate) =>
@@ -1077,8 +1204,12 @@ function requireNoOpenTurnWork(
       candidate.state === PermissionState.Requested,
   )
   if (permission) {
-    throw new Error(
+    throw invalidReplay(
       `Turn ${turnId} has pending permission ${permission.permissionRequestId}.`,
+      {
+        turnId,
+        permissionRequestId: permission.permissionRequestId,
+      },
     )
   }
 
@@ -1088,7 +1219,12 @@ function requireNoOpenTurnWork(
       (candidate.state === ToolState.Requested ||
         candidate.state === ToolState.Started),
   )
-  if (tool) throw new Error(`Turn ${turnId} has open tool ${tool.toolCallId}.`)
+  if (tool) {
+    throw invalidReplay(`Turn ${turnId} has open tool ${tool.toolCallId}.`, {
+      turnId,
+      toolCallId: tool.toolCallId,
+    })
+  }
 }
 
 function requireActiveTurn(
@@ -1097,7 +1233,10 @@ function requireActiveTurn(
 ): MutableTurnProjection {
   const turn = requireTurn(turns, turnId)
   if (turn.state === TurnState.Started) return turn
-  throw new Error(`Turn ${turnId} is already ${turn.state}.`)
+  throw invalidReplay(`Turn ${turnId} is already ${turn.state}.`, {
+    turnId,
+    state: turn.state,
+  })
 }
 
 function requireNoActiveTurn(turns: Map<string, MutableTurnProjection>): void {
@@ -1105,5 +1244,15 @@ function requireNoActiveTurn(turns: Map<string, MutableTurnProjection>): void {
     (candidate) => candidate.state === TurnState.Started,
   )
   if (!turn) return
-  throw new Error(`Session already has active turn ${turn.turnId}.`)
+  throw invalidReplay(`Session already has active turn ${turn.turnId}.`, {
+    turnId: turn.turnId,
+  })
+}
+
+function invalidReplay(message: string, details?: EventMetadata): Error {
+  return createYakitoriError({
+    code: YakitoriErrorCode.InvalidReplay,
+    message,
+    ...(details === undefined ? {} : { details }),
+  })
 }
