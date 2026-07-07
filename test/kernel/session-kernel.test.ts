@@ -5,6 +5,7 @@ import {
   createSessionKernel,
   EventType,
   InputRole,
+  InputState,
   ItemKind,
   ItemStatus,
   PermissionBehavior,
@@ -46,6 +47,102 @@ describe("session kernel", () => {
     })
   })
 
+  it("updates session metadata for an existing session", async () => {
+    await withKernel(async (context) => {
+      const session = await context.kernel.createSession({
+        title: "Draft",
+        metadata: {
+          stage: "bootstrap",
+        },
+      })
+
+      const updated = await context.kernel.updateSessionMetadata({
+        sessionId: session.sessionId,
+        title: "Kernel boundary",
+        metadata: {
+          stage: "kernel",
+        },
+      })
+      const read = await context.kernel.readSession({
+        sessionId: session.sessionId,
+      })
+
+      expect(updated.event).toMatchObject({
+        sessionId: session.sessionId,
+        seq: 2,
+        type: EventType.SessionMetadataUpdated,
+        data: {
+          title: "Kernel boundary",
+          metadata: {
+            stage: "kernel",
+          },
+        },
+      })
+      expect(read.session).toMatchObject({
+        id: session.sessionId,
+        seq: 2,
+        title: "Kernel boundary",
+        metadata: {
+          stage: "kernel",
+        },
+      })
+    })
+  })
+
+  it("lists session summaries through the kernel facade", async () => {
+    await withKernel(async (context) => {
+      const session = await context.kernel.createSession({
+        title: "Draft",
+        workingDirectory: "/tmp/yakitori",
+      })
+      const updated = await context.kernel.updateSessionMetadata({
+        sessionId: session.sessionId,
+        title: "Kernel boundary",
+        metadata: {
+          stage: "kernel",
+        },
+      })
+
+      expect(await context.kernel.listSessions()).toEqual({
+        sessions: [
+          {
+            sessionId: session.sessionId,
+            seq: 2,
+            createdAt: session.event.createdAt,
+            updatedAt: updated.event.createdAt,
+            title: "Kernel boundary",
+            workingDirectory: "/tmp/yakitori",
+            metadata: {
+              stage: "kernel",
+            },
+          },
+        ],
+      })
+    })
+  })
+
+  it("rejects malformed session summaries through the memory store", async () => {
+    await withKernel(async (context) => {
+      const sessionId = createSessionId()
+
+      await context.store.appendEvent(sessionId, {
+        type: EventType.InputAdmitted,
+        data: {
+          inputId: createInputId(),
+          role: InputRole.User,
+          content: {
+            kind: "text",
+            text: "orphan",
+          },
+        },
+      })
+
+      await expect(context.kernel.listSessions()).rejects.toThrow(
+        "Session log must start with session.created.",
+      )
+    })
+  })
+
   it("admits user input for an existing session", async () => {
     await withKernel(async (context) => {
       const session = await context.kernel.createSession()
@@ -70,6 +167,130 @@ describe("session kernel", () => {
           },
         },
       })
+    })
+  })
+
+  it("cancels admitted input before promotion", async () => {
+    await withKernel(async (context) => {
+      const session = await context.kernel.createSession()
+      const admitted = await context.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: {
+          kind: "text",
+          text: "queue this input",
+        },
+      })
+
+      const cancelled = await context.kernel.cancelInput({
+        sessionId: session.sessionId,
+        inputId: admitted.inputId,
+        reason: "superseded",
+      })
+      const read = await context.kernel.readSession({
+        sessionId: session.sessionId,
+      })
+
+      expect(cancelled.event).toMatchObject({
+        sessionId: session.sessionId,
+        seq: 3,
+        type: EventType.InputCancelled,
+        data: {
+          inputId: admitted.inputId,
+          reason: "superseded",
+        },
+      })
+      expect(read.session).toMatchObject({
+        inputs: [
+          {
+            inputId: admitted.inputId,
+            state: InputState.Cancelled,
+            cancelledReason: "superseded",
+          },
+        ],
+      })
+      await expect(
+        context.kernel.startTurn({
+          sessionId: session.sessionId,
+          inputId: admitted.inputId,
+        }),
+      ).rejects.toThrow(`Input ${admitted.inputId} has been cancelled.`)
+    })
+  })
+
+  it("serializes concurrent input promotion and cancellation", async () => {
+    await withKernel(async (context) => {
+      const session = await context.kernel.createSession()
+      const admitted = await context.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: {
+          kind: "text",
+          text: "race this input",
+        },
+      })
+
+      const results = await Promise.allSettled([
+        context.kernel.startTurn({
+          sessionId: session.sessionId,
+          inputId: admitted.inputId,
+        }),
+        context.kernel.cancelInput({
+          sessionId: session.sessionId,
+          inputId: admitted.inputId,
+        }),
+      ])
+      const replayed = await context.kernel.replaySession({
+        sessionId: session.sessionId,
+      })
+
+      expect(
+        results.filter((result) => result.status === "fulfilled"),
+      ).toHaveLength(1)
+      expect(
+        results.filter((result) => result.status === "rejected"),
+      ).toHaveLength(1)
+      expect(replayed.session).toBeDefined()
+      expect(replayed.events.map((event) => event.type)).toEqual([
+        EventType.SessionCreated,
+        EventType.InputAdmitted,
+        EventType.InputPromoted,
+        EventType.TurnStarted,
+      ])
+
+      const secondSession = await context.kernel.createSession()
+      const secondInput = await context.kernel.admitInput({
+        sessionId: secondSession.sessionId,
+        content: {
+          kind: "text",
+          text: "race cancel first",
+        },
+      })
+
+      const reversedResults = await Promise.allSettled([
+        context.kernel.cancelInput({
+          sessionId: secondSession.sessionId,
+          inputId: secondInput.inputId,
+        }),
+        context.kernel.startTurn({
+          sessionId: secondSession.sessionId,
+          inputId: secondInput.inputId,
+        }),
+      ])
+      const reversedReplay = await context.kernel.replaySession({
+        sessionId: secondSession.sessionId,
+      })
+
+      expect(
+        reversedResults.filter((result) => result.status === "fulfilled"),
+      ).toHaveLength(1)
+      expect(
+        reversedResults.filter((result) => result.status === "rejected"),
+      ).toHaveLength(1)
+      expect(reversedReplay.session).toBeDefined()
+      expect(reversedReplay.events.map((event) => event.type)).toEqual([
+        EventType.SessionCreated,
+        EventType.InputAdmitted,
+        EventType.InputCancelled,
+      ])
     })
   })
 

@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed as the next implementation plan.
+Accepted as the kernel v1 implementation plan.
 
 ## Context
 
@@ -109,7 +109,7 @@ The first projection should expose:
 - session metadata
 - pending inputs
 - active turn
-- completed turns
+- completed, failed, and cancelled turns
 - items grouped by turn
 - tool and permission states
 - terminal errors and cancellations
@@ -171,7 +171,10 @@ Callers should not append arbitrary events directly. The kernel should expose a
 small command surface that validates state transitions before writing events:
 
 - `createSession`
+- `updateSessionMetadata`
+- `listSessions`
 - `admitInput`
+- `cancelInput`
 - `startTurn`
 - `appendItem`
 - `requestPermission`
@@ -199,10 +202,12 @@ The storage interface should be narrow enough to replace later:
 ```text
 append(session id, event data) -> event envelope
 read(session id) -> event envelopes
-list sessions() -> session summaries
+list sessions(limit, cursor) -> session summaries, next cursor
 ```
 
 Each session should have monotonic sequence numbers assigned by the store.
+Session listing should return a bounded page so future server and GUI callers do
+not depend on unbounded scans or responses.
 
 ## Invariants
 
@@ -221,14 +226,15 @@ Each session should have monotonic sequence numbers assigned by the store.
 
 ## First Implementation Slice
 
-The first code change should create a small `src/kernel` module:
+The first kernel slice lives in a small `src/kernel` module:
 
 ```text
 src/kernel/ids.ts
 src/kernel/events.ts
 src/kernel/event-store.ts
-src/kernel/projector.ts
-src/kernel/commands.ts
+src/kernel/session-projector.ts
+src/kernel/session-kernel.ts
+src/kernel/errors.ts
 src/kernel/index.ts
 ```
 
@@ -236,14 +242,16 @@ Focused tests should cover:
 
 - event sequence assignment
 - JSONL append and readback
+- session listing
 - session creation projection
 - input admission and promotion
 - turn completion and cancellation
+- permission and tool state projection
+- replay invariants for malformed logs
 - invalid state transitions
 
-The project can choose package scripts and a test runner as part of this slice.
-The initial toolchain should use Vite and Vitest so the project can grow into a
-GUI without replacing the test/build foundation.
+The project uses Vite and Vitest so it can grow into a GUI without replacing the
+test/build foundation.
 
 ## Deferred
 
