@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readFile, readdir } from "node:fs/promises"
+import { appendFile, mkdir, readFile } from "node:fs/promises"
 import { join } from "node:path"
 import { createYakitoriError, YakitoriErrorCode } from "./errors.ts"
 import {
@@ -21,30 +21,6 @@ export type EventStore = {
     events: readonly KernelEvent[],
   ): Promise<EventEnvelope[]>
   readEvents(sessionId: string): Promise<EventEnvelope[]>
-  listSessions(
-    input?: EventStoreListSessionsInput,
-  ): Promise<EventStoreListSessionsResult>
-}
-
-export type EventStoreListSessionsInput = {
-  readonly limit?: number
-  readonly cursor?: string
-}
-
-export type EventStoreListSessionsResult = {
-  readonly sessions: readonly EventStoreSessionSummary[]
-  readonly nextCursor?: string
-}
-
-export type EventStoreSessionSummary = {
-  readonly sessionId: string
-  readonly seq: number
-  readonly createdAt: string
-  readonly updatedAt: string
-  readonly title?: string
-  readonly workingDirectory?: string
-  readonly parentSessionId?: string
-  readonly metadata?: EventMetadata
 }
 
 export type JsonlEventStoreOptions = {
@@ -88,25 +64,6 @@ export function createJsonlEventStore(
     async readEvents(sessionId) {
       assertSessionId(sessionId)
       return readEventsFromFile(rootDir, sessionId)
-    },
-
-    async listSessions(input = {}) {
-      const entries = await readSessionDirEntries(rootDir)
-      const summaries = await Promise.all(
-        entries
-          .filter((entry) => entry.isDirectory())
-          .filter((entry) => isSessionId(entry.name))
-          .map((entry) => readSessionSummary(rootDir, entry.name)),
-      )
-
-      return paginateSessionSummaries(
-        summaries
-          .filter((summary): summary is EventStoreSessionSummary => {
-            return summary !== undefined
-          })
-          .sort(compareSessionSummaries),
-        input,
-      )
     },
   }
 }
@@ -185,174 +142,6 @@ async function readEventsContent(
     if (isNotFoundError(error)) return ""
     throw error
   }
-}
-
-async function readSessionDirEntries(rootDir: string) {
-  try {
-    return await readdir(sessionsDir(rootDir), { withFileTypes: true })
-  } catch (error) {
-    if (isNotFoundError(error)) return []
-    throw error
-  }
-}
-
-async function readSessionSummary(
-  rootDir: string,
-  sessionId: string,
-): Promise<EventStoreSessionSummary | undefined> {
-  const events = await readEventsFromFile(rootDir, sessionId)
-  const firstEvent = events.at(0)
-  if (!firstEvent) return undefined
-  if (firstEvent.type !== EventType.SessionCreated) {
-    throw invalidEventLog("Session log must start with session.created.", {
-      details: {
-        sessionId,
-        actualType: firstEvent.type,
-      },
-    })
-  }
-
-  const lastEvent = requireLastEvent(events)
-  const summary: {
-    sessionId: string
-    seq: number
-    createdAt: string
-    updatedAt: string
-    title?: string
-    workingDirectory?: string
-    parentSessionId?: string
-    metadata?: EventMetadata
-  } = {
-    sessionId,
-    seq: lastEvent.seq,
-    createdAt: firstEvent.createdAt,
-    updatedAt: lastEvent.createdAt,
-  }
-
-  applySessionSummaryCreated(summary, firstEvent)
-  for (const event of events.slice(1)) {
-    if (event.type === EventType.SessionMetadataUpdated) {
-      applySessionSummaryMetadataUpdated(summary, event)
-    }
-  }
-
-  return summary
-}
-
-function applySessionSummaryCreated(
-  summary: {
-    title?: string
-    workingDirectory?: string
-    parentSessionId?: string
-    metadata?: EventMetadata
-  },
-  event: Extract<
-    EventEnvelope,
-    { readonly type: typeof EventType.SessionCreated }
-  >,
-): void {
-  if (event.data.title !== undefined) summary.title = event.data.title
-  if (event.data.workingDirectory !== undefined) {
-    summary.workingDirectory = event.data.workingDirectory
-  }
-  if (event.data.parentSessionId !== undefined) {
-    summary.parentSessionId = event.data.parentSessionId
-  }
-  if (event.data.metadata !== undefined) summary.metadata = event.data.metadata
-}
-
-function applySessionSummaryMetadataUpdated(
-  summary: {
-    title?: string
-    metadata?: EventMetadata
-  },
-  event: Extract<
-    EventEnvelope,
-    { readonly type: typeof EventType.SessionMetadataUpdated }
-  >,
-): void {
-  if (event.data.title !== undefined) summary.title = event.data.title
-  if (event.data.metadata !== undefined) summary.metadata = event.data.metadata
-}
-
-function requireLastEvent(events: readonly EventEnvelope[]): EventEnvelope {
-  const event = events.at(-1)
-  if (event) return event
-  throw invalidEventLog("Expected at least one event.")
-}
-
-function compareSessionSummaries(
-  left: EventStoreSessionSummary,
-  right: EventStoreSessionSummary,
-): number {
-  const updatedAt = right.updatedAt.localeCompare(left.updatedAt)
-  if (updatedAt !== 0) return updatedAt
-  return left.sessionId.localeCompare(right.sessionId)
-}
-
-function paginateSessionSummaries(
-  summaries: readonly EventStoreSessionSummary[],
-  input: EventStoreListSessionsInput = {},
-): EventStoreListSessionsResult {
-  const limit = requireSessionListLimit(input.limit)
-  const startIndex =
-    input.cursor === undefined
-      ? 0
-      : requireSessionCursorIndex(summaries, input.cursor) + 1
-  const sessions = summaries.slice(startIndex, startIndex + limit)
-  const nextCursor =
-    startIndex + limit < summaries.length
-      ? sessionSummaryCursor(requireLastSummary(sessions))
-      : undefined
-
-  return {
-    sessions,
-    ...(nextCursor === undefined ? {} : { nextCursor }),
-  }
-}
-
-function requireSessionListLimit(limit: number | undefined): number {
-  if (limit === undefined) return 50
-  if (Number.isInteger(limit) && limit > 0 && limit <= 100) return limit
-  throw createYakitoriError({
-    code: YakitoriErrorCode.InvalidArgument,
-    message: "Session list limit must be an integer from 1 to 100.",
-    details: {
-      limit,
-    },
-  })
-}
-
-function requireSessionCursorIndex(
-  summaries: readonly EventStoreSessionSummary[],
-  cursor: string,
-): number {
-  const index = summaries.findIndex(
-    (summary) => sessionSummaryCursor(summary) === cursor,
-  )
-  if (index >= 0) return index
-  throw createYakitoriError({
-    code: YakitoriErrorCode.InvalidArgument,
-    message: "Session list cursor is invalid.",
-    details: {
-      cursor,
-    },
-  })
-}
-
-function sessionSummaryCursor(summary: EventStoreSessionSummary): string {
-  return `${summary.updatedAt}\t${summary.sessionId}`
-}
-
-function requireLastSummary(
-  summaries: readonly EventStoreSessionSummary[],
-): EventStoreSessionSummary {
-  const summary = summaries.at(-1)
-  if (summary) return summary
-  throw createYakitoriError({
-    code: YakitoriErrorCode.InvalidState,
-    message: "Expected at least one session summary.",
-  })
 }
 
 function parseEventEnvelope(line: string, lineNumber: number): EventEnvelope {
@@ -471,12 +260,8 @@ function nextSeq(events: EventEnvelope[]): number {
   return last.seq + 1
 }
 
-function sessionsDir(rootDir: string): string {
-  return join(rootDir, "sessions")
-}
-
 function sessionDir(rootDir: string, sessionId: string): string {
-  return join(sessionsDir(rootDir), sessionId)
+  return join(rootDir, "sessions", sessionId)
 }
 
 function eventsPath(rootDir: string, sessionId: string): string {
@@ -484,7 +269,13 @@ function eventsPath(rootDir: string, sessionId: string): string {
 }
 
 function assertSessionId(sessionId: string): void {
-  if (isSessionId(sessionId)) return
+  if (
+    /^session_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
+      sessionId,
+    )
+  ) {
+    return
+  }
   throw createYakitoriError({
     code: YakitoriErrorCode.InvalidArgument,
     message: `Invalid session id ${sessionId}.`,
@@ -492,12 +283,6 @@ function assertSessionId(sessionId: string): void {
       sessionId,
     },
   })
-}
-
-function isSessionId(sessionId: string): boolean {
-  return /^session_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
-    sessionId,
-  )
 }
 
 function assertEventData(

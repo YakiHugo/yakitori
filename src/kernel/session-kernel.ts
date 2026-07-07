@@ -39,14 +39,9 @@ import {
 
 export type SessionKernel = {
   createSession(input?: CreateSessionInput): Promise<CreateSessionResult>
-  updateSessionMetadata(
-    input: UpdateSessionMetadataInput,
-  ): Promise<UpdateSessionMetadataResult>
-  listSessions(input?: ListSessionsInput): Promise<ListSessionsResult>
   readSession(input: ReadSessionInput): Promise<ReadSessionResult>
   replaySession(input: ReplaySessionInput): Promise<ReplaySessionResult>
   admitInput(input: AdmitInputInput): Promise<AdmitInputResult>
-  cancelInput(input: CancelInputInput): Promise<CancelInputResult>
   startTurn(input: StartTurnInput): Promise<StartTurnResult>
   appendItem(input: AppendItemInput): Promise<AppendItemResult>
   updateItem(input: UpdateItemInput): Promise<UpdateItemResult>
@@ -85,37 +80,6 @@ export type CreateSessionResult = {
   readonly event: EventEnvelope
 }
 
-export type UpdateSessionMetadataInput = {
-  readonly sessionId: string
-  readonly title?: string
-  readonly metadata?: EventMetadata
-}
-
-export type UpdateSessionMetadataResult = {
-  readonly event: EventEnvelope
-}
-
-export type ListSessionsInput = {
-  readonly limit?: number
-  readonly cursor?: string
-}
-
-export type ListSessionsResult = {
-  readonly sessions: readonly SessionSummary[]
-  readonly nextCursor?: string
-}
-
-export type SessionSummary = {
-  readonly sessionId: string
-  readonly seq: number
-  readonly createdAt: string
-  readonly updatedAt: string
-  readonly title?: string
-  readonly workingDirectory?: string
-  readonly parentSessionId?: string
-  readonly metadata?: EventMetadata
-}
-
 export type ReadSessionInput = {
   readonly sessionId: string
 }
@@ -143,16 +107,6 @@ export type AdmitInputInput = {
 
 export type AdmitInputResult = {
   readonly inputId: string
-  readonly event: EventEnvelope
-}
-
-export type CancelInputInput = {
-  readonly sessionId: string
-  readonly inputId: string
-  readonly reason?: string
-}
-
-export type CancelInputResult = {
   readonly event: EventEnvelope
 }
 
@@ -352,8 +306,6 @@ export type CancelTurnResult = {
 }
 
 export function createSessionKernel(eventStore: EventStore): SessionKernel {
-  const commandQueues = new Map<string, Promise<void>>()
-
   return {
     async createSession(input = {}) {
       const sessionId = createSessionId()
@@ -374,39 +326,6 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
       return { sessionId, event }
     },
 
-    async updateSessionMetadata(input) {
-      return serializeSessionCommand(
-        commandQueues,
-        input.sessionId,
-        async () => {
-          await readSessionProjection(eventStore, input.sessionId)
-          requireSessionMetadataUpdate(input)
-
-          return {
-            event: await eventStore.appendEvent(input.sessionId, {
-              type: EventType.SessionMetadataUpdated,
-              data: {
-                ...(input.title === undefined ? {} : { title: input.title }),
-                ...(input.metadata === undefined
-                  ? {}
-                  : { metadata: input.metadata }),
-              },
-            }),
-          }
-        },
-      )
-    },
-
-    async listSessions(input = {}) {
-      const result = await eventStore.listSessions(input)
-      return {
-        sessions: result.sessions.map((session) => ({ ...session })),
-        ...(result.nextCursor === undefined
-          ? {}
-          : { nextCursor: result.nextCursor }),
-      }
-    },
-
     async readSession(input) {
       const session = await readOptionalSessionProjection(
         eventStore,
@@ -424,613 +343,394 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
     },
 
     async admitInput(input) {
-      return serializeSessionCommand(
-        commandQueues,
-        input.sessionId,
-        async () => {
-          const session = await readSessionProjection(
-            eventStore,
-            input.sessionId,
-          )
-          if (input.parentInputId !== undefined) {
-            requireInput(session, input.parentInputId)
-          }
+      const session = await readSessionProjection(eventStore, input.sessionId)
+      if (input.parentInputId !== undefined) {
+        requireInput(session, input.parentInputId)
+      }
 
-          const inputId = createInputId()
-          const event = await eventStore.appendEvent(input.sessionId, {
-            type: EventType.InputAdmitted,
-            data: {
-              inputId,
-              role: input.role ?? InputRole.User,
-              content: input.content,
-              ...(input.parentInputId === undefined
-                ? {}
-                : { parentInputId: input.parentInputId }),
-              ...(input.metadata === undefined
-                ? {}
-                : { metadata: input.metadata }),
-            },
-          })
-
-          return { inputId, event }
+      const inputId = createInputId()
+      const event = await eventStore.appendEvent(input.sessionId, {
+        type: EventType.InputAdmitted,
+        data: {
+          inputId,
+          role: input.role ?? InputRole.User,
+          content: input.content,
+          ...(input.parentInputId === undefined
+            ? {}
+            : { parentInputId: input.parentInputId }),
+          ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
         },
-      )
-    },
+      })
 
-    async cancelInput(input) {
-      return serializeSessionCommand(
-        commandQueues,
-        input.sessionId,
-        async () => {
-          const session = await readSessionProjection(
-            eventStore,
-            input.sessionId,
-          )
-          requirePendingInput(requireInput(session, input.inputId))
-
-          return {
-            event: await eventStore.appendEvent(input.sessionId, {
-              type: EventType.InputCancelled,
-              data: {
-                inputId: input.inputId,
-                ...(input.reason === undefined ? {} : { reason: input.reason }),
-              },
-            }),
-          }
-        },
-      )
+      return { inputId, event }
     },
 
     async startTurn(input) {
-      return serializeSessionCommand(
-        commandQueues,
-        input.sessionId,
-        async () => {
-          const session = await readSessionProjection(
-            eventStore,
-            input.sessionId,
-          )
-          requireInputReadyForTurn(requireInput(session, input.inputId))
-          if (input.parentTurnId !== undefined) {
-            requireTurnStarted(session, input.parentTurnId)
-          }
-          requireNoActiveTurn(session)
+      const session = await readSessionProjection(eventStore, input.sessionId)
+      requireInputReadyForTurn(requireInput(session, input.inputId))
+      if (input.parentTurnId !== undefined) {
+        requireTurnStarted(session, input.parentTurnId)
+      }
+      requireNoActiveTurn(session)
 
-          const turnId = createTurnId()
-          return {
-            turnId,
-            events: await eventStore.appendEvents(input.sessionId, [
-              {
-                type: EventType.InputPromoted,
-                data: {
-                  inputId: input.inputId,
-                  turnId,
-                },
-              },
-              {
-                type: EventType.TurnStarted,
-                data: {
-                  turnId,
-                  inputId: input.inputId,
-                  ...(input.parentTurnId === undefined
-                    ? {}
-                    : { parentTurnId: input.parentTurnId }),
-                  ...(input.metadata === undefined
-                    ? {}
-                    : { metadata: input.metadata }),
-                },
-              },
-            ]),
-          }
-        },
-      )
-    },
-
-    async appendItem(input) {
-      return serializeSessionCommand(
-        commandQueues,
-        input.sessionId,
-        async () => {
-          const session = await readSessionProjection(
-            eventStore,
-            input.sessionId,
-          )
-          requireActiveTurn(session, input.turnId)
-          if (input.parentItemId !== undefined) {
-            requireItem(session, input.turnId, input.parentItemId)
-          }
-
-          const itemId = createItemId()
-          const event = await eventStore.appendEvent(input.sessionId, {
-            type: EventType.ItemAppended,
+      const turnId = createTurnId()
+      return {
+        turnId,
+        events: await eventStore.appendEvents(input.sessionId, [
+          {
+            type: EventType.InputPromoted,
             data: {
-              itemId,
-              turnId: input.turnId,
-              kind: input.kind,
-              content: input.content,
-              ...(input.parentItemId === undefined
-                ? {}
-                : { parentItemId: input.parentItemId }),
-              ...(input.status === undefined ? {} : { status: input.status }),
-              ...(input.providerMetadata === undefined
-                ? {}
-                : { providerMetadata: input.providerMetadata }),
+              inputId: input.inputId,
+              turnId,
             },
-          })
-
-          return { itemId, event }
-        },
-      )
-    },
-
-    async updateItem(input) {
-      return serializeSessionCommand(
-        commandQueues,
-        input.sessionId,
-        async () => {
-          const session = await readSessionProjection(
-            eventStore,
-            input.sessionId,
-          )
-          requireActiveTurn(session, input.turnId)
-          requireOpenItem(session, input.turnId, input.itemId)
-          requireItemUpdate(input)
-
-          return {
-            event: await eventStore.appendEvent(input.sessionId, {
-              type: EventType.ItemUpdated,
-              data: {
-                itemId: input.itemId,
-                turnId: input.turnId,
-                ...(input.content === undefined
-                  ? {}
-                  : { content: input.content }),
-                ...(input.metadata === undefined
-                  ? {}
-                  : { metadata: input.metadata }),
-              },
-            }),
-          }
-        },
-      )
-    },
-
-    async completeItem(input) {
-      return serializeSessionCommand(
-        commandQueues,
-        input.sessionId,
-        async () => {
-          const session = await readSessionProjection(
-            eventStore,
-            input.sessionId,
-          )
-          requireActiveTurn(session, input.turnId)
-          requireOpenItem(session, input.turnId, input.itemId)
-
-          return {
-            event: await eventStore.appendEvent(input.sessionId, {
-              type: EventType.ItemCompleted,
-              data: {
-                itemId: input.itemId,
-                turnId: input.turnId,
-                status: input.status ?? ItemStatus.Completed,
-                ...(input.metadata === undefined
-                  ? {}
-                  : { metadata: input.metadata }),
-              },
-            }),
-          }
-        },
-      )
-    },
-
-    async requestPermission(input) {
-      return serializeSessionCommand(
-        commandQueues,
-        input.sessionId,
-        async () => {
-          const session = await readSessionProjection(
-            eventStore,
-            input.sessionId,
-          )
-          requireActiveTurn(session, input.turnId)
-          if (input.toolCallId !== undefined) {
-            requireRequestedTool(session, input.turnId, input.toolCallId)
-          }
-
-          const permissionRequestId = createPermissionRequestId()
-          const event = await eventStore.appendEvent(input.sessionId, {
-            type: EventType.PermissionRequested,
+          },
+          {
+            type: EventType.TurnStarted,
             data: {
-              permissionRequestId,
-              turnId: input.turnId,
-              action: input.action,
-              ...(input.subject === undefined
+              turnId,
+              inputId: input.inputId,
+              ...(input.parentTurnId === undefined
                 ? {}
-                : { subject: input.subject }),
-              ...(input.toolCallId === undefined
-                ? {}
-                : { toolCallId: input.toolCallId }),
-              ...(input.reason === undefined ? {} : { reason: input.reason }),
+                : { parentTurnId: input.parentTurnId }),
               ...(input.metadata === undefined
                 ? {}
                 : { metadata: input.metadata }),
             },
-          })
+          },
+        ]),
+      }
+    },
 
-          return { permissionRequestId, event }
+    async appendItem(input) {
+      const session = await readSessionProjection(eventStore, input.sessionId)
+      requireActiveTurn(session, input.turnId)
+      if (input.parentItemId !== undefined) {
+        requireItem(session, input.turnId, input.parentItemId)
+      }
+
+      const itemId = createItemId()
+      const event = await eventStore.appendEvent(input.sessionId, {
+        type: EventType.ItemAppended,
+        data: {
+          itemId,
+          turnId: input.turnId,
+          kind: input.kind,
+          content: input.content,
+          ...(input.parentItemId === undefined
+            ? {}
+            : { parentItemId: input.parentItemId }),
+          ...(input.status === undefined ? {} : { status: input.status }),
+          ...(input.providerMetadata === undefined
+            ? {}
+            : { providerMetadata: input.providerMetadata }),
         },
-      )
+      })
+
+      return { itemId, event }
+    },
+
+    async updateItem(input) {
+      const session = await readSessionProjection(eventStore, input.sessionId)
+      requireActiveTurn(session, input.turnId)
+      requireOpenItem(session, input.turnId, input.itemId)
+      requireItemUpdate(input)
+
+      return {
+        event: await eventStore.appendEvent(input.sessionId, {
+          type: EventType.ItemUpdated,
+          data: {
+            itemId: input.itemId,
+            turnId: input.turnId,
+            ...(input.content === undefined ? {} : { content: input.content }),
+            ...(input.metadata === undefined
+              ? {}
+              : { metadata: input.metadata }),
+          },
+        }),
+      }
+    },
+
+    async completeItem(input) {
+      const session = await readSessionProjection(eventStore, input.sessionId)
+      requireActiveTurn(session, input.turnId)
+      requireOpenItem(session, input.turnId, input.itemId)
+
+      return {
+        event: await eventStore.appendEvent(input.sessionId, {
+          type: EventType.ItemCompleted,
+          data: {
+            itemId: input.itemId,
+            turnId: input.turnId,
+            status: input.status ?? ItemStatus.Completed,
+            ...(input.metadata === undefined
+              ? {}
+              : { metadata: input.metadata }),
+          },
+        }),
+      }
+    },
+
+    async requestPermission(input) {
+      const session = await readSessionProjection(eventStore, input.sessionId)
+      requireActiveTurn(session, input.turnId)
+      if (input.toolCallId !== undefined) {
+        requireRequestedTool(session, input.turnId, input.toolCallId)
+      }
+
+      const permissionRequestId = createPermissionRequestId()
+      const event = await eventStore.appendEvent(input.sessionId, {
+        type: EventType.PermissionRequested,
+        data: {
+          permissionRequestId,
+          turnId: input.turnId,
+          action: input.action,
+          ...(input.subject === undefined ? {} : { subject: input.subject }),
+          ...(input.toolCallId === undefined
+            ? {}
+            : { toolCallId: input.toolCallId }),
+          ...(input.reason === undefined ? {} : { reason: input.reason }),
+          ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
+        },
+      })
+
+      return { permissionRequestId, event }
     },
 
     async resolvePermission(input) {
-      return serializeSessionCommand(
-        commandQueues,
-        input.sessionId,
-        async () => {
-          const session = await readSessionProjection(
-            eventStore,
-            input.sessionId,
-          )
-          requireActiveTurn(session, input.turnId)
-          requirePendingPermission(
-            session,
-            input.turnId,
-            input.permissionRequestId,
-          )
+      const session = await readSessionProjection(eventStore, input.sessionId)
+      requireActiveTurn(session, input.turnId)
+      requirePendingPermission(session, input.turnId, input.permissionRequestId)
 
-          return {
-            event: await eventStore.appendEvent(input.sessionId, {
-              type: EventType.PermissionResolved,
-              data: {
-                permissionRequestId: input.permissionRequestId,
-                turnId: input.turnId,
-                behavior: input.behavior,
-                ...(input.reason === undefined ? {} : { reason: input.reason }),
-                ...(input.metadata === undefined
-                  ? {}
-                  : { metadata: input.metadata }),
-              },
-            }),
-          }
-        },
-      )
+      return {
+        event: await eventStore.appendEvent(input.sessionId, {
+          type: EventType.PermissionResolved,
+          data: {
+            permissionRequestId: input.permissionRequestId,
+            turnId: input.turnId,
+            behavior: input.behavior,
+            ...(input.reason === undefined ? {} : { reason: input.reason }),
+            ...(input.metadata === undefined
+              ? {}
+              : { metadata: input.metadata }),
+          },
+        }),
+      }
     },
 
     async cancelPermission(input) {
-      return serializeSessionCommand(
-        commandQueues,
-        input.sessionId,
-        async () => {
-          const session = await readSessionProjection(
-            eventStore,
-            input.sessionId,
-          )
-          requireActiveTurn(session, input.turnId)
-          requirePendingPermission(
-            session,
-            input.turnId,
-            input.permissionRequestId,
-          )
+      const session = await readSessionProjection(eventStore, input.sessionId)
+      requireActiveTurn(session, input.turnId)
+      requirePendingPermission(session, input.turnId, input.permissionRequestId)
 
-          return {
-            event: await eventStore.appendEvent(input.sessionId, {
-              type: EventType.PermissionCancelled,
-              data: {
-                permissionRequestId: input.permissionRequestId,
-                turnId: input.turnId,
-                ...(input.reason === undefined ? {} : { reason: input.reason }),
-              },
-            }),
-          }
-        },
-      )
+      return {
+        event: await eventStore.appendEvent(input.sessionId, {
+          type: EventType.PermissionCancelled,
+          data: {
+            permissionRequestId: input.permissionRequestId,
+            turnId: input.turnId,
+            ...(input.reason === undefined ? {} : { reason: input.reason }),
+          },
+        }),
+      }
     },
 
     async requestTool(input) {
-      return serializeSessionCommand(
-        commandQueues,
-        input.sessionId,
-        async () => {
-          const session = await readSessionProjection(
-            eventStore,
-            input.sessionId,
-          )
-          requireActiveTurn(session, input.turnId)
-          if (input.itemId !== undefined) {
-            requireItem(session, input.turnId, input.itemId)
-          }
-          if (input.permissionRequestId !== undefined) {
-            requireUnboundPermission(
-              session,
-              input.turnId,
-              input.permissionRequestId,
-            )
-          }
+      const session = await readSessionProjection(eventStore, input.sessionId)
+      requireActiveTurn(session, input.turnId)
+      if (input.itemId !== undefined) {
+        requireItem(session, input.turnId, input.itemId)
+      }
+      if (input.permissionRequestId !== undefined) {
+        requireUnboundPermission(
+          session,
+          input.turnId,
+          input.permissionRequestId,
+        )
+      }
 
-          const toolCallId = createToolCallId()
-          const event = await eventStore.appendEvent(input.sessionId, {
-            type: EventType.ToolRequested,
-            data: {
-              toolCallId,
-              turnId: input.turnId,
-              name: input.name,
-              input: input.input,
-              ...(input.itemId === undefined ? {} : { itemId: input.itemId }),
-              ...(input.permissionRequestId === undefined
-                ? {}
-                : { permissionRequestId: input.permissionRequestId }),
-              ...(input.providerMetadata === undefined
-                ? {}
-                : { providerMetadata: input.providerMetadata }),
-            },
-          })
-
-          return { toolCallId, event }
+      const toolCallId = createToolCallId()
+      const event = await eventStore.appendEvent(input.sessionId, {
+        type: EventType.ToolRequested,
+        data: {
+          toolCallId,
+          turnId: input.turnId,
+          name: input.name,
+          input: input.input,
+          ...(input.itemId === undefined ? {} : { itemId: input.itemId }),
+          ...(input.permissionRequestId === undefined
+            ? {}
+            : { permissionRequestId: input.permissionRequestId }),
+          ...(input.providerMetadata === undefined
+            ? {}
+            : { providerMetadata: input.providerMetadata }),
         },
-      )
+      })
+
+      return { toolCallId, event }
     },
 
     async startTool(input) {
-      return serializeSessionCommand(
-        commandQueues,
-        input.sessionId,
-        async () => {
-          const session = await readSessionProjection(
-            eventStore,
-            input.sessionId,
-          )
-          requireActiveTurn(session, input.turnId)
-          const tool = requireRequestedTool(
-            session,
-            input.turnId,
-            input.toolCallId,
-          )
-          requireAllowedToolPermissions(session, input.turnId, tool)
+      const session = await readSessionProjection(eventStore, input.sessionId)
+      requireActiveTurn(session, input.turnId)
+      const tool = requireRequestedTool(session, input.turnId, input.toolCallId)
+      requireAllowedToolPermissions(session, input.turnId, tool)
 
-          return {
-            event: await eventStore.appendEvent(input.sessionId, {
-              type: EventType.ToolStarted,
-              data: {
-                toolCallId: input.toolCallId,
-                turnId: input.turnId,
-              },
-            }),
-          }
-        },
-      )
+      return {
+        event: await eventStore.appendEvent(input.sessionId, {
+          type: EventType.ToolStarted,
+          data: {
+            toolCallId: input.toolCallId,
+            turnId: input.turnId,
+          },
+        }),
+      }
     },
 
     async recordToolProgress(input) {
-      return serializeSessionCommand(
-        commandQueues,
-        input.sessionId,
-        async () => {
-          const session = await readSessionProjection(
-            eventStore,
-            input.sessionId,
-          )
-          requireActiveTurn(session, input.turnId)
-          requireStartedTool(session, input.turnId, input.toolCallId)
-          requireToolProgress(input)
+      const session = await readSessionProjection(eventStore, input.sessionId)
+      requireActiveTurn(session, input.turnId)
+      requireStartedTool(session, input.turnId, input.toolCallId)
+      requireToolProgress(input)
 
-          return {
-            event: await eventStore.appendEvent(input.sessionId, {
-              type: EventType.ToolProgress,
-              data: {
-                toolCallId: input.toolCallId,
-                turnId: input.turnId,
-                ...(input.message === undefined
-                  ? {}
-                  : { message: input.message }),
-                ...(input.data === undefined ? {} : { data: input.data }),
-              },
-            }),
-          }
-        },
-      )
+      return {
+        event: await eventStore.appendEvent(input.sessionId, {
+          type: EventType.ToolProgress,
+          data: {
+            toolCallId: input.toolCallId,
+            turnId: input.turnId,
+            ...(input.message === undefined ? {} : { message: input.message }),
+            ...(input.data === undefined ? {} : { data: input.data }),
+          },
+        }),
+      }
     },
 
     async completeTool(input) {
-      return serializeSessionCommand(
-        commandQueues,
-        input.sessionId,
-        async () => {
-          const session = await readSessionProjection(
-            eventStore,
-            input.sessionId,
-          )
-          requireActiveTurn(session, input.turnId)
-          requireStartedTool(session, input.turnId, input.toolCallId)
-          if (input.itemId !== undefined) {
-            requireItem(session, input.turnId, input.itemId)
-          }
+      const session = await readSessionProjection(eventStore, input.sessionId)
+      requireActiveTurn(session, input.turnId)
+      requireStartedTool(session, input.turnId, input.toolCallId)
+      if (input.itemId !== undefined) {
+        requireItem(session, input.turnId, input.itemId)
+      }
 
-          return {
-            event: await eventStore.appendEvent(input.sessionId, {
-              type: EventType.ToolCompleted,
-              data: {
-                toolCallId: input.toolCallId,
-                turnId: input.turnId,
-                output: input.output,
-                ...(input.itemId === undefined ? {} : { itemId: input.itemId }),
-                ...(input.metadata === undefined
-                  ? {}
-                  : { metadata: input.metadata }),
-              },
-            }),
-          }
-        },
-      )
+      return {
+        event: await eventStore.appendEvent(input.sessionId, {
+          type: EventType.ToolCompleted,
+          data: {
+            toolCallId: input.toolCallId,
+            turnId: input.turnId,
+            output: input.output,
+            ...(input.itemId === undefined ? {} : { itemId: input.itemId }),
+            ...(input.metadata === undefined
+              ? {}
+              : { metadata: input.metadata }),
+          },
+        }),
+      }
     },
 
     async failTool(input) {
-      return serializeSessionCommand(
-        commandQueues,
-        input.sessionId,
-        async () => {
-          const session = await readSessionProjection(
-            eventStore,
-            input.sessionId,
-          )
-          requireActiveTurn(session, input.turnId)
-          requireStartedTool(session, input.turnId, input.toolCallId)
+      const session = await readSessionProjection(eventStore, input.sessionId)
+      requireActiveTurn(session, input.turnId)
+      requireStartedTool(session, input.turnId, input.toolCallId)
 
-          return {
-            event: await eventStore.appendEvent(input.sessionId, {
-              type: EventType.ToolFailed,
-              data: {
-                toolCallId: input.toolCallId,
-                turnId: input.turnId,
-                error: input.error,
-              },
-            }),
-          }
-        },
-      )
+      return {
+        event: await eventStore.appendEvent(input.sessionId, {
+          type: EventType.ToolFailed,
+          data: {
+            toolCallId: input.toolCallId,
+            turnId: input.turnId,
+            error: input.error,
+          },
+        }),
+      }
     },
 
     async cancelTool(input) {
-      return serializeSessionCommand(
-        commandQueues,
-        input.sessionId,
-        async () => {
-          const session = await readSessionProjection(
-            eventStore,
-            input.sessionId,
-          )
-          requireActiveTurn(session, input.turnId)
-          requireOpenTool(session, input.turnId, input.toolCallId)
+      const session = await readSessionProjection(eventStore, input.sessionId)
+      requireActiveTurn(session, input.turnId)
+      requireOpenTool(session, input.turnId, input.toolCallId)
 
-          return {
-            event: await eventStore.appendEvent(input.sessionId, {
-              type: EventType.ToolCancelled,
-              data: {
-                toolCallId: input.toolCallId,
-                turnId: input.turnId,
-                ...(input.reason === undefined ? {} : { reason: input.reason }),
-              },
-            }),
-          }
-        },
-      )
+      return {
+        event: await eventStore.appendEvent(input.sessionId, {
+          type: EventType.ToolCancelled,
+          data: {
+            toolCallId: input.toolCallId,
+            turnId: input.turnId,
+            ...(input.reason === undefined ? {} : { reason: input.reason }),
+          },
+        }),
+      }
     },
 
     async completeTurn(input) {
-      return serializeSessionCommand(
-        commandQueues,
-        input.sessionId,
-        async () => {
-          const session = await readSessionProjection(
-            eventStore,
-            input.sessionId,
-          )
-          requireActiveTurn(session, input.turnId)
-          if (input.outputItemId !== undefined) {
-            requireCompletedItem(session, input.turnId, input.outputItemId)
-          }
-          requireNoOpenTurnWork(session, input.turnId)
+      const session = await readSessionProjection(eventStore, input.sessionId)
+      requireActiveTurn(session, input.turnId)
+      if (input.outputItemId !== undefined) {
+        requireCompletedItem(session, input.turnId, input.outputItemId)
+      }
+      requireNoOpenTurnWork(session, input.turnId)
 
-          return {
-            event: await eventStore.appendEvent(input.sessionId, {
-              type: EventType.TurnCompleted,
-              data: {
-                turnId: input.turnId,
-                ...(input.outputItemId === undefined
-                  ? {}
-                  : { outputItemId: input.outputItemId }),
-                ...(input.metadata === undefined
-                  ? {}
-                  : { metadata: input.metadata }),
-              },
-            }),
-          }
-        },
-      )
+      return {
+        event: await eventStore.appendEvent(input.sessionId, {
+          type: EventType.TurnCompleted,
+          data: {
+            turnId: input.turnId,
+            ...(input.outputItemId === undefined
+              ? {}
+              : { outputItemId: input.outputItemId }),
+            ...(input.metadata === undefined
+              ? {}
+              : { metadata: input.metadata }),
+          },
+        }),
+      }
     },
 
     async failTurn(input) {
-      return serializeSessionCommand(
-        commandQueues,
-        input.sessionId,
-        async () => {
-          const session = await readSessionProjection(
-            eventStore,
-            input.sessionId,
-          )
-          requireActiveTurn(session, input.turnId)
-          const events = await eventStore.appendEvents(input.sessionId, [
-            ...openTurnWorkClosureEvents(
-              session,
-              input.turnId,
-              input.error.message,
-            ),
-            {
-              type: EventType.TurnFailed,
-              data: {
-                turnId: input.turnId,
-                error: input.error,
-              },
-            },
-          ])
-
-          return {
-            event: requireLastEvent(events),
-            events,
-          }
+      const session = await readSessionProjection(eventStore, input.sessionId)
+      requireActiveTurn(session, input.turnId)
+      const events = await eventStore.appendEvents(input.sessionId, [
+        ...openTurnWorkClosureEvents(
+          session,
+          input.turnId,
+          input.error.message,
+        ),
+        {
+          type: EventType.TurnFailed,
+          data: {
+            turnId: input.turnId,
+            error: input.error,
+          },
         },
-      )
+      ])
+
+      return {
+        event: requireLastEvent(events),
+        events,
+      }
     },
 
     async cancelTurn(input) {
-      return serializeSessionCommand(
-        commandQueues,
-        input.sessionId,
-        async () => {
-          const session = await readSessionProjection(
-            eventStore,
-            input.sessionId,
-          )
-          requireActiveTurn(session, input.turnId)
-          const events = await eventStore.appendEvents(input.sessionId, [
-            ...openTurnWorkClosureEvents(session, input.turnId, input.reason),
-            {
-              type: EventType.TurnCancelled,
-              data: {
-                turnId: input.turnId,
-                ...(input.reason === undefined ? {} : { reason: input.reason }),
-              },
-            },
-          ])
-
-          return {
-            event: requireLastEvent(events),
-            events,
-          }
+      const session = await readSessionProjection(eventStore, input.sessionId)
+      requireActiveTurn(session, input.turnId)
+      const events = await eventStore.appendEvents(input.sessionId, [
+        ...openTurnWorkClosureEvents(session, input.turnId, input.reason),
+        {
+          type: EventType.TurnCancelled,
+          data: {
+            turnId: input.turnId,
+            ...(input.reason === undefined ? {} : { reason: input.reason }),
+          },
         },
-      )
+      ])
+
+      return {
+        event: requireLastEvent(events),
+        events,
+      }
     },
   }
-}
-
-function serializeSessionCommand<T>(
-  commandQueues: Map<string, Promise<void>>,
-  sessionId: string,
-  command: () => Promise<T>,
-): Promise<T> {
-  const previous = commandQueues.get(sessionId) ?? Promise.resolve()
-  const current = previous.catch(() => undefined).then(command)
-  const next = current.then(
-    () => undefined,
-    () => undefined,
-  )
-
-  commandQueues.set(sessionId, next)
-  void next.then(() => {
-    if (commandQueues.get(sessionId) === next) commandQueues.delete(sessionId)
-  })
-
-  return current
 }
 
 async function readSessionProjection(
@@ -1049,21 +749,6 @@ async function readOptionalSessionProjection(
   sessionId: string,
 ): Promise<SessionProjection | undefined> {
   return projectSession(await eventStore.readEvents(sessionId))
-}
-
-function requireSessionMetadataUpdate(input: UpdateSessionMetadataInput): void {
-  if (input.title !== undefined || input.metadata !== undefined) return
-  throw invalidArgument(`Session ${input.sessionId} update has no changes.`, {
-    sessionId: input.sessionId,
-  })
-}
-
-function requirePendingInput(input: InputProjection): void {
-  if (input.state === InputState.Admitted) return
-  throw invalidState(`Input ${input.inputId} is already ${input.state}.`, {
-    inputId: input.inputId,
-    state: input.state,
-  })
 }
 
 function requireInputReadyForTurn(input: InputProjection): void {

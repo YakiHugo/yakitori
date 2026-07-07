@@ -21,14 +21,6 @@ describe("jsonl event store", () => {
     })
   })
 
-  it("lists no sessions when the session directory is missing", async () => {
-    await withStore(async (context) => {
-      expect(await context.store.listSessions()).toEqual({
-        sessions: [],
-      })
-    })
-  })
-
   it("appends and reads events in session order", async () => {
     await withStore(async (context) => {
       const sessionId = createSessionId()
@@ -50,79 +42,6 @@ describe("jsonl event store", () => {
       expect(
         await readFile(eventsPath(context.rootDir, sessionId), "utf8"),
       ).toBe(`${JSON.stringify(created)}\n${JSON.stringify(admitted)}\n`)
-    })
-  })
-
-  it("lists session summaries from event logs", async () => {
-    await withStore(async (context) => {
-      const sessionId = createSessionId()
-      const created = await context.store.appendEvent(
-        sessionId,
-        sessionCreatedEvent(),
-      )
-      const updated = await context.store.appendEvent(sessionId, {
-        type: EventType.SessionMetadataUpdated,
-        data: {
-          title: "Kernel boundary",
-          metadata: {
-            stage: "kernel",
-          },
-        },
-      })
-
-      expect(await context.store.listSessions()).toEqual({
-        sessions: [
-          {
-            sessionId,
-            seq: 2,
-            createdAt: created.createdAt,
-            updatedAt: updated.createdAt,
-            title: "Kernel boundary",
-            metadata: {
-              stage: "kernel",
-            },
-          },
-        ],
-      })
-    })
-  })
-
-  it("paginates listed session summaries", async () => {
-    await withStore(async (context) => {
-      const firstSessionId = createSessionId()
-      const secondSessionId = createSessionId()
-
-      await context.store.appendEvent(firstSessionId, sessionCreatedEvent())
-      await context.store.appendEvent(secondSessionId, sessionCreatedEvent())
-
-      const firstPage = await context.store.listSessions({ limit: 1 })
-      const cursor = firstPage.nextCursor
-      if (!cursor) throw new Error("Expected a next cursor.")
-      const secondPage = await context.store.listSessions({
-        limit: 1,
-        cursor,
-      })
-
-      expect(firstPage.sessions).toHaveLength(1)
-      expect(firstPage.nextCursor).toBeDefined()
-      expect(secondPage.sessions).toHaveLength(1)
-      expect(secondPage.nextCursor).toBeUndefined()
-      expect(
-        [...firstPage.sessions, ...secondPage.sessions].map(
-          (summary) => summary.sessionId,
-        ),
-      ).toEqual(expect.arrayContaining([firstSessionId, secondSessionId]))
-    })
-  })
-
-  it("rejects invalid session list limits and cursors", async () => {
-    await withStore(async (context) => {
-      await expect(context.store.listSessions({ limit: 0 })).rejects.toThrow(
-        "Session list limit must be an integer from 1 to 100.",
-      )
-      await expect(
-        context.store.listSessions({ cursor: "missing" }),
-      ).rejects.toThrow("Session list cursor is invalid.")
     })
   })
 
@@ -188,28 +107,6 @@ describe("jsonl event store", () => {
         },
         cause: expect.any(SyntaxError),
       })
-    })
-  })
-
-  it("rejects listed session logs that do not start with session creation", async () => {
-    await withStore(async (context) => {
-      const sessionId = createSessionId()
-
-      await mkdir(sessionDir(context.rootDir, sessionId), { recursive: true })
-      await writeFile(
-        eventsPath(context.rootDir, sessionId),
-        `${JSON.stringify(
-          createEventEnvelope({
-            sessionId,
-            seq: 1,
-            event: inputAdmittedEvent(),
-          }),
-        )}\n`,
-      )
-
-      await expect(context.store.listSessions()).rejects.toThrow(
-        "Session log must start with session.created.",
-      )
     })
   })
 
