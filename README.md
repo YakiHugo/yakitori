@@ -9,9 +9,9 @@ Yakitori is a from-scratch learning project for building a coding-agent harness
 and GUI. The goal is to understand the runtime pieces behind modern coding-agent
 products by implementing them directly, one module at a time.
 
-The project is inspired by public references from opencode, Codex, and Claude
-Code behavior/docs, but it does not wrap or depend on an existing agent
-framework.
+The project is inspired by public references from opencode, Codex, Claude Code
+behavior/docs, and an unofficial Claude Code source-map reconstruction for
+research, but it does not wrap or depend on an existing agent framework.
 
 ## Goals
 
@@ -37,6 +37,8 @@ git. Current intended references are:
 
 - `opencode`
 - `openai/codex`
+- `ChinaSiro/claude-code-sourcemap` as an unofficial source-map
+  reconstruction for research
 - Public Claude Code documentation and observable behavior
 
 Reference material is not part of the project source tree and should not be
@@ -44,8 +46,9 @@ required to build, test, or run Yakitori.
 
 ## Current Status
 
-This repository is at the project bootstrap stage. The package manager, runtime
-layout, server shape, GUI stack, and test runner are still intentionally open.
+This repository is at the project bootstrap stage. The initial toolchain uses
+Node, pnpm, Vite, Vitest, TypeScript, and Biome. The server shape, GUI stack,
+and runtime modules are still intentionally open.
 
 The first implementation module should be small and runnable locally. A likely
 starting point is the session/event kernel:
@@ -75,8 +78,28 @@ module lands.
 
 ## Development
 
-There are no install, build, test, or run commands yet. Once the first module is
-added, document the exact commands here and in `AGENTS.md`.
+Install dependencies:
+
+```sh
+pnpm install
+```
+
+Run the full local check:
+
+```sh
+pnpm check
+```
+
+Useful individual commands:
+
+```sh
+pnpm typecheck
+pnpm test
+pnpm lint
+pnpm format
+pnpm dev
+pnpm build
+```
 
 ## Agent Instructions
 
