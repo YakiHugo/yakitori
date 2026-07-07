@@ -59,6 +59,11 @@ export type SessionProjection = {
   readonly parentSessionId?: string
   readonly metadata?: EventMetadata
   readonly inputs: readonly InputProjection[]
+  readonly pendingInputs: readonly InputProjection[]
+  readonly activeTurn?: TurnProjection
+  readonly completedTurns: readonly TurnProjection[]
+  readonly failedTurns: readonly TurnProjection[]
+  readonly cancelledTurns: readonly TurnProjection[]
   readonly items: readonly ItemProjection[]
   readonly permissions: readonly PermissionProjection[]
   readonly tools: readonly ToolProjection[]
@@ -272,6 +277,8 @@ export function projectSession(
     })
   }
 
+  const eventIds = new Set<string>()
+  assertUniqueEventId(eventIds, firstEvent)
   const session = createInitialSessionProjection(firstEvent)
   const inputs = new Map<string, MutableInputProjection>()
   const items = new Map<string, MutableItemProjection>()
@@ -280,16 +287,36 @@ export function projectSession(
   const turns = new Map<string, MutableTurnProjection>()
 
   for (const event of events.slice(1)) {
+    assertUniqueEventId(eventIds, event)
     applyEvent(session, inputs, items, permissions, tools, turns, event)
   }
 
+  const projectedInputs = Array.from(inputs.values())
+  const projectedTurns = Array.from(turns.values())
+  const activeTurn = projectedTurns.find(
+    (turn) => turn.state === TurnState.Started,
+  )
+
   return {
     ...session,
-    inputs: Array.from(inputs.values()),
+    inputs: projectedInputs,
+    pendingInputs: projectedInputs.filter(
+      (input) => input.state === InputState.Admitted,
+    ),
+    ...(activeTurn === undefined ? {} : { activeTurn }),
+    completedTurns: projectedTurns.filter(
+      (turn) => turn.state === TurnState.Completed,
+    ),
+    failedTurns: projectedTurns.filter(
+      (turn) => turn.state === TurnState.Failed,
+    ),
+    cancelledTurns: projectedTurns.filter(
+      (turn) => turn.state === TurnState.Cancelled,
+    ),
     items: Array.from(items.values()),
     permissions: Array.from(permissions.values()),
     tools: Array.from(tools.values()),
-    turns: Array.from(turns.values()),
+    turns: projectedTurns,
   }
 }
 
@@ -439,6 +466,14 @@ function applyInputAdmitted(
       },
     )
   }
+  if (event.data.parentInputId === event.data.inputId) {
+    throw invalidReplay(`Input ${event.data.inputId} cannot parent itself.`, {
+      inputId: event.data.inputId,
+    })
+  }
+  if (event.data.parentInputId !== undefined) {
+    requireInput(inputs, event.data.parentInputId)
+  }
 
   inputs.set(event.data.inputId, {
     inputId: event.data.inputId,
@@ -493,12 +528,12 @@ function applyInputCancelled(
   >,
 ): void {
   const input = requireInput(inputs, event.data.inputId)
-  if (input.state === InputState.Promoted) {
+  if (input.state !== InputState.Admitted) {
     throw invalidReplay(
-      `Input ${event.data.inputId} has already been promoted.`,
+      `Input ${event.data.inputId} is already ${input.state}.`,
       {
         inputId: event.data.inputId,
-        turnId: input.turnId ?? null,
+        state: input.state,
       },
     )
   }
@@ -944,6 +979,19 @@ function assertNextSessionEvent(
       },
     )
   }
+}
+
+function assertUniqueEventId(
+  eventIds: Set<string>,
+  event: EventEnvelope,
+): void {
+  if (!eventIds.has(event.id)) {
+    eventIds.add(event.id)
+    return
+  }
+  throw invalidReplay(`Event ${event.id} has already been replayed.`, {
+    eventId: event.id,
+  })
 }
 
 function requireInput(
