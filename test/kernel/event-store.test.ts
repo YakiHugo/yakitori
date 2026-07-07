@@ -57,6 +57,30 @@ describe("jsonl event store", () => {
     })
   })
 
+  it("serializes concurrent appends for the same session", async () => {
+    await withStore(async (context) => {
+      const sessionId = createSessionId()
+      const events = await Promise.all(
+        Array.from({ length: 8 }, () =>
+          context.store.appendEvent(sessionId, inputAdmittedEvent()),
+        ),
+      )
+
+      expect(events.map((event) => event.seq)).toEqual([1, 2, 3, 4, 5, 6, 7, 8])
+      expect(
+        (await context.store.readEvents(sessionId)).map((event) => event.seq),
+      ).toEqual([1, 2, 3, 4, 5, 6, 7, 8])
+    })
+  })
+
+  it("rejects unsafe session ids before touching the filesystem", async () => {
+    await withStore(async (context) => {
+      await expect(context.store.readEvents("../../outside")).rejects.toThrow(
+        "Invalid session id ../../outside.",
+      )
+    })
+  })
+
   it("rejects invalid jsonl content", async () => {
     await withStore(async (context) => {
       const sessionId = createSessionId()
@@ -66,6 +90,30 @@ describe("jsonl event store", () => {
 
       await expect(context.store.readEvents(sessionId)).rejects.toThrow(
         "Invalid event JSON at line 1.",
+      )
+    })
+  })
+
+  it("rejects event logs with invalid payload data", async () => {
+    await withStore(async (context) => {
+      const sessionId = createSessionId()
+
+      await mkdir(sessionDir(context.rootDir, sessionId), { recursive: true })
+      await writeFile(
+        eventsPath(context.rootDir, sessionId),
+        `${JSON.stringify({
+          id: "event_test",
+          sessionId,
+          seq: 1,
+          version: 1,
+          createdAt: "2026-07-07T00:00:00.000Z",
+          type: EventType.InputAdmitted,
+          data: {},
+        })}\n`,
+      )
+
+      await expect(context.store.readEvents(sessionId)).rejects.toThrow(
+        "Invalid event data for input.admitted at line 1.",
       )
     })
   })
