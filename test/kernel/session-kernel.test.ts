@@ -465,6 +465,70 @@ describe("session kernel", () => {
     })
   })
 
+  it("enforces permissions that are bound to an existing tool call", async () => {
+    await withKernel(async (context) => {
+      const session = await context.kernel.createSession()
+      const admitted = await context.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: {
+          kind: "text",
+          text: "bind permission after tool request",
+        },
+      })
+      const started = await context.kernel.startTurn({
+        sessionId: session.sessionId,
+        inputId: admitted.inputId,
+      })
+      const tool = await context.kernel.requestTool({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        name: "shell.exec",
+        input: {
+          command: "pnpm test",
+        },
+      })
+      const permission = await context.kernel.requestPermission({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        action: "shell.exec",
+        subject: "pnpm test",
+        toolCallId: tool.toolCallId,
+      })
+
+      await expect(
+        context.kernel.startTool({
+          sessionId: session.sessionId,
+          turnId: started.turnId,
+          toolCallId: tool.toolCallId,
+        }),
+      ).rejects.toThrow(
+        `Permission ${permission.permissionRequestId} has not been allowed.`,
+      )
+
+      await context.kernel.resolvePermission({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        permissionRequestId: permission.permissionRequestId,
+        behavior: PermissionBehavior.Allow,
+      })
+
+      await expect(
+        context.kernel.startTool({
+          sessionId: session.sessionId,
+          turnId: started.turnId,
+          toolCallId: tool.toolCallId,
+        }),
+      ).resolves.toMatchObject({
+        event: {
+          type: EventType.ToolStarted,
+          data: {
+            toolCallId: tool.toolCallId,
+          },
+        },
+      })
+    })
+  })
+
   it("rejects completing a turn while work is still open", async () => {
     await withKernel(async (context) => {
       const session = await context.kernel.createSession()

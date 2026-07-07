@@ -473,7 +473,7 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
       const session = await readSessionProjection(eventStore, input.sessionId)
       requireActiveTurn(session, input.turnId)
       if (input.toolCallId !== undefined) {
-        requireTool(session, input.turnId, input.toolCallId)
+        requireRequestedTool(session, input.turnId, input.toolCallId)
       }
 
       const permissionRequestId = createPermissionRequestId()
@@ -540,7 +540,11 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
         requireItem(session, input.turnId, input.itemId)
       }
       if (input.permissionRequestId !== undefined) {
-        requirePermission(session, input.turnId, input.permissionRequestId)
+        requireUnboundPermission(
+          session,
+          input.turnId,
+          input.permissionRequestId,
+        )
       }
 
       const toolCallId = createToolCallId()
@@ -568,13 +572,7 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
       const session = await readSessionProjection(eventStore, input.sessionId)
       requireActiveTurn(session, input.turnId)
       const tool = requireRequestedTool(session, input.turnId, input.toolCallId)
-      if (tool.permissionRequestId !== undefined) {
-        requireAllowedPermission(
-          session,
-          input.turnId,
-          tool.permissionRequestId,
-        )
-      }
+      requireAllowedToolPermissions(session, input.turnId, tool)
 
       return {
         event: await eventStore.appendEvent(input.sessionId, {
@@ -833,6 +831,18 @@ function requirePermission(
   )
 }
 
+function requireUnboundPermission(
+  session: SessionProjection,
+  turnId: string,
+  permissionRequestId: string,
+): PermissionProjection {
+  const permission = requirePermission(session, turnId, permissionRequestId)
+  if (permission.toolCallId === undefined) return permission
+  throw new Error(
+    `Permission ${permissionRequestId} is already bound to tool ${permission.toolCallId}.`,
+  )
+}
+
 function requirePendingPermission(
   session: SessionProjection,
   turnId: string,
@@ -863,6 +873,23 @@ function requireAllowedPermission(
     )
   }
   throw new Error(`Permission ${permissionRequestId} has not been allowed.`)
+}
+
+function requireAllowedToolPermissions(
+  session: SessionProjection,
+  turnId: string,
+  tool: ToolProjection,
+): void {
+  const permissions = session.permissions.filter(
+    (permission) =>
+      permission.turnId === turnId &&
+      (permission.permissionRequestId === tool.permissionRequestId ||
+        permission.toolCallId === tool.toolCallId),
+  )
+
+  for (const permission of permissions) {
+    requireAllowedPermission(session, turnId, permission.permissionRequestId)
+  }
 }
 
 function requireTool(
