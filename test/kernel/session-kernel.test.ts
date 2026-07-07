@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import {
   createInputId,
+  createItemId,
   createSessionId,
   createSessionKernel,
   EventType,
@@ -117,6 +118,158 @@ describe("session kernel", () => {
         EventType.InputPromoted,
         EventType.TurnStarted,
       ])
+    })
+  })
+
+  it("completes an active turn and allows the next turn", async () => {
+    await withKernel(async (context) => {
+      const session = await context.kernel.createSession()
+      const firstInput = await context.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: {
+          kind: "text",
+          text: "first input",
+        },
+      })
+      const firstTurn = await context.kernel.startTurn({
+        sessionId: session.sessionId,
+        inputId: firstInput.inputId,
+      })
+      const outputItemId = createItemId()
+      const completed = await context.kernel.completeTurn({
+        sessionId: session.sessionId,
+        turnId: firstTurn.turnId,
+        outputItemId,
+        metadata: {
+          status: "done",
+        },
+      })
+      const secondInput = await context.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: {
+          kind: "text",
+          text: "second input",
+        },
+      })
+      const secondTurn = await context.kernel.startTurn({
+        sessionId: session.sessionId,
+        inputId: secondInput.inputId,
+      })
+
+      expect(completed.event).toMatchObject({
+        sessionId: session.sessionId,
+        seq: 5,
+        type: EventType.TurnCompleted,
+        data: {
+          turnId: firstTurn.turnId,
+          outputItemId,
+          metadata: {
+            status: "done",
+          },
+        },
+      })
+      expect(secondTurn.events.map((event) => event.seq)).toEqual([7, 8])
+    })
+  })
+
+  it("fails an active turn", async () => {
+    await withKernel(async (context) => {
+      const session = await context.kernel.createSession()
+      const admitted = await context.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: {
+          kind: "text",
+          text: "fail this turn",
+        },
+      })
+      const started = await context.kernel.startTurn({
+        sessionId: session.sessionId,
+        inputId: admitted.inputId,
+      })
+
+      const failed = await context.kernel.failTurn({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        error: {
+          message: "model failed",
+          code: "model_error",
+        },
+      })
+
+      expect(failed.event).toMatchObject({
+        sessionId: session.sessionId,
+        seq: 5,
+        type: EventType.TurnFailed,
+        data: {
+          turnId: started.turnId,
+          error: {
+            message: "model failed",
+            code: "model_error",
+          },
+        },
+      })
+    })
+  })
+
+  it("cancels an active turn", async () => {
+    await withKernel(async (context) => {
+      const session = await context.kernel.createSession()
+      const admitted = await context.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: {
+          kind: "text",
+          text: "cancel this turn",
+        },
+      })
+      const started = await context.kernel.startTurn({
+        sessionId: session.sessionId,
+        inputId: admitted.inputId,
+      })
+
+      const cancelled = await context.kernel.cancelTurn({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        reason: "user interrupted",
+      })
+
+      expect(cancelled.event).toMatchObject({
+        sessionId: session.sessionId,
+        seq: 5,
+        type: EventType.TurnCancelled,
+        data: {
+          turnId: started.turnId,
+          reason: "user interrupted",
+        },
+      })
+    })
+  })
+
+  it("rejects ending a turn twice", async () => {
+    await withKernel(async (context) => {
+      const session = await context.kernel.createSession()
+      const admitted = await context.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: {
+          kind: "text",
+          text: "complete once",
+        },
+      })
+      const started = await context.kernel.startTurn({
+        sessionId: session.sessionId,
+        inputId: admitted.inputId,
+      })
+
+      await context.kernel.completeTurn({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+      })
+
+      await expect(
+        context.kernel.cancelTurn({
+          sessionId: session.sessionId,
+          turnId: started.turnId,
+        }),
+      ).rejects.toThrow(`Turn ${started.turnId} is already completed.`)
     })
   })
 

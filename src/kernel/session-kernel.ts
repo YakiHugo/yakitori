@@ -4,6 +4,7 @@ import {
   InputRole,
   type EventEnvelope,
   type EventMetadata,
+  type KernelError,
   type TextContent,
 } from "./events.ts"
 import { createInputId, createSessionId, createTurnId } from "./ids.ts"
@@ -13,12 +14,16 @@ import {
   TurnState,
   type InputProjection,
   type SessionProjection,
+  type TurnProjection,
 } from "./session-projector.ts"
 
 export type SessionKernel = {
   createSession(input?: CreateSessionInput): Promise<CreateSessionResult>
   admitInput(input: AdmitInputInput): Promise<AdmitInputResult>
   startTurn(input: StartTurnInput): Promise<StartTurnResult>
+  completeTurn(input: CompleteTurnInput): Promise<CompleteTurnResult>
+  failTurn(input: FailTurnInput): Promise<FailTurnResult>
+  cancelTurn(input: CancelTurnInput): Promise<CancelTurnResult>
 }
 
 export type CreateSessionInput = {
@@ -56,6 +61,37 @@ export type StartTurnInput = {
 export type StartTurnResult = {
   readonly turnId: string
   readonly events: readonly EventEnvelope[]
+}
+
+export type CompleteTurnInput = {
+  readonly sessionId: string
+  readonly turnId: string
+  readonly outputItemId?: string
+  readonly metadata?: EventMetadata
+}
+
+export type CompleteTurnResult = {
+  readonly event: EventEnvelope
+}
+
+export type FailTurnInput = {
+  readonly sessionId: string
+  readonly turnId: string
+  readonly error: KernelError
+}
+
+export type FailTurnResult = {
+  readonly event: EventEnvelope
+}
+
+export type CancelTurnInput = {
+  readonly sessionId: string
+  readonly turnId: string
+  readonly reason?: string
+}
+
+export type CancelTurnResult = {
+  readonly event: EventEnvelope
 }
 
 export function createSessionKernel(eventStore: EventStore): SessionKernel {
@@ -137,6 +173,56 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
         ]),
       }
     },
+
+    async completeTurn(input) {
+      const session = await readSessionProjection(eventStore, input.sessionId)
+      requireActiveTurn(session, input.turnId)
+
+      return {
+        event: await eventStore.appendEvent(input.sessionId, {
+          type: EventType.TurnCompleted,
+          data: {
+            turnId: input.turnId,
+            ...(input.outputItemId === undefined
+              ? {}
+              : { outputItemId: input.outputItemId }),
+            ...(input.metadata === undefined
+              ? {}
+              : { metadata: input.metadata }),
+          },
+        }),
+      }
+    },
+
+    async failTurn(input) {
+      const session = await readSessionProjection(eventStore, input.sessionId)
+      requireActiveTurn(session, input.turnId)
+
+      return {
+        event: await eventStore.appendEvent(input.sessionId, {
+          type: EventType.TurnFailed,
+          data: {
+            turnId: input.turnId,
+            error: input.error,
+          },
+        }),
+      }
+    },
+
+    async cancelTurn(input) {
+      const session = await readSessionProjection(eventStore, input.sessionId)
+      requireActiveTurn(session, input.turnId)
+
+      return {
+        event: await eventStore.appendEvent(input.sessionId, {
+          type: EventType.TurnCancelled,
+          data: {
+            turnId: input.turnId,
+            ...(input.reason === undefined ? {} : { reason: input.reason }),
+          },
+        }),
+      }
+    },
   }
 }
 
@@ -169,8 +255,12 @@ function requireInput(
   throw new Error(`Input ${inputId} has not been admitted.`)
 }
 
-function requireTurnStarted(session: SessionProjection, turnId: string): void {
-  if (session.turns.some((turn) => turn.turnId === turnId)) return
+function requireTurnStarted(
+  session: SessionProjection,
+  turnId: string,
+): TurnProjection {
+  const turn = session.turns.find((candidate) => candidate.turnId === turnId)
+  if (turn) return turn
 
   throw new Error(`Turn ${turnId} has not been started.`)
 }
@@ -183,4 +273,13 @@ function requireNoActiveTurn(session: SessionProjection): void {
   throw new Error(
     `Session ${session.id} already has active turn ${turn.turnId}.`,
   )
+}
+
+function requireActiveTurn(
+  session: SessionProjection,
+  turnId: string,
+): TurnProjection {
+  const turn = requireTurnStarted(session, turnId)
+  if (turn.state === TurnState.Started) return turn
+  throw new Error(`Turn ${turnId} is already ${turn.state}.`)
 }
