@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest"
 import {
   createEventEnvelope,
   createInputId,
-  createItemId,
   createSessionId,
   createSessionKernel,
   createSessionProjector,
@@ -10,6 +9,8 @@ import {
   EventType,
   InputRole,
   InputState,
+  ItemKind,
+  ItemStatus,
   projectSession,
   TurnState,
   type EventEnvelope,
@@ -74,6 +75,7 @@ describe("session projector", () => {
             turnId: started.turnId,
           },
         ],
+        items: [],
         turns: [
           {
             turnId: started.turnId,
@@ -84,9 +86,90 @@ describe("session projector", () => {
             metadata: {
               reason: "mvp",
             },
+            itemIds: [],
           },
         ],
       })
+    })
+  })
+
+  it("projects item lifecycle inside a turn", async () => {
+    await withProjector(async (context) => {
+      const session = await context.kernel.createSession()
+      const admitted = await context.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: {
+          kind: "text",
+          text: "write an item",
+        },
+      })
+      const started = await context.kernel.startTurn({
+        sessionId: session.sessionId,
+        inputId: admitted.inputId,
+      })
+      const appended = await context.kernel.appendItem({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        kind: ItemKind.AssistantMessage,
+        content: {
+          kind: "text",
+          text: "draft",
+        },
+        providerMetadata: {
+          provider: "test",
+        },
+      })
+      const updated = await context.kernel.updateItem({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        itemId: appended.itemId,
+        content: {
+          kind: "text",
+          text: "final",
+        },
+      })
+      const completed = await context.kernel.completeItem({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        itemId: appended.itemId,
+        status: ItemStatus.Failed,
+        metadata: {
+          reason: "example",
+        },
+      })
+
+      expect(await context.projector.project(session.sessionId)).toMatchObject({
+        id: session.sessionId,
+        seq: 7,
+        updatedAt: completed.event.createdAt,
+        items: [
+          {
+            itemId: appended.itemId,
+            turnId: started.turnId,
+            kind: ItemKind.AssistantMessage,
+            content: {
+              kind: "text",
+              text: "final",
+            },
+            status: ItemStatus.Failed,
+            appendedAt: appended.event.createdAt,
+            updatedAt: completed.event.createdAt,
+            providerMetadata: {
+              provider: "test",
+            },
+            metadata: {
+              reason: "example",
+            },
+          },
+        ],
+        turns: [
+          {
+            turnId: started.turnId,
+            itemIds: [appended.itemId],
+          },
+        ],
+      })
+      expect(updated.event.type).toBe(EventType.ItemUpdated)
     })
   })
 
@@ -106,12 +189,20 @@ describe("session projector", () => {
         sessionId: session.sessionId,
         inputId: admitted.inputId,
       })
-      const itemId = createItemId()
+      const item = await context.kernel.appendItem({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        kind: ItemKind.AssistantMessage,
+        content: {
+          kind: "text",
+          text: "done",
+        },
+      })
       await context.store.appendEvent(session.sessionId, {
         type: EventType.TurnCompleted,
         data: {
           turnId: started.turnId,
-          outputItemId: itemId,
+          outputItemId: item.itemId,
           metadata: {
             status: "done",
           },
@@ -129,7 +220,7 @@ describe("session projector", () => {
 
       expect(await context.projector.project(session.sessionId)).toMatchObject({
         id: session.sessionId,
-        seq: 6,
+        seq: 7,
         updatedAt: updated.createdAt,
         title: "Done",
         metadata: {
@@ -140,10 +231,11 @@ describe("session projector", () => {
             turnId: started.turnId,
             inputId: admitted.inputId,
             state: TurnState.Completed,
-            outputItemId: itemId,
+            outputItemId: item.itemId,
             metadata: {
               status: "done",
             },
+            itemIds: [item.itemId],
           },
         ],
       })

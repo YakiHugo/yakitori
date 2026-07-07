@@ -4,15 +4,24 @@ import {
   InputRole,
   type EventEnvelope,
   type EventMetadata,
+  type ItemContent,
+  type ItemKind,
+  ItemStatus,
   type KernelError,
   type TextContent,
 } from "./events.ts"
-import { createInputId, createSessionId, createTurnId } from "./ids.ts"
+import {
+  createInputId,
+  createItemId,
+  createSessionId,
+  createTurnId,
+} from "./ids.ts"
 import {
   InputState,
   projectSession,
   TurnState,
   type InputProjection,
+  type ItemProjection,
   type SessionProjection,
   type TurnProjection,
 } from "./session-projector.ts"
@@ -21,6 +30,9 @@ export type SessionKernel = {
   createSession(input?: CreateSessionInput): Promise<CreateSessionResult>
   admitInput(input: AdmitInputInput): Promise<AdmitInputResult>
   startTurn(input: StartTurnInput): Promise<StartTurnResult>
+  appendItem(input: AppendItemInput): Promise<AppendItemResult>
+  updateItem(input: UpdateItemInput): Promise<UpdateItemResult>
+  completeItem(input: CompleteItemInput): Promise<CompleteItemResult>
   completeTurn(input: CompleteTurnInput): Promise<CompleteTurnResult>
   failTurn(input: FailTurnInput): Promise<FailTurnResult>
   cancelTurn(input: CancelTurnInput): Promise<CancelTurnResult>
@@ -61,6 +73,45 @@ export type StartTurnInput = {
 export type StartTurnResult = {
   readonly turnId: string
   readonly events: readonly EventEnvelope[]
+}
+
+export type AppendItemInput = {
+  readonly sessionId: string
+  readonly turnId: string
+  readonly kind: ItemKind
+  readonly content: ItemContent
+  readonly parentItemId?: string
+  readonly status?: ItemStatus
+  readonly providerMetadata?: EventMetadata
+}
+
+export type AppendItemResult = {
+  readonly itemId: string
+  readonly event: EventEnvelope
+}
+
+export type UpdateItemInput = {
+  readonly sessionId: string
+  readonly turnId: string
+  readonly itemId: string
+  readonly content?: ItemContent
+  readonly metadata?: EventMetadata
+}
+
+export type UpdateItemResult = {
+  readonly event: EventEnvelope
+}
+
+export type CompleteItemInput = {
+  readonly sessionId: string
+  readonly turnId: string
+  readonly itemId: string
+  readonly status?: typeof ItemStatus.Completed | typeof ItemStatus.Failed
+  readonly metadata?: EventMetadata
+}
+
+export type CompleteItemResult = {
+  readonly event: EventEnvelope
 }
 
 export type CompleteTurnInput = {
@@ -174,9 +225,81 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
       }
     },
 
+    async appendItem(input) {
+      const session = await readSessionProjection(eventStore, input.sessionId)
+      requireActiveTurn(session, input.turnId)
+      if (input.parentItemId !== undefined) {
+        requireItem(session, input.turnId, input.parentItemId)
+      }
+
+      const itemId = createItemId()
+      const event = await eventStore.appendEvent(input.sessionId, {
+        type: EventType.ItemAppended,
+        data: {
+          itemId,
+          turnId: input.turnId,
+          kind: input.kind,
+          content: input.content,
+          ...(input.parentItemId === undefined
+            ? {}
+            : { parentItemId: input.parentItemId }),
+          ...(input.status === undefined ? {} : { status: input.status }),
+          ...(input.providerMetadata === undefined
+            ? {}
+            : { providerMetadata: input.providerMetadata }),
+        },
+      })
+
+      return { itemId, event }
+    },
+
+    async updateItem(input) {
+      const session = await readSessionProjection(eventStore, input.sessionId)
+      requireActiveTurn(session, input.turnId)
+      requireOpenItem(session, input.turnId, input.itemId)
+      requireItemUpdate(input)
+
+      return {
+        event: await eventStore.appendEvent(input.sessionId, {
+          type: EventType.ItemUpdated,
+          data: {
+            itemId: input.itemId,
+            turnId: input.turnId,
+            ...(input.content === undefined ? {} : { content: input.content }),
+            ...(input.metadata === undefined
+              ? {}
+              : { metadata: input.metadata }),
+          },
+        }),
+      }
+    },
+
+    async completeItem(input) {
+      const session = await readSessionProjection(eventStore, input.sessionId)
+      requireActiveTurn(session, input.turnId)
+      requireOpenItem(session, input.turnId, input.itemId)
+
+      return {
+        event: await eventStore.appendEvent(input.sessionId, {
+          type: EventType.ItemCompleted,
+          data: {
+            itemId: input.itemId,
+            turnId: input.turnId,
+            status: input.status ?? ItemStatus.Completed,
+            ...(input.metadata === undefined
+              ? {}
+              : { metadata: input.metadata }),
+          },
+        }),
+      }
+    },
+
     async completeTurn(input) {
       const session = await readSessionProjection(eventStore, input.sessionId)
       requireActiveTurn(session, input.turnId)
+      if (input.outputItemId !== undefined) {
+        requireItem(session, input.turnId, input.outputItemId)
+      }
 
       return {
         event: await eventStore.appendEvent(input.sessionId, {
@@ -263,6 +386,32 @@ function requireTurnStarted(
   if (turn) return turn
 
   throw new Error(`Turn ${turnId} has not been started.`)
+}
+
+function requireItem(
+  session: SessionProjection,
+  turnId: string,
+  itemId: string,
+): ItemProjection {
+  const item = session.items.find((candidate) => candidate.itemId === itemId)
+  if (!item) throw new Error(`Item ${itemId} has not been appended.`)
+  if (item.turnId === turnId) return item
+  throw new Error(`Item ${itemId} does not belong to turn ${turnId}.`)
+}
+
+function requireOpenItem(
+  session: SessionProjection,
+  turnId: string,
+  itemId: string,
+): ItemProjection {
+  const item = requireItem(session, turnId, itemId)
+  if (item.status === ItemStatus.InProgress) return item
+  throw new Error(`Item ${itemId} is already ${item.status}.`)
+}
+
+function requireItemUpdate(input: UpdateItemInput): void {
+  if (input.content !== undefined || input.metadata !== undefined) return
+  throw new Error(`Item ${input.itemId} update has no changes.`)
 }
 
 function requireNoActiveTurn(session: SessionProjection): void {

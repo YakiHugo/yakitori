@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest"
 import {
   createInputId,
-  createItemId,
   createSessionId,
   createSessionKernel,
   EventType,
   InputRole,
+  ItemKind,
+  ItemStatus,
   type EventStore,
   type SessionKernel,
 } from "../../src/index.ts"
@@ -121,6 +122,96 @@ describe("session kernel", () => {
     })
   })
 
+  it("appends, updates, and completes an item in an active turn", async () => {
+    await withKernel(async (context) => {
+      const session = await context.kernel.createSession()
+      const admitted = await context.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: {
+          kind: "text",
+          text: "write a response",
+        },
+      })
+      const started = await context.kernel.startTurn({
+        sessionId: session.sessionId,
+        inputId: admitted.inputId,
+      })
+      const appended = await context.kernel.appendItem({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        kind: ItemKind.AssistantMessage,
+        content: {
+          kind: "text",
+          text: "draft",
+        },
+        providerMetadata: {
+          provider: "test",
+        },
+      })
+      const updated = await context.kernel.updateItem({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        itemId: appended.itemId,
+        content: {
+          kind: "text",
+          text: "final",
+        },
+      })
+      const completed = await context.kernel.completeItem({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        itemId: appended.itemId,
+        metadata: {
+          visible: true,
+        },
+      })
+
+      expect(appended.event).toMatchObject({
+        sessionId: session.sessionId,
+        seq: 5,
+        type: EventType.ItemAppended,
+        data: {
+          itemId: appended.itemId,
+          turnId: started.turnId,
+          kind: ItemKind.AssistantMessage,
+          content: {
+            kind: "text",
+            text: "draft",
+          },
+          providerMetadata: {
+            provider: "test",
+          },
+        },
+      })
+      expect(updated.event).toMatchObject({
+        sessionId: session.sessionId,
+        seq: 6,
+        type: EventType.ItemUpdated,
+        data: {
+          itemId: appended.itemId,
+          turnId: started.turnId,
+          content: {
+            kind: "text",
+            text: "final",
+          },
+        },
+      })
+      expect(completed.event).toMatchObject({
+        sessionId: session.sessionId,
+        seq: 7,
+        type: EventType.ItemCompleted,
+        data: {
+          itemId: appended.itemId,
+          turnId: started.turnId,
+          status: ItemStatus.Completed,
+          metadata: {
+            visible: true,
+          },
+        },
+      })
+    })
+  })
+
   it("completes an active turn and allows the next turn", async () => {
     await withKernel(async (context) => {
       const session = await context.kernel.createSession()
@@ -135,11 +226,19 @@ describe("session kernel", () => {
         sessionId: session.sessionId,
         inputId: firstInput.inputId,
       })
-      const outputItemId = createItemId()
+      const output = await context.kernel.appendItem({
+        sessionId: session.sessionId,
+        turnId: firstTurn.turnId,
+        kind: ItemKind.AssistantMessage,
+        content: {
+          kind: "text",
+          text: "first output",
+        },
+      })
       const completed = await context.kernel.completeTurn({
         sessionId: session.sessionId,
         turnId: firstTurn.turnId,
-        outputItemId,
+        outputItemId: output.itemId,
         metadata: {
           status: "done",
         },
@@ -158,17 +257,17 @@ describe("session kernel", () => {
 
       expect(completed.event).toMatchObject({
         sessionId: session.sessionId,
-        seq: 5,
+        seq: 6,
         type: EventType.TurnCompleted,
         data: {
           turnId: firstTurn.turnId,
-          outputItemId,
+          outputItemId: output.itemId,
           metadata: {
             status: "done",
           },
         },
       })
-      expect(secondTurn.events.map((event) => event.seq)).toEqual([7, 8])
+      expect(secondTurn.events.map((event) => event.seq)).toEqual([8, 9])
     })
   })
 
@@ -270,6 +369,50 @@ describe("session kernel", () => {
           turnId: started.turnId,
         }),
       ).rejects.toThrow(`Turn ${started.turnId} is already completed.`)
+    })
+  })
+
+  it("rejects updating a completed item", async () => {
+    await withKernel(async (context) => {
+      const session = await context.kernel.createSession()
+      const admitted = await context.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: {
+          kind: "text",
+          text: "item closes once",
+        },
+      })
+      const started = await context.kernel.startTurn({
+        sessionId: session.sessionId,
+        inputId: admitted.inputId,
+      })
+      const item = await context.kernel.appendItem({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        kind: ItemKind.AssistantMessage,
+        content: {
+          kind: "text",
+          text: "closed",
+        },
+      })
+
+      await context.kernel.completeItem({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        itemId: item.itemId,
+      })
+
+      await expect(
+        context.kernel.updateItem({
+          sessionId: session.sessionId,
+          turnId: started.turnId,
+          itemId: item.itemId,
+          content: {
+            kind: "text",
+            text: "too late",
+          },
+        }),
+      ).rejects.toThrow(`Item ${item.itemId} is already completed.`)
     })
   })
 

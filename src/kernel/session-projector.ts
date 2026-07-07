@@ -3,6 +3,9 @@ import {
   EventType,
   type EventEnvelope,
   type EventMetadata,
+  type ItemContent,
+  type ItemKind,
+  ItemStatus,
   type InputRole,
   type KernelError,
   type TextContent,
@@ -34,6 +37,7 @@ export type SessionProjection = {
   readonly parentSessionId?: string
   readonly metadata?: EventMetadata
   readonly inputs: readonly InputProjection[]
+  readonly items: readonly ItemProjection[]
   readonly turns: readonly TurnProjection[]
 }
 
@@ -60,6 +64,20 @@ export type TurnProjection = {
   readonly outputItemId?: string
   readonly error?: KernelError
   readonly cancelledReason?: string
+  readonly metadata?: EventMetadata
+  readonly itemIds: readonly string[]
+}
+
+export type ItemProjection = {
+  readonly itemId: string
+  readonly turnId: string
+  readonly kind: ItemKind
+  readonly content: ItemContent
+  readonly status: ItemStatus
+  readonly appendedAt: string
+  readonly updatedAt: string
+  readonly parentItemId?: string
+  readonly providerMetadata?: EventMetadata
   readonly metadata?: EventMetadata
 }
 
@@ -102,6 +120,20 @@ type MutableTurnProjection = {
   error?: KernelError
   cancelledReason?: string
   metadata?: EventMetadata
+  itemIds: string[]
+}
+
+type MutableItemProjection = {
+  itemId: string
+  turnId: string
+  kind: ItemKind
+  content: ItemContent
+  status: ItemStatus
+  appendedAt: string
+  updatedAt: string
+  parentItemId?: string
+  providerMetadata?: EventMetadata
+  metadata?: EventMetadata
 }
 
 export function createSessionProjector(
@@ -128,15 +160,17 @@ export function projectSession(
 
   const session = createInitialSessionProjection(firstEvent)
   const inputs = new Map<string, MutableInputProjection>()
+  const items = new Map<string, MutableItemProjection>()
   const turns = new Map<string, MutableTurnProjection>()
 
   for (const event of events.slice(1)) {
-    applyEvent(session, inputs, turns, event)
+    applyEvent(session, inputs, items, turns, event)
   }
 
   return {
     ...session,
     inputs: Array.from(inputs.values()),
+    items: Array.from(items.values()),
     turns: Array.from(turns.values()),
   }
 }
@@ -161,6 +195,7 @@ function createInitialSessionProjection(
 function applyEvent(
   session: MutableSessionProjection,
   inputs: Map<string, MutableInputProjection>,
+  items: Map<string, MutableItemProjection>,
   turns: Map<string, MutableTurnProjection>,
   event: EventEnvelope,
 ): void {
@@ -187,13 +222,22 @@ function applyEvent(
       applyTurnStarted(inputs, turns, event)
       return
     case EventType.TurnCompleted:
-      applyTurnCompleted(turns, event)
+      applyTurnCompleted(items, turns, event)
       return
     case EventType.TurnFailed:
       applyTurnFailed(turns, event)
       return
     case EventType.TurnCancelled:
       applyTurnCancelled(turns, event)
+      return
+    case EventType.ItemAppended:
+      applyItemAppended(items, turns, event)
+      return
+    case EventType.ItemUpdated:
+      applyItemUpdated(items, event)
+      return
+    case EventType.ItemCompleted:
+      applyItemCompleted(items, event)
       return
     default:
       return
@@ -313,6 +357,7 @@ function applyTurnStarted(
     state: TurnState.Started,
     startedAt: event.createdAt,
     updatedAt: event.createdAt,
+    itemIds: [],
     ...(event.data.parentTurnId === undefined
       ? {}
       : { parentTurnId: event.data.parentTurnId }),
@@ -323,6 +368,7 @@ function applyTurnStarted(
 }
 
 function applyTurnCompleted(
+  items: Map<string, MutableItemProjection>,
   turns: Map<string, MutableTurnProjection>,
   event: Extract<
     EventEnvelope,
@@ -333,6 +379,7 @@ function applyTurnCompleted(
   turn.state = TurnState.Completed
   turn.updatedAt = event.createdAt
   if (event.data.outputItemId !== undefined) {
+    requireItem(items, event.data.turnId, event.data.outputItemId)
     turn.outputItemId = event.data.outputItemId
   }
   if (event.data.metadata !== undefined) turn.metadata = event.data.metadata
@@ -363,6 +410,68 @@ function applyTurnCancelled(
   }
 }
 
+function applyItemAppended(
+  items: Map<string, MutableItemProjection>,
+  turns: Map<string, MutableTurnProjection>,
+  event: Extract<
+    EventEnvelope,
+    { readonly type: typeof EventType.ItemAppended }
+  >,
+): void {
+  if (items.has(event.data.itemId)) {
+    throw new Error(`Item ${event.data.itemId} has already been appended.`)
+  }
+
+  const turn = requireActiveTurn(turns, event.data.turnId)
+  if (event.data.parentItemId !== undefined) {
+    requireItem(items, event.data.turnId, event.data.parentItemId)
+  }
+
+  items.set(event.data.itemId, {
+    itemId: event.data.itemId,
+    turnId: event.data.turnId,
+    kind: event.data.kind,
+    content: event.data.content,
+    status: event.data.status ?? ItemStatus.InProgress,
+    appendedAt: event.createdAt,
+    updatedAt: event.createdAt,
+    ...(event.data.parentItemId === undefined
+      ? {}
+      : { parentItemId: event.data.parentItemId }),
+    ...(event.data.providerMetadata === undefined
+      ? {}
+      : { providerMetadata: event.data.providerMetadata }),
+  })
+  turn.itemIds.push(event.data.itemId)
+}
+
+function applyItemUpdated(
+  items: Map<string, MutableItemProjection>,
+  event: Extract<
+    EventEnvelope,
+    { readonly type: typeof EventType.ItemUpdated }
+  >,
+): void {
+  const item = requireActiveItem(items, event.data.turnId, event.data.itemId)
+  if (event.data.content !== undefined) item.content = event.data.content
+  if (event.data.status !== undefined) item.status = event.data.status
+  if (event.data.metadata !== undefined) item.metadata = event.data.metadata
+  item.updatedAt = event.createdAt
+}
+
+function applyItemCompleted(
+  items: Map<string, MutableItemProjection>,
+  event: Extract<
+    EventEnvelope,
+    { readonly type: typeof EventType.ItemCompleted }
+  >,
+): void {
+  const item = requireActiveItem(items, event.data.turnId, event.data.itemId)
+  item.status = event.data.status
+  item.updatedAt = event.createdAt
+  if (event.data.metadata !== undefined) item.metadata = event.data.metadata
+}
+
 function assertNextSessionEvent(
   session: MutableSessionProjection,
   event: EventEnvelope,
@@ -384,6 +493,27 @@ function requireInput(
   const input = inputs.get(inputId)
   if (input) return input
   throw new Error(`Input ${inputId} has not been admitted.`)
+}
+
+function requireItem(
+  items: Map<string, MutableItemProjection>,
+  turnId: string,
+  itemId: string,
+): MutableItemProjection {
+  const item = items.get(itemId)
+  if (!item) throw new Error(`Item ${itemId} has not been appended.`)
+  if (item.turnId === turnId) return item
+  throw new Error(`Item ${itemId} does not belong to turn ${turnId}.`)
+}
+
+function requireActiveItem(
+  items: Map<string, MutableItemProjection>,
+  turnId: string,
+  itemId: string,
+): MutableItemProjection {
+  const item = requireItem(items, turnId, itemId)
+  if (item.status === ItemStatus.InProgress) return item
+  throw new Error(`Item ${itemId} is already ${item.status}.`)
 }
 
 function requireActiveTurn(
