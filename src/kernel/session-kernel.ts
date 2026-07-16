@@ -19,10 +19,13 @@ import {
   createInputId,
   createItemId,
   createPermissionRequestId,
+  createRequestId,
   createSessionId,
   createToolCallId,
   createTurnId,
+  isRequestId,
 } from "./ids.ts"
+import { fingerprintOperation } from "./operation.ts"
 import {
   InputState,
   PermissionState,
@@ -135,6 +138,7 @@ export type ReplaySessionResult = {
 
 export type AdmitInputInput = {
   readonly sessionId: string
+  readonly requestId?: string
   readonly content: TextContent
   readonly role?: InputRole
   readonly parentInputId?: string
@@ -142,8 +146,10 @@ export type AdmitInputInput = {
 }
 
 export type AdmitInputResult = {
+  readonly requestId: string
   readonly inputId: string
   readonly event: EventEnvelope
+  readonly created: boolean
 }
 
 export type CancelInputInput = {
@@ -357,19 +363,25 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
   return {
     async createSession(input = {}) {
       const sessionId = createSessionId()
-      const event = await eventStore.appendEvent(sessionId, {
-        type: EventType.SessionCreated,
-        data: {
-          ...(input.title === undefined ? {} : { title: input.title }),
-          ...(input.workingDirectory === undefined
-            ? {}
-            : { workingDirectory: input.workingDirectory }),
-          ...(input.parentSessionId === undefined
-            ? {}
-            : { parentSessionId: input.parentSessionId }),
-          ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
+      const event = await eventStore.appendEvent(
+        sessionId,
+        {
+          type: EventType.SessionCreated,
+          data: {
+            ...(input.title === undefined ? {} : { title: input.title }),
+            ...(input.workingDirectory === undefined
+              ? {}
+              : { workingDirectory: input.workingDirectory }),
+            ...(input.parentSessionId === undefined
+              ? {}
+              : { parentSessionId: input.parentSessionId }),
+            ...(input.metadata === undefined
+              ? {}
+              : { metadata: input.metadata }),
+          },
         },
-      })
+        { expectedSeq: 0 },
+      )
 
       return { sessionId, event }
     },
@@ -379,11 +391,14 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
         commandQueues,
         input.sessionId,
         async () => {
-          await readSessionProjection(eventStore, input.sessionId)
+          const session = await readSessionProjection(
+            eventStore,
+            input.sessionId,
+          )
           requireSessionMetadataUpdate(input)
 
           return {
-            event: await eventStore.appendEvent(input.sessionId, {
+            event: await appendSessionEvent(eventStore, session, {
               type: EventType.SessionMetadataUpdated,
               data: {
                 ...(input.title === undefined ? {} : { title: input.title }),
@@ -436,23 +451,54 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
             requireInput(session, input.parentInputId)
           }
 
+          const requestId = input.requestId ?? createRequestId()
+          requireRequestId(requestId)
+          const role = input.role ?? InputRole.User
           const inputId = createInputId()
-          const event = await eventStore.appendEvent(input.sessionId, {
-            type: EventType.InputAdmitted,
-            data: {
-              inputId,
-              role: input.role ?? InputRole.User,
-              content: input.content,
-              ...(input.parentInputId === undefined
-                ? {}
-                : { parentInputId: input.parentInputId }),
-              ...(input.metadata === undefined
-                ? {}
-                : { metadata: input.metadata }),
+          const event = await eventStore.appendEvent(
+            input.sessionId,
+            {
+              type: EventType.InputAdmitted,
+              data: {
+                requestId,
+                inputId,
+                role,
+                content: input.content,
+                ...(input.parentInputId === undefined
+                  ? {}
+                  : { parentInputId: input.parentInputId }),
+                ...(input.metadata === undefined
+                  ? {}
+                  : { metadata: input.metadata }),
+              },
             },
-          })
+            {
+              expectedSeq: session.seq,
+              operation: {
+                id: `input.admit:${requestId}`,
+                fingerprint: fingerprintOperation({
+                  role,
+                  content: input.content,
+                  parentInputId: input.parentInputId ?? null,
+                  metadata: input.metadata ?? null,
+                }),
+              },
+            },
+          )
+          if (event.type !== EventType.InputAdmitted) {
+            throw createYakitoriError({
+              code: YakitoriErrorCode.InvalidState,
+              message: `Input admission ${requestId} resolved to an invalid event.`,
+              details: { requestId, eventId: event.id, type: event.type },
+            })
+          }
 
-          return { inputId, event }
+          return {
+            requestId,
+            inputId: event.data.inputId,
+            event,
+            created: event.data.inputId === inputId,
+          }
         },
       )
     },
@@ -469,7 +515,7 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
           requirePendingInput(requireInput(session, input.inputId))
 
           return {
-            event: await eventStore.appendEvent(input.sessionId, {
+            event: await appendSessionEvent(eventStore, session, {
               type: EventType.InputCancelled,
               data: {
                 inputId: input.inputId,
@@ -499,7 +545,7 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
           const turnId = createTurnId()
           return {
             turnId,
-            events: await eventStore.appendEvents(input.sessionId, [
+            events: await appendSessionEvents(eventStore, session, [
               {
                 type: EventType.InputPromoted,
                 data: {
@@ -541,7 +587,7 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
           }
 
           const itemId = createItemId()
-          const event = await eventStore.appendEvent(input.sessionId, {
+          const event = await appendSessionEvent(eventStore, session, {
             type: EventType.ItemAppended,
             data: {
               itemId,
@@ -577,7 +623,7 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
           requireItemUpdate(input)
 
           return {
-            event: await eventStore.appendEvent(input.sessionId, {
+            event: await appendSessionEvent(eventStore, session, {
               type: EventType.ItemUpdated,
               data: {
                 itemId: input.itemId,
@@ -608,7 +654,7 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
           requireOpenItem(session, input.turnId, input.itemId)
 
           return {
-            event: await eventStore.appendEvent(input.sessionId, {
+            event: await appendSessionEvent(eventStore, session, {
               type: EventType.ItemCompleted,
               data: {
                 itemId: input.itemId,
@@ -639,7 +685,7 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
           }
 
           const permissionRequestId = createPermissionRequestId()
-          const event = await eventStore.appendEvent(input.sessionId, {
+          const event = await appendSessionEvent(eventStore, session, {
             type: EventType.PermissionRequested,
             data: {
               permissionRequestId,
@@ -680,7 +726,7 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
           )
 
           return {
-            event: await eventStore.appendEvent(input.sessionId, {
+            event: await appendSessionEvent(eventStore, session, {
               type: EventType.PermissionResolved,
               data: {
                 permissionRequestId: input.permissionRequestId,
@@ -714,7 +760,7 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
           )
 
           return {
-            event: await eventStore.appendEvent(input.sessionId, {
+            event: await appendSessionEvent(eventStore, session, {
               type: EventType.PermissionCancelled,
               data: {
                 permissionRequestId: input.permissionRequestId,
@@ -749,7 +795,7 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
           }
 
           const toolCallId = createToolCallId()
-          const event = await eventStore.appendEvent(input.sessionId, {
+          const event = await appendSessionEvent(eventStore, session, {
             type: EventType.ToolRequested,
             data: {
               toolCallId,
@@ -789,7 +835,7 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
           requireAllowedToolPermissions(session, input.turnId, tool)
 
           return {
-            event: await eventStore.appendEvent(input.sessionId, {
+            event: await appendSessionEvent(eventStore, session, {
               type: EventType.ToolStarted,
               data: {
                 toolCallId: input.toolCallId,
@@ -815,7 +861,7 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
           requireToolProgress(input)
 
           return {
-            event: await eventStore.appendEvent(input.sessionId, {
+            event: await appendSessionEvent(eventStore, session, {
               type: EventType.ToolProgress,
               data: {
                 toolCallId: input.toolCallId,
@@ -847,7 +893,7 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
           }
 
           return {
-            event: await eventStore.appendEvent(input.sessionId, {
+            event: await appendSessionEvent(eventStore, session, {
               type: EventType.ToolCompleted,
               data: {
                 toolCallId: input.toolCallId,
@@ -877,7 +923,7 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
           requireStartedTool(session, input.turnId, input.toolCallId)
 
           return {
-            event: await eventStore.appendEvent(input.sessionId, {
+            event: await appendSessionEvent(eventStore, session, {
               type: EventType.ToolFailed,
               data: {
                 toolCallId: input.toolCallId,
@@ -903,7 +949,7 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
           requireOpenTool(session, input.turnId, input.toolCallId)
 
           return {
-            event: await eventStore.appendEvent(input.sessionId, {
+            event: await appendSessionEvent(eventStore, session, {
               type: EventType.ToolCancelled,
               data: {
                 toolCallId: input.toolCallId,
@@ -932,7 +978,7 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
           requireNoOpenTurnWork(session, input.turnId)
 
           return {
-            event: await eventStore.appendEvent(input.sessionId, {
+            event: await appendSessionEvent(eventStore, session, {
               type: EventType.TurnCompleted,
               data: {
                 turnId: input.turnId,
@@ -959,7 +1005,7 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
             input.sessionId,
           )
           requireActiveTurn(session, input.turnId)
-          const events = await eventStore.appendEvents(input.sessionId, [
+          const events = await appendSessionEvents(eventStore, session, [
             ...openTurnWorkClosureEvents(
               session,
               input.turnId,
@@ -992,7 +1038,7 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
             input.sessionId,
           )
           requireActiveTurn(session, input.turnId)
-          const events = await eventStore.appendEvents(input.sessionId, [
+          const events = await appendSessionEvents(eventStore, session, [
             ...openTurnWorkClosureEvents(session, input.turnId, input.reason),
             {
               type: EventType.TurnCancelled,
@@ -1013,6 +1059,26 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
   }
 }
 
+function appendSessionEvent(
+  eventStore: EventStore,
+  session: SessionProjection,
+  event: KernelEvent,
+): Promise<EventEnvelope> {
+  return eventStore.appendEvent(session.id, event, {
+    expectedSeq: session.seq,
+  })
+}
+
+function appendSessionEvents(
+  eventStore: EventStore,
+  session: SessionProjection,
+  events: readonly KernelEvent[],
+): Promise<EventEnvelope[]> {
+  return eventStore.appendEvents(session.id, events, {
+    expectedSeq: session.seq,
+  })
+}
+
 function serializeSessionCommand<T>(
   commandQueues: Map<string, Promise<void>>,
   sessionId: string,
@@ -1031,6 +1097,16 @@ function serializeSessionCommand<T>(
   })
 
   return current
+}
+
+function requireRequestId(requestId: string): void {
+  if (isRequestId(requestId)) return
+  throw createYakitoriError({
+    code: YakitoriErrorCode.InvalidArgument,
+    message:
+      "Request id must be 1 to 128 letters, numbers, dots, underscores, colons, or hyphens.",
+    details: { requestId },
+  })
 }
 
 async function readSessionProjection(

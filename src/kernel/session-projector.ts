@@ -71,6 +71,7 @@ export type SessionProjection = {
 }
 
 export type InputProjection = {
+  readonly requestId?: string
   readonly inputId: string
   readonly role: InputRole
   readonly content: TextContent
@@ -169,6 +170,7 @@ type MutableSessionProjection = {
 }
 
 type MutableInputProjection = {
+  requestId?: string
   inputId: string
   role: InputRole
   content: TextContent
@@ -476,6 +478,9 @@ function applyInputAdmitted(
   }
 
   inputs.set(event.data.inputId, {
+    ...(event.data.requestId === undefined
+      ? {}
+      : { requestId: event.data.requestId }),
     inputId: event.data.inputId,
     role: event.data.role,
     content: event.data.content,

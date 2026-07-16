@@ -1,8 +1,5 @@
-import { appendFile, mkdir, readFile, readdir } from "node:fs/promises"
-import { join } from "node:path"
 import { createYakitoriError, YakitoriErrorCode } from "./errors.ts"
 import {
-  createEventEnvelope,
   EventType,
   type EventEnvelope,
   type EventMetadata,
@@ -15,15 +12,28 @@ import {
 } from "./events.ts"
 
 export type EventStore = {
-  appendEvent(sessionId: string, event: KernelEvent): Promise<EventEnvelope>
+  appendEvent(
+    sessionId: string,
+    event: KernelEvent,
+    options?: EventStoreAppendOptions,
+  ): Promise<EventEnvelope>
   appendEvents(
     sessionId: string,
     events: readonly KernelEvent[],
+    options?: EventStoreAppendOptions,
   ): Promise<EventEnvelope[]>
   readEvents(sessionId: string): Promise<EventEnvelope[]>
   listSessions(
     input?: EventStoreListSessionsInput,
   ): Promise<EventStoreListSessionsResult>
+}
+
+export type EventStoreAppendOptions = {
+  readonly expectedSeq?: number
+  readonly operation?: {
+    readonly id: string
+    readonly fingerprint: string
+  }
 }
 
 export type EventStoreListSessionsInput = {
@@ -47,160 +57,43 @@ export type EventStoreSessionSummary = {
   readonly metadata?: EventMetadata
 }
 
-export type JsonlEventStoreOptions = {
-  readonly rootDir?: string
-}
-
-export function createJsonlEventStore(
-  options: JsonlEventStoreOptions = {},
-): EventStore {
-  const rootDir = options.rootDir ?? ".yakitori"
-  const appendQueues = new Map<string, Promise<void>>()
-
-  return {
-    async appendEvent(sessionId, event) {
-      assertSessionId(sessionId)
-      const envelopes = await serializeSessionAppend(
-        appendQueues,
-        sessionId,
-        () => appendEventsToFile(rootDir, sessionId, [event]),
-      )
-      const envelope = envelopes.at(0)
-      if (!envelope) {
-        throw createYakitoriError({
-          code: YakitoriErrorCode.InvalidState,
-          message: "Expected one appended event.",
-          details: {
-            sessionId,
-          },
-        })
-      }
-      return envelope
-    },
-
-    async appendEvents(sessionId, events) {
-      assertSessionId(sessionId)
-      return serializeSessionAppend(appendQueues, sessionId, () =>
-        appendEventsToFile(rootDir, sessionId, events),
-      )
-    },
-
-    async readEvents(sessionId) {
-      assertSessionId(sessionId)
-      return readEventsFromFile(rootDir, sessionId)
-    },
-
-    async listSessions(input = {}) {
-      const entries = await readSessionDirEntries(rootDir)
-      const summaries = await Promise.all(
-        entries
-          .filter((entry) => entry.isDirectory())
-          .filter((entry) => isSessionId(entry.name))
-          .map((entry) => readSessionSummary(rootDir, entry.name)),
-      )
-
-      return paginateSessionSummaries(
-        summaries
-          .filter((summary): summary is EventStoreSessionSummary => {
-            return summary !== undefined
-          })
-          .sort(compareSessionSummaries),
-        input,
-      )
-    },
-  }
-}
-
-function serializeSessionAppend<T>(
-  appendQueues: Map<string, Promise<void>>,
+export function requireOperationFingerprint(
   sessionId: string,
-  append: () => Promise<T>,
-): Promise<T> {
-  const previous = appendQueues.get(sessionId) ?? Promise.resolve()
-  // The original caller still receives its own failure; the queue only ignores it
-  // so later writes for the same session are not permanently blocked.
-  const current = previous.catch(() => undefined).then(append)
-  const next = current.then(
-    () => undefined,
-    () => undefined,
-  )
-
-  appendQueues.set(sessionId, next)
-  void next.then(() => {
-    if (appendQueues.get(sessionId) === next) appendQueues.delete(sessionId)
-  })
-
-  return current
-}
-
-async function appendEventsToFile(
-  rootDir: string,
-  sessionId: string,
-  eventsToAppend: readonly KernelEvent[],
-): Promise<EventEnvelope[]> {
-  if (eventsToAppend.length === 0) return []
-
-  const existingEvents = await readEventsFromFile(rootDir, sessionId)
-  const nextSequence = nextSeq(existingEvents)
-  const envelopes = eventsToAppend.map((event, index) =>
-    createEventEnvelope({
+  operation: NonNullable<EventStoreAppendOptions["operation"]>,
+  storedFingerprint: string,
+): void {
+  if (operation.fingerprint === storedFingerprint) return
+  throw createYakitoriError({
+    code: YakitoriErrorCode.InvalidState,
+    message: `Operation ${operation.id} was already used with different input.`,
+    details: {
       sessionId,
-      seq: nextSequence + index,
-      event,
-    }),
-  )
-
-  await mkdir(sessionDir(rootDir, sessionId), { recursive: true })
-  await appendFile(
-    eventsPath(rootDir, sessionId),
-    `${envelopes.map((envelope) => JSON.stringify(envelope)).join("\n")}\n`,
-    "utf8",
-  )
-  return envelopes
+      operationId: operation.id,
+    },
+  })
 }
 
-async function readEventsFromFile(
-  rootDir: string,
+export function requireExpectedSequence(
   sessionId: string,
-): Promise<EventEnvelope[]> {
-  const content = await readEventsContent(rootDir, sessionId)
-  if (content === "") return []
-
-  const events = content
-    .split("\n")
-    .filter((line) => line.trim().length > 0)
-    .map((line, index) => parseEventEnvelope(line, index + 1))
-
-  assertSessionEvents(sessionId, events)
-  return events
+  expectedSeq: number | undefined,
+  actualSeq: number,
+): void {
+  if (expectedSeq === undefined || expectedSeq === actualSeq) return
+  throw createYakitoriError({
+    code: YakitoriErrorCode.InvalidState,
+    message: `Session ${sessionId} changed before the operation could commit.`,
+    details: {
+      sessionId,
+      expectedSeq,
+      actualSeq,
+    },
+  })
 }
 
-async function readEventsContent(
-  rootDir: string,
+export function summarizeStoredSession(
   sessionId: string,
-): Promise<string> {
-  try {
-    return await readFile(eventsPath(rootDir, sessionId), "utf8")
-  } catch (error) {
-    if (isNotFoundError(error)) return ""
-    throw error
-  }
-}
-
-async function readSessionDirEntries(rootDir: string) {
-  try {
-    return await readdir(sessionsDir(rootDir), { withFileTypes: true })
-  } catch (error) {
-    if (isNotFoundError(error)) return []
-    throw error
-  }
-}
-
-async function readSessionSummary(
-  rootDir: string,
-  sessionId: string,
-): Promise<EventStoreSessionSummary | undefined> {
-  const events = await readEventsFromFile(rootDir, sessionId)
+  events: readonly EventEnvelope[],
+): EventStoreSessionSummary | undefined {
   const firstEvent = events.at(0)
   if (!firstEvent) return undefined
   if (firstEvent.type !== EventType.SessionCreated) {
@@ -281,16 +174,7 @@ function requireLastEvent(events: readonly EventEnvelope[]): EventEnvelope {
   throw invalidEventLog("Expected at least one event.")
 }
 
-function compareSessionSummaries(
-  left: EventStoreSessionSummary,
-  right: EventStoreSessionSummary,
-): number {
-  const updatedAt = right.updatedAt.localeCompare(left.updatedAt)
-  if (updatedAt !== 0) return updatedAt
-  return left.sessionId.localeCompare(right.sessionId)
-}
-
-function paginateSessionSummaries(
+export function paginateSessionSummaries(
   summaries: readonly EventStoreSessionSummary[],
   input: EventStoreListSessionsInput = {},
 ): EventStoreListSessionsResult {
@@ -355,90 +239,110 @@ function requireLastSummary(
   })
 }
 
-function parseEventEnvelope(line: string, lineNumber: number): EventEnvelope {
+export function parseStoredEventEnvelope(
+  serialized: string,
+  recordNumber: number,
+): EventEnvelope {
   let parsed: unknown
   try {
-    parsed = JSON.parse(line)
+    parsed = JSON.parse(serialized)
   } catch (error) {
-    throw invalidEventLog(`Invalid event JSON at line ${lineNumber}.`, {
+    throw invalidEventLog(`Invalid event JSON at record ${recordNumber}.`, {
       details: {
-        lineNumber,
+        recordNumber,
       },
       cause: error,
     })
   }
 
   if (!isRecord(parsed)) {
-    throw invalidEventLog(`Invalid event envelope at line ${lineNumber}.`, {
+    throw invalidEventLog(`Invalid event envelope at record ${recordNumber}.`, {
       details: {
-        lineNumber,
+        recordNumber,
       },
     })
   }
 
   if (typeof parsed.id !== "string") {
-    throw invalidEventLog(`Invalid event id at line ${lineNumber}.`, {
+    throw invalidEventLog(`Invalid event id at record ${recordNumber}.`, {
       details: {
-        lineNumber,
+        recordNumber,
       },
     })
   }
 
   if (typeof parsed.sessionId !== "string") {
-    throw invalidEventLog(`Invalid event session id at line ${lineNumber}.`, {
-      details: {
-        lineNumber,
+    throw invalidEventLog(
+      `Invalid event session id at record ${recordNumber}.`,
+      {
+        details: {
+          recordNumber,
+        },
       },
-    })
+    )
   }
 
   if (!isPositiveInteger(parsed.seq)) {
-    throw invalidEventLog(`Invalid event sequence at line ${lineNumber}.`, {
+    throw invalidEventLog(`Invalid event sequence at record ${recordNumber}.`, {
       details: {
-        lineNumber,
+        recordNumber,
       },
     })
   }
 
   if (!isPositiveInteger(parsed.version)) {
-    throw invalidEventLog(`Invalid event version at line ${lineNumber}.`, {
+    throw invalidEventLog(`Invalid event version at record ${recordNumber}.`, {
       details: {
-        lineNumber,
+        recordNumber,
       },
     })
   }
 
   if (!isEventType(parsed.type)) {
-    throw invalidEventLog(`Invalid event type at line ${lineNumber}.`, {
+    throw invalidEventLog(`Invalid event type at record ${recordNumber}.`, {
       details: {
-        lineNumber,
+        recordNumber,
       },
     })
   }
 
   if (typeof parsed.createdAt !== "string") {
-    throw invalidEventLog(`Invalid event timestamp at line ${lineNumber}.`, {
-      details: {
-        lineNumber,
+    throw invalidEventLog(
+      `Invalid event timestamp at record ${recordNumber}.`,
+      {
+        details: {
+          recordNumber,
+        },
       },
-    })
+    )
   }
 
   if (!isRecord(parsed.data)) {
-    throw invalidEventLog(`Invalid event data at line ${lineNumber}.`, {
+    throw invalidEventLog(`Invalid event data at record ${recordNumber}.`, {
       details: {
-        lineNumber,
+        recordNumber,
       },
     })
   }
-  assertEventData(parsed.type, parsed.data, lineNumber)
+  assertEventData(parsed.type, parsed.data, recordNumber)
 
   return parsed as EventEnvelope
 }
 
-function assertSessionEvents(sessionId: string, events: EventEnvelope[]): void {
+export function assertStoredSessionEvents(
+  sessionId: string,
+  events: EventEnvelope[],
+): void {
+  assertStoredEventRange(sessionId, events, 1)
+}
+
+export function assertStoredEventRange(
+  sessionId: string,
+  events: readonly EventEnvelope[],
+  firstSeq: number,
+): void {
   for (const [index, event] of events.entries()) {
-    const expectedSeq = index + 1
+    const expectedSeq = firstSeq + index
     if (event.sessionId !== sessionId) {
       throw invalidEventLog(
         `Event session mismatch at sequence ${event.seq}.`,
@@ -465,25 +369,7 @@ function assertSessionEvents(sessionId: string, events: EventEnvelope[]): void {
   }
 }
 
-function nextSeq(events: EventEnvelope[]): number {
-  const last = events.at(-1)
-  if (!last) return 1
-  return last.seq + 1
-}
-
-function sessionsDir(rootDir: string): string {
-  return join(rootDir, "sessions")
-}
-
-function sessionDir(rootDir: string, sessionId: string): string {
-  return join(sessionsDir(rootDir), sessionId)
-}
-
-function eventsPath(rootDir: string, sessionId: string): string {
-  return join(sessionDir(rootDir, sessionId), "events.jsonl")
-}
-
-function assertSessionId(sessionId: string): void {
+export function assertEventStoreSessionId(sessionId: string): void {
   if (isSessionId(sessionId)) return
   throw createYakitoriError({
     code: YakitoriErrorCode.InvalidArgument,
@@ -503,15 +389,15 @@ function isSessionId(sessionId: string): boolean {
 function assertEventData(
   type: EventType,
   data: Record<string, unknown>,
-  lineNumber: number,
+  recordNumber: number,
 ): void {
   if (isEventData(type, data)) return
   throw invalidEventLog(
-    `Invalid event data for ${type} at line ${lineNumber}.`,
+    `Invalid event data for ${type} at record ${recordNumber}.`,
     {
       details: {
         type,
-        lineNumber,
+        recordNumber,
       },
     },
   )
@@ -548,6 +434,7 @@ function isEventData(type: EventType, data: Record<string, unknown>): boolean {
       )
     case EventType.InputAdmitted:
       return (
+        isOptional(data.requestId, isString) &&
         isString(data.inputId) &&
         isInputRole(data.role) &&
         isTextContent(data.content) &&
@@ -731,10 +618,6 @@ function isJsonValue(value: unknown): value is JsonValue {
   if (typeof value === "number") return Number.isFinite(value)
   if (Array.isArray(value)) return value.every(isJsonValue)
   return isJsonObject(value)
-}
-
-function isNotFoundError(error: unknown): boolean {
-  return isRecord(error) && error.code === "ENOENT"
 }
 
 function isOptional(

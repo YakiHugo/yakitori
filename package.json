@@ -8,8 +8,12 @@
     "node": ">=24"
   },
   "scripts": {
-    "dev": "vite --host 127.0.0.1",
-    "build": "vite build",
+    "dev": "pnpm run --parallel \"/^dev:(gui|server)$/\"",
+    "dev:gui": "vite --host 127.0.0.1",
+    "dev:server": "node src/server/start.ts",
+    "build": "pnpm build:lib && pnpm build:gui",
+    "build:lib": "vite build --mode lib",
+    "build:gui": "vite build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",

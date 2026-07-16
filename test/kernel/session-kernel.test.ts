@@ -170,6 +170,59 @@ describe("session kernel", () => {
     })
   })
 
+  it("replays an admission with the same request id and rejects changed input", async () => {
+    await withKernel(async (context) => {
+      const session = await context.kernel.createSession()
+      const first = await context.kernel.admitInput({
+        sessionId: session.sessionId,
+        requestId: "request_kernel-retry",
+        content: {
+          kind: "text",
+          text: "retry this admission",
+        },
+        metadata: {
+          first: 1,
+          second: 2,
+        },
+      })
+      const replayed = await context.kernel.admitInput({
+        sessionId: session.sessionId,
+        requestId: "request_kernel-retry",
+        content: {
+          kind: "text",
+          text: "retry this admission",
+        },
+        metadata: {
+          second: 2,
+          first: 1,
+        },
+      })
+
+      expect(first.created).toBe(true)
+      expect(replayed).toEqual({
+        ...first,
+        created: false,
+      })
+      await expect(
+        context.kernel.admitInput({
+          sessionId: session.sessionId,
+          requestId: "request_kernel-retry",
+          content: {
+            kind: "text",
+            text: "changed input",
+          },
+        }),
+      ).rejects.toMatchObject({
+        code: YakitoriErrorCode.InvalidState,
+      })
+
+      expect(await context.store.readEvents(session.sessionId)).toEqual([
+        session.event,
+        first.event,
+      ])
+    })
+  })
+
   it("cancels admitted input before promotion", async () => {
     await withKernel(async (context) => {
       const session = await context.kernel.createSession()

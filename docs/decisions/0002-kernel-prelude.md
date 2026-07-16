@@ -2,7 +2,21 @@
 
 ## Status
 
-Accepted as the kernel v1 implementation plan.
+Accepted and implemented as the kernel v1 boundary. Decision 0004 extends it
+with persistent Workmates and shared Room collaboration. Decision 0005
+supersedes only the initial storage implementation choice.
+
+## Current Scope
+
+The Session in this decision is now the execution lane for one Workmate
+Assignment. Its single-active-Turn invariant remains in force per Session;
+parallel Workmates use separate Sessions coordinated by a Room.
+
+Room Messages and per-recipient Deliveries are not Session Inputs. A claimed
+Delivery may later admit an Input into one execution Session while retaining a
+reference to its source Message. Room, Task, Assignment, and Delivery require
+their own projections rather than expanding `SessionProjection` into the whole
+product model.
 
 ## Context
 
@@ -37,8 +51,9 @@ The kernel does not need to call a model or execute tools yet.
 
 ### Session
 
-A session is the durable conversation aggregate. It owns event ordering,
-pending inputs, turns, items, permissions, tool calls, and replay.
+A session is the durable execution aggregate. It owns event ordering, pending
+inputs, turns, items, permissions, tool calls, and replay for one execution
+lane. Decision 0004 assigns shared multi-Workmate conversation to a Room.
 
 Version one should allow only one active turn per session. Additional user
 inputs may be admitted while a turn is active, but they must remain pending
@@ -46,8 +61,9 @@ until a later turn promotes them.
 
 ### Input
 
-An input is user-authored or system-authored material that has been accepted by
-the kernel.
+An input is material accepted into one execution Session. Kernel v1 admits
+user-authored and system-authored material; decision 0004 also allows a durable
+Delivery to become the source of a future Input.
 
 Admission is not the same as model visibility. This keeps room for queued
 inputs, interrupts, hidden system prompts, background task notifications, and
@@ -255,7 +271,7 @@ test/build foundation.
 
 ## Deferred
 
-These are intentionally outside the first kernel slice:
+These were intentionally outside the original kernel v1 slice:
 
 - model provider adapters
 - streaming model loop
