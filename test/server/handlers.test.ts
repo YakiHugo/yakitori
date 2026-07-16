@@ -109,6 +109,7 @@ describe("server handlers", () => {
 
       const admitted = await server.admitInput({
         sessionId: created.body.session.id,
+        requestId: "request_handler-admit",
         content: {
           kind: "text",
           text: "next slice",
@@ -116,6 +117,7 @@ describe("server handlers", () => {
       })
       expectOk(admitted)
       expect(admitted.status).toBe(201)
+      expect(admitted.body.requestId).toBe("request_handler-admit")
       expect(admitted.body.event).toMatchObject({
         seq: 2,
         type: EventType.InputAdmitted,
@@ -136,12 +138,63 @@ describe("server handlers", () => {
     })
   })
 
+  it("returns the original admission for an exact request retry", async () => {
+    await withServer(async (server) => {
+      const created = await server.createSession()
+      expectOk(created)
+      const request = {
+        sessionId: created.body.session.id,
+        requestId: "request_handler-retry",
+        content: {
+          kind: "text",
+          text: "admit exactly once",
+        },
+      }
+
+      const first = await server.admitInput(request)
+      const replayed = await server.admitInput(request)
+      expectOk(first)
+      expectOk(replayed)
+
+      expect(first.status).toBe(201)
+      expect(replayed.status).toBe(200)
+      expect(replayed.body).toEqual(first.body)
+      expectError(
+        await server.admitInput({
+          ...request,
+          content: {
+            kind: "text",
+            text: "changed admission",
+          },
+        }),
+        409,
+        ApiErrorCode.Conflict,
+      )
+      expectError(
+        await server.admitInput({
+          sessionId: created.body.session.id,
+          content: request.content,
+        }),
+        400,
+        ApiErrorCode.InvalidInput,
+      )
+
+      const read = await server.readSession({
+        sessionId: created.body.session.id,
+      })
+      expectOk(read)
+      expect(read.body.session.counts.inputs).toBe(1)
+      expect(read.body.session.seq).toBe(2)
+    })
+  })
+
   it("reads durable session events after a sequence", async () => {
     await withServer(async (server) => {
       const created = await server.createSession()
       expectOk(created)
       const admitted = await server.admitInput({
         sessionId: created.body.session.id,
+        requestId: "request_handler-events",
         content: {
           kind: "text",
           text: "show events",

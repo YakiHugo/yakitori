@@ -144,12 +144,20 @@ async function handleRequest(
   }
 
   if (route.kind === "streamSessionEvents") {
+    const cursor = resolveEventCursor(
+      url.searchParams.get("after") ?? undefined,
+      request.headers["last-event-id"],
+    )
+    if (!cursor.ok) {
+      writeResult(response, cursor.result)
+      return
+    }
     await streamSessionEvents(
       response,
       handlers,
       eventHub,
       route.sessionId,
-      url.searchParams.get("after") ?? undefined,
+      cursor.after,
     )
     return
   }
@@ -206,7 +214,7 @@ async function streamSessionEvents(
   handlers: ServerHandlers,
   eventHub: DurableEventHub,
   sessionId: string,
-  after: string | undefined,
+  after: number,
 ): Promise<void> {
   const pendingEvents: EventEnvelope[] = []
   let heartbeat: ReturnType<typeof setInterval> | undefined
@@ -244,7 +252,7 @@ async function streamSessionEvents(
 
   writeSseHead(response)
   response.write(": connected\n\n")
-  lastSequence = parseSequence(after)
+  lastSequence = after
   lastSequence = writeSseEvents(response, replayed.body.events, lastSequence)
   live = true
   lastSequence = writeSseEvents(response, pendingEvents, lastSequence)
@@ -405,9 +413,42 @@ function optionalQueryNumber(
   return { [field]: value }
 }
 
-function parseSequence(value: string | undefined): number {
-  if (value === undefined || !/^[0-9]+$/.test(value)) return 0
-  return Number(value)
+function resolveEventCursor(
+  after: string | undefined,
+  lastEventId: string | string[] | undefined,
+): EventCursorResult {
+  const invalidField = !isOptionalEventSequence(after)
+    ? "after"
+    : !isOptionalEventSequence(lastEventId)
+      ? "Last-Event-ID"
+      : undefined
+  if (invalidField !== undefined) {
+    return {
+      ok: false,
+      result: errorResult(
+        400,
+        ApiErrorCode.InvalidInput,
+        `${invalidField} must be a non-negative integer sequence.`,
+      ),
+    }
+  }
+
+  const values = [after, lastEventId]
+  return {
+    ok: true,
+    after: Math.max(
+      0,
+      ...values.flatMap((value) =>
+        typeof value === "string" ? [Number(value)] : [],
+      ),
+    ),
+  }
+}
+
+function isOptionalEventSequence(value: unknown): boolean {
+  if (value === undefined) return true
+  if (typeof value !== "string" || !/^[0-9]+$/.test(value)) return false
+  return Number.isSafeInteger(Number(value))
 }
 
 function applyCorsHeaders(
@@ -463,6 +504,16 @@ type JsonReadResult =
   | {
       readonly ok: true
       readonly value: unknown
+    }
+  | {
+      readonly ok: false
+      readonly result: ApiHandlerResult<never>
+    }
+
+type EventCursorResult =
+  | {
+      readonly ok: true
+      readonly after: number
     }
   | {
       readonly ok: false

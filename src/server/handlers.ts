@@ -2,6 +2,7 @@ import {
   IdPrefix,
   InputRole,
   isIdWithPrefix,
+  isRequestId,
   isYakitoriError,
   type EventEnvelope,
   type EventMetadata,
@@ -121,8 +122,12 @@ export function createServerHandlers(
         const admitted = await kernel.admitInput(
           requireAdmitInputRequest(input),
         )
-        options.eventHub?.publish([admitted.event])
-        return ok(201, admitted)
+        if (admitted.created) options.eventHub?.publish([admitted.event])
+        return ok(admitted.created ? 201 : 200, {
+          requestId: admitted.requestId,
+          inputId: admitted.inputId,
+          event: admitted.event,
+        })
       } catch (error) {
         return fail(error)
       }
@@ -255,11 +260,20 @@ function requireAdmitInputRequest(input: unknown) {
   )
   return {
     sessionId: requireSessionId(record.sessionId, "sessionId"),
+    requestId: requireRequestId(record.requestId),
     content: requireTextContent(record.content),
     ...optionalInputRoleField(record, "role"),
     ...optionalStringField(record, "parentInputId"),
     ...optionalMetadataField(record, "metadata"),
   }
+}
+
+function requireRequestId(value: unknown): string {
+  if (typeof value === "string" && isRequestId(value)) return value
+  throw invalidInput(
+    "requestId must be 1 to 128 letters, numbers, dots, underscores, colons, or hyphens.",
+    { field: "requestId" },
+  )
 }
 
 function requireReadSessionEventsRequest(input: unknown) {

@@ -4,13 +4,15 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import {
-  ApiErrorCode,
+  type ApiAdmitInputResponse,
   type ApiCreateSessionResponse,
+  ApiErrorCode,
   type ApiListSessionsResponse,
+  type ApiReadSessionResponse,
   createSessionKernel,
   createYakitoriHttpServer,
-  EventType,
   type EventEnvelope,
+  EventType,
 } from "../../src/index.ts"
 import { createMemoryEventStore } from "../kernel/memory-event-store.ts"
 
@@ -165,6 +167,7 @@ describe("HTTP server", () => {
       const admitted = await postJson(
         `${baseUrl}/sessions/${created.body.session.id}/inputs`,
         {
+          requestId: "request_http-stream",
           content: {
             kind: "text",
             text: "tail this",
@@ -214,12 +217,107 @@ describe("HTTP server", () => {
     })
   })
 
-  it("serves sessions through the default JSONL store", async () => {
-    await withJsonlHttpServer(async (baseUrl) => {
+  it("resumes streams after the latest query or Last-Event-ID cursor", async () => {
+    await withHttpServer(async (baseUrl) => {
+      const created = await postJson<ApiCreateSessionResponse>(
+        `${baseUrl}/sessions`,
+        {},
+      )
+      const inputsUrl = `${baseUrl}/sessions/${created.body.session.id}/inputs`
+      await postJson(inputsUrl, {
+        requestId: "request_http-resume-1",
+        content: { kind: "text", text: "first" },
+      })
+      await postJson(inputsUrl, {
+        requestId: "request_http-resume-2",
+        content: { kind: "text", text: "second" },
+      })
+
+      for (const cursors of [
+        { after: 1, lastEventId: 2 },
+        { after: 2, lastEventId: 1 },
+      ]) {
+        const abort = new AbortController()
+        const stream = await fetch(
+          `${baseUrl}/sessions/${created.body.session.id}/events?after=${cursors.after}`,
+          {
+            headers: {
+              "Last-Event-ID": String(cursors.lastEventId),
+            },
+            signal: abort.signal,
+          },
+        )
+        const event = await readNextSessionEvent(stream)
+        abort.abort()
+
+        expect(event).toMatchObject({
+          seq: 3,
+          type: EventType.InputAdmitted,
+          data: {
+            content: { kind: "text", text: "second" },
+          },
+        })
+      }
+    })
+  })
+
+  it("rejects every malformed session event cursor", async () => {
+    await withHttpServer(async (baseUrl) => {
+      const created = await postJson<ApiCreateSessionResponse>(
+        `${baseUrl}/sessions`,
+        {},
+      )
+
+      for (const cursors of [
+        { after: "1.5", lastEventId: "2", invalidField: "after" },
+        {
+          after: "1",
+          lastEventId: "not-a-sequence",
+          invalidField: "Last-Event-ID",
+        },
+        {
+          after: "9007199254740992",
+          lastEventId: "1",
+          invalidField: "after",
+        },
+        {
+          after: "1",
+          lastEventId: "9007199254740992",
+          invalidField: "Last-Event-ID",
+        },
+      ]) {
+        const abort = new AbortController()
+        const response = await fetch(
+          `${baseUrl}/sessions/${created.body.session.id}/events?after=${cursors.after}`,
+          {
+            headers: {
+              "Last-Event-ID": cursors.lastEventId,
+            },
+            signal: abort.signal,
+          },
+        )
+
+        try {
+          expect(response.status).toBe(400)
+          expect(await response.json()).toEqual({
+            error: {
+              code: ApiErrorCode.InvalidInput,
+              message: `${cursors.invalidField} must be a non-negative integer sequence.`,
+            },
+          })
+        } finally {
+          abort.abort()
+        }
+      }
+    })
+  })
+
+  it("serves sessions through the default SQLite store", async () => {
+    await withSqliteHttpServer(async (baseUrl) => {
       const created = await postJson<ApiCreateSessionResponse>(
         `${baseUrl}/sessions`,
         {
-          title: "JSONL session",
+          title: "SQLite session",
         },
       )
       const listed = await getJson<ApiListSessionsResponse>(
@@ -231,9 +329,52 @@ describe("HTTP server", () => {
       expect(listed.body.sessions).toEqual([
         expect.objectContaining({
           id: created.body.session.id,
-          title: "JSONL session",
+          title: "SQLite session",
         }),
       ])
+    })
+  })
+
+  it("deduplicates retried admissions through the default SQLite store", async () => {
+    await withSqliteHttpServer(async (baseUrl) => {
+      const created = await postJson<ApiCreateSessionResponse>(
+        `${baseUrl}/sessions`,
+        {},
+      )
+      const url = `${baseUrl}/sessions/${created.body.session.id}/inputs`
+      const request = {
+        requestId: "request_http-retry",
+        content: {
+          kind: "text",
+          text: "persist once",
+        },
+      }
+
+      const first = await postJson<ApiAdmitInputResponse>(url, request)
+      const replayed = await postJson<ApiAdmitInputResponse>(url, request)
+      const changed = await postJson(url, {
+        ...request,
+        content: {
+          kind: "text",
+          text: "persist something else",
+        },
+      })
+      const read = await getJson<ApiReadSessionResponse>(
+        `${baseUrl}/sessions/${created.body.session.id}`,
+      )
+
+      expect(first.status).toBe(201)
+      expect(first.body.requestId).toBe(request.requestId)
+      expect(replayed.status).toBe(200)
+      expect(replayed.body).toEqual(first.body)
+      expect(changed.status).toBe(409)
+      expect(changed.body).toMatchObject({
+        error: {
+          code: ApiErrorCode.Conflict,
+        },
+      })
+      expect(read.body.session.seq).toBe(2)
+      expect(read.body.session.counts.inputs).toBe(1)
     })
   })
 })
@@ -265,7 +406,7 @@ async function withHttpServer(
   }
 }
 
-async function withJsonlHttpServer(
+async function withSqliteHttpServer(
   run: (baseUrl: string) => Promise<void>,
 ): Promise<void> {
   const rootDir = await mkdtemp(join(tmpdir(), "yakitori-http-"))

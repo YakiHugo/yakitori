@@ -8,19 +8,32 @@ import type {
   ApiSessionDetail,
   ApiSessionSummary,
 } from "../server/protocol.ts"
+import { acknowledgeAdmission, reserveAdmission } from "./admission-outbox.ts"
+import {
+  beginSessionSelection,
+  clearSessionSelection,
+  createSessionSelectionState,
+  currentSessionSelection,
+  isCurrentSessionSelection,
+  type SessionSelection,
+} from "./session-selection.ts"
 import "./styles.css"
 
 type StreamStatus = "connected" | "connecting" | "disconnected" | "idle"
 
 type AppState = {
   apiBase: string
+  apiRevision: number
   busy: boolean
   events: EventEnvelope[]
   message?: string
   nextCursor?: string
   promptDraft?: string
+  selection: ReturnType<typeof createSessionSelectionState>
+  sessionDetailRevision: number
+  sessionListRevision: number
+  sessionSelectionIntentRevision: number
   selectedSession?: ApiSessionDetail
-  selectedSessionId?: string
   sessions: ApiSessionSummary[]
   stream?: EventSource
   streamStatus: StreamStatus
@@ -30,24 +43,40 @@ const root = requireRoot()
 
 const state: AppState = {
   apiBase: initialApiBase(),
+  apiRevision: 0,
   busy: false,
   events: [],
+  selection: createSessionSelectionState(),
+  sessionDetailRevision: 0,
+  sessionListRevision: 0,
+  sessionSelectionIntentRevision: 0,
   sessions: [],
   streamStatus: "idle",
 }
+let activeTaskCount = 0
 
 void boot()
 
 async function boot(): Promise<void> {
+  const apiRevision = state.apiRevision
+  const intentRevision = state.sessionSelectionIntentRevision
   const loaded = await loadSessions()
-  if (!loaded) return
+  if (
+    !loaded ||
+    state.apiRevision !== apiRevision ||
+    state.sessionSelectionIntentRevision !== intentRevision
+  ) {
+    return
+  }
   const session = state.sessions.at(0)
   if (session) {
     await selectSession(session.id)
     return
   }
+  closeStream()
+  clearSessionSelection(state.selection)
+  state.sessionDetailRevision += 1
   delete state.selectedSession
-  delete state.selectedSessionId
   state.events = []
   render()
 }
@@ -55,125 +84,221 @@ async function boot(): Promise<void> {
 async function loadSessions(
   input: { readonly append?: boolean } = {},
 ): Promise<boolean> {
-  return await runTask(async () => {
-    const response = await requestJson<ApiListSessionsResponse>(
-      `/sessions?limit=30${state.nextCursor && input.append ? `&cursor=${encodeURIComponent(state.nextCursor)}` : ""}`,
-    )
-    state.sessions = input.append
-      ? [...state.sessions, ...response.sessions]
-      : [...response.sessions]
-    if (response.nextCursor === undefined) {
-      delete state.nextCursor
-      return
-    }
-    state.nextCursor = response.nextCursor
-  })
+  const apiRevision = state.apiRevision
+  const requestRevision = ++state.sessionListRevision
+  const existingSessions = state.sessions
+  const cursor = input.append ? state.nextCursor : undefined
+  let applied = false
+  const completed = await runTask(
+    async () => {
+      const response = await requestJson<ApiListSessionsResponse>(
+        `/sessions?limit=30${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
+      )
+      if (
+        state.apiRevision !== apiRevision ||
+        state.sessionListRevision !== requestRevision
+      ) {
+        return
+      }
+      state.sessions = input.append
+        ? [...existingSessions, ...response.sessions]
+        : [...response.sessions]
+      applied = true
+      if (response.nextCursor === undefined) {
+        delete state.nextCursor
+        return
+      }
+      state.nextCursor = response.nextCursor
+    },
+    () =>
+      state.apiRevision === apiRevision &&
+      state.sessionListRevision === requestRevision,
+  )
+  return completed && applied
 }
 
 async function createSession(): Promise<void> {
-  await runTask(async () => {
-    const response = await requestJson<ApiCreateSessionResponse>("/sessions", {
-      method: "POST",
-      body: {
-        title: `Session ${new Date().toLocaleTimeString([], {
-          hour: "2-digit",
-          minute: "2-digit",
-        })}`,
-      },
-    })
+  const apiRevision = state.apiRevision
+  const intentRevision = ++state.sessionSelectionIntentRevision
+  await runTask(
+    async () => {
+      const response = await requestJson<ApiCreateSessionResponse>(
+        "/sessions",
+        {
+          method: "POST",
+          body: {
+            title: `Session ${new Date().toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit",
+            })}`,
+          },
+        },
+      )
 
-    state.selectedSessionId = response.session.id
-    state.selectedSession = response.session
-    state.events = [response.event]
-    delete state.promptDraft
-    await loadSessions()
-    connectEvents(response.session.id, response.event.seq)
-  })
+      if (state.apiRevision !== apiRevision) return
+      await loadSessions()
+      if (state.sessionSelectionIntentRevision !== intentRevision) return
+      const selection = activateSession(response.session.id)
+      state.selectedSession = response.session
+      state.events = [response.event]
+      delete state.promptDraft
+      connectEvents(selection, response.event.seq)
+    },
+    () =>
+      state.apiRevision === apiRevision &&
+      state.sessionSelectionIntentRevision === intentRevision,
+  )
 }
 
 async function selectSession(sessionId: string): Promise<void> {
-  await runTask(async () => {
-    closeStream()
-    state.selectedSessionId = sessionId
-    state.events = []
-    delete state.promptDraft
-    const response = await requestJson<ApiReadSessionResponse>(
-      `/sessions/${encodeURIComponent(sessionId)}`,
-    )
-    state.selectedSession = response.session
-    connectEvents(sessionId, 0)
-  })
+  state.sessionSelectionIntentRevision += 1
+  const selection = activateSession(sessionId)
+  closeStream()
+  state.events = []
+  delete state.promptDraft
+  delete state.selectedSession
+  await runTask(
+    async () => {
+      const applied = await refreshSelectedSession(selection)
+      if (!applied) return
+      connectEvents(selection, 0)
+    },
+    () => isCurrentSessionSelection(state.selection, selection),
+  )
 }
 
-async function admitInput(text: string): Promise<boolean> {
-  const sessionId = state.selectedSessionId
-  if (!sessionId) return false
+async function admitInput(text: string): Promise<void> {
+  const selection = currentSessionSelection(state.selection)
+  if (!selection) return
 
-  return await runTask(async () => {
-    const response = await requestJson<ApiAdmitInputResponse>(
-      `/sessions/${encodeURIComponent(sessionId)}/inputs`,
-      {
-        method: "POST",
-        body: {
-          content: {
-            kind: "text",
-            text,
+  await runTask(
+    async () => {
+      const pendingAdmission = await reserveAdmission(localStorage, {
+        apiBase: state.apiBase,
+        sessionId: selection.sessionId,
+        text,
+      })
+      if (!isCurrentSessionSelection(state.selection, selection)) return
+      const response = await requestJson<ApiAdmitInputResponse>(
+        `/sessions/${encodeURIComponent(selection.sessionId)}/inputs`,
+        {
+          method: "POST",
+          body: {
+            requestId: pendingAdmission.requestId,
+            content: {
+              kind: "text",
+              text,
+            },
           },
         },
-      },
-    )
-    mergeEvent(response.event)
-    await refreshSelectedSession()
-    await loadSessions()
-  })
-}
-
-async function refreshSelectedSession(): Promise<void> {
-  const sessionId = state.selectedSessionId
-  if (!sessionId) return
-  const response = await requestJson<ApiReadSessionResponse>(
-    `/sessions/${encodeURIComponent(sessionId)}`,
+      )
+      if (
+        response.requestId !== pendingAdmission.requestId ||
+        response.event.sessionId !== selection.sessionId
+      ) {
+        throw new Error("Admission response did not match the request.")
+      }
+      await acknowledgeAdmission(localStorage, pendingAdmission)
+      if (!isCurrentSessionSelection(state.selection, selection)) return
+      if (state.promptDraft?.trim() === text) delete state.promptDraft
+      mergeEvent(response.event)
+      await refreshSelectedSession(selection)
+      if (!isCurrentSessionSelection(state.selection, selection)) return
+      await loadSessions()
+    },
+    () => isCurrentSessionSelection(state.selection, selection),
   )
-  state.selectedSession = response.session
 }
 
-function connectEvents(sessionId: string, after: number): void {
+async function refreshSelectedSession(
+  selection: SessionSelection,
+): Promise<boolean> {
+  const requestRevision = ++state.sessionDetailRevision
+  let response: ApiReadSessionResponse
+  try {
+    response = await requestJson<ApiReadSessionResponse>(
+      `/sessions/${encodeURIComponent(selection.sessionId)}`,
+    )
+  } catch (error) {
+    if (
+      !isCurrentSessionSelection(state.selection, selection) ||
+      state.sessionDetailRevision !== requestRevision
+    ) {
+      return false
+    }
+    throw error
+  }
+  if (
+    !isCurrentSessionSelection(state.selection, selection) ||
+    state.sessionDetailRevision !== requestRevision
+  ) {
+    return false
+  }
+  state.selectedSession = response.session
+  return true
+}
+
+function connectEvents(selection: SessionSelection, after: number): void {
+  if (!isCurrentSessionSelection(state.selection, selection)) return
   closeStream()
 
   try {
     state.streamStatus = "connecting"
     const source = new EventSource(
       apiUrl(
-        `/sessions/${encodeURIComponent(sessionId)}/events?after=${after}`,
+        `/sessions/${encodeURIComponent(selection.sessionId)}/events?after=${after}`,
       ),
     )
     state.stream = source
 
     source.addEventListener("open", () => {
-      if (state.stream !== source) return
+      if (
+        state.stream !== source ||
+        !isCurrentSessionSelection(state.selection, selection)
+      ) {
+        return
+      }
       state.streamStatus = "connected"
       render()
     })
     source.addEventListener("session.event", (message) => {
-      if (state.stream !== source) return
+      if (
+        state.stream !== source ||
+        !isCurrentSessionSelection(state.selection, selection)
+      ) {
+        return
+      }
       const event = JSON.parse(
         (message as MessageEvent<string>).data,
       ) as EventEnvelope
-      if (event.sessionId !== state.selectedSessionId) return
+      if (event.sessionId !== selection.sessionId) return
       mergeEvent(event)
-      void refreshSelectedSession().then(() => {
-        render()
-      })
+      void refreshSelectedSession(selection).then(
+        () => {
+          if (!isCurrentSessionSelection(state.selection, selection)) return
+          render()
+        },
+        (error: unknown) => {
+          if (!isCurrentSessionSelection(state.selection, selection)) return
+          state.message = errorMessage(error, "Could not refresh session.")
+          render()
+        },
+      )
     })
     source.addEventListener("error", () => {
-      if (state.stream !== source) return
+      if (
+        state.stream !== source ||
+        !isCurrentSessionSelection(state.selection, selection)
+      ) {
+        return
+      }
       state.streamStatus = "disconnected"
       render()
     })
   } catch (error) {
     closeStream()
-    state.message =
-      error instanceof Error ? error.message : "Could not open event stream."
+    if (!isCurrentSessionSelection(state.selection, selection)) return
+    state.message = errorMessage(error, "Could not open event stream.")
   }
 }
 
@@ -183,19 +308,24 @@ function closeStream(): void {
   state.streamStatus = "idle"
 }
 
-async function runTask(task: () => Promise<void>): Promise<boolean> {
+async function runTask(
+  task: () => Promise<void>,
+  isCurrent: () => boolean = () => true,
+): Promise<boolean> {
+  activeTaskCount += 1
   state.busy = true
-  delete state.message
+  if (isCurrent()) delete state.message
   render()
 
   try {
     await task()
     return true
   } catch (error) {
-    state.message = error instanceof Error ? error.message : "Request failed."
+    if (isCurrent()) state.message = errorMessage(error, "Request failed.")
     return false
   } finally {
-    state.busy = false
+    activeTaskCount -= 1
+    state.busy = activeTaskCount > 0
     render()
   }
 }
@@ -290,9 +420,10 @@ function renderSessions(): string {
 
   return state.sessions
     .map((session) => {
-      const selected = session.id === state.selectedSessionId ? " selected" : ""
+      const selected =
+        session.id === state.selection.sessionId ? " selected" : ""
       const current =
-        session.id === state.selectedSessionId ? ' aria-current="true"' : ""
+        session.id === state.selection.sessionId ? ' aria-current="true"' : ""
       return `
         <button class="session-row${selected}" type="button" data-session-id="${escapeHtml(session.id)}"${current}>
           <span class="session-title">${escapeHtml(session.title ?? "Untitled session")}</span>
@@ -416,12 +547,7 @@ function bindEvents(): void {
         document.querySelector<HTMLTextAreaElement>("#promptText")
       const text = (state.promptDraft ?? textarea?.value ?? "").trim()
       if (!text) return
-      void (async () => {
-        const admitted = await admitInput(text)
-        if (!admitted) return
-        delete state.promptDraft
-        render()
-      })()
+      void admitInput(text)
     })
   document
     .querySelector<HTMLTextAreaElement>("#promptText")
@@ -433,12 +559,21 @@ function bindEvents(): void {
 }
 
 function clearSessionState(): void {
+  state.apiRevision += 1
   state.events = []
+  state.sessionDetailRevision += 1
+  state.sessionListRevision += 1
+  state.sessionSelectionIntentRevision += 1
   state.sessions = []
+  clearSessionSelection(state.selection)
   delete state.nextCursor
   delete state.promptDraft
   delete state.selectedSession
-  delete state.selectedSessionId
+}
+
+function activateSession(sessionId: string): SessionSelection {
+  state.sessionDetailRevision += 1
+  return beginSessionSelection(state.selection, sessionId)
 }
 
 function mergeEvent(event: EventEnvelope): void {
@@ -491,6 +626,11 @@ function isApiErrorResponse(value: unknown): value is ApiErrorResponse {
     "message" in value.error &&
     typeof value.error.message === "string"
   )
+}
+
+function errorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error) return error.message
+  return fallback
 }
 
 function formatTime(value: string): string {

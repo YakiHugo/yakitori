@@ -68,6 +68,7 @@ export type ApiReadSessionResponse = {
 
 export type ApiAdmitInputRequest = {
   readonly sessionId: string
+  readonly requestId: string
   readonly content: TextContent
   readonly role?: InputRole
   readonly parentInputId?: string
@@ -75,6 +76,7 @@ export type ApiAdmitInputRequest = {
 }
 
 export type ApiAdmitInputResponse = {
+  readonly requestId: string
   readonly inputId: string
   readonly event: EventEnvelope
 }
