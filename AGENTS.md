@@ -3,7 +3,7 @@
 ## Project
 
 This repository is a from-scratch coding-agent harness and GUI centered on
-persistent-memory Workmates that can collaborate in shared task Rooms. Work in
+persistent-memory Mates that can collaborate in shared task Rooms. Work in
 small, reviewable modules and update this file as project conventions become
 concrete.
 
@@ -53,18 +53,18 @@ Examples: `feat(core): add event log`, `docs: update agent instructions`,
 
 ## Architecture Boundaries
 
-- Treat the harness core as the owner of Workmates, collaboration, execution,
+- Treat the harness core as the owner of Mates, collaboration, execution,
   events, tools, permissions, persistence, memory lifecycle, and replay.
 - Treat the GUI as the only product client of the harness core/server. Runtime,
   schedulers, and adapters are internal modules behind explicit boundaries.
-- Keep Workmate identity separate from models, processes, runtime leases,
+- Keep Mate identity separate from models, processes, runtime leases,
   Sessions, Turns, and subagent handles. Executions must record the immutable
-  Workmate profile revision they use.
+  Mate profile revision they use.
 - Keep Room, Task, and Assignment distinct. A Room owns communication and
   visibility, a Task owns the objective and result, and an Assignment binds one
-  Workmate execution lane to a Task.
-- Treat the existing Session/Input/Turn/Item kernel as one Workmate's execution
-  lane. A Session may have at most one active Turn while different Workmates run
+  Mate execution lane to a Task.
+- Treat the existing Session/Input/Turn/Item kernel as one Mate's execution
+  lane. A Session may have at most one active Turn while different Mates run
   concurrently in separate Sessions.
 - Keep a shared Room Message distinct from a Session Input. Store a Message
   once and track per-recipient, idempotent Delivery state for fan-out, catch-up,
@@ -73,7 +73,7 @@ Examples: `feat(core): add event log`, `docs: update agent instructions`,
   must not be reparsed from message text to decide identity or routing.
 - Separate visibility from attention. Ordinary Room messages are available for
   bounded catch-up; a structured mention raises Delivery priority and may wake
-  or steer a Workmate at a safe boundary.
+  or steer a Mate at a safe boundary.
 - Keep detailed reasoning, tool output, and permission facts in the execution
   Session. Only explicitly published findings, questions, results, and artifact
   references enter the shared Room.
@@ -82,7 +82,7 @@ Examples: `feat(core): add event log`, `docs: update agent instructions`,
 - Represent tool execution, approvals, interruptions, denials, errors, and
   cancellations as structured state or events rather than transcript-only text.
 - Keep tool execution behind a permission boundary.
-- Do not inherit another Workmate's personal memory, credentials, permissions,
+- Do not inherit another Mate's personal memory, credentials, permissions,
   or approvals through Room membership, mentions, or Assignments.
 - Use stable IDs, idempotent commands, and recoverable saga/outbox behavior for
   operations that cross Room, Delivery, Assignment, and Session boundaries.
@@ -210,7 +210,7 @@ export function createTurn(input: unknown) {
   deletable data. A read Message does not automatically become memory.
 - Authorize memory collections before retrieval and record the exact revisions
   selected in the ContextSnapshot.
-- Keep Workmate profile instructions separate from learned memory. Automatic
+- Keep Mate profile instructions separate from learned memory. Automatic
   extraction cannot silently change profile authority or store secret values.
 - Prefer structured events over ad hoc transcript strings.
 - Preserve enough event data for replay and debugging without forcing every raw
@@ -227,8 +227,8 @@ Priority areas:
 - Room message ordering and membership history
 - Atomic and idempotent Message fan-out
 - Per-recipient Delivery, catch-up, mention, and restart recovery behavior
-- Parallel Workmate Assignments with independent execution Sessions
-- Workmate profile revision attribution
+- Parallel Mate Assignments with independent execution Sessions
+- Mate profile revision attribution
 - Agent-to-agent loop and wakeup budgets
 - Memory scope, provenance, visibility, revision, and deletion
 - Tool permission decisions

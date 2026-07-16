@@ -7,7 +7,7 @@
 
 Yakitori is a from-scratch learning project for building a local coding-agent
 harness and GUI. Its product direction is a coding workbench centered on
-persistent-memory `Workmate`s that can work alone or collaborate in a shared
+persistent-memory `Mate`s that can work alone or collaborate in a shared
 task room.
 
 The goal is to understand the runtime and product boundaries behind modern
@@ -18,15 +18,15 @@ existing agent framework.
 ## Goals
 
 - Build a local coding-agent harness from first principles.
-- Give each Workmate a durable identity, versioned profile, governed memory,
+- Give each Mate a durable identity, versioned profile, governed memory,
   and inspectable history across tasks.
-- Let several Workmates work on the same Task concurrently, publish findings to
+- Let several Mates work on the same Task concurrently, publish findings to
   one Room, and use structured mentions to request attention.
 - Keep shared Messages distinct from per-recipient Deliveries and from each
-  Workmate's private execution Session.
+  Mate's private execution Session.
 - Keep the core responsible for structured execution, collaboration, tools,
   permissions, persistence, recovery, and replay.
-- Build a GUI task workbench for shared discussion, Workmate activity, terminal,
+- Build a GUI task workbench for shared discussion, Mate activity, terminal,
   diff, approvals, artifacts, worktrees, and memory provenance.
 - Record enough structured state to support debugging, replay, and evaluation.
 - Keep each module small enough to understand and replace.
@@ -37,16 +37,16 @@ The target shape is:
 
 ```text
 Codex-style coding task workbench
-+ persistent Workmates and governed memory
++ persistent Mates and governed memory
 + shared Room collaboration and structured @mentions
-+ one inspectable execution lane per Workmate Assignment
++ one inspectable execution lane per Mate Assignment
 ```
 
 A Room is not a copy of Slack or Raft's full product shell. It is the shared
 communication boundary inside the coding workbench. A Room Message is stored
-once; durable Deliveries decide which Workmates should catch up, wake, or steer.
-Detailed tool output stays in each Workmate's execution Session unless the
-Workmate explicitly publishes a bounded finding or artifact reference.
+once; durable Deliveries decide which Mates should catch up, wake, or steer.
+Detailed tool output stays in each Mate's execution Session unless the
+Mate explicitly publishes a bounded finding or artifact reference.
 
 ## Non-goals
 
@@ -55,7 +55,7 @@ Workmate explicitly publishes a bounded finding or artifact reference.
 - Do not make runtime code depend on local reference repositories.
 - Do not clone product behavior wholesale. Reference projects are used for
   comparison and learning.
-- Do not treat a Workmate as a permanently running process or silently promote
+- Do not treat a Mate as a permanently running process or silently promote
   every transcript message into long-term memory.
 - Do not turn the GUI into a general-purpose channel application or task board.
 
@@ -88,8 +88,8 @@ The current implementation includes:
 - a local HTTP/SSE API boundary
 - an initial GUI session workspace
 
-The Session kernel is now scoped as one Workmate's execution lane. Persistent
-Workmate identity, Room/Task/Assignment collaboration, durable Message delivery,
+The Session kernel is now scoped as one Mate's execution lane. Persistent
+Mate identity, Room/Task/Assignment collaboration, durable Message delivery,
 the model/tool runtime, and governed memory are accepted architecture direction
 but are not implemented yet.
 
@@ -98,7 +98,7 @@ but are not implemented yet.
 The project will grow around these conceptual areas:
 
 ```text
-workmates      identity, immutable profiles, capabilities, memory policy
+mates      identity, immutable profiles, capabilities, memory policy
 collaboration  rooms, tasks, assignments, messages, deliveries, mentions
 execution      sessions, inputs, turns, items, context, replay
 runtime        model loop, scheduling, pending/steer, tool execution
@@ -106,7 +106,7 @@ memory         scoped revisions, provenance, retrieval, consolidation
 tools          permission-checked built-in and extension capabilities
 storage        journals, projections, artifacts, checkpoints
 server         versioned local command, query, and subscription APIs
-gui            task room and inspectable Workmate execution lanes
+gui            task room and inspectable Mate execution lanes
 evals          replay, recovery, collaboration, and memory scenarios
 ```
 
@@ -119,7 +119,7 @@ to split the application into services.
 - [Initial Session/Turn/Item execution core](docs/decisions/0001-core-shape.md)
 - [Kernel v1 boundary](docs/decisions/0002-kernel-prelude.md)
 - [Local server API boundary](docs/decisions/0003-server-api-boundary.md)
-- [Persistent Workmate and Room collaboration](docs/decisions/0004-workmate-room-collaboration.md)
+- [Persistent Mate and Room collaboration](docs/decisions/0004-mate-room-collaboration.md)
 - [Transactional SQLite event storage](docs/decisions/0005-sqlite-event-store.md)
 
 ## Development
