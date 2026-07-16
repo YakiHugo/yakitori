@@ -2,7 +2,15 @@
 
 ## Status
 
-Accepted as the initial implementation direction.
+Accepted as the initial execution-kernel direction. Decision 0004 extends this
+model with persistent Workmates and shared Room collaboration.
+
+## Current Scope
+
+`Session -> Turn -> Item` remains the durable execution lane for one Workmate
+Assignment. It is no longer the complete top-level product model: Room, Task,
+Assignment, Message, and Delivery are separate collaboration concepts defined
+by decision 0004.
 
 ## Context
 
@@ -26,10 +34,11 @@ Event log -> Projection -> Replay
 Tool call -> Permission decision -> Tool result
 ```
 
-Codex is the primary architecture reference for the first implementation stage:
+Codex is the primary execution and workbench reference for the first
+implementation stage:
 
-- a durable conversation aggregate
-- turns as the unit of user-driven work
+- a durable execution aggregate
+- turns as the unit of input-driven execution
 - items as the persisted units inside a turn
 - append-oriented event history
 - replayable local persistence
@@ -54,8 +63,9 @@ adapters. Their internal transcripts are not Yakitori history. Yakitori should
 record the adapter invocation, inputs, outputs, file changes, status,
 permissions, interruptions, and errors in its own event log.
 
-Yakitori's durable event log is the source of truth for replay, debugging, GUI
-inspection, and evaluation.
+Yakitori's durable event logs are the source of truth for replay, debugging,
+GUI inspection, and evaluation. Session history is one such log; later domain
+aggregates keep their own durable facts and projections.
 
 ## Deferred Ideas
 
@@ -99,4 +109,5 @@ The first implementation module should focus on a narrow, replayable kernel:
 - read the event log back
 
 Later modules can add tools, permissions, model providers, MCP, external agent
-adapters, server APIs, and GUI surfaces without changing the core facts model.
+adapters, server APIs, and GUI surfaces without discarding these execution
+facts. Decision 0004 adds collaboration facts around the execution kernel.

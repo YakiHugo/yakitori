@@ -2,7 +2,20 @@
 
 ## Status
 
-Accepted as the next implementation direction after the first kernel slice.
+Accepted and implemented as the server API v1 boundary. Decision 0004 extends
+it with future Workmate collaboration resources. Decision 0005 supersedes only
+the initial storage implementation referenced by this decision.
+
+## Current Scope
+
+The existing Session APIs and durable event stream remain execution-lane
+interfaces. Workmate, Room, Task, Assignment, Message, and Delivery will use
+explicit protocol resources rather than being folded into Session responses.
+
+The original separation between durable input admission and runtime wakeup now
+also applies across collaboration: posting a Message, creating Deliveries,
+admitting a recipient Input, and waking an execution runtime are distinct
+operations.
 
 ## Context
 
@@ -22,8 +35,8 @@ implementations.
 
 ## Decision
 
-The next implementation stage is the server API boundary v1, not the model
-runtime.
+The implementation stage recorded by this decision was the server API boundary
+v1, before the model runtime.
 
 The server API should adapt the kernel to narrow public response shapes:
 
@@ -88,7 +101,7 @@ The kernel layer continues to own:
 
 ## Deferred
 
-These remain outside the server API boundary v1:
+These were outside the original server API boundary v1:
 
 - model provider adapters
 - agent runtime loop
@@ -103,8 +116,9 @@ runtime state separate from durable session facts.
 
 ## Consequences
 
-Yakitori will have a stable local API before it has an agent loop. This makes
-the future GUI and runtime easier to connect independently.
+Yakitori established a stable local API before adding an agent loop. The
+initial GUI now uses that boundary, and the future runtime can connect without
+becoming part of the public protocol contract.
 
 Some server responses will duplicate or reshape information already present in
 `SessionProjection`. That duplication is intentional: protocol objects are
