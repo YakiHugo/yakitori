@@ -5,8 +5,8 @@ import {
 } from "node:http"
 import type { AddressInfo } from "node:net"
 import {
-  createJsonlEventStore,
   createSessionKernel,
+  createSqliteEventStore,
   type EventEnvelope,
   type EventStore,
   type SessionKernel,
@@ -26,19 +26,34 @@ export function createYakitoriHttpServer(
   options: YakitoriHttpServerOptions = {},
 ) {
   const eventHub = options.eventHub ?? createDurableEventHub()
-  const eventStore =
-    options.eventStore ??
-    createJsonlEventStore({
-      ...(options.rootDir === undefined ? {} : { rootDir: options.rootDir }),
-    })
-  const kernel = options.kernel ?? createSessionKernel(eventStore)
-  const handlers = createServerHandlers(kernel, { eventHub })
+  const runtime = createServerRuntime(options)
+  const handlers = createServerHandlers(runtime.kernel, { eventHub })
 
-  return createServer((request, response) => {
+  const server = createServer((request, response) => {
     void handleRequest(request, response, handlers, eventHub).catch((error) => {
       writeUnhandledError(response, error)
     })
   })
+  if (runtime.close !== undefined) server.once("close", runtime.close)
+  return server
+}
+
+function createServerRuntime(options: YakitoriHttpServerOptions): {
+  readonly kernel: SessionKernel
+  readonly close?: () => void
+} {
+  if (options.kernel !== undefined) return { kernel: options.kernel }
+  if (options.eventStore !== undefined) {
+    return { kernel: createSessionKernel(options.eventStore) }
+  }
+
+  const eventStore = createSqliteEventStore({
+    ...(options.rootDir === undefined ? {} : { rootDir: options.rootDir }),
+  })
+  return {
+    kernel: createSessionKernel(eventStore),
+    close: () => eventStore.close(),
+  }
 }
 
 export async function listen(server: ReturnType<typeof createServer>) {

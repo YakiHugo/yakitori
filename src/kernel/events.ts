@@ -116,6 +116,7 @@ export type SessionMetadataUpdatedEvent = {
 export type InputAdmittedEvent = {
   readonly type: typeof EventType.InputAdmitted
   readonly data: {
+    readonly requestId?: string
     readonly inputId: string
     readonly role: InputRole
     readonly content: TextContent

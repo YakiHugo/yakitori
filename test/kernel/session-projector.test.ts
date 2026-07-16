@@ -67,6 +67,7 @@ describe("session projector", () => {
         },
         inputs: [
           {
+            requestId: admitted.requestId,
             inputId: admitted.inputId,
             role: InputRole.User,
             content: {

@@ -4,6 +4,7 @@ import {
   EventType,
   type EventEnvelope,
   type EventStore,
+  type EventStoreAppendOptions,
   type EventStoreListSessionsInput,
   type EventStoreListSessionsResult,
   type EventStoreSessionSummary,
@@ -11,13 +12,24 @@ import {
   type KernelEvent,
   YakitoriErrorCode,
 } from "../../src/index.ts"
+import {
+  requireExpectedSequence,
+  requireOperationFingerprint,
+} from "../../src/kernel/event-store.ts"
+
+type MemoryOperationRecord = {
+  readonly eventCount: number
+  readonly fingerprint: string
+  readonly firstSeq: number
+}
 
 export function createMemoryEventStore(): EventStore {
   const sessions = new Map<string, EventEnvelope[]>()
+  const operations = new Map<string, MemoryOperationRecord>()
 
   return {
-    async appendEvent(sessionId, event) {
-      const envelopes = await appendEvents(sessionId, [event])
+    async appendEvent(sessionId, event, options) {
+      const envelopes = await appendEvents(sessionId, [event], options)
       const envelope = envelopes.at(0)
       if (!envelope) throw new Error("Expected one appended event.")
       return envelope
@@ -48,8 +60,30 @@ export function createMemoryEventStore(): EventStore {
   async function appendEvents(
     sessionId: string,
     events: readonly KernelEvent[],
+    options: EventStoreAppendOptions = {},
   ): Promise<EventEnvelope[]> {
     const existingEvents = sessions.get(sessionId) ?? []
+    if (options.operation !== undefined) {
+      const operation = operations.get(
+        `${sessionId}\u0000${options.operation.id}`,
+      )
+      if (operation !== undefined) {
+        requireOperationFingerprint(
+          sessionId,
+          options.operation,
+          operation.fingerprint,
+        )
+        return existingEvents.slice(
+          operation.firstSeq - 1,
+          operation.firstSeq - 1 + operation.eventCount,
+        )
+      }
+    }
+    requireExpectedSequence(
+      sessionId,
+      options.expectedSeq,
+      existingEvents.length,
+    )
     const envelopes = events.map((event, index) =>
       createEventEnvelope({
         sessionId,
@@ -59,6 +93,13 @@ export function createMemoryEventStore(): EventStore {
     )
 
     sessions.set(sessionId, [...existingEvents, ...envelopes])
+    if (options.operation !== undefined) {
+      operations.set(`${sessionId}\u0000${options.operation.id}`, {
+        fingerprint: options.operation.fingerprint,
+        firstSeq: existingEvents.length + 1,
+        eventCount: envelopes.length,
+      })
+    }
     return envelopes
   }
 }
