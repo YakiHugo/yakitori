@@ -11,7 +11,7 @@ import {
   type JsonValue,
   type KernelError,
   type KernelEvent,
-  PermissionBehavior,
+  type PermissionBehavior,
   type PermissionDecisionReason,
   type TextContent,
 } from "./events.ts"
@@ -27,17 +27,32 @@ import {
 } from "./ids.ts"
 import { fingerprintOperation } from "./operation.ts"
 import {
+  commandGuardErrors,
+  requireActiveItem,
+  requireActiveTurn,
+  requireAllowedToolPermissions,
+  requireBindablePermission,
+  requireCompletedItem,
+  requireInput,
+  requireItem,
+  requireNoActiveTurn,
+  requireNoOpenTurnWork,
+  requireOpenTool,
+  requirePendingPermission,
+  requireRequestedTool,
+  requireStartedTool,
+  requireTurn,
+} from "./session-guards.ts"
+import {
   InputState,
   PermissionState,
   projectSession,
   ToolState,
-  TurnState,
   type InputProjection,
   type ItemProjection,
   type PermissionProjection,
   type SessionProjection,
   type ToolProjection,
-  type TurnProjection,
 } from "./session-projector.ts"
 
 export type SessionKernel = {
@@ -448,7 +463,11 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
             input.sessionId,
           )
           if (input.parentInputId !== undefined) {
-            requireInput(session, input.parentInputId)
+            requireInput(
+              session.inputs.find((candidate) => candidate.inputId === input.parentInputId),
+              input.parentInputId,
+              commandGuardErrors,
+            )
           }
 
           const requestId = input.requestId ?? createRequestId()
@@ -512,7 +531,7 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
             eventStore,
             input.sessionId,
           )
-          requirePendingInput(requireInput(session, input.inputId))
+          requirePendingInput(requireInput(session.inputs.find((candidate) => candidate.inputId === input.inputId), input.inputId, commandGuardErrors))
 
           return {
             event: await appendSessionEvent(eventStore, session, {
@@ -536,11 +555,19 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
             eventStore,
             input.sessionId,
           )
-          requireInputReadyForTurn(requireInput(session, input.inputId))
+          requireInputReadyForTurn(requireInput(session.inputs.find((candidate) => candidate.inputId === input.inputId), input.inputId, commandGuardErrors))
           if (input.parentTurnId !== undefined) {
-            requireTurnStarted(session, input.parentTurnId)
+            requireTurn(
+              session.turns.find((candidate) => candidate.turnId === input.parentTurnId),
+              input.parentTurnId,
+              commandGuardErrors,
+            )
           }
-          requireNoActiveTurn(session)
+          requireNoActiveTurn(
+            session.turns,
+            commandGuardErrors,
+            session.id,
+          )
 
           const turnId = createTurnId()
           return {
@@ -581,9 +608,18 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
             eventStore,
             input.sessionId,
           )
-          requireActiveTurn(session, input.turnId)
+          requireActiveTurn(
+            session.turns.find((candidate) => candidate.turnId === input.turnId),
+            input.turnId,
+            commandGuardErrors,
+          )
           if (input.parentItemId !== undefined) {
-            requireItem(session, input.turnId, input.parentItemId)
+            requireItem(
+              session.items.find((candidate) => candidate.itemId === input.parentItemId),
+              input.turnId,
+              input.parentItemId,
+              commandGuardErrors,
+            )
           }
 
           const itemId = createItemId()
@@ -618,8 +654,17 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
             eventStore,
             input.sessionId,
           )
-          requireActiveTurn(session, input.turnId)
-          requireOpenItem(session, input.turnId, input.itemId)
+          requireActiveTurn(
+            session.turns.find((candidate) => candidate.turnId === input.turnId),
+            input.turnId,
+            commandGuardErrors,
+          )
+          requireActiveItem(
+            session.items.find((candidate) => candidate.itemId === input.itemId),
+            input.turnId,
+            input.itemId,
+            commandGuardErrors,
+          )
           requireItemUpdate(input)
 
           return {
@@ -650,8 +695,17 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
             eventStore,
             input.sessionId,
           )
-          requireActiveTurn(session, input.turnId)
-          requireOpenItem(session, input.turnId, input.itemId)
+          requireActiveTurn(
+            session.turns.find((candidate) => candidate.turnId === input.turnId),
+            input.turnId,
+            commandGuardErrors,
+          )
+          requireActiveItem(
+            session.items.find((candidate) => candidate.itemId === input.itemId),
+            input.turnId,
+            input.itemId,
+            commandGuardErrors,
+          )
 
           return {
             event: await appendSessionEvent(eventStore, session, {
@@ -679,9 +733,18 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
             eventStore,
             input.sessionId,
           )
-          requireActiveTurn(session, input.turnId)
+          requireActiveTurn(
+            session.turns.find((candidate) => candidate.turnId === input.turnId),
+            input.turnId,
+            commandGuardErrors,
+          )
           if (input.toolCallId !== undefined) {
-            requireRequestedTool(session, input.turnId, input.toolCallId)
+            requireRequestedTool(
+              session.tools.find((candidate) => candidate.toolCallId === input.toolCallId),
+              input.turnId,
+              input.toolCallId,
+              commandGuardErrors,
+            )
           }
 
           const permissionRequestId = createPermissionRequestId()
@@ -718,11 +781,19 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
             eventStore,
             input.sessionId,
           )
-          requireActiveTurn(session, input.turnId)
+          requireActiveTurn(
+            session.turns.find((candidate) => candidate.turnId === input.turnId),
+            input.turnId,
+            commandGuardErrors,
+          )
           requirePendingPermission(
-            session,
+            session.permissions.find(
+              (candidate) =>
+                candidate.permissionRequestId === input.permissionRequestId,
+            ),
             input.turnId,
             input.permissionRequestId,
+            commandGuardErrors,
           )
 
           return {
@@ -752,11 +823,19 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
             eventStore,
             input.sessionId,
           )
-          requireActiveTurn(session, input.turnId)
+          requireActiveTurn(
+            session.turns.find((candidate) => candidate.turnId === input.turnId),
+            input.turnId,
+            commandGuardErrors,
+          )
           requirePendingPermission(
-            session,
+            session.permissions.find(
+              (candidate) =>
+                candidate.permissionRequestId === input.permissionRequestId,
+            ),
             input.turnId,
             input.permissionRequestId,
+            commandGuardErrors,
           )
 
           return {
@@ -782,15 +861,28 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
             eventStore,
             input.sessionId,
           )
-          requireActiveTurn(session, input.turnId)
+          requireActiveTurn(
+            session.turns.find((candidate) => candidate.turnId === input.turnId),
+            input.turnId,
+            commandGuardErrors,
+          )
           if (input.itemId !== undefined) {
-            requireItem(session, input.turnId, input.itemId)
+            requireItem(
+              session.items.find((candidate) => candidate.itemId === input.itemId),
+              input.turnId,
+              input.itemId,
+              commandGuardErrors,
+            )
           }
           if (input.permissionRequestId !== undefined) {
-            requireUnboundPermission(
-              session,
+            requireBindablePermission(
+              session.permissions.find(
+                (candidate) =>
+                  candidate.permissionRequestId === input.permissionRequestId,
+              ),
               input.turnId,
               input.permissionRequestId,
+              commandGuardErrors,
             )
           }
 
@@ -826,13 +918,25 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
             eventStore,
             input.sessionId,
           )
-          requireActiveTurn(session, input.turnId)
+          requireActiveTurn(
+            session.turns.find((candidate) => candidate.turnId === input.turnId),
+            input.turnId,
+            commandGuardErrors,
+          )
           const tool = requireRequestedTool(
-            session,
+            session.tools.find(
+              (candidate) => candidate.toolCallId === input.toolCallId,
+            ),
             input.turnId,
             input.toolCallId,
+            commandGuardErrors,
           )
-          requireAllowedToolPermissions(session, input.turnId, tool)
+          requireAllowedToolPermissions(
+            session.permissions,
+            input.turnId,
+            tool,
+            commandGuardErrors,
+          )
 
           return {
             event: await appendSessionEvent(eventStore, session, {
@@ -856,8 +960,17 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
             eventStore,
             input.sessionId,
           )
-          requireActiveTurn(session, input.turnId)
-          requireStartedTool(session, input.turnId, input.toolCallId)
+          requireActiveTurn(
+            session.turns.find((candidate) => candidate.turnId === input.turnId),
+            input.turnId,
+            commandGuardErrors,
+          )
+          requireStartedTool(
+            session.tools.find((candidate) => candidate.toolCallId === input.toolCallId),
+            input.turnId,
+            input.toolCallId,
+            commandGuardErrors,
+          )
           requireToolProgress(input)
 
           return {
@@ -886,10 +999,24 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
             eventStore,
             input.sessionId,
           )
-          requireActiveTurn(session, input.turnId)
-          requireStartedTool(session, input.turnId, input.toolCallId)
+          requireActiveTurn(
+            session.turns.find((candidate) => candidate.turnId === input.turnId),
+            input.turnId,
+            commandGuardErrors,
+          )
+          requireStartedTool(
+            session.tools.find((candidate) => candidate.toolCallId === input.toolCallId),
+            input.turnId,
+            input.toolCallId,
+            commandGuardErrors,
+          )
           if (input.itemId !== undefined) {
-            requireItem(session, input.turnId, input.itemId)
+            requireItem(
+              session.items.find((candidate) => candidate.itemId === input.itemId),
+              input.turnId,
+              input.itemId,
+              commandGuardErrors,
+            )
           }
 
           return {
@@ -919,8 +1046,17 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
             eventStore,
             input.sessionId,
           )
-          requireActiveTurn(session, input.turnId)
-          requireStartedTool(session, input.turnId, input.toolCallId)
+          requireActiveTurn(
+            session.turns.find((candidate) => candidate.turnId === input.turnId),
+            input.turnId,
+            commandGuardErrors,
+          )
+          requireStartedTool(
+            session.tools.find((candidate) => candidate.toolCallId === input.toolCallId),
+            input.turnId,
+            input.toolCallId,
+            commandGuardErrors,
+          )
 
           return {
             event: await appendSessionEvent(eventStore, session, {
@@ -945,8 +1081,17 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
             eventStore,
             input.sessionId,
           )
-          requireActiveTurn(session, input.turnId)
-          requireOpenTool(session, input.turnId, input.toolCallId)
+          requireActiveTurn(
+            session.turns.find((candidate) => candidate.turnId === input.turnId),
+            input.turnId,
+            commandGuardErrors,
+          )
+          requireOpenTool(
+            session.tools.find((candidate) => candidate.toolCallId === input.toolCallId),
+            input.turnId,
+            input.toolCallId,
+            commandGuardErrors,
+          )
 
           return {
             event: await appendSessionEvent(eventStore, session, {
@@ -971,11 +1116,26 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
             eventStore,
             input.sessionId,
           )
-          requireActiveTurn(session, input.turnId)
+          requireActiveTurn(
+            session.turns.find((candidate) => candidate.turnId === input.turnId),
+            input.turnId,
+            commandGuardErrors,
+          )
           if (input.outputItemId !== undefined) {
-            requireCompletedItem(session, input.turnId, input.outputItemId)
+            requireCompletedItem(
+              session.items.find((candidate) => candidate.itemId === input.outputItemId),
+              input.turnId,
+              input.outputItemId,
+              commandGuardErrors,
+            )
           }
-          requireNoOpenTurnWork(session, input.turnId)
+          requireNoOpenTurnWork(
+            session.items,
+            session.permissions,
+            session.tools,
+            input.turnId,
+            commandGuardErrors,
+          )
 
           return {
             event: await appendSessionEvent(eventStore, session, {
@@ -1004,7 +1164,11 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
             eventStore,
             input.sessionId,
           )
-          requireActiveTurn(session, input.turnId)
+          requireActiveTurn(
+            session.turns.find((candidate) => candidate.turnId === input.turnId),
+            input.turnId,
+            commandGuardErrors,
+          )
           const events = await appendSessionEvents(eventStore, session, [
             ...openTurnWorkClosureEvents(
               session,
@@ -1037,7 +1201,11 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
             eventStore,
             input.sessionId,
           )
-          requireActiveTurn(session, input.turnId)
+          requireActiveTurn(
+            session.turns.find((candidate) => candidate.turnId === input.turnId),
+            input.turnId,
+            commandGuardErrors,
+          )
           const events = await appendSessionEvents(eventStore, session, [
             ...openTurnWorkClosureEvents(session, input.turnId, input.reason),
             {
@@ -1157,251 +1325,10 @@ function requireInputReadyForTurn(input: InputProjection): void {
   }
 }
 
-function requireInput(
-  session: SessionProjection,
-  inputId: string,
-): InputProjection {
-  const input = session.inputs.find(
-    (candidate) => candidate.inputId === inputId,
-  )
-  if (input) return input
-  throw notFound(`Input ${inputId} has not been admitted.`, {
-    inputId,
-  })
-}
-
-function requireTurnStarted(
-  session: SessionProjection,
-  turnId: string,
-): TurnProjection {
-  const turn = session.turns.find((candidate) => candidate.turnId === turnId)
-  if (turn) return turn
-
-  throw notFound(`Turn ${turnId} has not been started.`, {
-    turnId,
-  })
-}
-
-function requireItem(
-  session: SessionProjection,
-  turnId: string,
-  itemId: string,
-): ItemProjection {
-  const item = session.items.find((candidate) => candidate.itemId === itemId)
-  if (!item) {
-    throw notFound(`Item ${itemId} has not been appended.`, {
-      itemId,
-    })
-  }
-  if (item.turnId === turnId) return item
-  throw invalidArgument(`Item ${itemId} does not belong to turn ${turnId}.`, {
-    itemId,
-    turnId,
-    actualTurnId: item.turnId,
-  })
-}
-
-function requireOpenItem(
-  session: SessionProjection,
-  turnId: string,
-  itemId: string,
-): ItemProjection {
-  const item = requireItem(session, turnId, itemId)
-  if (item.status === ItemStatus.InProgress) return item
-  throw invalidState(`Item ${itemId} is already ${item.status}.`, {
-    itemId,
-    status: item.status,
-  })
-}
-
-function requireCompletedItem(
-  session: SessionProjection,
-  turnId: string,
-  itemId: string,
-): ItemProjection {
-  const item = requireItem(session, turnId, itemId)
-  if (item.status === ItemStatus.Completed) return item
-  throw invalidState(`Item ${itemId} is ${item.status}.`, {
-    itemId,
-    status: item.status,
-  })
-}
-
 function requireItemUpdate(input: UpdateItemInput): void {
   if (input.content !== undefined || input.metadata !== undefined) return
   throw invalidArgument(`Item ${input.itemId} update has no changes.`, {
     itemId: input.itemId,
-  })
-}
-
-function requirePermission(
-  session: SessionProjection,
-  turnId: string,
-  permissionRequestId: string,
-): PermissionProjection {
-  const permission = session.permissions.find(
-    (candidate) => candidate.permissionRequestId === permissionRequestId,
-  )
-  if (!permission) {
-    throw notFound(
-      `Permission ${permissionRequestId} has not been requested.`,
-      {
-        permissionRequestId,
-      },
-    )
-  }
-  if (permission.turnId === turnId) return permission
-  throw invalidArgument(
-    `Permission ${permissionRequestId} does not belong to turn ${turnId}.`,
-    {
-      permissionRequestId,
-      turnId,
-      actualTurnId: permission.turnId,
-    },
-  )
-}
-
-function requireUnboundPermission(
-  session: SessionProjection,
-  turnId: string,
-  permissionRequestId: string,
-): PermissionProjection {
-  const permission = requirePermission(session, turnId, permissionRequestId)
-  if (permission.toolCallId === undefined) return permission
-  throw invalidState(
-    `Permission ${permissionRequestId} is already bound to tool ${permission.toolCallId}.`,
-    {
-      permissionRequestId,
-      toolCallId: permission.toolCallId,
-    },
-  )
-}
-
-function requirePendingPermission(
-  session: SessionProjection,
-  turnId: string,
-  permissionRequestId: string,
-): PermissionProjection {
-  const permission = requirePermission(session, turnId, permissionRequestId)
-  if (permission.state === PermissionState.Requested) return permission
-  throw invalidState(
-    `Permission ${permissionRequestId} is already ${permission.state}.`,
-    {
-      permissionRequestId,
-      state: permission.state,
-    },
-  )
-}
-
-function requireAllowedPermission(
-  session: SessionProjection,
-  turnId: string,
-  permissionRequestId: string,
-): PermissionProjection {
-  const permission = requirePermission(session, turnId, permissionRequestId)
-  if (
-    permission.state === PermissionState.Resolved &&
-    permission.behavior === PermissionBehavior.Allow
-  ) {
-    return permission
-  }
-  if (permission.state === PermissionState.Resolved) {
-    throw invalidState(
-      `Permission ${permissionRequestId} resolved with ${permission.behavior}.`,
-      {
-        permissionRequestId,
-        behavior: permission.behavior ?? null,
-      },
-    )
-  }
-  throw invalidState(
-    `Permission ${permissionRequestId} has not been allowed.`,
-    {
-      permissionRequestId,
-      state: permission.state,
-    },
-  )
-}
-
-function requireAllowedToolPermissions(
-  session: SessionProjection,
-  turnId: string,
-  tool: ToolProjection,
-): void {
-  const permissions = session.permissions.filter(
-    (permission) =>
-      permission.turnId === turnId &&
-      (permission.permissionRequestId === tool.permissionRequestId ||
-        permission.toolCallId === tool.toolCallId),
-  )
-
-  for (const permission of permissions) {
-    requireAllowedPermission(session, turnId, permission.permissionRequestId)
-  }
-}
-
-function requireTool(
-  session: SessionProjection,
-  turnId: string,
-  toolCallId: string,
-): ToolProjection {
-  const tool = session.tools.find(
-    (candidate) => candidate.toolCallId === toolCallId,
-  )
-  if (!tool) {
-    throw notFound(`Tool ${toolCallId} has not been requested.`, {
-      toolCallId,
-    })
-  }
-  if (tool.turnId === turnId) return tool
-  throw invalidArgument(
-    `Tool ${toolCallId} does not belong to turn ${turnId}.`,
-    {
-      toolCallId,
-      turnId,
-      actualTurnId: tool.turnId,
-    },
-  )
-}
-
-function requireRequestedTool(
-  session: SessionProjection,
-  turnId: string,
-  toolCallId: string,
-): ToolProjection {
-  const tool = requireTool(session, turnId, toolCallId)
-  if (tool.state === ToolState.Requested) return tool
-  throw invalidState(`Tool ${toolCallId} is already ${tool.state}.`, {
-    toolCallId,
-    state: tool.state,
-  })
-}
-
-function requireStartedTool(
-  session: SessionProjection,
-  turnId: string,
-  toolCallId: string,
-): ToolProjection {
-  const tool = requireTool(session, turnId, toolCallId)
-  if (tool.state === ToolState.Started) return tool
-  throw invalidState(`Tool ${toolCallId} is already ${tool.state}.`, {
-    toolCallId,
-    state: tool.state,
-  })
-}
-
-function requireOpenTool(
-  session: SessionProjection,
-  turnId: string,
-  toolCallId: string,
-): ToolProjection {
-  const tool = requireTool(session, turnId, toolCallId)
-  if (tool.state === ToolState.Requested || tool.state === ToolState.Started) {
-    return tool
-  }
-  throw invalidState(`Tool ${toolCallId} is already ${tool.state}.`, {
-    toolCallId,
-    state: tool.state,
   })
 }
 
@@ -1410,50 +1337,6 @@ function requireToolProgress(input: RecordToolProgressInput): void {
   throw invalidArgument(`Tool ${input.toolCallId} progress has no changes.`, {
     toolCallId: input.toolCallId,
   })
-}
-
-function requireNoOpenTurnWork(
-  session: SessionProjection,
-  turnId: string,
-): void {
-  const item = session.items.find(
-    (candidate) =>
-      candidate.turnId === turnId && candidate.status === ItemStatus.InProgress,
-  )
-  if (item) {
-    throw invalidState(`Turn ${turnId} has open item ${item.itemId}.`, {
-      turnId,
-      itemId: item.itemId,
-    })
-  }
-
-  const permission = session.permissions.find(
-    (candidate) =>
-      candidate.turnId === turnId &&
-      candidate.state === PermissionState.Requested,
-  )
-  if (permission) {
-    throw invalidState(
-      `Turn ${turnId} has pending permission ${permission.permissionRequestId}.`,
-      {
-        turnId,
-        permissionRequestId: permission.permissionRequestId,
-      },
-    )
-  }
-
-  const tool = session.tools.find(
-    (candidate) =>
-      candidate.turnId === turnId &&
-      (candidate.state === ToolState.Requested ||
-        candidate.state === ToolState.Started),
-  )
-  if (tool) {
-    throw invalidState(`Turn ${turnId} has open tool ${tool.toolCallId}.`, {
-      turnId,
-      toolCallId: tool.toolCallId,
-    })
-  }
 }
 
 function openTurnWorkClosureEvents(
@@ -1521,32 +1404,6 @@ function isOpenTool(tool: ToolProjection, turnId: string): boolean {
     tool.turnId === turnId &&
     (tool.state === ToolState.Requested || tool.state === ToolState.Started)
   )
-}
-
-function requireNoActiveTurn(session: SessionProjection): void {
-  const turn = session.turns.find(
-    (candidate) => candidate.state === TurnState.Started,
-  )
-  if (!turn) return
-  throw invalidState(
-    `Session ${session.id} already has active turn ${turn.turnId}.`,
-    {
-      sessionId: session.id,
-      turnId: turn.turnId,
-    },
-  )
-}
-
-function requireActiveTurn(
-  session: SessionProjection,
-  turnId: string,
-): TurnProjection {
-  const turn = requireTurnStarted(session, turnId)
-  if (turn.state === TurnState.Started) return turn
-  throw invalidState(`Turn ${turnId} is already ${turn.state}.`, {
-    turnId,
-    state: turn.state,
-  })
 }
 
 function requireLastEvent(events: readonly EventEnvelope[]): EventEnvelope {

@@ -10,44 +10,33 @@ import {
   type InputRole,
   type JsonValue,
   type KernelError,
-  PermissionBehavior,
-  type PermissionBehavior as PermissionBehaviorValue,
+  type PermissionBehavior,
   type PermissionDecisionReason,
   type TextContent,
 } from "./events.ts"
+import {
+  InputState,
+  PermissionState,
+  ToolState,
+  TurnState,
+  replayGuardErrors,
+  requireActiveItem,
+  requireActiveTurn,
+  requireAllowedToolPermissions,
+  requireBindablePermission,
+  requireCompletedItem,
+  requireInput,
+  requireItem,
+  requireNoActiveTurn,
+  requireNoOpenTurnWork,
+  requireOpenTool,
+  requirePendingPermission,
+  requireRequestedTool,
+  requireStartedTool,
+  requireTurn,
+} from "./session-guards.ts"
 
-export const InputState = {
-  Admitted: "admitted",
-  Cancelled: "cancelled",
-  Promoted: "promoted",
-} as const
-
-export const TurnState = {
-  Cancelled: "cancelled",
-  Completed: "completed",
-  Failed: "failed",
-  Started: "started",
-} as const
-
-export const PermissionState = {
-  Cancelled: "cancelled",
-  Requested: "requested",
-  Resolved: "resolved",
-} as const
-
-export const ToolState = {
-  Cancelled: "cancelled",
-  Completed: "completed",
-  Failed: "failed",
-  Requested: "requested",
-  Started: "started",
-} as const
-
-export type InputState = (typeof InputState)[keyof typeof InputState]
-export type TurnState = (typeof TurnState)[keyof typeof TurnState]
-export type PermissionState =
-  (typeof PermissionState)[keyof typeof PermissionState]
-export type ToolState = (typeof ToolState)[keyof typeof ToolState]
+export { InputState, PermissionState, ToolState, TurnState }
 
 export type SessionProjection = {
   readonly id: string
@@ -123,7 +112,7 @@ export type PermissionProjection = {
   readonly subject?: string
   readonly toolCallId?: string
   readonly reason?: string
-  readonly behavior?: PermissionBehaviorValue
+  readonly behavior?: PermissionBehavior
   readonly decisionReason?: PermissionDecisionReason
   readonly cancelledReason?: string
   readonly metadata?: EventMetadata
@@ -222,7 +211,7 @@ type MutablePermissionProjection = {
   subject?: string
   toolCallId?: string
   reason?: string
-  behavior?: PermissionBehaviorValue
+  behavior?: PermissionBehavior
   decisionReason?: PermissionDecisionReason
   cancelledReason?: string
   metadata?: EventMetadata
@@ -388,10 +377,10 @@ function applyEvent(
       applyItemAppended(items, turns, event)
       return
     case EventType.ItemUpdated:
-      applyItemUpdated(items, event)
+      applyItemUpdated(items, turns, event)
       return
     case EventType.ItemCompleted:
-      applyItemCompleted(items, event)
+      applyItemCompleted(items, turns, event)
       return
     case EventType.PermissionRequested:
       applyPermissionRequested(permissions, tools, turns, event)
@@ -420,8 +409,12 @@ function applyEvent(
     case EventType.ToolCancelled:
       applyToolCancelled(tools, turns, event)
       return
-    default:
-      return
+    default: {
+      const unknownEvent: { readonly type: string } = event
+      throw invalidReplay(`Unknown event type ${unknownEvent.type}.`, {
+        type: unknownEvent.type,
+      })
+    }
   }
 }
 
@@ -474,7 +467,7 @@ function applyInputAdmitted(
     })
   }
   if (event.data.parentInputId !== undefined) {
-    requireInput(inputs, event.data.parentInputId)
+    requireInput(inputs.get(event.data.parentInputId), event.data.parentInputId, replayGuardErrors)
   }
 
   inputs.set(event.data.inputId, {
@@ -503,7 +496,7 @@ function applyInputPromoted(
     { readonly type: typeof EventType.InputPromoted }
   >,
 ): void {
-  const input = requireInput(inputs, event.data.inputId)
+  const input = requireInput(inputs.get(event.data.inputId), event.data.inputId, replayGuardErrors)
   if (input.state === InputState.Cancelled) {
     throw invalidReplay(`Input ${event.data.inputId} has been cancelled.`, {
       inputId: event.data.inputId,
@@ -532,7 +525,7 @@ function applyInputCancelled(
     { readonly type: typeof EventType.InputCancelled }
   >,
 ): void {
-  const input = requireInput(inputs, event.data.inputId)
+  const input = requireInput(inputs.get(event.data.inputId), event.data.inputId, replayGuardErrors)
   if (input.state !== InputState.Admitted) {
     throw invalidReplay(
       `Input ${event.data.inputId} is already ${input.state}.`,
@@ -564,8 +557,8 @@ function applyTurnStarted(
     })
   }
 
-  requireNoActiveTurn(turns)
-  const input = requireInput(inputs, event.data.inputId)
+  requireNoActiveTurn(turns.values(), replayGuardErrors)
+  const input = requireInput(inputs.get(event.data.inputId), event.data.inputId, replayGuardErrors)
   if (
     input.state !== InputState.Promoted ||
     input.turnId !== event.data.turnId
@@ -581,7 +574,7 @@ function applyTurnStarted(
     )
   }
   if (event.data.parentTurnId !== undefined) {
-    requireTurn(turns, event.data.parentTurnId)
+    requireTurn(turns.get(event.data.parentTurnId), event.data.parentTurnId, replayGuardErrors)
   }
 
   turns.set(event.data.turnId, {
@@ -612,12 +605,12 @@ function applyTurnCompleted(
     { readonly type: typeof EventType.TurnCompleted }
   >,
 ): void {
-  const turn = requireActiveTurn(turns, event.data.turnId)
-  requireNoOpenTurnWork(items, permissions, tools, event.data.turnId)
+  const turn = requireActiveTurn(turns.get(event.data.turnId), event.data.turnId, replayGuardErrors)
+  requireNoOpenTurnWork(items.values(), permissions.values(), tools.values(), event.data.turnId, replayGuardErrors)
   turn.state = TurnState.Completed
   turn.updatedAt = event.createdAt
   if (event.data.outputItemId !== undefined) {
-    requireCompletedItem(items, event.data.turnId, event.data.outputItemId)
+    requireCompletedItem(items.get(event.data.outputItemId), event.data.turnId, event.data.outputItemId, replayGuardErrors)
     turn.outputItemId = event.data.outputItemId
   }
   if (event.data.metadata !== undefined) turn.metadata = event.data.metadata
@@ -630,8 +623,8 @@ function applyTurnFailed(
   turns: Map<string, MutableTurnProjection>,
   event: Extract<EventEnvelope, { readonly type: typeof EventType.TurnFailed }>,
 ): void {
-  const turn = requireActiveTurn(turns, event.data.turnId)
-  requireNoOpenTurnWork(items, permissions, tools, event.data.turnId)
+  const turn = requireActiveTurn(turns.get(event.data.turnId), event.data.turnId, replayGuardErrors)
+  requireNoOpenTurnWork(items.values(), permissions.values(), tools.values(), event.data.turnId, replayGuardErrors)
   turn.state = TurnState.Failed
   turn.error = event.data.error
   turn.updatedAt = event.createdAt
@@ -647,8 +640,8 @@ function applyTurnCancelled(
     { readonly type: typeof EventType.TurnCancelled }
   >,
 ): void {
-  const turn = requireActiveTurn(turns, event.data.turnId)
-  requireNoOpenTurnWork(items, permissions, tools, event.data.turnId)
+  const turn = requireActiveTurn(turns.get(event.data.turnId), event.data.turnId, replayGuardErrors)
+  requireNoOpenTurnWork(items.values(), permissions.values(), tools.values(), event.data.turnId, replayGuardErrors)
   turn.state = TurnState.Cancelled
   turn.updatedAt = event.createdAt
   if (event.data.reason !== undefined) {
@@ -673,9 +666,9 @@ function applyItemAppended(
     )
   }
 
-  const turn = requireActiveTurn(turns, event.data.turnId)
+  const turn = requireActiveTurn(turns.get(event.data.turnId), event.data.turnId, replayGuardErrors)
   if (event.data.parentItemId !== undefined) {
-    requireItem(items, event.data.turnId, event.data.parentItemId)
+    requireItem(items.get(event.data.parentItemId), event.data.turnId, event.data.parentItemId, replayGuardErrors)
   }
 
   items.set(event.data.itemId, {
@@ -698,12 +691,14 @@ function applyItemAppended(
 
 function applyItemUpdated(
   items: Map<string, MutableItemProjection>,
+  turns: Map<string, MutableTurnProjection>,
   event: Extract<
     EventEnvelope,
     { readonly type: typeof EventType.ItemUpdated }
   >,
 ): void {
-  const item = requireActiveItem(items, event.data.turnId, event.data.itemId)
+  requireActiveTurn(turns.get(event.data.turnId), event.data.turnId, replayGuardErrors)
+  const item = requireActiveItem(items.get(event.data.itemId), event.data.turnId, event.data.itemId, replayGuardErrors)
   if (event.data.content !== undefined) item.content = event.data.content
   if (event.data.metadata !== undefined) item.metadata = event.data.metadata
   item.updatedAt = event.createdAt
@@ -711,12 +706,14 @@ function applyItemUpdated(
 
 function applyItemCompleted(
   items: Map<string, MutableItemProjection>,
+  turns: Map<string, MutableTurnProjection>,
   event: Extract<
     EventEnvelope,
     { readonly type: typeof EventType.ItemCompleted }
   >,
 ): void {
-  const item = requireActiveItem(items, event.data.turnId, event.data.itemId)
+  requireActiveTurn(turns.get(event.data.turnId), event.data.turnId, replayGuardErrors)
+  const item = requireActiveItem(items.get(event.data.itemId), event.data.turnId, event.data.itemId, replayGuardErrors)
   item.status = event.data.status
   item.updatedAt = event.createdAt
   if (event.data.metadata !== undefined) item.metadata = event.data.metadata
@@ -740,9 +737,9 @@ function applyPermissionRequested(
     )
   }
 
-  const turn = requireActiveTurn(turns, event.data.turnId)
+  const turn = requireActiveTurn(turns.get(event.data.turnId), event.data.turnId, replayGuardErrors)
   if (event.data.toolCallId !== undefined) {
-    requireRequestedTool(tools, event.data.turnId, event.data.toolCallId)
+    requireRequestedTool(tools.get(event.data.toolCallId), event.data.turnId, event.data.toolCallId, replayGuardErrors)
   }
   permissions.set(event.data.permissionRequestId, {
     permissionRequestId: event.data.permissionRequestId,
@@ -773,11 +770,12 @@ function applyPermissionResolved(
     { readonly type: typeof EventType.PermissionResolved }
   >,
 ): void {
-  requireActiveTurn(turns, event.data.turnId)
+  requireActiveTurn(turns.get(event.data.turnId), event.data.turnId, replayGuardErrors)
   const permission = requirePendingPermission(
-    permissions,
+    permissions.get(event.data.permissionRequestId),
     event.data.turnId,
     event.data.permissionRequestId,
+    replayGuardErrors,
   )
   permission.state = PermissionState.Resolved
   permission.behavior = event.data.behavior
@@ -796,11 +794,12 @@ function applyPermissionCancelled(
     { readonly type: typeof EventType.PermissionCancelled }
   >,
 ): void {
-  requireActiveTurn(turns, event.data.turnId)
+  requireActiveTurn(turns.get(event.data.turnId), event.data.turnId, replayGuardErrors)
   const permission = requirePendingPermission(
-    permissions,
+    permissions.get(event.data.permissionRequestId),
     event.data.turnId,
     event.data.permissionRequestId,
+    replayGuardErrors,
   )
   permission.state = PermissionState.Cancelled
   permission.updatedAt = event.createdAt
@@ -828,16 +827,18 @@ function applyToolRequested(
     )
   }
 
-  const turn = requireActiveTurn(turns, event.data.turnId)
+  const turn = requireActiveTurn(turns.get(event.data.turnId), event.data.turnId, replayGuardErrors)
   if (event.data.itemId !== undefined) {
-    requireItem(items, event.data.turnId, event.data.itemId)
+    requireItem(items.get(event.data.itemId), event.data.turnId, event.data.itemId, replayGuardErrors)
   }
   if (event.data.permissionRequestId !== undefined) {
-    requireUnboundPermission(
-      permissions,
+    const permission = requireBindablePermission(
+      permissions.get(event.data.permissionRequestId),
       event.data.turnId,
       event.data.permissionRequestId,
+      replayGuardErrors,
     )
+    permission.toolCallId = event.data.toolCallId
   }
 
   tools.set(event.data.toolCallId, {
@@ -871,13 +872,19 @@ function applyToolStarted(
     { readonly type: typeof EventType.ToolStarted }
   >,
 ): void {
-  requireActiveTurn(turns, event.data.turnId)
+  requireActiveTurn(turns.get(event.data.turnId), event.data.turnId, replayGuardErrors)
   const tool = requireRequestedTool(
-    tools,
+    tools.get(event.data.toolCallId),
     event.data.turnId,
     event.data.toolCallId,
+    replayGuardErrors,
   )
-  requireAllowedToolPermissions(permissions, event.data.turnId, tool)
+  requireAllowedToolPermissions(
+    permissions.values(),
+    event.data.turnId,
+    tool,
+    replayGuardErrors,
+  )
 
   tool.state = ToolState.Started
   tool.updatedAt = event.createdAt
@@ -891,11 +898,12 @@ function applyToolProgress(
     { readonly type: typeof EventType.ToolProgress }
   >,
 ): void {
-  requireActiveTurn(turns, event.data.turnId)
+  requireActiveTurn(turns.get(event.data.turnId), event.data.turnId, replayGuardErrors)
   const tool = requireStartedTool(
-    tools,
+    tools.get(event.data.toolCallId),
     event.data.turnId,
     event.data.toolCallId,
+    replayGuardErrors,
   )
   tool.progress.push({
     createdAt: event.createdAt,
@@ -916,14 +924,15 @@ function applyToolCompleted(
     { readonly type: typeof EventType.ToolCompleted }
   >,
 ): void {
-  requireActiveTurn(turns, event.data.turnId)
+  requireActiveTurn(turns.get(event.data.turnId), event.data.turnId, replayGuardErrors)
   const tool = requireStartedTool(
-    tools,
+    tools.get(event.data.toolCallId),
     event.data.turnId,
     event.data.toolCallId,
+    replayGuardErrors,
   )
   if (event.data.itemId !== undefined) {
-    requireItem(items, event.data.turnId, event.data.itemId)
+    requireItem(items.get(event.data.itemId), event.data.turnId, event.data.itemId, replayGuardErrors)
     tool.resultItemId = event.data.itemId
   }
 
@@ -938,11 +947,12 @@ function applyToolFailed(
   turns: Map<string, MutableTurnProjection>,
   event: Extract<EventEnvelope, { readonly type: typeof EventType.ToolFailed }>,
 ): void {
-  requireActiveTurn(turns, event.data.turnId)
+  requireActiveTurn(turns.get(event.data.turnId), event.data.turnId, replayGuardErrors)
   const tool = requireStartedTool(
-    tools,
+    tools.get(event.data.toolCallId),
     event.data.turnId,
     event.data.toolCallId,
+    replayGuardErrors,
   )
   tool.state = ToolState.Failed
   tool.error = event.data.error
@@ -957,8 +967,8 @@ function applyToolCancelled(
     { readonly type: typeof EventType.ToolCancelled }
   >,
 ): void {
-  requireActiveTurn(turns, event.data.turnId)
-  const tool = requireOpenTool(tools, event.data.turnId, event.data.toolCallId)
+  requireActiveTurn(turns.get(event.data.turnId), event.data.turnId, replayGuardErrors)
+  const tool = requireOpenTool(tools.get(event.data.toolCallId), event.data.turnId, event.data.toolCallId, replayGuardErrors)
   tool.state = ToolState.Cancelled
   tool.updatedAt = event.createdAt
   if (event.data.reason !== undefined) tool.cancelledReason = event.data.reason
@@ -996,309 +1006,6 @@ function assertUniqueEventId(
   }
   throw invalidReplay(`Event ${event.id} has already been replayed.`, {
     eventId: event.id,
-  })
-}
-
-function requireInput(
-  inputs: Map<string, MutableInputProjection>,
-  inputId: string,
-): MutableInputProjection {
-  const input = inputs.get(inputId)
-  if (input) return input
-  throw invalidReplay(`Input ${inputId} has not been admitted.`, {
-    inputId,
-  })
-}
-
-function requireTurn(
-  turns: Map<string, MutableTurnProjection>,
-  turnId: string,
-): MutableTurnProjection {
-  const turn = turns.get(turnId)
-  if (turn) return turn
-  throw invalidReplay(`Turn ${turnId} has not been started.`, {
-    turnId,
-  })
-}
-
-function requireItem(
-  items: Map<string, MutableItemProjection>,
-  turnId: string,
-  itemId: string,
-): MutableItemProjection {
-  const item = items.get(itemId)
-  if (!item) {
-    throw invalidReplay(`Item ${itemId} has not been appended.`, {
-      itemId,
-    })
-  }
-  if (item.turnId === turnId) return item
-  throw invalidReplay(`Item ${itemId} does not belong to turn ${turnId}.`, {
-    itemId,
-    turnId,
-    actualTurnId: item.turnId,
-  })
-}
-
-function requireActiveItem(
-  items: Map<string, MutableItemProjection>,
-  turnId: string,
-  itemId: string,
-): MutableItemProjection {
-  const item = requireItem(items, turnId, itemId)
-  if (item.status === ItemStatus.InProgress) return item
-  throw invalidReplay(`Item ${itemId} is already ${item.status}.`, {
-    itemId,
-    status: item.status,
-  })
-}
-
-function requireCompletedItem(
-  items: Map<string, MutableItemProjection>,
-  turnId: string,
-  itemId: string,
-): MutableItemProjection {
-  const item = requireItem(items, turnId, itemId)
-  if (item.status === ItemStatus.Completed) return item
-  throw invalidReplay(`Item ${itemId} is ${item.status}.`, {
-    itemId,
-    status: item.status,
-  })
-}
-
-function requirePermission(
-  permissions: Map<string, MutablePermissionProjection>,
-  turnId: string,
-  permissionRequestId: string,
-): MutablePermissionProjection {
-  const permission = permissions.get(permissionRequestId)
-  if (!permission) {
-    throw invalidReplay(
-      `Permission ${permissionRequestId} has not been requested.`,
-      {
-        permissionRequestId,
-      },
-    )
-  }
-  if (permission.turnId === turnId) return permission
-  throw invalidReplay(
-    `Permission ${permissionRequestId} does not belong to turn ${turnId}.`,
-    {
-      permissionRequestId,
-      turnId,
-      actualTurnId: permission.turnId,
-    },
-  )
-}
-
-function requireUnboundPermission(
-  permissions: Map<string, MutablePermissionProjection>,
-  turnId: string,
-  permissionRequestId: string,
-): MutablePermissionProjection {
-  const permission = requirePermission(permissions, turnId, permissionRequestId)
-  if (permission.toolCallId === undefined) return permission
-  throw invalidReplay(
-    `Permission ${permissionRequestId} is already bound to tool ${permission.toolCallId}.`,
-    {
-      permissionRequestId,
-      toolCallId: permission.toolCallId,
-    },
-  )
-}
-
-function requirePendingPermission(
-  permissions: Map<string, MutablePermissionProjection>,
-  turnId: string,
-  permissionRequestId: string,
-): MutablePermissionProjection {
-  const permission = requirePermission(permissions, turnId, permissionRequestId)
-  if (permission.state === PermissionState.Requested) return permission
-  throw invalidReplay(
-    `Permission ${permissionRequestId} is already ${permission.state}.`,
-    {
-      permissionRequestId,
-      state: permission.state,
-    },
-  )
-}
-
-function requireAllowedPermission(
-  permissions: Map<string, MutablePermissionProjection>,
-  turnId: string,
-  permissionRequestId: string,
-): MutablePermissionProjection {
-  const permission = requirePermission(permissions, turnId, permissionRequestId)
-  if (
-    permission.state === PermissionState.Resolved &&
-    permission.behavior === PermissionBehavior.Allow
-  ) {
-    return permission
-  }
-  if (permission.state === PermissionState.Resolved) {
-    throw invalidReplay(
-      `Permission ${permissionRequestId} resolved with ${permission.behavior}.`,
-      {
-        permissionRequestId,
-        behavior: permission.behavior ?? null,
-      },
-    )
-  }
-  throw invalidReplay(
-    `Permission ${permissionRequestId} has not been allowed.`,
-    {
-      permissionRequestId,
-      state: permission.state,
-    },
-  )
-}
-
-function requireAllowedToolPermissions(
-  permissions: Map<string, MutablePermissionProjection>,
-  turnId: string,
-  tool: MutableToolProjection,
-): void {
-  const toolPermissions = Array.from(permissions.values()).filter(
-    (permission) =>
-      permission.turnId === turnId &&
-      (permission.permissionRequestId === tool.permissionRequestId ||
-        permission.toolCallId === tool.toolCallId),
-  )
-
-  for (const permission of toolPermissions) {
-    requireAllowedPermission(
-      permissions,
-      turnId,
-      permission.permissionRequestId,
-    )
-  }
-}
-
-function requireTool(
-  tools: Map<string, MutableToolProjection>,
-  turnId: string,
-  toolCallId: string,
-): MutableToolProjection {
-  const tool = tools.get(toolCallId)
-  if (!tool) {
-    throw invalidReplay(`Tool ${toolCallId} has not been requested.`, {
-      toolCallId,
-    })
-  }
-  if (tool.turnId === turnId) return tool
-  throw invalidReplay(`Tool ${toolCallId} does not belong to turn ${turnId}.`, {
-    toolCallId,
-    turnId,
-    actualTurnId: tool.turnId,
-  })
-}
-
-function requireRequestedTool(
-  tools: Map<string, MutableToolProjection>,
-  turnId: string,
-  toolCallId: string,
-): MutableToolProjection {
-  const tool = requireTool(tools, turnId, toolCallId)
-  if (tool.state === ToolState.Requested) return tool
-  throw invalidReplay(`Tool ${toolCallId} is already ${tool.state}.`, {
-    toolCallId,
-    state: tool.state,
-  })
-}
-
-function requireStartedTool(
-  tools: Map<string, MutableToolProjection>,
-  turnId: string,
-  toolCallId: string,
-): MutableToolProjection {
-  const tool = requireTool(tools, turnId, toolCallId)
-  if (tool.state === ToolState.Started) return tool
-  throw invalidReplay(`Tool ${toolCallId} is already ${tool.state}.`, {
-    toolCallId,
-    state: tool.state,
-  })
-}
-
-function requireOpenTool(
-  tools: Map<string, MutableToolProjection>,
-  turnId: string,
-  toolCallId: string,
-): MutableToolProjection {
-  const tool = requireTool(tools, turnId, toolCallId)
-  if (tool.state === ToolState.Requested || tool.state === ToolState.Started) {
-    return tool
-  }
-  throw invalidReplay(`Tool ${toolCallId} is already ${tool.state}.`, {
-    toolCallId,
-    state: tool.state,
-  })
-}
-
-function requireNoOpenTurnWork(
-  items: Map<string, MutableItemProjection>,
-  permissions: Map<string, MutablePermissionProjection>,
-  tools: Map<string, MutableToolProjection>,
-  turnId: string,
-): void {
-  const item = Array.from(items.values()).find(
-    (candidate) =>
-      candidate.turnId === turnId && candidate.status === ItemStatus.InProgress,
-  )
-  if (item) {
-    throw invalidReplay(`Turn ${turnId} has open item ${item.itemId}.`, {
-      turnId,
-      itemId: item.itemId,
-    })
-  }
-
-  const permission = Array.from(permissions.values()).find(
-    (candidate) =>
-      candidate.turnId === turnId &&
-      candidate.state === PermissionState.Requested,
-  )
-  if (permission) {
-    throw invalidReplay(
-      `Turn ${turnId} has pending permission ${permission.permissionRequestId}.`,
-      {
-        turnId,
-        permissionRequestId: permission.permissionRequestId,
-      },
-    )
-  }
-
-  const tool = Array.from(tools.values()).find(
-    (candidate) =>
-      candidate.turnId === turnId &&
-      (candidate.state === ToolState.Requested ||
-        candidate.state === ToolState.Started),
-  )
-  if (tool) {
-    throw invalidReplay(`Turn ${turnId} has open tool ${tool.toolCallId}.`, {
-      turnId,
-      toolCallId: tool.toolCallId,
-    })
-  }
-}
-
-function requireActiveTurn(
-  turns: Map<string, MutableTurnProjection>,
-  turnId: string,
-): MutableTurnProjection {
-  const turn = requireTurn(turns, turnId)
-  if (turn.state === TurnState.Started) return turn
-  throw invalidReplay(`Turn ${turnId} is already ${turn.state}.`, {
-    turnId,
-    state: turn.state,
-  })
-}
-
-function requireNoActiveTurn(turns: Map<string, MutableTurnProjection>): void {
-  const turn = Array.from(turns.values()).find(
-    (candidate) => candidate.state === TurnState.Started,
-  )
-  if (!turn) return
-  throw invalidReplay(`Session already has active turn ${turn.turnId}.`, {
-    turnId: turn.turnId,
   })
 }
 

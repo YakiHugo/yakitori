@@ -16,11 +16,13 @@ import {
   summarizeMate,
   type MateSummary,
 } from "./mate-projector.ts"
-import type {
-  MateStore,
-  MateStoreAppendOptions,
-  MateStoreListInput,
-  MateStoreListResult,
+import {
+  invalidMateListCursor,
+  requireMateListLimit,
+  type MateStore,
+  type MateStoreAppendOptions,
+  type MateStoreListInput,
+  type MateStoreListResult,
 } from "./mate-store.ts"
 
 export type SqliteMateStore = MateStore & {
@@ -128,7 +130,7 @@ function listMates(
   database: DatabaseSync,
   input: MateStoreListInput,
 ): MateStoreListResult {
-  const limit = requireListLimit(input.limit)
+  const limit = requireMateListLimit(input.limit)
   if (input.cursor !== undefined) requireStoredMateId(database, input.cursor)
   const rows = database
     .prepare(`
@@ -350,27 +352,13 @@ function requireExpectedSequence(
   })
 }
 
-function requireListLimit(value: number | undefined): number {
-  if (value === undefined) return 50
-  if (Number.isInteger(value) && value > 0 && value <= 100) return value
-  throw createYakitoriError({
-    code: YakitoriErrorCode.InvalidArgument,
-    message: "Mate list limit must be an integer from 1 to 100.",
-    details: { limit: value },
-  })
-}
-
 function requireStoredMateId(database: DatabaseSync, mateId: string): void {
   requireMateId(mateId)
   const row = database
     .prepare("SELECT mate_id FROM mate_summaries WHERE mate_id = ? LIMIT 1")
     .get(mateId) as MateIdRow | undefined
   if (row) return
-  throw createYakitoriError({
-    code: YakitoriErrorCode.InvalidArgument,
-    message: "Mate list cursor is invalid.",
-    details: { cursor: mateId },
-  })
+  throw invalidMateListCursor(mateId)
 }
 
 function requireMateId(mateId: string): void {

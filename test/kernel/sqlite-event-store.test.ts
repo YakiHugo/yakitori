@@ -13,6 +13,8 @@ import {
   type SqliteEventStore,
   YakitoriErrorCode,
 } from "../../src/index.ts"
+import { defineEventStoreContract } from "./event-store.contract.ts"
+import { createMemoryEventStore } from "./memory-event-store.ts"
 
 describe("SQLite event store", () => {
   it("returns empty results before any session exists", async () => {
@@ -379,3 +381,19 @@ function overwriteStoredEnvelope(
     .run(envelope, sessionId, seq)
   database.close()
 }
+
+defineEventStoreContract({
+  name: "memory",
+  withStore: async (run) => {
+    await run(createMemoryEventStore())
+  },
+})
+
+defineEventStoreContract({
+  name: "sqlite",
+  withStore: async (run) => {
+    await withStores(async (context) => {
+      await run(context.open())
+    })
+  },
+})

@@ -2,6 +2,10 @@ export * from "./events.ts"
 export * from "./ids.ts"
 export * from "./mate-kernel.ts"
 export * from "./mate-projector.ts"
+export {
+  invalidMateListCursor,
+  requireMateListLimit,
+} from "./mate-store.ts"
 export type {
   MateStore,
   MateStoreAppendOptions,

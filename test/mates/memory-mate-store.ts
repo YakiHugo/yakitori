@@ -1,7 +1,9 @@
 import {
   createMateEventEnvelope,
   createYakitoriError,
+  invalidMateListCursor,
   projectMate,
+  requireMateListLimit,
   summarizeMate,
   type MateEvent,
   type MateEventEnvelope,
@@ -22,7 +24,7 @@ export function createMemoryMateStore(): MateStore {
 
     async listMates(input = {}) {
       const mateIds = Array.from(mates.keys()).sort()
-      const limit = requireListLimit(input.limit)
+      const limit = requireMateListLimit(input.limit)
       const start = requireCursorIndex(mateIds, input) + 1
       const page = mateIds.slice(start, start + limit)
       return {
@@ -75,15 +77,6 @@ function requireSummary(
   throw new Error(`Expected a summary for ${mateId}.`)
 }
 
-function requireListLimit(value: number | undefined): number {
-  if (value === undefined) return 50
-  if (Number.isInteger(value) && value > 0 && value <= 100) return value
-  throw createYakitoriError({
-    code: YakitoriErrorCode.InvalidArgument,
-    message: "Mate list limit must be an integer from 1 to 100.",
-  })
-}
-
 function requireCursorIndex(
   mateIds: readonly string[],
   input: MateStoreListInput,
@@ -91,10 +84,7 @@ function requireCursorIndex(
   if (input.cursor === undefined) return -1
   const index = mateIds.indexOf(input.cursor)
   if (index >= 0) return index
-  throw createYakitoriError({
-    code: YakitoriErrorCode.InvalidArgument,
-    message: "Mate list cursor is invalid.",
-  })
+  throw invalidMateListCursor(input.cursor)
 }
 
 function requireLastMateId(mateIds: readonly string[]): string {

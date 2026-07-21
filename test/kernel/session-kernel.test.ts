@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import {
   createInputId,
   createSessionId,
   createSessionKernel,
+  createSqliteEventStore,
   EventType,
   InputRole,
   InputState,
@@ -18,7 +22,10 @@ import {
 } from "../../src/index.ts"
 import { createMemoryEventStore } from "./memory-event-store.ts"
 
-describe("session kernel", () => {
+describe.each([
+  { name: "memory" as const },
+  { name: "sqlite" as const },
+])("session kernel ($name)", ({ name: storeKind }) => {
   it("creates a session event log", async () => {
     await withKernel(async (context) => {
       const session = await context.kernel.createSession({
@@ -690,7 +697,7 @@ describe("session kernel", () => {
     })
   })
 
-  it("rejects starting a tool when permission was denied", async () => {
+  it("rejects binding a tool to a denied permission", async () => {
     await withKernel(async (context) => {
       const session = await context.kernel.createSession()
       const admitted = await context.kernel.admitInput({
@@ -718,7 +725,7 @@ describe("session kernel", () => {
         behavior: PermissionBehavior.Deny,
       })
 
-      const tool = await context.kernel.requestTool({
+      const deniedBind = context.kernel.requestTool({
         sessionId: session.sessionId,
         turnId: started.turnId,
         name: "shell.exec",
@@ -728,21 +735,172 @@ describe("session kernel", () => {
         permissionRequestId: permission.permissionRequestId,
       })
 
-      const deniedStart = context.kernel.startTool({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        toolCallId: tool.toolCallId,
-      })
-
-      await expect(deniedStart).rejects.toThrow(
+      await expect(deniedBind).rejects.toThrow(
         `Permission ${permission.permissionRequestId} resolved with deny.`,
       )
-      await expect(deniedStart).rejects.toMatchObject({
+      await expect(deniedBind).rejects.toMatchObject({
         code: YakitoriErrorCode.InvalidState,
         details: {
           permissionRequestId: permission.permissionRequestId,
           behavior: PermissionBehavior.Deny,
         },
+      })
+    })
+  })
+
+  it("rejects binding a second tool to the same permission grant", async () => {
+    await withKernel(async (context) => {
+      const session = await context.kernel.createSession()
+      const admitted = await context.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: {
+          kind: "text",
+          text: "one grant one tool",
+        },
+      })
+      const started = await context.kernel.startTurn({
+        sessionId: session.sessionId,
+        inputId: admitted.inputId,
+      })
+      const permission = await context.kernel.requestPermission({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        action: "shell.exec",
+        subject: "pnpm test",
+      })
+      await context.kernel.resolvePermission({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        permissionRequestId: permission.permissionRequestId,
+        behavior: PermissionBehavior.Allow,
+      })
+
+      const first = await context.kernel.requestTool({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        name: "shell.exec",
+        input: { command: "pnpm test" },
+        permissionRequestId: permission.permissionRequestId,
+      })
+      await context.kernel.startTool({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        toolCallId: first.toolCallId,
+      })
+
+      const second = context.kernel.requestTool({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        name: "shell.exec",
+        input: { command: "pnpm test --watch" },
+        permissionRequestId: permission.permissionRequestId,
+      })
+
+      await expect(second).rejects.toThrow(
+        `Permission ${permission.permissionRequestId} is already bound to tool ${first.toolCallId}.`,
+      )
+      await expect(second).rejects.toMatchObject({
+        code: YakitoriErrorCode.InvalidState,
+        details: {
+          permissionRequestId: permission.permissionRequestId,
+          toolCallId: first.toolCallId,
+        },
+      })
+    })
+  })
+
+  it("rejects binding a tool to a cancelled permission", async () => {
+    await withKernel(async (context) => {
+      const session = await context.kernel.createSession()
+      const admitted = await context.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: {
+          kind: "text",
+          text: "cancel the ask",
+        },
+      })
+      const started = await context.kernel.startTurn({
+        sessionId: session.sessionId,
+        inputId: admitted.inputId,
+      })
+      const permission = await context.kernel.requestPermission({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        action: "shell.exec",
+      })
+      await context.kernel.cancelPermission({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        permissionRequestId: permission.permissionRequestId,
+        reason: "user cancelled",
+      })
+
+      const cancelledBind = context.kernel.requestTool({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        name: "shell.exec",
+        input: { command: "pnpm test" },
+        permissionRequestId: permission.permissionRequestId,
+      })
+
+      await expect(cancelledBind).rejects.toThrow(
+        `Permission ${permission.permissionRequestId} is already cancelled.`,
+      )
+      await expect(cancelledBind).rejects.toMatchObject({
+        code: YakitoriErrorCode.InvalidState,
+        details: {
+          permissionRequestId: permission.permissionRequestId,
+          state: PermissionState.Cancelled,
+        },
+      })
+    })
+  })
+
+  it("projects a permission as bound after tool request replay", async () => {
+    await withKernel(async (context) => {
+      const session = await context.kernel.createSession()
+      const admitted = await context.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: {
+          kind: "text",
+          text: "bind on request",
+        },
+      })
+      const started = await context.kernel.startTurn({
+        sessionId: session.sessionId,
+        inputId: admitted.inputId,
+      })
+      const permission = await context.kernel.requestPermission({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        action: "shell.exec",
+      })
+      await context.kernel.resolvePermission({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        permissionRequestId: permission.permissionRequestId,
+        behavior: PermissionBehavior.Allow,
+      })
+      const tool = await context.kernel.requestTool({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        name: "shell.exec",
+        input: { command: "pnpm test" },
+        permissionRequestId: permission.permissionRequestId,
+      })
+      const read = await context.kernel.readSession({
+        sessionId: session.sessionId,
+      })
+
+      expect(read.session).toMatchObject({
+        permissions: [
+          {
+            permissionRequestId: permission.permissionRequestId,
+            toolCallId: tool.toolCallId,
+            state: PermissionState.Resolved,
+            behavior: PermissionBehavior.Allow,
+          },
+        ],
       })
     })
   })
@@ -1226,17 +1384,299 @@ describe("session kernel", () => {
       ).rejects.toThrow("has not been admitted")
     })
   })
-})
 
-async function withKernel(
-  run: (context: {
-    readonly kernel: SessionKernel
-    readonly store: EventStore
-  }) => Promise<void>,
-): Promise<void> {
-  const store = createMemoryEventStore()
-  await run({
-    kernel: createSessionKernel(store),
-    store,
+  it("cancels a pending permission", async () => {
+    await withKernel(async (context) => {
+      const session = await context.kernel.createSession()
+      const admitted = await context.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "cancel permission" },
+      })
+      const started = await context.kernel.startTurn({
+        sessionId: session.sessionId,
+        inputId: admitted.inputId,
+      })
+      const permission = await context.kernel.requestPermission({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        action: "shell.exec",
+      })
+
+      const cancelled = await context.kernel.cancelPermission({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        permissionRequestId: permission.permissionRequestId,
+        reason: "user dismissed",
+      })
+      const read = await context.kernel.readSession({
+        sessionId: session.sessionId,
+      })
+
+      expect(cancelled.event).toMatchObject({
+        type: EventType.PermissionCancelled,
+        data: {
+          permissionRequestId: permission.permissionRequestId,
+          reason: "user dismissed",
+        },
+      })
+      expect(read.session).toMatchObject({
+        permissions: [
+          {
+            permissionRequestId: permission.permissionRequestId,
+            state: PermissionState.Cancelled,
+            cancelledReason: "user dismissed",
+          },
+        ],
+      })
+    })
   })
-}
+
+  it("rejects cancelling a resolved permission", async () => {
+    await withKernel(async (context) => {
+      const session = await context.kernel.createSession()
+      const admitted = await context.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "already resolved" },
+      })
+      const started = await context.kernel.startTurn({
+        sessionId: session.sessionId,
+        inputId: admitted.inputId,
+      })
+      const permission = await context.kernel.requestPermission({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        action: "shell.exec",
+      })
+      await context.kernel.resolvePermission({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        permissionRequestId: permission.permissionRequestId,
+        behavior: PermissionBehavior.Allow,
+      })
+
+      await expect(
+        context.kernel.cancelPermission({
+          sessionId: session.sessionId,
+          turnId: started.turnId,
+          permissionRequestId: permission.permissionRequestId,
+        }),
+      ).rejects.toMatchObject({
+        code: YakitoriErrorCode.InvalidState,
+        message: `Permission ${permission.permissionRequestId} is already resolved.`,
+      })
+    })
+  })
+
+  it("fails a started tool", async () => {
+    await withKernel(async (context) => {
+      const session = await context.kernel.createSession()
+      const admitted = await context.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "fail tool" },
+      })
+      const started = await context.kernel.startTurn({
+        sessionId: session.sessionId,
+        inputId: admitted.inputId,
+      })
+      const tool = await context.kernel.requestTool({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        name: "shell.exec",
+        input: { command: "false" },
+      })
+      await context.kernel.startTool({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        toolCallId: tool.toolCallId,
+      })
+
+      const failed = await context.kernel.failTool({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        toolCallId: tool.toolCallId,
+        error: { message: "exit 1", code: "tool_failed" },
+      })
+      const read = await context.kernel.readSession({
+        sessionId: session.sessionId,
+      })
+
+      expect(failed.event).toMatchObject({
+        type: EventType.ToolFailed,
+        data: {
+          toolCallId: tool.toolCallId,
+          error: { message: "exit 1", code: "tool_failed" },
+        },
+      })
+      expect(read.session).toMatchObject({
+        tools: [
+          {
+            toolCallId: tool.toolCallId,
+            state: ToolState.Failed,
+            error: { message: "exit 1", code: "tool_failed" },
+          },
+        ],
+      })
+    })
+  })
+
+  it("rejects failing a tool that has not started", async () => {
+    await withKernel(async (context) => {
+      const session = await context.kernel.createSession()
+      const admitted = await context.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "fail too early" },
+      })
+      const started = await context.kernel.startTurn({
+        sessionId: session.sessionId,
+        inputId: admitted.inputId,
+      })
+      const tool = await context.kernel.requestTool({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        name: "shell.exec",
+        input: { command: "false" },
+      })
+
+      await expect(
+        context.kernel.failTool({
+          sessionId: session.sessionId,
+          turnId: started.turnId,
+          toolCallId: tool.toolCallId,
+          error: { message: "too early" },
+        }),
+      ).rejects.toMatchObject({
+        code: YakitoriErrorCode.InvalidState,
+        message: `Tool ${tool.toolCallId} is already requested.`,
+      })
+    })
+  })
+
+  it("cancels a requested or started tool", async () => {
+    await withKernel(async (context) => {
+      const session = await context.kernel.createSession()
+      const admitted = await context.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "cancel tool" },
+      })
+      const started = await context.kernel.startTurn({
+        sessionId: session.sessionId,
+        inputId: admitted.inputId,
+      })
+      const requested = await context.kernel.requestTool({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        name: "shell.exec",
+        input: { command: "sleep 10" },
+      })
+      const cancelledRequested = await context.kernel.cancelTool({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        toolCallId: requested.toolCallId,
+        reason: "never mind",
+      })
+
+      const startedTool = await context.kernel.requestTool({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        name: "shell.exec",
+        input: { command: "sleep 20" },
+      })
+      await context.kernel.startTool({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        toolCallId: startedTool.toolCallId,
+      })
+      const cancelledStarted = await context.kernel.cancelTool({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        toolCallId: startedTool.toolCallId,
+        reason: "timeout",
+      })
+
+      expect(cancelledRequested.event).toMatchObject({
+        type: EventType.ToolCancelled,
+        data: {
+          toolCallId: requested.toolCallId,
+          reason: "never mind",
+        },
+      })
+      expect(cancelledStarted.event).toMatchObject({
+        type: EventType.ToolCancelled,
+        data: {
+          toolCallId: startedTool.toolCallId,
+          reason: "timeout",
+        },
+      })
+    })
+  })
+
+  it("rejects cancelling a completed tool", async () => {
+    await withKernel(async (context) => {
+      const session = await context.kernel.createSession()
+      const admitted = await context.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "cancel completed" },
+      })
+      const started = await context.kernel.startTurn({
+        sessionId: session.sessionId,
+        inputId: admitted.inputId,
+      })
+      const tool = await context.kernel.requestTool({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        name: "shell.exec",
+        input: { command: "true" },
+      })
+      await context.kernel.startTool({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        toolCallId: tool.toolCallId,
+      })
+      await context.kernel.completeTool({
+        sessionId: session.sessionId,
+        turnId: started.turnId,
+        toolCallId: tool.toolCallId,
+        output: { exitCode: 0 },
+      })
+
+      await expect(
+        context.kernel.cancelTool({
+          sessionId: session.sessionId,
+          turnId: started.turnId,
+          toolCallId: tool.toolCallId,
+        }),
+      ).rejects.toMatchObject({
+        code: YakitoriErrorCode.InvalidState,
+        message: `Tool ${tool.toolCallId} is already completed.`,
+      })
+    })
+  })
+
+  async function withKernel(
+    run: (context: {
+      readonly kernel: SessionKernel
+      readonly store: EventStore
+    }) => Promise<void>,
+  ): Promise<void> {
+    if (storeKind === "memory") {
+      const store = createMemoryEventStore()
+      await run({
+        kernel: createSessionKernel(store),
+        store,
+      })
+      return
+    }
+
+    const rootDir = await mkdtemp(join(tmpdir(), "yakitori-kernel-"))
+    const store = createSqliteEventStore({ rootDir })
+    try {
+      await run({
+        kernel: createSessionKernel(store),
+        store,
+      })
+    } finally {
+      store.close()
+      await rm(rootDir, { recursive: true, force: true })
+    }
+  }
+})

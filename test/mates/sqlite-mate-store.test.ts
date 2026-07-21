@@ -14,6 +14,8 @@ import {
   type SqliteMateStore,
   YakitoriErrorCode,
 } from "../../src/index.ts"
+import { defineMateStoreContract } from "./mate-store.contract.ts"
+import { createMemoryMateStore } from "./memory-mate-store.ts"
 
 describe("SQLite mate store", () => {
   it("persists identities and revisions across reopen", async () => {
@@ -187,3 +189,19 @@ async function withStores(
     await rm(rootDir, { force: true, recursive: true })
   }
 }
+
+defineMateStoreContract({
+  name: "memory",
+  withStore: async (run) => {
+    await run(createMemoryMateStore())
+  },
+})
+
+defineMateStoreContract({
+  name: "sqlite",
+  withStore: async (run) => {
+    await withStores(async (context) => {
+      await run(context.open())
+    })
+  },
+})
