@@ -138,6 +138,25 @@ describe("server handlers", () => {
     })
   })
 
+  it("rejects input text above the configured model-visible cap", async () => {
+    const server = createServerHandlers(
+      createSessionKernel(createMemoryEventStore()),
+      { maxInputBytes: 4 },
+    )
+    const created = await server.createSession()
+    expectOk(created)
+
+    expectError(
+      await server.admitInput({
+        sessionId: created.body.session.id,
+        requestId: "request_oversized",
+        content: { kind: "text", text: "12345" },
+      }),
+      400,
+      ApiErrorCode.InvalidInput,
+    )
+  })
+
   it("returns the original admission for an exact request retry", async () => {
     await withServer(async (server) => {
       const created = await server.createSession()
@@ -208,7 +227,6 @@ describe("server handlers", () => {
       })
       expectOk(events)
 
-      expect(events.body.lastSequence).toBe(2)
       expect(events.body.events).toEqual([admitted.body.event])
     })
   })

@@ -10,7 +10,12 @@ import {
   type EventEnvelope,
   type EventStore,
   type SessionKernel,
+  type StoredEventEnvelope,
 } from "../kernel/index.ts"
+import type {
+  LiveSessionEvent,
+  TransientEventHub,
+} from "../runtime/live-events.ts"
 import { createDurableEventHub, type DurableEventHub } from "./event-hub.ts"
 import { createServerHandlers, type ServerHandlers } from "./handlers.ts"
 import { ApiErrorCode, type ApiHandlerResult } from "./protocol.ts"
@@ -18,6 +23,8 @@ import { ApiErrorCode, type ApiHandlerResult } from "./protocol.ts"
 export type YakitoriHttpServerOptions = {
   readonly eventStore?: EventStore
   readonly eventHub?: DurableEventHub
+  readonly transientHub?: TransientEventHub
+  readonly handlers?: ServerHandlers
   readonly kernel?: SessionKernel
   readonly rootDir?: string
 }
@@ -26,19 +33,31 @@ export function createYakitoriHttpServer(
   options: YakitoriHttpServerOptions = {},
 ) {
   const eventHub = options.eventHub ?? createDurableEventHub()
-  const runtime = createServerRuntime(options)
-  const handlers = createServerHandlers(runtime.kernel, { eventHub })
+  const transientHub = options.transientHub
+  const owned =
+    options.handlers === undefined
+      ? createOwnedServerRuntime(options)
+      : undefined
+  const handlers =
+    options.handlers ??
+    createServerHandlers(requireOwnedKernel(owned), { eventHub })
 
   const server = createServer((request, response) => {
-    void handleRequest(request, response, handlers, eventHub).catch((error) => {
+    void handleRequest(
+      request,
+      response,
+      handlers,
+      eventHub,
+      transientHub,
+    ).catch((error) => {
       writeUnhandledError(response, error)
     })
   })
-  if (runtime.close !== undefined) server.once("close", runtime.close)
+  if (owned?.close !== undefined) server.once("close", owned.close)
   return server
 }
 
-function createServerRuntime(options: YakitoriHttpServerOptions): {
+function createOwnedServerRuntime(options: YakitoriHttpServerOptions): {
   readonly kernel: SessionKernel
   readonly close?: () => void
 } {
@@ -54,6 +73,20 @@ function createServerRuntime(options: YakitoriHttpServerOptions): {
     kernel: createSessionKernel(eventStore),
     close: () => eventStore.close(),
   }
+}
+
+function requireOwnedKernel(
+  owned:
+    | {
+        readonly kernel: SessionKernel
+        readonly close?: () => void
+      }
+    | undefined,
+): SessionKernel {
+  if (owned) return owned.kernel
+  throw new Error(
+    "Expected owned server runtime when handlers are not provided.",
+  )
 }
 
 export async function listen(server: ReturnType<typeof createServer>) {
@@ -72,6 +105,7 @@ async function handleRequest(
   response: ServerResponse,
   handlers: ServerHandlers,
   eventHub: DurableEventHub,
+  transientHub: TransientEventHub | undefined,
 ): Promise<void> {
   const origin = requestOrigin(request)
   if (origin !== undefined && !isAllowedCorsOrigin(origin)) {
@@ -143,6 +177,41 @@ async function handleRequest(
     return
   }
 
+  if (route.kind === "cancelTurn") {
+    const body = await readJson(request)
+    if (!body.ok) {
+      writeResult(response, body.result)
+      return
+    }
+    writeResult(
+      response,
+      await handlers.cancelTurn({
+        ...requireBodyRecord(body.value),
+        sessionId: route.sessionId,
+        turnId: route.turnId,
+      }),
+    )
+    return
+  }
+
+  if (route.kind === "resolvePermission") {
+    const body = await readJson(request)
+    if (!body.ok) {
+      writeResult(response, body.result)
+      return
+    }
+    writeResult(
+      response,
+      await handlers.resolvePermission({
+        ...requireBodyRecord(body.value),
+        sessionId: route.sessionId,
+        turnId: route.turnId,
+        permissionRequestId: route.permissionRequestId,
+      }),
+    )
+    return
+  }
+
   if (route.kind === "streamSessionEvents") {
     const cursor = resolveEventCursor(
       url.searchParams.get("after") ?? undefined,
@@ -156,6 +225,7 @@ async function handleRequest(
       response,
       handlers,
       eventHub,
+      transientHub,
       route.sessionId,
       cursor.after,
     )
@@ -206,6 +276,39 @@ function routeRequest(method: string, url: URL): Route {
     return { kind: "streamSessionEvents", sessionId: segments[1] }
   }
 
+  // POST /sessions/:id/turns/:turnId/cancel
+  if (
+    method === "POST" &&
+    segments.length === 5 &&
+    segments[2] === "turns" &&
+    segments[4] === "cancel" &&
+    typeof segments[3] === "string"
+  ) {
+    return {
+      kind: "cancelTurn",
+      sessionId: segments[1],
+      turnId: segments[3],
+    }
+  }
+
+  // POST /sessions/:id/turns/:turnId/permissions/:id/resolve
+  if (
+    method === "POST" &&
+    segments.length === 7 &&
+    segments[2] === "turns" &&
+    segments[4] === "permissions" &&
+    segments[6] === "resolve" &&
+    typeof segments[3] === "string" &&
+    typeof segments[5] === "string"
+  ) {
+    return {
+      kind: "resolvePermission",
+      sessionId: segments[1],
+      turnId: segments[3],
+      permissionRequestId: segments[5],
+    }
+  }
+
   return { kind: "notFound" }
 }
 
@@ -213,10 +316,12 @@ async function streamSessionEvents(
   response: ServerResponse,
   handlers: ServerHandlers,
   eventHub: DurableEventHub,
+  transientHub: TransientEventHub | undefined,
   sessionId: string,
   after: number,
 ): Promise<void> {
   const pendingEvents: EventEnvelope[] = []
+  const pendingLive: LiveSessionEvent[] = []
   let heartbeat: ReturnType<typeof setInterval> | undefined
   let live = false
   let lastSequence = 0
@@ -229,9 +334,26 @@ async function streamSessionEvents(
     }
     lastSequence = writeSseEvents(response, events, lastSequence)
   })
+  const liveSubscription = transientHub?.subscribe(sessionId, (event) => {
+    if (responseClosed) return
+    if (!live) {
+      // Coalesce by stream id for slow subscribers during replay.
+      const index = pendingLive.findIndex(
+        (candidate) =>
+          candidate.type === "assistant.snapshot" &&
+          event.type === "assistant.snapshot" &&
+          candidate.streamId === event.streamId,
+      )
+      if (index >= 0) pendingLive[index] = event
+      else pendingLive.push(event)
+      return
+    }
+    writeTransientSseEvent(response, event)
+  })
   const cleanup = () => {
     if (heartbeat) clearInterval(heartbeat)
     subscription.close()
+    liveSubscription?.close()
   }
 
   response.once("close", () => {
@@ -257,6 +379,8 @@ async function streamSessionEvents(
   live = true
   lastSequence = writeSseEvents(response, pendingEvents, lastSequence)
   pendingEvents.length = 0
+  for (const event of pendingLive) writeTransientSseEvent(response, event)
+  pendingLive.length = 0
 
   heartbeat = setInterval(() => {
     if (responseClosed) return
@@ -275,7 +399,7 @@ function writeSseHead(response: ServerResponse): void {
 
 function writeSseEvents(
   response: ServerResponse,
-  events: readonly EventEnvelope[],
+  events: readonly StoredEventEnvelope[],
   lastSequence: number,
 ): number {
   return events.reduce((sequence, event) => {
@@ -285,6 +409,15 @@ function writeSseEvents(
     response.write(`data: ${JSON.stringify(event)}\n\n`)
     return event.seq
   }, lastSequence)
+}
+
+function writeTransientSseEvent(
+  response: ServerResponse,
+  event: LiveSessionEvent,
+): void {
+  // Transient events never set SSE id and must not advance Last-Event-ID.
+  response.write("event: session.transient\n")
+  response.write(`data: ${JSON.stringify(event)}\n\n`)
 }
 
 async function readJson(request: IncomingMessage): Promise<JsonReadResult> {
@@ -493,11 +626,22 @@ function isAddressInfo(value: unknown): value is AddressInfo {
 
 type Route =
   | { readonly kind: "admitInput"; readonly sessionId: string }
+  | {
+      readonly kind: "cancelTurn"
+      readonly sessionId: string
+      readonly turnId: string
+    }
   | { readonly kind: "createSession" }
   | { readonly kind: "health" }
   | { readonly kind: "listSessions" }
   | { readonly kind: "notFound" }
   | { readonly kind: "readSession"; readonly sessionId: string }
+  | {
+      readonly kind: "resolvePermission"
+      readonly sessionId: string
+      readonly turnId: string
+      readonly permissionRequestId: string
+    }
   | { readonly kind: "streamSessionEvents"; readonly sessionId: string }
 
 type JsonReadResult =

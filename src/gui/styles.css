@@ -505,3 +505,111 @@ button:disabled {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
+
+.execution-feed {
+  display: grid;
+  gap: 0.75rem;
+  margin: 0 0 1rem;
+  max-height: 28rem;
+  overflow: auto;
+  padding-right: 0.25rem;
+}
+
+.exec-row {
+  border: 1px solid var(--line);
+  border-radius: 0.75rem;
+  padding: 0.75rem 0.9rem;
+  background: color-mix(in oklab, var(--panel) 88%, black);
+}
+
+.exec-row header {
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  opacity: 0.75;
+  margin-bottom: 0.35rem;
+}
+
+.exec-row.user {
+  border-color: color-mix(in oklab, var(--accent) 35%, var(--line));
+}
+
+.exec-row.assistant.streaming {
+  border-style: dashed;
+}
+
+.exec-row.tool pre,
+.exec-row pre {
+  margin: 0.35rem 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.8rem;
+}
+
+.exec-row pre.error {
+  color: var(--danger);
+}
+
+.exec-row.permission {
+  border-color: color-mix(in oklab, #e3b341 45%, var(--line));
+}
+
+.permission-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.permission-actions button,
+#cancelTurn {
+  font: inherit;
+  border-radius: 0.5rem;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: inherit;
+  padding: 0.35rem 0.7rem;
+  cursor: pointer;
+}
+
+.permission-actions button:disabled,
+#cancelTurn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.session-meta-line {
+  margin: 0.15rem 0 0;
+  font-size: 0.8rem;
+  opacity: 0.8;
+  word-break: break-all;
+}
+
+.diagnostics summary {
+  cursor: pointer;
+  margin-bottom: 0.5rem;
+}
+
+.exec-row.terminal.failed {
+  border-color: color-mix(in oklab, var(--danger) 45%, var(--line));
+}
+
+.exec-row.terminal.cancelled {
+  border-color: color-mix(in oklab, var(--orange) 45%, var(--line));
+}
+
+.exec-row.terminal.interrupted {
+  border-color: color-mix(in oklab, var(--blue) 55%, var(--line));
+  border-style: dashed;
+}
+
+.exec-row.tool.interrupted,
+.exec-row.permission.stale {
+  border-color: color-mix(in oklab, var(--blue) 40%, var(--line));
+  border-style: dashed;
+}
+
+.hint {
+  font-size: 0.8rem;
+  opacity: 0.75;
+  margin: 0.25rem 0;
+}

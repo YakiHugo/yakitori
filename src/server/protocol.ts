@@ -2,6 +2,7 @@ import type {
   EventEnvelope,
   EventMetadata,
   InputRole,
+  StoredEventEnvelope,
   TextContent,
 } from "../kernel/index.ts"
 
@@ -39,6 +40,8 @@ export type ApiHandlerResult<T> =
 export type ApiCreateSessionRequest = {
   readonly title?: string
   readonly workingDirectory?: string
+  readonly mateId?: string
+  readonly mateRevisionId?: string
   readonly parentSessionId?: string
   readonly metadata?: EventMetadata
 }
@@ -81,14 +84,42 @@ export type ApiAdmitInputResponse = {
   readonly event: EventEnvelope
 }
 
+export type ApiCancelTurnRequest = {
+  readonly sessionId: string
+  readonly turnId: string
+  readonly reason?: string
+}
+
+export type ApiCancelTurnResponse = {
+  readonly sessionId: string
+  readonly turnId: string
+}
+
+export type ApiResolvePermissionRequest = {
+  readonly sessionId: string
+  readonly turnId: string
+  readonly permissionRequestId: string
+  readonly behavior: "allow" | "deny"
+  readonly reason?: {
+    readonly kind: string
+    readonly message?: string
+  }
+}
+
+export type ApiResolvePermissionResponse = {
+  readonly sessionId: string
+  readonly turnId: string
+  readonly permissionRequestId: string
+  readonly event: EventEnvelope
+}
+
 export type ApiReadSessionEventsRequest = {
   readonly sessionId: string
   readonly after?: number | string
 }
 
 export type ApiReadSessionEventsResponse = {
-  readonly events: readonly EventEnvelope[]
-  readonly lastSequence: number
+  readonly events: readonly StoredEventEnvelope[]
 }
 
 export type ApiSessionSummary = {
@@ -98,6 +129,8 @@ export type ApiSessionSummary = {
   readonly updatedAt: string
   readonly title?: string
   readonly workingDirectory?: string
+  readonly mateId?: string
+  readonly mateRevisionId?: string
   readonly parentSessionId?: string
   readonly metadata?: EventMetadata
 }

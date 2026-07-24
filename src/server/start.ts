@@ -1,13 +1,18 @@
-import { createYakitoriHttpServer } from "./http.ts"
+import { createYakitoriApplication } from "./application.ts"
 
 const host = process.env.HOST ?? "127.0.0.1"
 const port = Number(process.env.PORT ?? 4141)
 const rootDir = process.env.YAKITORI_STORE_DIR ?? ".yakitori"
-const server = createYakitoriHttpServer({ rootDir })
+
+const application = await createYakitoriApplication({ rootDir })
+const server = application.createHttpServer()
 let shuttingDown = false
 
 server.listen(port, host, () => {
   console.log(`Yakitori server listening on http://${host}:${port}`)
+  console.log(
+    `workspace=${application.workspace} mate=${application.activeMate.mateId} revision=${application.activeMate.mateRevisionId}`,
+  )
 })
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
@@ -15,7 +20,9 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
     if (shuttingDown) return
     shuttingDown = true
     server.close(() => {
-      process.exit(0)
+      void application.close().finally(() => {
+        process.exit(0)
+      })
     })
     server.closeAllConnections()
     setTimeout(() => {
