@@ -59,7 +59,7 @@ Project
    |- one collaboration Room
    `- Assignments
       `- one Mate execution Session
-         `- Inputs -> Turns -> Items / Tools / Permissions
+         `- Inputs -> Turns -> recorded facts -> derived views
 ```
 
 The first product version may create one Room automatically for each Task. The
@@ -99,14 +99,19 @@ necessarily equivalent to every Assignment finishing.
 
 ### Execution Session
 
-The current `Session -> Input -> Turn -> Item` kernel remains the execution
-lane for one Mate assignment. It owns detailed tool, permission, error,
-cancellation, and replay facts. Version one keeps at most one active Turn per
-execution Session while different Mates execute concurrently in different
-Sessions.
+The current `Session -> Input -> Turn` kernel remains the execution lane for
+one Mate assignment. It records coarse facts such as completed assistant
+messages, tool calls and results, permission decisions, and honest terminal
+boundaries. Item and Tool state exposed to consumers is derived from those
+facts rather than persisted as a second micro-state machine. Version one keeps
+at most one active Turn per execution Session while different Mates execute
+concurrently in different Sessions.
 
-A runtime activation is temporary. Process IDs, leases, sockets, and online
-state are operational projections, not Mate identity.
+A runtime activation is temporary and owns in-flight state such as streaming,
+runner fibers, active tool execution, and abort handles. Process IDs, leases,
+sockets, and online state are operational projections, not Mate identity. If a
+process stops mid-Turn, recovery records one `turn.interrupted` fact without
+inventing results for unfinished work.
 
 ## Shared Messages and Durable Delivery
 
@@ -182,9 +187,12 @@ retain deletable memory plaintext.
 
 ## Persistence and Coordination
 
-Durable facts remain append-oriented and projections remain rebuildable. The
-same event-journal infrastructure may back multiple aggregates, but Room,
-Task, Assignment, and execution Session keep distinct domain contracts.
+Durable facts remain append-oriented and projections remain rebuildable. For
+execution Sessions, each append updates the event journal, operation receipt,
+and write-through projection in one SQLite transaction. Normal reads select
+the projection directly; replay is reserved for debugging and repair. The same
+event-journal infrastructure may back multiple aggregates, but Room, Task,
+Assignment, and execution Session keep distinct domain contracts.
 
 Operations crossing aggregates use stable IDs, idempotent commands, and a
 recoverable saga or outbox. They must not assume that posting a Room Message,
@@ -235,19 +243,19 @@ are not required by this architecture.
 
 ## Implementation Direction
 
-The current event kernel, SQLite store, server boundary, and initial GUI remain
-useful. The next architecture-sensitive stages are:
+The MVP runtime now drives Turns end to end through the witness-style kernel
+and write-through SQLite projection, visible in the GUI. Collaboration
+contracts can now land against real execution-lane callers. The remaining
+architecture-sensitive stages are:
 
-1. Add Mate identity, immutable profile revisions, and explicit actor
-   references without conflating them with Sessions.
-2. Add Room, Task, Assignment, Message, and Delivery contracts and projections.
+1. Add safe-boundary steer/catch-up behavior and result publication.
+2. Add Room, Task, Assignment, Message, and Delivery
+   contracts and projections (decision 0006 items land here, with consumers).
 3. Associate one execution Session with each Assignment and add a durable
    Delivery scheduler.
-4. Add the model loop, safe-boundary steer/catch-up behavior, tool execution,
-   and result publication.
-5. Add explicit memory CRUD and ContextSnapshot manifests before enabling
+4. Add explicit memory CRUD and ContextSnapshot manifests before enabling
    conservative candidate extraction and consolidation.
-6. Grow the GUI around the shared Room and inspectable execution lanes.
+5. Grow the GUI around the shared Room and inspectable execution lanes.
 
 Embeddings, automatic memory consolidation, long-lived reusable Rooms,
 distributed execution, organization-wide sharing, and autonomous Mate

@@ -11,15 +11,24 @@ Reference material lives under `.references/` and is intentionally gitignored.
 Do not make source code, tests, build scripts, or runtime behavior depend on
 files in `.references/`.
 
-Allowed local references:
+Allowed local references, in priority order:
 
-- `.references/public/opencode-v2` (primary OpenCode reference)
+- `.references/public/opencode-v2` (primary: architecture — server/API
+  boundary, durable input admission, SQLite event log + projections)
+- `.references/public/codex` (primary: product workbench shape and context
+  management — rollout, compaction, fork, read-side normalization)
+- `.references/public/claude-code-sourcemap` (secondary: product behavior
+  cross-check; Rooms-stage reference for multi-agent tasks, permission UX,
+  and file checkpoints)
+- `.references/public/grok-build` (secondary: security model — session-
+  persisted security assumptions, WAL-on-network-filesystem hazard; see
+  decision 0006)
 - `.references/public/opencode` (legacy v1 comparison only)
-- `.references/public/codex`
-- `.references/public/claude-code-sourcemap`
-- `.references/public/pi`
+- `.references/public/pi` (consumed: its StreamFn contract and faux provider
+  patterns already landed in `src/runtime/`; historical reference only, do
+  not mine it for kernel, storage, or collaboration design)
 - Public Claude Code documentation and observable product behavior
-- Public Raft documentation and observable product behavior
+- Public Raft documentation (consensus reference for future coordination)
 
 ## Branch Names
 
@@ -54,7 +63,7 @@ Examples: `feat(core): add event log`, `docs: update agent instructions`,
 ## Architecture Boundaries
 
 - Treat the harness core as the owner of Mates, collaboration, execution,
-  events, tools, permissions, persistence, memory lifecycle, and replay.
+  facts, tools, permissions, persistence, memory lifecycle, and repair.
 - Treat the GUI as the only product client of the harness core/server. Runtime,
   schedulers, and adapters are internal modules behind explicit boundaries.
 - Keep Mate identity separate from models, processes, runtime leases,
@@ -63,9 +72,10 @@ Examples: `feat(core): add event log`, `docs: update agent instructions`,
 - Keep Room, Task, and Assignment distinct. A Room owns communication and
   visibility, a Task owns the objective and result, and an Assignment binds one
   Mate execution lane to a Task.
-- Treat the existing Session/Input/Turn/Item kernel as one Mate's execution
-  lane. A Session may have at most one active Turn while different Mates run
-  concurrently in separate Sessions.
+- Treat the existing Session/Input/Turn kernel as one Mate's execution lane.
+  Items and Tools are derived views over coarse recorded facts, not separately
+  persisted micro-state machines. A Session may have at most one active Turn
+  while different Mates run concurrently in separate Sessions.
 - Keep a shared Room Message distinct from a Session Input. Store a Message
   once and track per-recipient, idempotent Delivery state for fan-out, catch-up,
   mentions, and wakeup.
@@ -77,10 +87,15 @@ Examples: `feat(core): add event log`, `docs: update agent instructions`,
 - Keep detailed reasoning, tool output, and permission facts in the execution
   Session. Only explicitly published findings, questions, results, and artifact
   references enter the shared Room.
-- Keep event persistence append-oriented unless a module documents a stronger
-  reason to mutate state.
-- Represent tool execution, approvals, interruptions, denials, errors, and
-  cancellations as structured state or events rather than transcript-only text.
+- Keep fact persistence append-oriented and update each Session's write-through
+  projection in the same transaction as the facts and operation receipt.
+- Record tool calls and results, permission requests and decisions, and Turn
+  boundaries as structured facts. Keep transient execution state in Runtime
+  memory and never fabricate closure facts during recovery.
+- Treat the kernel as a witness, not a judge (decision 0007): strict about
+  what was recorded, permissive about what it means. Before adding an
+  invariant, ask whether the model could see the violation and compensate;
+  if yes, record honestly instead.
 - Keep tool execution behind a permission boundary.
 - Do not inherit another Mate's personal memory, credentials, permissions,
   or approvals through Room membership, mentions, or Assignments.
@@ -89,8 +104,8 @@ Examples: `feat(core): add event log`, `docs: update agent instructions`,
 - Bound agent-to-agent wakeups. Self-messages, acknowledgements, duplicate
   Deliveries, and exhausted causation budgets must not create model-call loops.
 - Be careful with external integration surfaces: local server APIs, persisted
-  event formats, configuration loading, Delivery scheduling, memory deletion,
-  and replay.
+  event formats, configuration loading, Delivery scheduling, and memory
+  deletion.
 
 ## Style Guide
 
@@ -196,7 +211,7 @@ export function createTurn(input: unknown) {
 - Extract only when it names a real concept such as `requireTurnInput` or
   `appendEvent`.
 
-## Model Context And Events
+## Model Context And Facts
 
 - Do not rewrite durable history. Build model-visible context incrementally from
   recorded state.
@@ -212,13 +227,13 @@ export function createTurn(input: unknown) {
   selected in the ContextSnapshot.
 - Keep Mate profile instructions separate from learned memory. Automatic
   extraction cannot silently change profile authority or store secret values.
-- Prefer structured events over ad hoc transcript strings.
-- Preserve enough event data for replay and debugging without forcing every raw
+- Prefer structured facts over ad hoc transcript strings.
+- Preserve enough fact data for repair and debugging without forcing every raw
   payload into the model context.
 
 ## Testing
 
-Add focused tests with each module once a test runner exists.
+Add focused tests with each module.
 
 Priority areas:
 
@@ -233,7 +248,7 @@ Priority areas:
 - Memory scope, provenance, visibility, revision, and deletion
 - Tool permission decisions
 - Tool result recording
-- Replay behavior
+- Write-through projection consistency with facts rebuilt from the log
 - File-change checkpoint behavior
 
 Testing rules:
