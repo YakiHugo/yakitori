@@ -3,6 +3,7 @@ export type {
   EventStoreAppendOptions,
   EventStoreListSessionsInput,
   EventStoreListSessionsResult,
+  EventStoreRebuildProjectionResult,
   EventStoreSessionSummary,
 } from "./event-store.ts"
 export * from "./errors.ts"

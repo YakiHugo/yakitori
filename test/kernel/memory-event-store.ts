@@ -48,6 +48,20 @@ export function createMemoryEventStore(): EventStore {
       return projection === undefined ? undefined : structuredClone(projection)
     },
 
+    async rebuildProjection(sessionId) {
+      const events = structuredClone(sessions.get(sessionId) ?? [])
+      const projection = applySessionFacts(undefined, events)
+      if (projection === undefined) {
+        projections.delete(sessionId)
+        return { events }
+      }
+      projections.set(sessionId, structuredClone(projection))
+      return {
+        events,
+        projection: structuredClone(projection),
+      }
+    },
+
     async listSessions(input = {}) {
       const summaries = Array.from(projections.values()).map(
         summarizeSessionProjection,

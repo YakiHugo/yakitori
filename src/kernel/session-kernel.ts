@@ -14,6 +14,7 @@ import {
   type PermissionDecisionReason,
   type StoredEventEnvelope,
   type TextContent,
+  type TokenUsage,
   type TurnExecutionContext,
 } from "./events.ts"
 import {
@@ -31,7 +32,6 @@ import {
   PermissionState,
   ToolState,
   TurnState,
-  projectSession,
   type InputProjection,
   type SessionProjection,
   type ToolProjection,
@@ -217,6 +217,7 @@ export type CompleteTurnInput = {
   readonly sessionId: string
   readonly turnId: string
   readonly outputMessageId?: string
+  readonly usage?: TokenUsage
   readonly metadata?: EventMetadata
 }
 export type CompleteTurnResult = {
@@ -228,6 +229,7 @@ export type CompleteTurnWithAssistantOutputInput = {
   readonly turnId: string
   readonly content: TextContent
   readonly providerMetadata?: EventMetadata
+  readonly usage?: TokenUsage
   readonly metadata?: EventMetadata
 }
 export type CompleteTurnWithAssistantOutputResult = {
@@ -308,9 +310,10 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
     },
 
     async replaySession(input) {
-      const events = await eventStore.readEvents(input.sessionId)
-      const session = projectSession(events)
-      return session ? { events, session } : { events }
+      const rebuilt = await eventStore.rebuildProjection(input.sessionId)
+      return rebuilt.projection
+        ? { events: rebuilt.events, session: rebuilt.projection }
+        : { events: rebuilt.events }
     },
 
     admitInput(input) {
@@ -553,6 +556,7 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
         data: compact({
           turnId: input.turnId,
           outputMessageId: input.outputMessageId,
+          usage: input.usage,
           metadata: input.metadata,
         }),
       })
@@ -578,6 +582,7 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
             data: compact({
               turnId: input.turnId,
               outputMessageId: itemId,
+              usage: input.usage,
               metadata: input.metadata,
             }),
           },

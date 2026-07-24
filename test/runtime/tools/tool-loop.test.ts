@@ -22,6 +22,7 @@ describe("tool loop", () => {
       const provider = createFauxProvider([
         {
           stopReason: ModelStopReason.ToolUse,
+          usage: { inputTokens: 10, outputTokens: 2 },
           content: [
             {
               type: "tool_call",
@@ -32,6 +33,7 @@ describe("tool loop", () => {
           ],
         },
         {
+          usage: { inputTokens: 20, outputTokens: 5 },
           content: [{ type: "text", text: "I read the file." }],
         },
       ])
@@ -60,6 +62,14 @@ describe("tool loop", () => {
         ]),
       )
       expect(replayed.session?.completedTurns).toHaveLength(1)
+      expect(replayed.session?.completedTurns[0]?.usage).toEqual({
+        inputTokens: 30,
+        outputTokens: 7,
+      })
+      expect(replayed.session?.usage).toEqual({
+        inputTokens: 30,
+        outputTokens: 7,
+      })
       expect(
         replayed.session?.items.some(
           (item) =>

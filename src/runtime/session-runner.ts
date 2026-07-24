@@ -7,6 +7,7 @@ import {
   type KernelError,
   type SessionKernel,
   type SessionProjection,
+  type TokenUsage,
   type TurnExecutionContext,
   YakitoriErrorCode,
 } from "../kernel/index.ts"
@@ -23,6 +24,7 @@ import {
   type ModelRequest,
   type ModelResponse,
   type ModelToolCallBlock,
+  type ModelUsage,
   type StreamFn,
 } from "./model.ts"
 import { createPermissionGate, type PermissionGate } from "./permission-gate.ts"
@@ -277,6 +279,7 @@ export function createSessionRunner(
 
     let modelCallIndex = 0
     let toolCallCount = 0
+    const usages: ModelUsage[] = []
     while (modelCallIndex < input.executionContext.limits.modelCallsPerTurn) {
       if (input.signal.aborted) {
         await cancelAfterRuntimeAbort(input.sessionId, input.turnId)
@@ -311,6 +314,7 @@ export function createSessionRunner(
         request,
       })
       modelCallIndex += 1
+      if (response.usage !== undefined) usages.push(response.usage)
 
       if (
         response.stopReason === ModelStopReason.Aborted ||
@@ -424,14 +428,17 @@ export function createSessionRunner(
       }
 
       if (text.length === 0) {
+        const usage = aggregateTokenUsage(usages)
         const completed = await options.kernel.completeTurn({
           sessionId: input.sessionId,
           turnId: input.turnId,
+          ...(usage === undefined ? {} : { usage }),
         })
         publishDurable([completed.event])
         return
       }
 
+      const usage = aggregateTokenUsage(usages)
       const completed = await options.kernel.completeTurnWithAssistantOutput({
         sessionId: input.sessionId,
         turnId: input.turnId,
@@ -448,6 +455,7 @@ export function createSessionRunner(
             ? {}
             : { providerRequestId: response.providerRequestId }),
         },
+        ...(usage === undefined ? {} : { usage }),
       })
       publishDurable(completed.events)
       return
@@ -899,6 +907,19 @@ function isInvalidState(error: unknown): boolean {
     error !== null &&
     "code" in error &&
     error.code === YakitoriErrorCode.InvalidState
+  )
+}
+
+function aggregateTokenUsage(
+  usages: readonly ModelUsage[],
+): TokenUsage | undefined {
+  if (usages.length === 0) return undefined
+  return usages.reduce<TokenUsage>(
+    (total, usage) => ({
+      inputTokens: total.inputTokens + (usage.inputTokens ?? 0),
+      outputTokens: total.outputTokens + (usage.outputTokens ?? 0),
+    }),
+    { inputTokens: 0, outputTokens: 0 },
   )
 }
 

@@ -24,6 +24,9 @@ export type EventStore = {
     input?: EventStoreReadEventsInput,
   ): Promise<StoredEventEnvelope[]>
   readProjection(sessionId: string): Promise<SessionProjection | undefined>
+  rebuildProjection(
+    sessionId: string,
+  ): Promise<EventStoreRebuildProjectionResult>
   listSessions(
     input?: EventStoreListSessionsInput,
   ): Promise<EventStoreListSessionsResult>
@@ -39,6 +42,11 @@ export type EventStoreAppendOptions = {
 
 export type EventStoreReadEventsInput = {
   readonly after?: number
+}
+
+export type EventStoreRebuildProjectionResult = {
+  readonly events: readonly StoredEventEnvelope[]
+  readonly projection?: SessionProjection
 }
 
 export type EventStoreListSessionsInput = {

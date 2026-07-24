@@ -21,6 +21,36 @@ export function defineEventStoreContract(options: {
     })
   })
 
+  it(`${options.name}: persistently rebuilds a projection from facts`, async () => {
+    await options.run(async (store) => {
+      const sessionId = "session_00000000-0000-4000-8000-00000000000a"
+      await store.appendEvents(
+        sessionId,
+        [
+          {
+            type: EventType.SessionCreated,
+            data: { title: "Rebuilt" },
+          },
+          {
+            type: EventType.InputCancelled,
+            data: { inputId: "input_missing" },
+          },
+        ],
+        { expectedSeq: 0 },
+      )
+
+      const rebuilt = await store.rebuildProjection(sessionId)
+
+      expect(rebuilt.events).toHaveLength(2)
+      expect(rebuilt.projection).toEqual(await store.readProjection(sessionId))
+      expect(rebuilt.projection).toMatchObject({
+        id: sessionId,
+        seq: 2,
+        title: "Rebuilt",
+      })
+    })
+  })
+
   it(`${options.name}: rejects stale compare-and-append`, async () => {
     await options.run(async (store) => {
       const sessionId = "session_00000000-0000-4000-8000-000000000002"

@@ -105,6 +105,11 @@ facts to derived views — never back. A projection can be deleted and
 rebuilt at any time; it is never patched by hand and never treated as a
 source of truth.
 
+`turn.completed` may record the input and output token usage accumulated
+across that Turn's model calls. The Session projection sums recorded
+completed-Turn usage for future context compaction and per-Mate budgeting;
+older facts without usage remain valid.
+
 **Three layers of authority.** "Events are the facts" applies only to what
 has already happened. The full picture is:
 
