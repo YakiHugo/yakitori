@@ -30,7 +30,7 @@ describe("mate projector", () => {
         }),
       ]),
     ).toThrow(
-      expect.objectContaining({ code: YakitoriErrorCode.InvalidReplay }),
+      expect.objectContaining({ code: YakitoriErrorCode.InvalidEventLog }),
     )
   })
 
@@ -54,7 +54,7 @@ describe("mate projector", () => {
         }),
       ]),
     ).toThrow(
-      expect.objectContaining({ code: YakitoriErrorCode.InvalidReplay }),
+      expect.objectContaining({ code: YakitoriErrorCode.InvalidEventLog }),
     )
   })
 
@@ -64,7 +64,7 @@ describe("mate projector", () => {
     expect(() =>
       projectMate([createdEvent(mateId), createdEvent(mateId, 2)]),
     ).toThrow(
-      expect.objectContaining({ code: YakitoriErrorCode.InvalidReplay }),
+      expect.objectContaining({ code: YakitoriErrorCode.InvalidEventLog }),
     )
   })
 
@@ -96,7 +96,7 @@ describe("mate projector", () => {
         }),
       ]),
     ).toThrow(
-      expect.objectContaining({ code: YakitoriErrorCode.InvalidReplay }),
+      expect.objectContaining({ code: YakitoriErrorCode.InvalidEventLog }),
     )
   })
 })

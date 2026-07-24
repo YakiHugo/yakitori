@@ -3,7 +3,6 @@ import type { EventMetadata, KernelError as KernelErrorData } from "./events.ts"
 export const YakitoriErrorCode = {
   InvalidArgument: "invalid_argument",
   InvalidEventLog: "invalid_event_log",
-  InvalidReplay: "invalid_replay",
   InvalidState: "invalid_state",
   NotFound: "not_found",
 } as const

@@ -1,1682 +1,353 @@
-import { describe, expect, it } from "vitest"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { afterEach, describe, expect, it } from "vitest"
 import {
-  createInputId,
-  createSessionId,
   createSessionKernel,
   createSqliteEventStore,
   EventType,
-  InputRole,
   InputState,
-  ItemKind,
-  ItemStatus,
   PermissionBehavior,
   PermissionState,
-  type EventStore,
-  type SessionKernel,
   ToolState,
   TurnState,
-  YakitoriErrorCode,
+  type EventStore,
+  type SessionKernel,
 } from "../../src/index.ts"
 import { createMemoryEventStore } from "./memory-event-store.ts"
 
-describe.each([
-  { name: "memory" as const },
-  { name: "sqlite" as const },
-])("session kernel ($name)", ({ name: storeKind }) => {
-  it("creates a session event log", async () => {
-    await withKernel(async (context) => {
-      const session = await context.kernel.createSession({
-        title: "Yakitori",
-        workingDirectory: "/tmp/yakitori",
-        metadata: {
-          source: "test",
-        },
-      })
+const cleanup: Array<() => Promise<void>> = []
+afterEach(async () => {
+  for (const run of cleanup.splice(0)) await run()
+})
 
-      expect(session.event).toMatchObject({
-        sessionId: session.sessionId,
-        seq: 1,
-        type: EventType.SessionCreated,
-        data: {
-          title: "Yakitori",
-          workingDirectory: "/tmp/yakitori",
-          metadata: {
-            source: "test",
-          },
-        },
-      })
-      expect(await context.store.readEvents(session.sessionId)).toEqual([
-        session.event,
-      ])
-    })
-  })
+for (const implementation of ["memory", "sqlite"] as const) {
+  describe(`session witness kernel (${implementation})`, () => {
+    it("admits idempotently and folds promotion into turn.started", async () => {
+      await withKernel(implementation, async ({ kernel }) => {
+        const session = await kernel.createSession({ title: "Witness" })
+        const first = await kernel.admitInput({
+          sessionId: session.sessionId,
+          requestId: "request:same",
+          content: { kind: "text", text: "hello" },
+        })
+        const retry = await kernel.admitInput({
+          sessionId: session.sessionId,
+          requestId: "request:same",
+          content: { kind: "text", text: "hello" },
+        })
+        const turn = await kernel.startTurn({
+          sessionId: session.sessionId,
+          inputId: first.inputId,
+        })
+        const replay = await kernel.replaySession({
+          sessionId: session.sessionId,
+        })
 
-  it("updates session metadata for an existing session", async () => {
-    await withKernel(async (context) => {
-      const session = await context.kernel.createSession({
-        title: "Draft",
-        metadata: {
-          stage: "bootstrap",
-        },
-      })
-
-      const updated = await context.kernel.updateSessionMetadata({
-        sessionId: session.sessionId,
-        title: "Kernel boundary",
-        metadata: {
-          stage: "kernel",
-        },
-      })
-      const read = await context.kernel.readSession({
-        sessionId: session.sessionId,
-      })
-
-      expect(updated.event).toMatchObject({
-        sessionId: session.sessionId,
-        seq: 2,
-        type: EventType.SessionMetadataUpdated,
-        data: {
-          title: "Kernel boundary",
-          metadata: {
-            stage: "kernel",
-          },
-        },
-      })
-      expect(read.session).toMatchObject({
-        id: session.sessionId,
-        seq: 2,
-        title: "Kernel boundary",
-        metadata: {
-          stage: "kernel",
-        },
+        expect(retry).toMatchObject({ inputId: first.inputId, created: false })
+        expect(turn.events.map((event) => event.type)).toEqual([
+          EventType.TurnStarted,
+        ])
+        expect(replay.events.map((event) => event.type)).toEqual([
+          EventType.SessionCreated,
+          EventType.InputAdmitted,
+          EventType.TurnStarted,
+        ])
+        expect(replay.session?.inputs[0]).toMatchObject({
+          state: InputState.Promoted,
+          turnId: turn.turnId,
+        })
       })
     })
-  })
 
-  it("lists session summaries through the kernel facade", async () => {
-    await withKernel(async (context) => {
-      const session = await context.kernel.createSession({
-        title: "Draft",
-        workingDirectory: "/tmp/yakitori",
-      })
-      const updated = await context.kernel.updateSessionMetadata({
-        sessionId: session.sessionId,
-        title: "Kernel boundary",
-        metadata: {
-          stage: "kernel",
-        },
-      })
+    it("keeps at most one active Turn", async () => {
+      await withKernel(implementation, async ({ kernel }) => {
+        const session = await kernel.createSession()
+        const first = await admit(kernel, session.sessionId, "first")
+        const second = await admit(kernel, session.sessionId, "second")
+        await kernel.startTurn({
+          sessionId: session.sessionId,
+          inputId: first.inputId,
+        })
 
-      expect(await context.kernel.listSessions()).toEqual({
-        sessions: [
-          {
+        await expect(
+          kernel.startTurn({
             sessionId: session.sessionId,
-            seq: 2,
-            createdAt: session.event.createdAt,
-            updatedAt: updated.event.createdAt,
-            title: "Kernel boundary",
-            workingDirectory: "/tmp/yakitori",
-            metadata: {
-              stage: "kernel",
+            inputId: second.inputId,
+          }),
+        ).rejects.toThrow("already has active Turn")
+      })
+    })
+
+    it("records assistant messages and coarse tool facts", async () => {
+      await withKernel(implementation, async ({ kernel }) => {
+        const active = await activeTurn(kernel)
+        const output = await kernel.recordAssistantOutput({
+          ...active,
+          content: [
+            { type: "reasoning", text: "check first" },
+            { type: "text", text: "Reading." },
+          ],
+          toolCalls: [
+            {
+              id: "tool_read",
+              name: "read_file",
+              input: { path: "README.md" },
+              requiresPermission: false,
             },
-          },
-        ],
+          ],
+        })
+        await kernel.requireToolExecutionAllowed({
+          ...active,
+          toolCallId: "tool_read",
+        })
+        await kernel.recordToolResult({
+          ...active,
+          toolCallId: "tool_read",
+          content: { kind: "text", text: "contents" },
+          output: { bytes: 8 },
+        })
+        const read = await kernel.readSession({ sessionId: active.sessionId })
+
+        expect(output.events.map((event) => event.type)).toEqual([
+          EventType.AssistantMessage,
+          EventType.ToolCall,
+        ])
+        expect(read.session?.tools[0]).toMatchObject({
+          toolCallId: "tool_read",
+          state: ToolState.Completed,
+          output: { bytes: 8 },
+        })
+        expect(read.session?.items.map((item) => item.kind)).toEqual([
+          "assistant_message",
+          "reasoning",
+          "tool_call",
+          "tool_result",
+        ])
       })
     })
-  })
 
-  it("rejects malformed session summaries through the memory store", async () => {
-    await withKernel(async (context) => {
-      const sessionId = createSessionId()
-
-      await context.store.appendEvent(sessionId, {
-        type: EventType.InputAdmitted,
-        data: {
-          inputId: createInputId(),
-          role: InputRole.User,
-          content: {
-            kind: "text",
-            text: "orphan",
-          },
-        },
-      })
-
-      await expect(context.kernel.listSessions()).rejects.toThrow(
-        "Session log must start with session.created.",
-      )
-    })
-  })
-
-  it("admits user input for an existing session", async () => {
-    await withKernel(async (context) => {
-      const session = await context.kernel.createSession()
-      const admitted = await context.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: {
-          kind: "text",
-          text: "start the kernel",
-        },
-      })
-
-      expect(admitted.event).toMatchObject({
-        sessionId: session.sessionId,
-        seq: 2,
-        type: EventType.InputAdmitted,
-        data: {
-          inputId: admitted.inputId,
-          role: InputRole.User,
-          content: {
-            kind: "text",
-            text: "start the kernel",
-          },
-        },
-      })
-    })
-  })
-
-  it("replays an admission with the same request id and rejects changed input", async () => {
-    await withKernel(async (context) => {
-      const session = await context.kernel.createSession()
-      const first = await context.kernel.admitInput({
-        sessionId: session.sessionId,
-        requestId: "request_kernel-retry",
-        content: {
-          kind: "text",
-          text: "retry this admission",
-        },
-        metadata: {
-          first: 1,
-          second: 2,
-        },
-      })
-      const replayed = await context.kernel.admitInput({
-        sessionId: session.sessionId,
-        requestId: "request_kernel-retry",
-        content: {
-          kind: "text",
-          text: "retry this admission",
-        },
-        metadata: {
-          second: 2,
-          first: 1,
-        },
-      })
-
-      expect(first.created).toBe(true)
-      expect(replayed).toEqual({
-        ...first,
-        created: false,
-      })
-      await expect(
-        context.kernel.admitInput({
-          sessionId: session.sessionId,
-          requestId: "request_kernel-retry",
-          content: {
-            kind: "text",
-            text: "changed input",
-          },
-        }),
-      ).rejects.toMatchObject({
-        code: YakitoriErrorCode.InvalidState,
-      })
-
-      expect(await context.store.readEvents(session.sessionId)).toEqual([
-        session.event,
-        first.event,
-      ])
-    })
-  })
-
-  it("cancels admitted input before promotion", async () => {
-    await withKernel(async (context) => {
-      const session = await context.kernel.createSession()
-      const admitted = await context.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: {
-          kind: "text",
-          text: "queue this input",
-        },
-      })
-
-      const cancelled = await context.kernel.cancelInput({
-        sessionId: session.sessionId,
-        inputId: admitted.inputId,
-        reason: "superseded",
-      })
-      const read = await context.kernel.readSession({
-        sessionId: session.sessionId,
-      })
-
-      expect(cancelled.event).toMatchObject({
-        sessionId: session.sessionId,
-        seq: 3,
-        type: EventType.InputCancelled,
-        data: {
-          inputId: admitted.inputId,
-          reason: "superseded",
-        },
-      })
-      expect(read.session).toMatchObject({
-        inputs: [
-          {
-            inputId: admitted.inputId,
-            state: InputState.Cancelled,
-            cancelledReason: "superseded",
-          },
-        ],
-      })
-      await expect(
-        context.kernel.startTurn({
-          sessionId: session.sessionId,
-          inputId: admitted.inputId,
-        }),
-      ).rejects.toThrow(`Input ${admitted.inputId} has been cancelled.`)
-    })
-  })
-
-  it("serializes concurrent input promotion and cancellation", async () => {
-    await withKernel(async (context) => {
-      const session = await context.kernel.createSession()
-      const admitted = await context.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: {
-          kind: "text",
-          text: "race this input",
-        },
-      })
-
-      const results = await Promise.allSettled([
-        context.kernel.startTurn({
-          sessionId: session.sessionId,
-          inputId: admitted.inputId,
-        }),
-        context.kernel.cancelInput({
-          sessionId: session.sessionId,
-          inputId: admitted.inputId,
-        }),
-      ])
-      const replayed = await context.kernel.replaySession({
-        sessionId: session.sessionId,
-      })
-
-      expect(
-        results.filter((result) => result.status === "fulfilled"),
-      ).toHaveLength(1)
-      expect(
-        results.filter((result) => result.status === "rejected"),
-      ).toHaveLength(1)
-      expect(replayed.session).toBeDefined()
-      expect(replayed.events.map((event) => event.type)).toEqual([
-        EventType.SessionCreated,
-        EventType.InputAdmitted,
-        EventType.InputPromoted,
-        EventType.TurnStarted,
-      ])
-
-      const secondSession = await context.kernel.createSession()
-      const secondInput = await context.kernel.admitInput({
-        sessionId: secondSession.sessionId,
-        content: {
-          kind: "text",
-          text: "race cancel first",
-        },
-      })
-
-      const reversedResults = await Promise.allSettled([
-        context.kernel.cancelInput({
-          sessionId: secondSession.sessionId,
-          inputId: secondInput.inputId,
-        }),
-        context.kernel.startTurn({
-          sessionId: secondSession.sessionId,
-          inputId: secondInput.inputId,
-        }),
-      ])
-      const reversedReplay = await context.kernel.replaySession({
-        sessionId: secondSession.sessionId,
-      })
-
-      expect(
-        reversedResults.filter((result) => result.status === "fulfilled"),
-      ).toHaveLength(1)
-      expect(
-        reversedResults.filter((result) => result.status === "rejected"),
-      ).toHaveLength(1)
-      expect(reversedReplay.session).toBeDefined()
-      expect(reversedReplay.events.map((event) => event.type)).toEqual([
-        EventType.SessionCreated,
-        EventType.InputAdmitted,
-        EventType.InputCancelled,
-      ])
-    })
-  })
-
-  it("reads and replays a session from durable events", async () => {
-    await withKernel(async (context) => {
-      const session = await context.kernel.createSession({
-        title: "Replay me",
-      })
-      const admitted = await context.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: {
-          kind: "text",
-          text: "show the session",
-        },
-      })
-      const started = await context.kernel.startTurn({
-        sessionId: session.sessionId,
-        inputId: admitted.inputId,
-      })
-
-      const read = await context.kernel.readSession({
-        sessionId: session.sessionId,
-      })
-      const replayed = await context.kernel.replaySession({
-        sessionId: session.sessionId,
-      })
-
-      expect(read.session).toMatchObject({
-        id: session.sessionId,
-        title: "Replay me",
-        seq: 4,
-        turns: [
-          {
-            turnId: started.turnId,
-            state: TurnState.Started,
-          },
-        ],
-      })
-      expect(replayed.events.map((event) => event.type)).toEqual([
-        EventType.SessionCreated,
-        EventType.InputAdmitted,
-        EventType.InputPromoted,
-        EventType.TurnStarted,
-      ])
-      expect(replayed.session).toEqual(read.session)
-    })
-  })
-
-  it("starts a turn by promoting admitted input", async () => {
-    await withKernel(async (context) => {
-      const session = await context.kernel.createSession()
-      const admitted = await context.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: {
-          kind: "text",
-          text: "write the first module",
-        },
-      })
-      const started = await context.kernel.startTurn({
-        sessionId: session.sessionId,
-        inputId: admitted.inputId,
-        metadata: {
-          reason: "mvp",
-        },
-      })
-
-      expect(started.events).toMatchObject([
-        {
-          sessionId: session.sessionId,
-          seq: 3,
-          type: EventType.InputPromoted,
-          data: {
-            inputId: admitted.inputId,
-            turnId: started.turnId,
-          },
-        },
-        {
-          sessionId: session.sessionId,
-          seq: 4,
-          type: EventType.TurnStarted,
-          data: {
-            inputId: admitted.inputId,
-            turnId: started.turnId,
-            metadata: {
-              reason: "mvp",
+    it("binds one permission decision to exactly one tool call", async () => {
+      await withKernel(implementation, async ({ kernel }) => {
+        const active = await activeTurn(kernel)
+        await kernel.recordAssistantOutput({
+          ...active,
+          toolCalls: [
+            {
+              id: "tool_shell",
+              name: "run_command",
+              input: { command: "pwd" },
+              requiresPermission: true,
             },
-          },
-        },
-      ])
-      expect(
-        (await context.store.readEvents(session.sessionId)).map(
-          (event) => event.type,
-        ),
-      ).toEqual([
-        EventType.SessionCreated,
-        EventType.InputAdmitted,
-        EventType.InputPromoted,
-        EventType.TurnStarted,
-      ])
-    })
-  })
-
-  it("appends, updates, and completes an item in an active turn", async () => {
-    await withKernel(async (context) => {
-      const session = await context.kernel.createSession()
-      const admitted = await context.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: {
-          kind: "text",
-          text: "write a response",
-        },
-      })
-      const started = await context.kernel.startTurn({
-        sessionId: session.sessionId,
-        inputId: admitted.inputId,
-      })
-      const appended = await context.kernel.appendItem({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        kind: ItemKind.AssistantMessage,
-        content: {
-          kind: "text",
-          text: "draft",
-        },
-        providerMetadata: {
-          provider: "test",
-        },
-      })
-      const updated = await context.kernel.updateItem({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        itemId: appended.itemId,
-        content: {
-          kind: "text",
-          text: "final",
-        },
-      })
-      const completed = await context.kernel.completeItem({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        itemId: appended.itemId,
-        metadata: {
-          visible: true,
-        },
-      })
-
-      expect(appended.event).toMatchObject({
-        sessionId: session.sessionId,
-        seq: 5,
-        type: EventType.ItemAppended,
-        data: {
-          itemId: appended.itemId,
-          turnId: started.turnId,
-          kind: ItemKind.AssistantMessage,
-          content: {
-            kind: "text",
-            text: "draft",
-          },
-          providerMetadata: {
-            provider: "test",
-          },
-        },
-      })
-      expect(updated.event).toMatchObject({
-        sessionId: session.sessionId,
-        seq: 6,
-        type: EventType.ItemUpdated,
-        data: {
-          itemId: appended.itemId,
-          turnId: started.turnId,
-          content: {
-            kind: "text",
-            text: "final",
-          },
-        },
-      })
-      expect(completed.event).toMatchObject({
-        sessionId: session.sessionId,
-        seq: 7,
-        type: EventType.ItemCompleted,
-        data: {
-          itemId: appended.itemId,
-          turnId: started.turnId,
-          status: ItemStatus.Completed,
-          metadata: {
-            visible: true,
-          },
-        },
-      })
-    })
-  })
-
-  it("requests and resolves permission in an active turn", async () => {
-    await withKernel(async (context) => {
-      const session = await context.kernel.createSession()
-      const admitted = await context.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: {
-          kind: "text",
-          text: "run a checked command",
-        },
-      })
-      const started = await context.kernel.startTurn({
-        sessionId: session.sessionId,
-        inputId: admitted.inputId,
-      })
-      const requested = await context.kernel.requestPermission({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        action: "shell.exec",
-        subject: "pnpm test",
-        reason: "verify changes",
-      })
-      const resolved = await context.kernel.resolvePermission({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        permissionRequestId: requested.permissionRequestId,
-        behavior: PermissionBehavior.Allow,
-        reason: {
-          kind: "user_allowed",
-          message: "ok",
-        },
-      })
-
-      expect(requested.event).toMatchObject({
-        sessionId: session.sessionId,
-        seq: 5,
-        type: EventType.PermissionRequested,
-        data: {
-          permissionRequestId: requested.permissionRequestId,
-          turnId: started.turnId,
-          action: "shell.exec",
-          subject: "pnpm test",
-          reason: "verify changes",
-        },
-      })
-      expect(resolved.event).toMatchObject({
-        sessionId: session.sessionId,
-        seq: 6,
-        type: EventType.PermissionResolved,
-        data: {
-          permissionRequestId: requested.permissionRequestId,
-          turnId: started.turnId,
-          behavior: PermissionBehavior.Allow,
-          reason: {
-            kind: "user_allowed",
-            message: "ok",
-          },
-        },
-      })
-    })
-  })
-
-  it("records a permission-checked tool lifecycle", async () => {
-    await withKernel(async (context) => {
-      const session = await context.kernel.createSession()
-      const admitted = await context.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: {
-          kind: "text",
-          text: "check the project",
-        },
-      })
-      const started = await context.kernel.startTurn({
-        sessionId: session.sessionId,
-        inputId: admitted.inputId,
-      })
-      const permission = await context.kernel.requestPermission({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        action: "shell.exec",
-        subject: "pnpm check",
-      })
-
-      await context.kernel.resolvePermission({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        permissionRequestId: permission.permissionRequestId,
-        behavior: PermissionBehavior.Allow,
-      })
-
-      const requested = await context.kernel.requestTool({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        name: "shell.exec",
-        input: {
-          command: "pnpm check",
-        },
-        permissionRequestId: permission.permissionRequestId,
-      })
-      const toolStarted = await context.kernel.startTool({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        toolCallId: requested.toolCallId,
-      })
-      const progress = await context.kernel.recordToolProgress({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        toolCallId: requested.toolCallId,
-        message: "running",
-      })
-      const completed = await context.kernel.completeTool({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        toolCallId: requested.toolCallId,
-        output: {
-          exitCode: 0,
-        },
-      })
-
-      expect(requested.event).toMatchObject({
-        sessionId: session.sessionId,
-        seq: 7,
-        type: EventType.ToolRequested,
-        data: {
-          toolCallId: requested.toolCallId,
-          turnId: started.turnId,
-          name: "shell.exec",
-          input: {
-            command: "pnpm check",
-          },
+            {
+              id: "tool_other",
+              name: "run_command",
+              input: { command: "date" },
+              requiresPermission: true,
+            },
+          ],
+        })
+        const permission = await kernel.requestPermission({
+          ...active,
+          toolCallId: "tool_shell",
+          action: "run_command",
+        })
+        await kernel.resolvePermission({
+          ...active,
           permissionRequestId: permission.permissionRequestId,
-        },
-      })
-      expect(toolStarted.event.type).toBe(EventType.ToolStarted)
-      expect(progress.event).toMatchObject({
-        seq: 9,
-        type: EventType.ToolProgress,
-        data: {
-          toolCallId: requested.toolCallId,
-          message: "running",
-        },
-      })
-      expect(completed.event).toMatchObject({
-        seq: 10,
-        type: EventType.ToolCompleted,
-        data: {
-          toolCallId: requested.toolCallId,
-          output: {
-            exitCode: 0,
-          },
-        },
+          behavior: PermissionBehavior.Allow,
+        })
+
+        await expect(
+          kernel.requireToolExecutionAllowed({
+            ...active,
+            toolCallId: "tool_shell",
+          }),
+        ).resolves.toBeUndefined()
+        await expect(
+          kernel.requireToolExecutionAllowed({
+            ...active,
+            toolCallId: "tool_other",
+          }),
+        ).rejects.toThrow("has not been allowed")
+
+        const read = await kernel.readSession({ sessionId: active.sessionId })
+        expect(read.session?.permissions[0]).toMatchObject({
+          toolCallId: "tool_shell",
+          state: PermissionState.Resolved,
+          behavior: PermissionBehavior.Allow,
+        })
       })
     })
-  })
 
-  it("rejects binding a tool to a denied permission", async () => {
-    await withKernel(async (context) => {
-      const session = await context.kernel.createSession()
-      const admitted = await context.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: {
-          kind: "text",
-          text: "try a denied command",
-        },
-      })
-      const started = await context.kernel.startTurn({
-        sessionId: session.sessionId,
-        inputId: admitted.inputId,
-      })
-      const permission = await context.kernel.requestPermission({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        action: "shell.exec",
-        subject: "rm -rf dist",
-      })
-
-      await context.kernel.resolvePermission({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        permissionRequestId: permission.permissionRequestId,
-        behavior: PermissionBehavior.Deny,
-      })
-
-      const deniedBind = context.kernel.requestTool({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        name: "shell.exec",
-        input: {
-          command: "rm -rf dist",
-        },
-        permissionRequestId: permission.permissionRequestId,
-      })
-
-      await expect(deniedBind).rejects.toThrow(
-        `Permission ${permission.permissionRequestId} resolved with deny.`,
-      )
-      await expect(deniedBind).rejects.toMatchObject({
-        code: YakitoriErrorCode.InvalidState,
-        details: {
+    it("never binds a denied permission to its tool call", async () => {
+      await withKernel(implementation, async ({ kernel }) => {
+        const active = await activeTurn(kernel)
+        await kernel.recordAssistantOutput({
+          ...active,
+          toolCalls: [
+            {
+              id: "tool_denied",
+              name: "run_command",
+              input: { command: "rm file" },
+              requiresPermission: true,
+            },
+          ],
+        })
+        const permission = await kernel.requestPermission({
+          ...active,
+          toolCallId: "tool_denied",
+          action: "run_command",
+        })
+        await kernel.resolvePermission({
+          ...active,
           permissionRequestId: permission.permissionRequestId,
           behavior: PermissionBehavior.Deny,
-        },
+        })
+
+        await expect(
+          kernel.requireToolExecutionAllowed({
+            ...active,
+            toolCallId: "tool_denied",
+          }),
+        ).rejects.toThrow("has not been allowed")
       })
     })
-  })
 
-  it("rejects binding a second tool to the same permission grant", async () => {
-    await withKernel(async (context) => {
-      const session = await context.kernel.createSession()
-      const admitted = await context.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: {
-          kind: "text",
-          text: "one grant one tool",
-        },
-      })
-      const started = await context.kernel.startTurn({
-        sessionId: session.sessionId,
-        inputId: admitted.inputId,
-      })
-      const permission = await context.kernel.requestPermission({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        action: "shell.exec",
-        subject: "pnpm test",
-      })
-      await context.kernel.resolvePermission({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        permissionRequestId: permission.permissionRequestId,
-        behavior: PermissionBehavior.Allow,
-      })
+    it("allows a Turn to finish with open work and accepts one late result", async () => {
+      await withKernel(implementation, async ({ kernel }) => {
+        const active = await activeTurn(kernel)
+        await kernel.recordAssistantOutput({
+          ...active,
+          toolCalls: [
+            {
+              id: "tool_background",
+              name: "background",
+              input: {},
+              requiresPermission: false,
+            },
+          ],
+        })
+        await kernel.completeTurn(active)
+        await kernel.recordToolResult({
+          ...active,
+          toolCallId: "tool_background",
+          content: { kind: "text", text: "done later" },
+        })
 
-      const first = await context.kernel.requestTool({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        name: "shell.exec",
-        input: { command: "pnpm test" },
-        permissionRequestId: permission.permissionRequestId,
+        await expect(
+          kernel.recordToolResult({
+            ...active,
+            toolCallId: "tool_background",
+            content: { kind: "text", text: "duplicate" },
+          }),
+        ).rejects.toThrow("already has a result")
+        const read = await kernel.readSession({ sessionId: active.sessionId })
+        expect(read.session?.turns[0]?.state).toBe(TurnState.Completed)
+        expect(read.session?.tools[0]?.state).toBe(ToolState.Completed)
       })
-      await context.kernel.startTool({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        toolCallId: first.toolCallId,
-      })
+    })
 
-      const second = context.kernel.requestTool({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        name: "shell.exec",
-        input: { command: "pnpm test --watch" },
-        permissionRequestId: permission.permissionRequestId,
-      })
+    it("records interruption once without fabricating closure facts", async () => {
+      await withKernel(implementation, async ({ kernel }) => {
+        const active = await activeTurn(kernel)
+        await kernel.recordAssistantOutput({
+          ...active,
+          toolCalls: [
+            {
+              id: "tool_stranded",
+              name: "run_command",
+              input: { command: "sleep 30" },
+              requiresPermission: true,
+            },
+          ],
+        })
+        const permission = await kernel.requestPermission({
+          ...active,
+          toolCallId: "tool_stranded",
+          action: "run_command",
+        })
+        const first = await kernel.interruptTurn({
+          ...active,
+          reason: "restart",
+        })
+        const retry = await kernel.interruptTurn({
+          ...active,
+          reason: "restart",
+        })
+        const replay = await kernel.replaySession({
+          sessionId: active.sessionId,
+        })
 
-      await expect(second).rejects.toThrow(
-        `Permission ${permission.permissionRequestId} is already bound to tool ${first.toolCallId}.`,
-      )
-      await expect(second).rejects.toMatchObject({
-        code: YakitoriErrorCode.InvalidState,
-        details: {
+        expect(first.created).toBe(true)
+        expect(retry).toEqual({ events: [], created: false })
+        expect(replay.events.map((event) => event.type)).toContain(
+          EventType.TurnInterrupted,
+        )
+        expect(replay.events.map((event) => event.type)).not.toContain(
+          "permission.cancelled",
+        )
+        expect(replay.session?.turns[0]).toMatchObject({
+          state: TurnState.Interrupted,
+          interruptedReason: "restart",
+        })
+        expect(replay.session?.tools[0]?.state).toBe(ToolState.Requested)
+        expect(replay.session?.permissions[0]).toMatchObject({
           permissionRequestId: permission.permissionRequestId,
-          toolCallId: first.toolCallId,
-        },
+          state: PermissionState.Pending,
+        })
+      })
+    })
+
+    it("keeps write-through and replay rebuilt projections equal", async () => {
+      await withKernel(implementation, async ({ kernel }) => {
+        const active = await activeTurn(kernel)
+        await kernel.completeTurnWithAssistantOutput({
+          ...active,
+          content: { kind: "text", text: "done" },
+        })
+        const read = await kernel.readSession({ sessionId: active.sessionId })
+        const replay = await kernel.replaySession({
+          sessionId: active.sessionId,
+        })
+        expect(read.session).toEqual(replay.session)
       })
     })
   })
+}
 
-  it("rejects binding a tool to a cancelled permission", async () => {
-    await withKernel(async (context) => {
-      const session = await context.kernel.createSession()
-      const admitted = await context.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: {
-          kind: "text",
-          text: "cancel the ask",
-        },
-      })
-      const started = await context.kernel.startTurn({
-        sessionId: session.sessionId,
-        inputId: admitted.inputId,
-      })
-      const permission = await context.kernel.requestPermission({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        action: "shell.exec",
-      })
-      await context.kernel.cancelPermission({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        permissionRequestId: permission.permissionRequestId,
-        reason: "user cancelled",
-      })
-
-      const cancelledBind = context.kernel.requestTool({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        name: "shell.exec",
-        input: { command: "pnpm test" },
-        permissionRequestId: permission.permissionRequestId,
-      })
-
-      await expect(cancelledBind).rejects.toThrow(
-        `Permission ${permission.permissionRequestId} is already cancelled.`,
-      )
-      await expect(cancelledBind).rejects.toMatchObject({
-        code: YakitoriErrorCode.InvalidState,
-        details: {
-          permissionRequestId: permission.permissionRequestId,
-          state: PermissionState.Cancelled,
-        },
-      })
-    })
+async function activeTurn(kernel: SessionKernel) {
+  const session = await kernel.createSession()
+  const input = await admit(kernel, session.sessionId, "work")
+  const turn = await kernel.startTurn({
+    sessionId: session.sessionId,
+    inputId: input.inputId,
   })
+  return { sessionId: session.sessionId, turnId: turn.turnId }
+}
 
-  it("projects a permission as bound after tool request replay", async () => {
-    await withKernel(async (context) => {
-      const session = await context.kernel.createSession()
-      const admitted = await context.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: {
-          kind: "text",
-          text: "bind on request",
-        },
-      })
-      const started = await context.kernel.startTurn({
-        sessionId: session.sessionId,
-        inputId: admitted.inputId,
-      })
-      const permission = await context.kernel.requestPermission({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        action: "shell.exec",
-      })
-      await context.kernel.resolvePermission({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        permissionRequestId: permission.permissionRequestId,
-        behavior: PermissionBehavior.Allow,
-      })
-      const tool = await context.kernel.requestTool({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        name: "shell.exec",
-        input: { command: "pnpm test" },
-        permissionRequestId: permission.permissionRequestId,
-      })
-      const read = await context.kernel.readSession({
-        sessionId: session.sessionId,
-      })
-
-      expect(read.session).toMatchObject({
-        permissions: [
-          {
-            permissionRequestId: permission.permissionRequestId,
-            toolCallId: tool.toolCallId,
-            state: PermissionState.Resolved,
-            behavior: PermissionBehavior.Allow,
-          },
-        ],
-      })
-    })
+function admit(kernel: SessionKernel, sessionId: string, text: string) {
+  return kernel.admitInput({
+    sessionId,
+    requestId: `request:${text}`,
+    content: { kind: "text", text },
   })
+}
 
-  it("enforces permissions that are bound to an existing tool call", async () => {
-    await withKernel(async (context) => {
-      const session = await context.kernel.createSession()
-      const admitted = await context.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: {
-          kind: "text",
-          text: "bind permission after tool request",
-        },
-      })
-      const started = await context.kernel.startTurn({
-        sessionId: session.sessionId,
-        inputId: admitted.inputId,
-      })
-      const tool = await context.kernel.requestTool({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        name: "shell.exec",
-        input: {
-          command: "pnpm test",
-        },
-      })
-      const permission = await context.kernel.requestPermission({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        action: "shell.exec",
-        subject: "pnpm test",
-        toolCallId: tool.toolCallId,
-      })
-
-      const pendingStart = context.kernel.startTool({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        toolCallId: tool.toolCallId,
-      })
-
-      await expect(pendingStart).rejects.toThrow(
-        `Permission ${permission.permissionRequestId} has not been allowed.`,
-      )
-      await expect(pendingStart).rejects.toMatchObject({
-        code: YakitoriErrorCode.InvalidState,
-        details: {
-          permissionRequestId: permission.permissionRequestId,
-          state: PermissionState.Requested,
-        },
-      })
-
-      await context.kernel.resolvePermission({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        permissionRequestId: permission.permissionRequestId,
-        behavior: PermissionBehavior.Allow,
-      })
-
-      await expect(
-        context.kernel.startTool({
-          sessionId: session.sessionId,
-          turnId: started.turnId,
-          toolCallId: tool.toolCallId,
-        }),
-      ).resolves.toMatchObject({
-        event: {
-          type: EventType.ToolStarted,
-          data: {
-            toolCallId: tool.toolCallId,
-          },
-        },
-      })
-    })
-  })
-
-  it("rejects completing a turn while work is still open", async () => {
-    await withKernel(async (context) => {
-      const session = await context.kernel.createSession()
-      const admitted = await context.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: {
-          kind: "text",
-          text: "leave work open",
-        },
-      })
-      const started = await context.kernel.startTurn({
-        sessionId: session.sessionId,
-        inputId: admitted.inputId,
-      })
-      const item = await context.kernel.appendItem({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        kind: ItemKind.AssistantMessage,
-        content: {
-          kind: "text",
-          text: "not done",
-        },
-      })
-
-      await expect(
-        context.kernel.completeTurn({
-          sessionId: session.sessionId,
-          turnId: started.turnId,
-          outputItemId: item.itemId,
-        }),
-      ).rejects.toThrow(`Item ${item.itemId} is in_progress.`)
-    })
-  })
-
-  it("cancels open work before cancelling the turn", async () => {
-    await withKernel(async (context) => {
-      const session = await context.kernel.createSession()
-      const admitted = await context.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: {
-          kind: "text",
-          text: "cancel everything",
-        },
-      })
-      const started = await context.kernel.startTurn({
-        sessionId: session.sessionId,
-        inputId: admitted.inputId,
-      })
-      const item = await context.kernel.appendItem({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        kind: ItemKind.AssistantMessage,
-        content: {
-          kind: "text",
-          text: "draft",
-        },
-      })
-      const permission = await context.kernel.requestPermission({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        action: "shell.exec",
-      })
-      const tool = await context.kernel.requestTool({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        name: "shell.exec",
-        input: {
-          command: "pnpm test",
-        },
-      })
-      const cancelled = await context.kernel.cancelTurn({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        reason: "user stopped",
-      })
-      const read = await context.kernel.readSession({
-        sessionId: session.sessionId,
-      })
-
-      expect(cancelled.events.map((event) => event.type)).toEqual([
-        EventType.ToolCancelled,
-        EventType.PermissionCancelled,
-        EventType.ItemCompleted,
-        EventType.TurnCancelled,
-      ])
-      expect(read.session).toMatchObject({
-        items: [
-          {
-            itemId: item.itemId,
-            status: ItemStatus.Failed,
-          },
-        ],
-        permissions: [
-          {
-            permissionRequestId: permission.permissionRequestId,
-            state: PermissionState.Cancelled,
-          },
-        ],
-        tools: [
-          {
-            toolCallId: tool.toolCallId,
-            state: ToolState.Cancelled,
-          },
-        ],
-        turns: [
-          {
-            turnId: started.turnId,
-            state: TurnState.Cancelled,
-          },
-        ],
-      })
-    })
-  })
-
-  it("completes an active turn and allows the next turn", async () => {
-    await withKernel(async (context) => {
-      const session = await context.kernel.createSession()
-      const firstInput = await context.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: {
-          kind: "text",
-          text: "first input",
-        },
-      })
-      const firstTurn = await context.kernel.startTurn({
-        sessionId: session.sessionId,
-        inputId: firstInput.inputId,
-      })
-      const output = await context.kernel.appendItem({
-        sessionId: session.sessionId,
-        turnId: firstTurn.turnId,
-        kind: ItemKind.AssistantMessage,
-        content: {
-          kind: "text",
-          text: "first output",
-        },
-      })
-      await context.kernel.completeItem({
-        sessionId: session.sessionId,
-        turnId: firstTurn.turnId,
-        itemId: output.itemId,
-      })
-      const completed = await context.kernel.completeTurn({
-        sessionId: session.sessionId,
-        turnId: firstTurn.turnId,
-        outputItemId: output.itemId,
-        metadata: {
-          status: "done",
-        },
-      })
-      const secondInput = await context.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: {
-          kind: "text",
-          text: "second input",
-        },
-      })
-      const secondTurn = await context.kernel.startTurn({
-        sessionId: session.sessionId,
-        inputId: secondInput.inputId,
-      })
-
-      expect(completed.event).toMatchObject({
-        sessionId: session.sessionId,
-        seq: 7,
-        type: EventType.TurnCompleted,
-        data: {
-          turnId: firstTurn.turnId,
-          outputItemId: output.itemId,
-          metadata: {
-            status: "done",
-          },
-        },
-      })
-      expect(secondTurn.events.map((event) => event.seq)).toEqual([9, 10])
-    })
-  })
-
-  it("fails an active turn", async () => {
-    await withKernel(async (context) => {
-      const session = await context.kernel.createSession()
-      const admitted = await context.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: {
-          kind: "text",
-          text: "fail this turn",
-        },
-      })
-      const started = await context.kernel.startTurn({
-        sessionId: session.sessionId,
-        inputId: admitted.inputId,
-      })
-
-      const failed = await context.kernel.failTurn({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        error: {
-          message: "model failed",
-          code: "model_error",
-        },
-      })
-
-      expect(failed.event).toMatchObject({
-        sessionId: session.sessionId,
-        seq: 5,
-        type: EventType.TurnFailed,
-        data: {
-          turnId: started.turnId,
-          error: {
-            message: "model failed",
-            code: "model_error",
-          },
-        },
-      })
-    })
-  })
-
-  it("cancels an active turn", async () => {
-    await withKernel(async (context) => {
-      const session = await context.kernel.createSession()
-      const admitted = await context.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: {
-          kind: "text",
-          text: "cancel this turn",
-        },
-      })
-      const started = await context.kernel.startTurn({
-        sessionId: session.sessionId,
-        inputId: admitted.inputId,
-      })
-
-      const cancelled = await context.kernel.cancelTurn({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        reason: "user interrupted",
-      })
-
-      expect(cancelled.event).toMatchObject({
-        sessionId: session.sessionId,
-        seq: 5,
-        type: EventType.TurnCancelled,
-        data: {
-          turnId: started.turnId,
-          reason: "user interrupted",
-        },
-      })
-    })
-  })
-
-  it("rejects ending a turn twice", async () => {
-    await withKernel(async (context) => {
-      const session = await context.kernel.createSession()
-      const admitted = await context.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: {
-          kind: "text",
-          text: "complete once",
-        },
-      })
-      const started = await context.kernel.startTurn({
-        sessionId: session.sessionId,
-        inputId: admitted.inputId,
-      })
-
-      await context.kernel.completeTurn({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-      })
-
-      await expect(
-        context.kernel.cancelTurn({
-          sessionId: session.sessionId,
-          turnId: started.turnId,
-        }),
-      ).rejects.toThrow(`Turn ${started.turnId} is already completed.`)
-    })
-  })
-
-  it("rejects updating a completed item", async () => {
-    await withKernel(async (context) => {
-      const session = await context.kernel.createSession()
-      const admitted = await context.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: {
-          kind: "text",
-          text: "item closes once",
-        },
-      })
-      const started = await context.kernel.startTurn({
-        sessionId: session.sessionId,
-        inputId: admitted.inputId,
-      })
-      const item = await context.kernel.appendItem({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        kind: ItemKind.AssistantMessage,
-        content: {
-          kind: "text",
-          text: "closed",
-        },
-      })
-
-      await context.kernel.completeItem({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        itemId: item.itemId,
-      })
-
-      await expect(
-        context.kernel.updateItem({
-          sessionId: session.sessionId,
-          turnId: started.turnId,
-          itemId: item.itemId,
-          content: {
-            kind: "text",
-            text: "too late",
-          },
-        }),
-      ).rejects.toThrow(`Item ${item.itemId} is already completed.`)
-    })
-  })
-
-  it("rejects input admission before session creation", async () => {
-    await withKernel(async (context) => {
-      await expect(
-        context.kernel.admitInput({
-          sessionId: createSessionId(),
-          content: {
-            kind: "text",
-            text: "orphan input",
-          },
-        }),
-      ).rejects.toThrow("has not been created")
-    })
-  })
-
-  it("rejects starting a turn twice for the same input", async () => {
-    await withKernel(async (context) => {
-      const session = await context.kernel.createSession()
-      const admitted = await context.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: {
-          kind: "text",
-          text: "run once",
-        },
-      })
-
-      await context.kernel.startTurn({
-        sessionId: session.sessionId,
-        inputId: admitted.inputId,
-      })
-
-      await expect(
-        context.kernel.startTurn({
-          sessionId: session.sessionId,
-          inputId: admitted.inputId,
-        }),
-      ).rejects.toThrow("has already been promoted")
-    })
-  })
-
-  it("rejects starting another turn while one is active", async () => {
-    await withKernel(async (context) => {
-      const session = await context.kernel.createSession()
-      const firstInput = await context.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: {
-          kind: "text",
-          text: "first turn",
-        },
-      })
-      const secondInput = await context.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: {
-          kind: "text",
-          text: "second turn",
-        },
-      })
-
-      const firstTurn = await context.kernel.startTurn({
-        sessionId: session.sessionId,
-        inputId: firstInput.inputId,
-      })
-
-      await expect(
-        context.kernel.startTurn({
-          sessionId: session.sessionId,
-          inputId: secondInput.inputId,
-        }),
-      ).rejects.toThrow(
-        `Session ${session.sessionId} already has active turn ${firstTurn.turnId}.`,
-      )
-    })
-  })
-
-  it("rejects starting a turn for unknown input", async () => {
-    await withKernel(async (context) => {
-      const session = await context.kernel.createSession()
-
-      await expect(
-        context.kernel.startTurn({
-          sessionId: session.sessionId,
-          inputId: createInputId(),
-        }),
-      ).rejects.toThrow("has not been admitted")
-    })
-  })
-
-  it("cancels a pending permission", async () => {
-    await withKernel(async (context) => {
-      const session = await context.kernel.createSession()
-      const admitted = await context.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: { kind: "text", text: "cancel permission" },
-      })
-      const started = await context.kernel.startTurn({
-        sessionId: session.sessionId,
-        inputId: admitted.inputId,
-      })
-      const permission = await context.kernel.requestPermission({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        action: "shell.exec",
-      })
-
-      const cancelled = await context.kernel.cancelPermission({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        permissionRequestId: permission.permissionRequestId,
-        reason: "user dismissed",
-      })
-      const read = await context.kernel.readSession({
-        sessionId: session.sessionId,
-      })
-
-      expect(cancelled.event).toMatchObject({
-        type: EventType.PermissionCancelled,
-        data: {
-          permissionRequestId: permission.permissionRequestId,
-          reason: "user dismissed",
-        },
-      })
-      expect(read.session).toMatchObject({
-        permissions: [
-          {
-            permissionRequestId: permission.permissionRequestId,
-            state: PermissionState.Cancelled,
-            cancelledReason: "user dismissed",
-          },
-        ],
-      })
-    })
-  })
-
-  it("rejects cancelling a resolved permission", async () => {
-    await withKernel(async (context) => {
-      const session = await context.kernel.createSession()
-      const admitted = await context.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: { kind: "text", text: "already resolved" },
-      })
-      const started = await context.kernel.startTurn({
-        sessionId: session.sessionId,
-        inputId: admitted.inputId,
-      })
-      const permission = await context.kernel.requestPermission({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        action: "shell.exec",
-      })
-      await context.kernel.resolvePermission({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        permissionRequestId: permission.permissionRequestId,
-        behavior: PermissionBehavior.Allow,
-      })
-
-      await expect(
-        context.kernel.cancelPermission({
-          sessionId: session.sessionId,
-          turnId: started.turnId,
-          permissionRequestId: permission.permissionRequestId,
-        }),
-      ).rejects.toMatchObject({
-        code: YakitoriErrorCode.InvalidState,
-        message: `Permission ${permission.permissionRequestId} is already resolved.`,
-      })
-    })
-  })
-
-  it("fails a started tool", async () => {
-    await withKernel(async (context) => {
-      const session = await context.kernel.createSession()
-      const admitted = await context.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: { kind: "text", text: "fail tool" },
-      })
-      const started = await context.kernel.startTurn({
-        sessionId: session.sessionId,
-        inputId: admitted.inputId,
-      })
-      const tool = await context.kernel.requestTool({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        name: "shell.exec",
-        input: { command: "false" },
-      })
-      await context.kernel.startTool({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        toolCallId: tool.toolCallId,
-      })
-
-      const failed = await context.kernel.failTool({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        toolCallId: tool.toolCallId,
-        error: { message: "exit 1", code: "tool_failed" },
-      })
-      const read = await context.kernel.readSession({
-        sessionId: session.sessionId,
-      })
-
-      expect(failed.event).toMatchObject({
-        type: EventType.ToolFailed,
-        data: {
-          toolCallId: tool.toolCallId,
-          error: { message: "exit 1", code: "tool_failed" },
-        },
-      })
-      expect(read.session).toMatchObject({
-        tools: [
-          {
-            toolCallId: tool.toolCallId,
-            state: ToolState.Failed,
-            error: { message: "exit 1", code: "tool_failed" },
-          },
-        ],
-      })
-    })
-  })
-
-  it("rejects failing a tool that has not started", async () => {
-    await withKernel(async (context) => {
-      const session = await context.kernel.createSession()
-      const admitted = await context.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: { kind: "text", text: "fail too early" },
-      })
-      const started = await context.kernel.startTurn({
-        sessionId: session.sessionId,
-        inputId: admitted.inputId,
-      })
-      const tool = await context.kernel.requestTool({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        name: "shell.exec",
-        input: { command: "false" },
-      })
-
-      await expect(
-        context.kernel.failTool({
-          sessionId: session.sessionId,
-          turnId: started.turnId,
-          toolCallId: tool.toolCallId,
-          error: { message: "too early" },
-        }),
-      ).rejects.toMatchObject({
-        code: YakitoriErrorCode.InvalidState,
-        message: `Tool ${tool.toolCallId} is already requested.`,
-      })
-    })
-  })
-
-  it("cancels a requested or started tool", async () => {
-    await withKernel(async (context) => {
-      const session = await context.kernel.createSession()
-      const admitted = await context.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: { kind: "text", text: "cancel tool" },
-      })
-      const started = await context.kernel.startTurn({
-        sessionId: session.sessionId,
-        inputId: admitted.inputId,
-      })
-      const requested = await context.kernel.requestTool({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        name: "shell.exec",
-        input: { command: "sleep 10" },
-      })
-      const cancelledRequested = await context.kernel.cancelTool({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        toolCallId: requested.toolCallId,
-        reason: "never mind",
-      })
-
-      const startedTool = await context.kernel.requestTool({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        name: "shell.exec",
-        input: { command: "sleep 20" },
-      })
-      await context.kernel.startTool({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        toolCallId: startedTool.toolCallId,
-      })
-      const cancelledStarted = await context.kernel.cancelTool({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        toolCallId: startedTool.toolCallId,
-        reason: "timeout",
-      })
-
-      expect(cancelledRequested.event).toMatchObject({
-        type: EventType.ToolCancelled,
-        data: {
-          toolCallId: requested.toolCallId,
-          reason: "never mind",
-        },
-      })
-      expect(cancelledStarted.event).toMatchObject({
-        type: EventType.ToolCancelled,
-        data: {
-          toolCallId: startedTool.toolCallId,
-          reason: "timeout",
-        },
-      })
-    })
-  })
-
-  it("rejects cancelling a completed tool", async () => {
-    await withKernel(async (context) => {
-      const session = await context.kernel.createSession()
-      const admitted = await context.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: { kind: "text", text: "cancel completed" },
-      })
-      const started = await context.kernel.startTurn({
-        sessionId: session.sessionId,
-        inputId: admitted.inputId,
-      })
-      const tool = await context.kernel.requestTool({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        name: "shell.exec",
-        input: { command: "true" },
-      })
-      await context.kernel.startTool({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        toolCallId: tool.toolCallId,
-      })
-      await context.kernel.completeTool({
-        sessionId: session.sessionId,
-        turnId: started.turnId,
-        toolCallId: tool.toolCallId,
-        output: { exitCode: 0 },
-      })
-
-      await expect(
-        context.kernel.cancelTool({
-          sessionId: session.sessionId,
-          turnId: started.turnId,
-          toolCallId: tool.toolCallId,
-        }),
-      ).rejects.toMatchObject({
-        code: YakitoriErrorCode.InvalidState,
-        message: `Tool ${tool.toolCallId} is already completed.`,
-      })
-    })
-  })
-
-  async function withKernel(
-    run: (context: {
-      readonly kernel: SessionKernel
-      readonly store: EventStore
-    }) => Promise<void>,
-  ): Promise<void> {
-    if (storeKind === "memory") {
-      const store = createMemoryEventStore()
-      await run({
-        kernel: createSessionKernel(store),
-        store,
-      })
-      return
-    }
-
-    const rootDir = await mkdtemp(join(tmpdir(), "yakitori-kernel-"))
-    const store = createSqliteEventStore({ rootDir })
-    try {
-      await run({
-        kernel: createSessionKernel(store),
-        store,
-      })
-    } finally {
-      store.close()
-      await rm(rootDir, { recursive: true, force: true })
-    }
+async function withKernel(
+  implementation: "memory" | "sqlite",
+  run: (context: { kernel: SessionKernel; store: EventStore }) => Promise<void>,
+) {
+  if (implementation === "memory") {
+    const store = createMemoryEventStore()
+    await run({ kernel: createSessionKernel(store), store })
+    return
   }
-})
+  const rootDir = await mkdtemp(join(tmpdir(), "yakitori-witness-"))
+  const store = createSqliteEventStore({ rootDir })
+  cleanup.push(async () => {
+    store.close()
+    await rm(rootDir, { recursive: true, force: true })
+  })
+  await run({ kernel: createSessionKernel(store), store })
+}

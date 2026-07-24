@@ -165,7 +165,7 @@ function requireProfile(profile: MateProfile, event: MateEventEnvelope): void {
 
 function invalidReplay(message: string, event: MateEventEnvelope | undefined) {
   return createYakitoriError({
-    code: YakitoriErrorCode.InvalidReplay,
+    code: YakitoriErrorCode.InvalidEventLog,
     message,
     ...(event === undefined
       ? {}

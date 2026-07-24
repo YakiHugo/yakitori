@@ -1,15 +1,17 @@
 import {
   createEventEnvelope,
+  applySessionFacts,
   type EventEnvelope,
   type EventStore,
   type EventStoreAppendOptions,
   type KernelEvent,
+  type SessionProjection,
 } from "../../src/index.ts"
 import {
   paginateSessionSummaries,
   requireExpectedSequence,
   requireOperationFingerprint,
-  summarizeStoredSession,
+  summarizeSessionProjection,
 } from "../../src/kernel/event-store.ts"
 
 type MemoryOperationRecord = {
@@ -21,6 +23,7 @@ type MemoryOperationRecord = {
 export function createMemoryEventStore(): EventStore {
   const sessions = new Map<string, EventEnvelope[]>()
   const operations = new Map<string, MemoryOperationRecord>()
+  const projections = new Map<string, SessionProjection>()
 
   return {
     async appendEvent(sessionId, event, options) {
@@ -32,21 +35,25 @@ export function createMemoryEventStore(): EventStore {
 
     appendEvents,
 
-    async readEvents(sessionId) {
-      return [...(sessions.get(sessionId) ?? [])]
+    async readEvents(sessionId, input = {}) {
+      return structuredClone(
+        (sessions.get(sessionId) ?? []).filter(
+          (event) => event.seq > (input.after ?? 0),
+        ),
+      )
+    },
+
+    async readProjection(sessionId) {
+      const projection = projections.get(sessionId)
+      return projection === undefined ? undefined : structuredClone(projection)
     },
 
     async listSessions(input = {}) {
-      const summaries = Array.from(sessions.entries())
-        .map(([sessionId, events]) => summarizeStoredSession(sessionId, events))
-        .filter((summary) => summary !== undefined)
-        .sort((left, right) => {
-          const updatedAt = right.updatedAt.localeCompare(left.updatedAt)
-          if (updatedAt !== 0) return updatedAt
-          return left.sessionId.localeCompare(right.sessionId)
-        })
+      const summaries = Array.from(projections.values()).map(
+        summarizeSessionProjection,
+      )
 
-      return paginateSessionSummaries(summaries, input)
+      return structuredClone(paginateSessionSummaries(summaries, input))
     },
   }
 
@@ -66,9 +73,11 @@ export function createMemoryEventStore(): EventStore {
           options.operation,
           operation.fingerprint,
         )
-        return existingEvents.slice(
-          operation.firstSeq - 1,
-          operation.firstSeq - 1 + operation.eventCount,
+        return structuredClone(
+          existingEvents.slice(
+            operation.firstSeq - 1,
+            operation.firstSeq - 1 + operation.eventCount,
+          ),
         )
       }
     }
@@ -84,8 +93,15 @@ export function createMemoryEventStore(): EventStore {
         event,
       }),
     )
+    const storedEnvelopes = structuredClone(envelopes)
+    const projection = applySessionFacts(
+      projections.get(sessionId),
+      storedEnvelopes,
+    )
+    if (!projection) throw new Error("Expected appended Session projection.")
 
-    sessions.set(sessionId, [...existingEvents, ...envelopes])
+    sessions.set(sessionId, [...existingEvents, ...storedEnvelopes])
+    projections.set(sessionId, structuredClone(projection))
     if (options.operation !== undefined) {
       operations.set(`${sessionId}\u0000${options.operation.id}`, {
         fingerprint: options.operation.fingerprint,
@@ -93,6 +109,6 @@ export function createMemoryEventStore(): EventStore {
         eventCount: envelopes.length,
       })
     }
-    return envelopes
+    return structuredClone(storedEnvelopes)
   }
 }

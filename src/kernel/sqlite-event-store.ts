@@ -3,22 +3,25 @@ import { dirname, join } from "node:path"
 import { DatabaseSync } from "node:sqlite"
 import {
   assertEventStoreSessionId,
-  assertStoredEventRange,
-  assertStoredSessionEvents,
   type EventStore,
   type EventStoreAppendOptions,
   paginateSessionSummaries,
   parseStoredEventEnvelope,
   requireExpectedSequence,
   requireOperationFingerprint,
-  summarizeStoredSession,
+  summarizeSessionProjection,
 } from "./event-store.ts"
 import { createYakitoriError, YakitoriErrorCode } from "./errors.ts"
 import {
   createEventEnvelope,
   type EventEnvelope,
   type KernelEvent,
+  type StoredEventEnvelope,
 } from "./events.ts"
+import {
+  applySessionFacts,
+  type SessionProjection,
+} from "./session-projector.ts"
 
 export type SqliteEventStore = EventStore & {
   close(): void
@@ -39,12 +42,12 @@ type OperationRow = {
   readonly first_seq: number
 }
 
-type SequenceRow = {
-  readonly seq: number
+type ProjectionRow = {
+  readonly projection_json: string
 }
 
-type SessionRow = {
-  readonly session_id: string
+type SequenceRow = {
+  readonly seq: number
 }
 
 export function createSqliteEventStore(
@@ -81,29 +84,26 @@ export function createSqliteEventStore(
       return appendEvents(database, sessionId, events, appendOptions)
     },
 
-    async readEvents(sessionId) {
+    async readEvents(sessionId, input = {}) {
       assertEventStoreSessionId(sessionId)
-      return readEvents(database, sessionId)
+      return readEvents(database, sessionId, input.after ?? 0)
+    },
+
+    async readProjection(sessionId) {
+      assertEventStoreSessionId(sessionId)
+      return readProjection(database, sessionId)
     },
 
     async listSessions(input = {}) {
       const summaries = (
         database
-          .prepare("SELECT DISTINCT session_id FROM events")
-          .all() as SessionRow[]
+          .prepare("SELECT projection_json FROM session_projections")
+          .all() as ProjectionRow[]
+      ).map((row) =>
+        summarizeSessionProjection(
+          JSON.parse(row.projection_json) as SessionProjection,
+        ),
       )
-        .map((row) =>
-          summarizeStoredSession(
-            row.session_id,
-            readEvents(database, row.session_id),
-          ),
-        )
-        .filter((summary) => summary !== undefined)
-        .sort((left, right) => {
-          const updatedAt = right.updatedAt.localeCompare(left.updatedAt)
-          if (updatedAt !== 0) return updatedAt
-          return left.sessionId.localeCompare(right.sessionId)
-        })
 
       return paginateSessionSummaries(summaries, input)
     },
@@ -135,6 +135,12 @@ function initializeDatabase(database: DatabaseSync): void {
         first_seq INTEGER NOT NULL,
         event_count INTEGER NOT NULL,
         PRIMARY KEY (session_id, operation_id)
+      ) STRICT;
+
+      CREATE TABLE IF NOT EXISTS session_projections (
+        session_id TEXT PRIMARY KEY,
+        seq INTEGER NOT NULL,
+        projection_json TEXT NOT NULL
       ) STRICT;
     `)
 
@@ -201,6 +207,27 @@ function appendEvents(
       )
     }
 
+    const projection = applySessionFacts(
+      readProjection(database, sessionId),
+      envelopes,
+    )
+    if (!projection) {
+      throw createYakitoriError({
+        code: YakitoriErrorCode.InvalidState,
+        message: `Session ${sessionId} append did not produce a projection.`,
+        details: { sessionId },
+      })
+    }
+    database
+      .prepare(`
+        INSERT INTO session_projections (session_id, seq, projection_json)
+        VALUES (?, ?, ?)
+        ON CONFLICT(session_id) DO UPDATE SET
+          seq = excluded.seq,
+          projection_json = excluded.projection_json
+      `)
+      .run(sessionId, projection.seq, JSON.stringify(projection))
+
     if (options.operation !== undefined) {
       database
         .prepare(`
@@ -229,18 +256,33 @@ function appendEvents(
   }
 }
 
+function readProjection(
+  database: DatabaseSync,
+  sessionId: string,
+): SessionProjection | undefined {
+  const row = database
+    .prepare(
+      "SELECT projection_json FROM session_projections WHERE session_id = ?",
+    )
+    .get(sessionId) as ProjectionRow | undefined
+  if (!row) return undefined
+  return JSON.parse(row.projection_json) as SessionProjection
+}
+
 function readEvents(
   database: DatabaseSync,
   sessionId: string,
-): EventEnvelope[] {
+  after: number,
+): StoredEventEnvelope[] {
   const events = (
     database
       .prepare(
-        "SELECT envelope_json FROM events WHERE session_id = ? ORDER BY seq",
+        "SELECT envelope_json FROM events WHERE session_id = ? AND seq > ? ORDER BY seq",
       )
-      .all(sessionId) as EventRow[]
-  ).map((row, index) => parseStoredEventEnvelope(row.envelope_json, index + 1))
-  assertStoredSessionEvents(sessionId, events)
+      .all(sessionId, after) as EventRow[]
+  ).map((row, index) =>
+    parseStoredEventEnvelope(row.envelope_json, after + index + 1),
+  )
   return events
 }
 
@@ -261,7 +303,7 @@ function readEventRange(
       .all(sessionId, firstSeq, firstSeq + eventCount) as EventRow[]
   ).map((row, index) =>
     parseStoredEventEnvelope(row.envelope_json, firstSeq + index),
-  )
+  ) as EventEnvelope[]
   if (events.length !== eventCount) {
     throw createYakitoriError({
       code: YakitoriErrorCode.InvalidEventLog,
@@ -274,7 +316,6 @@ function readEventRange(
       },
     })
   }
-  assertStoredEventRange(sessionId, events, firstSeq)
   return events
 }
 
