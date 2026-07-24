@@ -1,8 +1,9 @@
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { DatabaseSync } from "node:sqlite"
 import { afterEach, describe, expect, it } from "vitest"
-import { createSqliteEventStore } from "../../src/index.ts"
+import { createSessionKernel, createSqliteEventStore } from "../../src/index.ts"
 import { parseStoredEventEnvelope } from "../../src/kernel/event-store.ts"
 import { defineEventStoreContract } from "./event-store.contract.ts"
 import { createMemoryEventStore } from "./memory-event-store.ts"
@@ -70,6 +71,66 @@ describe("stored event tolerance", () => {
 })
 
 describe("SQLite persistence", () => {
+  it("repairs a deleted projection while preserving an unknown fact", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "yakitori-repair-"))
+    const databasePath = join(rootDir, "events.sqlite")
+    const sessionId = "session_00000000-0000-4000-8000-00000000000b"
+    try {
+      const first = createSqliteEventStore({ databasePath })
+      await first.appendEvent(
+        sessionId,
+        { type: "session.created", data: { title: "Repairable" } },
+        { expectedSeq: 0 },
+      )
+      first.close()
+
+      const database = new DatabaseSync(databasePath)
+      database
+        .prepare("DELETE FROM session_projections WHERE session_id = ?")
+        .run(sessionId)
+      database
+        .prepare(`
+          INSERT INTO events (session_id, seq, event_id, envelope_json)
+          VALUES (?, ?, ?, ?)
+        `)
+        .run(
+          sessionId,
+          2,
+          "event_unknown_repair",
+          JSON.stringify({
+            id: "event_unknown_repair",
+            sessionId,
+            seq: 2,
+            version: 1,
+            createdAt: "2026-07-24T00:00:00.000Z",
+            type: "provider.future_fact",
+            data: { value: "opaque" },
+          }),
+        )
+      database.close()
+
+      const reopened = createSqliteEventStore({ databasePath })
+      expect(await reopened.readProjection(sessionId)).toBeUndefined()
+      const replayed = await createSessionKernel(reopened).replaySession({
+        sessionId,
+      })
+
+      expect(replayed.events[1]).toMatchObject({
+        type: "provider.future_fact",
+        data: { value: "opaque" },
+      })
+      expect(replayed.session).toMatchObject({
+        id: sessionId,
+        seq: 2,
+        title: "Repairable",
+      })
+      expect(await reopened.readProjection(sessionId)).toEqual(replayed.session)
+      reopened.close()
+    } finally {
+      await rm(rootDir, { recursive: true, force: true })
+    }
+  })
+
   it("retains facts, projection, and operation receipts across reopen", async () => {
     const rootDir = await mkdtemp(join(tmpdir(), "yakitori-reopen-"))
     const databasePath = join(rootDir, "events.sqlite")

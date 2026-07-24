@@ -74,11 +74,11 @@ A `Mate` is a durable identity, not a process, Thread, Session, model, or
 subagent handle. It can participate in many Tasks and survive runtime restarts
 or provider changes.
 
-Stable identity data includes a name, role, lifecycle state, current profile
-revision, and default memory and capability policies. Instructions,
-personality, model policy, and capability policy live in immutable
-`MateRevision`s. An execution Session records the exact revision it uses so
-later profile changes do not rewrite previous work.
+The stable identity root contains the Mate ID, lifecycle state, current
+profile revision, and creation time. Name, role, instructions, personality,
+model policy, and capability policy live in immutable `MateRevision`s. An
+execution Session records the exact revision it uses so later profile changes
+do not rewrite previous work.
 
 `Subagent` is a relative role in one collaboration, not a separate kind of
 durable identity.

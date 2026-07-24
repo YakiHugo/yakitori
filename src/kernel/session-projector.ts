@@ -1,4 +1,3 @@
-import type { EventStore } from "./event-store.ts"
 import {
   EventType,
   ItemKind,
@@ -15,6 +14,7 @@ import {
   type PermissionDecisionReason,
   type StoredEventEnvelope,
   type TextContent,
+  type TokenUsage,
   type TurnExecutionContext,
   type InputRole,
 } from "./events.ts"
@@ -42,6 +42,7 @@ export type SessionProjection = {
   readonly mateRevisionId?: string
   readonly parentSessionId?: string
   readonly metadata?: EventMetadata
+  readonly usage?: TokenUsage
   readonly inputs: readonly InputProjection[]
   readonly pendingInputs: readonly InputProjection[]
   readonly activeTurn?: TurnProjection
@@ -82,6 +83,7 @@ export type TurnProjection = {
   readonly cancelledReason?: string
   readonly interruptedReason?: string
   readonly metadata?: EventMetadata
+  readonly usage?: TokenUsage
   readonly itemIds: readonly string[]
   readonly permissionRequestIds: readonly string[]
   readonly toolCallIds: readonly string[]
@@ -129,20 +131,6 @@ export type ToolProjection = {
   readonly providerMetadata?: EventMetadata
   readonly output?: JsonValue
   readonly error?: KernelError
-}
-
-export type SessionProjector = {
-  project(sessionId: string): Promise<SessionProjection | undefined>
-}
-
-export function createSessionProjector(
-  eventStore: EventStore,
-): SessionProjector {
-  return {
-    project(sessionId) {
-      return eventStore.readProjection(sessionId)
-    },
-  }
 }
 
 export function projectSession(
@@ -206,8 +194,10 @@ export function applySessionFacts(
   const activeTurn = projectedTurns.find(
     (turn) => turn.state === TurnState.Started,
   )
+  const usage = aggregateTokenUsage(projectedTurns)
   return {
     ...session,
+    ...(usage === undefined ? {} : { usage }),
     inputs: projectedInputs,
     pendingInputs: projectedInputs.filter(
       (input) => input.state === InputState.Admitted,
@@ -383,6 +373,7 @@ function applyKnownEvent(
       if (event.data.outputMessageId !== undefined) {
         turn.outputMessageId = event.data.outputMessageId
       }
+      if (event.data.usage !== undefined) turn.usage = event.data.usage
       return
     }
     case EventType.TurnFailed: {
@@ -441,6 +432,23 @@ function applyKnownEvent(
       return
     }
   }
+}
+
+function aggregateTokenUsage(
+  turns: readonly TurnProjection[],
+): TokenUsage | undefined {
+  const recorded = turns.filter(
+    (turn): turn is TurnProjection & { readonly usage: TokenUsage } =>
+      turn.usage !== undefined,
+  )
+  if (recorded.length === 0) return undefined
+  return recorded.reduce(
+    (total, turn) => ({
+      inputTokens: total.inputTokens + turn.usage.inputTokens,
+      outputTokens: total.outputTokens + turn.usage.outputTokens,
+    }),
+    { inputTokens: 0, outputTokens: 0 },
+  )
 }
 
 function applyAssistantMessage(

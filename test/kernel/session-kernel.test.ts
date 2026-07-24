@@ -79,6 +79,37 @@ for (const implementation of ["memory", "sqlite"] as const) {
       })
     })
 
+    it("cancels an admitted Input once", async () => {
+      await withKernel(implementation, async ({ kernel }) => {
+        const session = await kernel.createSession()
+        const input = await admit(kernel, session.sessionId, "cancel")
+        const cancelled = await kernel.cancelInput({
+          sessionId: session.sessionId,
+          inputId: input.inputId,
+          reason: "superseded",
+        })
+
+        expect(cancelled.event).toMatchObject({
+          type: EventType.InputCancelled,
+          data: { inputId: input.inputId, reason: "superseded" },
+        })
+        await expect(
+          kernel.cancelInput({
+            sessionId: session.sessionId,
+            inputId: input.inputId,
+          }),
+        ).rejects.toThrow("already cancelled")
+        const read = await kernel.readSession({
+          sessionId: session.sessionId,
+        })
+        expect(read.session?.inputs[0]).toMatchObject({
+          state: InputState.Cancelled,
+          cancelledReason: "superseded",
+        })
+        expect(read.session?.pendingInputs).toEqual([])
+      })
+    })
+
     it("records assistant messages and coarse tool facts", async () => {
       await withKernel(implementation, async ({ kernel }) => {
         const active = await activeTurn(kernel)
@@ -299,18 +330,147 @@ for (const implementation of ["memory", "sqlite"] as const) {
       })
     })
 
-    it("keeps write-through and replay rebuilt projections equal", async () => {
+    it("records failed and cancelled Turn commands", async () => {
       await withKernel(implementation, async ({ kernel }) => {
-        const active = await activeTurn(kernel)
-        await kernel.completeTurnWithAssistantOutput({
-          ...active,
-          content: { kind: "text", text: "done" },
+        const session = await kernel.createSession()
+        const failedInput = await admit(kernel, session.sessionId, "fail")
+        const failedTurn = await kernel.startTurn({
+          sessionId: session.sessionId,
+          inputId: failedInput.inputId,
         })
-        const read = await kernel.readSession({ sessionId: active.sessionId })
+        const failed = await kernel.failTurn({
+          sessionId: session.sessionId,
+          turnId: failedTurn.turnId,
+          error: { code: "provider_error", message: "unavailable" },
+        })
+        const cancelledInput = await admit(
+          kernel,
+          session.sessionId,
+          "cancel-turn",
+        )
+        const cancelledTurn = await kernel.startTurn({
+          sessionId: session.sessionId,
+          inputId: cancelledInput.inputId,
+        })
+        const cancelled = await kernel.cancelTurn({
+          sessionId: session.sessionId,
+          turnId: cancelledTurn.turnId,
+          reason: "user stopped",
+        })
+
+        expect(failed.events).toEqual([failed.event])
+        expect(failed.event).toMatchObject({
+          type: EventType.TurnFailed,
+          data: {
+            turnId: failedTurn.turnId,
+            error: { code: "provider_error", message: "unavailable" },
+          },
+        })
+        expect(cancelled.events).toEqual([cancelled.event])
+        expect(cancelled.event).toMatchObject({
+          type: EventType.TurnCancelled,
+          data: { turnId: cancelledTurn.turnId, reason: "user stopped" },
+        })
+        const read = await kernel.readSession({ sessionId: session.sessionId })
+        expect(read.session?.failedTurns).toEqual([
+          expect.objectContaining({
+            turnId: failedTurn.turnId,
+            state: TurnState.Failed,
+            error: { code: "provider_error", message: "unavailable" },
+          }),
+        ])
+        expect(read.session?.cancelledTurns).toEqual([
+          expect.objectContaining({
+            turnId: cancelledTurn.turnId,
+            state: TurnState.Cancelled,
+            cancelledReason: "user stopped",
+          }),
+        ])
+        expect(read.session?.activeTurn).toBeUndefined()
+      })
+    })
+
+    it("keeps rich write-through and replay rebuilt projections equal", async () => {
+      await withKernel(implementation, async ({ kernel }) => {
+        const completed = await activeTurn(kernel)
+        await kernel.recordAssistantOutput({
+          ...completed,
+          content: [{ type: "reasoning", text: "inspect" }],
+          toolCalls: [
+            {
+              id: "tool_allowed",
+              name: "run_command",
+              input: { command: "pwd" },
+              requiresPermission: true,
+            },
+          ],
+        })
+        const resolved = await kernel.requestPermission({
+          ...completed,
+          toolCallId: "tool_allowed",
+          action: "run_command",
+        })
+        await kernel.resolvePermission({
+          ...completed,
+          permissionRequestId: resolved.permissionRequestId,
+          behavior: PermissionBehavior.Allow,
+        })
+        await kernel.recordToolResult({
+          ...completed,
+          toolCallId: "tool_allowed",
+          content: { kind: "text", text: "/workspace" },
+          output: { exitCode: 0 },
+        })
+        await kernel.completeTurn({
+          ...completed,
+          usage: { inputTokens: 21, outputTokens: 8 },
+        })
+
+        const interruptedInput = await admit(
+          kernel,
+          completed.sessionId,
+          "interrupt",
+        )
+        const interrupted = await kernel.startTurn({
+          sessionId: completed.sessionId,
+          inputId: interruptedInput.inputId,
+        })
+        await kernel.recordAssistantOutput({
+          sessionId: completed.sessionId,
+          turnId: interrupted.turnId,
+          toolCalls: [
+            {
+              id: "tool_pending",
+              name: "run_command",
+              input: { command: "sleep 30" },
+              requiresPermission: true,
+            },
+          ],
+        })
+        await kernel.requestPermission({
+          sessionId: completed.sessionId,
+          turnId: interrupted.turnId,
+          toolCallId: "tool_pending",
+          action: "run_command",
+        })
+        await kernel.interruptTurn({
+          sessionId: completed.sessionId,
+          turnId: interrupted.turnId,
+          reason: "restart",
+        })
+
+        const read = await kernel.readSession({
+          sessionId: completed.sessionId,
+        })
         const replay = await kernel.replaySession({
-          sessionId: active.sessionId,
+          sessionId: completed.sessionId,
         })
+
         expect(read.session).toEqual(replay.session)
+        expect(replay.session?.usage).toEqual({
+          inputTokens: 21,
+          outputTokens: 8,
+        })
       })
     })
   })

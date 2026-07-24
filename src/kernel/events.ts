@@ -81,6 +81,11 @@ export type KernelError = {
   readonly details?: EventMetadata
 }
 
+export type TokenUsage = {
+  readonly inputTokens: number
+  readonly outputTokens: number
+}
+
 export type PermissionDecisionReason = {
   readonly kind: string
   readonly message?: string
@@ -156,6 +161,7 @@ export type TurnCompletedEvent = {
   readonly data: {
     readonly turnId: string
     readonly outputMessageId?: string
+    readonly usage?: TokenUsage
     readonly metadata?: EventMetadata
   }
 }
@@ -360,8 +366,9 @@ function requireKernelEvent(value: unknown): asserts value is KernelEvent {
         )
       case EventType.TurnCompleted:
         return (
-          onlyKeys(data, ["turnId", "outputMessageId", "metadata"]) &&
-          isString(data.turnId)
+          onlyKeys(data, ["turnId", "outputMessageId", "usage", "metadata"]) &&
+          isString(data.turnId) &&
+          (data.usage === undefined || isTokenUsage(data.usage))
         )
       case EventType.TurnFailed:
         return (
@@ -516,6 +523,15 @@ function isInputRole(value: unknown): value is InputRole {
 
 function isPermissionBehavior(value: unknown): value is PermissionBehavior {
   return typeof value === "string" && permissionBehaviors.has(value)
+}
+
+function isTokenUsage(value: unknown): value is TokenUsage {
+  return (
+    isRecord(value) &&
+    onlyKeys(value, ["inputTokens", "outputTokens"]) &&
+    isNonNegativeInteger(value.inputTokens) &&
+    isNonNegativeInteger(value.outputTokens)
+  )
 }
 
 function isTextContent(value: unknown): value is TextContent {

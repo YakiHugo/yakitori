@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 import {
+  applySessionFacts,
   createEventEnvelope,
   EventType,
   InputRole,
@@ -132,6 +133,27 @@ describe("session fact projection", () => {
     expect(projection?.seq).toBe(6)
     expect(projection?.items).toHaveLength(1)
     expect(projection?.turns[0]?.state).toBe(TurnState.Interrupted)
+  })
+
+  it("keeps incremental apply and full rebuild equal across unknown facts", () => {
+    const events = baseWithInterruptedTool()
+    const unknown = parseStoredEventEnvelope(
+      JSON.stringify({
+        id: "event_unknown_incremental",
+        sessionId: events[0]?.sessionId,
+        seq: 6,
+        version: 1,
+        createdAt: "2026-07-24T00:00:00.000Z",
+        type: "provider.future_fact",
+        data: { value: "opaque" },
+      }),
+      6,
+    )
+    const prefix = projectSession(events.slice(0, 4))
+
+    expect(applySessionFacts(prefix, [...events.slice(4), unknown])).toEqual(
+      projectSession([...events, unknown]),
+    )
   })
 })
 

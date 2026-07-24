@@ -94,6 +94,11 @@ export function createSqliteEventStore(
       return readProjection(database, sessionId)
     },
 
+    async rebuildProjection(sessionId) {
+      assertEventStoreSessionId(sessionId)
+      return rebuildProjection(database, sessionId)
+    },
+
     async listSessions(input = {}) {
       const summaries = (
         database
@@ -267,6 +272,41 @@ function readProjection(
     .get(sessionId) as ProjectionRow | undefined
   if (!row) return undefined
   return JSON.parse(row.projection_json) as SessionProjection
+}
+
+function rebuildProjection(
+  database: DatabaseSync,
+  sessionId: string,
+): {
+  readonly events: readonly StoredEventEnvelope[]
+  readonly projection?: SessionProjection
+} {
+  database.exec("BEGIN IMMEDIATE")
+  try {
+    const events = readEvents(database, sessionId, 0)
+    const projection = applySessionFacts(undefined, events)
+    if (projection === undefined) {
+      database
+        .prepare("DELETE FROM session_projections WHERE session_id = ?")
+        .run(sessionId)
+      database.exec("COMMIT")
+      return { events }
+    }
+    database
+      .prepare(`
+        INSERT INTO session_projections (session_id, seq, projection_json)
+        VALUES (?, ?, ?)
+        ON CONFLICT(session_id) DO UPDATE SET
+          seq = excluded.seq,
+          projection_json = excluded.projection_json
+      `)
+      .run(sessionId, projection.seq, JSON.stringify(projection))
+    database.exec("COMMIT")
+    return { events, projection }
+  } catch (error) {
+    if (database.isTransaction) database.exec("ROLLBACK")
+    throw error
+  }
 }
 
 function readEvents(

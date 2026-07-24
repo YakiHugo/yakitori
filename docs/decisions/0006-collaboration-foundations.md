@@ -149,11 +149,10 @@ Event schemas unify on one evolution posture:
 - `envelope.version` gains minimal real semantics: readers accept version 1
   and reject unknown versions; a breaking change must ship an upcaster
   before version 2 is ever written.
-- Unknown event types continue to throw on replay (decision enforced in
-  stage 0): local single-process reads and writes are always same-version,
-  and a forgotten projector update must be loud. If cross-version log
-  replication ever arrives, unknown types flip to skip — the version field
-  is that switch.
+- Unknown event types are preserved opaquely and skipped by projection and
+  replay, as superseded by decision 0007 §4. The write side remains strict;
+  tolerant reads keep older binaries able to inspect additive or
+  provider-specific history without inventing meaning for it.
 
 ## Consequences
 
