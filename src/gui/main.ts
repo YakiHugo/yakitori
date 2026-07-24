@@ -1,4 +1,5 @@
-import type { EventEnvelope } from "../kernel/index.ts"
+import type { StoredEventEnvelope } from "../kernel/index.ts"
+import type { LiveSessionEvent } from "../runtime/live-events.ts"
 import type {
   ApiAdmitInputResponse,
   ApiCreateSessionResponse,
@@ -9,6 +10,12 @@ import type {
   ApiSessionSummary,
 } from "../server/protocol.ts"
 import { acknowledgeAdmission, reserveAdmission } from "./admission-outbox.ts"
+import {
+  createExecutionViewState,
+  projectExecutionView,
+  reduceExecutionView,
+  type ExecutionViewState,
+} from "./execution-view.ts"
 import {
   beginSessionSelection,
   clearSessionSelection,
@@ -25,7 +32,9 @@ type AppState = {
   apiBase: string
   apiRevision: number
   busy: boolean
-  events: EventEnvelope[]
+  events: StoredEventEnvelope[]
+  execution: ExecutionViewState
+  inFlightActions: Set<string>
   message?: string
   nextCursor?: string
   promptDraft?: string
@@ -46,6 +55,8 @@ const state: AppState = {
   apiRevision: 0,
   busy: false,
   events: [],
+  execution: createExecutionViewState(),
+  inFlightActions: new Set(),
   selection: createSessionSelectionState(),
   sessionDetailRevision: 0,
   sessionListRevision: 0,
@@ -78,6 +89,7 @@ async function boot(): Promise<void> {
   state.sessionDetailRevision += 1
   delete state.selectedSession
   state.events = []
+  state.execution = createExecutionViewState()
   render()
 }
 
@@ -141,6 +153,11 @@ async function createSession(): Promise<void> {
       const selection = activateSession(response.session.id)
       state.selectedSession = response.session
       state.events = [response.event]
+      state.execution = reduceExecutionView(createExecutionViewState(), {
+        type: "durable",
+        event: response.event,
+        session: response.session,
+      })
       delete state.promptDraft
       connectEvents(selection, response.event.seq)
     },
@@ -155,6 +172,7 @@ async function selectSession(sessionId: string): Promise<void> {
   const selection = activateSession(sessionId)
   closeStream()
   state.events = []
+  state.execution = createExecutionViewState()
   delete state.promptDraft
   delete state.selectedSession
   await runTask(
@@ -235,6 +253,10 @@ async function refreshSelectedSession(
     return false
   }
   state.selectedSession = response.session
+  state.execution = reduceExecutionView(state.execution, {
+    type: "session",
+    session: response.session,
+  })
   return true
 }
 
@@ -270,7 +292,7 @@ function connectEvents(selection: SessionSelection, after: number): void {
       }
       const event = JSON.parse(
         (message as MessageEvent<string>).data,
-      ) as EventEnvelope
+      ) as StoredEventEnvelope
       if (event.sessionId !== selection.sessionId) return
       mergeEvent(event)
       void refreshSelectedSession(selection).then(
@@ -284,6 +306,23 @@ function connectEvents(selection: SessionSelection, after: number): void {
           render()
         },
       )
+    })
+    source.addEventListener("session.transient", (message) => {
+      if (
+        state.stream !== source ||
+        !isCurrentSessionSelection(state.selection, selection)
+      ) {
+        return
+      }
+      const event = JSON.parse(
+        (message as MessageEvent<string>).data,
+      ) as LiveSessionEvent
+      if (event.sessionId !== selection.sessionId) return
+      state.execution = reduceExecutionView(state.execution, {
+        type: "transient",
+        event,
+      })
+      render()
     })
     source.addEventListener("error", () => {
       if (
@@ -400,12 +439,15 @@ function render(): void {
 
       <section class="event-pane">
         <div class="pane-head">
-          <h2>Events</h2>
+          <h2>Diagnostics</h2>
           <span class="stream-pill ${state.streamStatus}">${state.streamStatus}</span>
         </div>
-        <div class="event-list">
-          ${renderEvents()}
-        </div>
+        <details class="diagnostics">
+          <summary>Raw events (${state.events.length})</summary>
+          <div class="event-list">
+            ${renderEvents()}
+          </div>
+        </details>
       </section>
     </div>
   `
@@ -445,16 +487,31 @@ function renderSessionDetail(): string {
     `
   }
 
+  const view = projectExecutionView(state.execution)
+  const cancelDisabled =
+    !view.activeTurnId ||
+    state.busy ||
+    state.inFlightActions.has(`cancel:${view.activeTurnId}`)
+
   return `
     <section class="session-band">
       <div>
         <p class="eyebrow">Active session</p>
         <h2>${escapeHtml(session.title ?? "Untitled session")}</h2>
         <p class="session-id">${escapeHtml(session.id)}</p>
+        <p class="session-meta-line">
+          mate ${escapeHtml(view.mateId ?? "—")} · rev ${escapeHtml(view.mateRevisionId ?? "—")}
+        </p>
+        <p class="session-meta-line">workspace ${escapeHtml(view.workingDirectory ?? "—")}</p>
       </div>
       <div class="seq-block">
         <span>${session.seq}</span>
         <small>sequence</small>
+        ${
+          view.activeTurnId
+            ? `<button type="button" id="cancelTurn" data-turn-id="${escapeHtml(view.activeTurnId)}" ${cancelDisabled ? "disabled" : ""}>Cancel turn</button>`
+            : ""
+        }
       </div>
     </section>
 
@@ -467,15 +524,54 @@ function renderSessionDetail(): string {
       ${metric("Permissions", session.counts.permissions)}
     </section>
 
+    <section class="execution-feed">
+      ${renderExecutionFeed(view)}
+    </section>
+
     <form class="prompt-panel" id="promptForm">
       <label for="promptText">Input</label>
-      <textarea id="promptText" name="promptText" rows="7" placeholder="Record durable input">${escapeHtml(state.promptDraft ?? "")}</textarea>
+      <textarea id="promptText" name="promptText" rows="5" placeholder="Send input to the Mate">${escapeHtml(state.promptDraft ?? "")}</textarea>
       <div class="prompt-actions">
         <span>${state.message ? escapeHtml(state.message) : ""}</span>
         <button type="submit" ${state.busy ? "disabled" : ""}>Admit</button>
       </div>
     </form>
   `
+}
+
+function renderExecutionFeed(
+  view: ReturnType<typeof projectExecutionView>,
+): string {
+  if (view.entries.length === 0) {
+    return `<div class="empty-state">Conversation will appear here</div>`
+  }
+  return view.entries
+    .map((entry) => {
+      if (entry.kind === "user_input") {
+        return `<article class="exec-row user"><header>You</header><p>${escapeHtml(entry.text)}</p></article>`
+      }
+      if (entry.kind === "assistant") {
+        return `<article class="exec-row assistant ${entry.status}"><header>${entry.status === "streaming" ? "Mate · streaming" : "Mate"}</header><p>${escapeHtml(entry.text)}</p></article>`
+      }
+      if (entry.kind === "tool") {
+        return `<article class="exec-row tool ${entry.state}"><header>${escapeHtml(entry.name)} · ${escapeHtml(entry.state)}</header><pre>${escapeHtml(JSON.stringify(entry.input, null, 2))}</pre>${entry.resultText ? `<pre class="${entry.resultError ? "error" : ""}">${escapeHtml(entry.resultText)}</pre>` : ""}</article>`
+      }
+      if (entry.kind === "permission") {
+        const busy = state.inFlightActions.has(
+          `permission:${entry.permissionRequestId}`,
+        )
+        const actions =
+          entry.state === "requested"
+            ? `<div class="permission-actions">
+                <button type="button" data-permission-allow="${escapeHtml(entry.permissionRequestId)}" data-turn-id="${escapeHtml(entry.turnId)}" ${busy ? "disabled" : ""}>Allow</button>
+                <button type="button" data-permission-deny="${escapeHtml(entry.permissionRequestId)}" data-turn-id="${escapeHtml(entry.turnId)}" ${busy ? "disabled" : ""}>Deny</button>
+              </div>`
+            : `<p class="permission-state">${escapeHtml(entry.behavior ?? entry.state)}</p>`
+        return `<article class="exec-row permission ${entry.state}"><header>Permission · ${escapeHtml(entry.action)}</header><p>${escapeHtml(entry.subject ?? "")}</p><p class="hint">Runs with host user authority (files, process, network).</p>${actions}</article>`
+      }
+      return `<article class="exec-row terminal ${entry.state}"><header>Turn ${escapeHtml(entry.state)}</header><p>${escapeHtml(entry.message)}</p></article>`
+    })
+    .join("")
 }
 
 function renderEvents(): string {
@@ -556,11 +652,98 @@ function bindEvents(): void {
       if (!(textarea instanceof HTMLTextAreaElement)) return
       state.promptDraft = textarea.value
     })
+
+  document
+    .querySelector<HTMLButtonElement>("#cancelTurn")
+    ?.addEventListener("click", () => {
+      const turnId =
+        document.querySelector<HTMLButtonElement>("#cancelTurn")?.dataset.turnId
+      if (turnId) void cancelTurn(turnId)
+    })
+
+  for (const button of document.querySelectorAll<HTMLButtonElement>(
+    "[data-permission-allow]",
+  )) {
+    button.addEventListener("click", () => {
+      const permissionRequestId = button.dataset.permissionAllow
+      const turnId = button.dataset.turnId
+      if (permissionRequestId && turnId) {
+        void resolvePermission(turnId, permissionRequestId, "allow")
+      }
+    })
+  }
+  for (const button of document.querySelectorAll<HTMLButtonElement>(
+    "[data-permission-deny]",
+  )) {
+    button.addEventListener("click", () => {
+      const permissionRequestId = button.dataset.permissionDeny
+      const turnId = button.dataset.turnId
+      if (permissionRequestId && turnId) {
+        void resolvePermission(turnId, permissionRequestId, "deny")
+      }
+    })
+  }
+}
+
+async function cancelTurn(turnId: string): Promise<void> {
+  const selection = currentSessionSelection(state.selection)
+  if (!selection) return
+  const key = `cancel:${turnId}`
+  if (state.inFlightActions.has(key)) return
+  state.inFlightActions.add(key)
+  render()
+  await runTask(
+    async () => {
+      await requestJson(
+        `/sessions/${encodeURIComponent(selection.sessionId)}/turns/${encodeURIComponent(turnId)}/cancel`,
+        { method: "POST", body: { reason: "user_cancel" } },
+      )
+      await refreshSelectedSession(selection)
+    },
+    () => isCurrentSessionSelection(state.selection, selection),
+  )
+  state.inFlightActions.delete(key)
+  render()
+}
+
+async function resolvePermission(
+  turnId: string,
+  permissionRequestId: string,
+  behavior: "allow" | "deny",
+): Promise<void> {
+  const selection = currentSessionSelection(state.selection)
+  if (!selection) return
+  const key = `permission:${permissionRequestId}`
+  if (state.inFlightActions.has(key)) return
+  state.inFlightActions.add(key)
+  render()
+  await runTask(
+    async () => {
+      await requestJson(
+        `/sessions/${encodeURIComponent(selection.sessionId)}/turns/${encodeURIComponent(turnId)}/permissions/${encodeURIComponent(permissionRequestId)}/resolve`,
+        {
+          method: "POST",
+          body: {
+            behavior,
+            reason: {
+              kind: behavior === "allow" ? "user_allowed" : "user_denied",
+            },
+          },
+        },
+      )
+      await refreshSelectedSession(selection)
+    },
+    () => isCurrentSessionSelection(state.selection, selection),
+  )
+  state.inFlightActions.delete(key)
+  render()
 }
 
 function clearSessionState(): void {
   state.apiRevision += 1
   state.events = []
+  state.execution = createExecutionViewState()
+  state.inFlightActions.clear()
   state.sessionDetailRevision += 1
   state.sessionListRevision += 1
   state.sessionSelectionIntentRevision += 1
@@ -576,11 +759,18 @@ function activateSession(sessionId: string): SessionSelection {
   return beginSessionSelection(state.selection, sessionId)
 }
 
-function mergeEvent(event: EventEnvelope): void {
+function mergeEvent(event: StoredEventEnvelope): void {
   if (state.events.some((candidate) => candidate.id === event.id)) return
   state.events = [...state.events, event].sort(
     (left, right) => left.seq - right.seq,
   )
+  state.execution = reduceExecutionView(state.execution, {
+    type: "durable",
+    event,
+    ...(state.selectedSession === undefined
+      ? {}
+      : { session: state.selectedSession }),
+  })
 }
 
 function metric(label: string, value: number): string {
@@ -594,6 +784,7 @@ function metric(label: string, value: number): string {
 
 function eventTone(type: string): string {
   if (type.includes("failed") || type.includes("cancelled")) return "danger"
+  if (type.includes("interrupted")) return "neutral"
   if (type.includes("created") || type.includes("admitted")) return "fresh"
   if (type.includes("completed") || type.includes("resolved")) return "settled"
   return "neutral"

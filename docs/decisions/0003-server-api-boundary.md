@@ -3,13 +3,13 @@
 ## Status
 
 Accepted and implemented as the server API v1 boundary. Decision 0004 extends
-it with future Workmate collaboration resources. Decision 0005 supersedes only
+it with future Mate collaboration resources. Decision 0005 supersedes only
 the initial storage implementation referenced by this decision.
 
 ## Current Scope
 
 The existing Session APIs and durable event stream remain execution-lane
-interfaces. Workmate, Room, Task, Assignment, Message, and Delivery will use
+interfaces. Mate, Room, Task, Assignment, Message, and Delivery will use
 explicit protocol resources rather than being folded into Session responses.
 
 The original separation between durable input admission and runtime wakeup now

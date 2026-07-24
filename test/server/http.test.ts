@@ -402,6 +402,7 @@ async function withHttpServer(
         }
         resolve()
       })
+      server.closeAllConnections()
     })
   }
 }

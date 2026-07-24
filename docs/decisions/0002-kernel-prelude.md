@@ -3,14 +3,14 @@
 ## Status
 
 Accepted and implemented as the kernel v1 boundary. Decision 0004 extends it
-with persistent Workmates and shared Room collaboration. Decision 0005
+with persistent Mates and shared Room collaboration. Decision 0005
 supersedes only the initial storage implementation choice.
 
 ## Current Scope
 
-The Session in this decision is now the execution lane for one Workmate
+The Session in this decision is now the execution lane for one Mate
 Assignment. Its single-active-Turn invariant remains in force per Session;
-parallel Workmates use separate Sessions coordinated by a Room.
+parallel Mates use separate Sessions coordinated by a Room.
 
 Room Messages and per-recipient Deliveries are not Session Inputs. A claimed
 Delivery may later admit an Input into one execution Session while retaining a
@@ -53,7 +53,7 @@ The kernel does not need to call a model or execute tools yet.
 
 A session is the durable execution aggregate. It owns event ordering, pending
 inputs, turns, items, permissions, tool calls, and replay for one execution
-lane. Decision 0004 assigns shared multi-Workmate conversation to a Room.
+lane. Decision 0004 assigns shared multi-Mate conversation to a Room.
 
 Version one should allow only one active turn per session. Additional user
 inputs may be admitted while a turn is active, but they must remain pending

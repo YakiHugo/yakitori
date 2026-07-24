@@ -3,11 +3,11 @@
 ## Status
 
 Accepted as the initial execution-kernel direction. Decision 0004 extends this
-model with persistent Workmates and shared Room collaboration.
+model with persistent Mates and shared Room collaboration.
 
 ## Current Scope
 
-`Session -> Turn -> Item` remains the durable execution lane for one Workmate
+`Session -> Turn -> Item` remains the durable execution lane for one Mate
 Assignment. It is no longer the complete top-level product model: Room, Task,
 Assignment, Message, and Delivery are separate collaboration concepts defined
 by decision 0004.

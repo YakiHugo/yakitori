@@ -1,34 +1,59 @@
+import { realpath } from "node:fs/promises"
 import {
   IdPrefix,
   InputRole,
   isIdWithPrefix,
   isRequestId,
   isYakitoriError,
+  PermissionBehavior,
   type EventEnvelope,
   type EventMetadata,
   type JsonValue,
+  type PermissionDecisionReason,
   type SessionKernel,
   type SessionProjection,
   type SessionSummary,
   type TextContent,
   YakitoriErrorCode,
 } from "../kernel/index.ts"
+import { RuntimeLimits } from "../runtime/limits.ts"
 import {
   ApiErrorCode,
   type ApiAdmitInputResponse,
+  type ApiCancelTurnResponse,
   type ApiCreateSessionResponse,
   type ApiHandlerResult,
   type ApiListSessionsResponse,
   type ApiReadSessionEventsResponse,
   type ApiReadSessionResponse,
+  type ApiResolvePermissionResponse,
   type ApiSessionDetail,
   type ApiSessionSummary,
 } from "./protocol.ts"
+
+export type SessionCreateDefaults = {
+  readonly workingDirectory: string
+  readonly mateId: string
+  readonly mateRevisionId: string
+}
 
 export type ServerHandlerOptions = {
   readonly eventHub?: {
     publish(events: readonly EventEnvelope[]): void
   }
+  readonly sessionDefaults?: SessionCreateDefaults
+  readonly wakeSession?: (sessionId: string) => void
+  readonly onPermissionResolved?: (input: {
+    readonly sessionId: string
+    readonly turnId: string
+    readonly permissionRequestId: string
+  }) => void
+  readonly interruptTurn?: (input: {
+    readonly sessionId: string
+    readonly turnId: string
+    readonly reason?: string
+  }) => Promise<void>
+  readonly maxInputBytes?: number
 }
 
 export type ServerHandlers = {
@@ -40,6 +65,10 @@ export type ServerHandlers = {
   ): Promise<ApiHandlerResult<ApiListSessionsResponse>>
   readSession(input: unknown): Promise<ApiHandlerResult<ApiReadSessionResponse>>
   admitInput(input: unknown): Promise<ApiHandlerResult<ApiAdmitInputResponse>>
+  cancelTurn(input: unknown): Promise<ApiHandlerResult<ApiCancelTurnResponse>>
+  resolvePermission(
+    input: unknown,
+  ): Promise<ApiHandlerResult<ApiResolvePermissionResponse>>
   readSessionEvents(
     input: unknown,
   ): Promise<ApiHandlerResult<ApiReadSessionEventsResponse>>
@@ -55,7 +84,10 @@ export function createServerHandlers(
     async createSession(input = {}) {
       try {
         const created = await kernel.createSession(
-          requireCreateSessionRequest(input),
+          await applySessionCreateDefaults(
+            requireCreateSessionRequest(input),
+            options.sessionDefaults,
+          ),
         )
         options.eventHub?.publish([created.event])
         const read = await kernel.readSession({ sessionId: created.sessionId })
@@ -119,14 +151,58 @@ export function createServerHandlers(
 
     async admitInput(input) {
       try {
-        const admitted = await kernel.admitInput(
-          requireAdmitInputRequest(input),
+        const request = requireAdmitInputRequest(
+          input,
+          options.maxInputBytes ?? RuntimeLimits.modelVisibleContextBytes,
         )
+        const admitted = await kernel.admitInput(request)
         if (admitted.created) options.eventHub?.publish([admitted.event])
+        // Wake even on idempotent replay: original process may have crashed
+        // after commit and before scheduling.
+        options.wakeSession?.(request.sessionId)
         return ok(admitted.created ? 201 : 200, {
           requestId: admitted.requestId,
           inputId: admitted.inputId,
           event: admitted.event,
+        })
+      } catch (error) {
+        return fail(error)
+      }
+    },
+
+    async cancelTurn(input) {
+      try {
+        const request = requireCancelTurnRequest(input)
+        if (options.interruptTurn) {
+          await options.interruptTurn(request)
+        } else {
+          const cancelled = await kernel.cancelTurn(request)
+          options.eventHub?.publish(cancelled.events)
+        }
+        return ok(200, {
+          sessionId: request.sessionId,
+          turnId: request.turnId,
+        })
+      } catch (error) {
+        return fail(error)
+      }
+    },
+
+    async resolvePermission(input) {
+      try {
+        const request = requireResolvePermissionRequest(input)
+        const resolved = await kernel.resolvePermission(request)
+        options.eventHub?.publish([resolved.event])
+        options.onPermissionResolved?.({
+          sessionId: request.sessionId,
+          turnId: request.turnId,
+          permissionRequestId: request.permissionRequestId,
+        })
+        return ok(200, {
+          sessionId: request.sessionId,
+          turnId: request.turnId,
+          permissionRequestId: request.permissionRequestId,
+          event: resolved.event,
         })
       } catch (error) {
         return fail(error)
@@ -146,16 +222,13 @@ export function createServerHandlers(
           })
         }
 
-        const replayed = await kernel.replaySession({
+        const read = await kernel.readEvents({
           sessionId: request.sessionId,
+          after: request.after,
         })
-        const events = replayed.events.filter(
-          (event) => event.seq > request.after,
-        )
 
         return ok(200, {
-          events,
-          lastSequence: replayed.events.at(-1)?.seq ?? 0,
+          events: read.events,
         })
       } catch (error) {
         return fail(error)
@@ -174,6 +247,10 @@ function mapSessionSummary(summary: SessionSummary): ApiSessionSummary {
     ...(summary.workingDirectory === undefined
       ? {}
       : { workingDirectory: summary.workingDirectory }),
+    ...(summary.mateId === undefined ? {} : { mateId: summary.mateId }),
+    ...(summary.mateRevisionId === undefined
+      ? {}
+      : { mateRevisionId: summary.mateRevisionId }),
     ...(summary.parentSessionId === undefined
       ? {}
       : { parentSessionId: summary.parentSessionId }),
@@ -191,6 +268,10 @@ function mapSessionDetail(session: SessionProjection): ApiSessionDetail {
     ...(session.workingDirectory === undefined
       ? {}
       : { workingDirectory: session.workingDirectory }),
+    ...(session.mateId === undefined ? {} : { mateId: session.mateId }),
+    ...(session.mateRevisionId === undefined
+      ? {}
+      : { mateRevisionId: session.mateRevisionId }),
     ...(session.parentSessionId === undefined
       ? {}
       : { parentSessionId: session.parentSessionId }),
@@ -230,8 +311,72 @@ function requireCreateSessionRequest(input: unknown) {
   return {
     ...optionalStringField(record, "title"),
     ...optionalStringField(record, "workingDirectory"),
+    ...optionalStringField(record, "mateId"),
+    ...optionalStringField(record, "mateRevisionId"),
     ...optionalSessionIdField(record, "parentSessionId"),
     ...optionalMetadataField(record, "metadata"),
+  }
+}
+
+async function applySessionCreateDefaults(
+  request: {
+    readonly title?: string
+    readonly workingDirectory?: string
+    readonly mateId?: string
+    readonly mateRevisionId?: string
+    readonly parentSessionId?: string
+    readonly metadata?: EventMetadata
+  },
+  defaults: SessionCreateDefaults | undefined,
+) {
+  if (defaults === undefined) return request
+
+  if (request.workingDirectory !== undefined) {
+    const requestedWorkspace = await resolveOptionalWorkspace(
+      request.workingDirectory,
+    )
+    if (requestedWorkspace !== defaults.workingDirectory) {
+      throw invalidInput(
+        "workingDirectory must match the configured workspace in Stage 1.",
+        {
+          field: "workingDirectory",
+          requested: request.workingDirectory,
+          workspace: defaults.workingDirectory,
+        },
+      )
+    }
+  }
+
+  if (request.mateId !== undefined && request.mateId !== defaults.mateId) {
+    throw invalidInput(
+      "mateId cannot override the configured active Mate in Stage 1.",
+      { field: "mateId" },
+    )
+  }
+
+  if (
+    request.mateRevisionId !== undefined &&
+    request.mateRevisionId !== defaults.mateRevisionId
+  ) {
+    throw invalidInput(
+      "mateRevisionId cannot override the configured active Mate revision in Stage 1.",
+      { field: "mateRevisionId" },
+    )
+  }
+
+  return {
+    ...request,
+    workingDirectory: defaults.workingDirectory,
+    mateId: defaults.mateId,
+    mateRevisionId: defaults.mateRevisionId,
+  }
+}
+
+async function resolveOptionalWorkspace(workspace: string): Promise<string> {
+  try {
+    return await realpath(workspace)
+  } catch {
+    return workspace
   }
 }
 
@@ -253,7 +398,7 @@ function requireReadSessionRequest(input: unknown) {
   }
 }
 
-function requireAdmitInputRequest(input: unknown) {
+function requireAdmitInputRequest(input: unknown, maxInputBytes: number) {
   const record = requireRecord(
     input,
     "Input admission request must be an object.",
@@ -261,11 +406,67 @@ function requireAdmitInputRequest(input: unknown) {
   return {
     sessionId: requireSessionId(record.sessionId, "sessionId"),
     requestId: requireRequestId(record.requestId),
-    content: requireTextContent(record.content),
+    content: requireTextContent(record.content, maxInputBytes),
     ...optionalInputRoleField(record, "role"),
     ...optionalStringField(record, "parentInputId"),
     ...optionalMetadataField(record, "metadata"),
   }
+}
+
+function requireCancelTurnRequest(input: unknown) {
+  const record = requireRecord(input, "Turn cancel request must be an object.")
+  return {
+    sessionId: requireSessionId(record.sessionId, "sessionId"),
+    turnId: requireString(record.turnId, "turnId"),
+    ...optionalStringField(record, "reason"),
+  }
+}
+
+function requireResolvePermissionRequest(input: unknown) {
+  const record = requireRecord(
+    input,
+    "Permission resolve request must be an object.",
+  )
+  const behavior = record.behavior
+  if (
+    behavior !== PermissionBehavior.Allow &&
+    behavior !== PermissionBehavior.Deny
+  ) {
+    throw invalidInput('behavior must be "allow" or "deny".', {
+      field: "behavior",
+    })
+  }
+  return {
+    sessionId: requireSessionId(record.sessionId, "sessionId"),
+    turnId: requireString(record.turnId, "turnId"),
+    permissionRequestId: requireString(
+      record.permissionRequestId,
+      "permissionRequestId",
+    ),
+    behavior,
+    ...(record.reason === undefined
+      ? {}
+      : { reason: requireDecisionReason(record.reason) }),
+  }
+}
+
+function requireDecisionReason(value: unknown): PermissionDecisionReason {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw invalidInput("reason must be an object.")
+  }
+  const record = value as Record<string, unknown>
+  if (typeof record.kind !== "string" || record.kind.trim().length === 0) {
+    throw invalidInput("reason.kind must be a non-empty string.")
+  }
+  return {
+    kind: record.kind,
+    ...(typeof record.message === "string" ? { message: record.message } : {}),
+  }
+}
+
+function requireString(value: unknown, field: string): string {
+  if (typeof value === "string" && value.trim().length > 0) return value
+  throw invalidInput(`${field} must be a non-empty string.`, { field })
 }
 
 function requireRequestId(value: unknown): string {
@@ -331,11 +532,23 @@ function requireOptionalSequence(value: unknown): number {
   })
 }
 
-function requireTextContent(value: unknown): TextContent {
+function requireTextContent(
+  value: unknown,
+  maxInputBytes: number,
+): TextContent {
   if (!isRecord(value)) {
     throw invalidInput("content must be a text content object.")
   }
   if (value.kind === "text" && typeof value.text === "string") {
+    if (Buffer.byteLength(value.text, "utf8") > maxInputBytes) {
+      throw invalidInput(
+        `content.text must not exceed ${maxInputBytes} bytes.`,
+        {
+          field: "content.text",
+          maxBytes: maxInputBytes,
+        },
+      )
+    }
     return {
       kind: "text",
       text: value.text,

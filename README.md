@@ -7,7 +7,7 @@
 
 Yakitori is a from-scratch learning project for building a local coding-agent
 harness and GUI. Its product direction is a coding workbench centered on
-persistent-memory `Workmate`s that can work alone or collaborate in a shared
+persistent-memory `Mate`s that can work alone or collaborate in a shared
 task room.
 
 The goal is to understand the runtime and product boundaries behind modern
@@ -18,17 +18,18 @@ existing agent framework.
 ## Goals
 
 - Build a local coding-agent harness from first principles.
-- Give each Workmate a durable identity, versioned profile, governed memory,
+- Give each Mate a durable identity, versioned profile, governed memory,
   and inspectable history across tasks.
-- Let several Workmates work on the same Task concurrently, publish findings to
+- Let several Mates work on the same Task concurrently, publish findings to
   one Room, and use structured mentions to request attention.
 - Keep shared Messages distinct from per-recipient Deliveries and from each
-  Workmate's private execution Session.
+  Mate's private execution Session.
 - Keep the core responsible for structured execution, collaboration, tools,
-  permissions, persistence, recovery, and replay.
-- Build a GUI task workbench for shared discussion, Workmate activity, terminal,
+  permissions, persistence, and honest recovery.
+- Build a GUI task workbench for shared discussion, Mate activity, terminal,
   diff, approvals, artifacts, worktrees, and memory provenance.
-- Record enough structured state to support debugging, replay, and evaluation.
+- Record coarse, truthful facts sufficient for debugging, repair, and
+  evaluation without persisting every runtime transition.
 - Keep each module small enough to understand and replace.
 
 ## Product Direction
@@ -37,16 +38,16 @@ The target shape is:
 
 ```text
 Codex-style coding task workbench
-+ persistent Workmates and governed memory
++ persistent Mates and governed memory
 + shared Room collaboration and structured @mentions
-+ one inspectable execution lane per Workmate Assignment
++ one inspectable execution lane per Mate Assignment
 ```
 
 A Room is not a copy of Slack or Raft's full product shell. It is the shared
 communication boundary inside the coding workbench. A Room Message is stored
-once; durable Deliveries decide which Workmates should catch up, wake, or steer.
-Detailed tool output stays in each Workmate's execution Session unless the
-Workmate explicitly publishes a bounded finding or artifact reference.
+once; durable Deliveries decide which Mates should catch up, wake, or steer.
+Detailed tool output stays in each Mate's execution Session unless the
+Mate explicitly publishes a bounded finding or artifact reference.
 
 ## Non-goals
 
@@ -55,7 +56,7 @@ Workmate explicitly publishes a bounded finding or artifact reference.
 - Do not make runtime code depend on local reference repositories.
 - Do not clone product behavior wholesale. Reference projects are used for
   comparison and learning.
-- Do not treat a Workmate as a permanently running process or silently promote
+- Do not treat a Mate as a permanently running process or silently promote
   every transcript message into long-term memory.
 - Do not turn the GUI into a general-purpose channel application or task board.
 
@@ -80,33 +81,100 @@ required to build, test, or run Yakitori.
 
 ## Current Status
 
-The current implementation includes:
+Stage 1 MVP runtime is implemented as one vertical slice:
 
-- a replayable Session/Input/Turn/Item event kernel
-- structured tool and permission lifecycle facts
-- a SQLite event store with ordered append and idempotent operations
-- a local HTTP/SSE API boundary
-- an initial GUI session workspace
+- a witness-style Session/Input/Turn kernel with 13 coarse durable facts
+- transactional write-through Session projections; replay is a repair tool
+- Mate profile store + default active Mate selection at application startup
+- SessionRunner with single-flight wakes, bounded model context, and recovery
+- scripted faux provider (default tests), OpenAI Responses adapter, and
+  optional Anthropic Messages adapter
+- bounded tools: `read_file`, `write_file` (compare-and-write), `run_command`
+- durable permission gate for host commands (never auto-approved in production)
+- dual event delivery: durable SSE (`session.event`) + transient snapshots
+- GUI execution feed with streaming, tool/permission cards, cancel, and diagnostics
 
-The Session kernel is now scoped as one Workmate's execution lane. Persistent
-Workmate identity, Room/Task/Assignment collaboration, durable Message delivery,
-the model/tool runtime, and governed memory are accepted architecture direction
-but are not implemented yet.
+Still deferred to later stages: Room/Task/Assignment/Delivery collaboration,
+governed memory, worktrees, multi-provider selection UI, compaction, subagents.
+
+## Local Run
+
+Install:
+
+```sh
+pnpm install
+```
+
+Run server + GUI:
+
+```sh
+pnpm dev
+```
+
+- GUI: `http://127.0.0.1:5173`
+- API default: `http://127.0.0.1:4141`
+
+### Environment variables
+
+| Name | Purpose |
+| --- | --- |
+| `YAKITORI_STORE_DIR` | Store directory (default `.yakitori`) |
+| `YAKITORI_WORKSPACE` | Canonical workspace root (default `process.cwd()`) |
+| `YAKITORI_MATE_ID` | Explicit active Mate when multiple exist |
+| `YAKITORI_PROVIDER` | `faux` (default), `openai`, or `anthropic` |
+| `YAKITORI_FAUX_SCENARIO` | Faux scenario: `text`, `file`, `command`, `error` |
+| `YAKITORI_MODEL` | Required when a network provider is selected |
+| `OPENAI_API_KEY` | Required when `YAKITORI_PROVIDER=openai` |
+| `ANTHROPIC_API_KEY` | Required when `YAKITORI_PROVIDER=anthropic` |
+| `HOST` / `PORT` | Server listen address (default `127.0.0.1:4141`) |
+
+Example faux command-approval flow:
+
+```sh
+YAKITORI_PROVIDER=faux YAKITORI_FAUX_SCENARIO=command pnpm dev
+```
+
+Example OpenAI Responses:
+
+```sh
+YAKITORI_PROVIDER=openai YAKITORI_MODEL=gpt-5.6 OPENAI_API_KEY=… pnpm dev
+```
+
+The model is always explicit so changing provider defaults cannot silently
+change the model recorded on a Turn. `gpt-5.6` is an example, not an
+application default.
+
+Example Anthropic Messages:
+
+```sh
+YAKITORI_PROVIDER=anthropic YAKITORI_MODEL=claude-sonnet-4-20250514 ANTHROPIC_API_KEY=… pnpm dev
+```
+
+Never commit API key values. `pnpm test` and `pnpm check` never require network
+access or credentials.
+
+### Verify
+
+```sh
+pnpm format
+pnpm check
+pnpm build
+```
 
 ## Expected Shape
 
 The project will grow around these conceptual areas:
 
 ```text
-workmates      identity, immutable profiles, capabilities, memory policy
+mates      identity, immutable profiles, capabilities, memory policy
 collaboration  rooms, tasks, assignments, messages, deliveries, mentions
-execution      sessions, inputs, turns, items, context, replay
+execution      sessions, inputs, turns, derived items, context, repair
 runtime        model loop, scheduling, pending/steer, tool execution
 memory         scoped revisions, provenance, retrieval, consolidation
 tools          permission-checked built-in and extension capabilities
 storage        journals, projections, artifacts, checkpoints
 server         versioned local command, query, and subscription APIs
-gui            task room and inspectable Workmate execution lanes
+gui            task room and inspectable Mate execution lanes
 evals          replay, recovery, collaboration, and memory scenarios
 ```
 
@@ -119,8 +187,10 @@ to split the application into services.
 - [Initial Session/Turn/Item execution core](docs/decisions/0001-core-shape.md)
 - [Kernel v1 boundary](docs/decisions/0002-kernel-prelude.md)
 - [Local server API boundary](docs/decisions/0003-server-api-boundary.md)
-- [Persistent Workmate and Room collaboration](docs/decisions/0004-workmate-room-collaboration.md)
+- [Persistent Mate and Room collaboration](docs/decisions/0004-mate-room-collaboration.md)
 - [Transactional SQLite event storage](docs/decisions/0005-sqlite-event-store.md)
+- [Collaboration foundations](docs/decisions/0006-collaboration-foundations.md)
+- [Kernel as witness](docs/decisions/0007-kernel-as-witness.md)
 
 ## Development
 

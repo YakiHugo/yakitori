@@ -1,20 +1,17 @@
 import {
   createEventEnvelope,
-  createYakitoriError,
-  EventType,
+  applySessionFacts,
   type EventEnvelope,
   type EventStore,
   type EventStoreAppendOptions,
-  type EventStoreListSessionsInput,
-  type EventStoreListSessionsResult,
-  type EventStoreSessionSummary,
-  type EventMetadata,
   type KernelEvent,
-  YakitoriErrorCode,
+  type SessionProjection,
 } from "../../src/index.ts"
 import {
+  paginateSessionSummaries,
   requireExpectedSequence,
   requireOperationFingerprint,
+  summarizeSessionProjection,
 } from "../../src/kernel/event-store.ts"
 
 type MemoryOperationRecord = {
@@ -26,6 +23,7 @@ type MemoryOperationRecord = {
 export function createMemoryEventStore(): EventStore {
   const sessions = new Map<string, EventEnvelope[]>()
   const operations = new Map<string, MemoryOperationRecord>()
+  const projections = new Map<string, SessionProjection>()
 
   return {
     async appendEvent(sessionId, event, options) {
@@ -37,23 +35,25 @@ export function createMemoryEventStore(): EventStore {
 
     appendEvents,
 
-    async readEvents(sessionId) {
-      return [...(sessions.get(sessionId) ?? [])]
+    async readEvents(sessionId, input = {}) {
+      return structuredClone(
+        (sessions.get(sessionId) ?? []).filter(
+          (event) => event.seq > (input.after ?? 0),
+        ),
+      )
+    },
+
+    async readProjection(sessionId) {
+      const projection = projections.get(sessionId)
+      return projection === undefined ? undefined : structuredClone(projection)
     },
 
     async listSessions(input = {}) {
-      const summaries = Array.from(sessions.entries())
-        .map(([sessionId, events]) => createSessionSummary(sessionId, events))
-        .filter((summary): summary is EventStoreSessionSummary => {
-          return summary !== undefined
-        })
-        .sort((left, right) => {
-          const updatedAt = right.updatedAt.localeCompare(left.updatedAt)
-          if (updatedAt !== 0) return updatedAt
-          return left.sessionId.localeCompare(right.sessionId)
-        })
+      const summaries = Array.from(projections.values()).map(
+        summarizeSessionProjection,
+      )
 
-      return paginateSessionSummaries(summaries, input)
+      return structuredClone(paginateSessionSummaries(summaries, input))
     },
   }
 
@@ -73,9 +73,11 @@ export function createMemoryEventStore(): EventStore {
           options.operation,
           operation.fingerprint,
         )
-        return existingEvents.slice(
-          operation.firstSeq - 1,
-          operation.firstSeq - 1 + operation.eventCount,
+        return structuredClone(
+          existingEvents.slice(
+            operation.firstSeq - 1,
+            operation.firstSeq - 1 + operation.eventCount,
+          ),
         )
       }
     }
@@ -91,8 +93,15 @@ export function createMemoryEventStore(): EventStore {
         event,
       }),
     )
+    const storedEnvelopes = structuredClone(envelopes)
+    const projection = applySessionFacts(
+      projections.get(sessionId),
+      storedEnvelopes,
+    )
+    if (!projection) throw new Error("Expected appended Session projection.")
 
-    sessions.set(sessionId, [...existingEvents, ...envelopes])
+    sessions.set(sessionId, [...existingEvents, ...storedEnvelopes])
+    projections.set(sessionId, structuredClone(projection))
     if (options.operation !== undefined) {
       operations.set(`${sessionId}\u0000${options.operation.id}`, {
         fingerprint: options.operation.fingerprint,
@@ -100,126 +109,6 @@ export function createMemoryEventStore(): EventStore {
         eventCount: envelopes.length,
       })
     }
-    return envelopes
+    return structuredClone(storedEnvelopes)
   }
-}
-
-function createSessionSummary(
-  sessionId: string,
-  events: readonly EventEnvelope[],
-): EventStoreSessionSummary | undefined {
-  const firstEvent = events.at(0)
-  if (!firstEvent) return undefined
-  if (firstEvent.type !== EventType.SessionCreated) {
-    throw createYakitoriError({
-      code: YakitoriErrorCode.InvalidEventLog,
-      message: "Session log must start with session.created.",
-      details: {
-        sessionId,
-        actualType: firstEvent.type,
-      },
-    })
-  }
-
-  const lastEvent = events.at(-1) ?? firstEvent
-  const summary: {
-    sessionId: string
-    seq: number
-    createdAt: string
-    updatedAt: string
-    title?: string
-    workingDirectory?: string
-    parentSessionId?: string
-    metadata?: EventMetadata
-  } = {
-    sessionId,
-    seq: lastEvent.seq,
-    createdAt: firstEvent.createdAt,
-    updatedAt: lastEvent.createdAt,
-  }
-
-  if (firstEvent.data.title !== undefined) summary.title = firstEvent.data.title
-  if (firstEvent.data.workingDirectory !== undefined) {
-    summary.workingDirectory = firstEvent.data.workingDirectory
-  }
-  if (firstEvent.data.parentSessionId !== undefined) {
-    summary.parentSessionId = firstEvent.data.parentSessionId
-  }
-  if (firstEvent.data.metadata !== undefined) {
-    summary.metadata = firstEvent.data.metadata
-  }
-
-  for (const event of events.slice(1)) {
-    if (event.type !== EventType.SessionMetadataUpdated) continue
-    if (event.data.title !== undefined) summary.title = event.data.title
-    if (event.data.metadata !== undefined)
-      summary.metadata = event.data.metadata
-  }
-
-  return summary
-}
-
-function paginateSessionSummaries(
-  summaries: readonly EventStoreSessionSummary[],
-  input: EventStoreListSessionsInput = {},
-): EventStoreListSessionsResult {
-  const limit = requireSessionListLimit(input.limit)
-  const startIndex =
-    input.cursor === undefined
-      ? 0
-      : requireSessionCursorIndex(summaries, input.cursor) + 1
-  const sessions = summaries.slice(startIndex, startIndex + limit)
-  const nextCursor =
-    startIndex + limit < summaries.length
-      ? sessionSummaryCursor(requireLastSummary(sessions))
-      : undefined
-
-  return {
-    sessions,
-    ...(nextCursor === undefined ? {} : { nextCursor }),
-  }
-}
-
-function requireSessionListLimit(limit: number | undefined): number {
-  if (limit === undefined) return 50
-  if (Number.isInteger(limit) && limit > 0 && limit <= 100) return limit
-  throw createYakitoriError({
-    code: YakitoriErrorCode.InvalidArgument,
-    message: "Session list limit must be an integer from 1 to 100.",
-    details: {
-      limit,
-    },
-  })
-}
-
-function requireSessionCursorIndex(
-  summaries: readonly EventStoreSessionSummary[],
-  cursor: string,
-): number {
-  const index = summaries.findIndex(
-    (summary) => sessionSummaryCursor(summary) === cursor,
-  )
-  if (index >= 0) return index
-  throw createYakitoriError({
-    code: YakitoriErrorCode.InvalidArgument,
-    message: "Session list cursor is invalid.",
-    details: {
-      cursor,
-    },
-  })
-}
-
-function sessionSummaryCursor(summary: EventStoreSessionSummary): string {
-  return `${summary.updatedAt}\t${summary.sessionId}`
-}
-
-function requireLastSummary(
-  summaries: readonly EventStoreSessionSummary[],
-): EventStoreSessionSummary {
-  const summary = summaries.at(-1)
-  if (summary) return summary
-  throw createYakitoriError({
-    code: YakitoriErrorCode.InvalidState,
-    message: "Expected at least one session summary.",
-  })
 }
