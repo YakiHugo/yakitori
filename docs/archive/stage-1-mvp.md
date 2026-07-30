@@ -1,5 +1,9 @@
 # Stage 1: MVP — a Mate That Actually Runs
 
+> Archived 2026-07-24: this stage is complete. This document is a historical
+> record — do not implement from it. Current direction lives in
+> `docs/architecture.md` and `docs/decisions/`.
+>
 > Stage 1 is complete. This document records the plan that produced the MVP;
 > decision 0007 now controls event vocabulary, projection, and recovery
 > semantics where its terminology differs from this plan.

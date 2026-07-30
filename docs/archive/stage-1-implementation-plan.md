@@ -1,9 +1,13 @@
 # Stage 1 MVP Implementation Plan
 
+> Archived 2026-07-24: this stage is complete. This document is a historical
+> record — do not implement from it. Current direction lives in
+> `docs/architecture.md` and `docs/decisions/`.
+>
 > Completed historical plan. Decision 0007 now controls event vocabulary,
 > projection, and recovery semantics where its terminology differs here.
 
-This is the execution plan for `docs/stage-1-mvp.md`. It is written for a
+This is the execution plan for `docs/archive/stage-1-mvp.md`. It is written for a
 coding agent implementing the work one reviewable step at a time. Read
 `AGENTS.md`, `docs/architecture.md`, and
 `docs/decisions/0006-collaboration-foundations.md` before starting.
@@ -64,7 +68,7 @@ Track progress here. Mark a step complete only after its exit criteria and
 
 ## Decisions fixed by this plan
 
-This document preserves the intent of `docs/stage-1-mvp.md` while resolving
+This document preserves the intent of `docs/archive/stage-1-mvp.md` while resolving
 the implementation ambiguities found during repository and reference review.
 If the two documents differ on the following details, this plan controls:
 
