@@ -1,28 +1,29 @@
 import {
-  createEventEnvelope,
   applySessionFacts,
+  createEventEnvelope,
   type EventEnvelope,
   type EventStore,
   type EventStoreAppendOptions,
+  EventType,
   type KernelEvent,
   type SessionProjection,
 } from "../../src/index.ts"
 import {
   paginateSessionSummaries,
+  requireAdmissionFingerprint,
   requireExpectedSequence,
-  requireOperationFingerprint,
   summarizeSessionProjection,
 } from "../../src/kernel/event-store.ts"
+import { fingerprintInputAdmission } from "../../src/kernel/operation.ts"
 
-type MemoryOperationRecord = {
-  readonly eventCount: number
+type MemoryAdmissionRecord = {
+  readonly event: EventEnvelope
   readonly fingerprint: string
-  readonly firstSeq: number
 }
 
 export function createMemoryEventStore(): EventStore {
   const sessions = new Map<string, EventEnvelope[]>()
-  const operations = new Map<string, MemoryOperationRecord>()
+  const admissions = new Map<string, MemoryAdmissionRecord>()
   const projections = new Map<string, SessionProjection>()
 
   return {
@@ -77,22 +78,28 @@ export function createMemoryEventStore(): EventStore {
     options: EventStoreAppendOptions = {},
   ): Promise<EventEnvelope[]> {
     const existingEvents = sessions.get(sessionId) ?? []
-    if (options.operation !== undefined) {
-      const operation = operations.get(
-        `${sessionId}\u0000${options.operation.id}`,
+    if (options.admission !== undefined) {
+      const event = events[0]
+      if (
+        events.length !== 1 ||
+        event?.type !== EventType.InputAdmitted ||
+        event.data.requestId !== options.admission.requestId ||
+        fingerprintInputAdmission(event.data) !== options.admission.fingerprint
+      ) {
+        throw new Error(
+          "Admission reconciliation must match one input.admitted fact.",
+        )
+      }
+      const admission = admissions.get(
+        `${sessionId}\u0000${options.admission.requestId}`,
       )
-      if (operation !== undefined) {
-        requireOperationFingerprint(
+      if (admission !== undefined) {
+        requireAdmissionFingerprint(
           sessionId,
-          options.operation,
-          operation.fingerprint,
+          options.admission,
+          admission.fingerprint,
         )
-        return structuredClone(
-          existingEvents.slice(
-            operation.firstSeq - 1,
-            operation.firstSeq - 1 + operation.eventCount,
-          ),
-        )
+        return [structuredClone(admission.event)]
       }
     }
     requireExpectedSequence(
@@ -108,6 +115,24 @@ export function createMemoryEventStore(): EventStore {
       }),
     )
     const storedEnvelopes = structuredClone(envelopes)
+    const pendingAdmissionKeys = new Set<string>()
+    const newAdmissions = storedEnvelopes.flatMap((event) => {
+      if (event.type !== EventType.InputAdmitted) return []
+      const key = `${sessionId}\u0000${event.data.requestId}`
+      if (admissions.has(key) || pendingAdmissionKeys.has(key)) {
+        throw new Error(`Request ${event.data.requestId} was already admitted.`)
+      }
+      pendingAdmissionKeys.add(key)
+      return [
+        {
+          key,
+          record: {
+            event,
+            fingerprint: fingerprintInputAdmission(event.data),
+          },
+        },
+      ]
+    })
     const projection = applySessionFacts(
       projections.get(sessionId),
       storedEnvelopes,
@@ -116,12 +141,8 @@ export function createMemoryEventStore(): EventStore {
 
     sessions.set(sessionId, [...existingEvents, ...storedEnvelopes])
     projections.set(sessionId, structuredClone(projection))
-    if (options.operation !== undefined) {
-      operations.set(`${sessionId}\u0000${options.operation.id}`, {
-        fingerprint: options.operation.fingerprint,
-        firstSeq: existingEvents.length + 1,
-        eventCount: envelopes.length,
-      })
+    for (const admission of newAdmissions) {
+      admissions.set(admission.key, admission.record)
     }
     return structuredClone(storedEnvelopes)
   }

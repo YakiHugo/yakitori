@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
@@ -20,13 +20,56 @@ function testApplicationOptions(input: {
 }) {
   return {
     ...input,
-    acquireLock: false,
     recoverOnStart: false,
     stream: createFauxProvider([]).stream,
   }
 }
 
 describe("application composition", () => {
+  it("binds the runtime lock to the canonical Session store", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const secondRoot = await mkdtemp(join(tmpdir(), "yakitori-app-second-"))
+      const sessionStoreRoot = join(rootDir, "shared-sessions")
+      const first = await createYakitoriApplication({
+        ...testApplicationOptions({ rootDir, workspace }),
+        sessionStoreRoot,
+      })
+      try {
+        await expect(
+          createYakitoriApplication({
+            ...testApplicationOptions({
+              rootDir: secondRoot,
+              workspace,
+            }),
+            sessionStoreRoot,
+          }),
+        ).rejects.toThrow("Runtime lock is held by live process")
+      } finally {
+        await first.close()
+        await rm(secondRoot, { recursive: true, force: true })
+      }
+    })
+  })
+
+  it("releases the Session lock when Mate storage construction fails", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const invalidDatabasePath = join(rootDir, "mate-database-directory")
+      await mkdir(invalidDatabasePath)
+      await expect(
+        createYakitoriApplication({
+          ...testApplicationOptions({ rootDir, workspace }),
+          mateDatabasePath: invalidDatabasePath,
+        }),
+      ).rejects.toThrow()
+      await rm(invalidDatabasePath, { recursive: true })
+
+      const retried = await createYakitoriApplication(
+        testApplicationOptions({ rootDir, workspace }),
+      )
+      await retried.close()
+    })
+  })
+
   it("creates one default Mate only once across restarts", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const first = await createYakitoriApplication(
@@ -34,7 +77,11 @@ describe("application composition", () => {
       )
       const firstMateId = first.activeMate.mateId
       const firstRevisionId = first.activeMate.mateRevisionId
-      await first.close()
+      expect(first.sessionStoreRoot).toBe(
+        await realpath(join(rootDir, "sessions")),
+      )
+      expect(first.mateDatabasePath).toBe(join(rootDir, "mates.sqlite"))
+      await Promise.all([first.close(), first.close()])
 
       const second = await createYakitoriApplication(
         testApplicationOptions({ rootDir, workspace }),
@@ -52,10 +99,34 @@ describe("application composition", () => {
     })
   })
 
+  it("keeps legacy Mate identity in events.sqlite when no Mate DB exists", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const legacyPath = join(rootDir, "events.sqlite")
+      const mateStore = createSqliteMateStore({ databasePath: legacyPath })
+      const created = await createMateKernel(mateStore).createMate({
+        instructions: "Preserve this identity.",
+        name: "Legacy",
+        role: "Builder",
+      })
+      mateStore.close()
+
+      const application = await createYakitoriApplication(
+        testApplicationOptions({ rootDir, workspace }),
+      )
+      try {
+        expect(application.mateDatabasePath).toBe(legacyPath)
+        expect(application.activeMate.mateId).toBe(created.mate.id)
+        expect((await application.mateKernel.listMates()).mates).toHaveLength(1)
+      } finally {
+        await application.close()
+      }
+    })
+  })
+
   it("selects an explicitly configured active Mate and pins its revision", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const mateStore = createSqliteMateStore({
-        databasePath: join(rootDir, "events.sqlite"),
+        databasePath: join(rootDir, "mates.sqlite"),
       })
       const mateKernel = createMateKernel(mateStore)
       const created = await mateKernel.createMate({
@@ -109,7 +180,7 @@ describe("application composition", () => {
       ).rejects.toThrow("Configured Mate was not found")
 
       const mateStore = createSqliteMateStore({
-        databasePath: join(rootDir, "events.sqlite"),
+        databasePath: join(rootDir, "mates.sqlite"),
       })
       const mateKernel = createMateKernel(mateStore)
       const created = await mateKernel.createMate({
@@ -138,7 +209,7 @@ describe("application composition", () => {
   it("fails startup when multiple active Mates exist without an explicit selection", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const mateStore = createSqliteMateStore({
-        databasePath: join(rootDir, "events.sqlite"),
+        databasePath: join(rootDir, "mates.sqlite"),
       })
       const mateKernel = createMateKernel(mateStore)
       await mateKernel.createMate({
@@ -211,7 +282,6 @@ describe("application composition", () => {
       const application = await createYakitoriApplication({
         rootDir,
         workspace,
-        acquireLock: false,
         recoverOnStart: false,
         stream: provider.stream,
         provider: "openai",
@@ -248,7 +318,6 @@ describe("application composition", () => {
       const application = await createYakitoriApplication({
         rootDir,
         workspace,
-        acquireLock: false,
         recoverOnStart: false,
         provider: "faux",
         fauxScenario: "text",
@@ -298,7 +367,6 @@ describe("application composition", () => {
         createYakitoriApplication({
           rootDir,
           workspace,
-          acquireLock: false,
           stream: provider.stream,
         }),
         new Promise<never>((_, reject) => {

@@ -9,7 +9,7 @@ import {
   createRuntimeLimits,
   createSessionKernel,
   createSessionRunner,
-  createSqliteEventStore,
+  createJsonlEventStore,
   createSqliteMateStore,
   createTransientEventHub,
   EventType,
@@ -437,9 +437,11 @@ async function createAttributedSession(runtime: RuntimeContext) {
 
 async function withRuntime(run: (runtime: RuntimeContext) => Promise<void>) {
   const rootDir = await mkdtemp(join(tmpdir(), "yakitori-runner-"))
-  const eventStore = createSqliteEventStore({ rootDir })
+  const eventStore = createJsonlEventStore({
+    sessionsDir: join(rootDir, "sessions"),
+  })
   const mateStore = createSqliteMateStore({
-    databasePath: join(rootDir, "events.sqlite"),
+    databasePath: join(rootDir, "mates.sqlite"),
   })
   const runtime: RuntimeContext = {
     kernel: createSessionKernel(eventStore),
@@ -451,7 +453,7 @@ async function withRuntime(run: (runtime: RuntimeContext) => Promise<void>) {
     await run(runtime)
   } finally {
     mateStore.close()
-    eventStore.close()
+    await eventStore.close()
     await rm(rootDir, { recursive: true, force: true })
   }
 }

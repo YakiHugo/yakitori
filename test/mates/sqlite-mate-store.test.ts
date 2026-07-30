@@ -51,7 +51,7 @@ describe("SQLite mate store", () => {
       const store = context.open()
       const mateId = createMateId()
       await store.appendEvent(mateId, createdEvent(), { expectedSeq: 0 })
-      const databasePath = join(context.rootDir, "events.sqlite")
+      const databasePath = join(context.rootDir, "mates.sqlite")
       const startGate = new Int32Array(new SharedArrayBuffer(4))
       const workers = [
         createAppendWorker(databasePath, mateId, startGate.buffer),

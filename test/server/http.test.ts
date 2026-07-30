@@ -9,14 +9,22 @@ import {
   ApiErrorCode,
   type ApiListSessionsResponse,
   type ApiReadSessionResponse,
+  createJsonlEventStore,
   createSessionKernel,
   createYakitoriHttpServer,
   type EventEnvelope,
   EventType,
+  type YakitoriHttpServerOptions,
 } from "../../src/index.ts"
 import { createMemoryEventStore } from "../kernel/memory-event-store.ts"
 
 describe("HTTP server", () => {
+  it("requires an injected runtime instead of opening persistence implicitly", () => {
+    expect(() =>
+      createYakitoriHttpServer({} as YakitoriHttpServerOptions),
+    ).toThrow("createYakitoriApplication")
+  })
+
   it("adapts session handlers to JSON routes", async () => {
     await withHttpServer(async (baseUrl) => {
       const created = await postJson<ApiCreateSessionResponse>(
@@ -312,12 +320,12 @@ describe("HTTP server", () => {
     })
   })
 
-  it("serves sessions through the default SQLite store", async () => {
-    await withSqliteHttpServer(async (baseUrl) => {
+  it("serves sessions through an injected JSONL store", async () => {
+    await withJsonlHttpServer(async (baseUrl) => {
       const created = await postJson<ApiCreateSessionResponse>(
         `${baseUrl}/sessions`,
         {
-          title: "SQLite session",
+          title: "JSONL session",
         },
       )
       const listed = await getJson<ApiListSessionsResponse>(
@@ -329,14 +337,14 @@ describe("HTTP server", () => {
       expect(listed.body.sessions).toEqual([
         expect.objectContaining({
           id: created.body.session.id,
-          title: "SQLite session",
+          title: "JSONL session",
         }),
       ])
     })
   })
 
-  it("deduplicates retried admissions through the default SQLite store", async () => {
-    await withSqliteHttpServer(async (baseUrl) => {
+  it("deduplicates retried admissions through an injected JSONL store", async () => {
+    await withJsonlHttpServer(async (baseUrl) => {
       const created = await postJson<ApiCreateSessionResponse>(
         `${baseUrl}/sessions`,
         {},
@@ -407,11 +415,14 @@ async function withHttpServer(
   }
 }
 
-async function withSqliteHttpServer(
+async function withJsonlHttpServer(
   run: (baseUrl: string) => Promise<void>,
 ): Promise<void> {
   const rootDir = await mkdtemp(join(tmpdir(), "yakitori-http-"))
-  const server = createYakitoriHttpServer({ rootDir })
+  const eventStore = createJsonlEventStore({
+    sessionsDir: join(rootDir, "sessions"),
+  })
+  const server = createYakitoriHttpServer({ eventStore })
   await new Promise<void>((resolve) => {
     server.listen(0, "127.0.0.1", resolve)
   })
@@ -431,6 +442,7 @@ async function withSqliteHttpServer(
       })
       server.closeAllConnections()
     })
+    await eventStore.close()
     await rm(rootDir, { recursive: true, force: true })
   }
 }

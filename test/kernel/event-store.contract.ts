@@ -1,5 +1,6 @@
 import { expect, it } from "vitest"
-import { EventType, type EventStore } from "../../src/index.ts"
+import { type EventStore, EventType } from "../../src/index.ts"
+import { fingerprintInputAdmission } from "../../src/kernel/operation.ts"
 
 export function defineEventStoreContract(options: {
   readonly name: string
@@ -72,7 +73,7 @@ export function defineEventStoreContract(options: {
     })
   })
 
-  it(`${options.name}: returns the original event for an idempotent receipt`, async () => {
+  it(`${options.name}: returns the original event for an idempotent admission`, async () => {
     await options.run(async (store) => {
       const sessionId = "session_00000000-0000-4000-8000-000000000003"
       await store.appendEvent(
@@ -80,22 +81,39 @@ export function defineEventStoreContract(options: {
         { type: EventType.SessionCreated, data: {} },
         { expectedSeq: 0 },
       )
-      const options = {
+      const data = {
+        requestId: "request:contract",
+        inputId: "input_contract",
+        role: "user" as const,
+        content: { kind: "text" as const, text: "same" },
+      }
+      const appendOptions = {
         expectedSeq: 1,
-        operation: { id: "input:1", fingerprint: "same" },
+        admission: {
+          requestId: data.requestId,
+          fingerprint: fingerprintInputAdmission(data),
+        },
       }
       const fact = {
-        type: EventType.InputCancelled,
-        data: { inputId: "input_1" },
+        type: EventType.InputAdmitted,
+        data,
       } as const
-      const first = await store.appendEvent(sessionId, fact, options)
-      const retry = await store.appendEvent(sessionId, fact, options)
+      const first = await store.appendEvent(sessionId, fact, appendOptions)
+      await store.appendEvent(
+        sessionId,
+        {
+          type: EventType.InputCancelled,
+          data: { inputId: "input_later" },
+        },
+        { expectedSeq: 2 },
+      )
+      const retry = await store.appendEvent(sessionId, fact, appendOptions)
       expect(retry).toEqual(first)
-      expect(await store.readEvents(sessionId)).toHaveLength(2)
+      expect(await store.readEvents(sessionId)).toHaveLength(3)
     })
   })
 
-  it(`${options.name}: rejects an operation id reused with a different fingerprint`, async () => {
+  it(`${options.name}: rejects a request id reused with a different fingerprint`, async () => {
     await options.run(async (store) => {
       const sessionId = "session_00000000-0000-4000-8000-000000000004"
       await store.appendEvent(
@@ -103,31 +121,48 @@ export function defineEventStoreContract(options: {
         { type: EventType.SessionCreated, data: {} },
         { expectedSeq: 0 },
       )
+      const firstData = {
+        requestId: "request:reused",
+        inputId: "input_1",
+        role: "user" as const,
+        content: { kind: "text" as const, text: "first" },
+      }
       await store.appendEvent(
         sessionId,
         {
-          type: EventType.InputCancelled,
-          data: { inputId: "input_1" },
+          type: EventType.InputAdmitted,
+          data: firstData,
         },
         {
           expectedSeq: 1,
-          operation: { id: "operation:1", fingerprint: "first" },
+          admission: {
+            requestId: firstData.requestId,
+            fingerprint: fingerprintInputAdmission(firstData),
+          },
         },
       )
 
+      const secondData = {
+        ...firstData,
+        inputId: "input_2",
+        content: { kind: "text" as const, text: "different" },
+      }
       await expect(
         store.appendEvent(
           sessionId,
           {
-            type: EventType.InputCancelled,
-            data: { inputId: "input_2" },
+            type: EventType.InputAdmitted,
+            data: secondData,
           },
           {
             expectedSeq: 2,
-            operation: { id: "operation:1", fingerprint: "different" },
+            admission: {
+              requestId: secondData.requestId,
+              fingerprint: fingerprintInputAdmission(secondData),
+            },
           },
         ),
-      ).rejects.toThrow("already used with different input")
+      ).rejects.toThrow("already admitted with different input")
     })
   })
 
@@ -157,7 +192,10 @@ export function defineEventStoreContract(options: {
       const sessionId = "session_00000000-0000-4000-8000-000000000006"
       await store.appendEvent(
         sessionId,
-        { type: EventType.SessionCreated, data: { title: "Original" } },
+        {
+          type: EventType.SessionCreated,
+          data: { title: "Original", metadata: { source: "Original" } },
+        },
         { expectedSeq: 0 },
       )
       const event = (await store.readEvents(sessionId))[0] as unknown as {
@@ -165,16 +203,82 @@ export function defineEventStoreContract(options: {
       }
       const projection = (await store.readProjection(sessionId)) as unknown as {
         title?: string
+        metadata?: { source?: string }
       }
+      const listing = await store.listSessions()
+      const listedMetadata = listing.sessions[0]?.metadata as
+        | { source?: string }
+        | undefined
       event.data.title = "Mutated"
       projection.title = "Mutated"
+      if (listedMetadata !== undefined) listedMetadata.source = "Mutated"
 
       expect((await store.readEvents(sessionId))[0]).toMatchObject({
         data: { title: "Original" },
       })
       expect(await store.readProjection(sessionId)).toMatchObject({
         title: "Original",
+        metadata: { source: "Original" },
       })
+    })
+  })
+
+  it(`${options.name}: snapshots mutable append inputs before admission`, async () => {
+    await options.run(async (store) => {
+      const sessionId = "session_00000000-0000-4000-8000-000000000011"
+      await store.appendEvent(
+        sessionId,
+        { type: EventType.SessionCreated, data: {} },
+        { expectedSeq: 0 },
+      )
+      const event = {
+        type: EventType.InputAdmitted,
+        data: {
+          requestId: "request:snapshot",
+          inputId: "input_snapshot",
+          role: "user" as const,
+          content: { kind: "text" as const, text: "Original" },
+        },
+      }
+      const appendOptions = {
+        expectedSeq: 1,
+        admission: {
+          requestId: event.data.requestId,
+          fingerprint: fingerprintInputAdmission(event.data),
+        },
+      }
+      const pending = store.appendEvent(sessionId, event, appendOptions)
+      event.data.content.text = "Mutated"
+      appendOptions.admission.fingerprint = "Mutated"
+      const original = await pending
+
+      expect((await store.readEvents(sessionId))[1]).toMatchObject({
+        data: { content: { text: "Original" } },
+      })
+      expect(
+        await store.appendEvent(
+          sessionId,
+          {
+            type: EventType.InputAdmitted,
+            data: {
+              requestId: "request:snapshot",
+              inputId: "input_retry",
+              role: "user",
+              content: { kind: "text", text: "Original" },
+            },
+          },
+          {
+            expectedSeq: 1,
+            admission: {
+              requestId: "request:snapshot",
+              fingerprint: fingerprintInputAdmission({
+                role: "user",
+                content: { kind: "text", text: "Original" },
+              }),
+            },
+          },
+        ),
+      ).toEqual(original)
     })
   })
 
