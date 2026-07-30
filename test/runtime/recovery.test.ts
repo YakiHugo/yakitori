@@ -67,6 +67,46 @@ describe("runtime recovery", () => {
     })
   })
 
+  it("discovers and interrupts an open Turn after a cold store reopen", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "yakitori-cold-recovery-"))
+    const sessionsDir = join(rootDir, "sessions")
+    let eventStore = createJsonlEventStore({ sessionsDir })
+    try {
+      const firstKernel = createSessionKernel(eventStore)
+      const session = await firstKernel.createSession({
+        workingDirectory: rootDir,
+      })
+      const admitted = await firstKernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "cold restart" },
+      })
+      await firstKernel.startTurn({
+        sessionId: session.sessionId,
+        inputId: admitted.inputId,
+      })
+      await eventStore.close()
+
+      eventStore = createJsonlEventStore({ sessionsDir })
+      const recoveredKernel = createSessionKernel(eventStore)
+      const recovered = await recoverSessions({ kernel: recoveredKernel })
+
+      expect(recovered.recoveredSessionIds).toEqual([session.sessionId])
+      expect(recovered.events).toMatchObject([
+        { sessionId: session.sessionId, type: EventType.TurnInterrupted },
+      ])
+      const read = await recoveredKernel.readSession({
+        sessionId: session.sessionId,
+      })
+      expect(read.session?.activeTurn).toBeUndefined()
+      expect(read.session?.interruptedTurns).toMatchObject([
+        { state: "interrupted" },
+      ])
+    } finally {
+      await eventStore.close()
+      await rm(rootDir, { recursive: true, force: true })
+    }
+  })
+
   it("wakes sessions that only have admitted Inputs", async () => {
     await withStore(async (runtime) => {
       const session = await createAttributedSession(runtime)
