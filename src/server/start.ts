@@ -19,14 +19,22 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
     if (shuttingDown) return
     shuttingDown = true
-    server.close(() => {
-      void application.close().finally(() => {
-        process.exit(0)
-      })
+    server.close((serverError) => {
+      void application.close().then(
+        () => {
+          if (serverError)
+            console.error("HTTP server close failed", serverError)
+          process.exit(serverError ? 1 : 0)
+        },
+        (error: unknown) => {
+          console.error("Yakitori shutdown failed", error)
+          process.exit(1)
+        },
+      )
     })
     server.closeAllConnections()
     setTimeout(() => {
       process.exit(1)
-    }, 1_000).unref()
+    }, 10_000).unref()
   })
 }

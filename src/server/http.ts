@@ -6,7 +6,6 @@ import {
 import type { AddressInfo } from "node:net"
 import {
   createSessionKernel,
-  createSqliteEventStore,
   type EventEnvelope,
   type EventStore,
   type SessionKernel,
@@ -20,27 +19,36 @@ import { createDurableEventHub, type DurableEventHub } from "./event-hub.ts"
 import { createServerHandlers, type ServerHandlers } from "./handlers.ts"
 import { ApiErrorCode, type ApiHandlerResult } from "./protocol.ts"
 
-export type YakitoriHttpServerOptions = {
-  readonly eventStore?: EventStore
+type YakitoriHttpServerCommonOptions = {
   readonly eventHub?: DurableEventHub
   readonly transientHub?: TransientEventHub
-  readonly handlers?: ServerHandlers
-  readonly kernel?: SessionKernel
-  readonly rootDir?: string
 }
 
-export function createYakitoriHttpServer(
-  options: YakitoriHttpServerOptions = {},
-) {
+export type YakitoriHttpServerOptions = YakitoriHttpServerCommonOptions &
+  (
+    | {
+        readonly handlers: ServerHandlers
+        readonly kernel?: never
+        readonly eventStore?: never
+      }
+    | {
+        readonly kernel: SessionKernel
+        readonly handlers?: never
+        readonly eventStore?: never
+      }
+    | {
+        readonly eventStore: EventStore
+        readonly handlers?: never
+        readonly kernel?: never
+      }
+  )
+
+export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
   const eventHub = options.eventHub ?? createDurableEventHub()
   const transientHub = options.transientHub
-  const owned =
-    options.handlers === undefined
-      ? createOwnedServerRuntime(options)
-      : undefined
   const handlers =
     options.handlers ??
-    createServerHandlers(requireOwnedKernel(owned), { eventHub })
+    createServerHandlers(resolveServerKernel(options), { eventHub })
 
   const server = createServer((request, response) => {
     void handleRequest(
@@ -53,39 +61,18 @@ export function createYakitoriHttpServer(
       writeUnhandledError(response, error)
     })
   })
-  if (owned?.close !== undefined) server.once("close", owned.close)
   return server
 }
 
-function createOwnedServerRuntime(options: YakitoriHttpServerOptions): {
-  readonly kernel: SessionKernel
-  readonly close?: () => void
-} {
-  if (options.kernel !== undefined) return { kernel: options.kernel }
-  if (options.eventStore !== undefined) {
-    return { kernel: createSessionKernel(options.eventStore) }
-  }
-
-  const eventStore = createSqliteEventStore({
-    ...(options.rootDir === undefined ? {} : { rootDir: options.rootDir }),
-  })
-  return {
-    kernel: createSessionKernel(eventStore),
-    close: () => eventStore.close(),
-  }
-}
-
-function requireOwnedKernel(
-  owned:
-    | {
-        readonly kernel: SessionKernel
-        readonly close?: () => void
-      }
-    | undefined,
+function resolveServerKernel(
+  options: YakitoriHttpServerOptions,
 ): SessionKernel {
-  if (owned) return owned.kernel
+  if (options.kernel !== undefined) return options.kernel
+  if (options.eventStore !== undefined) {
+    return createSessionKernel(options.eventStore)
+  }
   throw new Error(
-    "Expected owned server runtime when handlers are not provided.",
+    "An injected kernel, eventStore, or handlers is required. Use createYakitoriApplication() for an owned persistent runtime.",
   )
 }
 

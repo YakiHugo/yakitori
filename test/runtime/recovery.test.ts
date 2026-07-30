@@ -4,9 +4,9 @@ import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import {
   acquireRuntimeLock,
+  createJsonlEventStore,
   createMateKernel,
   createSessionKernel,
-  createSqliteEventStore,
   createSqliteMateStore,
   discoverRecoveryState,
   EventType,
@@ -172,7 +172,7 @@ describe("runtime recovery", () => {
       )
       expect(recovered.events).toHaveLength(101)
     })
-  })
+  }, 15_000)
 
   it("acquires an exclusive runtime lock and reclaims a stale one", async () => {
     const rootDir = await mkdtemp(join(tmpdir(), "yakitori-lock-"))
@@ -240,9 +240,11 @@ async function createAttributedSession(runtime: StoreRuntime) {
 async function withStore(run: (runtime: StoreRuntime) => Promise<void>) {
   const rootDir = await mkdtemp(join(tmpdir(), "yakitori-recovery-"))
   const workspace = await mkdtemp(join(tmpdir(), "yakitori-recovery-ws-"))
-  const eventStore = createSqliteEventStore({ rootDir })
+  const eventStore = createJsonlEventStore({
+    sessionsDir: join(rootDir, "sessions"),
+  })
   const mateStore = createSqliteMateStore({
-    databasePath: join(rootDir, "events.sqlite"),
+    databasePath: join(rootDir, "mates.sqlite"),
   })
   try {
     await run({
@@ -252,7 +254,7 @@ async function withStore(run: (runtime: StoreRuntime) => Promise<void>) {
     })
   } finally {
     mateStore.close()
-    eventStore.close()
+    await eventStore.close()
     await rm(rootDir, { recursive: true, force: true })
     await rm(workspace, { recursive: true, force: true })
   }

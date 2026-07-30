@@ -1,8 +1,28 @@
 import { createHash } from "node:crypto"
-import type { JsonObject, JsonValue } from "./events.ts"
+import type {
+  EventMetadata,
+  InputRole,
+  JsonObject,
+  JsonValue,
+  TextContent,
+} from "./events.ts"
 
 export function fingerprintOperation(value: JsonValue): string {
   return createHash("sha256").update(canonicalJson(value)).digest("hex")
+}
+
+export function fingerprintInputAdmission(data: {
+  readonly role: InputRole
+  readonly content: TextContent
+  readonly parentInputId?: string | undefined
+  readonly metadata?: EventMetadata | undefined
+}): string {
+  return fingerprintOperation({
+    role: data.role,
+    content: data.content,
+    parentInputId: data.parentInputId ?? null,
+    metadata: data.metadata ?? null,
+  })
 }
 
 function canonicalJson(value: JsonValue): string {

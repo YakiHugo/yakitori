@@ -8,7 +8,7 @@ import {
   createRuntimeLimits,
   createSessionKernel,
   createSessionRunner,
-  createSqliteEventStore,
+  createJsonlEventStore,
   createSqliteMateStore,
   createToolRegistry,
   EventType,
@@ -343,9 +343,11 @@ async function createSession(runtime: ToolRuntime) {
 async function withToolRuntime(run: (runtime: ToolRuntime) => Promise<void>) {
   const rootDir = await mkdtemp(join(tmpdir(), "yakitori-tool-loop-"))
   const workspace = await mkdtemp(join(tmpdir(), "yakitori-tool-ws-"))
-  const eventStore = createSqliteEventStore({ rootDir })
+  const eventStore = createJsonlEventStore({
+    sessionsDir: join(rootDir, "sessions"),
+  })
   const mateStore = createSqliteMateStore({
-    databasePath: join(rootDir, "events.sqlite"),
+    databasePath: join(rootDir, "mates.sqlite"),
   })
   try {
     await run({
@@ -355,7 +357,7 @@ async function withToolRuntime(run: (runtime: ToolRuntime) => Promise<void>) {
     })
   } finally {
     mateStore.close()
-    eventStore.close()
+    await eventStore.close()
     await rm(rootDir, { recursive: true, force: true })
     await rm(workspace, { recursive: true, force: true })
   }

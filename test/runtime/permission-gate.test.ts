@@ -6,7 +6,7 @@ import {
   createRuntimeLimits,
   createSessionKernel,
   createSessionRunner,
-  createSqliteEventStore,
+  createJsonlEventStore,
   createSqliteMateStore,
   createToolRegistry,
   createRunCommandTool,
@@ -360,9 +360,11 @@ async function createSession(runtime: Runtime) {
 async function withPermissionRuntime(run: (runtime: Runtime) => Promise<void>) {
   const rootDir = await mkdtemp(join(tmpdir(), "yakitori-perm-"))
   const workspace = await mkdtemp(join(tmpdir(), "yakitori-perm-ws-"))
-  const eventStore = createSqliteEventStore({ rootDir })
+  const eventStore = createJsonlEventStore({
+    sessionsDir: join(rootDir, "sessions"),
+  })
   const mateStore = createSqliteMateStore({
-    databasePath: join(rootDir, "events.sqlite"),
+    databasePath: join(rootDir, "mates.sqlite"),
   })
   try {
     await run({
@@ -372,7 +374,7 @@ async function withPermissionRuntime(run: (runtime: Runtime) => Promise<void>) {
     })
   } finally {
     mateStore.close()
-    eventStore.close()
+    await eventStore.close()
     await rm(rootDir, { recursive: true, force: true })
     await rm(workspace, { recursive: true, force: true })
   }

@@ -1,8 +1,9 @@
-import { realpath, stat } from "node:fs/promises"
+import { mkdir, realpath, stat } from "node:fs/promises"
 import { join } from "node:path"
 import {
+  createJsonlEventStore,
   createSessionKernel,
-  createSqliteEventStore,
+  type JsonlEventStore,
   type SessionKernel,
 } from "../kernel/index.ts"
 import {
@@ -11,6 +12,7 @@ import {
   MateLifecycle,
   type MateKernel,
   type MateProjection,
+  type SqliteMateStore,
 } from "../mates/index.ts"
 import {
   acquireRuntimeLock,
@@ -45,28 +47,29 @@ const defaultMateProfile = {
 
 export type YakitoriApplicationOptions = {
   readonly activeMateId?: string
-  readonly databasePath?: string
+  readonly mateDatabasePath?: string
   readonly rootDir?: string
+  readonly sessionStoreRoot?: string
   readonly workspace?: string
   readonly stream?: StreamFn
   readonly provider?: string
   readonly model?: string
   readonly fauxScenario?: string
   readonly recoverOnStart?: boolean
-  readonly acquireLock?: boolean
 }
 
 export type YakitoriApplication = {
-  readonly databasePath: string
   readonly eventHub: DurableEventHub
   readonly transientHub: TransientEventHub
   readonly handlers: ServerHandlers
   readonly mateKernel: MateKernel
+  readonly mateDatabasePath: string
   readonly permissionGate: PermissionGate
   readonly runner: SessionRunner
   readonly rootDir: string
   readonly sessionDefaults: SessionCreateDefaults
   readonly sessionKernel: SessionKernel
+  readonly sessionStoreRoot: string
   readonly workspace: string
   readonly activeMate: {
     readonly mateId: string
@@ -82,30 +85,42 @@ export async function createYakitoriApplication(
   options: YakitoriApplicationOptions = {},
 ): Promise<YakitoriApplication> {
   const rootDir = options.rootDir ?? ".yakitori"
-  const databasePath = options.databasePath ?? join(rootDir, "events.sqlite")
+  const configuredSessionStoreRoot =
+    options.sessionStoreRoot ?? join(rootDir, "sessions")
+  const mateDatabasePath = await resolveMateDatabasePath(
+    rootDir,
+    options.mateDatabasePath,
+  )
   const workspace = await resolveWorkspaceDirectory(
     options.workspace ?? process.env.YAKITORI_WORKSPACE ?? process.cwd(),
   )
   const activeMateId =
     options.activeMateId ?? process.env.YAKITORI_MATE_ID ?? undefined
-  const shouldLock = options.acquireLock ?? true
   const shouldRecover = options.recoverOnStart ?? true
 
   let runtimeLock: RuntimeLock | undefined
-  if (shouldLock) {
-    runtimeLock = await acquireRuntimeLock(rootDir)
-  }
-
-  const eventStore = createSqliteEventStore({ databasePath })
-  const mateStore = createSqliteMateStore({ databasePath })
-  const sessionKernel = createSessionKernel(eventStore)
-  const mateKernel = createMateKernel(mateStore)
-  const eventHub = createDurableEventHub()
-  const transientHub = createTransientEventHub()
-  const permissionGate = createPermissionGate()
-  const toolRegistry = createToolRegistry()
+  let eventStore: JsonlEventStore | undefined
+  let mateStore: SqliteMateStore | undefined
+  let runnerForCleanup: SessionRunner | undefined
 
   try {
+    await mkdir(configuredSessionStoreRoot, { recursive: true })
+    const sessionStoreRoot = await realpath(configuredSessionStoreRoot)
+    runtimeLock = await acquireRuntimeLock(sessionStoreRoot)
+    const ownedEventStore = createJsonlEventStore({
+      sessionsDir: sessionStoreRoot,
+    })
+    eventStore = ownedEventStore
+    const ownedMateStore = createSqliteMateStore({
+      databasePath: mateDatabasePath,
+    })
+    mateStore = ownedMateStore
+    const sessionKernel = createSessionKernel(ownedEventStore)
+    const mateKernel = createMateKernel(ownedMateStore)
+    const eventHub = createDurableEventHub()
+    const transientHub = createTransientEventHub()
+    const permissionGate = createPermissionGate()
+    const toolRegistry = createToolRegistry()
     const activeMate = await resolveActiveMate(mateKernel, activeMateId)
     const sessionDefaults: SessionCreateDefaults = {
       workingDirectory: workspace,
@@ -141,6 +156,7 @@ export async function createYakitoriApplication(
       permissionGate,
       toolRegistry,
     })
+    runnerForCleanup = runner
 
     const handlers = createServerHandlers(sessionKernel, {
       eventHub,
@@ -169,18 +185,19 @@ export async function createYakitoriApplication(
       })
     }
 
-    let closed = false
+    let closePromise: Promise<void> | undefined
     return {
-      databasePath,
       eventHub,
       transientHub,
       handlers,
       mateKernel,
+      mateDatabasePath,
       permissionGate,
       runner,
       rootDir,
       sessionDefaults,
       sessionKernel,
+      sessionStoreRoot,
       workspace,
       activeMate: {
         mateId: activeMate.id,
@@ -196,18 +213,90 @@ export async function createYakitoriApplication(
         })
       },
       async close() {
-        if (closed) return
-        closed = true
-        await runner.close()
-        mateStore.close()
-        eventStore.close()
-        await runtimeLock?.release()
+        closePromise ??= closeApplicationResources(
+          runner,
+          ownedEventStore.close,
+          ownedMateStore.close,
+          runtimeLock,
+        )
+        await closePromise
       },
     }
   } catch (error) {
-    mateStore.close()
-    eventStore.close()
+    try {
+      await closeApplicationResources(
+        runnerForCleanup,
+        eventStore?.close,
+        mateStore?.close,
+        runtimeLock,
+      )
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        "Yakitori application startup and cleanup both failed.",
+        { cause: error },
+      )
+    }
+    throw error
+  }
+}
+
+async function closeApplicationResources(
+  runner: SessionRunner | undefined,
+  closeEventStore: (() => Promise<void>) | undefined,
+  closeMateStore: (() => void) | undefined,
+  runtimeLock: RuntimeLock | undefined,
+): Promise<void> {
+  const errors: unknown[] = []
+  try {
+    await runner?.close()
+  } catch (error) {
+    errors.push(error)
+  }
+  try {
+    await closeEventStore?.()
+  } catch (error) {
+    errors.push(error)
+  }
+  try {
+    closeMateStore?.()
+  } catch (error) {
+    errors.push(error)
+  }
+  try {
     await runtimeLock?.release()
+  } catch (error) {
+    errors.push(error)
+  }
+  if (errors.length > 0) {
+    throw new AggregateError(errors, "Failed to close Yakitori application.")
+  }
+}
+
+async function resolveMateDatabasePath(
+  rootDir: string,
+  configuredPath: string | undefined,
+): Promise<string> {
+  if (configuredPath !== undefined) return configuredPath
+  const current = join(rootDir, "mates.sqlite")
+  if (await pathExists(current)) return current
+  const legacy = join(rootDir, "events.sqlite")
+  if (await pathExists(legacy)) return legacy
+  return current
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await stat(path)
+    return true
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      (error as NodeJS.ErrnoException).code === "ENOENT"
+    ) {
+      return false
+    }
     throw error
   }
 }

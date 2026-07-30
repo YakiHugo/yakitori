@@ -3,16 +3,16 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import {
+  createJsonlEventStore,
   createSessionKernel,
-  createSqliteEventStore,
+  type EventStore,
   EventType,
   InputState,
   PermissionBehavior,
   PermissionState,
+  type SessionKernel,
   ToolState,
   TurnState,
-  type EventStore,
-  type SessionKernel,
 } from "../../src/index.ts"
 import { createMemoryEventStore } from "./memory-event-store.ts"
 
@@ -21,7 +21,7 @@ afterEach(async () => {
   for (const run of cleanup.splice(0)) await run()
 })
 
-for (const implementation of ["memory", "sqlite"] as const) {
+for (const implementation of ["memory", "jsonl"] as const) {
   describe(`session witness kernel (${implementation})`, () => {
     it("admits idempotently and folds promotion into turn.started", async () => {
       await withKernel(implementation, async ({ kernel }) => {
@@ -36,6 +36,13 @@ for (const implementation of ["memory", "sqlite"] as const) {
           requestId: "request:same",
           content: { kind: "text", text: "hello" },
         })
+        await expect(
+          kernel.admitInput({
+            sessionId: session.sessionId,
+            requestId: "request:same",
+            content: { kind: "text", text: "different" },
+          }),
+        ).rejects.toThrow("already admitted with different input")
         const turn = await kernel.startTurn({
           sessionId: session.sessionId,
           inputId: first.inputId,
@@ -390,7 +397,7 @@ for (const implementation of ["memory", "sqlite"] as const) {
       })
     })
 
-    it("keeps rich write-through and replay rebuilt projections equal", async () => {
+    it("keeps cached and replay rebuilt projections equal", async () => {
       await withKernel(implementation, async ({ kernel }) => {
         const completed = await activeTurn(kernel)
         await kernel.recordAssistantOutput({
@@ -495,7 +502,7 @@ function admit(kernel: SessionKernel, sessionId: string, text: string) {
 }
 
 async function withKernel(
-  implementation: "memory" | "sqlite",
+  implementation: "memory" | "jsonl",
   run: (context: { kernel: SessionKernel; store: EventStore }) => Promise<void>,
 ) {
   if (implementation === "memory") {
@@ -504,9 +511,11 @@ async function withKernel(
     return
   }
   const rootDir = await mkdtemp(join(tmpdir(), "yakitori-witness-"))
-  const store = createSqliteEventStore({ rootDir })
+  const store = createJsonlEventStore({
+    sessionsDir: join(rootDir, "sessions"),
+  })
   cleanup.push(async () => {
-    store.close()
+    await store.close()
     await rm(rootDir, { recursive: true, force: true })
   })
   await run({ kernel: createSessionKernel(store), store })
