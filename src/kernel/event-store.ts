@@ -1,8 +1,8 @@
 import { createYakitoriError, YakitoriErrorCode } from "./errors.ts"
 import {
-  isJsonObject,
   type EventEnvelope,
   type EventMetadata,
+  isJsonObject,
   type KernelEvent,
   type StoredEventEnvelope,
 } from "./events.ts"
@@ -34,8 +34,8 @@ export type EventStore = {
 
 export type EventStoreAppendOptions = {
   readonly expectedSeq?: number
-  readonly operation?: {
-    readonly id: string
+  readonly admission?: {
+    readonly requestId: string
     readonly fingerprint: string
   }
 }
@@ -73,16 +73,16 @@ export type EventStoreSessionSummary = {
   readonly metadata?: EventMetadata
 }
 
-export function requireOperationFingerprint(
+export function requireAdmissionFingerprint(
   sessionId: string,
-  operation: NonNullable<EventStoreAppendOptions["operation"]>,
+  admission: NonNullable<EventStoreAppendOptions["admission"]>,
   storedFingerprint: string,
 ): void {
-  if (operation.fingerprint === storedFingerprint) return
+  if (admission.fingerprint === storedFingerprint) return
   throw createYakitoriError({
     code: YakitoriErrorCode.InvalidState,
-    message: `Operation ${operation.id} was already used with different input.`,
-    details: { sessionId, operationId: operation.id },
+    message: `Request ${admission.requestId} was already admitted with different input.`,
+    details: { sessionId, requestId: admission.requestId },
   })
 }
 

@@ -1,16 +1,16 @@
-import type { EventStore } from "./event-store.ts"
 import { createYakitoriError, YakitoriErrorCode } from "./errors.ts"
+import type { EventStore } from "./event-store.ts"
 import {
-  EventType,
-  InputRole,
-  PermissionBehavior,
   type AssistantContentBlock,
   type EventEnvelope,
   type EventMetadata,
+  EventType,
+  InputRole,
   type ItemContent,
   type JsonValue,
   type KernelError,
   type KernelEvent,
+  PermissionBehavior,
   type PermissionDecisionReason,
   type StoredEventEnvelope,
   type TextContent,
@@ -26,16 +26,16 @@ import {
   createTurnId,
   isRequestId,
 } from "./ids.ts"
-import { fingerprintOperation } from "./operation.ts"
+import { fingerprintInputAdmission } from "./operation.ts"
 import {
+  type InputProjection,
   InputState,
   PermissionState,
-  ToolState,
-  TurnState,
-  type InputProjection,
   type SessionProjection,
   type ToolProjection,
+  ToolState,
   type TurnProjection,
+  TurnState,
 } from "./session-projector.ts"
 
 export type SessionKernel = {
@@ -340,13 +340,13 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
           },
           {
             expectedSeq: session.seq,
-            operation: {
-              id: `input.admit:${requestId}`,
-              fingerprint: fingerprintOperation({
+            admission: {
+              requestId,
+              fingerprint: fingerprintInputAdmission({
                 role: input.role ?? InputRole.User,
                 content: input.content,
-                parentInputId: input.parentInputId ?? null,
-                metadata: input.metadata ?? null,
+                parentInputId: input.parentInputId,
+                metadata: input.metadata,
               }),
             },
           },

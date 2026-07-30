@@ -46,8 +46,7 @@ export function createSqliteMateStore(
   options: SqliteMateStoreOptions = {},
 ): SqliteMateStore {
   const databasePath =
-    options.databasePath ??
-    join(options.rootDir ?? ".yakitori", "events.sqlite")
+    options.databasePath ?? join(options.rootDir ?? ".yakitori", "mates.sqlite")
   if (databasePath !== ":memory:") {
     mkdirSync(dirname(databasePath), { recursive: true })
   }
