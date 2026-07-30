@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted and implemented.
+Superseded by decision 0008 on 2026-07-27. This record remains the historical
+rationale for the SQLite implementation; its storage choice and
+multi-connection writer topology are no longer active.
 
 This decision supersedes only the JSONL storage choice in decisions 0002 and
 0003. Their kernel and server boundaries remain active.

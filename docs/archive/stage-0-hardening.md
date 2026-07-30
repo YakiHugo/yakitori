@@ -1,5 +1,9 @@
 # Stage 0: Kernel and Test Hardening
 
+> Archived 2026-07-24: this stage is complete. This document is a historical
+> record — do not implement from it. Current direction lives in
+> `docs/architecture.md` and `docs/decisions/`.
+
 This document specifies four independent work items to complete before any
 Room/Delivery or runtime work starts. Each item lists the problem with
 evidence, the required fix, and acceptance criteria. Land them in order; each

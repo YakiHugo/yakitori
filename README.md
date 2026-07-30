@@ -1,10 +1,5 @@
 # Yakitori
 
-<p align="center">
-  <a href="README.md">English</a> |
-  <a href="README.zh-CN.md">简体中文</a>
-</p>
-
 Yakitori is a from-scratch learning project for building a local coding-agent
 harness and GUI. Its product direction is a coding workbench centered on
 persistent-memory `Mate`s that can work alone or collaborate in a shared
@@ -68,6 +63,8 @@ git. Current intended references are:
 - `.references/public/codex` for the primary workbench and system reference
 - `.references/public/opencode-v2` for durable input, transaction, and recovery
   mechanisms
+- `.references/public/grok-build` for Session-owner persistence and filesystem
+  durability cross-checks
 - `.references/public/opencode` for legacy v1 comparison only
 - `.references/public/pi` for a small model loop and provider/tool boundaries
 - `.references/public/claude-code-sourcemap` as an unofficial research aid
@@ -84,7 +81,8 @@ required to build, test, or run Yakitori.
 Stage 1 MVP runtime is implemented as one vertical slice:
 
 - a witness-style Session/Input/Turn kernel with 13 coarse durable facts
-- transactional write-through Session projections; replay is a repair tool
+- one synchronized per-fact JSONL journal per Session with rebuildable cached
+  projections; replay is a repair tool
 - Mate profile store + default active Mate selection at application startup
 - SessionRunner with single-flight wakes, bounded model context, and recovery
 - scripted faux provider (default tests), OpenAI Responses adapter, and
@@ -96,6 +94,9 @@ Stage 1 MVP runtime is implemented as one vertical slice:
 
 Still deferred to later stages: Room/Task/Assignment/Delivery collaboration,
 governed memory, worktrees, multi-provider selection UI, compaction, subagents.
+
+The per-fact journal line stage is implemented; its historical plan is archived
+at `docs/archive/stage-2-fact-journal.md`.
 
 ## Local Run
 
@@ -191,6 +192,8 @@ to split the application into services.
 - [Transactional SQLite event storage](docs/decisions/0005-sqlite-event-store.md)
 - [Collaboration foundations](docs/decisions/0006-collaboration-foundations.md)
 - [Kernel as witness](docs/decisions/0007-kernel-as-witness.md)
+- [Per-Session JSONL event storage](docs/decisions/0008-per-session-jsonl-event-store.md)
+- [Per-fact Session journal lines](docs/decisions/0009-per-fact-journal-lines.md)
 
 ## Development
 

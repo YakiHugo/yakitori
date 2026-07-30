@@ -3,8 +3,12 @@
 ## Status
 
 Implemented on 2026-07-24. Decision 0002 remains in force except where this
-decision explicitly narrows it. Decisions 0005 and 0006 are unaffected except
-as noted.
+decision explicitly narrows it. Decision 0008 supersedes the SQLite projection
+container described here while preserving the witness semantics and the rule
+that projections are disposable derived views. Decision 0009 supersedes the
+generic operation receipt used for input admission; admission retries now
+reconcile against the recorded `input.admitted` fact. Decision 0006 is
+unaffected.
 
 This decision supersedes three parts of decision 0002:
 

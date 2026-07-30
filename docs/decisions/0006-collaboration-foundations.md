@@ -3,8 +3,13 @@
 ## Status
 
 Accepted as direction. Implementation is deferred until the MVP runtime
-(docs/stage-1-mvp.md) provides real consumers for these contracts; individual
-items land when their callers land, starting from what the MVP teaches.
+(docs/archive/stage-1-mvp.md) provides real consumers for these contracts;
+individual items land when their callers land, starting from what the MVP
+teaches.
+
+Decision 0008 supersedes this record's proposed shared SQLite deployment
+shape for execution Sessions. Its Room/Delivery ownership and outbox direction
+remain active for the future relational collaboration store.
 
 This decision extends decisions 0004 and 0005. It prepares the kernel and
 storage layers for the Room/Delivery stage and for execution lanes that are

@@ -2,33 +2,47 @@
 
 ## Project
 
-This repository is a from-scratch coding-agent harness and GUI centered on
-persistent-memory Mates that can collaborate in shared task Rooms. Work in
-small, reviewable modules and update this file as project conventions become
-concrete.
+This repository is a from-scratch coding-agent harness and GUI. The primary
+goal is a working coding agent — one Mate, one execution lane, solid tools
+and persistence. Persistent-memory Mates collaborating in shared task Rooms
+are the later product direction — the Raft product's persistent-colleague
+collaboration — and only become relevant after the coding agent itself
+works. Work in small, reviewable modules and update this file as project
+conventions become concrete.
 
 Reference material lives under `.references/` and is intentionally gitignored.
 Do not make source code, tests, build scripts, or runtime behavior depend on
 files in `.references/`.
 
-Allowed local references, in priority order:
+local references:
 
-- `.references/public/opencode-v2` (primary: architecture — server/API
-  boundary, durable input admission, SQLite event log + projections)
-- `.references/public/codex` (primary: product workbench shape and context
-  management — rollout, compaction, fork, read-side normalization)
-- `.references/public/claude-code-sourcemap` (secondary: product behavior
-  cross-check; Rooms-stage reference for multi-agent tasks, permission UX,
-  and file checkpoints)
-- `.references/public/grok-build` (secondary: security model — session-
-  persisted security assumptions, WAL-on-network-filesystem hazard; see
-  decision 0006)
+- `.references/public/opencode-v2`
+- `.references/public/codex`
+- `.references/public/claude-code-sourcemap`
+- `.references/public/grok-build`
 - `.references/public/opencode` (legacy v1 comparison only)
-- `.references/public/pi` (consumed: its StreamFn contract and faux provider
-  patterns already landed in `src/runtime/`; historical reference only, do
+- `.references/public/pi` (minimal reference only, do
   not mine it for kernel, storage, or collaboration design)
 - Public Claude Code documentation and observable product behavior
-- Public Raft documentation (consensus reference for future coordination)
+- Public Raft documentation (product-design reference for the later
+  persistent-colleague collaboration direction — Rooms and mentions, not the
+  consensus protocol)
+
+## Documentation
+
+- `docs/architecture.md` is the living architecture overview; keep it current
+  as boundaries land.
+- `docs/kernel-persistence-direction.md` is the settled direction for Session
+  kernel persistence: settled principles, storage layout, deferred capabilities
+  with triggers, and rejected approaches. Changing it requires an ADR or an
+  explicit amendment.
+- `docs/decisions/` holds append-only architecture decision records. Never
+  rewrite a decision's substance; supersede it with a new numbered record and
+  amend the old record's Status section.
+- `docs/` root holds only living documents and the one active stage plan.
+  When a stage completes, move its plan to `docs/archive/` with an archive
+  banner and update inbound links. Archived documents are historical records:
+  never implement from them.
 
 ## Branch Names
 
@@ -62,20 +76,44 @@ Examples: `feat(core): add event log`, `docs: update agent instructions`,
 
 ## Architecture Boundaries
 
-- Treat the harness core as the owner of Mates, collaboration, execution,
-  facts, tools, permissions, persistence, memory lifecycle, and repair.
+The coding-agent core comes first. Mate and Room rules are the design
+direction for a later stage, not the current priority.
+
+Current stage — the coding agent:
+
+- Treat the harness core as the owner of execution, facts, tools, permissions,
+  persistence, memory lifecycle, and repair.
+- Treat the existing Session/Input/Turn kernel as one Mate's execution lane.
+  Items and Tools are derived views over coarse recorded facts, not separately
+  persisted micro-state machines. A Session may have at most one active Turn.
+- Keep tool execution behind a permission boundary.
+- Keep Session fact persistence append-oriented. Store one flat fact envelope
+  per JSONL line; a command may write several lines in one synchronized buffer,
+  and recovery retains every complete-line prefix. Advance disposable
+  projections only after synchronization, and reconcile admission retries from
+  the recorded `input.admitted` fact rather than a generic operation receipt.
+- Record tool calls and results, permission requests and decisions, and Turn
+  boundaries as structured facts. Keep transient execution state in Runtime
+  memory and never fabricate closure facts during recovery.
+- Treat the kernel as a witness, not a judge (decision 0007): strict about
+  what was recorded, permissive about what it means. Before adding an
+  invariant, ask whether the model could see the violation and compensate;
+  if yes, record honestly instead.
 - Treat the GUI as the only product client of the harness core/server. Runtime,
   schedulers, and adapters are internal modules behind explicit boundaries.
+- Be careful with external integration surfaces: local server APIs, persisted
+  event formats, configuration loading, and memory deletion.
+
+Later stage — Rooms and multi-Mate collaboration (the Raft product is the
+design reference for this stage):
+
 - Keep Mate identity separate from models, processes, runtime leases,
   Sessions, Turns, and subagent handles. Executions must record the immutable
   Mate profile revision they use.
 - Keep Room, Task, and Assignment distinct. A Room owns communication and
   visibility, a Task owns the objective and result, and an Assignment binds one
-  Mate execution lane to a Task.
-- Treat the existing Session/Input/Turn kernel as one Mate's execution lane.
-  Items and Tools are derived views over coarse recorded facts, not separately
-  persisted micro-state machines. A Session may have at most one active Turn
-  while different Mates run concurrently in separate Sessions.
+  Mate execution lane to a Task. Different Mates run concurrently in separate
+  Sessions.
 - Keep a shared Room Message distinct from a Session Input. Store a Message
   once and track per-recipient, idempotent Delivery state for fan-out, catch-up,
   mentions, and wakeup.
@@ -87,25 +125,14 @@ Examples: `feat(core): add event log`, `docs: update agent instructions`,
 - Keep detailed reasoning, tool output, and permission facts in the execution
   Session. Only explicitly published findings, questions, results, and artifact
   references enter the shared Room.
-- Keep fact persistence append-oriented and update each Session's write-through
-  projection in the same transaction as the facts and operation receipt.
-- Record tool calls and results, permission requests and decisions, and Turn
-  boundaries as structured facts. Keep transient execution state in Runtime
-  memory and never fabricate closure facts during recovery.
-- Treat the kernel as a witness, not a judge (decision 0007): strict about
-  what was recorded, permissive about what it means. Before adding an
-  invariant, ask whether the model could see the violation and compensate;
-  if yes, record honestly instead.
-- Keep tool execution behind a permission boundary.
 - Do not inherit another Mate's personal memory, credentials, permissions,
   or approvals through Room membership, mentions, or Assignments.
 - Use stable IDs, idempotent commands, and recoverable saga/outbox behavior for
   operations that cross Room, Delivery, Assignment, and Session boundaries.
 - Bound agent-to-agent wakeups. Self-messages, acknowledgements, duplicate
   Deliveries, and exhausted causation budgets must not create model-call loops.
-- Be careful with external integration surfaces: local server APIs, persisted
-  event formats, configuration loading, Delivery scheduling, and memory
-  deletion.
+- Treat Delivery scheduling as an external integration surface; apply the same
+  care as for the surfaces listed above.
 
 ## Style Guide
 
@@ -114,7 +141,10 @@ Examples: `feat(core): add event log`, `docs: update agent instructions`,
 - Keep things in one function unless logic is reusable, independently named, or
   complex enough that extraction improves the caller.
 - Do not extract single-use helpers preemptively.
-- Avoid `try`/`catch` where possible.
+- Avoid `try`/`catch` where possible. Catch only where error handling is part
+  of system management (input admission, tool execution, persistence,
+  recovery), and never let an error fail silently — propagate it or record it
+  as a fact.
 - Avoid `any`.
 - Rely on type inference when possible. Add explicit types for exports,
   cross-module contracts, and clarity.
@@ -125,31 +155,6 @@ Examples: `feat(core): add event log`, `docs: update agent instructions`,
 - Add comments for non-obvious constraints and surprising behavior, not for
   obvious assignments or control flow.
 
-Reduce total variable count by inlining values that are only used once.
-
-```ts
-// Good
-const event = await readJson(path.join(dir, "event.json"))
-
-// Bad
-const eventPath = path.join(dir, "event.json")
-const event = await readJson(eventPath)
-```
-
-### Destructuring
-
-Avoid unnecessary destructuring. Use dot notation when it preserves useful
-context.
-
-```ts
-// Good
-tool.name
-tool.input
-
-// Bad
-const { name, input } = tool
-```
-
 ### Imports
 
 - Avoid aliased imports such as `import { resolve as pathResolve } from "path"`.
@@ -159,38 +164,6 @@ const { name, input } = tool
 - Prefer dynamic imports for heavy modules that are only needed in selected
   code paths.
 
-### Variables
-
-Prefer `const` over `let`. Use early returns or expression-level assignment
-instead of reassignment.
-
-```ts
-// Good
-const mode = isReadOnly ? "read" : "write"
-
-// Bad
-let mode
-if (isReadOnly) mode = "read"
-else mode = "write"
-```
-
-### Control Flow
-
-Avoid `else` statements when an early return is clearer.
-
-```ts
-// Good
-function permissionLabel(allowed: boolean) {
-  if (allowed) return "allow"
-  return "deny"
-}
-
-// Bad
-function permissionLabel(allowed: boolean) {
-  if (allowed) return "allow"
-  else return "deny"
-}
-```
 
 ### Complex Logic
 
@@ -248,7 +221,7 @@ Priority areas:
 - Memory scope, provenance, visibility, revision, and deletion
 - Tool permission decisions
 - Tool result recording
-- Write-through projection consistency with facts rebuilt from the log
+- Cached projection consistency with facts rebuilt from the log
 - File-change checkpoint behavior
 
 Testing rules:
@@ -269,56 +242,11 @@ Keep changes small unless they are mechanical.
 - If a change grows too large, split it into the smallest coherent stage that
   can land independently.
 
-## Current Commands
+## Commands
 
-Install:
-
-```sh
-pnpm install
-```
-
-Format:
-
-```sh
-pnpm format
-```
-
-Typecheck:
-
-```sh
-pnpm typecheck
-```
-
-Test:
-
-```sh
-pnpm test
-```
-
-Check:
-
-```sh
-pnpm check
-```
-
-Build:
-
-```sh
-pnpm build
-```
-
-Run the local server and GUI together:
-
-```sh
-pnpm dev
-```
-
-Run only one development side:
-
-```sh
-pnpm dev:gui
-pnpm dev:server
-```
+Use pnpm for everything. Scripts for format, typecheck, test, check, build,
+and dev (server and GUI) live in `package.json` — check the `scripts` section
+there when you need one instead of guessing.
 
 ## UI Changes
 

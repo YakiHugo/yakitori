@@ -3,8 +3,9 @@
 ## Status
 
 Accepted and implemented as the server API v1 boundary. Decision 0004 extends
-it with future Mate collaboration resources. Decision 0005 supersedes only
-the initial storage implementation referenced by this decision.
+it with future Mate collaboration resources. Decision 0008 supersedes the
+Session storage implementations referenced by this decision without changing
+the server boundary.
 
 ## Current Scope
 

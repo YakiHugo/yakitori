@@ -33,6 +33,8 @@ architecture:
   approvals, and agent activity UI.
 - OpenCode v2 is the primary reference for durable input admission,
   transaction and recovery semantics, and selected implementation mechanisms.
+- Grok Build is a secondary cross-check for single-owner Session persistence,
+  JSONL recovery boundaries, and network-filesystem WAL hazards.
 - Pi is a reference for a small model loop and provider/tool boundaries.
 - Claude Code documentation and observable behavior are cross-checks for
   permissions, hooks, instructions, and terminal product behavior.
@@ -187,12 +189,23 @@ retain deletable memory plaintext.
 
 ## Persistence and Coordination
 
-Durable facts remain append-oriented and projections remain rebuildable. For
-execution Sessions, each append updates the event journal, operation receipt,
-and write-through projection in one SQLite transaction. Normal reads select
-the projection directly; replay is reserved for debugging and repair. The same
-event-journal infrastructure may back multiple aggregates, but Room, Task,
-Assignment, and execution Session keep distinct domain contracts.
+Durable facts remain append-oriented and projections remain rebuildable. Each
+execution Session owns `sessions/<sessionId>/events.jsonl`, and one complete
+line records one flat fact envelope. A command may serialize several fact
+lines into one buffer and synchronize once, but recovery retains any complete
+line prefix rather than treating the command as a transaction. Only after
+synchronization does the writer advance its in-memory projection. Input
+admission reconciles retries from the stored `input.admitted` fact's request ID
+and payload fingerprint; there is no generic operation receipt. A versioned
+`summary.json` accelerates listing but is disposable and is trusted only when
+it matches the journal byte length. Replay remains a debugging and repair
+operation rather than a parallel source of truth.
+
+One runtime lock in the canonical Session store excludes a second server, and
+one per-Session I/O gate serializes journal initialization, reads, appends,
+repair, and rebuild. Parallel Mates use distinct execution Sessions. SQLite
+remains a fit for Mate identity and future relational collaboration
+aggregates, but it does not own Session transcripts.
 
 Operations crossing aggregates use stable IDs, idempotent commands, and a
 recoverable saga or outbox. They must not assume that posting a Room Message,
@@ -244,9 +257,15 @@ are not required by this architecture.
 ## Implementation Direction
 
 The MVP runtime now drives Turns end to end through the witness-style kernel
-and write-through SQLite projection, visible in the GUI. Collaboration
-contracts can now land against real execution-lane callers. The remaining
-architecture-sensitive stages are:
+and per-Session JSONL journals, visible in the GUI.
+
+The per-fact journal decision
+(`docs/decisions/0009-per-fact-journal-lines.md`) is implemented. Its historical
+stage plan is archived at `docs/archive/stage-2-fact-journal.md`; the continuing
+direction is `docs/kernel-persistence-direction.md`.
+
+Collaboration contracts can then land against real execution-lane callers. The
+remaining architecture-sensitive stages are:
 
 1. Add safe-boundary steer/catch-up behavior and result publication.
 2. Add Room, Task, Assignment, Message, and Delivery
