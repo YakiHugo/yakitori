@@ -155,6 +155,18 @@ design reference for this stage):
 - Add comments for non-obvious constraints and surprising behavior, not for
   obvious assignments or control flow.
 
+### GUI Stack
+
+- The GUI (`src/gui/`) is a React 19 + Tailwind v4 + shadcn/ui application.
+  The from-scratch rule applies to the agent loop only; the GUI uses ordinary
+  frontend libraries.
+- `src/gui/components/ui/` holds vendored shadcn/ui primitives; treat them as
+  generated output — re-vendor or edit locally, never hand-tune their API
+  shape ad hoc.
+- Keep view projection logic in framework-free modules (`execution-view.ts`)
+  with unit tests; React components consume projections, they do not derive
+  them.
+
 ### Imports
 
 - Avoid aliased imports such as `import { resolve as pathResolve } from "path"`.

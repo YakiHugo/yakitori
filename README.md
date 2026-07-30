@@ -90,7 +90,8 @@ Stage 1 MVP runtime is implemented as one vertical slice:
 - bounded tools: `read_file`, `write_file` (compare-and-write), `run_command`
 - durable permission gate for host commands (never auto-approved in production)
 - dual event delivery: durable SSE (`session.event`) + transient snapshots
-- GUI execution feed with streaming, tool/permission cards, cancel, and diagnostics
+- React + Tailwind v4 + shadcn/ui workbench GUI with streaming markdown,
+  collapsible tool cells, approval bar, interrupt, and diagnostics drawer
 
 Still deferred to later stages: Room/Task/Assignment/Delivery collaboration,
 governed memory, worktrees, multi-provider selection UI, compaction, subagents.
