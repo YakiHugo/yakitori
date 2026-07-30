@@ -2,6 +2,7 @@ import {
   isKernelEvent,
   type EventEnvelope,
   type StoredEventEnvelope,
+  type TokenUsage,
 } from "../kernel/events.ts"
 import type { LiveSessionEvent } from "../runtime/live-events.ts"
 import type { ApiSessionDetail } from "../server/protocol.ts"
@@ -26,6 +27,7 @@ export type ExecutionEntry =
       readonly toolCallId: string
       readonly turnId: string
       readonly name: string
+      readonly summary: string
       readonly input: unknown
       readonly state: string
       readonly resultText?: string
@@ -55,6 +57,13 @@ export type ExecutionView = {
   readonly mateRevisionId?: string
   readonly workingDirectory?: string
   readonly pendingPermissionIds: readonly string[]
+  readonly queuedInputIds: readonly string[]
+  readonly lastModel?: {
+    readonly provider: string
+    readonly model: string
+  }
+  readonly lastTurnUsage?: TokenUsage
+  readonly activeTurnStartedAt?: string
 }
 
 export type ExecutionViewState = {
@@ -168,17 +177,45 @@ export function projectExecutionView(state: ExecutionViewState): ExecutionView {
     Extract<ExecutionEntry, { readonly kind: "permission" }>
   >()
   const streamIdsSeen = new Set<string>()
+  const admittedInputIds: string[] = []
+  const startedInputIds = new Set<string>()
+  const cancelledInputIds = new Set<string>()
+  const turnStartedAt = new Map<string, string>()
+  let lastModel:
+    | { readonly provider: string; readonly model: string }
+    | undefined
+  let lastTurnUsage: TokenUsage | undefined
 
   for (const stored of state.durableEvents) {
     const event = knownEvent(stored)
     if (!event) continue
-    if (event.type === "input.admitted" && event.data.role === "user") {
-      entries.push({
-        kind: "user_input",
-        inputId: event.data.inputId,
-        text: event.data.content.text,
-        at: event.createdAt,
-      })
+    if (event.type === "input.admitted") {
+      admittedInputIds.push(event.data.inputId)
+      if (event.data.role === "user") {
+        entries.push({
+          kind: "user_input",
+          inputId: event.data.inputId,
+          text: event.data.content.text,
+          at: event.createdAt,
+        })
+      }
+      continue
+    }
+    if (event.type === "input.cancelled") {
+      cancelledInputIds.add(event.data.inputId)
+      continue
+    }
+    if (event.type === "turn.started") {
+      startedInputIds.add(event.data.inputId)
+      turnStartedAt.set(event.data.turnId, stored.createdAt)
+      const context = event.data.executionContext
+      if (context !== undefined) {
+        lastModel = { provider: context.provider, model: context.model }
+      }
+      continue
+    }
+    if (event.type === "turn.completed") {
+      if (event.data.usage !== undefined) lastTurnUsage = event.data.usage
       continue
     }
     if (event.type === "assistant.message") {
@@ -206,6 +243,7 @@ export function projectExecutionView(state: ExecutionViewState): ExecutionView {
         toolCallId: event.data.toolCallId,
         turnId: event.data.turnId,
         name: event.data.name,
+        summary: summarizeTool(event.data.name, event.data.input),
         input: event.data.input,
         state: "requested",
       }
@@ -309,11 +347,17 @@ export function projectExecutionView(state: ExecutionViewState): ExecutionView {
     )
     .map((entry) => entry.permissionRequestId)
 
+  const queuedInputIds = admittedInputIds.filter(
+    (inputId) =>
+      !startedInputIds.has(inputId) && !cancelledInputIds.has(inputId),
+  )
+  const activeTurnId = state.session?.activeTurnId
+  const activeTurnStartedAt =
+    activeTurnId === undefined ? undefined : turnStartedAt.get(activeTurnId)
+
   return {
     entries,
-    ...(state.session?.activeTurnId === undefined
-      ? {}
-      : { activeTurnId: state.session.activeTurnId }),
+    ...(activeTurnId === undefined ? {} : { activeTurnId }),
     ...(state.session?.mateId === undefined
       ? {}
       : { mateId: state.session.mateId }),
@@ -324,6 +368,10 @@ export function projectExecutionView(state: ExecutionViewState): ExecutionView {
       ? {}
       : { workingDirectory: state.session.workingDirectory }),
     pendingPermissionIds,
+    queuedInputIds,
+    ...(lastModel === undefined ? {} : { lastModel }),
+    ...(lastTurnUsage === undefined ? {} : { lastTurnUsage }),
+    ...(activeTurnStartedAt === undefined ? {} : { activeTurnStartedAt }),
   }
 }
 
@@ -385,4 +433,30 @@ function updatePermission(
       entry.permissionRequestId === permissionRequestId,
   )
   if (index >= 0) entries[index] = next
+}
+
+function summarizeTool(name: string, input: unknown): string {
+  if (isRecord(input)) {
+    if (
+      (name === "read_file" || name === "write_file") &&
+      typeof input.path === "string"
+    ) {
+      return input.path
+    }
+    if (name === "run_command" && typeof input.command === "string") {
+      return truncateLine(input.command, 80)
+    }
+  }
+  return name
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function truncateLine(value: string, max: number): string {
+  const singleLine = value.replace(/\s+/g, " ").trim()
+  return singleLine.length <= max
+    ? singleLine
+    : `${singleLine.slice(0, max - 1)}…`
 }
