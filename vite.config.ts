@@ -24,6 +24,27 @@ export default defineConfig(({ mode }) => {
     }
   }
 
+  if (mode === "desktop") {
+    return {
+      build: {
+        lib: {
+          entry: "src/desktop/main.ts",
+          fileName: "main",
+          formats: ["es"],
+        },
+        outDir: "dist/desktop",
+        rollupOptions: {
+          external: ["electron", /^node:/],
+        },
+        sourcemap: true,
+      },
+      test: {
+        include: ["test/**/*.test.ts"],
+        restoreMocks: true,
+      },
+    }
+  }
+
   return {
     plugins: [react(), tailwindcss()],
     resolve: {
