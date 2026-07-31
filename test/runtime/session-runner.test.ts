@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import {
   createDurableEventHub,
   createFauxProvider,
@@ -404,6 +404,266 @@ describe("session runner", () => {
       expect(read.session?.activeTurn).toBeDefined()
       expect(read.session?.cancelledTurns).toEqual([])
       expect(read.session?.interruptedTurns).toEqual([])
+    })
+  })
+
+  it("compacts dropped history into a durable checkpoint under pressure", async () => {
+    await withRuntime(async (runtime) => {
+      const provider = createFauxProvider([
+        {
+          content: [
+            {
+              type: "tool_call",
+              id: "call_1",
+              name: "read_file",
+              input: { path: "missing.txt" },
+            },
+          ],
+          stopReason: ModelStopReason.ToolUse,
+        },
+        {
+          content: [{ type: "text", text: "first answer" }],
+          usage: { inputTokens: 100, outputTokens: 50 },
+        },
+        {
+          content: [{ type: "text", text: "Goal: checkpoint one." }],
+          usage: { inputTokens: 10, outputTokens: 5 },
+        },
+        {
+          content: [
+            {
+              type: "tool_call",
+              id: "call_2",
+              name: "read_file",
+              input: { path: "missing.txt" },
+            },
+          ],
+          stopReason: ModelStopReason.ToolUse,
+          usage: { inputTokens: 200, outputTokens: 60 },
+        },
+        {
+          content: [{ type: "text", text: "second answer" }],
+          usage: { inputTokens: 300, outputTokens: 70 },
+        },
+        {
+          content: [{ type: "text", text: "Goal: checkpoint two." }],
+          usage: { inputTokens: 20, outputTokens: 6 },
+        },
+        {
+          content: [{ type: "text", text: "third answer" }],
+          usage: { inputTokens: 400, outputTokens: 80 },
+        },
+      ])
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+        limits: createRuntimeLimits({ modelVisibleMessageBlocks: 3 }),
+      })
+      const session = await createAttributedSession(runtime)
+      for (const question of [
+        "first question",
+        "second question",
+        "third question",
+      ]) {
+        await runtime.kernel.admitInput({
+          sessionId: session.sessionId,
+          content: { kind: "text", text: question },
+        })
+        await runner.wake(session.sessionId)
+      }
+
+      const replayed = await runtime.kernel.replaySession({
+        sessionId: session.sessionId,
+      })
+      const turns = replayed.session?.turns ?? []
+      const [firstTurn, secondTurn, thirdTurn] = turns
+      const compacted = replayed.events.filter(
+        (event) => event.type === EventType.ContextCompacted,
+      )
+      if (compacted.length !== 2) throw new Error("expected two compactions")
+      const [first, second] = compacted
+      if (
+        first?.type !== EventType.ContextCompacted ||
+        second?.type !== EventType.ContextCompacted
+      ) {
+        throw new Error("expected compaction facts")
+      }
+
+      // throughSeq is the high-water seq observed before the summary call:
+      // nothing is appended between turn.started and the first context build.
+      const secondTurnStarted = replayed.events.find(
+        (event) =>
+          event.type === EventType.TurnStarted &&
+          event.data.turnId === secondTurn?.turnId,
+      )
+      expect(first.data).toMatchObject({
+        turnId: secondTurn?.turnId,
+        throughSeq: secondTurnStarted?.seq,
+        coveredTurnIds: [firstTurn?.turnId],
+        summary: "Goal: checkpoint one.",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      })
+      // Coverage is cumulative: the second checkpoint supersedes the first.
+      expect(second.data.coveredTurnIds).toEqual([
+        firstTurn?.turnId,
+        secondTurn?.turnId,
+      ])
+      expect(second.data.summary).toBe("Goal: checkpoint two.")
+
+      // The summarization request flattens the dropped turns, carries no
+      // tools, and folds the previous checkpoint into its instruction.
+      const firstSummary = provider.requests[2]
+      expect(firstSummary?.tools).toEqual([])
+      expect(firstSummary?.system).toContain("checkpoint")
+      const firstSummaryText = JSON.stringify(firstSummary?.messages)
+      expect(firstSummaryText).toContain("first question")
+      expect(firstSummaryText).toContain("first answer")
+      const secondSummary = provider.requests[5]
+      const secondInstruction = secondSummary?.messages.at(-1)
+      if (secondInstruction?.role !== "user") {
+        throw new Error("missing summarization instruction")
+      }
+      expect(secondInstruction.content[0]?.text).toContain(
+        "Previous checkpoint:\nGoal: checkpoint one.",
+      )
+
+      // The real request after compaction starts with the checkpoint and
+      // excludes covered turns.
+      const realRequest = provider.requests[6]
+      const realFirst = realRequest?.messages[0]
+      if (realFirst?.role !== "user") throw new Error("missing checkpoint")
+      expect(realFirst.content[0]?.text).toContain("<context_compacted>")
+      expect(realFirst.content[0]?.text).toContain("Goal: checkpoint two.")
+      const realText = JSON.stringify(realRequest?.messages)
+      expect(realText).not.toContain("first question")
+      expect(realText).not.toContain("second question")
+      expect(realRequest?.messages.at(-1)).toEqual({
+        role: "user",
+        content: [{ type: "text", text: "third question" }],
+      })
+
+      // Compaction usage is folded into turn.completed usage.
+      expect(secondTurn?.usage).toEqual({
+        inputTokens: 510,
+        outputTokens: 135,
+      })
+      expect(thirdTurn?.usage).toEqual({
+        inputTokens: 420,
+        outputTokens: 86,
+      })
+      expect(provider.callCount).toBe(7)
+    })
+  })
+
+  it("does not count the compaction call against the model call budget", async () => {
+    await withRuntime(async (runtime) => {
+      const provider = createFauxProvider([
+        {
+          content: [
+            {
+              type: "tool_call",
+              id: "call_1",
+              name: "read_file",
+              input: { path: "missing.txt" },
+            },
+          ],
+          stopReason: ModelStopReason.ToolUse,
+        },
+        { content: [{ type: "text", text: "first answer" }] },
+        { content: [{ type: "text", text: "Goal: checkpoint." }] },
+        {
+          content: [
+            {
+              type: "tool_call",
+              id: "call_2",
+              name: "read_file",
+              input: { path: "missing.txt" },
+            },
+          ],
+          stopReason: ModelStopReason.ToolUse,
+        },
+        { content: [{ type: "text", text: "second answer" }] },
+      ])
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+        limits: createRuntimeLimits({
+          modelCallsPerTurn: 2,
+          modelVisibleMessageBlocks: 3,
+        }),
+      })
+      const session = await createAttributedSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "first question" },
+      })
+      await runner.wake(session.sessionId)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "second question" },
+      })
+      await runner.wake(session.sessionId)
+
+      // The second turn makes two real model calls plus one compaction call;
+      // counting housekeeping would exhaust the budget of two.
+      const read = await runtime.kernel.readSession({
+        sessionId: session.sessionId,
+      })
+      expect(read.session?.completedTurns).toHaveLength(2)
+      expect(read.session?.failedTurns).toEqual([])
+      expect(provider.callCount).toBe(5)
+    })
+  })
+
+  it("falls back to dropped history when summarization fails", async () => {
+    await withRuntime(async (runtime) => {
+      const provider = createFauxProvider([
+        { content: [{ type: "text", text: "first answer" }] },
+        { throwDuring: new Error("summarizer down") },
+        { content: [{ type: "text", text: "second answer" }] },
+      ])
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+        limits: createRuntimeLimits({ modelVisibleMessageBlocks: 2 }),
+      })
+      const session = await createAttributedSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "first question" },
+      })
+      await runner.wake(session.sessionId)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "second question" },
+      })
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {})
+      try {
+        await runner.wake(session.sessionId)
+        expect(errors).toHaveBeenCalled()
+      } finally {
+        errors.mockRestore()
+      }
+
+      const replayed = await runtime.kernel.replaySession({
+        sessionId: session.sessionId,
+      })
+      expect(
+        replayed.events.some(
+          (event) => event.type === EventType.ContextCompacted,
+        ),
+      ).toBe(false)
+      expect(replayed.session?.completedTurns).toHaveLength(2)
+      // The turn proceeds with the uncovered history silently dropped.
+      expect(provider.requests[2]?.messages).toEqual([
+        {
+          role: "user",
+          content: [{ type: "text", text: "second question" }],
+        },
+      ])
     })
   })
 })

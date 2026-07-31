@@ -2,6 +2,7 @@ import { useLayoutEffect } from "react"
 import { usePinnedScroll } from "../hooks/use-pinned-scroll.ts"
 import { useExecutionView } from "../store/app-store.ts"
 import { AssistantMessageCell } from "./cells/assistant-message-cell.tsx"
+import { CompactionCell } from "./cells/compaction-cell.tsx"
 import { PermissionCell } from "./cells/permission-cell.tsx"
 import { ToolCell } from "./cells/tool-cell.tsx"
 import { TurnTerminalCell } from "./cells/turn-terminal-cell.tsx"
@@ -62,6 +63,13 @@ export function Transcript() {
                 return (
                   <TurnTerminalCell
                     key={`terminal:${entry.turnId}:${entry.state}`}
+                    entry={entry}
+                  />
+                )
+              case "context_compacted":
+                return (
+                  <CompactionCell
+                    key={`compaction:${entry.compactionId}`}
                     entry={entry}
                   />
                 )

@@ -1,0 +1,131 @@
+import type { TokenUsage } from "../kernel/index.ts"
+import type { DroppedTurn } from "./model-context.ts"
+import {
+  ModelStopReason,
+  type ModelRequest,
+  type ModelResponse,
+  type ModelTextBlock,
+  type StreamFn,
+} from "./model.ts"
+
+export const COMPACTION_SYSTEM_PROMPT = `You are compressing a coding-agent conversation into a checkpoint for your future self. The earlier turns you see will be replaced by the checkpoint you write; the complete history remains on disk but will leave your context.
+
+Write the checkpoint with exactly these sections, in this order:
+
+Goal — what the user is trying to accomplish.
+Progress — what is done so far, including key decisions and why they were made.
+Files — exact paths read or modified, and why each one matters.
+Errors — failures encountered and how they were resolved, or that they are still open.
+Next steps — the concrete work that remains, in order.
+
+Rules:
+- Use precise file paths, commands, and identifiers; avoid vague references.
+- The checkpoint must be self-contained: it must make sense without the conversation it replaces.
+- No pleasantries, preamble, or meta-commentary; output only the checkpoint.`
+
+export type CompactionResult = {
+  readonly summary: string
+  readonly usage?: TokenUsage
+}
+
+export function buildCompactionRequest(input: {
+  readonly source: readonly DroppedTurn[]
+  readonly previousSummary?: string
+  readonly provider: string
+  readonly model: string
+  readonly signal?: AbortSignal
+}): ModelRequest {
+  return {
+    system: COMPACTION_SYSTEM_PROMPT,
+    messages: [
+      ...input.source.flatMap((group) => group.messages),
+      {
+        role: "user",
+        content: [
+          { type: "text", text: compactionInstruction(input.previousSummary) },
+        ],
+      },
+    ],
+    tools: [],
+    provider: input.provider,
+    model: input.model,
+    ...(input.signal === undefined ? {} : { signal: input.signal }),
+  }
+}
+
+// Compaction is housekeeping: drain the stream locally without publishing
+// snapshots, and fail loudly so the caller can fall back to dropped history.
+export async function runCompaction(input: {
+  readonly stream: StreamFn
+  readonly request: ModelRequest
+}): Promise<CompactionResult> {
+  let terminal: ModelResponse | undefined
+  try {
+    for await (const event of input.stream(input.request)) {
+      if (event.type === "snapshot") continue
+      if (terminal !== undefined) {
+        throw new Error("Model stream emitted more than one terminal response.")
+      }
+      terminal = event.response
+    }
+  } catch (error) {
+    if (isAbortError(error) || input.request.signal?.aborted) {
+      throw createAbortError()
+    }
+    throw error
+  }
+  if (terminal === undefined) {
+    throw new Error("Model stream ended without a terminal response.")
+  }
+  if (terminal.stopReason === ModelStopReason.Error) {
+    throw new Error(terminal.error?.message ?? "Model returned an error.")
+  }
+  if (
+    terminal.stopReason === ModelStopReason.Aborted ||
+    input.request.signal?.aborted
+  ) {
+    throw createAbortError()
+  }
+  const summary = terminal.content
+    .filter((block): block is ModelTextBlock => block.type === "text")
+    .map((block) => block.text)
+    .join("")
+    .trim()
+  if (summary.length === 0) {
+    throw new Error("Compaction produced an empty checkpoint.")
+  }
+  return {
+    summary,
+    ...(terminal.usage === undefined
+      ? {}
+      : {
+          usage: {
+            inputTokens: terminal.usage.inputTokens ?? 0,
+            outputTokens: terminal.usage.outputTokens ?? 0,
+          },
+        }),
+  }
+}
+
+function compactionInstruction(previousSummary: string | undefined): string {
+  const fold =
+    previousSummary === undefined
+      ? ""
+      : `\n\nPrevious checkpoint:\n${previousSummary}\n\nFold the previous checkpoint into the new one. The new checkpoint must be self-contained and supersede it.`
+  return `Write the checkpoint for the conversation above now.${fold}`
+}
+
+function createAbortError(): Error {
+  const error = new Error("Compaction was aborted.")
+  error.name = "AbortError"
+  return error
+}
+
+function isAbortError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "name" in error &&
+    (error as { name: unknown }).name === "AbortError"
+  )
+}

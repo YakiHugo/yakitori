@@ -43,6 +43,7 @@ export type SessionProjection = {
   readonly parentSessionId?: string
   readonly metadata?: EventMetadata
   readonly usage?: TokenUsage
+  readonly compaction?: CompactionProjection
   readonly inputs: readonly InputProjection[]
   readonly pendingInputs: readonly InputProjection[]
   readonly activeTurn?: TurnProjection
@@ -54,6 +55,18 @@ export type SessionProjection = {
   readonly permissions: readonly PermissionProjection[]
   readonly tools: readonly ToolProjection[]
   readonly turns: readonly TurnProjection[]
+}
+
+// The latest checkpoint replaces the previous one; coverage is cumulative by
+// construction, so one field is enough.
+export type CompactionProjection = {
+  readonly compactionId: string
+  readonly turnId: string
+  readonly throughSeq: number
+  readonly coveredTurnIds: readonly string[]
+  readonly summary: string
+  readonly usage?: TokenUsage
+  readonly createdAt: string
 }
 
 export type InputProjection = {
@@ -184,6 +197,10 @@ export function applySessionFacts(
     session.seq = Math.max(session.seq, stored.seq)
     session.updatedAt = stored.createdAt
     if (!isKernelEvent(stored)) continue
+    if (stored.type === EventType.ContextCompacted) {
+      session.compaction = compactionProjection(stored)
+      continue
+    }
     applyKnownEvent(inputs, turns, items, tools, permissions, stored)
   }
 
@@ -267,6 +284,9 @@ function mutableSession(current: SessionProjection): MutableSession {
       ? {}
       : { parentSessionId: current.parentSessionId }),
     ...(current.metadata === undefined ? {} : { metadata: current.metadata }),
+    ...(current.compaction === undefined
+      ? {}
+      : { compaction: current.compaction }),
   }
 }
 
@@ -281,6 +301,7 @@ type MutableSession = {
   mateRevisionId?: string
   parentSessionId?: string
   metadata?: EventMetadata
+  compaction?: CompactionProjection
 }
 
 type Mutable<T> = { -readonly [K in keyof T]: T[K] }
@@ -449,6 +470,20 @@ function aggregateTokenUsage(
     }),
     { inputTokens: 0, outputTokens: 0 },
   )
+}
+
+function compactionProjection(
+  event: Extract<EventEnvelope, { type: typeof EventType.ContextCompacted }>,
+): CompactionProjection {
+  return {
+    compactionId: event.data.compactionId,
+    turnId: event.data.turnId,
+    throughSeq: event.data.throughSeq,
+    coveredTurnIds: [...event.data.coveredTurnIds],
+    summary: event.data.summary,
+    ...(event.data.usage === undefined ? {} : { usage: event.data.usage }),
+    createdAt: event.createdAt,
+  }
 }
 
 function applyAssistantMessage(

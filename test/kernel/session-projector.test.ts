@@ -155,7 +155,74 @@ describe("session fact projection", () => {
       projectSession([...events, unknown]),
     )
   })
+
+  it("keeps only the latest compaction checkpoint with cumulative coverage", () => {
+    const events = baseWithCompactions()
+
+    const projection = projectSession(events)
+    expect(projection?.compaction).toEqual({
+      compactionId: "compaction_2",
+      turnId: "turn_2",
+      throughSeq: 5,
+      coveredTurnIds: ["turn_0", "turn_1"],
+      summary: "second checkpoint",
+      usage: { inputTokens: 12, outputTokens: 4 },
+      createdAt: "2026-07-24T00:00:02.000Z",
+    })
+  })
+
+  it("keeps incremental apply and full rebuild equal across compaction facts", () => {
+    const events = baseWithCompactions()
+    const prefix = projectSession(events.slice(0, 2))
+
+    expect(applySessionFacts(prefix, events.slice(2))).toEqual(
+      projectSession(events),
+    )
+  })
 })
+
+function baseWithCompactions() {
+  const sessionId = "session_00000000-0000-4000-8000-000000000000"
+  return [
+    createEventEnvelope({
+      sessionId,
+      seq: 1,
+      createdAt: "2026-07-24T00:00:00.000Z",
+      event: { type: EventType.SessionCreated, data: {} },
+    }),
+    createEventEnvelope({
+      sessionId,
+      seq: 2,
+      createdAt: "2026-07-24T00:00:01.000Z",
+      event: {
+        type: EventType.ContextCompacted,
+        data: {
+          compactionId: "compaction_1",
+          turnId: "turn_1",
+          throughSeq: 1,
+          coveredTurnIds: ["turn_0"],
+          summary: "first checkpoint",
+        },
+      },
+    }),
+    createEventEnvelope({
+      sessionId,
+      seq: 3,
+      createdAt: "2026-07-24T00:00:02.000Z",
+      event: {
+        type: EventType.ContextCompacted,
+        data: {
+          compactionId: "compaction_2",
+          turnId: "turn_2",
+          throughSeq: 5,
+          coveredTurnIds: ["turn_0", "turn_1"],
+          summary: "second checkpoint",
+          usage: { inputTokens: 12, outputTokens: 4 },
+        },
+      },
+    }),
+  ]
+}
 
 function baseWithInterruptedTool() {
   const sessionId = "session_00000000-0000-4000-8000-000000000000"

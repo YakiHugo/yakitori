@@ -49,6 +49,12 @@ export type ExecutionEntry =
       readonly state: "failed" | "cancelled" | "interrupted"
       readonly message: string
     }
+  | {
+      readonly kind: "context_compacted"
+      readonly compactionId: string
+      readonly summary: string
+      readonly createdAt: string
+    }
 
 export type ExecutionView = {
   readonly entries: readonly ExecutionEntry[]
@@ -325,6 +331,15 @@ export function projectExecutionView(state: ExecutionViewState): ExecutionView {
         turnId: event.data.turnId,
         state: "interrupted",
         message: event.data.reason ?? "Turn interrupted.",
+      })
+      continue
+    }
+    if (event.type === "context.compacted") {
+      entries.push({
+        kind: "context_compacted",
+        compactionId: event.data.compactionId,
+        summary: event.data.summary,
+        createdAt: event.createdAt,
       })
     }
   }

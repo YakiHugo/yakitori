@@ -17,8 +17,13 @@ import {
   type TransientEventHub,
 } from "./live-events.ts"
 import { buildEnvironmentContext } from "./environment-context.ts"
+import { buildCompactionRequest, runCompaction } from "./compaction.ts"
 import { createRuntimeLimits, type RuntimeLimits } from "./limits.ts"
-import { buildModelContext } from "./model-context.ts"
+import {
+  buildModelContext,
+  type DroppedTurn,
+  type ModelContextBuildResult,
+} from "./model-context.ts"
 import {
   ModelStopReason,
   type ModelContentBlock,
@@ -292,11 +297,23 @@ export function createSessionRunner(
       }
 
       const session = await requireSession(input.sessionId)
-      const context = buildModelContext({
+      let context = buildModelContext({
         session,
         currentInputId: input.inputId,
         limits: input.executionContext.limits,
       })
+      if (context.droppedTurns.length > 0) {
+        context =
+          (await attemptCompaction({
+            session,
+            turnId: input.turnId,
+            inputId: input.inputId,
+            executionContext: input.executionContext,
+            droppedTurns: context.droppedTurns,
+            usages,
+            signal: input.signal,
+          })) ?? context
+      }
 
       const request: ModelRequest = {
         system,
@@ -472,6 +489,65 @@ export function createSessionRunner(
       "model_budget_exhausted",
       `Turn exceeded model call budget of ${input.executionContext.limits.modelCallsPerTurn}.`,
     )
+  }
+
+  // Housekeeping: fold the longest fitting prefix of dropped history into a
+  // durable checkpoint, then rebuild context. Any failure falls back to the
+  // originally built context; an abort surfaces via the normal abort path.
+  async function attemptCompaction(input: {
+    readonly session: SessionProjection
+    readonly turnId: string
+    readonly inputId: string
+    readonly executionContext: TurnExecutionContext
+    readonly droppedTurns: readonly DroppedTurn[]
+    readonly usages: ModelUsage[]
+    readonly signal: AbortSignal
+  }): Promise<ModelContextBuildResult | undefined> {
+    try {
+      const previousSummary = input.session.compaction?.summary
+      const source = selectCompactionSource(
+        input.droppedTurns,
+        previousSummary,
+        limits.modelVisibleContextBytes,
+      )
+      if (source.length === 0) return undefined
+      const throughSeq = input.session.seq
+      const result = await runCompaction({
+        stream: options.stream,
+        request: buildCompactionRequest({
+          source,
+          ...(previousSummary === undefined ? {} : { previousSummary }),
+          provider: input.executionContext.provider,
+          model: input.executionContext.model,
+          signal: input.signal,
+        }),
+      })
+      const recorded = await options.kernel.recordCompaction({
+        sessionId: input.session.id,
+        turnId: input.turnId,
+        throughSeq,
+        coveredTurnIds: [
+          ...(input.session.compaction?.coveredTurnIds ?? []),
+          ...source.map((group) => group.turnId),
+        ],
+        summary: truncateSummary(result.summary, limits.compactionSummaryBytes),
+        ...(result.usage === undefined ? {} : { usage: result.usage }),
+      })
+      publishDurable([recorded.event])
+      if (result.usage !== undefined) input.usages.push(result.usage)
+      const rebuilt = await requireSession(input.session.id)
+      return buildModelContext({
+        session: rebuilt,
+        currentInputId: input.inputId,
+        limits: input.executionContext.limits,
+      })
+    } catch (error) {
+      console.error(
+        "Context compaction failed; continuing with dropped history.",
+        error,
+      )
+      return undefined
+    }
   }
 
   async function persistAssistantAndExecuteTools(input: {
@@ -1007,6 +1083,32 @@ function isAbortError(error: unknown): boolean {
     "name" in error &&
     (error as { name: unknown }).name === "AbortError"
   )
+}
+
+function selectCompactionSource(
+  droppedTurns: readonly DroppedTurn[],
+  previousSummary: string | undefined,
+  budgetBytes: number,
+): readonly DroppedTurn[] {
+  const selected: DroppedTurn[] = []
+  let bytes = utf8Bytes(previousSummary ?? "")
+  for (const group of droppedTurns) {
+    const groupBytes = utf8Bytes(JSON.stringify(group.messages))
+    if (bytes + groupBytes > budgetBytes) break
+    selected.push(group)
+    bytes += groupBytes
+  }
+  return selected
+}
+
+function truncateSummary(summary: string, budgetBytes: number): string {
+  if (utf8Bytes(summary) <= budgetBytes) return summary
+  const marker = "\n...[summary truncated]"
+  let text = summary
+  while (utf8Bytes(`${text}${marker}`) > budgetBytes && text.length > 0) {
+    text = text.slice(0, Math.max(0, text.length - 1_024))
+  }
+  return `${text}${marker}`
 }
 
 function utf8Bytes(value: string): number {

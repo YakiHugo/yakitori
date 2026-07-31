@@ -1,4 +1,5 @@
 export const IdPrefix = {
+  Compaction: "compaction",
   Event: "event",
   Input: "input",
   Item: "item",
@@ -10,6 +11,10 @@ export const IdPrefix = {
 } as const
 
 export type IdPrefix = (typeof IdPrefix)[keyof typeof IdPrefix]
+
+export function createCompactionId(): string {
+  return createPrefixedId(IdPrefix.Compaction)
+}
 
 export function createEventId(): string {
   return createPrefixedId(IdPrefix.Event)

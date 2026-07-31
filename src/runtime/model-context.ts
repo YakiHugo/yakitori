@@ -16,10 +16,16 @@ export type ModelContextLimits = {
   readonly modelVisibleToolResultLines: number
 }
 
+export type DroppedTurn = {
+  readonly turnId: string
+  readonly messages: readonly ModelMessage[]
+}
+
 export type ModelContextBuildResult = {
   readonly messages: readonly ModelMessage[]
   readonly selectedItemIds: readonly string[]
   readonly droppedTurnCount: number
+  readonly droppedTurns: readonly DroppedTurn[]
   readonly truncatedToolResultCount: number
   readonly byteCount: number
   readonly blockCount: number
@@ -37,7 +43,11 @@ export function buildModelContext(input: {
     throw new Error(`Current input ${input.currentInputId} was not found.`)
   }
 
-  const turnGroups = buildTurnGroups(input.session)
+  const coveredTurnIds = new Set(input.session.compaction?.coveredTurnIds ?? [])
+  const turnGroups = buildTurnGroups(input.session).filter(
+    (group) => !coveredTurnIds.has(group.turnId),
+  )
+  const compactionGroup = buildCompactionGroup(input.session)
   const activeGroup = buildActiveTurnGroup(input.session, input.currentInputId)
   const currentGroup: ContextGroup = activeGroup ?? {
     kind: "current_input",
@@ -51,25 +61,30 @@ export function buildModelContext(input: {
     itemIds: [],
   }
 
-  let droppedTurnCount = 0
-  let selectedGroups = [...turnGroups, currentGroup]
+  const droppedTurns: DroppedTurn[] = []
+  let selectedGroups: readonly ContextGroup[] = [
+    ...(compactionGroup === undefined ? [] : [compactionGroup]),
+    ...turnGroups,
+    currentGroup,
+  ]
   let assembled = assembleGroups(selectedGroups, input.limits)
 
-  while (
-    selectedGroups.length > 1 &&
-    (assembled.blockCount > input.limits.modelVisibleMessageBlocks ||
-      assembled.byteCount > input.limits.modelVisibleContextBytes)
-  ) {
+  while (selectedGroups.length > 1 && exceedsCaps(assembled, input.limits)) {
+    const dropped = selectedGroups[0]
+    if (dropped === undefined) break
+    if (dropped.kind === "turn") {
+      // Reuse per-group assembly so summarization input gets the same
+      // tool-result truncation as selected groups.
+      droppedTurns.push({
+        turnId: dropped.turnId,
+        messages: assembleGroups([dropped], input.limits).messages,
+      })
+    }
     selectedGroups = selectedGroups.slice(1)
-    droppedTurnCount += 1
     assembled = assembleGroups(selectedGroups, input.limits)
   }
 
-  if (
-    selectedGroups.length === 1 &&
-    (assembled.blockCount > input.limits.modelVisibleMessageBlocks ||
-      assembled.byteCount > input.limits.modelVisibleContextBytes)
-  ) {
+  if (selectedGroups.length === 1 && exceedsCaps(assembled, input.limits)) {
     throw new Error(
       `Current Turn context exceeds the configured hard cap (${assembled.byteCount} bytes, ${assembled.blockCount} blocks).`,
     )
@@ -78,17 +93,25 @@ export function buildModelContext(input: {
   return {
     messages: assembled.messages,
     selectedItemIds: assembled.itemIds,
-    droppedTurnCount,
+    droppedTurnCount: droppedTurns.length,
+    droppedTurns,
     truncatedToolResultCount: assembled.truncatedToolResultCount,
     byteCount: assembled.byteCount,
     blockCount: assembled.blockCount,
   }
 }
 
+type TurnContextGroup = {
+  readonly kind: "turn"
+  readonly turnId: string
+  readonly messages: readonly ModelMessage[]
+  readonly itemIds: readonly string[]
+}
+
 type ContextGroup =
+  | TurnContextGroup
   | {
-      readonly kind: "turn"
-      readonly turnId: string
+      readonly kind: "compaction"
       readonly messages: readonly ModelMessage[]
       readonly itemIds: readonly string[]
     }
@@ -99,7 +122,29 @@ type ContextGroup =
       readonly itemIds: readonly string[]
     }
 
-function buildTurnGroups(session: SessionProjection): ContextGroup[] {
+function buildCompactionGroup(
+  session: SessionProjection,
+): ContextGroup | undefined {
+  const compaction = session.compaction
+  if (compaction === undefined) return undefined
+  return {
+    kind: "compaction",
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: `<context_compacted>\nEarlier turns in this session were summarized into this checkpoint. The complete history is preserved on disk.\n${compaction.summary}\n</context_compacted>`,
+          },
+        ],
+      },
+    ],
+    itemIds: [],
+  }
+}
+
+function buildTurnGroups(session: SessionProjection): TurnContextGroup[] {
   const terminalTurns = session.turns.filter(
     (turn) => turn.state !== TurnState.Started,
   )
@@ -112,7 +157,7 @@ function buildTurnGroups(session: SessionProjection): ContextGroup[] {
 function buildActiveTurnGroup(
   session: SessionProjection,
   currentInputId: string,
-): ContextGroup | undefined {
+): TurnContextGroup | undefined {
   const active = session.activeTurn
   if (!active || active.inputId !== currentInputId) return undefined
   return buildTurnGroup(session, active, true)
@@ -122,7 +167,7 @@ function buildTurnGroup(
   session: SessionProjection,
   turn: TurnProjection,
   includeOpenTools: boolean,
-): ContextGroup | undefined {
+): TurnContextGroup | undefined {
   const input = session.inputs.find(
     (candidate) => candidate.inputId === turn.inputId,
   )
@@ -254,6 +299,19 @@ function terminalTurnNotice(turn: TurnProjection): string | undefined {
     return `<turn_interrupted>\nThe previous turn lost its runtime before a clean execution boundary was recorded${turn.interruptedReason === undefined ? "." : `: ${turn.interruptedReason}`}. Open tools may have partially executed; inspect current state before retrying.\n</turn_interrupted>`
   }
   return undefined
+}
+
+function exceedsCaps(
+  assembled: {
+    readonly byteCount: number
+    readonly blockCount: number
+  },
+  limits: ModelContextLimits,
+): boolean {
+  return (
+    assembled.blockCount > limits.modelVisibleMessageBlocks ||
+    assembled.byteCount > limits.modelVisibleContextBytes
+  )
 }
 
 function assembleGroups(
