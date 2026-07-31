@@ -17,7 +17,12 @@ import {
   projectExecutionView,
   reduceExecutionView,
 } from "../execution-view.ts"
-import { openSessionEventStream, requestJson } from "../lib/api-client.ts"
+import {
+  ApiRequestError,
+  cancelSessionInput,
+  openSessionEventStream,
+  requestJson,
+} from "../lib/api-client.ts"
 import {
   beginSessionSelection,
   clearSessionSelection,
@@ -57,6 +62,7 @@ export type AppStoreActions = {
   selectSession(sessionId: string): Promise<void>
   admitInput(text: string): Promise<void>
   cancelTurn(turnId: string): Promise<void>
+  cancelQueuedInput(inputId: string): Promise<void>
   resolvePermission(
     turnId: string,
     permissionRequestId: string,
@@ -467,6 +473,40 @@ export const useAppStore = create<AppStore>()((set, get) => {
             `/sessions/${encodeURIComponent(selection.sessionId)}/turns/${encodeURIComponent(turnId)}/cancel`,
             { method: "POST", body: { reason: "user_cancel" } },
           )
+          await refreshSelectedSession(selection)
+        },
+        () => isCurrentSessionSelection(get().selection, selection),
+      )
+      set((state) => {
+        const inFlightActions = new Set(state.inFlightActions)
+        inFlightActions.delete(key)
+        return { inFlightActions }
+      })
+    },
+
+    cancelQueuedInput: async (inputId) => {
+      const selection = currentSessionSelection(get().selection)
+      if (!selection) return
+      const key = `cancel-input:${inputId}`
+      if (get().inFlightActions.has(key)) return
+      set((state) => ({
+        inFlightActions: new Set(state.inFlightActions).add(key),
+      }))
+      await runTask(
+        async () => {
+          try {
+            await cancelSessionInput(
+              get().apiBase,
+              selection.sessionId,
+              inputId,
+            )
+          } catch (error) {
+            // 409 means the input already left the pending queue (usually it
+            // just started); the detail refresh below reconciles the view.
+            if (!(error instanceof ApiRequestError && error.status === 409)) {
+              throw error
+            }
+          }
           await refreshSelectedSession(selection)
         },
         () => isCurrentSessionSelection(get().selection, selection),

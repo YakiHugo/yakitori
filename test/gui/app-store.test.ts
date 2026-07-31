@@ -186,6 +186,144 @@ describe("app store event stream", () => {
   })
 })
 
+describe("cancel queued input", () => {
+  it("posts the cancel route and clears the queue when input.cancelled flows", async () => {
+    const cancelled = createEventEnvelope({
+      sessionId: "session_1",
+      seq: 3,
+      event: {
+        type: EventType.InputCancelled,
+        data: { inputId: "input_1", reason: "user_cancel" },
+      },
+    })
+    const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
+      const url = String(input)
+      if (url === "http://api.test/sessions/session_1") {
+        return jsonResponse({ session: sessionDetail })
+      }
+      if (
+        url === "http://api.test/sessions/session_1/inputs/input_1/cancel" &&
+        init?.method === "POST"
+      ) {
+        return jsonResponse({
+          sessionId: "session_1",
+          inputId: "input_1",
+          event: cancelled,
+        })
+      }
+      return errorResponse(404)
+    })
+    vi.stubGlobal("fetch", fetchMock)
+
+    await useAppStore.getState().selectSession("session_1")
+    const source = FakeEventSource.instances[0]
+    source?.emit(
+      "session.event",
+      createEventEnvelope({
+        sessionId: "session_1",
+        seq: 2,
+        event: {
+          type: EventType.InputAdmitted,
+          data: {
+            requestId: "request:1",
+            inputId: "input_1",
+            role: InputRole.User,
+            content: { kind: "text", text: "hello" },
+          },
+        },
+      }),
+    )
+    await vi.waitFor(() => {
+      expect(
+        projectExecutionView(useAppStore.getState().execution).queuedInputIds,
+      ).toContain("input_1")
+    })
+
+    await useAppStore.getState().cancelQueuedInput("input_1")
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://api.test/sessions/session_1/inputs/input_1/cancel",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ reason: "user_cancel" }),
+      }),
+    )
+    expect(useAppStore.getState().inFlightActions.size).toBe(0)
+    // The row stays queued until the recorded fact streams in.
+    expect(
+      projectExecutionView(useAppStore.getState().execution).queuedInputIds,
+    ).toContain("input_1")
+
+    source?.emit("session.event", cancelled)
+    await vi.waitFor(() => {
+      expect(
+        projectExecutionView(useAppStore.getState().execution).queuedInputIds,
+      ).not.toContain("input_1")
+    })
+  })
+
+  it("treats 409 as a stale queue row: refreshes detail without an error banner", async () => {
+    const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
+      const url = String(input)
+      if (url === "http://api.test/sessions/session_1") {
+        return jsonResponse({ session: sessionDetail })
+      }
+      if (
+        url === "http://api.test/sessions/session_1/inputs/input_1/cancel" &&
+        init?.method === "POST"
+      ) {
+        return conflictResponse()
+      }
+      return errorResponse(404)
+    })
+    vi.stubGlobal("fetch", fetchMock)
+
+    await useAppStore.getState().selectSession("session_1")
+    expect(detailCallCount(fetchMock)).toBe(1)
+
+    await useAppStore.getState().cancelQueuedInput("input_1")
+
+    expect(useAppStore.getState().message).toBeUndefined()
+    expect(detailCallCount(fetchMock)).toBe(2)
+    expect(useAppStore.getState().inFlightActions.size).toBe(0)
+  })
+
+  it("surfaces non-conflict failures through the message banner", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: unknown, init?: RequestInit) => {
+        const url = String(input)
+        if (url === "http://api.test/sessions/session_1") {
+          return jsonResponse({ session: sessionDetail })
+        }
+        if (
+          url === "http://api.test/sessions/session_1/inputs/input_1/cancel" &&
+          init?.method === "POST"
+        ) {
+          return new Response(
+            JSON.stringify({
+              error: { code: "internal_error", message: "boom" },
+            }),
+            { status: 500 },
+          )
+        }
+        return errorResponse(404)
+      }),
+    )
+
+    await useAppStore.getState().selectSession("session_1")
+    await useAppStore.getState().cancelQueuedInput("input_1")
+
+    expect(useAppStore.getState().message).toBe("boom")
+  })
+})
+
+function detailCallCount(fetchMock: ReturnType<typeof vi.fn>): number {
+  return fetchMock.mock.calls.filter(
+    ([input]) => String(input) === "http://api.test/sessions/session_1",
+  ).length
+}
+
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), { status: 200 })
 }
@@ -194,5 +332,17 @@ function errorResponse(status: number): Response {
   return new Response(
     JSON.stringify({ error: { code: "not_found", message: "not found" } }),
     { status },
+  )
+}
+
+function conflictResponse(): Response {
+  return new Response(
+    JSON.stringify({
+      error: {
+        code: "conflict",
+        message: "Input input_1 is already started.",
+      },
+    }),
+    { status: 409 },
   )
 }

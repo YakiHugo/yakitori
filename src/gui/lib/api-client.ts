@@ -1,6 +1,22 @@
 import type { StoredEventEnvelope } from "../../kernel/index.ts"
 import type { LiveSessionEvent } from "../../runtime/live-events.ts"
-import type { ApiErrorResponse } from "../../server/protocol.ts"
+import type {
+  ApiCancelInputResponse,
+  ApiErrorCode,
+  ApiErrorResponse,
+} from "../../server/protocol.ts"
+
+export class ApiRequestError extends Error {
+  readonly status: number
+  readonly code: ApiErrorCode | undefined
+
+  constructor(status: number, message: string, code?: ApiErrorCode) {
+    super(message)
+    this.name = "ApiRequestError"
+    this.status = status
+    this.code = code
+  }
+}
 
 export function apiUrl(apiBase: string, path: string): string {
   const base = apiBase.endsWith("/") ? apiBase : `${apiBase}/`
@@ -28,10 +44,25 @@ export async function requestJson<T>(
   const response = await fetch(apiUrl(apiBase, path), request)
   const payload = (await response.json()) as T | ApiErrorResponse
   if (response.ok) return payload as T
-  throw new Error(
-    isApiErrorResponse(payload)
-      ? payload.error.message
-      : `HTTP ${response.status}`,
+  if (isApiErrorResponse(payload)) {
+    throw new ApiRequestError(
+      response.status,
+      payload.error.message,
+      payload.error.code,
+    )
+  }
+  throw new ApiRequestError(response.status, `HTTP ${response.status}`)
+}
+
+export function cancelSessionInput(
+  apiBase: string,
+  sessionId: string,
+  inputId: string,
+): Promise<ApiCancelInputResponse> {
+  return requestJson<ApiCancelInputResponse>(
+    apiBase,
+    `/sessions/${encodeURIComponent(sessionId)}/inputs/${encodeURIComponent(inputId)}/cancel`,
+    { method: "POST", body: { reason: "user_cancel" } },
   )
 }
 
