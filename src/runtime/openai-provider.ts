@@ -4,7 +4,7 @@ import type {
   Response,
   ResponseInput,
 } from "openai/resources/responses/responses"
-import type { JsonValue } from "../kernel/index.ts"
+import type { JsonObject, JsonValue } from "../kernel/index.ts"
 import {
   ModelStopReason,
   type ModelContentBlock,
@@ -257,6 +257,7 @@ function responseError(
 }
 
 function terminalError(error: unknown): ModelResponse {
+  const details = retryableDetails(error)
   return {
     stopReason: ModelStopReason.Error,
     content: [],
@@ -264,8 +265,30 @@ function terminalError(error: unknown): ModelResponse {
       code: "openai_error",
       message:
         error instanceof Error ? error.message : "OpenAI request failed.",
+      ...(details === undefined ? {} : { details }),
     },
   }
+}
+
+const RETRYABLE_STATUSES: ReadonlySet<number> = new Set([
+  408, 409, 429, 500, 502, 503, 504, 529,
+])
+
+// Transient failures carry retryable details for withRetries: retryable HTTP
+// statuses, plus connection/timeout errors (APIConnectionTimeoutError extends
+// APIConnectionError; both have no HTTP status).
+function retryableDetails(error: unknown): JsonObject | undefined {
+  if (error instanceof OpenAI.APIConnectionError) {
+    return { retryable: true }
+  }
+  if (
+    error instanceof OpenAI.APIError &&
+    typeof error.status === "number" &&
+    RETRYABLE_STATUSES.has(error.status)
+  ) {
+    return { retryable: true, status: error.status }
+  }
+  return undefined
 }
 
 function abortedResponse(): ModelStreamEvent {

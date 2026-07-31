@@ -1,4 +1,4 @@
-import type OpenAI from "openai"
+import OpenAI from "openai"
 import type { Response } from "openai/resources/responses/responses"
 import { describe, expect, it } from "vitest"
 import {
@@ -8,6 +8,7 @@ import {
   toOpenAIInput,
   toOpenAITools,
   type ModelRequest,
+  type ModelStreamEvent,
 } from "../../src/index.ts"
 
 describe("OpenAI Responses provider", () => {
@@ -176,6 +177,88 @@ describe("OpenAI Responses provider", () => {
     })
   })
 })
+
+describe("OpenAI provider error classification", () => {
+  it("marks a 429 API error as retryable with its status", async () => {
+    const error = new OpenAI.APIError(429, undefined, undefined, new Headers())
+
+    const events = await collectWithThrowingClient(error)
+
+    expect(events).toEqual([
+      {
+        type: "response",
+        response: {
+          stopReason: ModelStopReason.Error,
+          content: [],
+          error: {
+            code: "openai_error",
+            message: error.message,
+            details: { retryable: true, status: 429 },
+          },
+        },
+      },
+    ])
+  })
+
+  it("keeps a 400 API error free of retry details", async () => {
+    const error = new OpenAI.APIError(400, undefined, undefined, new Headers())
+
+    const events = await collectWithThrowingClient(error)
+
+    expect(events).toEqual([
+      {
+        type: "response",
+        response: {
+          stopReason: ModelStopReason.Error,
+          content: [],
+          error: { code: "openai_error", message: error.message },
+        },
+      },
+    ])
+  })
+
+  it("marks connection errors without a status as retryable", async () => {
+    const error = new OpenAI.APIConnectionError({ message: "socket hang up" })
+
+    const events = await collectWithThrowingClient(error)
+
+    expect(events).toEqual([
+      {
+        type: "response",
+        response: {
+          stopReason: ModelStopReason.Error,
+          content: [],
+          error: {
+            code: "openai_error",
+            message: error.message,
+            details: { retryable: true },
+          },
+        },
+      },
+    ])
+  })
+})
+
+async function collectWithThrowingClient(
+  error: unknown,
+): Promise<ModelStreamEvent[]> {
+  const client = {
+    responses: {
+      async create() {
+        throw error
+      },
+    },
+  } as unknown as OpenAI
+  const stream = createOpenAIProvider({
+    apiKey: "test",
+    model: "gpt-test",
+    client,
+  })
+
+  const events: ModelStreamEvent[] = []
+  for await (const event of stream(requestFixture())) events.push(event)
+  return events
+}
 
 function requestFixture(): ModelRequest {
   return {

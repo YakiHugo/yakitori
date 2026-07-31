@@ -1,9 +1,13 @@
+import Anthropic from "@anthropic-ai/sdk"
 import { describe, expect, it } from "vitest"
 import {
+  createAnthropicProvider,
   fromAnthropicMessage,
   ModelStopReason,
   toAnthropicMessages,
   toAnthropicTools,
+  type ModelRequest,
+  type ModelStreamEvent,
 } from "../../src/index.ts"
 
 describe("anthropic provider conversion", () => {
@@ -125,3 +129,104 @@ describe("anthropic provider conversion", () => {
     ).toBe(ModelStopReason.Length)
   })
 })
+
+describe("anthropic provider error classification", () => {
+  it("marks a 429 API error as retryable with its status", async () => {
+    const error = new Anthropic.APIError(
+      429,
+      undefined,
+      undefined,
+      new Headers(),
+    )
+
+    const events = await collectWithThrowingClient(error)
+
+    expect(events).toEqual([
+      {
+        type: "response",
+        response: {
+          stopReason: ModelStopReason.Error,
+          content: [],
+          error: {
+            code: "anthropic_error",
+            message: error.message,
+            details: { retryable: true, status: 429 },
+          },
+        },
+      },
+    ])
+  })
+
+  it("keeps a 400 API error free of retry details", async () => {
+    const error = new Anthropic.APIError(
+      400,
+      undefined,
+      undefined,
+      new Headers(),
+    )
+
+    const events = await collectWithThrowingClient(error)
+
+    expect(events).toEqual([
+      {
+        type: "response",
+        response: {
+          stopReason: ModelStopReason.Error,
+          content: [],
+          error: { code: "anthropic_error", message: error.message },
+        },
+      },
+    ])
+  })
+
+  it("marks connection errors without a status as retryable", async () => {
+    const error = new Anthropic.APIConnectionError({
+      message: "socket hang up",
+    })
+
+    const events = await collectWithThrowingClient(error)
+
+    expect(events).toEqual([
+      {
+        type: "response",
+        response: {
+          stopReason: ModelStopReason.Error,
+          content: [],
+          error: {
+            code: "anthropic_error",
+            message: error.message,
+            details: { retryable: true },
+          },
+        },
+      },
+    ])
+  })
+})
+
+async function collectWithThrowingClient(
+  error: unknown,
+): Promise<ModelStreamEvent[]> {
+  const client = {
+    messages: {
+      stream() {
+        throw error
+      },
+    },
+  } as unknown as Anthropic
+  const stream = createAnthropicProvider({
+    apiKey: "test",
+    model: "claude-test",
+    client,
+  })
+
+  const request: ModelRequest = {
+    provider: "anthropic",
+    model: "claude-test",
+    system: "Be helpful.",
+    messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+    tools: [],
+  }
+  const events: ModelStreamEvent[] = []
+  for await (const event of stream(request)) events.push(event)
+  return events
+}

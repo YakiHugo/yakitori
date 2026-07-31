@@ -233,6 +233,30 @@ describe("session runner", () => {
     })
   })
 
+  it("adds an environment block to the system prompt", async () => {
+    await withRuntime(async (runtime) => {
+      const provider = createFauxProvider([
+        { content: [{ type: "text", text: "ok" }] },
+      ])
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+      })
+      const session = await createAttributedSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "hi" },
+      })
+      await runner.wake(session.sessionId)
+
+      const system = provider.requests[0]?.system
+      expect(system).toContain("Answer briefly.")
+      expect(system).toContain("<environment>")
+      expect(system).toContain(`Working directory: ${runtime.rootDir}`)
+    })
+  })
+
   it("publishes snapshots to the transient hub but not to durable replay", async () => {
     await withRuntime(async (runtime) => {
       const live: LiveSessionEvent[] = []

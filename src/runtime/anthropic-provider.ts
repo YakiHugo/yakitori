@@ -4,7 +4,7 @@ import type {
   Tool,
   ToolResultBlockParam,
 } from "@anthropic-ai/sdk/resources/messages"
-import type { JsonValue } from "../kernel/index.ts"
+import type { JsonObject, JsonValue } from "../kernel/index.ts"
 import {
   ModelStopReason,
   type ModelContentBlock,
@@ -241,6 +241,7 @@ function mapStopReason(
 }
 
 function terminalError(error: unknown): ModelResponse {
+  const details = retryableDetails(error)
   return {
     stopReason: ModelStopReason.Error,
     content: [],
@@ -248,8 +249,30 @@ function terminalError(error: unknown): ModelResponse {
       code: "anthropic_error",
       message:
         error instanceof Error ? error.message : "Anthropic request failed.",
+      ...(details === undefined ? {} : { details }),
     },
   }
+}
+
+const RETRYABLE_STATUSES: ReadonlySet<number> = new Set([
+  408, 409, 429, 500, 502, 503, 504, 529,
+])
+
+// Transient failures carry retryable details for withRetries: retryable HTTP
+// statuses, plus connection/timeout errors (APIConnectionTimeoutError extends
+// APIConnectionError; both have no HTTP status).
+function retryableDetails(error: unknown): JsonObject | undefined {
+  if (error instanceof Anthropic.APIConnectionError) {
+    return { retryable: true }
+  }
+  if (
+    error instanceof Anthropic.APIError &&
+    typeof error.status === "number" &&
+    RETRYABLE_STATUSES.has(error.status)
+  ) {
+    return { retryable: true, status: error.status }
+  }
+  return undefined
 }
 
 function isAbortError(error: unknown): boolean {

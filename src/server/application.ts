@@ -30,6 +30,7 @@ import {
   type StreamFn,
   type TransientEventHub,
 } from "../runtime/index.ts"
+import { withRetries } from "../runtime/retrying-stream.ts"
 import { createDurableEventHub, type DurableEventHub } from "./event-hub.ts"
 import {
   createServerHandlers,
@@ -402,7 +403,7 @@ function createDefaultProvider(
       )
     }
     return {
-      stream: createAnthropicProvider({ apiKey, model }),
+      stream: withRetries(createAnthropicProvider({ apiKey, model })),
       provider,
       model,
     }
@@ -420,7 +421,7 @@ function createDefaultProvider(
       )
     }
     return {
-      stream: createOpenAIProvider({ apiKey, model }),
+      stream: withRetries(createOpenAIProvider({ apiKey, model })),
       provider,
       model,
     }

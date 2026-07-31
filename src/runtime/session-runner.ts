@@ -16,6 +16,7 @@ import {
   createCoalescingSnapshotPublisher,
   type TransientEventHub,
 } from "./live-events.ts"
+import { buildEnvironmentContext } from "./environment-context.ts"
 import { createRuntimeLimits, type RuntimeLimits } from "./limits.ts"
 import { buildModelContext } from "./model-context.ts"
 import {
@@ -277,6 +278,10 @@ export function createSessionRunner(
       })
     }
 
+    const system = `${revision.instructions}\n\n${buildEnvironmentContext({
+      workingDirectory: input.executionContext.workingDirectory,
+    })}`
+
     let modelCallIndex = 0
     let toolCallCount = 0
     const usages: ModelUsage[] = []
@@ -294,7 +299,7 @@ export function createSessionRunner(
       })
 
       const request: ModelRequest = {
-        system: revision.instructions,
+        system,
         messages: context.messages,
         tools: toolRegistry
           .definitions()
