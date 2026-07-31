@@ -80,21 +80,28 @@ required to build, test, or run Yakitori.
 
 Stage 1 MVP runtime is implemented as one vertical slice:
 
-- a witness-style Session/Input/Turn kernel with 13 coarse durable facts
+- a witness-style Session/Input/Turn kernel with 14 coarse durable facts
 - one synchronized per-fact JSONL journal per Session with rebuildable cached
   projections; replay is a repair tool
 - Mate profile store + default active Mate selection at application startup
 - SessionRunner with single-flight wakes, bounded model context, and recovery
+- context compaction: pressure-triggered checkpoint summaries recorded as
+  append-only `context.compacted` facts (decision 0011)
+- transient provider errors retried with bounded backoff (decision 0012);
+  per-Turn environment context block in the system prompt (decision 0013)
 - scripted faux provider (default tests), OpenAI Responses adapter, and
   optional Anthropic Messages adapter
 - bounded tools: `read_file`, `write_file` (compare-and-write), `run_command`
 - durable permission gate for host commands (never auto-approved in production)
 - dual event delivery: durable SSE (`session.event`) + transient snapshots
 - React + Tailwind v4 + shadcn/ui workbench GUI with streaming markdown,
-  collapsible tool cells, approval bar, interrupt, and diagnostics drawer
+  collapsible tool cells, approval bar, queued-input cancel, interrupt, and
+  diagnostics drawer
+- Electron desktop shell: the main process embeds the application and serves
+  the GUI same-origin from the local server (decision 0010)
 
 Still deferred to later stages: Room/Task/Assignment/Delivery collaboration,
-governed memory, worktrees, multi-provider selection UI, compaction, subagents.
+governed memory, worktrees, multi-provider selection UI, subagents.
 
 The per-fact journal line stage is implemented; its historical plan is archived
 at `docs/archive/stage-2-fact-journal.md`.
@@ -107,7 +114,20 @@ Install:
 pnpm install
 ```
 
-Run server + GUI:
+Run the desktop app (production-style: builds the GUI and desktop bundle,
+embeds the server, serves the GUI same-origin):
+
+```sh
+pnpm start:desktop
+```
+
+Desktop development with vite HMR (embedded server on port `4141`):
+
+```sh
+pnpm dev:desktop
+```
+
+Run server + GUI in a browser instead:
 
 ```sh
 pnpm dev
@@ -115,6 +135,9 @@ pnpm dev
 
 - GUI: `http://127.0.0.1:5173`
 - API default: `http://127.0.0.1:4141`
+- The server also serves the built GUI itself when `dist/gui` exists (or
+  `YAKITORI_GUI_DIR` points elsewhere), so `http://127.0.0.1:4141` works
+  directly after `pnpm build:gui`.
 
 ### Environment variables
 
@@ -122,6 +145,7 @@ pnpm dev
 | --- | --- |
 | `YAKITORI_STORE_DIR` | Store directory (default `.yakitori`) |
 | `YAKITORI_WORKSPACE` | Canonical workspace root (default `process.cwd()`) |
+| `YAKITORI_GUI_DIR` | Static GUI directory served by the server (default `./dist/gui` when it exists) |
 | `YAKITORI_MATE_ID` | Explicit active Mate when multiple exist |
 | `YAKITORI_PROVIDER` | `faux` (default), `openai`, or `anthropic` |
 | `YAKITORI_FAUX_SCENARIO` | Faux scenario: `text`, `file`, `command`, `error` |
@@ -195,6 +219,10 @@ to split the application into services.
 - [Kernel as witness](docs/decisions/0007-kernel-as-witness.md)
 - [Per-Session JSONL event storage](docs/decisions/0008-per-session-jsonl-event-store.md)
 - [Per-fact Session journal lines](docs/decisions/0009-per-fact-journal-lines.md)
+- [Electron desktop shell with server-served GUI](docs/decisions/0010-electron-desktop-shell.md)
+- [Context compaction checkpoints](docs/decisions/0011-context-compaction.md)
+- [Provider retry backoff](docs/decisions/0012-provider-retry-backoff.md)
+- [Environment context block](docs/decisions/0013-environment-context-block.md)
 
 ## Development
 
@@ -228,10 +256,14 @@ pnpm test
 pnpm lint
 pnpm format
 pnpm build
+pnpm start:desktop
+pnpm dev:desktop
+pnpm package:desktop
 ```
 
-The build keeps the library entry at `dist/index.js` and writes the GUI to
-`dist/gui`.
+The build keeps the library entry at `dist/index.js`, writes the GUI to
+`dist/gui`, and writes the Electron main bundle to `dist/desktop`.
+`pnpm package:desktop` produces an unsigned unpacked app under `release/`.
 
 ## Agent Instructions
 

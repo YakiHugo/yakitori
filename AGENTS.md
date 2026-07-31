@@ -160,6 +160,10 @@ design reference for this stage):
 - The GUI (`src/gui/`) is a React 19 + Tailwind v4 + shadcn/ui application.
   The from-scratch rule applies to the agent loop only; the GUI uses ordinary
   frontend libraries.
+- The product ships as an Electron desktop app (decision 0010):
+  `src/desktop/main.ts` embeds the application in the main process and the
+  local server serves the built GUI same-origin. Electron adds no privileged
+  IPC bridge — the HTTP API stays the only GUI↔core channel.
 - `src/gui/components/ui/` holds vendored shadcn/ui primitives; treat them as
   generated output — re-vendor or edit locally, never hand-tune their API
   shape ad hoc.
@@ -257,8 +261,8 @@ Keep changes small unless they are mechanical.
 ## Commands
 
 Use pnpm for everything. Scripts for format, typecheck, test, check, build,
-and dev (server and GUI) live in `package.json` — check the `scripts` section
-there when you need one instead of guessing.
+dev (server, GUI, and desktop), and desktop packaging live in `package.json` —
+check the `scripts` section there when you need one instead of guessing.
 
 ## UI Changes
 

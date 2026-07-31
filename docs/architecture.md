@@ -256,8 +256,17 @@ are not required by this architecture.
 
 ## Implementation Direction
 
-The MVP runtime now drives Turns end to end through the witness-style kernel
-and per-Session JSONL journals, visible in the GUI.
+The MVP runtime drives Turns end to end through the witness-style kernel and
+per-Session JSONL journals. The product ships as an Electron desktop app whose
+main process embeds the application and serves the GUI from the same local
+server, same-origin (decision 0010); the HTTP API remains the only GUI↔core
+channel.
+
+Context pressure is handled by compaction: an append-only `context.compacted`
+fact records the exact source boundary and a bounded checkpoint summary, and
+later context builds replace covered turns with it (decision 0011). Transient
+provider errors are retried with bounded backoff (decision 0012), and every
+Turn's system prompt carries a bounded environment block (decision 0013).
 
 The per-fact journal decision
 (`docs/decisions/0009-per-fact-journal-lines.md`) is implemented. Its historical
