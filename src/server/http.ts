@@ -1,9 +1,11 @@
+import { readFile } from "node:fs/promises"
 import {
   createServer,
   type IncomingMessage,
   type ServerResponse,
 } from "node:http"
 import type { AddressInfo } from "node:net"
+import { extname, join, resolve, sep } from "node:path"
 import {
   createSessionKernel,
   type EventEnvelope,
@@ -19,9 +21,14 @@ import { createDurableEventHub, type DurableEventHub } from "./event-hub.ts"
 import { createServerHandlers, type ServerHandlers } from "./handlers.ts"
 import { ApiErrorCode, type ApiHandlerResult } from "./protocol.ts"
 
+export type YakitoriStaticAssets = {
+  readonly directory: string
+}
+
 type YakitoriHttpServerCommonOptions = {
   readonly eventHub?: DurableEventHub
   readonly transientHub?: TransientEventHub
+  readonly staticAssets?: YakitoriStaticAssets
 }
 
 export type YakitoriHttpServerOptions = YakitoriHttpServerCommonOptions &
@@ -57,6 +64,7 @@ export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
       handlers,
       eventHub,
       transientHub,
+      options.staticAssets,
     ).catch((error) => {
       writeUnhandledError(response, error)
     })
@@ -93,6 +101,7 @@ async function handleRequest(
   handlers: ServerHandlers,
   eventHub: DurableEventHub,
   transientHub: TransientEventHub | undefined,
+  staticAssets: YakitoriStaticAssets | undefined,
 ): Promise<void> {
   const origin = requestOrigin(request)
   if (origin !== undefined && !isAllowedCorsOrigin(origin)) {
@@ -164,6 +173,23 @@ async function handleRequest(
     return
   }
 
+  if (route.kind === "cancelInput") {
+    const body = await readJson(request)
+    if (!body.ok) {
+      writeResult(response, body.result)
+      return
+    }
+    writeResult(
+      response,
+      await handlers.cancelInput({
+        ...requireBodyRecord(body.value),
+        sessionId: route.sessionId,
+        inputId: route.inputId,
+      }),
+    )
+    return
+  }
+
   if (route.kind === "cancelTurn") {
     const body = await readJson(request)
     if (!body.ok) {
@@ -219,6 +245,18 @@ async function handleRequest(
     return
   }
 
+  // Static serving is GET-only: HEAD and other methods keep the JSON 404.
+  // API-shaped prefixes always keep the JSON 404 so clients can tell a
+  // missing API resource apart from the SPA fallback.
+  if (
+    request.method === "GET" &&
+    staticAssets !== undefined &&
+    !isApiPath(url.pathname) &&
+    (await serveStaticAsset(response, staticAssets, url.pathname))
+  ) {
+    return
+  }
+
   writeResult(
     response,
     errorResult(404, ApiErrorCode.NotFound, "Route not found."),
@@ -261,6 +299,21 @@ function routeRequest(method: string, url: URL): Route {
 
   if (method === "GET" && segments.length === 3 && segments[2] === "events") {
     return { kind: "streamSessionEvents", sessionId: segments[1] }
+  }
+
+  // POST /sessions/:id/inputs/:inputId/cancel
+  if (
+    method === "POST" &&
+    segments.length === 5 &&
+    segments[2] === "inputs" &&
+    segments[4] === "cancel" &&
+    typeof segments[3] === "string"
+  ) {
+    return {
+      kind: "cancelInput",
+      sessionId: segments[1],
+      inputId: segments[3],
+    }
   }
 
   // POST /sessions/:id/turns/:turnId/cancel
@@ -517,6 +570,96 @@ function writeUnhandledError(response: ServerResponse, error: unknown): void {
   )
 }
 
+function isApiPath(pathname: string): boolean {
+  return pathname.startsWith("/sessions") || pathname.startsWith("/health")
+}
+
+async function serveStaticAsset(
+  response: ServerResponse,
+  staticAssets: YakitoriStaticAssets,
+  pathname: string,
+): Promise<boolean> {
+  const root = resolve(staticAssets.directory)
+  const resolved = resolve(root, `.${decodeURIComponent(pathname)}`)
+  if (resolved !== root && !resolved.startsWith(`${root}${sep}`)) {
+    return serveSpaFallback(response, root)
+  }
+
+  const candidate = pathname === "/" ? join(root, "index.html") : resolved
+  const body = await readStaticFile(candidate)
+  if (body !== undefined) {
+    writeStaticFile(response, root, candidate, body)
+    return true
+  }
+  return serveSpaFallback(response, root)
+}
+
+async function serveSpaFallback(
+  response: ServerResponse,
+  root: string,
+): Promise<boolean> {
+  const indexPath = join(root, "index.html")
+  const body = await readStaticFile(indexPath)
+  if (body === undefined) return false
+  writeStaticFile(response, root, indexPath, body)
+  return true
+}
+
+async function readStaticFile(path: string): Promise<Buffer | undefined> {
+  try {
+    return await readFile(path)
+  } catch {
+    // Missing paths and directories fall through to the SPA fallback or 404.
+    return undefined
+  }
+}
+
+function writeStaticFile(
+  response: ServerResponse,
+  root: string,
+  path: string,
+  body: Buffer,
+): void {
+  response.writeHead(200, {
+    "Cache-Control": staticCacheControl(root, path),
+    "Content-Type": staticContentType(path),
+  })
+  response.end(body)
+}
+
+function staticCacheControl(root: string, path: string): string {
+  // Vite content-hashes everything under assets/; index.html must revalidate.
+  return path.startsWith(`${join(root, "assets")}${sep}`)
+    ? "public, max-age=31536000, immutable"
+    : "no-cache"
+}
+
+function staticContentType(path: string): string {
+  return (
+    staticContentTypes[extname(path).toLowerCase()] ??
+    "application/octet-stream"
+  )
+}
+
+const staticContentTypes: Record<string, string> = {
+  ".css": "text/css; charset=utf-8",
+  ".html": "text/html; charset=utf-8",
+  ".ico": "image/x-icon",
+  ".jpeg": "image/jpeg",
+  ".jpg": "image/jpeg",
+  ".js": "text/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".map": "application/json; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".png": "image/png",
+  ".svg": "image/svg+xml",
+  ".ttf": "font/ttf",
+  ".txt": "text/plain; charset=utf-8",
+  ".webmanifest": "application/manifest+json",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+}
+
 function optionalQueryString(url: URL, field: string): Record<string, string> {
   const value = url.searchParams.get(field)
   if (value === null) return {}
@@ -613,6 +756,11 @@ function isAddressInfo(value: unknown): value is AddressInfo {
 
 type Route =
   | { readonly kind: "admitInput"; readonly sessionId: string }
+  | {
+      readonly kind: "cancelInput"
+      readonly sessionId: string
+      readonly inputId: string
+    }
   | {
       readonly kind: "cancelTurn"
       readonly sessionId: string

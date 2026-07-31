@@ -20,6 +20,7 @@ import { RuntimeLimits } from "../runtime/limits.ts"
 import {
   ApiErrorCode,
   type ApiAdmitInputResponse,
+  type ApiCancelInputResponse,
   type ApiCancelTurnResponse,
   type ApiCreateSessionResponse,
   type ApiHandlerResult,
@@ -65,6 +66,7 @@ export type ServerHandlers = {
   ): Promise<ApiHandlerResult<ApiListSessionsResponse>>
   readSession(input: unknown): Promise<ApiHandlerResult<ApiReadSessionResponse>>
   admitInput(input: unknown): Promise<ApiHandlerResult<ApiAdmitInputResponse>>
+  cancelInput(input: unknown): Promise<ApiHandlerResult<ApiCancelInputResponse>>
   cancelTurn(input: unknown): Promise<ApiHandlerResult<ApiCancelTurnResponse>>
   resolvePermission(
     input: unknown,
@@ -75,6 +77,7 @@ export type ServerHandlers = {
 }
 
 const sessionListOrder = "updated_at_desc"
+const maxCancelReasonLength = 512
 
 export function createServerHandlers(
   kernel: SessionKernel,
@@ -164,6 +167,21 @@ export function createServerHandlers(
           requestId: admitted.requestId,
           inputId: admitted.inputId,
           event: admitted.event,
+        })
+      } catch (error) {
+        return fail(error)
+      }
+    },
+
+    async cancelInput(input) {
+      try {
+        const request = requireCancelInputRequest(input)
+        const cancelled = await kernel.cancelInput(request)
+        options.eventHub?.publish([cancelled.event])
+        return ok(200, {
+          sessionId: request.sessionId,
+          inputId: request.inputId,
+          event: cancelled.event,
         })
       } catch (error) {
         return fail(error)
@@ -413,6 +431,15 @@ function requireAdmitInputRequest(input: unknown, maxInputBytes: number) {
   }
 }
 
+function requireCancelInputRequest(input: unknown) {
+  const record = requireRecord(input, "Input cancel request must be an object.")
+  return {
+    sessionId: requireSessionId(record.sessionId, "sessionId"),
+    inputId: requireInputId(record.inputId, "inputId"),
+    ...optionalReasonField(record, "reason"),
+  }
+}
+
 function requireCancelTurnRequest(input: unknown) {
   const record = requireRecord(input, "Turn cancel request must be an object.")
   return {
@@ -509,6 +536,19 @@ function requireSessionId(value: unknown, field: string): string {
   })
 }
 
+function requireInputId(value: unknown, field: string): string {
+  if (
+    typeof value === "string" &&
+    isIdWithPrefix(value, IdPrefix.Input) &&
+    isGeneratedInputId(value)
+  ) {
+    return value
+  }
+  throw invalidInput(`${field} must be an input id.`, {
+    field,
+  })
+}
+
 function requireOptionalLimit(value: unknown): number {
   if (value === undefined) return 50
   if (Number.isInteger(value) && typeof value === "number" && value > 0) {
@@ -563,6 +603,21 @@ function optionalStringField(
 ): Record<string, string> {
   const value = requireOptionalString(record[field], field)
   if (value === undefined) return {}
+  return { [field]: value }
+}
+
+function optionalReasonField(
+  record: Record<string, unknown>,
+  field: string,
+): Record<string, string> {
+  const value = requireOptionalString(record[field], field)
+  if (value === undefined) return {}
+  if (value.length > maxCancelReasonLength) {
+    throw invalidInput(
+      `${field} must not exceed ${maxCancelReasonLength} characters.`,
+      { field },
+    )
+  }
   return { [field]: value }
 }
 
@@ -748,6 +803,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isGeneratedSessionId(value: string): boolean {
   return /^session_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
+    value,
+  )
+}
+
+function isGeneratedInputId(value: string): boolean {
+  return /^input_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
     value,
   )
 }

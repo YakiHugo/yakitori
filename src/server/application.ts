@@ -48,6 +48,7 @@ const defaultMateProfile = {
 
 export type YakitoriApplicationOptions = {
   readonly activeMateId?: string
+  readonly guiStaticDir?: string
   readonly mateDatabasePath?: string
   readonly rootDir?: string
   readonly sessionStoreRoot?: string
@@ -211,6 +212,9 @@ export async function createYakitoriApplication(
           eventHub,
           transientHub,
           handlers,
+          ...(options.guiStaticDir === undefined
+            ? {}
+            : { staticAssets: { directory: options.guiStaticDir } }),
         })
       },
       async close() {
