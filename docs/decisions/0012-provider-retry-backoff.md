@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted on 2026-07-31.
+Accepted on 2026-07-31. Amended on 2026-07-31: corrected the worst-case
+backoff figure, and recorded that SDK-internal retries are disabled and
+mid-stream failures are classified by transient error type/code.
 
 ## Context
 
@@ -24,9 +26,14 @@ distinguish "try again" from "give up".
   `ModelError.details` envelope: transient failures carry
   `details: { retryable: true, status?: number }`. Retryable means the
   consensus set — HTTP 408, 409, 429, 500, 502, 503, 504, 529 — plus the
-  SDKs' connection/timeout error classes (no status). Non-transient errors
-  keep the exact previous shape; `code`/`message` are unchanged, so no
-  existing consumer is affected.
+  SDKs' connection/timeout error classes (no status). Mid-stream failures
+  carry no HTTP status (the Anthropic SDK throws an `APIError` with an
+  undefined `status` for SSE `error` events; OpenAI stream `error` events and
+  `response.failed` carry only a code), so classification also maps a small
+  transient set — Anthropic error types `overloaded_error` and `api_error`,
+  OpenAI codes `server_error` and `rate_limit_exceeded` — to
+  `retryable: true`. Non-transient errors keep the exact previous shape;
+  `code`/`message` are unchanged, so no existing consumer is affected.
 - `withRetries(stream, options?)` wraps any `StreamFn`: on a terminal
   error response flagged retryable, it waits and starts a fresh attempt with
   the same request. Defaults: 4 total attempts, 500 ms base doubling per
@@ -38,6 +45,10 @@ distinguish "try again" from "give up".
   facts — nothing durable happened until a response lands.
 - Only the Anthropic and OpenAI providers are wrapped at composition. The
   faux provider stays deterministic for scripted development and tests.
+- Both SDKs default to two internal retries, which would stack under the
+  wrapper (up to 12 HTTP attempts per model call). Default client
+  construction passes `maxRetries: 0`, so the wrapper is the only retry
+  layer.
 
 ## Rejected Alternatives
 
@@ -54,6 +65,7 @@ distinguish "try again" from "give up".
 
 - Rate limits and transient network faults no longer kill Turns; hard
   failures keep their existing recorded shape and timing bounds (worst case
-  adds ~7.5 s of backoff before failing).
+  adds ~3.5 s of backoff before failing: three sleeps of at most 500, 1000,
+  and 2000 ms at full jitter).
 - The retry policy is a runtime concern only: no API, journal, or envelope
   changes.

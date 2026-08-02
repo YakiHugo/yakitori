@@ -26,6 +26,7 @@ export type ModelContextBuildResult = {
   readonly selectedItemIds: readonly string[]
   readonly droppedTurnCount: number
   readonly droppedTurns: readonly DroppedTurn[]
+  readonly droppedCompactionCheckpoint: boolean
   readonly truncatedToolResultCount: number
   readonly byteCount: number
   readonly blockCount: number
@@ -62,6 +63,7 @@ export function buildModelContext(input: {
   }
 
   const droppedTurns: DroppedTurn[] = []
+  let droppedCompactionCheckpoint = false
   let selectedGroups: readonly ContextGroup[] = [
     ...(compactionGroup === undefined ? [] : [compactionGroup]),
     ...turnGroups,
@@ -69,8 +71,18 @@ export function buildModelContext(input: {
   ]
   let assembled = assembleGroups(selectedGroups, input.limits)
 
+  // The checkpoint is pinned until last resort and the final group — the
+  // current input or active Turn — is never dropped: the oldest remaining
+  // completed Turn group drops first, and the compaction group drops only
+  // when no droppable Turn groups remain. Message order stays
+  // checkpoint-first either way.
   while (selectedGroups.length > 1 && exceedsCaps(assembled, input.limits)) {
-    const dropped = selectedGroups[0]
+    const lastIndex = selectedGroups.length - 1
+    const turnIndex = selectedGroups.findIndex(
+      (group, index) => index < lastIndex && group.kind === "turn",
+    )
+    const dropIndex = turnIndex === -1 ? 0 : turnIndex
+    const dropped = selectedGroups[dropIndex]
     if (dropped === undefined) break
     if (dropped.kind === "turn") {
       // Reuse per-group assembly so summarization input gets the same
@@ -80,7 +92,10 @@ export function buildModelContext(input: {
         messages: assembleGroups([dropped], input.limits).messages,
       })
     }
-    selectedGroups = selectedGroups.slice(1)
+    if (dropped.kind === "compaction") {
+      droppedCompactionCheckpoint = true
+    }
+    selectedGroups = selectedGroups.filter((_, index) => index !== dropIndex)
     assembled = assembleGroups(selectedGroups, input.limits)
   }
 
@@ -95,6 +110,7 @@ export function buildModelContext(input: {
     selectedItemIds: assembled.itemIds,
     droppedTurnCount: droppedTurns.length,
     droppedTurns,
+    droppedCompactionCheckpoint,
     truncatedToolResultCount: assembled.truncatedToolResultCount,
     byteCount: assembled.byteCount,
     blockCount: assembled.blockCount,

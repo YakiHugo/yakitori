@@ -6,7 +6,9 @@ Accepted on 2026-07-31. This decision lands the "Compaction facts" capability
 whose shape was pre-agreed in `docs/kernel-persistence-direction.md`; its
 trigger — model-context pressure in long Sessions — has a real caller. The
 witness-style kernel rules (decision 0007) and the per-fact journal format
-(decision 0009) remain in force.
+(decision 0009) remain in force. Amended on 2026-07-31: clarified that
+`throughSeq` is the observation point of the summary source, not a coverage
+bound.
 
 ## Context
 
@@ -39,8 +41,11 @@ checkpoint, with raw facts retained.
 ```
 
 - `throughSeq` is the Session projection's high-water `seq` observed when the
-  summary source was built — the exact source boundary, using the envelope
-  coordinate reserved for compaction boundaries.
+  summary source was built — the observation point, using the envelope
+  coordinate reserved for compaction boundaries. Coverage is exactly
+  `coveredTurnIds`: consumers (e.g. a future fork) must not read `throughSeq`
+  as "every fact ≤ `throughSeq` is summarized" — the active Turn's in-flight
+  facts are also ≤ `throughSeq` and are not covered.
 - `coveredTurnIds` is the cumulative set of terminal Turns this checkpoint
   supersedes, including earlier compactions' coverage. The projection keeps
   only the latest compaction; membership is explicit in the fact, so replay

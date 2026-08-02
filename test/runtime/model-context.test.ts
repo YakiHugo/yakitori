@@ -364,6 +364,7 @@ describe("model context", () => {
     ])
     expect(context.droppedTurnCount).toBe(0)
     expect(context.droppedTurns).toEqual([])
+    expect(context.droppedCompactionCheckpoint).toBe(true)
   })
 
   it("returns dropped Turns with tool-result truncation applied", async () => {
@@ -429,9 +430,10 @@ describe("model context", () => {
       },
     )
 
-    // The checkpoint group drops first without counting; the tool Turn drops
-    // after it and is reported with truncation applied.
+    // The tool Turn drops first; the pinned checkpoint survives next to the
+    // current input. The dropped Turn is reported with truncation applied.
     expect(context.droppedTurnCount).toBe(1)
+    expect(context.droppedCompactionCheckpoint).toBe(false)
     expect(context.droppedTurns).toEqual([
       {
         turnId: droppedTurnId,
@@ -461,6 +463,15 @@ describe("model context", () => {
       },
     ])
     expect(context.messages).toEqual([
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: "<context_compacted>\nEarlier turns in this session were summarized into this checkpoint. The complete history is preserved on disk.\ncheckpoint\n</context_compacted>",
+          },
+        ],
+      },
       {
         role: "user",
         content: [{ type: "text", text: "current" }],

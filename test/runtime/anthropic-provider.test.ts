@@ -201,6 +201,49 @@ describe("anthropic provider error classification", () => {
       },
     ])
   })
+
+  it("marks a mid-stream overloaded_error API error as retryable by type", async () => {
+    // The SDK throws an APIError with an undefined status for mid-stream SSE
+    // error events; only the body type classifies them.
+    const error = new Anthropic.APIError(
+      undefined,
+      undefined,
+      undefined,
+      new Headers(),
+      "overloaded_error",
+    )
+    const client = {
+      messages: {
+        stream() {
+          return (async function* () {
+            yield {
+              type: "content_block_delta",
+              delta: { type: "text_delta", text: "par" },
+            }
+            throw error
+          })()
+        },
+      },
+    } as unknown as Anthropic
+
+    const events = await collectWithClient(client)
+
+    expect(events).toEqual([
+      { type: "snapshot", text: "par" },
+      {
+        type: "response",
+        response: {
+          stopReason: ModelStopReason.Error,
+          content: [],
+          error: {
+            code: "anthropic_error",
+            message: error.message,
+            details: { retryable: true, type: "overloaded_error" },
+          },
+        },
+      },
+    ])
+  })
 })
 
 async function collectWithThrowingClient(
@@ -213,6 +256,12 @@ async function collectWithThrowingClient(
       },
     },
   } as unknown as Anthropic
+  return collectWithClient(client)
+}
+
+async function collectWithClient(
+  client: Anthropic,
+): Promise<ModelStreamEvent[]> {
   const stream = createAnthropicProvider({
     apiKey: "test",
     model: "claude-test",

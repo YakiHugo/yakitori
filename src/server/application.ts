@@ -157,6 +157,9 @@ export async function createYakitoriApplication(
       transientHub,
       permissionGate,
       toolRegistry,
+      onRuntimeError: (error) => {
+        console.error("Session lane failed", error)
+      },
     })
     runnerForCleanup = runner
 

@@ -169,11 +169,12 @@ export function createSessionRunner(
     if (closed) return
     const executionContext = await buildExecutionContext(session)
     if (closed) return
-    const started = await options.kernel.startTurn({
-      sessionId: session.id,
+    const started = await startTurnUnlessInputConsumed(
+      session.id,
       inputId,
       executionContext,
-    })
+    )
+    if (started === undefined) return
     publishDurable(started.events)
 
     const lane = lanes.get(session.id) ?? { dirty: false }
@@ -200,6 +201,31 @@ export function createSessionRunner(
         current.activeTurnId = undefined
         current.abort = undefined
       }
+    }
+  }
+
+  // A queued Input can be cancelled between readSession and startTurn. That
+  // race must not kill the lane: skip the consumed Input so the loop picks up
+  // the next pending one. Any other InvalidState still propagates.
+  async function startTurnUnlessInputConsumed(
+    sessionId: string,
+    inputId: string,
+    executionContext: TurnExecutionContext,
+  ) {
+    try {
+      return await options.kernel.startTurn({
+        sessionId,
+        inputId,
+        executionContext,
+      })
+    } catch (error) {
+      if (!isInvalidState(error)) throw error
+      const read = await options.kernel.readSession({ sessionId })
+      const stillPending = read.session?.pendingInputs.some(
+        (candidate) => candidate.inputId === inputId,
+      )
+      if (stillPending) throw error
+      return undefined
     }
   }
 
@@ -283,9 +309,13 @@ export function createSessionRunner(
       })
     }
 
-    const system = `${revision.instructions}\n\n${buildEnvironmentContext({
+    const environment = buildEnvironmentContext({
       workingDirectory: input.executionContext.workingDirectory,
-    })}`
+    })
+    const system =
+      revision.instructions.length === 0
+        ? environment
+        : `${revision.instructions}\n\n${environment}`
 
     let modelCallIndex = 0
     let toolCallCount = 0
@@ -417,6 +447,9 @@ export function createSessionRunner(
             selectedItemIds: [...context.selectedItemIds],
             droppedTurnCount: context.droppedTurnCount,
             truncatedToolResultCount: context.truncatedToolResultCount,
+            ...(context.droppedCompactionCheckpoint
+              ? { droppedCompactionCheckpoint: true }
+              : {}),
             ...(response.providerRequestId === undefined
               ? {}
               : { providerRequestId: response.providerRequestId }),
@@ -473,6 +506,9 @@ export function createSessionRunner(
           selectedItemIds: [...context.selectedItemIds],
           droppedTurnCount: context.droppedTurnCount,
           truncatedToolResultCount: context.truncatedToolResultCount,
+          ...(context.droppedCompactionCheckpoint
+            ? { droppedCompactionCheckpoint: true }
+            : {}),
           ...(response.providerRequestId === undefined
             ? {}
             : { providerRequestId: response.providerRequestId }),
@@ -542,10 +578,14 @@ export function createSessionRunner(
         limits: input.executionContext.limits,
       })
     } catch (error) {
-      console.error(
-        "Context compaction failed; continuing with dropped history.",
-        error,
-      )
+      // A user interrupt mid-summary surfaces here as an AbortError; that is
+      // the normal abort path, not a compaction failure worth logging.
+      if (!input.signal.aborted) {
+        console.error(
+          "Context compaction failed; continuing with dropped history.",
+          error,
+        )
+      }
       return undefined
     }
   }

@@ -24,10 +24,12 @@ export type AnthropicProviderOptions = {
 export function createAnthropicProvider(
   options: AnthropicProviderOptions,
 ): StreamFn {
+  // SDK-internal retries stay disabled: withRetries owns the retry policy.
   const client =
     options.client ??
     new Anthropic({
       apiKey: options.apiKey,
+      maxRetries: 0,
     })
 
   return (request) => streamAnthropic(client, options.model, request)
@@ -258,6 +260,13 @@ const RETRYABLE_STATUSES: ReadonlySet<number> = new Set([
   408, 409, 429, 500, 502, 503, 504, 529,
 ])
 
+// Mid-stream SSE error events carry no HTTP status; these error types are the
+// transient ones worth retrying.
+const RETRYABLE_ERROR_TYPES: ReadonlySet<string> = new Set([
+  "overloaded_error",
+  "api_error",
+])
+
 // Transient failures carry retryable details for withRetries: retryable HTTP
 // statuses, plus connection/timeout errors (APIConnectionTimeoutError extends
 // APIConnectionError; both have no HTTP status).
@@ -271,6 +280,13 @@ function retryableDetails(error: unknown): JsonObject | undefined {
     RETRYABLE_STATUSES.has(error.status)
   ) {
     return { retryable: true, status: error.status }
+  }
+  if (
+    error instanceof Anthropic.APIError &&
+    error.type !== null &&
+    RETRYABLE_ERROR_TYPES.has(error.type)
+  ) {
+    return { retryable: true, type: error.type }
   }
   return undefined
 }

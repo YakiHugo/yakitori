@@ -104,6 +104,30 @@ describe("withRetries", () => {
     expect(provider.calls()).toBe(1)
   })
 
+  it("ends the default sleep early when the signal aborts mid-backoff", async () => {
+    const controller = new AbortController()
+    const provider = scriptedStream([[retryableError(429)], [success]])
+    const stream = withRetries(provider.stream, {
+      baseDelayMs: 60_000,
+      random: () => 1,
+    })
+
+    const startedAt = Date.now()
+    const collecting = collect(stream, requestFixture(controller.signal))
+    setTimeout(() => controller.abort(), 10)
+    const events = await collecting
+
+    // The capped delay would be 8 s without the abort wakeup.
+    expect(Date.now() - startedAt).toBeLessThan(5_000)
+    expect(events).toEqual([
+      {
+        type: "response",
+        response: { stopReason: ModelStopReason.Aborted, content: [] },
+      },
+    ])
+    expect(provider.calls()).toBe(1)
+  })
+
   it("does not retry when the error has no retryable details", async () => {
     const plainError: ModelStreamEvent = {
       type: "response",
