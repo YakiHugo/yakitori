@@ -20,7 +20,7 @@ export function CompactionCell({
         </span>
       </CollapsibleTrigger>
       <CollapsibleContent className="border-t px-3 py-2">
-        <pre className="overflow-x-auto rounded-md bg-muted p-2 text-xs whitespace-pre-wrap">
+        <pre className="max-h-64 overflow-y-auto rounded-md bg-muted p-2 text-xs whitespace-pre-wrap">
           {entry.summary}
         </pre>
       </CollapsibleContent>

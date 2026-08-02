@@ -249,17 +249,24 @@ describe("cancel queued input", () => {
       }),
     )
     expect(useAppStore.getState().inFlightActions.size).toBe(0)
-    // The row stays queued until the recorded fact streams in.
-    expect(
-      projectExecutionView(useAppStore.getState().execution).queuedInputIds,
-    ).toContain("input_1")
-
-    source?.emit("session.event", cancelled)
+    // The recorded event from the response clears the row immediately.
     await vi.waitFor(() => {
       expect(
         projectExecutionView(useAppStore.getState().execution).queuedInputIds,
       ).not.toContain("input_1")
     })
+
+    // The same fact streaming in later is deduplicated by event id.
+    source?.emit("session.event", cancelled)
+    await vi.waitFor(() => {
+      const durableEvents = useAppStore.getState().execution.durableEvents
+      expect(
+        durableEvents.filter((event) => event.id === cancelled.id),
+      ).toHaveLength(1)
+    })
+    expect(
+      projectExecutionView(useAppStore.getState().execution).queuedInputIds,
+    ).not.toContain("input_1")
   })
 
   it("treats 409 as a stale queue row: refreshes detail without an error banner", async () => {

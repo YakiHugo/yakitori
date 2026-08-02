@@ -495,11 +495,14 @@ export const useAppStore = create<AppStore>()((set, get) => {
       await runTask(
         async () => {
           try {
-            await cancelSessionInput(
+            const response = await cancelSessionInput(
               get().apiBase,
               selection.sessionId,
               inputId,
             )
+            if (!isCurrentSessionSelection(get().selection, selection)) return
+            // Merge the recorded fact now; the SSE replay dedups by event id.
+            mergeEvent(response.event)
           } catch (error) {
             // 409 means the input already left the pending queue (usually it
             // just started); the detail refresh below reconciles the view.
