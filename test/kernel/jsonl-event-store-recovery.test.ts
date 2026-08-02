@@ -1,10 +1,4 @@
-import {
-  mkdir,
-  mkdtemp,
-  open,
-  rm,
-  writeFile,
-} from "node:fs/promises"
+import { mkdir, mkdtemp, open, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -89,8 +83,7 @@ describe("JSONL recovery fault models", () => {
       code: YakitoriErrorCode.InvalidEventLog,
       details: {
         sessionId,
-        recordSessionId:
-          "session_00000000-0000-4000-8000-000000000999",
+        recordSessionId: "session_00000000-0000-4000-8000-000000000999",
       },
     })
   })
@@ -199,9 +192,7 @@ describe("JSONL recovery fault models", () => {
     await fixture.reopen()
     await fixture.store.readEvents(sessionId)
     const failure = new Error("simulated second write failure")
-    const { originalWrite, write } = await spyOnFileHandleWrite(
-      fixture.journal,
-    )
+    const { originalWrite, write } = await spyOnFileHandleWrite(fixture.journal)
     write.mockImplementationOnce(async function (
       this: WritableHandle,
       buffer,

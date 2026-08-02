@@ -4,7 +4,7 @@ import type {
   Response,
   ResponseInput,
 } from "openai/resources/responses/responses"
-import type { JsonValue } from "../kernel/index.ts"
+import type { JsonObject, JsonValue } from "../kernel/index.ts"
 import {
   ModelStopReason,
   type ModelContentBlock,
@@ -22,7 +22,10 @@ export type OpenAIProviderOptions = {
 }
 
 export function createOpenAIProvider(options: OpenAIProviderOptions): StreamFn {
-  const client = options.client ?? new OpenAI({ apiKey: options.apiKey })
+  // SDK-internal retries stay disabled: withRetries owns the retry policy.
+  const client =
+    options.client ??
+    new OpenAI({ apiKey: options.apiKey, maxRetries: 0 })
   return (request) => streamOpenAI(client, options.model, request)
 }
 
@@ -78,6 +81,9 @@ async function* streamOpenAI(
             error: {
               code: event.code ?? "openai_error",
               message: event.message,
+              ...(event.code !== null && TRANSIENT_ERROR_CODES.has(event.code)
+                ? { details: { retryable: true } }
+                : {}),
             },
           },
         }
@@ -168,10 +174,12 @@ export function fromOpenAIResponse(response: Response): ModelResponse {
     )
   }
   if (response.status === "failed" || response.error) {
+    const code = response.error?.code ?? "openai_error"
     return responseError(
       response,
-      response.error?.code ?? "openai_error",
+      code,
       response.error?.message ?? "OpenAI response failed.",
+      TRANSIENT_ERROR_CODES.has(code) ? { retryable: true } : undefined,
     )
   }
 
@@ -249,14 +257,16 @@ function responseError(
   response: Response,
   code: string,
   message: string,
+  details?: JsonObject,
 ): ModelResponse {
   return {
     ...responseResult(response, ModelStopReason.Error, []),
-    error: { code, message },
+    error: { code, message, ...(details === undefined ? {} : { details }) },
   }
 }
 
 function terminalError(error: unknown): ModelResponse {
+  const details = retryableDetails(error)
   return {
     stopReason: ModelStopReason.Error,
     content: [],
@@ -264,8 +274,37 @@ function terminalError(error: unknown): ModelResponse {
       code: "openai_error",
       message:
         error instanceof Error ? error.message : "OpenAI request failed.",
+      ...(details === undefined ? {} : { details }),
     },
   }
+}
+
+const RETRYABLE_STATUSES: ReadonlySet<number> = new Set([
+  408, 409, 429, 500, 502, 503, 504, 529,
+])
+
+// Stream error events and failed responses carry no HTTP status; these error
+// codes are the transient ones worth retrying.
+const TRANSIENT_ERROR_CODES: ReadonlySet<string> = new Set([
+  "server_error",
+  "rate_limit_exceeded",
+])
+
+// Transient failures carry retryable details for withRetries: retryable HTTP
+// statuses, plus connection/timeout errors (APIConnectionTimeoutError extends
+// APIConnectionError; both have no HTTP status).
+function retryableDetails(error: unknown): JsonObject | undefined {
+  if (error instanceof OpenAI.APIConnectionError) {
+    return { retryable: true }
+  }
+  if (
+    error instanceof OpenAI.APIError &&
+    typeof error.status === "number" &&
+    RETRYABLE_STATUSES.has(error.status)
+  ) {
+    return { retryable: true, status: error.status }
+  }
+  return undefined
 }
 
 function abortedResponse(): ModelStreamEvent {

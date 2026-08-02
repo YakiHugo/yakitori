@@ -4,7 +4,7 @@ import type {
   Tool,
   ToolResultBlockParam,
 } from "@anthropic-ai/sdk/resources/messages"
-import type { JsonValue } from "../kernel/index.ts"
+import type { JsonObject, JsonValue } from "../kernel/index.ts"
 import {
   ModelStopReason,
   type ModelContentBlock,
@@ -24,10 +24,12 @@ export type AnthropicProviderOptions = {
 export function createAnthropicProvider(
   options: AnthropicProviderOptions,
 ): StreamFn {
+  // SDK-internal retries stay disabled: withRetries owns the retry policy.
   const client =
     options.client ??
     new Anthropic({
       apiKey: options.apiKey,
+      maxRetries: 0,
     })
 
   return (request) => streamAnthropic(client, options.model, request)
@@ -241,6 +243,7 @@ function mapStopReason(
 }
 
 function terminalError(error: unknown): ModelResponse {
+  const details = retryableDetails(error)
   return {
     stopReason: ModelStopReason.Error,
     content: [],
@@ -248,8 +251,44 @@ function terminalError(error: unknown): ModelResponse {
       code: "anthropic_error",
       message:
         error instanceof Error ? error.message : "Anthropic request failed.",
+      ...(details === undefined ? {} : { details }),
     },
   }
+}
+
+const RETRYABLE_STATUSES: ReadonlySet<number> = new Set([
+  408, 409, 429, 500, 502, 503, 504, 529,
+])
+
+// Mid-stream SSE error events carry no HTTP status; these error types are the
+// transient ones worth retrying.
+const RETRYABLE_ERROR_TYPES: ReadonlySet<string> = new Set([
+  "overloaded_error",
+  "api_error",
+])
+
+// Transient failures carry retryable details for withRetries: retryable HTTP
+// statuses, plus connection/timeout errors (APIConnectionTimeoutError extends
+// APIConnectionError; both have no HTTP status).
+function retryableDetails(error: unknown): JsonObject | undefined {
+  if (error instanceof Anthropic.APIConnectionError) {
+    return { retryable: true }
+  }
+  if (
+    error instanceof Anthropic.APIError &&
+    typeof error.status === "number" &&
+    RETRYABLE_STATUSES.has(error.status)
+  ) {
+    return { retryable: true, status: error.status }
+  }
+  if (
+    error instanceof Anthropic.APIError &&
+    error.type !== null &&
+    RETRYABLE_ERROR_TYPES.has(error.type)
+  ) {
+    return { retryable: true, type: error.type }
+  }
+  return undefined
 }
 
 function isAbortError(error: unknown): boolean {

@@ -1,0 +1,18 @@
+appId: com.yakitori.app
+productName: Yakitori
+asar: true
+# The desktop bundle inlines all npm dependencies, so node_modules must not
+# be packaged.
+files:
+  - dist/desktop/**
+  - package.json
+  - "!node_modules/**"
+extraResources:
+  - from: dist/gui
+    to: gui
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - dir
+directories:
+  output: release

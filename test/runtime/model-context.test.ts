@@ -273,6 +273,211 @@ describe("model context", () => {
       ).toThrow("exceeds the configured hard cap")
     })
   })
+
+  it("replaces covered Turns with the compaction checkpoint", async () => {
+    const context = await withAttributedSession(
+      async ({ kernel, sessionId }) => {
+        const firstTurnId = await completeTextTurn(
+          kernel,
+          sessionId,
+          "old question",
+          "old answer",
+        )
+        const secondTurnId = await completeTextTurn(
+          kernel,
+          sessionId,
+          "mid question",
+          "mid answer",
+        )
+        const current = await admitAndStartTurn(kernel, sessionId, "current")
+        await kernel.recordCompaction({
+          sessionId,
+          turnId: current.turnId,
+          throughSeq: 1,
+          coveredTurnIds: [firstTurnId, secondTurnId],
+          summary: "Goal: answer questions.",
+        })
+        const read = await kernel.readSession({ sessionId })
+        if (!read.session) throw new Error("missing session")
+        return buildModelContext({
+          session: read.session,
+          currentInputId: current.inputId,
+          limits: generousLimits(),
+        })
+      },
+    )
+
+    expect(context.messages).toEqual([
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: "<context_compacted>\nEarlier turns in this session were summarized into this checkpoint. The complete history is preserved on disk.\nGoal: answer questions.\n</context_compacted>",
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: [{ type: "text", text: "current" }],
+      },
+    ])
+    expect(context.droppedTurnCount).toBe(0)
+    expect(context.droppedTurns).toEqual([])
+  })
+
+  it("drops the compaction checkpoint last-resort when still over cap", async () => {
+    const context = await withAttributedSession(
+      async ({ kernel, sessionId }) => {
+        const firstTurnId = await completeTextTurn(
+          kernel,
+          sessionId,
+          "old question",
+          "old answer",
+        )
+        const current = await admitAndStartTurn(kernel, sessionId, "current")
+        await kernel.recordCompaction({
+          sessionId,
+          turnId: current.turnId,
+          throughSeq: 1,
+          coveredTurnIds: [firstTurnId],
+          summary: "Goal: answer questions.",
+        })
+        const read = await kernel.readSession({ sessionId })
+        if (!read.session) throw new Error("missing session")
+        return buildModelContext({
+          session: read.session,
+          currentInputId: current.inputId,
+          limits: {
+            ...generousLimits(),
+            modelVisibleMessageBlocks: 1,
+          },
+        })
+      },
+    )
+
+    expect(context.messages).toEqual([
+      {
+        role: "user",
+        content: [{ type: "text", text: "current" }],
+      },
+    ])
+    expect(context.droppedTurnCount).toBe(0)
+    expect(context.droppedTurns).toEqual([])
+    expect(context.droppedCompactionCheckpoint).toBe(true)
+  })
+
+  it("returns dropped Turns with tool-result truncation applied", async () => {
+    const { context, droppedTurnId } = await withAttributedSession(
+      async ({ kernel, sessionId }) => {
+        const coveredTurnId = await completeTextTurn(
+          kernel,
+          sessionId,
+          "covered question",
+          "covered answer",
+        )
+        const admitted = await kernel.admitInput({
+          sessionId,
+          content: { kind: "text", text: "use a tool" },
+        })
+        const toolTurn = await kernel.startTurn({
+          sessionId,
+          inputId: admitted.inputId,
+        })
+        await kernel.recordAssistantOutput({
+          sessionId,
+          turnId: toolTurn.turnId,
+          toolCalls: [
+            {
+              id: "tool_long",
+              name: "run_command",
+              input: { command: "seq" },
+              requiresPermission: false,
+            },
+          ],
+        })
+        await kernel.recordToolResult({
+          sessionId,
+          turnId: toolTurn.turnId,
+          toolCallId: "tool_long",
+          content: {
+            kind: "text",
+            text: Array.from({ length: 50 }, (_, i) => `line ${i}`).join("\n"),
+          },
+        })
+        await kernel.completeTurn({ sessionId, turnId: toolTurn.turnId })
+        const current = await admitAndStartTurn(kernel, sessionId, "current")
+        await kernel.recordCompaction({
+          sessionId,
+          turnId: current.turnId,
+          throughSeq: 1,
+          coveredTurnIds: [coveredTurnId],
+          summary: "checkpoint",
+        })
+        const read = await kernel.readSession({ sessionId })
+        if (!read.session) throw new Error("missing session")
+        const context = buildModelContext({
+          session: read.session,
+          currentInputId: current.inputId,
+          limits: {
+            modelVisibleMessageBlocks: 2,
+            modelVisibleContextBytes: 100_000,
+            modelVisibleToolResultBytes: 10_000,
+            modelVisibleToolResultLines: 5,
+          },
+        })
+        return { context, droppedTurnId: toolTurn.turnId }
+      },
+    )
+
+    // The tool Turn drops first; the pinned checkpoint survives next to the
+    // current input. The dropped Turn is reported with truncation applied.
+    expect(context.droppedTurnCount).toBe(1)
+    expect(context.droppedCompactionCheckpoint).toBe(false)
+    expect(context.droppedTurns).toEqual([
+      {
+        turnId: droppedTurnId,
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "text", text: "use a tool" }],
+          },
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "tool_call",
+                id: "tool_long",
+                name: "run_command",
+                input: { command: "seq" },
+              },
+            ],
+          },
+          {
+            role: "tool",
+            toolCallId: "tool_long",
+            content:
+              "line 0\nline 1\nline 2\nline 3\nline 4\n...[truncated 45 lines]",
+          },
+        ],
+      },
+    ])
+    expect(context.messages).toEqual([
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: "<context_compacted>\nEarlier turns in this session were summarized into this checkpoint. The complete history is preserved on disk.\ncheckpoint\n</context_compacted>",
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: [{ type: "text", text: "current" }],
+      },
+    ])
+  })
 })
 
 function generousLimits() {
@@ -289,7 +494,7 @@ async function completeTextTurn(
   sessionId: string,
   userText: string,
   assistantText: string,
-): Promise<void> {
+): Promise<string> {
   const admitted = await kernel.admitInput({
     sessionId,
     content: { kind: "text", text: userText },
@@ -326,6 +531,23 @@ async function completeTextTurn(
       status: ItemStatus.Completed,
     },
   })
+  return started.turnId
+}
+
+async function admitAndStartTurn(
+  kernel: ReturnType<typeof createSessionKernel>,
+  sessionId: string,
+  userText: string,
+): Promise<{ readonly inputId: string; readonly turnId: string }> {
+  const admitted = await kernel.admitInput({
+    sessionId,
+    content: { kind: "text", text: userText },
+  })
+  const started = await kernel.startTurn({
+    sessionId,
+    inputId: admitted.inputId,
+  })
+  return { inputId: admitted.inputId, turnId: started.turnId }
 }
 
 async function withAttributedSession<T>(

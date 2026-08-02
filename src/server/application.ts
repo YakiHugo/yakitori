@@ -30,6 +30,7 @@ import {
   type StreamFn,
   type TransientEventHub,
 } from "../runtime/index.ts"
+import { withRetries } from "../runtime/retrying-stream.ts"
 import { createDurableEventHub, type DurableEventHub } from "./event-hub.ts"
 import {
   createServerHandlers,
@@ -47,6 +48,7 @@ const defaultMateProfile = {
 
 export type YakitoriApplicationOptions = {
   readonly activeMateId?: string
+  readonly guiStaticDir?: string
   readonly mateDatabasePath?: string
   readonly rootDir?: string
   readonly sessionStoreRoot?: string
@@ -155,6 +157,9 @@ export async function createYakitoriApplication(
       transientHub,
       permissionGate,
       toolRegistry,
+      onRuntimeError: (error) => {
+        console.error("Session lane failed", error)
+      },
     })
     runnerForCleanup = runner
 
@@ -210,6 +215,9 @@ export async function createYakitoriApplication(
           eventHub,
           transientHub,
           handlers,
+          ...(options.guiStaticDir === undefined
+            ? {}
+            : { staticAssets: { directory: options.guiStaticDir } }),
         })
       },
       async close() {
@@ -402,7 +410,7 @@ function createDefaultProvider(
       )
     }
     return {
-      stream: createAnthropicProvider({ apiKey, model }),
+      stream: withRetries(createAnthropicProvider({ apiKey, model })),
       provider,
       model,
     }
@@ -420,7 +428,7 @@ function createDefaultProvider(
       )
     }
     return {
-      stream: createOpenAIProvider({ apiKey, model }),
+      stream: withRetries(createOpenAIProvider({ apiKey, model })),
       provider,
       model,
     }

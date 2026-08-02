@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import {
   createDurableEventHub,
   createFauxProvider,
@@ -12,8 +12,10 @@ import {
   createJsonlEventStore,
   createSqliteMateStore,
   createTransientEventHub,
+  createYakitoriError,
   EventType,
   ModelStopReason,
+  YakitoriErrorCode,
   type EventEnvelope,
   type LiveSessionEvent,
 } from "../../src/index.ts"
@@ -191,6 +193,107 @@ describe("session runner", () => {
     })
   })
 
+  it("keeps the lane alive when a queued Input is cancelled before startTurn", async () => {
+    await withRuntime(async (runtime) => {
+      const provider = createFauxProvider([
+        { content: [{ type: "text", text: "second answer" }] },
+      ])
+      const session = await createAttributedSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "cancelled" },
+      })
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "survivor" },
+      })
+
+      // Simulate the cancel race: the Input is consumed between the lane's
+      // readSession and startTurn, so startTurn rejects InvalidState for an
+      // Input that is no longer Admitted.
+      const realStartTurn = runtime.kernel.startTurn.bind(runtime.kernel)
+      let startTurnCalls = 0
+      const kernel: typeof runtime.kernel = {
+        ...runtime.kernel,
+        async startTurn(input) {
+          startTurnCalls += 1
+          if (startTurnCalls === 1) {
+            await runtime.kernel.cancelInput({
+              sessionId: input.sessionId,
+              inputId: input.inputId,
+              reason: "user_cancel",
+            })
+            throw createYakitoriError({
+              code: YakitoriErrorCode.InvalidState,
+              message: `Input ${input.inputId} is already Cancelled.`,
+            })
+          }
+          return realStartTurn(input)
+        },
+      }
+      const runner = createSessionRunner({
+        kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+      })
+
+      await runner.wake(session.sessionId)
+
+      expect(startTurnCalls).toBe(2)
+      const read = await runtime.kernel.readSession({
+        sessionId: session.sessionId,
+      })
+      expect(read.session?.completedTurns).toHaveLength(1)
+      expect(read.session?.items.map((item) => item.content)).toEqual([
+        { kind: "text", text: "second answer" },
+      ])
+      expect(provider.callCount).toBe(1)
+    })
+  })
+
+  it("reports a startTurn InvalidState that is not a cancel race", async () => {
+    await withRuntime(async (runtime) => {
+      const provider = createFauxProvider([
+        { content: [{ type: "text", text: "unused" }] },
+      ])
+      const session = await createAttributedSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "first" },
+      })
+
+      // The Input stays pending, so this InvalidState is a real conflict and
+      // must surface through onRuntimeError instead of being swallowed.
+      const thrown = createYakitoriError({
+        code: YakitoriErrorCode.InvalidState,
+        message: "Simulated active-turn conflict.",
+      })
+      let startTurnCalls = 0
+      const kernel: typeof runtime.kernel = {
+        ...runtime.kernel,
+        async startTurn(input) {
+          startTurnCalls += 1
+          if (startTurnCalls === 1) throw thrown
+          return runtime.kernel.startTurn(input)
+        },
+      }
+      const runtimeErrors: unknown[] = []
+      const runner = createSessionRunner({
+        kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+        onRuntimeError: (error) => {
+          runtimeErrors.push(error)
+        },
+      })
+
+      await runner.wake(session.sessionId)
+
+      expect(runtimeErrors).toEqual([thrown])
+      expect(provider.callCount).toBe(0)
+    })
+  })
+
   it("includes prior successful history in the second model request", async () => {
     await withRuntime(async (runtime) => {
       const provider = createFauxProvider([
@@ -230,6 +333,63 @@ describe("session runner", () => {
           content: [{ type: "text", text: "again" }],
         },
       ])
+    })
+  })
+
+  it("adds an environment block to the system prompt", async () => {
+    await withRuntime(async (runtime) => {
+      const provider = createFauxProvider([
+        { content: [{ type: "text", text: "ok" }] },
+      ])
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+      })
+      const session = await createAttributedSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "hi" },
+      })
+      await runner.wake(session.sessionId)
+
+      const system = provider.requests[0]?.system
+      expect(system).toContain("Answer briefly.")
+      expect(system).toContain("<environment>")
+      expect(system).toContain(`Working directory: ${runtime.rootDir}`)
+    })
+  })
+
+  it("omits the instructions separator when Mate instructions are empty", async () => {
+    await withRuntime(async (runtime) => {
+      const provider = createFauxProvider([
+        { content: [{ type: "text", text: "ok" }] },
+      ])
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+      })
+      const mate = await runtime.mateKernel.createMate({
+        instructions: "",
+        name: "QuietMate",
+        role: "Assistant",
+      })
+      const session = await runtime.kernel.createSession({
+        title: "quiet",
+        workingDirectory: runtime.rootDir,
+        mateId: mate.mate.id,
+        mateRevisionId: mate.mate.currentRevision.id,
+      })
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "hi" },
+      })
+      await runner.wake(session.sessionId)
+
+      const system = provider.requests[0]?.system
+      expect(system?.startsWith("<environment>")).toBe(true)
+      expect(system).toContain(`Working directory: ${runtime.rootDir}`)
     })
   })
 
@@ -380,6 +540,339 @@ describe("session runner", () => {
       expect(read.session?.activeTurn).toBeDefined()
       expect(read.session?.cancelledTurns).toEqual([])
       expect(read.session?.interruptedTurns).toEqual([])
+    })
+  })
+
+  it("compacts dropped history into a durable checkpoint under pressure", async () => {
+    await withRuntime(async (runtime) => {
+      const provider = createFauxProvider([
+        {
+          content: [
+            {
+              type: "tool_call",
+              id: "call_1",
+              name: "read_file",
+              input: { path: "missing.txt" },
+            },
+          ],
+          stopReason: ModelStopReason.ToolUse,
+        },
+        {
+          content: [{ type: "text", text: "first answer" }],
+          usage: { inputTokens: 100, outputTokens: 50 },
+        },
+        {
+          content: [{ type: "text", text: "Goal: checkpoint one." }],
+          usage: { inputTokens: 10, outputTokens: 5 },
+        },
+        {
+          content: [
+            {
+              type: "tool_call",
+              id: "call_2",
+              name: "read_file",
+              input: { path: "missing.txt" },
+            },
+          ],
+          stopReason: ModelStopReason.ToolUse,
+          usage: { inputTokens: 200, outputTokens: 60 },
+        },
+        {
+          content: [{ type: "text", text: "second answer" }],
+          usage: { inputTokens: 300, outputTokens: 70 },
+        },
+        {
+          content: [{ type: "text", text: "Goal: checkpoint two." }],
+          usage: { inputTokens: 20, outputTokens: 6 },
+        },
+        {
+          content: [{ type: "text", text: "third answer" }],
+          usage: { inputTokens: 400, outputTokens: 80 },
+        },
+      ])
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+        limits: createRuntimeLimits({ modelVisibleMessageBlocks: 3 }),
+      })
+      const session = await createAttributedSession(runtime)
+      for (const question of [
+        "first question",
+        "second question",
+        "third question",
+      ]) {
+        await runtime.kernel.admitInput({
+          sessionId: session.sessionId,
+          content: { kind: "text", text: question },
+        })
+        await runner.wake(session.sessionId)
+      }
+
+      const replayed = await runtime.kernel.replaySession({
+        sessionId: session.sessionId,
+      })
+      const turns = replayed.session?.turns ?? []
+      const [firstTurn, secondTurn, thirdTurn] = turns
+      const compacted = replayed.events.filter(
+        (event) => event.type === EventType.ContextCompacted,
+      )
+      if (compacted.length !== 2) throw new Error("expected two compactions")
+      const [first, second] = compacted
+      if (
+        first?.type !== EventType.ContextCompacted ||
+        second?.type !== EventType.ContextCompacted
+      ) {
+        throw new Error("expected compaction facts")
+      }
+
+      // throughSeq is the high-water seq observed before the summary call:
+      // nothing is appended between turn.started and the first context build.
+      const secondTurnStarted = replayed.events.find(
+        (event) =>
+          event.type === EventType.TurnStarted &&
+          event.data.turnId === secondTurn?.turnId,
+      )
+      expect(first.data).toMatchObject({
+        turnId: secondTurn?.turnId,
+        throughSeq: secondTurnStarted?.seq,
+        coveredTurnIds: [firstTurn?.turnId],
+        summary: "Goal: checkpoint one.",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      })
+      // Coverage is cumulative: the second checkpoint supersedes the first.
+      expect(second.data.coveredTurnIds).toEqual([
+        firstTurn?.turnId,
+        secondTurn?.turnId,
+      ])
+      expect(second.data.summary).toBe("Goal: checkpoint two.")
+
+      // The summarization request flattens the dropped turns, carries no
+      // tools, and folds the previous checkpoint into its instruction.
+      const firstSummary = provider.requests[2]
+      expect(firstSummary?.tools).toEqual([])
+      expect(firstSummary?.system).toContain("checkpoint")
+      const firstSummaryText = JSON.stringify(firstSummary?.messages)
+      expect(firstSummaryText).toContain("first question")
+      expect(firstSummaryText).toContain("first answer")
+      const secondSummary = provider.requests[5]
+      const secondInstruction = secondSummary?.messages.at(-1)
+      if (secondInstruction?.role !== "user") {
+        throw new Error("missing summarization instruction")
+      }
+      expect(secondInstruction.content[0]?.text).toContain(
+        "Previous checkpoint:\nGoal: checkpoint one.",
+      )
+
+      // The real request after compaction starts with the checkpoint and
+      // excludes covered turns.
+      const realRequest = provider.requests[6]
+      const realFirst = realRequest?.messages[0]
+      if (realFirst?.role !== "user") throw new Error("missing checkpoint")
+      expect(realFirst.content[0]?.text).toContain("<context_compacted>")
+      expect(realFirst.content[0]?.text).toContain("Goal: checkpoint two.")
+      const realText = JSON.stringify(realRequest?.messages)
+      expect(realText).not.toContain("first question")
+      expect(realText).not.toContain("second question")
+      expect(realRequest?.messages.at(-1)).toEqual({
+        role: "user",
+        content: [{ type: "text", text: "third question" }],
+      })
+
+      // Compaction usage is folded into turn.completed usage.
+      expect(secondTurn?.usage).toEqual({
+        inputTokens: 510,
+        outputTokens: 135,
+      })
+      expect(thirdTurn?.usage).toEqual({
+        inputTokens: 420,
+        outputTokens: 86,
+      })
+      expect(provider.callCount).toBe(7)
+    })
+  })
+
+  it("does not count the compaction call against the model call budget", async () => {
+    await withRuntime(async (runtime) => {
+      const provider = createFauxProvider([
+        {
+          content: [
+            {
+              type: "tool_call",
+              id: "call_1",
+              name: "read_file",
+              input: { path: "missing.txt" },
+            },
+          ],
+          stopReason: ModelStopReason.ToolUse,
+        },
+        { content: [{ type: "text", text: "first answer" }] },
+        { content: [{ type: "text", text: "Goal: checkpoint." }] },
+        {
+          content: [
+            {
+              type: "tool_call",
+              id: "call_2",
+              name: "read_file",
+              input: { path: "missing.txt" },
+            },
+          ],
+          stopReason: ModelStopReason.ToolUse,
+        },
+        { content: [{ type: "text", text: "second answer" }] },
+      ])
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+        limits: createRuntimeLimits({
+          modelCallsPerTurn: 2,
+          modelVisibleMessageBlocks: 3,
+        }),
+      })
+      const session = await createAttributedSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "first question" },
+      })
+      await runner.wake(session.sessionId)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "second question" },
+      })
+      await runner.wake(session.sessionId)
+
+      // The second turn makes two real model calls plus one compaction call;
+      // counting housekeeping would exhaust the budget of two.
+      const read = await runtime.kernel.readSession({
+        sessionId: session.sessionId,
+      })
+      expect(read.session?.completedTurns).toHaveLength(2)
+      expect(read.session?.failedTurns).toEqual([])
+      expect(provider.callCount).toBe(5)
+
+      // The second Turn's final call ran without the checkpoint, which did
+      // not fit next to the active Turn; that last-resort drop is recorded
+      // in the assistant message metadata.
+      const replayed = await runtime.kernel.replaySession({
+        sessionId: session.sessionId,
+      })
+      const assistantMetadata = replayed.events.flatMap((event) =>
+        event.type === EventType.AssistantMessage
+          ? [event.data.providerMetadata]
+          : [],
+      )
+      expect(assistantMetadata).toEqual([
+        expect.not.objectContaining({ droppedCompactionCheckpoint: true }),
+        expect.objectContaining({ droppedCompactionCheckpoint: true }),
+      ])
+    })
+  })
+
+  it("falls back to dropped history when summarization fails", async () => {
+    await withRuntime(async (runtime) => {
+      const provider = createFauxProvider([
+        { content: [{ type: "text", text: "first answer" }] },
+        { throwDuring: new Error("summarizer down") },
+        { content: [{ type: "text", text: "second answer" }] },
+      ])
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+        limits: createRuntimeLimits({ modelVisibleMessageBlocks: 2 }),
+      })
+      const session = await createAttributedSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "first question" },
+      })
+      await runner.wake(session.sessionId)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "second question" },
+      })
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {})
+      try {
+        await runner.wake(session.sessionId)
+        expect(errors).toHaveBeenCalled()
+      } finally {
+        errors.mockRestore()
+      }
+
+      const replayed = await runtime.kernel.replaySession({
+        sessionId: session.sessionId,
+      })
+      expect(
+        replayed.events.some(
+          (event) => event.type === EventType.ContextCompacted,
+        ),
+      ).toBe(false)
+      expect(replayed.session?.completedTurns).toHaveLength(2)
+      // The turn proceeds with the uncovered history silently dropped.
+      expect(provider.requests[2]?.messages).toEqual([
+        {
+          role: "user",
+          content: [{ type: "text", text: "second question" }],
+        },
+      ])
+    })
+  })
+
+  it("does not log a compaction failure when the summary is aborted", async () => {
+    await withRuntime(async (runtime) => {
+      const provider = createFauxProvider([
+        { content: [{ type: "text", text: "first answer" }] },
+        { waitForAbort: true },
+        { content: [{ type: "text", text: "unreached" }] },
+      ])
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+        limits: createRuntimeLimits({ modelVisibleMessageBlocks: 2 }),
+      })
+      const session = await createAttributedSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "first question" },
+      })
+      await runner.wake(session.sessionId)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "second question" },
+      })
+
+      // The second Turn drops history, so its first model call is the parked
+      // compaction summary; interrupt while it is in flight.
+      const wake = runner.wake(session.sessionId)
+      for (;;) {
+        if (provider.callCount >= 2) break
+        await new Promise((resolve) => setTimeout(resolve, 1))
+      }
+      const started = await runtime.kernel.readSession({
+        sessionId: session.sessionId,
+      })
+      const active = started.session?.activeTurn
+      if (!active) throw new Error("missing active turn")
+
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {})
+      try {
+        await runner.interrupt({
+          sessionId: session.sessionId,
+          turnId: active.turnId,
+          reason: "user_cancel",
+        })
+        await wake
+        expect(errors).not.toHaveBeenCalled()
+      } finally {
+        errors.mockRestore()
+      }
+
+      const final = await runtime.kernel.readSession({
+        sessionId: session.sessionId,
+      })
+      expect(final.session?.cancelledTurns).toHaveLength(1)
     })
   })
 })

@@ -14,6 +14,7 @@ export const EventType = {
   ToolResult: "tool.result",
   PermissionRequested: "permission.requested",
   PermissionResolved: "permission.resolved",
+  ContextCompacted: "context.compacted",
 } as const
 
 export const InputRole = {
@@ -240,6 +241,18 @@ export type PermissionResolvedEvent = {
   }
 }
 
+export type ContextCompactedEvent = {
+  readonly type: typeof EventType.ContextCompacted
+  readonly data: {
+    readonly compactionId: string
+    readonly turnId: string
+    readonly throughSeq: number
+    readonly coveredTurnIds: readonly string[]
+    readonly summary: string
+    readonly usage?: TokenUsage
+  }
+}
+
 export type KernelEvent =
   | SessionCreatedEvent
   | InputAdmittedEvent
@@ -254,6 +267,7 @@ export type KernelEvent =
   | ToolResultEvent
   | PermissionRequestedEvent
   | PermissionResolvedEvent
+  | ContextCompactedEvent
 
 export type EventEnvelopeBase = {
   readonly id: string
@@ -456,6 +470,24 @@ function requireKernelEvent(value: unknown): asserts value is KernelEvent {
           isString(data.turnId) &&
           isPermissionBehavior(data.behavior)
         )
+      case EventType.ContextCompacted:
+        return (
+          onlyKeys(data, [
+            "compactionId",
+            "turnId",
+            "throughSeq",
+            "coveredTurnIds",
+            "summary",
+            "usage",
+          ]) &&
+          isString(data.compactionId) &&
+          isString(data.turnId) &&
+          isPositiveInteger(data.throughSeq) &&
+          Array.isArray(data.coveredTurnIds) &&
+          data.coveredTurnIds.every(isString) &&
+          isString(data.summary) &&
+          (data.usage === undefined || isTokenUsage(data.usage))
+        )
     }
   })()
   if (!valid || !optionalFieldsAreValid(value.type, data)) {
@@ -610,6 +642,10 @@ export function isJsonValue(value: unknown): value is JsonValue {
 
 function isNonNegativeInteger(value: unknown): boolean {
   return typeof value === "number" && Number.isInteger(value) && value >= 0
+}
+
+function isPositiveInteger(value: unknown): boolean {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1
 }
 
 function isString(value: unknown): value is string {

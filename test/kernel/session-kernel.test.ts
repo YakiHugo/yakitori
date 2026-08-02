@@ -165,6 +165,69 @@ for (const implementation of ["memory", "jsonl"] as const) {
       })
     })
 
+    it("records a compaction checkpoint inside the active Turn", async () => {
+      await withKernel(implementation, async ({ kernel }) => {
+        const active = await activeTurn(kernel)
+        const read = await kernel.readSession({ sessionId: active.sessionId })
+        const throughSeq = read.session?.seq
+        if (throughSeq === undefined) throw new Error("missing session")
+        const recorded = await kernel.recordCompaction({
+          ...active,
+          throughSeq,
+          coveredTurnIds: ["turn_earlier"],
+          summary: "Goal: ship the feature.",
+          usage: { inputTokens: 12, outputTokens: 4 },
+        })
+
+        expect(recorded.compactionId.startsWith("compaction_")).toBe(true)
+        expect(recorded.event).toMatchObject({
+          type: EventType.ContextCompacted,
+          data: {
+            compactionId: recorded.compactionId,
+            turnId: active.turnId,
+            throughSeq,
+            coveredTurnIds: ["turn_earlier"],
+            summary: "Goal: ship the feature.",
+            usage: { inputTokens: 12, outputTokens: 4 },
+          },
+        })
+        const replay = await kernel.replaySession({
+          sessionId: active.sessionId,
+        })
+        expect(replay.session?.compaction).toMatchObject({
+          compactionId: recorded.compactionId,
+          throughSeq,
+          coveredTurnIds: ["turn_earlier"],
+          summary: "Goal: ship the feature.",
+        })
+      })
+    })
+
+    it("refuses to record a compaction without an active Turn", async () => {
+      await withKernel(implementation, async ({ kernel }) => {
+        const session = await kernel.createSession()
+        const input = await admit(kernel, session.sessionId, "work")
+        const turn = await kernel.startTurn({
+          sessionId: session.sessionId,
+          inputId: input.inputId,
+        })
+        await kernel.completeTurn({
+          sessionId: session.sessionId,
+          turnId: turn.turnId,
+        })
+
+        await expect(
+          kernel.recordCompaction({
+            sessionId: session.sessionId,
+            turnId: turn.turnId,
+            throughSeq: 3,
+            coveredTurnIds: [turn.turnId],
+            summary: "too late",
+          }),
+        ).rejects.toThrow("is not active")
+      })
+    })
+
     it("binds one permission decision to exactly one tool call", async () => {
       await withKernel(implementation, async ({ kernel }) => {
         const active = await activeTurn(kernel)

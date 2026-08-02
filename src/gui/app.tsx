@@ -126,7 +126,8 @@ function SessionHeader() {
       </div>
       <p className="truncate text-xs text-muted-foreground">
         mate {view.mateId ?? "—"} · rev {view.mateRevisionId ?? "—"} ·{" "}
-        {view.workingDirectory ?? "—"}
+        {view.workingDirectory ?? "—"} · {session.counts.turns} turns ·{" "}
+        {session.counts.inputs} inputs · {session.counts.tools} tools
       </p>
     </header>
   )

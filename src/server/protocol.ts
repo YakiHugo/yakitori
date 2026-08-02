@@ -84,6 +84,18 @@ export type ApiAdmitInputResponse = {
   readonly event: EventEnvelope
 }
 
+export type ApiCancelInputRequest = {
+  readonly sessionId: string
+  readonly inputId: string
+  readonly reason?: string
+}
+
+export type ApiCancelInputResponse = {
+  readonly sessionId: string
+  readonly inputId: string
+  readonly event: EventEnvelope
+}
+
 export type ApiCancelTurnRequest = {
   readonly sessionId: string
   readonly turnId: string

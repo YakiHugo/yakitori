@@ -1,20 +1,24 @@
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
 import type { AddressInfo } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import {
   type ApiAdmitInputResponse,
+  type ApiCancelInputResponse,
   type ApiCreateSessionResponse,
   ApiErrorCode,
   type ApiListSessionsResponse,
   type ApiReadSessionResponse,
+  createInputId,
   createJsonlEventStore,
+  createSessionId,
   createSessionKernel,
   createYakitoriHttpServer,
   type EventEnvelope,
   EventType,
   type YakitoriHttpServerOptions,
+  type YakitoriStaticAssets,
 } from "../../src/index.ts"
 import { createMemoryEventStore } from "../kernel/memory-event-store.ts"
 
@@ -385,33 +389,337 @@ describe("HTTP server", () => {
       expect(read.body.session.counts.inputs).toBe(1)
     })
   })
+
+  it("cancels a pending input and replays the recorded event", async () => {
+    await withHttpServer(async (baseUrl) => {
+      const created = await postJson<ApiCreateSessionResponse>(
+        `${baseUrl}/sessions`,
+        {},
+      )
+      const sessionId = created.body.session.id
+      const admitted = await postJson<ApiAdmitInputResponse>(
+        `${baseUrl}/sessions/${sessionId}/inputs`,
+        {
+          requestId: "request_http-cancel-input",
+          content: {
+            kind: "text",
+            text: "cancel me",
+          },
+        },
+      )
+      expect(admitted.status).toBe(201)
+
+      const cancelUrl = `${baseUrl}/sessions/${sessionId}/inputs/${admitted.body.inputId}/cancel`
+      const cancelled = await postJson<ApiCancelInputResponse>(cancelUrl, {
+        reason: "user_cancel",
+      })
+
+      expect(cancelled.status).toBe(200)
+      expect(cancelled.body).toMatchObject({
+        sessionId,
+        inputId: admitted.body.inputId,
+        event: {
+          seq: 3,
+          type: EventType.InputCancelled,
+          data: {
+            inputId: admitted.body.inputId,
+            reason: "user_cancel",
+          },
+        },
+      })
+
+      const abort = new AbortController()
+      const stream = await fetch(
+        `${baseUrl}/sessions/${sessionId}/events?after=2`,
+        {
+          signal: abort.signal,
+        },
+      )
+      const replayed = await readNextSessionEvent(stream)
+      abort.abort()
+
+      expect(replayed).toMatchObject({
+        seq: 3,
+        type: EventType.InputCancelled,
+        data: {
+          inputId: admitted.body.inputId,
+        },
+      })
+
+      const again = await postJson(cancelUrl, {})
+      expect(again.status).toBe(409)
+      expect(again.body).toMatchObject({
+        error: {
+          code: ApiErrorCode.Conflict,
+        },
+      })
+
+      const missing = await postJson(
+        `${baseUrl}/sessions/${sessionId}/inputs/${createInputId()}/cancel`,
+        {},
+      )
+      expect(missing.status).toBe(404)
+      expect(missing.body).toMatchObject({
+        error: {
+          code: ApiErrorCode.NotFound,
+        },
+      })
+
+      const malformed = await postJson(
+        `${baseUrl}/sessions/${sessionId}/inputs/input_bad/cancel`,
+        {},
+      )
+      expect(malformed.status).toBe(400)
+      expect(malformed.body).toMatchObject({
+        error: {
+          code: ApiErrorCode.InvalidInput,
+        },
+      })
+
+      const oversizedReason = await postJson(cancelUrl, {
+        reason: "x".repeat(513),
+      })
+      expect(oversizedReason.status).toBe(400)
+      expect(oversizedReason.body).toMatchObject({
+        error: {
+          code: ApiErrorCode.InvalidInput,
+        },
+      })
+    })
+  })
+
+  it("bounds the cancel-turn reason like the cancel-input reason", async () => {
+    await withHttpServer(async (baseUrl) => {
+      const created = await postJson<ApiCreateSessionResponse>(
+        `${baseUrl}/sessions`,
+        {},
+      )
+      const sessionId = created.body.session.id
+      const cancelUrl = `${baseUrl}/sessions/${sessionId}/turns/turn_test/cancel`
+
+      const oversizedReason = await postJson(cancelUrl, {
+        reason: "x".repeat(513),
+      })
+      expect(oversizedReason.status).toBe(400)
+      expect(oversizedReason.body).toMatchObject({
+        error: {
+          code: ApiErrorCode.InvalidInput,
+        },
+      })
+
+      const wrongType = await postJson(cancelUrl, { reason: 42 })
+      expect(wrongType.status).toBe(400)
+      expect(wrongType.body).toMatchObject({
+        error: {
+          code: ApiErrorCode.InvalidInput,
+        },
+      })
+    })
+  })
+})
+
+const staticIndexHtml = "<!doctype html><html><body>yakitori</body></html>"
+const staticAssetJs = "console.log('yakitori')\n"
+const staticSecret = "top secret\n"
+
+describe("HTTP static assets", () => {
+  it("serves index.html at the root with revalidation", async () => {
+    await withStaticHttpServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/`)
+
+      expect(response.status).toBe(200)
+      expect(response.headers.get("content-type")).toBe(
+        "text/html; charset=utf-8",
+      )
+      expect(response.headers.get("cache-control")).toBe("no-cache")
+      expect(await response.text()).toBe(staticIndexHtml)
+    })
+  })
+
+  it("serves hashed assets with an immutable cache header", async () => {
+    await withStaticHttpServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/assets/app-abc123.js`)
+
+      expect(response.status).toBe(200)
+      expect(response.headers.get("content-type")).toBe(
+        "text/javascript; charset=utf-8",
+      )
+      expect(response.headers.get("cache-control")).toBe(
+        "public, max-age=31536000, immutable",
+      )
+      expect(await response.text()).toBe(staticAssetJs)
+    })
+  })
+
+  it("falls back to index.html for unknown client-side routes", async () => {
+    await withStaticHttpServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/missing-page`)
+
+      expect(response.status).toBe(200)
+      expect(response.headers.get("cache-control")).toBe("no-cache")
+      expect(await response.text()).toBe(staticIndexHtml)
+    })
+  })
+
+  it("keeps JSON errors for API-shaped paths", async () => {
+    await withStaticHttpServer(async (baseUrl) => {
+      const malformed = await fetch(`${baseUrl}/sessions/unknown`)
+      expect(malformed.status).toBe(400)
+      expect(malformed.headers.get("content-type")).toContain(
+        "application/json",
+      )
+      expect(await malformed.json()).toMatchObject({
+        error: {
+          code: ApiErrorCode.InvalidInput,
+        },
+      })
+
+      const missing = await fetch(`${baseUrl}/sessions/${createSessionId()}`)
+      expect(missing.status).toBe(404)
+      expect(await missing.json()).toMatchObject({
+        error: {
+          code: ApiErrorCode.NotFound,
+        },
+      })
+
+      const unknownApiPath = await fetch(`${baseUrl}/sessions/unknown/extra`)
+      expect(unknownApiPath.status).toBe(404)
+      expect(await unknownApiPath.json()).toEqual({
+        error: {
+          code: ApiErrorCode.NotFound,
+          message: "Route not found.",
+        },
+      })
+
+      const post = await fetch(`${baseUrl}/missing-page`, { method: "POST" })
+      expect(post.status).toBe(404)
+      expect(await post.json()).toEqual({
+        error: {
+          code: ApiErrorCode.NotFound,
+          message: "Route not found.",
+        },
+      })
+    })
+  })
+
+  it("never serves files outside the static directory", async () => {
+    await withStaticHttpServer(async (baseUrl) => {
+      for (const path of ["/%2e%2e/secret.txt", "/..%2fsecret.txt"]) {
+        const response = await fetch(`${baseUrl}${path}`)
+
+        expect(response.status).toBe(200)
+        const body = await response.text()
+        expect(body).not.toContain(staticSecret)
+        expect(body).toBe(staticIndexHtml)
+      }
+    })
+  })
+
+  it("never serves files through symlinks escaping the static directory", async () => {
+    await withStaticHttpServer(async (baseUrl, paths) => {
+      try {
+        await symlink(
+          join(paths.rootDir, "secret.txt"),
+          join(paths.staticDir, "leak.txt"),
+        )
+      } catch {
+        // Symlink creation needs extra privileges on some platforms.
+        return
+      }
+
+      const response = await fetch(`${baseUrl}/leak.txt`)
+
+      expect(response.status).toBe(200)
+      const body = await response.text()
+      expect(body).not.toContain(staticSecret)
+      expect(body).toBe(staticIndexHtml)
+    })
+  })
+
+  it("falls back to the SPA for near-miss API prefixes", async () => {
+    await withStaticHttpServer(async (baseUrl) => {
+      for (const path of ["/sessionsettings", "/healthcheck"]) {
+        const response = await fetch(`${baseUrl}${path}`)
+
+        expect(response.status).toBe(200)
+        expect(response.headers.get("content-type")).toBe(
+          "text/html; charset=utf-8",
+        )
+        expect(await response.text()).toBe(staticIndexHtml)
+      }
+    })
+  })
+
+  it("routes encoded API segments like decoded ones", async () => {
+    await withStaticHttpServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/%73essions/nope/extra`)
+
+      expect(response.status).toBe(404)
+      expect(response.headers.get("content-type")).toContain("application/json")
+      expect(await response.json()).toEqual({
+        error: {
+          code: ApiErrorCode.NotFound,
+          message: "Route not found.",
+        },
+      })
+    })
+  })
+
+  it("keeps the JSON 404 for HEAD requests", async () => {
+    await withStaticHttpServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/`, { method: "HEAD" })
+
+      expect(response.status).toBe(404)
+      expect(response.headers.get("content-type")).toContain("application/json")
+    })
+  })
+
+  it("returns the JSON 404 for unknown paths without static assets", async () => {
+    await withHttpServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/`)
+
+      expect(response.status).toBe(404)
+      expect(await response.json()).toEqual({
+        error: {
+          code: ApiErrorCode.NotFound,
+          message: "Route not found.",
+        },
+      })
+    })
+  })
 })
 
 async function withHttpServer(
   run: (baseUrl: string) => Promise<void>,
+  options?: { readonly staticAssets?: YakitoriStaticAssets },
 ): Promise<void> {
-  const server = createYakitoriHttpServer({
-    kernel: createSessionKernel(createMemoryEventStore()),
-  })
-  await new Promise<void>((resolve) => {
-    server.listen(0, "127.0.0.1", resolve)
-  })
+  await withListeningServer(
+    createYakitoriHttpServer({
+      kernel: createSessionKernel(createMemoryEventStore()),
+      ...options,
+    }),
+    run,
+  )
+}
 
+async function withStaticHttpServer(
+  run: (
+    baseUrl: string,
+    paths: { readonly staticDir: string; readonly rootDir: string },
+  ) => Promise<void>,
+): Promise<void> {
+  const rootDir = await mkdtemp(join(tmpdir(), "yakitori-static-"))
+  const staticDir = join(rootDir, "site")
   try {
-    const address = server.address()
-    if (!isAddressInfo(address)) throw new Error("Expected TCP address.")
-    await run(`http://${address.address}:${address.port}`)
-  } finally {
-    await new Promise<void>((resolve, reject) => {
-      server.close((error) => {
-        if (error) {
-          reject(error)
-          return
-        }
-        resolve()
-      })
-      server.closeAllConnections()
+    await mkdir(join(staticDir, "assets"), { recursive: true })
+    await writeFile(join(staticDir, "index.html"), staticIndexHtml)
+    await writeFile(join(staticDir, "assets", "app-abc123.js"), staticAssetJs)
+    await writeFile(join(rootDir, "secret.txt"), staticSecret)
+    await withHttpServer((baseUrl) => run(baseUrl, { staticDir, rootDir }), {
+      staticAssets: { directory: staticDir },
     })
+  } finally {
+    await rm(rootDir, { recursive: true, force: true })
   }
 }
 
@@ -422,7 +730,19 @@ async function withJsonlHttpServer(
   const eventStore = createJsonlEventStore({
     sessionsDir: join(rootDir, "sessions"),
   })
-  const server = createYakitoriHttpServer({ eventStore })
+
+  try {
+    await withListeningServer(createYakitoriHttpServer({ eventStore }), run)
+  } finally {
+    await eventStore.close()
+    await rm(rootDir, { recursive: true, force: true })
+  }
+}
+
+async function withListeningServer(
+  server: ReturnType<typeof createYakitoriHttpServer>,
+  run: (baseUrl: string) => Promise<void>,
+): Promise<void> {
   await new Promise<void>((resolve) => {
     server.listen(0, "127.0.0.1", resolve)
   })
@@ -442,8 +762,6 @@ async function withJsonlHttpServer(
       })
       server.closeAllConnections()
     })
-    await eventStore.close()
-    await rm(rootDir, { recursive: true, force: true })
   }
 }
 

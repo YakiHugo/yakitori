@@ -18,6 +18,7 @@ import {
   type TurnExecutionContext,
 } from "./events.ts"
 import {
+  createCompactionId,
   createInputId,
   createItemId,
   createPermissionRequestId,
@@ -62,6 +63,9 @@ export type SessionKernel = {
   recordToolResult(
     input: RecordToolResultInput,
   ): Promise<RecordToolResultResult>
+  recordCompaction(
+    input: RecordCompactionInput,
+  ): Promise<RecordCompactionResult>
   completeTurn(input: CompleteTurnInput): Promise<CompleteTurnResult>
   completeTurnWithAssistantOutput(
     input: CompleteTurnWithAssistantOutputInput,
@@ -212,6 +216,18 @@ export type RecordToolResultResult = {
   readonly itemId: string
   readonly event: EventEnvelope
   readonly events: readonly EventEnvelope[]
+}
+export type RecordCompactionInput = {
+  readonly sessionId: string
+  readonly turnId: string
+  readonly throughSeq: number
+  readonly coveredTurnIds: readonly string[]
+  readonly summary: string
+  readonly usage?: TokenUsage
+}
+export type RecordCompactionResult = {
+  readonly compactionId: string
+  readonly event: EventEnvelope
 }
 export type CompleteTurnInput = {
   readonly sessionId: string
@@ -547,6 +563,26 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
           }),
         })
         return { itemId, event, events: [event] }
+      })
+    },
+
+    recordCompaction(input) {
+      return command(input.sessionId, async () => {
+        const session = await requireSession(eventStore, input.sessionId)
+        requireActiveTurn(session, input.turnId)
+        const compactionId = createCompactionId()
+        const event = await append(eventStore, session, {
+          type: EventType.ContextCompacted,
+          data: compact({
+            compactionId,
+            turnId: input.turnId,
+            throughSeq: input.throughSeq,
+            coveredTurnIds: [...input.coveredTurnIds],
+            summary: input.summary,
+            usage: input.usage,
+          }),
+        })
+        return { compactionId, event }
       })
     },
 

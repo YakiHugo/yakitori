@@ -1,4 +1,5 @@
 export * from "./anthropic-provider.ts"
+export * from "./compaction.ts"
 export * from "./faux-provider.ts"
 export * from "./limits.ts"
 export * from "./live-events.ts"

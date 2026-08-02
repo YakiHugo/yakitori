@@ -1,9 +1,11 @@
+import { readFile, realpath } from "node:fs/promises"
 import {
   createServer,
   type IncomingMessage,
   type ServerResponse,
 } from "node:http"
 import type { AddressInfo } from "node:net"
+import { extname, join, resolve, sep } from "node:path"
 import {
   createSessionKernel,
   type EventEnvelope,
@@ -19,9 +21,14 @@ import { createDurableEventHub, type DurableEventHub } from "./event-hub.ts"
 import { createServerHandlers, type ServerHandlers } from "./handlers.ts"
 import { ApiErrorCode, type ApiHandlerResult } from "./protocol.ts"
 
+export type YakitoriStaticAssets = {
+  readonly directory: string
+}
+
 type YakitoriHttpServerCommonOptions = {
   readonly eventHub?: DurableEventHub
   readonly transientHub?: TransientEventHub
+  readonly staticAssets?: YakitoriStaticAssets
 }
 
 export type YakitoriHttpServerOptions = YakitoriHttpServerCommonOptions &
@@ -50,6 +57,11 @@ export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
     options.handlers ??
     createServerHandlers(resolveServerKernel(options), { eventHub })
 
+  const staticAssets =
+    options.staticAssets === undefined
+      ? undefined
+      : createStaticAssetContext(options.staticAssets.directory)
+
   const server = createServer((request, response) => {
     void handleRequest(
       request,
@@ -57,6 +69,7 @@ export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
       handlers,
       eventHub,
       transientHub,
+      staticAssets,
     ).catch((error) => {
       writeUnhandledError(response, error)
     })
@@ -93,6 +106,7 @@ async function handleRequest(
   handlers: ServerHandlers,
   eventHub: DurableEventHub,
   transientHub: TransientEventHub | undefined,
+  staticAssets: StaticAssetContext | undefined,
 ): Promise<void> {
   const origin = requestOrigin(request)
   if (origin !== undefined && !isAllowedCorsOrigin(origin)) {
@@ -164,6 +178,23 @@ async function handleRequest(
     return
   }
 
+  if (route.kind === "cancelInput") {
+    const body = await readJson(request)
+    if (!body.ok) {
+      writeResult(response, body.result)
+      return
+    }
+    writeResult(
+      response,
+      await handlers.cancelInput({
+        ...requireBodyRecord(body.value),
+        sessionId: route.sessionId,
+        inputId: route.inputId,
+      }),
+    )
+    return
+  }
+
   if (route.kind === "cancelTurn") {
     const body = await readJson(request)
     if (!body.ok) {
@@ -219,6 +250,18 @@ async function handleRequest(
     return
   }
 
+  // Static serving is GET-only: HEAD and other methods keep the JSON 404.
+  // Decoded first-segment API paths keep the JSON 404 so clients can tell a
+  // missing API resource apart from the SPA fallback.
+  if (
+    request.method === "GET" &&
+    staticAssets !== undefined &&
+    !isApiPath(route.segments) &&
+    (await serveStaticAsset(response, staticAssets, url.pathname))
+  ) {
+    return
+  }
+
   writeResult(
     response,
     errorResult(404, ApiErrorCode.NotFound, "Route not found."),
@@ -248,7 +291,7 @@ function routeRequest(method: string, url: URL): Route {
   }
 
   if (segments[0] !== "sessions" || typeof segments[1] !== "string") {
-    return { kind: "notFound" }
+    return { kind: "notFound", segments }
   }
 
   if (method === "GET" && segments.length === 2) {
@@ -261,6 +304,21 @@ function routeRequest(method: string, url: URL): Route {
 
   if (method === "GET" && segments.length === 3 && segments[2] === "events") {
     return { kind: "streamSessionEvents", sessionId: segments[1] }
+  }
+
+  // POST /sessions/:id/inputs/:inputId/cancel
+  if (
+    method === "POST" &&
+    segments.length === 5 &&
+    segments[2] === "inputs" &&
+    segments[4] === "cancel" &&
+    typeof segments[3] === "string"
+  ) {
+    return {
+      kind: "cancelInput",
+      sessionId: segments[1],
+      inputId: segments[3],
+    }
   }
 
   // POST /sessions/:id/turns/:turnId/cancel
@@ -296,7 +354,7 @@ function routeRequest(method: string, url: URL): Route {
     }
   }
 
-  return { kind: "notFound" }
+  return { kind: "notFound", segments }
 }
 
 async function streamSessionEvents(
@@ -517,6 +575,156 @@ function writeUnhandledError(response: ServerResponse, error: unknown): void {
   )
 }
 
+function isApiPath(segments: readonly string[]): boolean {
+  return segments[0] === "sessions" || segments[0] === "health"
+}
+
+type StaticAssetContext = {
+  readonly root: string
+  realpathRoot(): Promise<string | undefined>
+}
+
+function createStaticAssetContext(directory: string): StaticAssetContext {
+  const root = resolve(directory)
+  let cached: string | undefined
+  return {
+    root,
+    async realpathRoot() {
+      // A missing root is not cached: the GUI directory may appear later.
+      if (cached === undefined) cached = await realpathOrMissing(root)
+      return cached
+    },
+  }
+}
+
+async function serveStaticAsset(
+  response: ServerResponse,
+  staticAssets: StaticAssetContext,
+  pathname: string,
+): Promise<boolean> {
+  const root = staticAssets.root
+  const resolved = resolve(root, `.${decodeURIComponent(pathname)}`)
+  if (resolved !== root && !resolved.startsWith(`${root}${sep}`)) {
+    return serveSpaFallback(response, root)
+  }
+
+  const candidate = pathname === "/" ? join(root, "index.html") : resolved
+  // Lexical containment is not enough: readFile follows symlinks, so the
+  // candidate's real path must stay inside the real root. A missing
+  // candidate falls through to readStaticFile and keeps the SPA fallback.
+  const realCandidate = await realpathOrMissing(candidate)
+  if (realCandidate !== undefined) {
+    const realRoot = await staticAssets.realpathRoot()
+    if (
+      realRoot === undefined ||
+      (realCandidate !== realRoot &&
+        !realCandidate.startsWith(`${realRoot}${sep}`))
+    ) {
+      return serveSpaFallback(response, root)
+    }
+  }
+
+  const body = await readStaticFile(candidate)
+  if (body !== undefined) {
+    writeStaticFile(response, root, candidate, body)
+    return true
+  }
+  return serveSpaFallback(response, root)
+}
+
+async function serveSpaFallback(
+  response: ServerResponse,
+  root: string,
+): Promise<boolean> {
+  const indexPath = join(root, "index.html")
+  const body = await readStaticFile(indexPath)
+  if (body === undefined) return false
+  writeStaticFile(response, root, indexPath, body)
+  return true
+}
+
+async function readStaticFile(path: string): Promise<Buffer | undefined> {
+  try {
+    return await readFile(path)
+  } catch (error) {
+    // Missing paths and directories fall through to the SPA fallback or 404;
+    // other I/O errors surface as an unhandled 500.
+    if (isMissingPathError(error)) return undefined
+    throw error
+  }
+}
+
+async function realpathOrMissing(path: string): Promise<string | undefined> {
+  try {
+    return await realpath(path)
+  } catch (error) {
+    if (isMissingPathError(error)) return undefined
+    throw error
+  }
+}
+
+function isMissingPathError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error.code === "ENOENT" ||
+      error.code === "ENOTDIR" ||
+      error.code === "EISDIR")
+  )
+}
+
+function writeStaticFile(
+  response: ServerResponse,
+  root: string,
+  path: string,
+  body: Buffer,
+): void {
+  response.writeHead(200, {
+    "Cache-Control": staticCacheControl(root, path),
+    "Content-Type": staticContentType(path),
+  })
+  response.end(body)
+}
+
+function staticCacheControl(root: string, path: string): string {
+  // Vite content-hashes everything under assets/; index.html must revalidate.
+  return path.startsWith(`${join(root, "assets")}${sep}`)
+    ? "public, max-age=31536000, immutable"
+    : "no-cache"
+}
+
+function staticContentType(path: string): string {
+  return (
+    staticContentTypes[extname(path).toLowerCase()] ??
+    "application/octet-stream"
+  )
+}
+
+const staticContentTypes: Record<string, string> = {
+  ".avif": "image/avif",
+  ".css": "text/css; charset=utf-8",
+  ".gif": "image/gif",
+  ".html": "text/html; charset=utf-8",
+  ".ico": "image/x-icon",
+  ".jpeg": "image/jpeg",
+  ".jpg": "image/jpeg",
+  ".js": "text/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".map": "application/json; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".mp4": "video/mp4",
+  ".png": "image/png",
+  ".svg": "image/svg+xml",
+  ".ttf": "font/ttf",
+  ".txt": "text/plain; charset=utf-8",
+  ".wasm": "application/wasm",
+  ".webmanifest": "application/manifest+json",
+  ".webp": "image/webp",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+}
+
 function optionalQueryString(url: URL, field: string): Record<string, string> {
   const value = url.searchParams.get(field)
   if (value === null) return {}
@@ -614,6 +822,11 @@ function isAddressInfo(value: unknown): value is AddressInfo {
 type Route =
   | { readonly kind: "admitInput"; readonly sessionId: string }
   | {
+      readonly kind: "cancelInput"
+      readonly sessionId: string
+      readonly inputId: string
+    }
+  | {
       readonly kind: "cancelTurn"
       readonly sessionId: string
       readonly turnId: string
@@ -621,7 +834,7 @@ type Route =
   | { readonly kind: "createSession" }
   | { readonly kind: "health" }
   | { readonly kind: "listSessions" }
-  | { readonly kind: "notFound" }
+  | { readonly kind: "notFound"; readonly segments: readonly string[] }
   | { readonly kind: "readSession"; readonly sessionId: string }
   | {
       readonly kind: "resolvePermission"

@@ -301,9 +301,10 @@ produces a real caller, via its own ADR or an amendment to this document:
   the next seq/offset in one transaction. Trigger: the Room/Delivery stage
   needs relational pagination that the in-memory projection and
   `summary.json` cannot serve.
-- **Compaction facts** — an append-only `context.compacted` fact recording
-  the exact source boundary plus a bounded, self-contained checkpoint; raw
-  facts are retained. Trigger: model-context pressure in long Sessions.
+- **Compaction facts** — landed: an append-only `context.compacted` fact
+  records the exact source boundary (`throughSeq` + cumulative
+  `coveredTurnIds`) plus a bounded, self-contained checkpoint; raw facts are
+  retained. See decision 0011.
 - **Exact-boundary fork** — a self-contained child journal recording
   `forkedFrom: { sessionId, throughSeq }`; flush-before-copy, staged child
   publication, selective fact rewriting with provenance. Trigger: a product

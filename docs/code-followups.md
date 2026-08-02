@@ -41,3 +41,16 @@ Each can land first as an independent small change:
 - `src/server/handlers.ts` error messages say "in Stage 1" while stage 1 is
   archived (`docs/archive/`). Reword to describe the restriction without
   naming a stage (for example, "in the current single-Mate stage").
+
+## Desktop shell follow-ups (recorded 2026-07-31)
+
+- Packaged builds launched from Finder resolve the default workspace/store
+  from `process.cwd()` (which is `/`). Before shipping packaged builds, add a
+  workspace picker or a user-data default with an explicit project-open flow
+  (decision 0010, Deferred Work).
+- Static GUI serving is GET-only (no HEAD); add HEAD if a real client needs
+  it.
+- `pnpm package:desktop` produces an unsigned `dir` build only; signed
+  `dmg`, notarization, and auto-update are unconfigured.
+- `dev:desktop` shares port 4141 with `dev:server`; running both at once
+  collides on the runtime lock and the port.

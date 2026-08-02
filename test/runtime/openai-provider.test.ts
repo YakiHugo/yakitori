@@ -1,4 +1,4 @@
-import type OpenAI from "openai"
+import OpenAI from "openai"
 import type { Response } from "openai/resources/responses/responses"
 import { describe, expect, it } from "vitest"
 import {
@@ -8,6 +8,7 @@ import {
   toOpenAIInput,
   toOpenAITools,
   type ModelRequest,
+  type ModelStreamEvent,
 } from "../../src/index.ts"
 
 describe("OpenAI Responses provider", () => {
@@ -177,6 +178,188 @@ describe("OpenAI Responses provider", () => {
   })
 })
 
+describe("OpenAI provider error classification", () => {
+  it("marks a 429 API error as retryable with its status", async () => {
+    const error = new OpenAI.APIError(429, undefined, undefined, new Headers())
+
+    const events = await collectWithThrowingClient(error)
+
+    expect(events).toEqual([
+      {
+        type: "response",
+        response: {
+          stopReason: ModelStopReason.Error,
+          content: [],
+          error: {
+            code: "openai_error",
+            message: error.message,
+            details: { retryable: true, status: 429 },
+          },
+        },
+      },
+    ])
+  })
+
+  it("keeps a 400 API error free of retry details", async () => {
+    const error = new OpenAI.APIError(400, undefined, undefined, new Headers())
+
+    const events = await collectWithThrowingClient(error)
+
+    expect(events).toEqual([
+      {
+        type: "response",
+        response: {
+          stopReason: ModelStopReason.Error,
+          content: [],
+          error: { code: "openai_error", message: error.message },
+        },
+      },
+    ])
+  })
+
+  it("marks connection errors without a status as retryable", async () => {
+    const error = new OpenAI.APIConnectionError({ message: "socket hang up" })
+
+    const events = await collectWithThrowingClient(error)
+
+    expect(events).toEqual([
+      {
+        type: "response",
+        response: {
+          stopReason: ModelStopReason.Error,
+          content: [],
+          error: {
+            code: "openai_error",
+            message: error.message,
+            details: { retryable: true },
+          },
+        },
+      },
+    ])
+  })
+
+  it("marks a failed response with a transient code as retryable", () => {
+    const response = fromOpenAIResponse(
+      responseFixture({
+        status: "failed",
+        error: { code: "server_error", message: "upstream overloaded" },
+      }),
+    )
+
+    expect(response).toEqual({
+      stopReason: ModelStopReason.Error,
+      content: [],
+      providerRequestId: "response_1",
+      error: {
+        code: "server_error",
+        message: "upstream overloaded",
+        details: { retryable: true },
+      },
+    })
+  })
+
+  it("keeps a failed response with a non-transient code free of retry details", () => {
+    const response = fromOpenAIResponse(
+      responseFixture({
+        status: "failed",
+        error: { code: "invalid_prompt", message: "bad prompt" },
+      }),
+    )
+
+    expect(response).toEqual({
+      stopReason: ModelStopReason.Error,
+      content: [],
+      providerRequestId: "response_1",
+      error: { code: "invalid_prompt", message: "bad prompt" },
+    })
+  })
+
+  it("keeps refusals free of retry details", () => {
+    const response = fromOpenAIResponse(
+      responseFixture({
+        output: [
+          {
+            type: "message",
+            id: "message_1",
+            role: "assistant",
+            status: "completed",
+            content: [{ type: "refusal", refusal: "cannot help" }],
+          },
+        ],
+      }),
+    )
+
+    expect(response).toEqual({
+      stopReason: ModelStopReason.Error,
+      content: [],
+      providerRequestId: "response_1",
+      error: { code: "openai_refusal", message: "cannot help" },
+    })
+  })
+
+  it("marks a stream error event with a transient code as retryable", async () => {
+    const client = {
+      responses: {
+        async create() {
+          return (async function* () {
+            yield {
+              type: "error",
+              code: "server_error",
+              message: "stream failed",
+              param: null,
+              sequence_number: 1,
+            }
+          })()
+        },
+      },
+    } as unknown as OpenAI
+    const stream = createOpenAIProvider({
+      apiKey: "test",
+      model: "gpt-test",
+      client,
+    })
+
+    const events: ModelStreamEvent[] = []
+    for await (const event of stream(requestFixture())) events.push(event)
+
+    expect(events).toEqual([
+      {
+        type: "response",
+        response: {
+          stopReason: ModelStopReason.Error,
+          content: [],
+          error: {
+            code: "server_error",
+            message: "stream failed",
+            details: { retryable: true },
+          },
+        },
+      },
+    ])
+  })
+})
+
+async function collectWithThrowingClient(
+  error: unknown,
+): Promise<ModelStreamEvent[]> {
+  const client = {
+    responses: {
+      async create() {
+        throw error
+      },
+    },
+  } as unknown as OpenAI
+  const stream = createOpenAIProvider({
+    apiKey: "test",
+    model: "gpt-test",
+    client,
+  })
+
+  const events: ModelStreamEvent[] = []
+  for await (const event of stream(requestFixture())) events.push(event)
+  return events
+}
+
 function requestFixture(): ModelRequest {
   return {
     provider: "openai",
@@ -192,6 +375,7 @@ function responseFixture(
     readonly status?: Response["status"]
     readonly output?: Response["output"]
     readonly incomplete_details?: Response["incomplete_details"]
+    readonly error?: Response["error"]
     readonly usage?: {
       readonly input_tokens: number
       readonly output_tokens: number
@@ -216,6 +400,6 @@ function responseFixture(
             },
             output_tokens_details: { reasoning_tokens: 0 },
           },
-    error: null,
+    error: overrides.error ?? null,
   } as unknown as Response
 }

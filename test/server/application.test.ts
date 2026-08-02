@@ -8,6 +8,7 @@ import {
   createMateKernel,
   createSqliteMateStore,
   createYakitoriApplication,
+  listen,
   MateLifecycle,
   resolveWorkspaceDirectory,
   type ApiHandlerResult,
@@ -344,6 +345,55 @@ describe("application composition", () => {
         expect(read.session?.completedTurns).toHaveLength(2)
         expect(read.session?.failedTurns).toEqual([])
       } finally {
+        await application.close()
+      }
+    })
+  })
+
+  it("serves the built GUI when guiStaticDir is configured", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const guiStaticDir = join(rootDir, "gui")
+      await mkdir(guiStaticDir)
+      await writeFile(
+        join(guiStaticDir, "index.html"),
+        "<!doctype html><html><body>yakitori gui</body></html>",
+      )
+      const application = await createYakitoriApplication({
+        ...testApplicationOptions({ rootDir, workspace }),
+        guiStaticDir,
+      })
+      const server = application.createHttpServer()
+
+      try {
+        const baseUrl = await listen(server)
+
+        const index = await fetch(`${baseUrl}/`)
+        expect(index.status).toBe(200)
+        expect(index.headers.get("content-type")).toBe(
+          "text/html; charset=utf-8",
+        )
+        expect(await index.text()).toContain("yakitori gui")
+
+        const fallback = await fetch(`${baseUrl}/client-side-route`)
+        expect(fallback.status).toBe(200)
+        expect(await fallback.text()).toContain("yakitori gui")
+
+        const apiNotFound = await fetch(`${baseUrl}/sessions/unknown/extra`)
+        expect(apiNotFound.status).toBe(404)
+        expect(apiNotFound.headers.get("content-type")).toContain(
+          "application/json",
+        )
+      } finally {
+        await new Promise<void>((resolve, reject) => {
+          server.close((error) => {
+            if (error) {
+              reject(error)
+              return
+            }
+            resolve()
+          })
+          server.closeAllConnections()
+        })
         await application.close()
       }
     })

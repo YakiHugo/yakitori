@@ -22,6 +22,7 @@ describe("kernel facts", () => {
       "tool.result",
       "permission.requested",
       "permission.resolved",
+      "context.compacted",
     ])
   })
 
@@ -74,5 +75,71 @@ describe("kernel facts", () => {
         },
       }),
     ).toBe(true)
+  })
+
+  it("recognizes a valid context.compacted fact", () => {
+    expect(
+      isKernelEvent({
+        type: EventType.ContextCompacted,
+        data: {
+          compactionId: "compaction_1",
+          turnId: "turn_1",
+          throughSeq: 7,
+          coveredTurnIds: ["turn_0"],
+          summary: "Goal: ship it.",
+          usage: { inputTokens: 10, outputTokens: 5 },
+        },
+      }),
+    ).toBe(true)
+  })
+
+  it.each([
+    {
+      name: "an extra key",
+      data: {
+        compactionId: "compaction_1",
+        turnId: "turn_1",
+        throughSeq: 7,
+        coveredTurnIds: ["turn_0"],
+        summary: "Goal: ship it.",
+        model: "faux-1",
+      },
+    },
+    {
+      name: "a missing key",
+      data: {
+        compactionId: "compaction_1",
+        turnId: "turn_1",
+        coveredTurnIds: ["turn_0"],
+        summary: "Goal: ship it.",
+      },
+    },
+    {
+      name: "throughSeq of zero",
+      data: {
+        compactionId: "compaction_1",
+        turnId: "turn_1",
+        throughSeq: 0,
+        coveredTurnIds: ["turn_0"],
+        summary: "Goal: ship it.",
+      },
+    },
+    {
+      name: "a non-string covered turn id",
+      data: {
+        compactionId: "compaction_1",
+        turnId: "turn_1",
+        throughSeq: 7,
+        coveredTurnIds: ["turn_0", 42],
+        summary: "Goal: ship it.",
+      },
+    },
+  ])("rejects context.compacted with $name", ({ data }) => {
+    expect(
+      isKernelEvent({
+        type: EventType.ContextCompacted,
+        data,
+      }),
+    ).toBe(false)
   })
 })

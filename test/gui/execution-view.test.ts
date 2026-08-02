@@ -200,6 +200,62 @@ describe("execution view", () => {
     expect(projectExecutionView(state).entries).toEqual([])
   })
 
+  it("projects a compaction marker in seq order with its summary", () => {
+    const facts = [
+      {
+        type: EventType.InputAdmitted,
+        data: {
+          requestId: "request:1",
+          inputId: "input_1",
+          role: InputRole.User,
+          content: { kind: "text" as const, text: "earlier work" },
+        },
+      },
+      {
+        type: EventType.ContextCompacted,
+        data: {
+          compactionId: "compaction_1",
+          turnId: "turn_2",
+          throughSeq: 5,
+          coveredTurnIds: ["turn_1"],
+          summary: "Goal: ship the feature.",
+        },
+      },
+      {
+        type: EventType.AssistantMessage,
+        data: {
+          messageId: "item_1",
+          turnId: "turn_2",
+          content: [{ type: "text" as const, text: "Continuing." }],
+        },
+      },
+    ]
+    const state = facts.reduce(
+      (current, event, index) =>
+        reduceExecutionView(current, {
+          type: "durable",
+          event: createEventEnvelope({
+            sessionId,
+            seq: index + 1,
+            createdAt: `2026-07-24T00:00:0${index}.000Z`,
+            event,
+          }),
+        }),
+      createExecutionViewState(),
+    )
+
+    expect(projectExecutionView(state).entries).toEqual([
+      expect.objectContaining({ kind: "user_input", text: "earlier work" }),
+      {
+        kind: "context_compacted",
+        compactionId: "compaction_1",
+        summary: "Goal: ship the feature.",
+        createdAt: "2026-07-24T00:00:01.000Z",
+      },
+      expect.objectContaining({ kind: "assistant", text: "Continuing." }),
+    ])
+  })
+
   it("summarizes tool entries and tracks model, usage, and queued inputs", () => {
     const facts = [
       {
