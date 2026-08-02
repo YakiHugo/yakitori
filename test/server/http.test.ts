@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
 import type { AddressInfo } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -487,6 +487,35 @@ describe("HTTP server", () => {
       })
     })
   })
+
+  it("bounds the cancel-turn reason like the cancel-input reason", async () => {
+    await withHttpServer(async (baseUrl) => {
+      const created = await postJson<ApiCreateSessionResponse>(
+        `${baseUrl}/sessions`,
+        {},
+      )
+      const sessionId = created.body.session.id
+      const cancelUrl = `${baseUrl}/sessions/${sessionId}/turns/turn_test/cancel`
+
+      const oversizedReason = await postJson(cancelUrl, {
+        reason: "x".repeat(513),
+      })
+      expect(oversizedReason.status).toBe(400)
+      expect(oversizedReason.body).toMatchObject({
+        error: {
+          code: ApiErrorCode.InvalidInput,
+        },
+      })
+
+      const wrongType = await postJson(cancelUrl, { reason: 42 })
+      expect(wrongType.status).toBe(400)
+      expect(wrongType.body).toMatchObject({
+        error: {
+          code: ApiErrorCode.InvalidInput,
+        },
+      })
+    })
+  })
 })
 
 const staticIndexHtml = "<!doctype html><html><body>yakitori</body></html>"
@@ -586,6 +615,65 @@ describe("HTTP static assets", () => {
     })
   })
 
+  it("never serves files through symlinks escaping the static directory", async () => {
+    await withStaticHttpServer(async (baseUrl, paths) => {
+      try {
+        await symlink(
+          join(paths.rootDir, "secret.txt"),
+          join(paths.staticDir, "leak.txt"),
+        )
+      } catch {
+        // Symlink creation needs extra privileges on some platforms.
+        return
+      }
+
+      const response = await fetch(`${baseUrl}/leak.txt`)
+
+      expect(response.status).toBe(200)
+      const body = await response.text()
+      expect(body).not.toContain(staticSecret)
+      expect(body).toBe(staticIndexHtml)
+    })
+  })
+
+  it("falls back to the SPA for near-miss API prefixes", async () => {
+    await withStaticHttpServer(async (baseUrl) => {
+      for (const path of ["/sessionsettings", "/healthcheck"]) {
+        const response = await fetch(`${baseUrl}${path}`)
+
+        expect(response.status).toBe(200)
+        expect(response.headers.get("content-type")).toBe(
+          "text/html; charset=utf-8",
+        )
+        expect(await response.text()).toBe(staticIndexHtml)
+      }
+    })
+  })
+
+  it("routes encoded API segments like decoded ones", async () => {
+    await withStaticHttpServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/%73essions/nope/extra`)
+
+      expect(response.status).toBe(404)
+      expect(response.headers.get("content-type")).toContain("application/json")
+      expect(await response.json()).toEqual({
+        error: {
+          code: ApiErrorCode.NotFound,
+          message: "Route not found.",
+        },
+      })
+    })
+  })
+
+  it("keeps the JSON 404 for HEAD requests", async () => {
+    await withStaticHttpServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/`, { method: "HEAD" })
+
+      expect(response.status).toBe(404)
+      expect(response.headers.get("content-type")).toContain("application/json")
+    })
+  })
+
   it("returns the JSON 404 for unknown paths without static assets", async () => {
     await withHttpServer(async (baseUrl) => {
       const response = await fetch(`${baseUrl}/`)
@@ -615,7 +703,10 @@ async function withHttpServer(
 }
 
 async function withStaticHttpServer(
-  run: (baseUrl: string) => Promise<void>,
+  run: (
+    baseUrl: string,
+    paths: { readonly staticDir: string; readonly rootDir: string },
+  ) => Promise<void>,
 ): Promise<void> {
   const rootDir = await mkdtemp(join(tmpdir(), "yakitori-static-"))
   const staticDir = join(rootDir, "site")
@@ -624,7 +715,9 @@ async function withStaticHttpServer(
     await writeFile(join(staticDir, "index.html"), staticIndexHtml)
     await writeFile(join(staticDir, "assets", "app-abc123.js"), staticAssetJs)
     await writeFile(join(rootDir, "secret.txt"), staticSecret)
-    await withHttpServer(run, { staticAssets: { directory: staticDir } })
+    await withHttpServer((baseUrl) => run(baseUrl, { staticDir, rootDir }), {
+      staticAssets: { directory: staticDir },
+    })
   } finally {
     await rm(rootDir, { recursive: true, force: true })
   }

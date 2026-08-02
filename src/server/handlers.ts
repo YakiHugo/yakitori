@@ -445,7 +445,7 @@ function requireCancelTurnRequest(input: unknown) {
   return {
     sessionId: requireSessionId(record.sessionId, "sessionId"),
     turnId: requireString(record.turnId, "turnId"),
-    ...optionalStringField(record, "reason"),
+    ...optionalReasonField(record, "reason"),
   }
 }
 

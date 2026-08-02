@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises"
+import { readFile, realpath } from "node:fs/promises"
 import {
   createServer,
   type IncomingMessage,
@@ -57,6 +57,11 @@ export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
     options.handlers ??
     createServerHandlers(resolveServerKernel(options), { eventHub })
 
+  const staticAssets =
+    options.staticAssets === undefined
+      ? undefined
+      : createStaticAssetContext(options.staticAssets.directory)
+
   const server = createServer((request, response) => {
     void handleRequest(
       request,
@@ -64,7 +69,7 @@ export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
       handlers,
       eventHub,
       transientHub,
-      options.staticAssets,
+      staticAssets,
     ).catch((error) => {
       writeUnhandledError(response, error)
     })
@@ -101,7 +106,7 @@ async function handleRequest(
   handlers: ServerHandlers,
   eventHub: DurableEventHub,
   transientHub: TransientEventHub | undefined,
-  staticAssets: YakitoriStaticAssets | undefined,
+  staticAssets: StaticAssetContext | undefined,
 ): Promise<void> {
   const origin = requestOrigin(request)
   if (origin !== undefined && !isAllowedCorsOrigin(origin)) {
@@ -246,12 +251,12 @@ async function handleRequest(
   }
 
   // Static serving is GET-only: HEAD and other methods keep the JSON 404.
-  // API-shaped prefixes always keep the JSON 404 so clients can tell a
+  // Decoded first-segment API paths keep the JSON 404 so clients can tell a
   // missing API resource apart from the SPA fallback.
   if (
     request.method === "GET" &&
     staticAssets !== undefined &&
-    !isApiPath(url.pathname) &&
+    !isApiPath(route.segments) &&
     (await serveStaticAsset(response, staticAssets, url.pathname))
   ) {
     return
@@ -286,7 +291,7 @@ function routeRequest(method: string, url: URL): Route {
   }
 
   if (segments[0] !== "sessions" || typeof segments[1] !== "string") {
-    return { kind: "notFound" }
+    return { kind: "notFound", segments }
   }
 
   if (method === "GET" && segments.length === 2) {
@@ -349,7 +354,7 @@ function routeRequest(method: string, url: URL): Route {
     }
   }
 
-  return { kind: "notFound" }
+  return { kind: "notFound", segments }
 }
 
 async function streamSessionEvents(
@@ -570,22 +575,55 @@ function writeUnhandledError(response: ServerResponse, error: unknown): void {
   )
 }
 
-function isApiPath(pathname: string): boolean {
-  return pathname.startsWith("/sessions") || pathname.startsWith("/health")
+function isApiPath(segments: readonly string[]): boolean {
+  return segments[0] === "sessions" || segments[0] === "health"
+}
+
+type StaticAssetContext = {
+  readonly root: string
+  realpathRoot(): Promise<string | undefined>
+}
+
+function createStaticAssetContext(directory: string): StaticAssetContext {
+  const root = resolve(directory)
+  let cached: string | undefined
+  return {
+    root,
+    async realpathRoot() {
+      // A missing root is not cached: the GUI directory may appear later.
+      if (cached === undefined) cached = await realpathOrMissing(root)
+      return cached
+    },
+  }
 }
 
 async function serveStaticAsset(
   response: ServerResponse,
-  staticAssets: YakitoriStaticAssets,
+  staticAssets: StaticAssetContext,
   pathname: string,
 ): Promise<boolean> {
-  const root = resolve(staticAssets.directory)
+  const root = staticAssets.root
   const resolved = resolve(root, `.${decodeURIComponent(pathname)}`)
   if (resolved !== root && !resolved.startsWith(`${root}${sep}`)) {
     return serveSpaFallback(response, root)
   }
 
   const candidate = pathname === "/" ? join(root, "index.html") : resolved
+  // Lexical containment is not enough: readFile follows symlinks, so the
+  // candidate's real path must stay inside the real root. A missing
+  // candidate falls through to readStaticFile and keeps the SPA fallback.
+  const realCandidate = await realpathOrMissing(candidate)
+  if (realCandidate !== undefined) {
+    const realRoot = await staticAssets.realpathRoot()
+    if (
+      realRoot === undefined ||
+      (realCandidate !== realRoot &&
+        !realCandidate.startsWith(`${realRoot}${sep}`))
+    ) {
+      return serveSpaFallback(response, root)
+    }
+  }
+
   const body = await readStaticFile(candidate)
   if (body !== undefined) {
     writeStaticFile(response, root, candidate, body)
@@ -608,10 +646,32 @@ async function serveSpaFallback(
 async function readStaticFile(path: string): Promise<Buffer | undefined> {
   try {
     return await readFile(path)
-  } catch {
-    // Missing paths and directories fall through to the SPA fallback or 404.
-    return undefined
+  } catch (error) {
+    // Missing paths and directories fall through to the SPA fallback or 404;
+    // other I/O errors surface as an unhandled 500.
+    if (isMissingPathError(error)) return undefined
+    throw error
   }
+}
+
+async function realpathOrMissing(path: string): Promise<string | undefined> {
+  try {
+    return await realpath(path)
+  } catch (error) {
+    if (isMissingPathError(error)) return undefined
+    throw error
+  }
+}
+
+function isMissingPathError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error.code === "ENOENT" ||
+      error.code === "ENOTDIR" ||
+      error.code === "EISDIR")
+  )
 }
 
 function writeStaticFile(
@@ -642,7 +702,9 @@ function staticContentType(path: string): string {
 }
 
 const staticContentTypes: Record<string, string> = {
+  ".avif": "image/avif",
   ".css": "text/css; charset=utf-8",
+  ".gif": "image/gif",
   ".html": "text/html; charset=utf-8",
   ".ico": "image/x-icon",
   ".jpeg": "image/jpeg",
@@ -651,11 +713,14 @@ const staticContentTypes: Record<string, string> = {
   ".json": "application/json; charset=utf-8",
   ".map": "application/json; charset=utf-8",
   ".mjs": "text/javascript; charset=utf-8",
+  ".mp4": "video/mp4",
   ".png": "image/png",
   ".svg": "image/svg+xml",
   ".ttf": "font/ttf",
   ".txt": "text/plain; charset=utf-8",
+  ".wasm": "application/wasm",
   ".webmanifest": "application/manifest+json",
+  ".webp": "image/webp",
   ".woff": "font/woff",
   ".woff2": "font/woff2",
 }
@@ -769,7 +834,7 @@ type Route =
   | { readonly kind: "createSession" }
   | { readonly kind: "health" }
   | { readonly kind: "listSessions" }
-  | { readonly kind: "notFound" }
+  | { readonly kind: "notFound"; readonly segments: readonly string[] }
   | { readonly kind: "readSession"; readonly sessionId: string }
   | {
       readonly kind: "resolvePermission"
