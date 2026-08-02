@@ -27,6 +27,10 @@ export default defineConfig(({ mode }) => {
   if (mode === "desktop") {
     return {
       build: {
+        // Node target: resolve node export conditions and skip package.json
+        // "browser" field shims (e.g. @anthropic-ai/sdk's node.browser
+        // chunks must not land in the Electron main bundle).
+        ssr: true,
         lib: {
           entry: "src/desktop/main.ts",
           fileName: "main",
@@ -37,6 +41,11 @@ export default defineConfig(({ mode }) => {
           external: ["electron", /^node:/],
         },
         sourcemap: true,
+      },
+      ssr: {
+        // SSR builds externalize dependencies by default; the desktop bundle
+        // inlines every npm dependency except electron and node builtins.
+        noExternal: true,
       },
       test: {
         include: ["test/**/*.test.ts"],

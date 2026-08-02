@@ -6,6 +6,7 @@ asar: true
 files:
   - dist/desktop/**
   - package.json
+  - "!node_modules/**"
 extraResources:
   - from: dist/gui
     to: gui

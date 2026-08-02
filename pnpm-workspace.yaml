@@ -1,7 +1,9 @@
 allowBuilds:
+  # electron and electron-builder currently ship no install scripts (electron
+  # downloads its binary on first CLI run); keep them approved so fresh
+  # installs do not break if a future version adds build scripts again.
+  electron: true
+  electron-builder: true
   # Windows-only installer tool from electron-builder; unused for the mac dir
   # target, so its install script stays disabled.
   electron-winstaller: false
-onlyBuiltDependencies:
-  - electron
-  - electron-builder
