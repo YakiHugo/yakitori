@@ -34,6 +34,7 @@ import {
   type StreamFn,
 } from "./model.ts"
 import { createPermissionGate, type PermissionGate } from "./permission-gate.ts"
+import { createFileObservationStore } from "./tools/file-observations.ts"
 import { resolveWorkspaceRoot } from "./tools/path-policy.ts"
 import { createToolRegistry, type ToolRegistry } from "./tools/registry.ts"
 
@@ -168,6 +169,7 @@ export function createSessionRunner(
   ): Promise<void> {
     if (closed) return
     const executionContext = await buildExecutionContext(session)
+    const fileObservations = createFileObservationStore(session.tools)
     if (closed) return
     const started = await startTurnUnlessInputConsumed(
       session.id,
@@ -191,6 +193,7 @@ export function createSessionRunner(
         turnId: started.turnId,
         inputId,
         executionContext,
+        fileObservations,
         signal: abort.signal,
       })
     } catch (error) {
@@ -295,6 +298,7 @@ export function createSessionRunner(
     readonly inputId: string
     readonly executionContext: TurnExecutionContext
     readonly signal: AbortSignal
+    readonly fileObservations: ReturnType<typeof createFileObservationStore>
   }): Promise<void> {
     const mate = await options.mateKernel.readMate({
       mateId: input.executionContext.mateId,
@@ -455,6 +459,7 @@ export function createSessionRunner(
               : { providerRequestId: response.providerRequestId }),
           },
           signal: input.signal,
+          fileObservations: input.fileObservations,
         })
         continue
       }
@@ -600,6 +605,7 @@ export function createSessionRunner(
     readonly executionContext: TurnExecutionContext
     readonly contextMetadata: EventMetadata
     readonly signal: AbortSignal
+    readonly fileObservations: ReturnType<typeof createFileObservationStore>
   }): Promise<void> {
     const recorded = await options.kernel.recordAssistantOutput({
       sessionId: input.sessionId,
@@ -706,6 +712,7 @@ export function createSessionRunner(
           : await tool.execute(call.input, {
               workspaceRoot,
               signal: input.signal,
+              fileObservations: input.fileObservations,
             })
 
       if (result.ok) {
@@ -717,6 +724,11 @@ export function createSessionRunner(
           content: { kind: "text", text: result.content },
         })
         publishDurable(resolved.events)
+        input.fileObservations.recordSuccess(
+          call.name,
+          call.input,
+          result.output,
+        )
         continue
       }
 
