@@ -361,6 +361,16 @@ export function createSessionRunner(
         model: input.executionContext.model,
         signal: input.signal,
       }
+      const observationEligibleToolResultItemIds = new Set(
+        context.observationEligibleToolResultItemIds,
+      )
+      const visibleFileObservations = createFileObservationStore(
+        session.tools.filter(
+          (tool) =>
+            tool.resultItemId !== undefined &&
+            observationEligibleToolResultItemIds.has(tool.resultItemId),
+        ),
+      )
 
       const streamId = `stream_${input.turnId}_${modelCallIndex + 1}`
       const response = await consumeModelStream({
@@ -449,6 +459,9 @@ export function createSessionRunner(
           executionContext: input.executionContext,
           contextMetadata: {
             selectedItemIds: [...context.selectedItemIds],
+            observationEligibleToolResultItemIds: [
+              ...context.observationEligibleToolResultItemIds,
+            ],
             droppedTurnCount: context.droppedTurnCount,
             truncatedToolResultCount: context.truncatedToolResultCount,
             ...(context.droppedCompactionCheckpoint
@@ -460,6 +473,7 @@ export function createSessionRunner(
           },
           signal: input.signal,
           fileObservations: input.fileObservations,
+          visibleFileObservations,
         })
         continue
       }
@@ -509,6 +523,9 @@ export function createSessionRunner(
           callIndex: modelCallIndex,
           streamId,
           selectedItemIds: [...context.selectedItemIds],
+          observationEligibleToolResultItemIds: [
+            ...context.observationEligibleToolResultItemIds,
+          ],
           droppedTurnCount: context.droppedTurnCount,
           truncatedToolResultCount: context.truncatedToolResultCount,
           ...(context.droppedCompactionCheckpoint
@@ -606,6 +623,9 @@ export function createSessionRunner(
     readonly contextMetadata: EventMetadata
     readonly signal: AbortSignal
     readonly fileObservations: ReturnType<typeof createFileObservationStore>
+    readonly visibleFileObservations: ReturnType<
+      typeof createFileObservationStore
+    >
   }): Promise<void> {
     const recorded = await options.kernel.recordAssistantOutput({
       sessionId: input.sessionId,
@@ -713,6 +733,7 @@ export function createSessionRunner(
               workspaceRoot,
               signal: input.signal,
               fileObservations: input.fileObservations,
+              visibleFileObservations: input.visibleFileObservations,
             })
 
       if (result.ok) {

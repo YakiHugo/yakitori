@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto"
 import type { JsonValue, ToolProjection } from "../../kernel/index.ts"
 
 export type FileObservationKind =
@@ -21,18 +20,6 @@ export type FileRevision = {
 export type FileObservationStore = {
   latest(path: string): FileRevision | undefined
   continuationSha(path: string, offset: number): string | undefined
-  hasRead(input: {
-    readonly path: string
-    readonly sha256: string
-    readonly offset: number
-    readonly limit: number
-  }): boolean
-  checkpoint(): string
-  checkpointAfterSuccess(
-    name: string,
-    input: unknown,
-    output: JsonValue,
-  ): string
   recordSuccess(name: string, input: unknown, output: JsonValue): void
 }
 
@@ -40,7 +27,6 @@ export function createFileObservationStore(
   tools: readonly ToolProjection[] = [],
 ): FileObservationStore {
   const revisions = new Map<string, FileRevision>()
-  const reads = new Set<string>()
   const continuations = new Map<string, Map<number, string>>()
 
   const store: FileObservationStore = {
@@ -50,41 +36,8 @@ export function createFileObservationStore(
     continuationSha(path, offset) {
       return continuations.get(normalizePath(path))?.get(offset)
     },
-    hasRead(input) {
-      return reads.has(readKey(input))
-    },
-    checkpoint() {
-      return checkpoint(revisions, reads, continuations)
-    },
-    checkpointAfterSuccess(name, input, output) {
-      const projectedRevisions = new Map(revisions)
-      const projectedReads = new Set(reads)
-      const projectedContinuations = new Map(
-        [...continuations].map(([path, offsets]) => [path, new Map(offsets)]),
-      )
-      applySuccessfulResult(
-        projectedRevisions,
-        projectedReads,
-        projectedContinuations,
-        name,
-        input,
-        output,
-      )
-      return checkpoint(
-        projectedRevisions,
-        projectedReads,
-        projectedContinuations,
-      )
-    },
     recordSuccess(name, input, output) {
-      applySuccessfulResult(
-        revisions,
-        reads,
-        continuations,
-        name,
-        input,
-        output,
-      )
+      applySuccessfulResult(revisions, continuations, name, input, output)
     },
   }
 
@@ -98,7 +51,6 @@ export function createFileObservationStore(
 
 function applySuccessfulResult(
   revisions: Map<string, FileRevision>,
-  reads: Set<string>,
   continuations: Map<string, Map<number, string>>,
   name: string,
   _input: unknown,
@@ -111,7 +63,7 @@ function applySuccessfulResult(
     const sha256 = shaField(output)
     const range = isRecord(output.range) ? output.range : undefined
     const offset = numberField(range, "offset")
-    const limit = numberField(range, "requestedLimit")
+    const limit = numberField(range, "limit")
     if (path === undefined || sha256 === undefined) return
     const normalized = normalizePath(path)
     const previous = revisions.get(normalized)
@@ -125,23 +77,27 @@ function applySuccessfulResult(
       offsets?.delete(offset)
       if (offsets?.size === 0) continuations.delete(normalized)
     }
-    if (output.unchanged !== true) {
-      if (output.truncated === false) {
-        revisions.set(normalized, {
-          sha256,
-          complete: true,
-          observation: "whole_file_read",
-        })
-      } else if (!(previous?.sha256 === sha256 && previous.complete)) {
-        revisions.set(normalized, {
-          sha256,
-          complete: false,
-          observation: "ranged_read",
-        })
-      }
-    }
-    if (offset !== undefined && limit !== undefined) {
-      reads.add(readKey({ path, sha256, offset, limit }))
+    if (output.truncated === false && offset === 1) {
+      revisions.set(normalized, {
+        sha256,
+        complete: true,
+        observation: "whole_file_read",
+      })
+    } else if (!(previous?.sha256 === sha256 && previous.complete)) {
+      const observedRanges =
+        offset === undefined || limit === undefined || limit < 1
+          ? undefined
+          : [{ startLine: offset, endLine: offset + limit - 1 }]
+      const ranges =
+        previous?.sha256 === sha256
+          ? mergeRanges(previous.ranges, observedRanges)
+          : observedRanges
+      revisions.set(normalized, {
+        sha256,
+        complete: false,
+        observation: "ranged_read",
+        ...(ranges === undefined ? {} : { ranges }),
+      })
     }
     const continuation = isRecord(output.continuation)
       ? output.continuation
@@ -166,7 +122,9 @@ function applySuccessfulResult(
     }
     revisions.set(normalized, {
       sha256,
-      complete: name === "write_file" || previous?.complete === true,
+      complete:
+        name === "write_file" ||
+        (output.optimisticRebase !== true && previous?.complete === true),
       observation: name === "write_file" ? "write" : "edit",
     })
     return
@@ -223,26 +181,6 @@ function mergeRanges(
   return merged.length === 0 ? undefined : merged
 }
 
-function checkpoint(
-  revisions: ReadonlyMap<string, FileRevision>,
-  reads: ReadonlySet<string>,
-  continuations: ReadonlyMap<string, ReadonlyMap<number, string>>,
-): string {
-  const state = {
-    revisions: [...revisions]
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([path, revision]) => ({ path, ...revision })),
-    reads: [...reads].sort(),
-    continuations: [...continuations]
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([path, offsets]) => ({
-        path,
-        offsets: [...offsets].sort(([left], [right]) => left - right),
-      })),
-  }
-  return createHash("sha256").update(JSON.stringify(state)).digest("hex")
-}
-
 function rangesField(value: Record<string, unknown>) {
   if (!Array.isArray(value.ranges)) return undefined
   const ranges = value.ranges.flatMap((range) => {
@@ -261,15 +199,6 @@ function rangesField(value: Record<string, unknown>) {
     return [{ startLine, endLine }]
   })
   return ranges.length === 0 ? undefined : ranges
-}
-
-function readKey(input: {
-  readonly path: string
-  readonly sha256: string
-  readonly offset: number
-  readonly limit: number
-}): string {
-  return `${normalizePath(input.path)}\0${input.sha256}\0${input.offset}\0${input.limit}`
 }
 
 function normalizePath(path: string): string {

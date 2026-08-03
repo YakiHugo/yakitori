@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import {
   InputRole,
   ItemKind,
@@ -24,6 +25,7 @@ export type DroppedTurn = {
 export type ModelContextBuildResult = {
   readonly messages: readonly ModelMessage[]
   readonly selectedItemIds: readonly string[]
+  readonly observationEligibleToolResultItemIds: readonly string[]
   readonly droppedTurnCount: number
   readonly droppedTurns: readonly DroppedTurn[]
   readonly droppedCompactionCheckpoint: boolean
@@ -61,6 +63,14 @@ export function buildModelContext(input: {
     ],
     itemIds: [],
   }
+  const readResultKeys = buildReadResultKeys(input.session)
+  const toolResultItemIds = new Map(
+    input.session.tools.flatMap((tool) =>
+      tool.resultItemId === undefined
+        ? []
+        : [[tool.toolCallId, tool.resultItemId] as const],
+    ),
+  )
 
   const droppedTurns: DroppedTurn[] = []
   let droppedCompactionCheckpoint = false
@@ -69,7 +79,7 @@ export function buildModelContext(input: {
     ...turnGroups,
     currentGroup,
   ]
-  let assembled = assembleGroups(selectedGroups, input.limits)
+  let assembled = assembleGroups(selectedGroups, input.limits, readResultKeys)
 
   // The checkpoint is pinned until last resort and the final group — the
   // current input or active Turn — is never dropped: the oldest remaining
@@ -89,14 +99,15 @@ export function buildModelContext(input: {
       // tool-result truncation as selected groups.
       droppedTurns.push({
         turnId: dropped.turnId,
-        messages: assembleGroups([dropped], input.limits).messages,
+        messages: assembleGroups([dropped], input.limits, readResultKeys)
+          .messages,
       })
     }
     if (dropped.kind === "compaction") {
       droppedCompactionCheckpoint = true
     }
     selectedGroups = selectedGroups.filter((_, index) => index !== dropIndex)
-    assembled = assembleGroups(selectedGroups, input.limits)
+    assembled = assembleGroups(selectedGroups, input.limits, readResultKeys)
   }
 
   if (selectedGroups.length === 1 && exceedsCaps(assembled, input.limits)) {
@@ -108,6 +119,12 @@ export function buildModelContext(input: {
   return {
     messages: assembled.messages,
     selectedItemIds: assembled.itemIds,
+    observationEligibleToolResultItemIds: assembled.visibleToolCallIds.flatMap(
+      (toolCallId) => {
+        const itemId = toolResultItemIds.get(toolCallId)
+        return itemId === undefined ? [] : [itemId]
+      },
+    ),
     droppedTurnCount: droppedTurns.length,
     droppedTurns,
     droppedCompactionCheckpoint,
@@ -333,23 +350,43 @@ function exceedsCaps(
 function assembleGroups(
   groups: readonly ContextGroup[],
   limits: ModelContextLimits,
+  readResultKeys: ReadonlyMap<string, string>,
 ): {
   readonly messages: readonly ModelMessage[]
   readonly itemIds: readonly string[]
+  readonly visibleToolCallIds: readonly string[]
   readonly truncatedToolResultCount: number
   readonly byteCount: number
   readonly blockCount: number
 } {
   const messages: ModelMessage[] = []
   const itemIds: string[] = []
+  const visibleToolCallIds: string[] = []
+  const visibleReads = new Map<string, string>()
   let truncatedToolResultCount = 0
 
   for (const group of groups) {
     itemIds.push(...group.itemIds)
     for (const message of group.messages) {
       if (message.role === "tool") {
-        const truncated = truncateToolResult(message, limits)
+        const readKey = readResultKeys.get(message.toolCallId)
+        const representative =
+          readKey === undefined ? undefined : visibleReads.get(readKey)
+        const projected =
+          representative === undefined
+            ? message
+            : {
+                ...message,
+                content: `Duplicate read; same content as tool call ${representative}.`,
+              }
+        if (readKey !== undefined && representative === undefined) {
+          visibleReads.set(readKey, message.toolCallId)
+        }
+        const truncated = truncateToolResult(projected, limits)
         if (truncated.truncated) truncatedToolResultCount += 1
+        if (!truncated.truncated && representative === undefined) {
+          visibleToolCallIds.push(message.toolCallId)
+        }
         messages.push(truncated.message)
         continue
       }
@@ -362,10 +399,48 @@ function assembleGroups(
   return {
     messages,
     itemIds,
+    visibleToolCallIds,
     truncatedToolResultCount,
     byteCount,
     blockCount,
   }
+}
+
+function buildReadResultKeys(
+  session: SessionProjection,
+): ReadonlyMap<string, string> {
+  const keys = new Map<string, string>()
+  const items = new Map(session.items.map((item) => [item.itemId, item]))
+  for (const tool of session.tools) {
+    if (tool.name !== "read_file" || !isRecord(tool.output)) continue
+    const range = tool.output.range
+    if (
+      typeof tool.output.path !== "string" ||
+      typeof tool.output.sha256 !== "string" ||
+      !isRecord(range) ||
+      typeof range.offset !== "number" ||
+      typeof range.requestedLimit !== "number"
+    ) {
+      continue
+    }
+    const resultItem =
+      tool.resultItemId === undefined ? undefined : items.get(tool.resultItemId)
+    if (resultItem?.content.kind !== "text") continue
+    keys.set(
+      tool.toolCallId,
+      JSON.stringify({
+        path: tool.output.path,
+        sha256: tool.output.sha256,
+        offset: range.offset,
+        requestedLimit: range.requestedLimit,
+        lineCharacterLimit: tool.output.lineCharacterLimit,
+        contentSha256: createHash("sha256")
+          .update(resultItem.content.text)
+          .digest("hex"),
+      }),
+    )
+  }
+  return keys
 }
 
 function truncateToolResult(
@@ -407,4 +482,8 @@ function countBlocks(messages: readonly ModelMessage[]): number {
 
 function utf8Bytes(value: string): number {
   return Buffer.byteLength(value, "utf8")
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
 }

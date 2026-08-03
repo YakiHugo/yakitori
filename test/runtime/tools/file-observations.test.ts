@@ -26,15 +26,6 @@ describe("file observations", () => {
       complete: false,
       observation: "edit",
     })
-    expect(
-      rebuilt.hasRead({
-        path: "src/value.ts",
-        sha256: "a".repeat(64),
-        offset: 1,
-        limit: 20,
-      }),
-    ).toBe(true)
-
     rebuilt.recordSuccess(
       "write_file",
       { path: "new.ts" },
@@ -175,6 +166,27 @@ describe("file observations", () => {
       },
     )
     expect(store.continuationSha("src/value.ts", 21)).toBeUndefined()
+  })
+
+  it("does not treat a suffix read through EOF as a complete observation", () => {
+    const store = createFileObservationStore()
+    store.recordSuccess(
+      "read_file",
+      {},
+      {
+        path: "src/value.ts",
+        sha256: "a".repeat(64),
+        truncated: false,
+        range: { offset: 100, limit: 20, requestedLimit: 20 },
+      },
+    )
+
+    expect(store.latest("src/value.ts")).toEqual({
+      sha256: "a".repeat(64),
+      complete: false,
+      observation: "ranged_read",
+      ranges: [{ startLine: 100, endLine: 119 }],
+    })
   })
 })
 

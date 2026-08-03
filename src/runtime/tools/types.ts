@@ -5,6 +5,7 @@ export type ToolExecutionContext = {
   readonly workspaceRoot: string
   readonly signal?: AbortSignal
   readonly fileObservations?: FileObservationStore
+  readonly visibleFileObservations?: FileObservationStore
 }
 
 export type ToolSuccess = {
