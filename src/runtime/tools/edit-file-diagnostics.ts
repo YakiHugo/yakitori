@@ -8,7 +8,12 @@ export type EditDiagnosticCandidate = {
   readonly startLine: number
   readonly endLine: number
   readonly score?: number
-  readonly snippet: string
+  readonly text: string
+}
+
+export type EditMatchLocation = {
+  readonly startLine: number
+  readonly endLine: number
 }
 
 export function closestEditCandidates(
@@ -31,6 +36,7 @@ export function closestEditCandidates(
       start,
       windowLength,
     )
+    if (score === 0) continue
     if (!couldEnterRanking(candidates, score, start + 1, limit)) continue
     insertRankedCandidate(
       candidates,
@@ -38,7 +44,7 @@ export function closestEditCandidates(
         startLine: start + 1,
         endLine: start + windowLength,
         score,
-        snippet: formatLines(
+        text: formatLines(
           lines.slice(start, start + Math.min(windowLength, MAX_SNIPPET_LINES)),
           start + 1,
         ),
@@ -49,11 +55,11 @@ export function closestEditCandidates(
   return candidates
 }
 
-export function matchedEditCandidates(
+export function matchedEditLocations(
   content: string,
   matches: readonly TextMatch[],
   limit = 5,
-): readonly EditDiagnosticCandidate[] {
+): readonly EditMatchLocation[] {
   if (limit <= 0) return []
   return matches.slice(0, limit).map((match) => {
     const startLine = lineNumberAt(content, match.start)
@@ -61,13 +67,8 @@ export function matchedEditCandidates(
     return {
       startLine,
       endLine: startLine + Math.max(0, matchedLines.length - 1),
-      snippet: formatLines(matchedLines.slice(0, MAX_SNIPPET_LINES), startLine),
     }
   })
-}
-
-export function formatExpectedEditText(oldString: string): string {
-  return formatLines(splitLines(oldString).slice(0, MAX_SCORE_LINES))
 }
 
 function candidateScore(

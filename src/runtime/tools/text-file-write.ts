@@ -1,8 +1,10 @@
 import { createHash, randomBytes } from "node:crypto"
 import { link, open, readFile, rename, rm } from "node:fs/promises"
 import { dirname, join } from "node:path"
+import { RuntimeLimits } from "../limits.ts"
 import { resolveWritePath, type ResolvedWorkspacePath } from "./path-policy.ts"
 import type { ToolExecutionResult } from "./types.ts"
+import { createBoundedUnifiedDiff } from "./unified-diff.ts"
 
 export type CompareAndWriteTextFileInput = {
   readonly workspaceRoot: string
@@ -88,11 +90,20 @@ export async function compareAndWriteTextFile(
           sha256: sha256(written),
           byteCount: written.byteLength,
           created: !target.exists,
+          diff: createBoundedUnifiedDiff({
+            path: target.relativePath,
+            before:
+              checked.currentContent === null
+                ? null
+                : checked.currentContent.toString("utf8"),
+            after: input.content,
+            maxBytes: RuntimeLimits.toolDiffBytes,
+          }),
         }
         return {
           ok: true,
           output,
-          content: JSON.stringify(output),
+          content: `${output.created ? "Created" : "Updated"} ${output.path} (${output.byteCount} bytes, sha256 ${output.sha256}).`,
         }
       } finally {
         await rm(tempPath, { force: true })
@@ -133,19 +144,26 @@ async function checkPrecondition(
   target: Extract<ResolvedWorkspacePath, { readonly ok: true }>,
   expectedSha256: string | null,
 ): Promise<
-  | { readonly ok: true; readonly currentSha256: string | null }
+  | {
+      readonly ok: true
+      readonly currentSha256: string | null
+      readonly currentContent: Buffer | null
+    }
   | { readonly ok: false; readonly result: ToolExecutionResult }
 > {
   if (!target.exists) {
     if (expectedSha256 === null) {
-      return { ok: true, currentSha256: null }
+      return { ok: true, currentSha256: null, currentContent: null }
     }
     return {
       ok: false,
       result: writeFailure(
         "file_missing",
-        "File does not exist; use expectedSha256 null to create it.",
-        { suggestion: "Retry as an explicit new-file creation." },
+        "The observed file no longer exists.",
+        {
+          suggestion:
+            "Inspect the path before deciding whether to recreate it.",
+        },
       ),
     }
   }
@@ -155,21 +173,25 @@ async function checkPrecondition(
       ok: false,
       result: writeFailure(
         "file_exists",
-        "File already exists; provide expectedSha256 to overwrite it.",
-        { suggestion: "Read the complete file before replacing it." },
+        "File was created before this new-file write could commit.",
+        {
+          suggestion:
+            "Read the complete file before deciding whether to replace it.",
+        },
       ),
     }
   }
 
-  const currentSha256 = sha256(await readFile(target.absolutePath))
+  const currentContent = await readFile(target.absolutePath)
+  const currentSha256 = sha256(currentContent)
   if (currentSha256 === expectedSha256) {
-    return { ok: true, currentSha256 }
+    return { ok: true, currentSha256, currentContent }
   }
   return {
     ok: false,
     result: writeFailure(
       "stale_sha256",
-      "expectedSha256 does not match the current file contents.",
+      "The file changed since it was observed.",
       {
         currentSha256,
         suggestion: "Read the file again before retrying the write.",
@@ -192,12 +214,19 @@ function writeFailure(
     readonly suggestion?: string
   },
 ): ToolExecutionResult {
-  const error = { code, message, ...details }
   return {
     ok: false,
     code,
     message,
-    content: JSON.stringify({ error }),
+    content: [
+      `${code}: ${message}`,
+      ...(details?.currentSha256 === undefined
+        ? []
+        : [`Current sha256: ${details.currentSha256}`]),
+      ...(details?.suggestion === undefined
+        ? []
+        : [`Suggestion: ${details.suggestion}`]),
+    ].join("\n"),
     ...(details === undefined ? {} : { output: details }),
   }
 }

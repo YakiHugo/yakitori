@@ -4,9 +4,7 @@ import type { JsonObject } from "../../kernel/index.ts"
 import { RuntimeLimits } from "../limits.ts"
 import {
   closestEditCandidates,
-  formatExpectedEditText,
-  matchedEditCandidates,
-  type EditDiagnosticCandidate,
+  matchedEditLocations,
 } from "./edit-file-diagnostics.ts"
 import { locateEditMatches } from "./edit-file-match.ts"
 import {
@@ -70,11 +68,13 @@ export function createEditFileTool(
         })
       }
 
-      const observed = context.fileObservations?.latest(resolved.relativePath)
+      const observed = context.visibleFileObservations?.latest(
+        resolved.relativePath,
+      )
       if (observed === undefined) {
         return editFailure(
           "file_not_observed",
-          `${resolved.relativePath} has not been observed in this session.`,
+          `${resolved.relativePath} is not visible in the current model context.`,
           { suggestion: "Read it first with read_file or grep." },
         )
       }
@@ -100,10 +100,11 @@ export function createEditFileTool(
       }
 
       const currentSha256 = sha256(bytes)
-      if (currentSha256 !== observedSha256) {
+      const optimisticRebase = currentSha256 !== observedSha256
+      if (optimisticRebase && parsed.replaceAll) {
         return editFailure(
           "file_changed_since_observation",
-          "The file changed since it was last observed in this session.",
+          "The file changed since it was observed; replaceAll requires the observed revision.",
           {
             suggestion:
               "Read the file again and rebuild the edit from its latest contents.",
@@ -123,37 +124,35 @@ export function createEditFileTool(
       }
 
       const located = locateEditMatches(content, parsed.oldString)
-      if (located.matches.length === 0) {
-        const candidates = closestEditCandidates(content, parsed.oldString)
+      if (
+        optimisticRebase &&
+        (located.mode !== "exact" || located.matches.length !== 1)
+      ) {
         return editFailure(
-          "edit_target_not_found",
-          `oldString was not found in ${resolved.relativePath}.`,
+          "file_changed_since_observation",
+          "The file changed since it was observed and the exact edit anchor is no longer unique.",
           {
-            expected: formatExpectedEditText(parsed.oldString),
-            candidates,
-            recovery: editReadRecovery(
-              resolved.relativePath,
-              candidates[0],
-              "Read the suggested range and retry edit_file with exact current text and enough surrounding context.",
-            ),
+            suggestion:
+              "Read the file again and rebuild the edit from its latest contents.",
           },
         )
       }
-      if (!parsed.replaceAll && located.matches.length > 1) {
-        const candidates = matchedEditCandidates(content, located.matches)
+      if (located.matches.length === 0) {
+        const nearMatches = closestEditCandidates(content, parsed.oldString)
         return editFailure(
-          "edit_target_ambiguous",
+          "old_string_not_found",
+          `oldString was not found in ${resolved.relativePath}.`,
+          nearMatches.length === 0 ? {} : { nearMatches },
+        )
+      }
+      if (!parsed.replaceAll && located.matches.length > 1) {
+        return editFailure(
+          "old_string_ambiguous",
           `oldString matched ${located.matches.length} locations in ${resolved.relativePath}.`,
           {
             matchMode: located.mode,
             matchCount: located.matches.length,
-            expected: formatExpectedEditText(parsed.oldString),
-            candidates,
-            recovery: editReadRecovery(
-              resolved.relativePath,
-              candidates[0],
-              "Read the suggested range and add surrounding oldString context, or set replaceAll only when every occurrence should change.",
-            ),
+            locations: matchedEditLocations(content, located.matches),
           },
         )
       }
@@ -161,6 +160,16 @@ export function createEditFileTool(
       const matches = parsed.replaceAll
         ? located.matches
         : located.matches.slice(0, 1)
+      const changedRanges = matchedEditLocations(content, matches)
+      const editWithinObservedRanges =
+        observed.complete ||
+        changedRanges.every((changed) =>
+          observed.ranges?.some(
+            (range) =>
+              range.startLine <= changed.startLine &&
+              range.endLine >= changed.endLine,
+          ),
+        )
       const replacement = normalizeReplacementLineEndings(
         parsed.newString,
         dominantLineEnding(content),
@@ -192,7 +201,7 @@ export function createEditFileTool(
         workspaceRoot: context.workspaceRoot,
         path: parsed.path,
         content: updated,
-        expectedSha256: observedSha256,
+        expectedSha256: currentSha256,
       })
       if (!written.ok) {
         if (written.code !== "stale_sha256") return written
@@ -213,11 +222,19 @@ export function createEditFileTool(
         ...baseOutput,
         replacementCount: matches.length,
         matchMode: located.mode,
+        optimisticRebase,
+        observedSha256,
+        changedRanges,
+        observation: {
+          kind: observed.observation,
+          complete: observed.complete,
+          editWithinObservedRanges,
+        },
       }
       return {
         ok: true,
         output,
-        content: JSON.stringify(output),
+        content: `Updated ${resolved.relativePath}: replaced ${matches.length} ${matches.length === 1 ? "match" : "matches"} (${located.mode}).`,
       }
     },
   }
@@ -302,38 +319,49 @@ function editInputFailure(
   return { ok: false, result: editFailure(code, message) }
 }
 
-function editReadRecovery(
-  path: string,
-  candidate: EditDiagnosticCandidate | undefined,
-  instruction: string,
-): JsonObject {
-  const offset = Math.max(1, (candidate?.startLine ?? 1) - 3)
-  const candidateLines =
-    candidate === undefined ? 1 : candidate.endLine - candidate.startLine + 1
-  return {
-    action: "read_file",
-    input: {
-      path,
-      offset,
-      limit: Math.min(50, Math.max(10, candidateLines + 6)),
-    },
-    instruction,
-  }
-}
-
 function editFailure(
   code: string,
   message: string,
   details: JsonObject = {},
 ): ToolExecutionResult {
-  const error = { code, message, ...details }
   return {
     ok: false,
     code,
     message,
-    content: JSON.stringify({ error }),
+    content: renderEditFailure(code, message, details),
     ...(Object.keys(details).length === 0 ? {} : { output: details }),
   }
+}
+
+function renderEditFailure(
+  code: string,
+  message: string,
+  details: JsonObject,
+): string {
+  const lines = [`${code}: ${message}`]
+  if (typeof details.suggestion === "string") {
+    lines.push(`Suggestion: ${details.suggestion}`)
+  }
+  if (Array.isArray(details.nearMatches)) {
+    lines.push("Near matches:")
+    for (const match of details.nearMatches) {
+      if (!isRecord(match)) continue
+      lines.push(
+        `Lines ${String(match.startLine)}-${String(match.endLine)} (score ${String(match.score)}):`,
+      )
+      if (typeof match.text === "string") lines.push(match.text)
+    }
+  }
+  if (Array.isArray(details.locations)) {
+    lines.push("Exact match locations:")
+    for (const location of details.locations) {
+      if (!isRecord(location)) continue
+      lines.push(
+        `- lines ${String(location.startLine)}-${String(location.endLine)}`,
+      )
+    }
+  }
+  return lines.join("\n")
 }
 
 function sha256(value: Buffer): string {

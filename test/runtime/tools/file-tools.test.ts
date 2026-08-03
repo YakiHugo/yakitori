@@ -34,17 +34,12 @@ describe("bounded file tools", () => {
     })
   })
 
-  it("compare-and-write succeeds, rejects stale hashes, and creates new files", async () => {
+  it("creates new files and derives overwrite revisions from visible observations", async () => {
     await withWorkspace(async (workspace) => {
       const write = createWriteFileTool()
-      const read = createReadFileTool()
 
       const created = await write.execute(
-        {
-          path: "new.txt",
-          content: "hello",
-          expectedSha256: null,
-        },
+        { path: "new.txt", content: "hello" },
         { workspaceRoot: workspace },
       )
       expect(created.ok).toBe(true)
@@ -52,112 +47,125 @@ describe("bounded file tools", () => {
       expect(created.output).toMatchObject({
         previousSha256: null,
         created: true,
+        diff: {
+          format: "unified",
+          text: expect.stringContaining("+++ b/new.txt"),
+          truncated: false,
+        },
       })
 
       const collision = await write.execute(
-        {
-          path: "new.txt",
-          content: "nope",
-          expectedSha256: null,
-        },
+        { path: "new.txt", content: "nope" },
         { workspaceRoot: workspace },
       )
       expect(collision.ok).toBe(false)
       if (collision.ok) return
-      expect(collision.code).toBe("file_exists")
+      expect(collision.code).toBe("file_not_observed")
 
-      const current = await read.execute(
-        { path: "new.txt" },
-        { workspaceRoot: workspace },
-      )
-      expect(current.ok).toBe(true)
-      if (!current.ok) return
-      const sha =
-        typeof current.output === "object" &&
-        current.output !== null &&
-        "sha256" in current.output
-          ? String(current.output.sha256)
-          : ""
-
+      const observed = observedContext(workspace, "new.txt", "hello")
+      await writeFile(join(workspace, "new.txt"), "external")
       const stale = await write.execute(
-        {
-          path: "new.txt",
-          content: "stale",
-          expectedSha256: "0".repeat(64),
-        },
-        { workspaceRoot: workspace },
+        { path: "new.txt", content: "stale" },
+        observed,
       )
       expect(stale.ok).toBe(false)
       if (stale.ok) return
       expect(stale).toMatchObject({
         code: "stale_sha256",
         output: {
-          currentSha256: sha,
+          currentSha256: sha256("external"),
           suggestion: "Read the file again before retrying the write.",
         },
       })
-      expect(JSON.parse(stale.content)).toEqual({
-        error: {
-          code: "stale_sha256",
-          message: "expectedSha256 does not match the current file contents.",
-          currentSha256: sha,
-          suggestion: "Read the file again before retrying the write.",
-        },
-      })
+      expect(stale.content).toBe(
+        `stale_sha256: The file changed since it was observed.\nCurrent sha256: ${sha256("external")}\nSuggestion: Read the file again before retrying the write.`,
+      )
 
+      await writeFile(join(workspace, "new.txt"), "hello")
       const updated = await write.execute(
-        {
-          path: "new.txt",
-          content: "updated",
-          expectedSha256: sha,
-        },
-        { workspaceRoot: workspace },
+        { path: "new.txt", content: "updated" },
+        observed,
       )
       expect(updated.ok).toBe(true)
       if (!updated.ok) return
       expect(updated.output).toMatchObject({
-        previousSha256: sha,
+        previousSha256: sha256("hello"),
         created: false,
       })
       expect(await readFile(join(workspace, "new.txt"), "utf8")).toBe("updated")
     })
   })
 
-  it("validates and normalizes the expected SHA-256 revision", async () => {
+  it("requires a complete observation before replacing an existing file", async () => {
     await withWorkspace(async (workspace) => {
       await writeFile(join(workspace, "revision.txt"), "before")
       const write = createWriteFileTool()
 
-      const invalid = await write.execute(
-        {
-          path: "revision.txt",
-          content: "after",
-          expectedSha256: "not-a-sha",
-        },
+      const unobserved = await write.execute(
+        { path: "revision.txt", content: "after" },
         { workspaceRoot: workspace },
       )
-      expect(invalid).toMatchObject({
+      expect(unobserved).toMatchObject({
         ok: false,
-        code: "invalid_tool_input",
+        code: "file_not_observed",
       })
 
-      const expectedSha256 = createHash("sha256")
-        .update("before")
-        .digest("hex")
-        .toUpperCase()
-      const updated = await write.execute(
+      const partial = createFileObservationStore()
+      partial.recordSuccess(
+        "read_file",
+        {},
         {
           path: "revision.txt",
-          content: "after",
-          expectedSha256,
+          sha256: sha256("before"),
+          truncated: true,
+          range: { offset: 1, limit: 1, requestedLimit: 1 },
         },
-        { workspaceRoot: workspace },
+      )
+      expect(
+        await write.execute(
+          { path: "revision.txt", content: "after" },
+          {
+            workspaceRoot: workspace,
+            visibleFileObservations: partial,
+          },
+        ),
+      ).toMatchObject({
+        ok: false,
+        code: "file_not_fully_observed",
+      })
+
+      const updated = await write.execute(
+        { path: "revision.txt", content: "after" },
+        observedContext(workspace, "revision.txt", "before"),
       )
 
       expect(updated.ok).toBe(true)
       expect(await readFile(join(workspace, "revision.txt"), "utf8")).toBe(
         "after",
       )
+    })
+  })
+
+  it("bounds inline unified diffs independently of file size", async () => {
+    await withWorkspace(async (workspace) => {
+      const before = `${"before\n".repeat(20_000)}`
+      const after = `${"after\n".repeat(20_000)}`
+      await writeFile(join(workspace, "large-diff.txt"), before)
+
+      const result = await createWriteFileTool().execute(
+        { path: "large-diff.txt", content: after },
+        observedContext(workspace, "large-diff.txt", before),
+      )
+
+      expect(result).toMatchObject({
+        ok: true,
+        output: { diff: { format: "unified", truncated: true } },
+      })
+      if (!result.ok || !isObject(result.output)) return
+      const diff = result.output.diff
+      expect(
+        isObject(diff) && Buffer.byteLength(String(diff.text), "utf8"),
+      ).toBeLessThanOrEqual(64 * 1024)
     })
   })
 
@@ -180,7 +188,6 @@ describe("bounded file tools", () => {
           {
             path: "strict.txt",
             content: "after\n",
-            expectedSha256: sha256("before\n"),
             replaceAll: true,
           },
           { workspaceRoot: workspace },
@@ -210,6 +217,17 @@ describe("bounded file tools", () => {
         previousSha256: sha256(before),
         replacementCount: 1,
         matchMode: "exact",
+        optimisticRebase: false,
+        observation: {
+          kind: "whole_file_read",
+          complete: true,
+          editWithinObservedRanges: true,
+        },
+        diff: {
+          format: "unified",
+          text: expect.stringContaining("-const value = 1"),
+          truncated: false,
+        },
       })
       expect(await readFile(join(workspace, "value.ts"), "utf8")).toBe(
         "const value = 2\n",
@@ -245,6 +263,58 @@ describe("bounded file tools", () => {
             "Read the file again and rebuild the edit from its latest contents.",
         },
       })
+    })
+  })
+
+  it("rebases a single exact unique edit and records its observation risk", async () => {
+    await withWorkspace(async (workspace) => {
+      const before = "first\ntarget = 1\nlast\n"
+      await writeFile(join(workspace, "rebase.txt"), before)
+      const fileObservations = createFileObservationStore()
+      fileObservations.recordSuccess(
+        "grep",
+        {},
+        {
+          observations: [
+            {
+              path: "rebase.txt",
+              sha256: sha256(before),
+              ranges: [{ startLine: 1, endLine: 1 }],
+            },
+          ],
+        },
+      )
+      await writeFile(join(workspace, "rebase.txt"), `${before}external\n`)
+
+      const result = await createEditFileTool().execute(
+        {
+          path: "rebase.txt",
+          oldString: "target = 1",
+          newString: "target = 2",
+        },
+        {
+          workspaceRoot: workspace,
+          fileObservations,
+          visibleFileObservations: fileObservations,
+        },
+      )
+
+      expect(result).toMatchObject({
+        ok: true,
+        output: {
+          optimisticRebase: true,
+          observedSha256: sha256(before),
+          changedRanges: [{ startLine: 2, endLine: 2 }],
+          observation: {
+            kind: "grep_snippet",
+            complete: false,
+            editWithinObservedRanges: false,
+          },
+        },
+      })
+      expect(await readFile(join(workspace, "rebase.txt"), "utf8")).toBe(
+        `${before.replace("target = 1", "target = 2")}external\n`,
+      )
     })
   })
 
@@ -336,7 +406,7 @@ describe("bounded file tools", () => {
 
       expect(result).toMatchObject({
         ok: false,
-        code: "edit_target_not_found",
+        code: "old_string_not_found",
       })
       expect(await readFile(join(workspace, "literal.ts"), "utf8")).toBe(before)
     })
@@ -366,24 +436,21 @@ describe("bounded file tools", () => {
 
       expect(result).toMatchObject({
         ok: false,
-        code: "edit_target_not_found",
+        code: "old_string_not_found",
         output: {
-          expected: '  function beta() {\n    return "stale"\n  }',
-          recovery: {
-            action: "read_file",
-            input: { path: "candidate.ts", offset: 1, limit: 10 },
-          },
+          nearMatches: expect.any(Array),
         },
       })
       if (result.ok) return
-      const error = JSON.parse(result.content).error
-      expect(error.candidates).toHaveLength(3)
-      expect(error.candidates[0]).toEqual({
+      const output = result.output as { nearMatches: unknown[] }
+      expect(output.nearMatches).toHaveLength(2)
+      expect(output.nearMatches[0]).toEqual({
         startLine: 4,
         endLine: 6,
         score: 4,
-        snippet: '  4| function beta() {\n  5|   return "current"\n  6| }',
+        text: '  4| function beta() {\n  5|   return "current"\n  6| }',
       })
+      expect(result.content).toContain("Near matches:")
       expect(await readFile(join(workspace, "candidate.ts"), "utf8")).toBe(
         before,
       )
@@ -407,7 +474,7 @@ describe("bounded file tools", () => {
 
       expect(result).toMatchObject({
         ok: false,
-        code: "edit_target_not_found",
+        code: "old_string_not_found",
       })
       expect(await readFile(join(workspace, "script.py"), "utf8")).toBe(python)
 
@@ -424,7 +491,7 @@ describe("bounded file tools", () => {
       )
       expect(yamlResult).toMatchObject({
         ok: false,
-        code: "edit_target_not_found",
+        code: "old_string_not_found",
       })
       expect(await readFile(join(workspace, "config.yaml"), "utf8")).toBe(yaml)
     })
@@ -464,25 +531,19 @@ describe("bounded file tools", () => {
       )
       expect(ambiguous).toMatchObject({
         ok: false,
-        code: "edit_target_ambiguous",
+        code: "old_string_ambiguous",
         output: {
           matchCount: 2,
-          candidates: [
+          locations: [
             {
               startLine: 1,
               endLine: 1,
-              snippet: "  1| const value = 1",
             },
             {
               startLine: 2,
               endLine: 2,
-              snippet: "  2| const value = 1",
             },
           ],
-          recovery: {
-            action: "read_file",
-            input: { path: "ambiguous.ts", offset: 1, limit: 10 },
-          },
         },
       })
       expect(await readFile(join(workspace, "ambiguous.ts"), "utf8")).toBe(
@@ -565,6 +626,19 @@ describe("bounded file tools", () => {
       definitions.find((tool) => tool.name === "edit_file")?.inputSchema
         .properties,
     ).not.toHaveProperty("expectedSha256")
+    expect(
+      definitions.find((tool) => tool.name === "write_file")?.inputSchema,
+    ).toMatchObject({
+      required: ["path", "content"],
+      properties: {
+        path: { type: "string" },
+        content: { type: "string" },
+      },
+    })
+    expect(
+      definitions.find((tool) => tool.name === "write_file")?.inputSchema
+        .properties,
+    ).not.toHaveProperty("expectedSha256")
   })
 
   it("rejects path traversal and symlink escapes", async () => {
@@ -581,7 +655,6 @@ describe("bounded file tools", () => {
             {
               path: "../secret.txt",
               content: "x",
-              expectedSha256: null,
             },
             { workspaceRoot: workspace },
           )
@@ -591,7 +664,6 @@ describe("bounded file tools", () => {
             {
               path: "link/secret.txt",
               content: "x",
-              expectedSha256: null,
             },
             { workspaceRoot: workspace },
           )
@@ -631,20 +703,12 @@ describe("bounded file tools", () => {
   it("serializes compare-and-write so one concurrent writer observes stale state", async () => {
     await withWorkspace(async (workspace) => {
       await writeFile(join(workspace, "shared.txt"), "original")
-      const expectedSha256 = createHash("sha256")
-        .update("original")
-        .digest("hex")
       const write = createWriteFileTool()
+      const context = observedContext(workspace, "shared.txt", "original")
 
       const results = await Promise.all([
-        write.execute(
-          { path: "shared.txt", content: "first", expectedSha256 },
-          { workspaceRoot: workspace },
-        ),
-        write.execute(
-          { path: "shared.txt", content: "second", expectedSha256 },
-          { workspaceRoot: workspace },
-        ),
+        write.execute({ path: "shared.txt", content: "first" }, context),
+        write.execute({ path: "shared.txt", content: "second" }, context),
       ])
 
       expect(results.filter((result) => result.ok)).toHaveLength(1)
@@ -662,19 +726,19 @@ describe("bounded file tools", () => {
       const write = createWriteFileTool()
       const results = await Promise.all([
         write.execute(
-          { path: "created.txt", content: "first", expectedSha256: null },
+          { path: "created.txt", content: "first" },
           { workspaceRoot: workspace },
         ),
         write.execute(
-          { path: "created.txt", content: "second", expectedSha256: null },
+          { path: "created.txt", content: "second" },
           { workspaceRoot: workspace },
         ),
       ])
 
       expect(results.filter((result) => result.ok)).toHaveLength(1)
-      expect(results.filter((result) => !result.ok)).toEqual([
-        expect.objectContaining({ code: "file_exists" }),
-      ])
+      const failures = results.filter((result) => !result.ok)
+      expect(failures).toHaveLength(1)
+      expect(["file_exists", "file_not_observed"]).toContain(failures[0]?.code)
     })
   })
 })
@@ -693,10 +757,18 @@ function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex")
 }
 
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
 function observedContext(workspaceRoot: string, path: string, content: string) {
   const fileObservations = createFileObservationStore()
   observe(fileObservations, path, content)
-  return { workspaceRoot, fileObservations }
+  return {
+    workspaceRoot,
+    fileObservations,
+    visibleFileObservations: fileObservations,
+  }
 }
 
 function observe(

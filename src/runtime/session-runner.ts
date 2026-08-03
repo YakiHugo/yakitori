@@ -757,6 +757,7 @@ export function createSessionRunner(
         sessionId: input.sessionId,
         turnId: input.turnId,
         toolCallId: call.id,
+        ...(result.output === undefined ? {} : { output: result.output }),
         error: {
           code: result.code,
           message: result.message,

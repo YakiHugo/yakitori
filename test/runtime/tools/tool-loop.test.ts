@@ -139,6 +139,250 @@ describe("tool loop", () => {
     })
   })
 
+  it("lets a later model call edit a file observed in its context", async () => {
+    await withToolRuntime(async (runtime) => {
+      await writeFile(join(runtime.workspace, "value.txt"), "value = 1\n")
+      const provider = createFauxProvider([
+        {
+          stopReason: ModelStopReason.ToolUse,
+          content: [
+            {
+              type: "tool_call",
+              id: "tool_read_value",
+              name: "read_file",
+              input: { path: "value.txt" },
+            },
+          ],
+        },
+        {
+          stopReason: ModelStopReason.ToolUse,
+          content: [
+            {
+              type: "tool_call",
+              id: "tool_edit_value",
+              name: "edit_file",
+              input: {
+                path: "value.txt",
+                oldString: "value = 1",
+                newString: "value = 2",
+              },
+            },
+          ],
+        },
+        { content: [{ type: "text", text: "updated" }] },
+      ])
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+      })
+      const session = await createSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "update value.txt" },
+      })
+
+      await runner.wake(session.sessionId)
+
+      expect(await readFile(join(runtime.workspace, "value.txt"), "utf8")).toBe(
+        "value = 2\n",
+      )
+      const read = await runtime.kernel.readSession({
+        sessionId: session.sessionId,
+      })
+      expect(read.session?.tools).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            toolCallId: "tool_edit_value",
+            state: "completed",
+          }),
+        ]),
+      )
+    })
+  })
+
+  it("derives a whole-file write revision from a later model call's context", async () => {
+    await withToolRuntime(async (runtime) => {
+      await writeFile(join(runtime.workspace, "replace.txt"), "before\n")
+      const provider = createFauxProvider([
+        {
+          stopReason: ModelStopReason.ToolUse,
+          content: [
+            {
+              type: "tool_call",
+              id: "tool_read_replace",
+              name: "read_file",
+              input: { path: "replace.txt" },
+            },
+          ],
+        },
+        {
+          stopReason: ModelStopReason.ToolUse,
+          content: [
+            {
+              type: "tool_call",
+              id: "tool_write_replace",
+              name: "write_file",
+              input: { path: "replace.txt", content: "after\n" },
+            },
+          ],
+        },
+        { content: [{ type: "text", text: "replaced" }] },
+      ])
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+      })
+      const session = await createSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "replace the file" },
+      })
+
+      await runner.wake(session.sessionId)
+
+      expect(
+        await readFile(join(runtime.workspace, "replace.txt"), "utf8"),
+      ).toBe("after\n")
+    })
+  })
+
+  it("does not let a read retroactively authorize an edit from the same model call", async () => {
+    await withToolRuntime(async (runtime) => {
+      await writeFile(join(runtime.workspace, "same-call.txt"), "value = 1\n")
+      const provider = createFauxProvider([
+        {
+          stopReason: ModelStopReason.ToolUse,
+          content: [
+            {
+              type: "tool_call",
+              id: "tool_same_read",
+              name: "read_file",
+              input: { path: "same-call.txt" },
+            },
+            {
+              type: "tool_call",
+              id: "tool_same_edit",
+              name: "edit_file",
+              input: {
+                path: "same-call.txt",
+                oldString: "value = 1",
+                newString: "value = 2",
+              },
+            },
+          ],
+        },
+        {
+          assertRequest: (request) => {
+            expect(request.messages).toEqual(
+              expect.arrayContaining([
+                expect.objectContaining({
+                  role: "tool",
+                  toolCallId: "tool_same_edit",
+                  isError: true,
+                  content: expect.stringContaining("file_not_observed"),
+                }),
+              ]),
+            )
+          },
+          content: [{ type: "text", text: "will retry later" }],
+        },
+      ])
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+      })
+      const session = await createSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "read and edit immediately" },
+      })
+
+      await runner.wake(session.sessionId)
+
+      expect(
+        await readFile(join(runtime.workspace, "same-call.txt"), "utf8"),
+      ).toBe("value = 1\n")
+    })
+  })
+
+  it("does not authorize edits from a context-truncated read result", async () => {
+    await withToolRuntime(async (runtime) => {
+      await writeFile(join(runtime.workspace, "truncated.txt"), "one\ntwo\n")
+      const provider = createFauxProvider([
+        {
+          stopReason: ModelStopReason.ToolUse,
+          content: [
+            {
+              type: "tool_call",
+              id: "tool_truncated_read",
+              name: "read_file",
+              input: { path: "truncated.txt" },
+            },
+          ],
+        },
+        {
+          assertRequest: (request) => {
+            expect(request.messages).toEqual(
+              expect.arrayContaining([
+                expect.objectContaining({
+                  role: "tool",
+                  toolCallId: "tool_truncated_read",
+                  content: expect.stringContaining("...[truncated"),
+                }),
+              ]),
+            )
+          },
+          stopReason: ModelStopReason.ToolUse,
+          content: [
+            {
+              type: "tool_call",
+              id: "tool_after_truncation",
+              name: "edit_file",
+              input: {
+                path: "truncated.txt",
+                oldString: "one",
+                newString: "changed",
+              },
+            },
+          ],
+        },
+        { content: [{ type: "text", text: "handled" }] },
+      ])
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+        limits: createRuntimeLimits({ modelVisibleToolResultLines: 1 }),
+      })
+      const session = await createSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "read then edit" },
+      })
+
+      await runner.wake(session.sessionId)
+
+      expect(
+        await readFile(join(runtime.workspace, "truncated.txt"), "utf8"),
+      ).toBe("one\ntwo\n")
+      const read = await runtime.kernel.readSession({
+        sessionId: session.sessionId,
+      })
+      expect(read.session?.tools).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            toolCallId: "tool_after_truncation",
+            state: "failed",
+            error: expect.objectContaining({ code: "file_not_observed" }),
+          }),
+        ]),
+      )
+    })
+  })
+
   it("turns unknown tools into bounded ToolResult errors for the next model call", async () => {
     await withToolRuntime(async (runtime) => {
       const provider = createFauxProvider([
@@ -199,7 +443,6 @@ describe("tool loop", () => {
               input: {
                 path: "out.txt",
                 content: "written by tool",
-                expectedSha256: null,
               },
             },
           ],
@@ -236,7 +479,6 @@ describe("tool loop", () => {
               input: {
                 path: "disabled.txt",
                 content: "must not be written",
-                expectedSha256: null,
               },
             },
           ],

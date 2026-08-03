@@ -1,4 +1,5 @@
 import { RuntimeLimits } from "../limits.ts"
+import { resolveWritePath } from "./path-policy.ts"
 import { compareAndWriteTextFile } from "./text-file-write.ts"
 import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
 
@@ -8,7 +9,7 @@ export function createWriteFileTool(
   return {
     name: "write_file",
     description:
-      "Create or intentionally replace a complete UTF-8 text file using compare-and-write. Existing files require expectedSha256 from a complete read_file result; new files require expectedSha256 null. Prefer edit_file for modifications—it only sends the diff. NEVER create *.md files unless the user explicitly requested one.",
+      "Create or intentionally replace a complete UTF-8 text file using compare-and-write. New files are created without a prior read. Before replacing an existing file, read the complete current file; write_file rejects missing, partial, or stale observations. Prefer edit_file for modifications. NEVER create *.md files unless the user explicitly requested one.",
     autoAllow: true,
     inputSchema: {
       type: "object",
@@ -22,24 +23,42 @@ export function createWriteFileTool(
           type: "string",
           description: "Complete desired UTF-8 contents of the file.",
         },
-        expectedSha256: {
-          type: ["string", "null"],
-          description:
-            "SHA-256 from a complete read_file result, or null only when creating a new file.",
-          pattern: "^[A-Fa-f0-9]{64}$",
-        },
       },
-      required: ["path", "content", "expectedSha256"],
+      required: ["path", "content"],
     },
     async execute(input, context): Promise<ToolExecutionResult> {
       const parsed = parseWriteInput(input, maxBytes)
       if (!parsed.ok) return parsed.result
+      const resolved = await resolveWritePath(
+        context.workspaceRoot,
+        parsed.path,
+      )
+      if (!resolved.ok) {
+        return writeFailure(resolved.error.code, resolved.error.message)
+      }
+      const observed = context.visibleFileObservations?.latest(
+        resolved.relativePath,
+      )
+      if (resolved.exists && observed === undefined) {
+        return writeFailure(
+          "file_not_observed",
+          `${resolved.relativePath} has not been read in the current model context.`,
+          "Read the complete file before replacing it.",
+        )
+      }
+      if (observed !== undefined && !observed.complete) {
+        return writeFailure(
+          "file_not_fully_observed",
+          `${resolved.relativePath} has only been partially observed.`,
+          "Read the complete file before replacing it.",
+        )
+      }
 
       return compareAndWriteTextFile({
         workspaceRoot: context.workspaceRoot,
-        path: parsed.path,
+        path: resolved.relativePath,
         content: parsed.content,
-        expectedSha256: parsed.expectedSha256,
+        expectedSha256: observed?.sha256 ?? null,
       })
     },
   }
@@ -53,7 +72,6 @@ function parseWriteInput(
       readonly ok: true
       readonly path: string
       readonly content: string
-      readonly expectedSha256: string | null
     }
   | { readonly ok: false; readonly result: ToolExecutionResult } {
   if (typeof input !== "object" || input === null || Array.isArray(input)) {
@@ -64,7 +82,7 @@ function parseWriteInput(
   }
   const record = input as Record<string, unknown>
   const unsupported = Object.keys(record).find(
-    (key) => key !== "path" && key !== "content" && key !== "expectedSha256",
+    (key) => key !== "path" && key !== "content",
   )
   if (unsupported !== undefined) {
     return {
@@ -95,38 +113,27 @@ function parseWriteInput(
       ),
     }
   }
-  if (
-    !(
-      typeof record.expectedSha256 === "string" ||
-      record.expectedSha256 === null
-    )
-  ) {
-    return {
-      ok: false,
-      result: writeInputFailure(
-        "write_file expectedSha256 must be a string or null.",
-      ),
-    }
-  }
-  if (
-    typeof record.expectedSha256 === "string" &&
-    !/^[a-f0-9]{64}$/i.test(record.expectedSha256)
-  ) {
-    return {
-      ok: false,
-      result: writeInputFailure(
-        "write_file expectedSha256 must be a 64-character hex SHA-256.",
-      ),
-    }
-  }
   return {
     ok: true,
     path: record.path,
     content: record.content,
-    expectedSha256:
-      typeof record.expectedSha256 === "string"
-        ? record.expectedSha256.toLowerCase()
-        : null,
+  }
+}
+
+function writeFailure(
+  code: string,
+  message: string,
+  suggestion?: string,
+): ToolExecutionResult {
+  return {
+    ok: false,
+    code,
+    message,
+    content: [
+      `${code}: ${message}`,
+      ...(suggestion === undefined ? [] : [`Suggestion: ${suggestion}`]),
+    ].join("\n"),
+    ...(suggestion === undefined ? {} : { output: { suggestion } }),
   }
 }
 
@@ -138,6 +145,6 @@ function writeInputFailure(
     ok: false,
     code,
     message,
-    content: JSON.stringify({ error: { code, message } }),
+    content: `${code}: ${message}`,
   }
 }
