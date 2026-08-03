@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto"
 import type { JsonObject } from "../../kernel/index.ts"
 import { SensitivePathGlobs } from "./path-policy.ts"
 
@@ -18,7 +17,6 @@ export type GrepInput = {
   readonly type?: string
   readonly multiline: boolean
   readonly onlyMatching: boolean
-  readonly expectedRevision?: string
 }
 
 const VCS_DIRECTORIES = [".git", ".svn", ".hg", ".bzr", ".jj", ".sl"]
@@ -56,7 +54,6 @@ export const GrepInputSchema: JsonObject = {
     head_limit: { type: "integer", minimum: 0 },
     offset: { type: "integer", minimum: 0 },
     multiline: { type: "boolean" },
-    expected_revision: { type: "string" },
   },
   required: ["pattern"],
 }
@@ -90,7 +87,6 @@ export function parseGrepInput(
     "head_limit",
     "offset",
     "multiline",
-    "expected_revision",
   ])
   const unsupported = Object.keys(input).find((key) => !allowed.has(key))
   if (unsupported !== undefined) {
@@ -99,7 +95,7 @@ export function parseGrepInput(
       message: `grep does not accept the ${unsupported} argument.`,
     }
   }
-  for (const key of ["path", "glob", "type", "expected_revision"] as const) {
+  for (const key of ["path", "glob", "type"] as const) {
     if (input[key] !== undefined && typeof input[key] !== "string") {
       return { ok: false, message: `grep ${key} must be a string.` }
     }
@@ -168,9 +164,6 @@ export function parseGrepInput(
     ...(typeof input.type === "string" ? { type: input.type } : {}),
     multiline: input.multiline === true,
     onlyMatching: input["-o"] === true,
-    ...(typeof input.expected_revision === "string"
-      ? { expectedRevision: input.expected_revision }
-      : {}),
   }
 }
 
@@ -226,31 +219,6 @@ export function buildGrepArguments(
     input.pattern,
     path,
   ]
-}
-
-export function grepRevision(
-  input: GrepInput,
-  path: string,
-  includeIgnored: boolean,
-  checkpoint: string,
-): string {
-  const query = {
-    pattern: input.pattern,
-    path,
-    ...(input.glob === undefined ? {} : { glob: input.glob }),
-    outputMode: input.outputMode,
-    caseInsensitive: input.caseInsensitive,
-    lineNumbers: input.lineNumbers,
-    beforeContext: input.beforeContext,
-    afterContext: input.afterContext,
-    ...(input.type === undefined ? {} : { type: input.type }),
-    multiline: input.multiline,
-    onlyMatching: input.onlyMatching,
-    includeIgnored,
-  }
-  return createHash("sha256")
-    .update(JSON.stringify({ query, checkpoint }))
-    .digest("hex")
 }
 
 function boundedInteger(value: unknown, minimum: number, maximum = Infinity) {

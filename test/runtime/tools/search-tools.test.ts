@@ -67,7 +67,6 @@ describe("workspace search tools", () => {
         head_limit: { type: "integer" },
         offset: { type: "integer" },
         multiline: { type: "boolean" },
-        expected_revision: { type: "string" },
       },
     })
     expect(schema.properties).not.toHaveProperty("include_ignored")
@@ -146,7 +145,7 @@ describe("workspace search tools", () => {
     })
   })
 
-  it("paginates against an observation checkpoint and rejects stale continuation", async () => {
+  it("paginates a live search without claiming snapshot consistency", async () => {
     await withWorkspace(async (workspace) => {
       await writeFile(join(workspace, "a.ts"), "needle\n")
       await writeFile(join(workspace, "b.ts"), "needle\n")
@@ -184,7 +183,6 @@ describe("workspace search tools", () => {
           output_mode: "content",
           head_limit: 1,
           offset: page.next.offset,
-          expected_revision: page.next.expected_revision,
         },
         { workspaceRoot: workspace, fileObservations: observations },
       )
@@ -198,17 +196,16 @@ describe("workspace search tools", () => {
           sha256: "f".repeat(64),
         },
       )
-      const stale = await tool.execute(
+      const livePage = await tool.execute(
         {
           pattern: "needle",
           output_mode: "content",
           head_limit: 1,
           offset: page.next.offset,
-          expected_revision: page.next.expected_revision,
         },
         { workspaceRoot: workspace, fileObservations: observations },
       )
-      expect(stale).toMatchObject({ ok: false, code: "stale_revision" })
+      expect(successContent(livePage)).toContain("b.ts:1:needle")
     })
   })
 

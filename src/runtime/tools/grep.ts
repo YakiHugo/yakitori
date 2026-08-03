@@ -3,7 +3,6 @@ import { open } from "node:fs/promises"
 import { RuntimeLimits } from "../limits.ts"
 import {
   buildGrepArguments,
-  grepRevision,
   GrepInputSchema,
   parseGrepInput,
   type GrepInput,
@@ -74,28 +73,6 @@ export function createGrepTool(
       )
       if (!resolved.ok) {
         return failure(resolved.error.code, resolved.error.message)
-      }
-
-      const currentRevision = grepRevision(
-        parsed,
-        resolved.relativePath,
-        includeIgnored,
-        context.fileObservations?.checkpoint() ?? "untracked",
-      )
-      if (parsed.offset > 0 && parsed.expectedRevision === undefined) {
-        return failure(
-          "missing_revision",
-          "grep expected_revision is required when offset is greater than zero. Restart at offset 0.",
-        )
-      }
-      if (
-        parsed.expectedRevision !== undefined &&
-        parsed.expectedRevision !== currentRevision
-      ) {
-        return failure(
-          "stale_revision",
-          "grep results may have changed since the previous page. Restart at offset 0 without expected_revision.",
-        )
       }
 
       const entries: SearchEntry[] = []
@@ -172,16 +149,12 @@ export function createGrepTool(
         parsed,
         workspaceRoot: context.workspaceRoot,
         resolvedPath: resolved.relativePath,
-        includeIgnored,
         entries,
         hasMore,
         lineTruncated,
         ...(limitReason === undefined ? {} : { limitReason }),
         maxOutputBytes: limits.maxOutputBytes,
         stopResult: result,
-        ...(context.fileObservations === undefined
-          ? {}
-          : { fileObservations: context.fileObservations }),
       })
     },
   }
@@ -248,14 +221,12 @@ async function buildSuccess(input: {
   readonly parsed: GrepInput
   readonly workspaceRoot: string
   readonly resolvedPath: string
-  readonly includeIgnored: boolean
   readonly entries: SearchEntry[]
   readonly hasMore: boolean
   readonly lineTruncated: boolean
   readonly limitReason?: string
   readonly maxOutputBytes: number
   readonly stopResult: Extract<RipgrepRecordResult, { readonly ok: true }>
-  readonly fileObservations?: import("./file-observations.ts").FileObservationStore
 }): Promise<ToolExecutionResult> {
   const entries = [...input.entries]
   const hashes = await hashVisibleFiles(input.workspaceRoot, entries)
@@ -271,7 +242,7 @@ async function buildSuccess(input: {
       hashes,
     )
   }
-  return { ok: true, output, content: JSON.stringify(output) }
+  return { ok: true, output, content: output.content }
 }
 
 function makeOutput(
@@ -302,29 +273,17 @@ function makeOutput(
       input.parsed.offset,
     ),
   }
-  const checkpoint =
-    input.fileObservations?.checkpointAfterSuccess("grep", {}, preliminary) ??
-    "untracked"
-  const revision = grepRevision(
-    input.parsed,
-    input.resolvedPath,
-    input.includeIgnored,
-    checkpoint,
-  )
   const nextOffset = input.parsed.offset + entries.length
   return {
     ...preliminary,
-    revision,
     page: {
       offset: input.parsed.offset,
       returned: entries.length,
       has_more: input.hasMore,
-      snapshot_token: revision,
       ...(input.hasMore
         ? {
             next: {
               offset: nextOffset,
-              expected_revision: revision,
             },
           }
         : {}),
@@ -343,7 +302,7 @@ function renderContent(
     ...(lineTruncated ? ["(One or more result lines were truncated.)"] : []),
     ...(hasMore
       ? [
-          `(Results truncated. Continue from offset ${offset + entries.length} with the returned expected_revision, or narrow the search.)`,
+          `(Results truncated. Continue from offset ${offset + entries.length}, or narrow the search. Pagination reruns the live search and is best effort.)`,
         ]
       : []),
   ]
@@ -474,7 +433,7 @@ function failure(code: string, message: string): ToolExecutionResult {
     ok: false,
     code,
     message,
-    content: JSON.stringify({ error: { code, message } }),
+    content: `${code}: ${message}`,
   }
 }
 
