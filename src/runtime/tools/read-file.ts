@@ -107,26 +107,6 @@ export function createReadFileTool(
         )
       }
 
-      if (
-        context.fileObservations?.hasRead({
-          path: resolved.relativePath,
-          sha256: snapshot.sha256,
-          offset: start,
-          limit: parsed.limit,
-        })
-      ) {
-        const output = {
-          path: resolved.relativePath,
-          sha256: snapshot.sha256,
-          unchanged: true,
-          status: "read_unchanged",
-          range: { offset: start, requestedLimit: parsed.limit },
-          content:
-            "(File unchanged; reuse the previous read_file result for this range.)",
-        }
-        return { ok: true, output, content: JSON.stringify(output) }
-      }
-
       const selected = selectSnapshotLines({
         lines: snapshot.lines,
         lineCount: snapshot.lineCount,
@@ -185,7 +165,7 @@ export function createReadFileTool(
         ...(nextOffset === undefined ? {} : { continuation: { nextOffset } }),
         content: visibleContent,
       }
-      return { ok: true, output, content: JSON.stringify(output) }
+      return { ok: true, output, content: visibleContent }
     },
   }
 }
@@ -348,12 +328,16 @@ function readFailure(
   message: string,
   details: Record<string, string | number> = {},
 ): ToolExecutionResult {
-  const error = { code, message, ...details }
   return {
     ok: false,
     code,
     message,
-    content: JSON.stringify({ error }),
+    content: [
+      `${code}: ${message}`,
+      ...(typeof details.suggestion === "string"
+        ? [`Suggestion: ${details.suggestion}`]
+        : []),
+    ].join("\n"),
     ...(Object.keys(details).length === 0 ? {} : { output: details }),
   }
 }

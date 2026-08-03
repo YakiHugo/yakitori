@@ -162,7 +162,7 @@ describe("read_file contract", () => {
     })
   })
 
-  it("returns a stub for an unchanged duplicate range", async () => {
+  it("records a self-contained result for an unchanged duplicate range", async () => {
     await withWorkspace(async (workspace) => {
       const body = "one\ntwo\n"
       await writeFile(join(workspace, "same.txt"), body)
@@ -189,7 +189,10 @@ describe("read_file contract", () => {
       )
       expect(duplicate).toMatchObject({
         ok: true,
-        output: { unchanged: true, sha256: sha256(body) },
+        output: {
+          sha256: sha256(body),
+          content: "1\tone\n2\ttwo",
+        },
       })
     })
   })

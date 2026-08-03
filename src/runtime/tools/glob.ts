@@ -124,7 +124,7 @@ export function createGlobTool(options: GlobToolOptions = {}): RuntimeTool {
           : { limitReason: result.stopReason }),
         content,
       }
-      return { ok: true, output, content: JSON.stringify(output) }
+      return { ok: true, output, content }
     },
   }
 }
@@ -200,7 +200,7 @@ function failure(code: string, message: string): ToolExecutionResult {
     ok: false,
     code,
     message,
-    content: JSON.stringify({ error: { code, message } }),
+    content: `${code}: ${message}`,
   }
 }
 
