@@ -6,7 +6,6 @@ export const RuntimeLimits = {
   modelVisibleToolResultBytes: 50 * 1024,
   modelVisibleToolResultLines: 2_000,
   compactionSummaryBytes: 16 * 1024,
-  rawFileReadBytes: 256 * 1024,
   fileWriteBytes: 1 * 1024 * 1024,
   commandOutputBytes: 1 * 1024 * 1024,
   commandTextBytes: 16 * 1024,
