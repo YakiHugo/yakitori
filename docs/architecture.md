@@ -238,20 +238,35 @@ and checks the revision again before publishing the replacement. File tools
 may define different model-facing edit protocols, but they must reuse this
 commit boundary instead of implementing independent write paths.
 
+`write_file` exposes only `path` and complete desired `content`; revision hashes
+remain internal Runtime state rather than model-authored arguments. A missing
+target takes the atomic no-clobber creation path. Replacing an existing target
+requires a complete observation in the frozen model-context view, and Runtime
+uses that observation's SHA as the compare-and-write precondition. Missing,
+partial, and stale observations fail with instructions to read the complete
+current file before retrying.
+
 The default `edit_file` protocol performs one flat `oldString`/`newString`
 replacement, with optional `replaceAll` for one search string. Its model-facing
 input does not carry a revision hash: Runtime derives the write precondition
-from the Session's latest successful file observation. It tries exact text
-first, then only deterministic line-ending, straight-versus-curly quote, and
-trailing-whitespace equivalence. Single-versus-double quote delimiters,
-indentation, and internal whitespace remain exact for every file format.
-Replacement text always adopts the file's dominant line-ending style. Missing,
-ambiguous, and stale edits fail with structured, model-actionable diagnostics;
-the tool never applies similarity or nearest-match guesses.
-Missing-target diagnostics may rank up to three bounded line-window candidates,
-and ambiguous-target diagnostics may list up to five bounded actual matches.
-Candidate scoring is isolated from replacement matching and can only suggest a
-`read_file` range for an explicit retry; it can never select a write target.
+from an observation still present in the model context that produced the edit
+call. It tries exact text first, then only deterministic line-ending,
+straight-versus-curly quote, and trailing-whitespace equivalence.
+Single-versus-double quote delimiters, indentation, and internal whitespace
+remain exact for every file format. Replacement text always adopts the file's
+dominant line-ending style. If the file changed after observation, a
+single-target edit may rebase only when the exact `oldString` remains unique;
+`replaceAll` keeps the observed-revision requirement. The tool never applies
+similarity or nearest-match guesses.
+
+Missing-target diagnostics return only bounded, nonzero-score nearby text;
+ambiguous-target diagnostics return exact line ranges without repeating the
+same matched body. Diagnostics never choose a write target or encode a retry
+action. Successful edits record whether they rebased and whether their changed
+ranges were inside the visible observation, so the softer observed-file policy
+can be monitored before deciding whether range authorization should become a
+hard rule. Successful writes and edits also record a bounded unified diff in
+structured output.
 
 `read_file` opens the source once and derives bytes, SHA, UTF-8 validation,
 line count, newline style, and the returned 1-based line-prefixed slice during
@@ -264,6 +279,10 @@ only its next offset while Runtime binds that offset to the snapshot SHA in the
 Session observation projection and rejects a changed next page internally.
 Output is capped at 2,000 lines, 2,000 characters per displayed line, and 50 KB
 and reports LF, CRLF, CR, mixed, or absent line endings plus final-newline state.
+Every successful read result remains bounded and self-contained in recorded
+facts. Model-context assembly deduplicates identical selected read results by
+showing one body and short references for the other tool calls; compaction and
+resume therefore recompute deduplication without relying on a persisted stub.
 `grep` and `glob` use ripgrep, respect ignore rules, filter secret-bearing paths,
 and have independent result caps. The same sensitive-path policy applies to
 direct file reads and writes.
@@ -282,25 +301,28 @@ byte limit is known, while a timeout keeps complete records already received.
 File lists use reverse mtime ordering; content and counts use ripgrep's stable
 path ordering, with content retaining line order.
 
-Grep continuation metadata follows Wuu's revision shape without materializing
-an entire result snapshot. Its revision binds the normalized query to the
-Session's disposable file-observation checkpoint. A continuation supplies
-`expected_revision`; a changed checkpoint fails stale and restarts at offset
-zero. This is deliberately a read-state checkpoint rather than proof that an
-unobserved workspace file did not change.
+Grep `offset` pagination reruns the live search and is explicitly best effort;
+it does not expose a revision or claim snapshot consistency. Stable pagination
+requires a future bounded materialized result artifact rather than a token over
+unrelated observation state.
 
-Read-before-edit state is a disposable per-Session projection over successful
-recorded tool results: the latest observed SHA for each path plus bounded read
-range identities. Each revision also preserves whether its evidence is a
-whole-file read, ranged read, grep snippet, edit, or write. Grep records only
-the files and line ranges actually returned to the model after pagination and
-truncation; a grep snippet is therefore a local observation and never silently
-becomes a complete read. Runtime advances the projection only after the tool
-result is durable and rebuilds it from `SessionProjection.tools` when a Session
-lane activates. A successful full-file write establishes authorship of the new
-revision. This adds neither an LRU cache nor a new fact type, and filesystem SHA
-comparison at the synchronized write boundary remains the final concurrency
-check.
+File state has two derived views. The durable per-Session observation projection
+rebuilds the latest SHA, observed ranges, and read continuation preconditions
+from all successful recorded tool results. Separately, each model request
+derives a visible-observation projection from only final, untruncated result
+Items in that request; a result truncated again by model-context assembly is
+visible as text but conservatively grants no file observation. `edit_file` uses
+this frozen view, so a read issued alongside an edit cannot retroactively
+authorize it. Grep records only files and line ranges actually returned after
+pagination and tool-level truncation, and verifies their full-file SHA before
+they become observations. A successful full-file write establishes authorship
+of the new revision. Filesystem SHA comparison at the synchronized write
+boundary remains the final concurrency check.
+
+Tool results retain the coarse durable `{ content, output?, error? }` shape.
+`content` is bounded, concise plain text for the model; `output` carries
+structured metadata for projections and the GUI rather than being stringified
+back into model context.
 
 Alternative model-specific protocols such as hashline or GPT-only
 grammar-constrained patching must be exposed as mutually exclusive toolsets and
