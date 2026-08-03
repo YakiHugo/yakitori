@@ -453,7 +453,11 @@ function updatePermission(
 function summarizeTool(name: string, input: unknown): string {
   if (isRecord(input)) {
     if (
-      (name === "read_file" || name === "write_file") &&
+      (name === "read_file" ||
+        name === "edit_file" ||
+        name === "write_file" ||
+        name === "grep" ||
+        name === "glob") &&
       typeof input.path === "string"
     ) {
       return input.path
