@@ -230,6 +230,82 @@ survive process restarts.
 - A Mate does not inherit another Mate's personal memory, credentials,
   or approvals.
 
+Text-file replacement goes through one Runtime-owned compare-and-write
+boundary. It resolves workspace containment, serializes writers by canonical
+path, checks the protocol's internal revision precondition, writes and
+synchronizes a temporary file in the target directory, then resolves the path
+and checks the revision again before publishing the replacement. File tools
+may define different model-facing edit protocols, but they must reuse this
+commit boundary instead of implementing independent write paths.
+
+The default `edit_file` protocol performs one flat `oldString`/`newString`
+replacement, with optional `replaceAll` for one search string. Its model-facing
+input does not carry a revision hash: Runtime derives the write precondition
+from the Session's latest successful file observation. It tries exact text
+first, then only deterministic line-ending, straight-versus-curly quote, and
+trailing-whitespace equivalence. Single-versus-double quote delimiters,
+indentation, and internal whitespace remain exact for every file format.
+Replacement text always adopts the file's dominant line-ending style. Missing,
+ambiguous, and stale edits fail with structured, model-actionable diagnostics;
+the tool never applies similarity or nearest-match guesses.
+Missing-target diagnostics may rank up to three bounded line-window candidates,
+and ambiguous-target diagnostics may list up to five bounded actual matches.
+Candidate scoring is isolated from replacement matching and can only suggest a
+`read_file` range for an explicit retry; it can never select a write target.
+
+`read_file` opens the source once and derives bytes, SHA, UTF-8 validation,
+line count, newline style, and the returned 1-based line-prefixed slice during
+one bounded-memory stream over that file descriptor. Descriptor metadata is
+checked before and after capture so an in-place concurrent change is rejected.
+This avoids the prior analyze-then-reopen TOCTOU without loading a large file
+wholesale.
+Model input contains only `path`, `offset`, and `limit`; a continuation exposes
+only its next offset while Runtime binds that offset to the snapshot SHA in the
+Session observation projection and rejects a changed next page internally.
+Output is capped at 2,000 lines, 2,000 characters per displayed line, and 50 KB
+and reports LF, CRLF, CR, mixed, or absent line endings plus final-newline state.
+`grep` and `glob` use ripgrep, respect ignore rules, filter secret-bearing paths,
+and have independent result caps. The same sensitive-path policy applies to
+direct file reads and writes.
+`glob` exposes only Claude-compatible `pattern` and optional `path` inputs. It
+passes the pattern and reverse-modified sorting to ripgrep directly; ignored
+files may be enabled only through construction-time Runtime configuration, not
+by a model-supplied argument.
+
+`grep` exposes the common Claude/Kimi search surface, including context,
+file-type, multiline, offset, and head-limit controls; Kimi's `count_matches`
+spelling is accepted as an alias for Claude's `count`. Ignored-file discovery
+is Runtime construction state rather than a model argument. Ripgrep output is
+consumed as a stream under hard time, result, record, line, raw-byte, and
+model-visible byte limits. The child process is stopped as soon as a result or
+byte limit is known, while a timeout keeps complete records already received.
+File lists use reverse mtime ordering; content and counts use ripgrep's stable
+path ordering, with content retaining line order.
+
+Grep continuation metadata follows Wuu's revision shape without materializing
+an entire result snapshot. Its revision binds the normalized query to the
+Session's disposable file-observation checkpoint. A continuation supplies
+`expected_revision`; a changed checkpoint fails stale and restarts at offset
+zero. This is deliberately a read-state checkpoint rather than proof that an
+unobserved workspace file did not change.
+
+Read-before-edit state is a disposable per-Session projection over successful
+recorded tool results: the latest observed SHA for each path plus bounded read
+range identities. Each revision also preserves whether its evidence is a
+whole-file read, ranged read, grep snippet, edit, or write. Grep records only
+the files and line ranges actually returned to the model after pagination and
+truncation; a grep snippet is therefore a local observation and never silently
+becomes a complete read. Runtime advances the projection only after the tool
+result is durable and rebuilds it from `SessionProjection.tools` when a Session
+lane activates. A successful full-file write establishes authorship of the new
+revision. This adds neither an LRU cache nor a new fact type, and filesystem SHA
+comparison at the synchronized write boundary remains the final concurrency
+check.
+
+Alternative model-specific protocols such as hashline or GPT-only
+grammar-constrained patching must be exposed as mutually exclusive toolsets and
+reuse the same compare-and-write boundary.
+
 Agent-to-agent wakeups also require loop controls:
 
 - each Delivery is consumed at most once
