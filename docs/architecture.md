@@ -298,12 +298,18 @@ configuration, not by a model-supplied argument.
 `grep` exposes the common Claude/Kimi search surface, including context,
 file-type, multiline, offset, and head-limit controls; Kimi's `count_matches`
 spelling is accepted as an alias for Claude's `count`. Ignored-file discovery
-is Runtime construction state rather than a model argument. Ripgrep output is
+is Runtime construction state rather than a model argument. `head_limit` is
+bounded from 1 through the Runtime cap (250 by default), and multiline search
+enables ripgrep's multiline and dotall modes together. Ripgrep output is
 consumed as a stream under hard time, result, record, line, raw-byte, and
-model-visible byte limits. The child process is stopped as soon as a result or
-byte limit is known, while a timeout keeps complete records already received.
-`grep` file lists use reverse mtime ordering; content and counts use ripgrep's
-stable path ordering, with content retaining line order.
+model-visible byte limits. Result and model-output limits expose a usable next
+offset only after at least one complete result was returned; raw/record limits,
+empty bounded pages, and timeouts do not. Runtime rejects output budgets too
+small for the minimum result envelope, and an irreducible oversized envelope
+fails instead of violating the configured cap. Timeout is recorded separately
+from output-boundary truncation, and line shortening does not make the search
+itself truncated. `grep` file lists use reverse mtime ordering; content and
+counts use ripgrep's stable path ordering, with content retaining line order.
 
 Grep `offset` pagination reruns the live search and is explicitly best effort;
 it does not expose a revision or claim snapshot consistency. Stable pagination
@@ -317,11 +323,10 @@ derives a visible-observation projection from only final, untruncated result
 Items in that request; a result truncated again by model-context assembly is
 visible as text but conservatively grants no file observation. `edit_file` uses
 this frozen view, so a read issued alongside an edit cannot retroactively
-authorize it. Grep records only files and line ranges actually returned after
-pagination and tool-level truncation, and verifies their full-file SHA before
-they become observations. A successful full-file write establishes authorship
-of the new revision. Filesystem SHA comparison at the synchronized write
-boundary remains the final concurrency check.
+authorize it. `grep` locates files and lines but produces no file observation;
+the model must use `read_file` before editing. A successful full-file write
+establishes authorship of the new revision. Filesystem SHA comparison at the
+synchronized write boundary remains the final concurrency check.
 
 Tool results retain the coarse durable `{ content, output?, error? }` shape.
 `content` is bounded, concise plain text for the model; `output` carries

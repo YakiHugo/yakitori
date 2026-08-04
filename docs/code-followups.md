@@ -96,11 +96,10 @@ kernel fact protocol ahead of a concrete consumer.
   ripgrep against the current workspace and is explicitly best effort. Remove
   the `expected_revision`/`snapshot_token` contract rather than presenting the
   Session observation checkpoint as a workspace snapshot.
-- Preserve grep's existing cross-tool behavior: only visible returned matches
-  may produce bounded path/range observations, and their full-file SHA must be
-  verified before the observation can supply a later edit precondition. A grep
-  range does not authorize `write_file`, which requires a complete observation.
-  Removing the pagination token must not remove this observation projection.
+- Keep grep as a locator rather than an edit observation. It must not reopen
+  matched files, hash full contents, emit `observations`, or authorize an edit;
+  the model uses `read_file` before `edit_file`. Monitor the resulting
+  grep-to-read-to-edit sequence before reconsidering that boundary.
 - If stable traversal later becomes a product requirement, materialize one
   bounded content-addressed search-result artifact and page that artifact.
   Do not revive a revision token unless it identifies the actual paged result
@@ -122,9 +121,9 @@ kernel fact protocol ahead of a concrete consumer.
 - Treat read-before-edit as an observed-file behavioral gate, not as strict
   revision CAS. An existing file must have a qualifying observation in the
   model context that produced the edit call. A complete or ranged `read_file`
-  result and a verified visible `grep` snippet qualify; durable observations
-  that disappeared behind compaction still supply revision evidence but do not
-  prove current model visibility.
+  result qualifies; grep results do not. Durable observations that disappeared
+  behind compaction still supply revision evidence but do not prove current
+  model visibility.
 - If the current SHA still equals the observed SHA, apply the deterministic
   exact edit. If it changed, a single-target edit may proceed only when
   `oldString` still has exactly one exact match in the current file; record the
