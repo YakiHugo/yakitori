@@ -287,9 +287,13 @@ resume therefore recompute deduplication without relying on a persisted stub.
 and have independent result caps. The same sensitive-path policy applies to
 direct file reads and writes.
 `glob` exposes only Claude-compatible `pattern` and optional `path` inputs. It
-passes the pattern and reverse-modified sorting to ripgrep directly; ignored
-files may be enabled only through construction-time Runtime configuration, not
-by a model-supplied argument.
+streams paths in ripgrep's traversal order and stops on the first valid path
+beyond its 100-result hard cap, then sorts only the retained paths
+lexicographically. Truncated selection is therefore best effort rather than a
+workspace-wide top-N ordering. Its public result distinguishes result, timeout,
+and output-byte truncation; a timeout with no complete path is a tool failure.
+Ignored files may be enabled only through construction-time Runtime
+configuration, not by a model-supplied argument.
 
 `grep` exposes the common Claude/Kimi search surface, including context,
 file-type, multiline, offset, and head-limit controls; Kimi's `count_matches`
@@ -298,8 +302,8 @@ is Runtime construction state rather than a model argument. Ripgrep output is
 consumed as a stream under hard time, result, record, line, raw-byte, and
 model-visible byte limits. The child process is stopped as soon as a result or
 byte limit is known, while a timeout keeps complete records already received.
-File lists use reverse mtime ordering; content and counts use ripgrep's stable
-path ordering, with content retaining line order.
+`grep` file lists use reverse mtime ordering; content and counts use ripgrep's
+stable path ordering, with content retaining line order.
 
 Grep `offset` pagination reruns the live search and is explicitly best effort;
 it does not expose a revision or claim snapshot consistency. Stable pagination
