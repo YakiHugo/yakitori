@@ -201,6 +201,79 @@ describe("tool loop", () => {
     })
   })
 
+  it("lets a later model call edit a file created with edit_file", async () => {
+    await withToolRuntime(async (runtime) => {
+      const provider = createFauxProvider([
+        {
+          stopReason: ModelStopReason.ToolUse,
+          content: [
+            {
+              type: "tool_call",
+              id: "tool_create_value",
+              name: "edit_file",
+              input: {
+                path: "created-value.txt",
+                oldString: "",
+                newString: "value = 1\n",
+              },
+            },
+          ],
+        },
+        {
+          stopReason: ModelStopReason.ToolUse,
+          content: [
+            {
+              type: "tool_call",
+              id: "tool_edit_created_value",
+              name: "edit_file",
+              input: {
+                path: "created-value.txt",
+                oldString: "value = 1",
+                newString: "value = 2",
+              },
+            },
+          ],
+        },
+        { content: [{ type: "text", text: "created and updated" }] },
+      ])
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+      })
+      const session = await createSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "create and update a file" },
+      })
+
+      await runner.wake(session.sessionId)
+
+      expect(
+        await readFile(join(runtime.workspace, "created-value.txt"), "utf8"),
+      ).toBe("value = 2\n")
+      const read = await runtime.kernel.readSession({
+        sessionId: session.sessionId,
+      })
+      expect(read.session?.tools).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            toolCallId: "tool_create_value",
+            state: "completed",
+            output: expect.objectContaining({
+              action: "create",
+              created: true,
+            }),
+          }),
+          expect.objectContaining({
+            toolCallId: "tool_edit_created_value",
+            state: "completed",
+          }),
+        ]),
+      )
+    })
+  })
+
   it("requires read_file between grep and edit_file", async () => {
     await withToolRuntime(async (runtime) => {
       await writeFile(join(runtime.workspace, "grep-only.txt"), "value = 1\n")

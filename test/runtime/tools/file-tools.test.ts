@@ -235,6 +235,172 @@ describe("bounded file tools", () => {
     })
   })
 
+  it("creates files from an empty oldString and observes the authored content", async () => {
+    await withWorkspace(async (workspace) => {
+      const edit = createEditFileTool()
+      const fileObservations = createFileObservationStore()
+      const created = await edit.execute(
+        {
+          path: "created-by-edit.ts",
+          oldString: "",
+          newString: "const value = 1\n",
+        },
+        { workspaceRoot: workspace },
+      )
+
+      expect(created).toMatchObject({
+        ok: true,
+        output: {
+          action: "create",
+          path: "created-by-edit.ts",
+          previousSha256: null,
+          sha256: sha256("const value = 1\n"),
+          byteCount: 16,
+          created: true,
+          diff: {
+            format: "unified",
+            text: expect.stringContaining("--- /dev/null"),
+            truncated: false,
+          },
+        },
+        content: "Created created-by-edit.ts (16 bytes).",
+      })
+      if (!created.ok) return
+      expect(created.output).not.toHaveProperty("replacementCount")
+      expect(created.output).not.toHaveProperty("matchMode")
+      expect(created.output).not.toHaveProperty("observedSha256")
+      expect(created.output).not.toHaveProperty("changedRanges")
+      expect(created.output).not.toHaveProperty("optimisticRebase")
+
+      fileObservations.recordSuccess(
+        "edit_file",
+        { path: "created-by-edit.ts", oldString: "" },
+        created.output,
+      )
+      expect(fileObservations.latest("created-by-edit.ts")).toEqual({
+        sha256: sha256("const value = 1\n"),
+        complete: true,
+        observation: "edit",
+      })
+
+      const replaced = await edit.execute(
+        {
+          path: "created-by-edit.ts",
+          oldString: "value = 1",
+          newString: "value = 2",
+        },
+        {
+          workspaceRoot: workspace,
+          fileObservations,
+          visibleFileObservations: fileObservations,
+        },
+      )
+      expect(replaced).toMatchObject({ ok: true })
+      expect(
+        await readFile(join(workspace, "created-by-edit.ts"), "utf8"),
+      ).toBe("const value = 2\n")
+    })
+  })
+
+  it("creates an empty file but never overwrites an existing file", async () => {
+    await withWorkspace(async (workspace) => {
+      const edit = createEditFileTool()
+      const empty = await edit.execute(
+        { path: "empty.txt", oldString: "", newString: "" },
+        { workspaceRoot: workspace },
+      )
+      expect(empty).toMatchObject({
+        ok: true,
+        output: { action: "create", created: true, byteCount: 0 },
+      })
+      expect(await readFile(join(workspace, "empty.txt"), "utf8")).toBe("")
+
+      for (const [path, content] of [
+        ["empty.txt", ""],
+        ["existing.txt", "original"],
+      ] as const) {
+        if (path === "existing.txt")
+          await writeFile(join(workspace, path), content)
+        const result = await edit.execute(
+          { path, oldString: "", newString: "replacement" },
+          { workspaceRoot: workspace },
+        )
+        expect(result).toMatchObject({
+          ok: false,
+          code: "file_exists",
+          message: `Cannot create ${path} because the file already exists.`,
+        })
+        expect(result.content).toContain(
+          "Use a non-empty oldString to edit it, or write_file for an intentional whole-file replacement.",
+        )
+        expect(await readFile(join(workspace, path), "utf8")).toBe(content)
+      }
+    })
+  })
+
+  it("validates empty-oldString creation semantics", async () => {
+    await withWorkspace(async (workspace) => {
+      const edit = createEditFileTool()
+      expect(
+        await edit.execute(
+          {
+            path: "all.txt",
+            oldString: "",
+            newString: "content",
+            replaceAll: true,
+          },
+          { workspaceRoot: workspace },
+        ),
+      ).toMatchObject({
+        ok: false,
+        code: "invalid_tool_input",
+        message: "replaceAll cannot be used when oldString is empty.",
+      })
+
+      const missing = await edit.execute(
+        {
+          path: "missing.txt",
+          oldString: "before",
+          newString: "after",
+        },
+        { workspaceRoot: workspace },
+      )
+      expect(missing).toMatchObject({
+        ok: false,
+        code: "path_not_found",
+        message: "Path does not exist.",
+      })
+      expect(missing.content).not.toContain("empty oldString")
+    })
+  })
+
+  it("preserves similar-path diagnostics for a missing edit target", async () => {
+    await withWorkspace(async (workspace) => {
+      await writeFile(join(workspace, "correct-name.txt"), "before")
+
+      const result = await createEditFileTool().execute(
+        {
+          path: "corect-name.txt",
+          oldString: "before",
+          newString: "after",
+        },
+        { workspaceRoot: workspace },
+      )
+
+      expect(result).toMatchObject({
+        ok: false,
+        code: "path_not_found",
+      })
+      if (result.ok) return
+      expect(result.message).toContain('Did you mean "correct-name.txt"?')
+      expect(result.content).toContain('Did you mean "correct-name.txt"?')
+      expect(result.content).not.toContain("empty oldString")
+      expect(await readFile(join(workspace, "correct-name.txt"), "utf8")).toBe(
+        "before",
+      )
+    })
+  })
+
   it("requires the edit revision to be observed in the current session", async () => {
     await withWorkspace(async (workspace) => {
       const before = "const value = 1\n"
@@ -494,29 +660,12 @@ describe("bounded file tools", () => {
     })
   })
 
-  it("rejects empty and ambiguous oldString values without changing the file", async () => {
+  it("rejects ambiguous oldString values without changing the file", async () => {
     await withWorkspace(async (workspace) => {
       const repeated = "const value = 1\nconst value = 1\n"
       const edit = createEditFileTool()
       await writeFile(join(workspace, "ambiguous.ts"), repeated)
       const context = observedContext(workspace, "ambiguous.ts", repeated)
-
-      const empty = await edit.execute(
-        {
-          path: "ambiguous.ts",
-          oldString: "",
-          newString: "replacement",
-        },
-        context,
-      )
-      expect(empty).toMatchObject({
-        ok: false,
-        code: "invalid_tool_input",
-        output: {
-          reason: "empty_old_string",
-          suggestion: "Use write_file to create or replace a complete file.",
-        },
-      })
 
       const ambiguous = await edit.execute(
         {
@@ -614,7 +763,7 @@ describe("bounded file tools", () => {
       required: ["path", "oldString", "newString"],
       properties: {
         path: { type: "string" },
-        oldString: { type: "string", minLength: 1 },
+        oldString: { type: "string" },
         newString: { type: "string" },
         replaceAll: { type: "boolean" },
       },
@@ -623,6 +772,9 @@ describe("bounded file tools", () => {
       definitions.find((tool) => tool.name === "edit_file")?.inputSchema
         .properties,
     ).not.toHaveProperty("expectedSha256")
+    expect(
+      definitions.find((tool) => tool.name === "edit_file")?.inputSchema,
+    ).not.toHaveProperty("properties.oldString.minLength")
     expect(
       definitions.find((tool) => tool.name === "write_file")?.inputSchema,
     ).toMatchObject({
@@ -666,6 +818,26 @@ describe("bounded file tools", () => {
           )
           expect(symlinkEscape.ok).toBe(false)
         }
+
+        const edit = createEditFileTool()
+        expect(
+          await edit.execute(
+            { path: "../created.txt", oldString: "", newString: "x" },
+            { workspaceRoot: workspace },
+          ),
+        ).toMatchObject({ ok: false, code: "path_denied" })
+        expect(
+          await edit.execute(
+            { path: "link/created.txt", oldString: "", newString: "x" },
+            { workspaceRoot: workspace },
+          ),
+        ).toMatchObject({ ok: false, code: "path_denied" })
+        expect(
+          await edit.execute(
+            { path: ".env.local", oldString: "", newString: "secret" },
+            { workspaceRoot: workspace },
+          ),
+        ).toMatchObject({ ok: false, code: "sensitive_path" })
       } finally {
         await rm(outside, { recursive: true, force: true })
       }
@@ -736,6 +908,30 @@ describe("bounded file tools", () => {
       const failures = results.filter((result) => !result.ok)
       expect(failures).toHaveLength(1)
       expect(["file_exists", "file_not_observed"]).toContain(failures[0]?.code)
+    })
+  })
+
+  it("creates a new file exclusively under concurrent empty-oldString edits", async () => {
+    await withWorkspace(async (workspace) => {
+      const edit = createEditFileTool()
+      const results = await Promise.all([
+        edit.execute(
+          { path: "edit-created.txt", oldString: "", newString: "first" },
+          { workspaceRoot: workspace },
+        ),
+        edit.execute(
+          { path: "edit-created.txt", oldString: "", newString: "second" },
+          { workspaceRoot: workspace },
+        ),
+      ])
+
+      expect(results.filter((result) => result.ok)).toHaveLength(1)
+      expect(results.filter((result) => !result.ok)).toEqual([
+        expect.objectContaining({ code: "file_exists" }),
+      ])
+      expect(["first", "second"]).toContain(
+        await readFile(join(workspace, "edit-created.txt"), "utf8"),
+      )
     })
   })
 })

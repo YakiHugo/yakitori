@@ -123,6 +123,7 @@ function applySuccessfulResult(
       sha256,
       complete:
         name === "write_file" ||
+        output.created === true ||
         (output.optimisticRebase !== true && previous?.complete === true),
       observation: name === "write_file" ? "write" : "edit",
     })

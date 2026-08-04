@@ -12,7 +12,7 @@ import {
   normalizeReplacementLineEndings,
   preserveCurlyQuoteStyle,
 } from "./text-file-format.ts"
-import { resolveReadPath } from "./path-policy.ts"
+import { resolveReadPath, resolveWritePath } from "./path-policy.ts"
 import { compareAndWriteTextFile } from "./text-file-write.ts"
 import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
 
@@ -29,7 +29,7 @@ export function createEditFileTool(
   return {
     name: "edit_file",
     description:
-      "Replace text in an existing UTF-8 file that you read first. Supply the smallest unique oldString, usually 2-4 lines, and exclude read_file's {N}\\t line prefixes. Matching is exact first, followed only by deterministic line-ending, curly-quote, and trailing-whitespace equivalence. Indentation, internal whitespace, and single-vs-double quote delimiters remain exact. No similarity edit is ever applied. Set replaceAll only when every match should change.",
+      "Replace text in an existing UTF-8 file, or create a new file by setting oldString to an empty string. An empty oldString never overwrites an existing file. Read existing files before editing them. Supply the smallest unique non-empty oldString, usually 2-4 lines, and exclude read_file's {N}\\t line prefixes. Matching is exact first, followed only by deterministic line-ending, curly-quote, and trailing-whitespace equivalence. Indentation, internal whitespace, and single-vs-double quote delimiters remain exact. No similarity edit is ever applied. Set replaceAll only when every match should change.",
     autoAllow: true,
     inputSchema: {
       type: "object",
@@ -37,17 +37,17 @@ export function createEditFileTool(
       properties: {
         path: {
           type: "string",
-          description: "Workspace-relative path of the existing text file.",
+          description: "Workspace-relative path of the text file.",
         },
         oldString: {
           type: "string",
-          minLength: 1,
           description:
-            "Existing text to replace. Include surrounding context when it is not unique.",
+            "Existing text to replace, or an empty string to create a new file without overwriting. Include surrounding context when replacement text is not unique.",
         },
         newString: {
           type: "string",
-          description: "Replacement text, which must differ from oldString.",
+          description:
+            "Replacement text. For an existing file, it must differ from oldString.",
         },
         replaceAll: {
           type: "boolean",
@@ -60,6 +60,39 @@ export function createEditFileTool(
     async execute(input, context): Promise<ToolExecutionResult> {
       const parsed = parseEditInput(input, maxBytes)
       if (!parsed.ok) return parsed.result
+      if (parsed.oldString === "") {
+        const resolved = await resolveWritePath(
+          context.workspaceRoot,
+          parsed.path,
+        )
+        if (!resolved.ok) {
+          return editFailure(resolved.error.code, resolved.error.message)
+        }
+        if (resolved.exists) return fileExistsFailure(resolved.relativePath)
+
+        const written = await compareAndWriteTextFile({
+          workspaceRoot: context.workspaceRoot,
+          path: parsed.path,
+          content: parsed.newString,
+          expectedSha256: null,
+        })
+        if (!written.ok) {
+          return written.code === "file_exists"
+            ? fileExistsFailure(resolved.relativePath)
+            : written
+        }
+        const baseOutput =
+          typeof written.output === "object" &&
+          written.output !== null &&
+          !Array.isArray(written.output)
+            ? written.output
+            : {}
+        return {
+          ok: true,
+          output: { ...baseOutput, action: "create" },
+          content: `Created ${resolved.relativePath} (${Buffer.byteLength(parsed.newString, "utf8")} bytes).`,
+        }
+      }
 
       const resolved = await resolveReadPath(context.workspaceRoot, parsed.path)
       if (!resolved.ok) {
@@ -267,35 +300,36 @@ function parseEditInput(
   if (typeof input.oldString !== "string") {
     return editInputFailure("edit_file oldString must be a string.")
   }
-  if (input.oldString.length === 0) {
-    return {
-      ok: false,
-      result: editFailure(
-        "invalid_tool_input",
-        "edit_file oldString must not be empty.",
-        {
-          reason: "empty_old_string",
-          suggestion: "Use write_file to create or replace a complete file.",
-        },
-      ),
-    }
-  }
   if (typeof input.newString !== "string") {
     return editInputFailure("edit_file newString must be a string.")
   }
-  if (input.oldString === input.newString) {
+  if (input.replaceAll !== undefined && typeof input.replaceAll !== "boolean") {
+    return editInputFailure("edit_file replaceAll must be a boolean.")
+  }
+  if (input.oldString === "" && input.replaceAll === true) {
+    return editInputFailure(
+      "replaceAll cannot be used when oldString is empty.",
+    )
+  }
+  if (input.oldString !== "" && input.oldString === input.newString) {
     return editInputFailure(
       "edit_file oldString and newString must differ.",
       "no_change",
     )
   }
-  if (input.replaceAll !== undefined && typeof input.replaceAll !== "boolean") {
-    return editInputFailure("edit_file replaceAll must be a boolean.")
-  }
 
   const inputBytes =
     Buffer.byteLength(input.oldString, "utf8") +
     Buffer.byteLength(input.newString, "utf8")
+  if (
+    input.oldString === "" &&
+    Buffer.byteLength(input.newString, "utf8") > maxBytes
+  ) {
+    return editInputFailure(
+      `The new file would exceed ${maxBytes} bytes.`,
+      "content_too_large",
+    )
+  }
   if (inputBytes > maxBytes * 2) {
     return editInputFailure(
       `edit_file replacement input exceeds ${maxBytes * 2} bytes.`,
@@ -317,6 +351,17 @@ function editInputFailure(
   code = "invalid_tool_input",
 ): { readonly ok: false; readonly result: ToolExecutionResult } {
   return { ok: false, result: editFailure(code, message) }
+}
+
+function fileExistsFailure(path: string): ToolExecutionResult {
+  return editFailure(
+    "file_exists",
+    `Cannot create ${path} because the file already exists.`,
+    {
+      suggestion:
+        "Use a non-empty oldString to edit it, or write_file for an intentional whole-file replacement.",
+    },
+  )
 }
 
 function editFailure(

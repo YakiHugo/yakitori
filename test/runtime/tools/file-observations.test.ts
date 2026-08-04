@@ -27,6 +27,20 @@ describe("file observations", () => {
       observation: "edit",
     })
     rebuilt.recordSuccess(
+      "edit_file",
+      { path: "created-by-edit.ts", oldString: "" },
+      {
+        path: "created-by-edit.ts",
+        sha256: "d".repeat(64),
+        created: true,
+      },
+    )
+    expect(rebuilt.latest("created-by-edit.ts")).toEqual({
+      sha256: "d".repeat(64),
+      complete: true,
+      observation: "edit",
+    })
+    rebuilt.recordSuccess(
       "write_file",
       { path: "new.ts" },
       {

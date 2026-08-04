@@ -274,6 +274,9 @@ async function suggestWorkspacePath(
   workspaceRoot: string,
   requested: string,
 ): Promise<string | undefined> {
+  // TODO(path-not-found-hints): Promote bounded path suggestions to a
+  // structured, shared path-policy result so edit, read, and search tools can
+  // render consistent recovery hints without parsing or replacing messages.
   const listed = await runRipgrep(
     [
       "--files",
