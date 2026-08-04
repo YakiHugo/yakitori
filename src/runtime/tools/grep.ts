@@ -1,6 +1,3 @@
-import { createHash } from "node:crypto"
-import { open } from "node:fs/promises"
-import { RuntimeLimits } from "../limits.ts"
 import {
   buildGrepArguments,
   GrepInputSchema,
@@ -9,30 +6,31 @@ import {
   type GrepOutputMode,
 } from "./grep-input.ts"
 import { isSensitiveWorkspacePath, resolveSearchPath } from "./path-policy.ts"
-import { runRipgrepRecords, type RipgrepRecordResult } from "./ripgrep.ts"
+import { runRipgrepRecords } from "./ripgrep.ts"
 import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
 
 const DEFAULT_RESULTS = 250
 const DEFAULT_TIMEOUT_MS = 20_000
 const DEFAULT_LINE_CHARACTERS = 1_000
 const DEFAULT_OUTPUT_BYTES = 40 * 1024
+const MIN_OUTPUT_BYTES = 512
 const DEFAULT_RAW_BYTES = 5 * 1024 * 1024
 const MAX_RECORD_BYTES = 256 * 1024
 
 type Match = {
   readonly path: string
   readonly line: number
-  readonly endLine: number
   readonly text: string
-  readonly fullLine: boolean
 }
 
 type SearchEntry = {
   readonly content: string
   readonly match?: Match
+  readonly lineTruncated?: boolean
 }
 
 type GrepRunner = typeof runRipgrepRecords
+type GrepTruncationReason = "result_limit" | "output_byte_limit"
 
 export type GrepToolOptions = {
   // This is startup/permission state and is deliberately absent from the
@@ -49,19 +47,27 @@ export function createGrepTool(
   options: GrepToolOptions = {},
   runRecords: GrepRunner = runRipgrepRecords,
 ): RuntimeTool {
+  const maxOutputBytes = options.maxOutputBytes ?? DEFAULT_OUTPUT_BYTES
+  if (!Number.isInteger(maxOutputBytes) || maxOutputBytes < MIN_OUTPUT_BYTES) {
+    throw new RangeError(
+      `grep maxOutputBytes must be an integer of at least ${MIN_OUTPUT_BYTES}.`,
+    )
+  }
   const limits = {
     timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     maxResults: options.maxResults ?? DEFAULT_RESULTS,
     maxLineCharacters: options.maxLineCharacters ?? DEFAULT_LINE_CHARACTERS,
-    maxOutputBytes: options.maxOutputBytes ?? DEFAULT_OUTPUT_BYTES,
+    maxOutputBytes,
     maxRawBytes: options.maxRawBytes ?? DEFAULT_RAW_BYTES,
   }
   const includeIgnored = options.includeIgnored ?? false
 
+  // TODO(grep-edit-monitoring): Measure grep -> read_file -> edit_file
+  // sequences before reconsidering grep-derived edit authorization.
   return {
     name: "grep",
     description:
-      "Search file contents with ripgrep. Supports regex, file globs, file types, context lines, case-insensitive and multiline search. files_with_matches is sorted newest-first; content and count are sorted by path and line. Results are paginated and bounded.",
+      "Search file contents with ripgrep. Read the relevant file before editing it. Supports regex, file globs, file types, context lines, case-insensitive and multiline search. files_with_matches is sorted newest-first; content and count are sorted by path and line. Results are paginated and bounded.",
     autoAllow: true,
     inputSchema: GrepInputSchema,
     async execute(input, context): Promise<ToolExecutionResult> {
@@ -79,8 +85,7 @@ export function createGrepTool(
       let encountered = 0
       let selectedBytes = 0
       let hasMore = false
-      let lineTruncated = false
-      let limitReason: string | undefined
+      let truncationReason: GrepTruncationReason | undefined
       const metadataReserve = Math.max(
         1_024,
         Math.floor(limits.maxOutputBytes / 5),
@@ -100,20 +105,19 @@ export function createGrepTool(
         if (encountered++ < parsed.offset) return true
         if (entries.length >= parsed.headLimit) {
           hasMore = true
-          limitReason = "result_limit"
+          truncationReason = "result_limit"
           return false
         }
         const bounded = boundLine(entry, limits.maxLineCharacters)
-        lineTruncated ||= bounded.truncated
-        const bytes = Buffer.byteLength(bounded.entry.content, "utf8")
+        const bytes = Buffer.byteLength(bounded.content, "utf8")
         const separator = entries.length === 0 ? 0 : 1
         if (selectedBytes + separator + bytes > contentBudget) {
           hasMore = true
-          limitReason = "output_byte_limit"
+          truncationReason = "output_byte_limit"
           return false
         }
         selectedBytes += separator + bytes
-        entries.push(bounded.entry)
+        entries.push(bounded)
         return true
       }
 
@@ -137,24 +141,36 @@ export function createGrepTool(
       if (result.stopReason === "aborted") {
         return failure("search_aborted", "grep search was aborted.")
       }
-      if (
-        result.stopReason !== undefined &&
-        result.stopReason !== "consumer_limit"
-      ) {
-        hasMore = true
-        limitReason = result.stopReason
+      if (result.stopReason === "timeout" && entries.length === 0) {
+        return failure(
+          "search_timeout",
+          "Grep search timed out after returning 0 results.",
+        )
+      }
+      // TODO(search-status): Align glob and grep timeout/status fields after
+      // both public protocols have been exercised. Do not represent timeout as
+      // a pagination truncation reason merely for structural symmetry.
+      const timedOut = result.stopReason === "timeout"
+      const stoppedByRawOutput =
+        result.stopReason === "raw_byte_limit" ||
+        result.stopReason === "record_byte_limit"
+      if (timedOut) {
+        hasMore = false
+        truncationReason = undefined
+      } else if (stoppedByRawOutput) {
+        hasMore = false
+        truncationReason = "output_byte_limit"
       }
 
       return buildSuccess({
         parsed,
-        workspaceRoot: context.workspaceRoot,
         resolvedPath: resolved.relativePath,
         entries,
         hasMore,
-        lineTruncated,
-        ...(limitReason === undefined ? {} : { limitReason }),
+        timedOut,
+        ...(truncationReason === undefined ? {} : { truncationReason }),
+        allowNextPage: !timedOut && !stoppedByRawOutput,
         maxOutputBytes: limits.maxOutputBytes,
-        stopResult: result,
       })
     },
   }
@@ -174,7 +190,7 @@ function parseRecord(
     const path = normalizePath(record.slice(0, separator))
     return { content: `${path}:${record.slice(separator + 1)}` }
   }
-  const match = parseRipgrepJson(record, input.onlyMatching)
+  const match = parseRipgrepJson(record)
   if (match === undefined) return undefined
   return {
     content: input.lineNumbers
@@ -184,10 +200,7 @@ function parseRecord(
   }
 }
 
-function parseRipgrepJson(
-  record: string,
-  onlyMatching: boolean,
-): Match | undefined {
+function parseRipgrepJson(record: string): Match | undefined {
   let event: unknown
   try {
     event = JSON.parse(record)
@@ -207,78 +220,95 @@ function parseRipgrepJson(
     return undefined
   }
   const text = lines.replace(/\r\n$|\n$|\r$/u, "")
-  const lineCount = text.length === 0 ? 1 : text.split(/\r\n|\n|\r/u).length
   return {
     path: normalizePath(path),
     line,
-    endLine: line + lineCount - 1,
     text,
-    fullLine: event.type === "context" || !onlyMatching,
   }
 }
 
-async function buildSuccess(input: {
+function buildSuccess(input: {
   readonly parsed: GrepInput
-  readonly workspaceRoot: string
   readonly resolvedPath: string
   readonly entries: SearchEntry[]
   readonly hasMore: boolean
-  readonly lineTruncated: boolean
-  readonly limitReason?: string
+  readonly timedOut: boolean
+  readonly truncationReason?: GrepTruncationReason
+  readonly allowNextPage: boolean
   readonly maxOutputBytes: number
-  readonly stopResult: Extract<RipgrepRecordResult, { readonly ok: true }>
-}): Promise<ToolExecutionResult> {
+}): ToolExecutionResult {
   const entries = [...input.entries]
-  const hashes = await hashVisibleFiles(input.workspaceRoot, entries)
-  let output = makeOutput(input, entries, hashes)
+  let output = makeOutput({
+    ...input,
+    entries,
+    hasMore: input.hasMore && input.allowNextPage && entries.length > 0,
+  })
   while (
     entries.length > 0 &&
     Buffer.byteLength(JSON.stringify(output), "utf8") > input.maxOutputBytes
   ) {
     entries.pop()
-    output = makeOutput(
-      { ...input, hasMore: true, limitReason: "output_byte_limit" },
+    const reduced = {
+      ...input,
       entries,
-      hashes,
+      hasMore: input.allowNextPage && entries.length > 0,
+    }
+    output = makeOutput(
+      input.timedOut
+        ? reduced
+        : { ...reduced, truncationReason: "output_byte_limit" },
+    )
+  }
+  if (input.timedOut && entries.length === 0) {
+    return failure(
+      "search_timeout",
+      "Grep search timed out after returning 0 results.",
+    )
+  }
+  if (
+    Buffer.byteLength(JSON.stringify(output), "utf8") > input.maxOutputBytes
+  ) {
+    return failure(
+      "output_budget_too_small",
+      "Grep result metadata exceeds the configured output byte limit.",
     )
   }
   return { ok: true, output, content: output.content }
 }
 
-function makeOutput(
-  input: Parameters<typeof buildSuccess>[0],
-  entries: readonly SearchEntry[],
-  hashes: ReadonlyMap<string, string>,
-) {
-  const observations = buildObservations(entries, hashes)
-  const truncated =
-    input.hasMore ||
-    input.lineTruncated ||
-    input.stopResult.stopReason !== undefined
-  const preliminary = {
+function makeOutput(input: Parameters<typeof buildSuccess>[0]) {
+  const lineTruncated = input.entries.some(
+    (entry) => entry.lineTruncated === true,
+  )
+  const truncated = input.timedOut || input.truncationReason !== undefined
+  const output = {
     path: input.resolvedPath,
     outputMode: input.parsed.outputMode,
-    count: entries.length,
+    count: input.entries.length,
     offset: input.parsed.offset,
-    observations,
     truncated,
-    timedOut: input.stopResult.stopReason === "timeout",
-    ...(input.limitReason === undefined
+    ...(input.truncationReason === undefined
       ? {}
-      : { limitReason: input.limitReason }),
+      : { truncationReason: input.truncationReason }),
+    timedOut: input.timedOut,
+    lineTruncated,
     content: renderContent(
-      entries,
+      input.entries,
       input.hasMore,
-      input.lineTruncated,
+      lineTruncated,
+      input.timedOut,
+      input.truncationReason,
       input.parsed.offset,
     ),
   }
-  const nextOffset = input.parsed.offset + entries.length
+  const nextOffset = input.parsed.offset + input.entries.length
+  // TODO(search-pagination): Revisit offset pagination if stable workspace
+  // search snapshots become a real GUI or agent workflow requirement.
   return {
-    ...preliminary,
+    ...output,
     page: {
       offset: input.parsed.offset,
-      returned: entries.length,
+      returned: input.entries.length,
       has_more: input.hasMore,
       ...(input.hasMore
         ? {
@@ -295,97 +325,40 @@ function renderContent(
   entries: readonly SearchEntry[],
   hasMore: boolean,
   lineTruncated: boolean,
+  timedOut: boolean,
+  truncationReason: GrepTruncationReason | undefined,
   offset: number,
 ): string {
-  const body = entries.map((entry) => entry.content).join("\n")
+  if (entries.length === 0 && !timedOut && truncationReason === undefined) {
+    return offset === 0
+      ? "No matches found."
+      : `Grep returned 0 results at offset ${offset}.`
+  }
+  const noun = entries.length === 1 ? "result" : "results"
+  const summary = timedOut
+    ? `Grep returned ${entries.length} ${noun} before timing out.`
+    : `Grep returned ${entries.length} ${noun}.`
   const markers = [
-    ...(lineTruncated ? ["(One or more result lines were truncated.)"] : []),
-    ...(hasMore
+    ...(truncationReason === "result_limit" && hasMore
       ? [
-          `(Results truncated. Continue from offset ${offset + entries.length}, or narrow the search. Pagination reruns the live search and is best effort.)`,
+          `(Results truncated at the result limit. Continue from offset ${offset + entries.length}.)`,
         ]
       : []),
+    ...(truncationReason === "output_byte_limit"
+      ? [
+          entries.length === 0
+            ? "(Search output exceeded the byte limit before a complete result was returned.)"
+            : "(Search output exceeded the byte limit; partial results shown.)",
+        ]
+      : []),
+    ...(timedOut ? ["(Search timed out; partial results shown.)"] : []),
+    ...(lineTruncated
+      ? ["(One or more result lines were shortened for display.)"]
+      : []),
   ]
-  if (body.length === 0 && markers.length === 0) return "No matches found"
-  return [...(body.length === 0 ? [] : [body]), ...markers].join("\n")
-}
-
-function buildObservations(
-  entries: readonly SearchEntry[],
-  hashes: ReadonlyMap<string, string>,
-) {
-  const lines = new Map<string, number[]>()
-  for (const entry of entries) {
-    if (entry.match === undefined) continue
-    const existing = lines.get(entry.match.path) ?? []
-    for (let line = entry.match.line; line <= entry.match.endLine; line += 1) {
-      existing.push(line)
-    }
-    lines.set(entry.match.path, existing)
-  }
-  return [...lines]
-    .sort(([left], [right]) => left.localeCompare(right))
-    .flatMap(([path, observedLines]) => {
-      const sha256 = hashes.get(path)
-      if (sha256 === undefined) return []
-      const sorted = [...new Set(observedLines)].sort(
-        (left, right) => left - right,
-      )
-      const ranges: { startLine: number; endLine: number }[] = []
-      for (const line of sorted) {
-        const previous = ranges.at(-1)
-        if (previous !== undefined && line === previous.endLine + 1) {
-          previous.endLine = line
-        } else {
-          ranges.push({ startLine: line, endLine: line })
-        }
-      }
-      return [{ path, sha256, kind: "grep_snippet", ranges }]
-    })
-}
-
-async function hashVisibleFiles(
-  workspaceRoot: string,
-  entries: readonly SearchEntry[],
-): Promise<ReadonlyMap<string, string>> {
-  const paths = [
-    ...new Set(
-      entries.flatMap((entry) => (entry.match ? [entry.match.path] : [])),
-    ),
-  ]
-  const hashes = new Map<string, string>()
-  for (const path of paths) {
-    let handle: Awaited<ReturnType<typeof open>> | undefined
-    try {
-      handle = await open(`${workspaceRoot}/${path}`, "r")
-      if ((await handle.stat()).size > RuntimeLimits.fileWriteBytes) continue
-      const content = await handle.readFile()
-      if (content.byteLength > RuntimeLimits.fileWriteBytes) continue
-      const visible = entries.filter((entry) => entry.match?.path === path)
-      if (!matchesCurrentContent(content.toString("utf8"), visible)) continue
-      hashes.set(path, createHash("sha256").update(content).digest("hex"))
-    } catch {
-      // A disappearing file is not a valid observation. The visible search
-      // line remains useful, but it cannot authorize a later write.
-    } finally {
-      await handle?.close()
-    }
-  }
-  return hashes
-}
-
-function matchesCurrentContent(
-  content: string,
-  entries: readonly SearchEntry[],
-): boolean {
-  const lines = content.split(/\r\n|\n|\r/u)
-  return entries.every((entry) => {
-    const match = entry.match
-    if (match === undefined) return true
-    const current = lines.slice(match.line - 1, match.endLine).join("\n")
-    const expected = match.text.replace(/\r\n|\r|\n/gu, "\n")
-    return match.fullLine ? current === expected : current.includes(expected)
-  })
+  return [summary, ...entries.map((entry) => entry.content), ...markers].join(
+    "\n",
+  )
 }
 
 function displayText(value: string): string {
@@ -394,20 +367,18 @@ function displayText(value: string): string {
 
 function boundLine(entry: SearchEntry, maxCharacters: number) {
   if (entry.content.length <= maxCharacters) {
-    return { entry, truncated: false }
+    return entry
   }
   const marker = "…[line truncated]…"
   const available = Math.max(0, maxCharacters - marker.length)
   const prefix = Math.ceil(available / 2)
   const suffix = Math.floor(available / 2)
   return {
-    entry: {
-      ...entry,
-      content: `${entry.content.slice(0, prefix)}${marker}${entry.content.slice(
-        entry.content.length - suffix,
-      )}`,
-    },
-    truncated: true,
+    ...entry,
+    content: `${entry.content.slice(0, prefix)}${marker}${entry.content.slice(
+      entry.content.length - suffix,
+    )}`,
+    lineTruncated: true,
   }
 }
 

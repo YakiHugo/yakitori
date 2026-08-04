@@ -3,7 +3,6 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import {
-  createFileObservationStore,
   createGlobTool,
   createGrepTool,
   resolveWorkspaceRoot,
@@ -32,7 +31,14 @@ describe("workspace search tools", () => {
         output: {
           count: 1,
           truncated: true,
+          truncationReason: "result_limit",
+          timedOut: false,
+          lineTruncated: false,
           content: expect.stringContaining(":1:const"),
+          page: {
+            has_more: true,
+            next: { offset: 1 },
+          },
         },
       })
       if (result.ok) {
@@ -64,7 +70,7 @@ describe("workspace search tools", () => {
         "-i": { type: "boolean" },
         "-o": { type: "boolean" },
         type: { type: "string" },
-        head_limit: { type: "integer" },
+        head_limit: { type: "integer", minimum: 1, maximum: 250 },
         offset: { type: "integer" },
         multiline: { type: "boolean" },
       },
@@ -82,6 +88,72 @@ describe("workspace search tools", () => {
         ok: false,
         code: "invalid_tool_input",
       })
+    })
+  })
+
+  it("validates head_limit instead of treating zero as the default or clamping", async () => {
+    await withWorkspace(async (workspace) => {
+      const zero = await createGrepTool().execute(
+        { pattern: "needle", head_limit: 0 },
+        { workspaceRoot: workspace },
+      )
+      expect(zero).toMatchObject({
+        ok: false,
+        code: "invalid_tool_input",
+        content: expect.stringContaining("integer from 1 to 250"),
+      })
+
+      const abovePublicLimit = await createGrepTool().execute(
+        { pattern: "needle", head_limit: 251 },
+        { workspaceRoot: workspace },
+      )
+      expect(abovePublicLimit).toMatchObject({
+        ok: false,
+        code: "invalid_tool_input",
+        content: expect.stringContaining("integer from 1 to 250"),
+      })
+
+      const overRuntimeLimit = await createGrepTool({
+        maxResults: 2,
+      }).execute(
+        { pattern: "needle", head_limit: 3 },
+        { workspaceRoot: workspace },
+      )
+      expect(overRuntimeLimit).toMatchObject({
+        ok: false,
+        code: "invalid_tool_input",
+        content: expect.stringContaining("Runtime maximum of 2"),
+      })
+    })
+  })
+
+  it("enables multiline matching and dotall together", async () => {
+    await withWorkspace(async (workspace) => {
+      const result = await createGrepTool({}, async (args, input) => {
+        expect(args).toEqual(
+          expect.arrayContaining(["--multiline", "--multiline-dotall"]),
+        )
+        input.onRecord(ripgrepMatch("missing.ts", 1, "needle\nnext\n"))
+        return { ok: true }
+      }).execute(
+        {
+          pattern: "needle.*next",
+          output_mode: "content",
+          multiline: true,
+        },
+        { workspaceRoot: workspace },
+      )
+
+      expect(result).toMatchObject({
+        ok: true,
+        output: {
+          count: 1,
+          content: "Grep returned 1 result.\nmissing.ts:1:needle\\nnext",
+        },
+      })
+      if (result.ok && isObject(result.output)) {
+        expect(result.output).not.toHaveProperty("observations")
+      }
     })
   })
 
@@ -104,13 +176,18 @@ describe("workspace search tools", () => {
         { pattern: "needle", output_mode: "files_with_matches" },
         { workspaceRoot: workspace },
       )
-      expect(successContent(files).split("\n")).toEqual(["a.ts", "z.ts"])
+      expect(successContent(files).split("\n")).toEqual([
+        "Grep returned 2 results.",
+        "a.ts",
+        "z.ts",
+      ])
 
       const content = await createGrepTool().execute(
         { pattern: "needle", output_mode: "content" },
         { workspaceRoot: workspace },
       )
       expect(successContent(content).split("\n")).toEqual([
+        "Grep returned 3 results.",
         "a.ts:2:needle",
         "z.ts:1:needle",
         "z.ts:2:needle",
@@ -120,7 +197,11 @@ describe("workspace search tools", () => {
         { pattern: "needle", output_mode: "count" },
         { workspaceRoot: workspace },
       )
-      expect(successContent(count).split("\n")).toEqual(["a.ts:1", "z.ts:2"])
+      expect(successContent(count).split("\n")).toEqual([
+        "Grep returned 2 results.",
+        "a.ts:1",
+        "z.ts:2",
+      ])
     })
   })
 
@@ -135,7 +216,7 @@ describe("workspace search tools", () => {
         { pattern: "needle" },
         { workspaceRoot: workspace },
       )
-      expect(successContent(normal)).toBe("visible.ts")
+      expect(successContent(normal)).toBe("Grep returned 1 result.\nvisible.ts")
 
       const configured = await createGrepTool({ includeIgnored: true }).execute(
         { pattern: "needle" },
@@ -149,23 +230,19 @@ describe("workspace search tools", () => {
     await withWorkspace(async (workspace) => {
       await writeFile(join(workspace, "a.ts"), "needle\n")
       await writeFile(join(workspace, "b.ts"), "needle\n")
-      const observations = createFileObservationStore()
       const tool = createGrepTool()
       const first = await tool.execute(
         { pattern: "needle", output_mode: "content", head_limit: 1 },
-        { workspaceRoot: workspace, fileObservations: observations },
+        { workspaceRoot: workspace },
       )
       expect(first).toMatchObject({
         ok: true,
         output: {
           count: 1,
-          observations: [
-            {
-              path: "a.ts",
-              kind: "grep_snippet",
-              ranges: [{ startLine: 1, endLine: 1 }],
-            },
-          ],
+          truncated: true,
+          truncationReason: "result_limit",
+          timedOut: false,
+          lineTruncated: false,
           page: {
             has_more: true,
             next: { offset: 1 },
@@ -173,7 +250,7 @@ describe("workspace search tools", () => {
         },
       })
       if (!first.ok || !isObject(first.output)) return
-      observations.recordSuccess("grep", {}, first.output)
+      expect(first.output).not.toHaveProperty("observations")
       const page = first.output.page
       if (!isObject(page) || !isObject(page.next)) return
 
@@ -184,18 +261,9 @@ describe("workspace search tools", () => {
           head_limit: 1,
           offset: page.next.offset,
         },
-        { workspaceRoot: workspace, fileObservations: observations },
+        { workspaceRoot: workspace },
       )
       expect(successContent(second)).toContain("b.ts:1:needle")
-
-      observations.recordSuccess(
-        "write_file",
-        {},
-        {
-          path: "other.ts",
-          sha256: "f".repeat(64),
-        },
-      )
       const livePage = await tool.execute(
         {
           pattern: "needle",
@@ -203,13 +271,33 @@ describe("workspace search tools", () => {
           head_limit: 1,
           offset: page.next.offset,
         },
-        { workspaceRoot: workspace, fileObservations: observations },
+        { workspaceRoot: workspace },
       )
       expect(successContent(livePage)).toContain("b.ts:1:needle")
+
+      const exhausted = await tool.execute(
+        {
+          pattern: "needle",
+          path: "a.ts",
+          output_mode: "content",
+          offset: 1,
+        },
+        { workspaceRoot: workspace },
+      )
+      expect(exhausted).toMatchObject({
+        ok: true,
+        output: {
+          count: 0,
+          offset: 1,
+          content: "Grep returned 0 results at offset 1.",
+          page: { has_more: false },
+        },
+        content: "Grep returned 0 results at offset 1.",
+      })
     })
   })
 
-  it("returns partial timeout output and observes only displayed snippets", async () => {
+  it("distinguishes pageable result limits from non-pageable timeouts", async () => {
     await withWorkspace(async (workspace) => {
       await writeFile(join(workspace, "a.ts"), "needle\n")
       await writeFile(join(workspace, "b.ts"), "needle\n")
@@ -238,8 +326,12 @@ describe("workspace search tools", () => {
           count: 1,
           truncated: true,
           timedOut: false,
-          limitReason: "result_limit",
-          observations: [{ path: "a.ts" }],
+          lineTruncated: false,
+          truncationReason: "result_limit",
+          page: {
+            has_more: true,
+            next: { offset: 1 },
+          },
         },
       })
 
@@ -256,24 +348,44 @@ describe("workspace search tools", () => {
           count: 1,
           timedOut: true,
           truncated: true,
-          observations: [{ path: "a.ts" }],
+          lineTruncated: false,
+          content:
+            "Grep returned 1 result before timing out.\na.ts:1:needle\n(Search timed out; partial results shown.)",
+          page: { has_more: false },
         },
+      })
+      if (timedOut.ok && isObject(timedOut.output)) {
+        expect(timedOut.output).not.toHaveProperty("truncationReason")
+        expect(timedOut.output.page).not.toHaveProperty("next")
+      }
+
+      const emptyTimeout = await createGrepTool({}, async () => ({
+        ok: true,
+        stopReason: "timeout",
+      })).execute(
+        { pattern: "needle", output_mode: "content" },
+        { workspaceRoot: workspace },
+      )
+      expect(emptyTimeout).toMatchObject({
+        ok: false,
+        code: "search_timeout",
+        content:
+          "search_timeout: Grep search timed out after returning 0 results.",
       })
     })
   })
 
-  it("caps individual lines and total model-visible grep bytes", async () => {
+  it("reports a pageable model-output byte limit", async () => {
     await withWorkspace(async (workspace) => {
-      await writeFile(join(workspace, "a.ts"), `needle ${"x".repeat(2_000)}\n`)
       let offered = 0
       const tool = createGrepTool(
-        { maxLineCharacters: 120, maxOutputBytes: 9 * 1024 },
+        { maxOutputBytes: 2 * 1024 },
         async (_arguments, input) => {
           for (let line = 1; line <= 100; line += 1) {
             offered += 1
             if (
               !input.onRecord(
-                ripgrepMatch("a.ts", line, `needle ${"x".repeat(2_000)}\n`),
+                ripgrepMatch("a.ts", line, `needle ${"x".repeat(80)}\n`),
               )
             ) {
               return { ok: true, stopReason: "consumer_limit" }
@@ -290,67 +402,228 @@ describe("workspace search tools", () => {
         ok: true,
         output: {
           truncated: true,
-          limitReason: "output_byte_limit",
-          content: expect.stringContaining("[line truncated]"),
+          truncationReason: "output_byte_limit",
+          timedOut: false,
+          lineTruncated: false,
+          page: {
+            has_more: true,
+            next: { offset: expect.any(Number) },
+          },
+          content: expect.stringContaining(
+            "Search output exceeded the byte limit; partial results shown.",
+          ),
         },
       })
       expect(offered).toBeLessThan(100)
       if (result.ok) {
         expect(Buffer.byteLength(result.content, "utf8")).toBeLessThanOrEqual(
-          9 * 1024,
+          2 * 1024,
         )
         const output = result.output
         if (isObject(output)) {
-          const firstLine = String(output.content).split("\n")[0] ?? ""
-          expect(firstLine.length).toBeLessThanOrEqual(120)
+          expect(
+            Buffer.byteLength(JSON.stringify(output), "utf8"),
+          ).toBeLessThanOrEqual(2 * 1024)
+          expect(output).not.toHaveProperty("limitReason")
         }
       }
     })
   })
 
-  it("records every displayed line in a multiline grep snippet", async () => {
+  it("rejects impossible output budgets and does not paginate an empty bounded result", async () => {
+    expect(() => createGrepTool({ maxOutputBytes: 511 })).toThrow(
+      "grep maxOutputBytes must be an integer of at least 512.",
+    )
+
     await withWorkspace(async (workspace) => {
-      await writeFile(join(workspace, "multi.ts"), "needle\nnext\nafter\n")
-      const result = await createGrepTool().execute(
-        {
-          pattern: "needle\\nnext",
-          output_mode: "content",
-          multiline: true,
+      const result = await createGrepTool(
+        { maxOutputBytes: 512 },
+        async (_arguments, input) => {
+          input.onRecord(ripgrepMatch("a.ts", 1, "needle\n"))
+          return { ok: true, stopReason: "consumer_limit" }
         },
+      ).execute(
+        { pattern: "needle", output_mode: "content" },
         { workspaceRoot: workspace },
       )
+
       expect(result).toMatchObject({
         ok: true,
         output: {
-          content: expect.stringContaining("multi.ts:1:needle\\nnext"),
-          observations: [
-            {
-              path: "multi.ts",
-              kind: "grep_snippet",
-              ranges: [{ startLine: 1, endLine: 2 }],
-            },
-          ],
+          count: 0,
+          truncated: true,
+          truncationReason: "output_byte_limit",
+          content:
+            "Grep returned 0 results.\n(Search output exceeded the byte limit before a complete result was returned.)",
+          page: { has_more: false },
         },
+      })
+      if (result.ok && isObject(result.output)) {
+        expect(result.output.page).not.toHaveProperty("next")
+        expect(
+          Buffer.byteLength(JSON.stringify(result.output), "utf8"),
+        ).toBeLessThanOrEqual(512)
+      }
+
+      const longPath = ["a".repeat(180), "b".repeat(180), "c".repeat(180)].join(
+        "/",
+      )
+      await mkdir(join(workspace, longPath), { recursive: true })
+      const irreducible = await createGrepTool(
+        { maxOutputBytes: 512 },
+        async () => ({ ok: true }),
+      ).execute(
+        { pattern: "needle", path: longPath },
+        { workspaceRoot: workspace },
+      )
+      expect(irreducible).toMatchObject({
+        ok: false,
+        code: "output_budget_too_small",
       })
     })
   })
 
-  it("does not materialize edit observations for files above the edit limit", async () => {
+  it("reports line shortening without marking the search truncated", async () => {
     await withWorkspace(async (workspace) => {
-      await writeFile(
-        join(workspace, "large.txt"),
-        `needle\n${"x".repeat(1024 * 1024)}`,
+      const result = await createGrepTool(
+        { maxLineCharacters: 120 },
+        async (_arguments, input) => {
+          input.onRecord(
+            ripgrepMatch("a.ts", 1, `needle ${"x".repeat(2_000)}\n`),
+          )
+          return { ok: true }
+        },
+      ).execute(
+        { pattern: "needle", output_mode: "content" },
+        { workspaceRoot: workspace },
       )
+
+      expect(result).toMatchObject({
+        ok: true,
+        output: {
+          count: 1,
+          truncated: false,
+          timedOut: false,
+          lineTruncated: true,
+          content: expect.stringContaining(
+            "One or more result lines were shortened for display.",
+          ),
+          page: { has_more: false },
+        },
+      })
+      if (result.ok && isObject(result.output)) {
+        expect(result.output).not.toHaveProperty("truncationReason")
+      }
+    })
+  })
+
+  it("never returns file observations from grep results", async () => {
+    await withWorkspace(async (workspace) => {
+      await writeFile(join(workspace, "a.ts"), "needle\n")
       const result = await createGrepTool().execute(
         { pattern: "needle", output_mode: "content" },
         { workspaceRoot: workspace },
       )
+      expect(result).toMatchObject({ ok: true })
+      if (result.ok && isObject(result.output)) {
+        expect(result.output).not.toHaveProperty("observations")
+      }
+
+      const empty = await createGrepTool().execute(
+        { pattern: "missing", output_mode: "content" },
+        { workspaceRoot: workspace },
+      )
+      expect(empty).toMatchObject({
+        ok: true,
+        output: {
+          count: 0,
+          truncated: false,
+          timedOut: false,
+          lineTruncated: false,
+          content: "No matches found.",
+          page: { has_more: false },
+        },
+        content: "No matches found.",
+      })
+    })
+  })
+
+  it.each([
+    "raw_byte_limit",
+    "record_byte_limit",
+  ] as const)("maps %s to a non-pageable output byte limit", async (stopReason) => {
+    await withWorkspace(async (workspace) => {
+      const result = await createGrepTool({}, async (_arguments, input) => {
+        input.onRecord(ripgrepMatch("a.ts", 1, "needle\n"))
+        return { ok: true, stopReason }
+      }).execute(
+        { pattern: "needle", output_mode: "content" },
+        { workspaceRoot: workspace },
+      )
+
       expect(result).toMatchObject({
         ok: true,
         output: {
-          content: expect.stringContaining("large.txt:1:needle"),
-          observations: [],
+          count: 1,
+          truncated: true,
+          truncationReason: "output_byte_limit",
+          timedOut: false,
+          page: { has_more: false },
         },
+      })
+      if (result.ok && isObject(result.output)) {
+        expect(result.output.page).not.toHaveProperty("next")
+      }
+    })
+  })
+
+  it.each([
+    "raw_byte_limit",
+    "record_byte_limit",
+  ] as const)("describes a zero-result grep %s without claiming partial results", async (stopReason) => {
+    await withWorkspace(async (workspace) => {
+      const result = await createGrepTool({}, async () => ({
+        ok: true,
+        stopReason,
+      })).execute(
+        { pattern: "needle", output_mode: "content" },
+        { workspaceRoot: workspace },
+      )
+
+      expect(result).toMatchObject({
+        ok: true,
+        output: {
+          count: 0,
+          truncated: true,
+          truncationReason: "output_byte_limit",
+          timedOut: false,
+          content:
+            "Grep returned 0 results.\n(Search output exceeded the byte limit before a complete result was returned.)",
+          page: { has_more: false },
+        },
+      })
+      expect(result.content).not.toContain("partial results shown")
+    })
+  })
+
+  it("keeps grep abort and ripgrep failures as tool failures", async () => {
+    await withWorkspace(async (workspace) => {
+      const aborted = await createGrepTool({}, async () => ({
+        ok: true,
+        stopReason: "aborted",
+      })).execute({ pattern: "needle" }, { workspaceRoot: workspace })
+      expect(aborted).toMatchObject({
+        ok: false,
+        code: "search_aborted",
+      })
+
+      const failed = await createGrepTool({}, async () => ({
+        ok: false,
+        message: "ripgrep failed",
+      })).execute({ pattern: "needle" }, { workspaceRoot: workspace })
+      expect(failed).toMatchObject({
+        ok: false,
+        code: "search_failed",
       })
     })
   })

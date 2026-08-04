@@ -20,6 +20,7 @@ export type GrepInput = {
 }
 
 const VCS_DIRECTORIES = [".git", ".svn", ".hg", ".bzr", ".jj", ".sl"]
+const MAX_HEAD_LIMIT = 250
 
 export const GrepInputSchema: JsonObject = {
   type: "object",
@@ -51,7 +52,7 @@ export const GrepInputSchema: JsonObject = {
     "-i": { type: "boolean" },
     "-o": { type: "boolean" },
     type: { type: "string" },
-    head_limit: { type: "integer", minimum: 0 },
+    head_limit: { type: "integer", minimum: 1, maximum: MAX_HEAD_LIMIT },
     offset: { type: "integer", minimum: 0 },
     multiline: { type: "boolean" },
   },
@@ -124,10 +125,19 @@ export function parseGrepInput(
       }
     }
   }
-  if (input.head_limit !== undefined && !boundedInteger(input.head_limit, 0)) {
+  if (
+    input.head_limit !== undefined &&
+    !boundedInteger(input.head_limit, 1, MAX_HEAD_LIMIT)
+  ) {
     return {
       ok: false,
-      message: "grep head_limit must be a non-negative integer.",
+      message: `grep head_limit must be an integer from 1 to ${MAX_HEAD_LIMIT}.`,
+    }
+  }
+  if (typeof input.head_limit === "number" && input.head_limit > maxResults) {
+    return {
+      ok: false,
+      message: `grep head_limit exceeds the Runtime maximum of ${maxResults}.`,
     }
   }
   if (input.offset !== undefined && !boundedInteger(input.offset, 0)) {
@@ -143,10 +153,6 @@ export function parseGrepInput(
       : typeof input["-C"] === "number"
         ? input["-C"]
         : undefined
-  const requestedLimit =
-    typeof input.head_limit === "number" && input.head_limit > 0
-      ? input.head_limit
-      : maxResults
   return {
     ok: true,
     pattern: input.pattern,
@@ -159,7 +165,10 @@ export function parseGrepInput(
       sharedContext ?? (typeof input["-B"] === "number" ? input["-B"] : 0),
     afterContext:
       sharedContext ?? (typeof input["-A"] === "number" ? input["-A"] : 0),
-    headLimit: Math.min(requestedLimit, maxResults),
+    headLimit:
+      typeof input.head_limit === "number"
+        ? input.head_limit
+        : Math.min(maxResults, MAX_HEAD_LIMIT),
     offset: typeof input.offset === "number" ? input.offset : 0,
     ...(typeof input.type === "string" ? { type: input.type } : {}),
     multiline: input.multiline === true,
@@ -172,6 +181,9 @@ export function buildGrepArguments(
   path: string,
   includeIgnored: boolean,
 ): readonly string[] {
+  // TODO(grep-ordering): Evaluate removing ripgrep sorting so broad searches
+  // can stop during traversal instead of collecting enough state to sort
+  // globally.
   const common = [
     "--hidden",
     "--no-require-git",
@@ -181,7 +193,7 @@ export function buildGrepArguments(
     ...(input.caseInsensitive ? ["-i"] : []),
     ...(input.glob === undefined ? [] : ["--glob", input.glob]),
     ...(input.type === undefined ? [] : ["--type", input.type]),
-    ...(input.multiline ? ["--multiline"] : []),
+    ...(input.multiline ? ["--multiline", "--multiline-dotall"] : []),
   ]
   if (input.outputMode === "files_with_matches") {
     return [
