@@ -246,18 +246,21 @@ uses that observation's SHA as the compare-and-write precondition. Missing,
 partial, and stale observations fail with instructions to read the complete
 current file before retrying.
 
-The default `edit_file` protocol performs one flat `oldString`/`newString`
-replacement, with optional `replaceAll` for one search string. Its model-facing
-input does not carry a revision hash: Runtime derives the write precondition
-from an observation still present in the model context that produced the edit
-call. It tries exact text first, then only deterministic line-ending,
-straight-versus-curly quote, and trailing-whitespace equivalence.
+The default `edit_file` protocol treats an empty `oldString` as an atomic
+create-if-absent operation; it never overwrites an existing file and reuses the
+same no-clobber commit path as `write_file`. A non-empty `oldString` performs
+one flat `oldString`/`newString` replacement, with optional `replaceAll` for one
+search string. Its model-facing input does not carry a revision hash: Runtime
+derives the write precondition from an observation still present in the model
+context that produced the edit call. It tries exact text first, then only
+deterministic line-ending, straight-versus-curly quote, and trailing-whitespace
+equivalence.
 Single-versus-double quote delimiters, indentation, and internal whitespace
 remain exact for every file format. Replacement text always adopts the file's
 dominant line-ending style. If the file changed after observation, a
 single-target edit may rebase only when the exact `oldString` remains unique;
-`replaceAll` keeps the observed-revision requirement. The tool never applies
-similarity or nearest-match guesses.
+`replaceAll` keeps the observed-revision requirement and is invalid for
+create-if-absent. The tool never applies similarity or nearest-match guesses.
 
 Missing-target diagnostics return only bounded, nonzero-score nearby text;
 ambiguous-target diagnostics return exact line ranges without repeating the
@@ -324,9 +327,10 @@ Items in that request; a result truncated again by model-context assembly is
 visible as text but conservatively grants no file observation. `edit_file` uses
 this frozen view, so a read issued alongside an edit cannot retroactively
 authorize it. `grep` locates files and lines but produces no file observation;
-the model must use `read_file` before editing. A successful full-file write
-establishes authorship of the new revision. Filesystem SHA comparison at the
-synchronized write boundary remains the final concurrency check.
+the model must use `read_file` before editing an existing file. A successful
+full-file write or create-if-absent edit establishes authorship of the new
+revision. Filesystem SHA comparison at the synchronized write boundary remains
+the final concurrency check.
 
 Tool results retain the coarse durable `{ content, output?, error? }` shape.
 `content` is bounded, concise plain text for the model; `output` carries

@@ -131,7 +131,8 @@ kernel fact protocol ahead of a concrete consumer.
   `write_file` replacement or `replaceAll`, which keep an exact current-SHA
   precondition. `write_file` derives that SHA internally from a complete
   visible observation instead of asking the model to echo it. New-file creation
-  remains the separate no-clobber path.
+  remains the separate no-clobber path: `edit_file` may enter it only with an
+  empty `oldString`, which never overwrites an existing target.
 - This deliberately permits an exact unique edit outside the lines shown by a
   partial observation, while still requiring that the file was visible and
   refusing similarity edits. Keep the stricter alternative as deferred work:
