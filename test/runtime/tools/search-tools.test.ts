@@ -366,6 +366,7 @@ describe("workspace search tools", () => {
       },
     })
     expect(schema.properties).not.toHaveProperty("include_ignored")
+    expect(schema.properties).not.toHaveProperty("limit")
   })
 
   it("rejects model-supplied ignored-file switches", async () => {
@@ -377,17 +378,22 @@ describe("workspace search tools", () => {
       expect(result).toMatchObject({
         ok: false,
         code: "invalid_tool_input",
+        content:
+          "invalid_tool_input: glob does not accept the include_ignored argument.",
       })
     })
   })
 
-  it("passes glob patterns to ripgrep and returns newest files first", async () => {
+  it("passes glob patterns to ripgrep and returns paths lexicographically", async () => {
     await withWorkspace(async (workspace) => {
       await writeFile(join(workspace, "one.ts"), "one")
       await writeFile(join(workspace, "two.ts"), "two")
       await mkdir(join(workspace, "nested"))
       await writeFile(join(workspace, "nested", "three.ts"), "three")
+      await writeFile(join(workspace, ".hidden.ts"), "hidden")
       await writeFile(join(workspace, ".env.ts"), "secret")
+      await mkdir(join(workspace, ".git"))
+      await writeFile(join(workspace, ".git", "internal.ts"), "vcs")
       await utimes(
         join(workspace, "one.ts"),
         new Date("2026-01-01T00:00:00.000Z"),
@@ -409,15 +415,32 @@ describe("workspace search tools", () => {
       )
       expect(complete).toMatchObject({
         ok: true,
-        output: { count: 3, truncated: false },
+        output: {
+          pattern: "*.ts",
+          path: ".",
+          count: 4,
+          truncated: false,
+          content:
+            "Glob returned 4 files.\n.hidden.ts\nnested/three.ts\none.ts\ntwo.ts",
+        },
       })
       if (complete.ok) {
         const content = String(
           (complete.output as { content: unknown }).content,
         )
-        expect(content.split("\n")[0]).toBe("two.ts")
-        expect(content).toContain("nested/three.ts")
+        if (isObject(complete.output)) {
+          expect(complete.output).not.toHaveProperty("truncationReason")
+        }
+        expect(complete.content).toBe(content)
+        expect(content.split("\n")).toEqual([
+          "Glob returned 4 files.",
+          ".hidden.ts",
+          "nested/three.ts",
+          "one.ts",
+          "two.ts",
+        ])
         expect(content).not.toContain(".env.ts")
+        expect(content).not.toContain(".git")
       }
 
       const result = await createGlobTool({ limit: 1 }).execute(
@@ -426,14 +449,163 @@ describe("workspace search tools", () => {
       )
       expect(result).toMatchObject({
         ok: true,
-        output: { count: 1, truncated: true },
+        output: {
+          count: 1,
+          truncated: true,
+          truncationReason: "result_limit",
+        },
       })
       if (!result.ok) return
       const content = String((result.output as { content: unknown }).content)
-      expect(content).toContain(
-        "Consider using a more specific path or pattern",
-      )
+      expect(content).toContain("(Results truncated at the result limit.)")
+      expect(content).not.toContain("Consider using")
       expect(content).not.toContain(".env.ts")
+    })
+  })
+
+  it("stops on the 101st valid path and reports the result limit", async () => {
+    await withWorkspace(async (workspace) => {
+      let offered = 0
+      const result = await createGlobTool({}, async (args, input) => {
+        expect(args).not.toContain("--sortr=modified")
+        for (let index = 100; index >= 0; index -= 1) {
+          offered += 1
+          if (!input.onRecord(`file-${String(index).padStart(3, "0")}.ts`)) {
+            return { ok: true, stopReason: "consumer_limit" }
+          }
+        }
+        return { ok: true }
+      }).execute({ pattern: "*.ts" }, { workspaceRoot: workspace })
+
+      expect(offered).toBe(101)
+      expect(result).toMatchObject({
+        ok: true,
+        output: {
+          count: 100,
+          truncated: true,
+          truncationReason: "result_limit",
+        },
+      })
+      expect(successContent(result).split("\n")).toEqual([
+        "Glob returned 100 files.",
+        ...Array.from(
+          { length: 100 },
+          (_, index) => `file-${String(index + 1).padStart(3, "0")}.ts`,
+        ),
+        "(Results truncated at the result limit.)",
+      ])
+      expect(result.content).toBe(successContent(result))
+    })
+  })
+
+  it("returns partial timeout results but fails a zero-result timeout", async () => {
+    await withWorkspace(async (workspace) => {
+      const partial = await createGlobTool({}, async (_args, input) => {
+        input.onRecord("z.ts")
+        input.onRecord("a.ts")
+        return { ok: true, stopReason: "timeout" }
+      }).execute({ pattern: "*.ts" }, { workspaceRoot: workspace })
+
+      expect(partial).toMatchObject({
+        ok: true,
+        output: {
+          count: 2,
+          truncated: true,
+          truncationReason: "timeout",
+          content:
+            "Glob returned 2 files before timing out.\na.ts\nz.ts\n(Search timed out; partial results shown.)",
+        },
+      })
+      if (partial.ok && isObject(partial.output)) {
+        expect(partial.output).not.toHaveProperty("timedOut")
+        expect(partial.output).not.toHaveProperty("limitReason")
+      }
+      expect(partial.content).toBe(
+        "Glob returned 2 files before timing out.\na.ts\nz.ts\n(Search timed out; partial results shown.)",
+      )
+
+      const empty = await createGlobTool({}, async () => ({
+        ok: true,
+        stopReason: "timeout",
+      })).execute({ pattern: "*.ts" }, { workspaceRoot: workspace })
+      expect(empty).toMatchObject({
+        ok: false,
+        code: "search_timeout",
+        content:
+          "search_timeout: Glob search timed out after returning 0 files.",
+      })
+      expect(empty.content).not.toContain("No files found")
+    })
+  })
+
+  it.each([
+    "raw_byte_limit",
+    "record_byte_limit",
+  ] as const)("maps %s to the public output byte limit", async (stopReason) => {
+    await withWorkspace(async (workspace) => {
+      const result = await createGlobTool({}, async (_args, input) => {
+        input.onRecord("partial.ts")
+        return { ok: true, stopReason }
+      }).execute({ pattern: "*.ts" }, { workspaceRoot: workspace })
+
+      expect(result).toMatchObject({
+        ok: true,
+        output: {
+          count: 1,
+          truncated: true,
+          truncationReason: "output_byte_limit",
+          content: expect.stringContaining(
+            "Search output exceeded the byte limit; partial results shown.",
+          ),
+        },
+      })
+    })
+  })
+
+  it.each([
+    "raw_byte_limit",
+    "record_byte_limit",
+  ] as const)("describes a zero-result %s without claiming partial results", async (stopReason) => {
+    await withWorkspace(async (workspace) => {
+      const result = await createGlobTool({}, async () => ({
+        ok: true,
+        stopReason,
+      })).execute({ pattern: "*.ts" }, { workspaceRoot: workspace })
+
+      expect(result).toMatchObject({
+        ok: true,
+        output: {
+          count: 0,
+          truncated: true,
+          truncationReason: "output_byte_limit",
+          content:
+            "Glob returned 0 files.\n(Search output exceeded the byte limit before a complete file path was returned.)",
+        },
+      })
+      expect(result.content).not.toContain("partial results shown")
+    })
+  })
+
+  it("keeps abort and ripgrep failures as tool failures", async () => {
+    await withWorkspace(async (workspace) => {
+      const aborted = await createGlobTool({}, async () => ({
+        ok: true,
+        stopReason: "aborted",
+      })).execute({ pattern: "*" }, { workspaceRoot: workspace })
+      expect(aborted).toMatchObject({
+        ok: false,
+        code: "search_aborted",
+      })
+
+      const failed = await createGlobTool({}, async () => ({
+        ok: false,
+        message: "ripgrep failed",
+      })).execute({ pattern: "*" }, { workspaceRoot: workspace })
+      expect(failed).toMatchObject({
+        ok: false,
+        code: "search_failed",
+        content: "search_failed: ripgrep failed",
+      })
     })
   })
 
@@ -450,7 +622,10 @@ describe("workspace search tools", () => {
       )
       expect(normal).toMatchObject({
         ok: true,
-        output: { count: 1, content: "visible.ts" },
+        output: {
+          count: 1,
+          content: "Glob returned 1 file.\nvisible.ts",
+        },
       })
 
       const configured = await createGlobTool({
@@ -478,7 +653,10 @@ describe("workspace search tools", () => {
       )
       expect(nested).toMatchObject({
         ok: true,
-        output: { count: 1, content: "src/main.ts" },
+        output: {
+          count: 1,
+          content: "Glob returned 1 file.\nsrc/main.ts",
+        },
       })
 
       const fileRoot = await createGlobTool().execute(
@@ -489,6 +667,38 @@ describe("workspace search tools", () => {
         ok: false,
         code: "path_not_directory",
       })
+
+      const outside = await createGlobTool().execute(
+        { pattern: "*", path: "../" },
+        { workspaceRoot: workspace },
+      )
+      expect(outside).toMatchObject({
+        ok: false,
+        code: "path_denied",
+      })
+
+      const absolute = await createGlobTool().execute(
+        { pattern: "*", path: tmpdir() },
+        { workspaceRoot: workspace },
+      )
+      expect(absolute).toMatchObject({
+        ok: false,
+        code: "path_denied",
+      })
+
+      const empty = await createGlobTool().execute(
+        { pattern: "*.missing" },
+        { workspaceRoot: workspace },
+      )
+      expect(empty).toMatchObject({
+        ok: true,
+        output: {
+          count: 0,
+          truncated: false,
+          content: "No files found.",
+        },
+      })
+      expect(empty.content).toBe("No files found.")
 
       // TODO(grok-glob): add a directory-result contract test if we later
       // adopt Grok's advertised file-and-directory behavior. Claude/Kimi and

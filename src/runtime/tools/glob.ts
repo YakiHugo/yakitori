@@ -4,7 +4,7 @@ import {
   resolveSearchPath,
   SensitivePathGlobs,
 } from "./path-policy.ts"
-import { runRipgrepRecords } from "./ripgrep.ts"
+import { runRipgrepRecords, type RipgrepRecordStopReason } from "./ripgrep.ts"
 import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
 
 const DEFAULT_LIMIT = 100
@@ -13,7 +13,13 @@ const DEFAULT_RAW_BYTES = 5 * 1024 * 1024
 const MAX_RECORD_BYTES = 256 * 1024
 const VCS_DIRECTORIES = [".git", ".svn", ".hg", ".bzr", ".jj", ".sl"]
 
+type GlobRunner = typeof runRipgrepRecords
+type GlobTruncationReason = "result_limit" | "timeout" | "output_byte_limit"
+
 export type GlobToolOptions = {
+  // TODO(glob-limit): Consider a model-requested max_results bounded by the
+  // Runtime hard cap if usage shows repeated broad searches followed by manual
+  // narrowing or substantial unused result output.
   readonly limit?: number
   // Deliberately construction-time state. A later startup setting may enable
   // ignored-file discovery without exposing the switch to the model.
@@ -22,7 +28,10 @@ export type GlobToolOptions = {
   readonly maxRawBytes?: number
 }
 
-export function createGlobTool(options: GlobToolOptions = {}): RuntimeTool {
+export function createGlobTool(
+  options: GlobToolOptions = {},
+  runRecords: GlobRunner = runRipgrepRecords,
+): RuntimeTool {
   const limit = options.limit ?? DEFAULT_LIMIT
   const includeIgnored = options.includeIgnored ?? false
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
@@ -30,7 +39,7 @@ export function createGlobTool(options: GlobToolOptions = {}): RuntimeTool {
   return {
     name: "glob",
     description:
-      "Fast file pattern matching that works with any codebase size. Supports patterns such as **/*.js and src/**/*.ts, returns workspace-relative file paths sorted by modification time, and caps results at 100 files. Use glob to find files by name pattern or wildcard.",
+      "Fast file pattern matching that works with any codebase size. Supports patterns such as **/*.js and src/**/*.ts, returns workspace-relative file paths sorted lexicographically, and caps results at 100 files. Use glob to find files by name pattern or wildcard.",
     autoAllow: true,
     inputSchema: {
       type: "object",
@@ -52,6 +61,10 @@ export function createGlobTool(options: GlobToolOptions = {}): RuntimeTool {
       const parsed = parseGlobInput(input)
       if (!parsed.ok) return parsed.result
 
+      // TODO(external-roots): Allow absolute paths under user-authorized
+      // additional roots, following Claude Code's add-dir model. Keep arbitrary
+      // external paths denied until Runtime permission decisions can authorize
+      // and record them.
       const resolved = await resolveSearchPath(
         context.workspaceRoot,
         parsed.path ?? ".",
@@ -76,8 +89,7 @@ export function createGlobTool(options: GlobToolOptions = {}): RuntimeTool {
       }
 
       const paths: string[] = []
-      let hasMore = false
-      const result = await runRipgrepRecords(
+      const result = await runRecords(
         buildRipgrepArguments(parsed.pattern, includeIgnored),
         {
           cwd: resolved.absolutePath,
@@ -91,9 +103,10 @@ export function createGlobTool(options: GlobToolOptions = {}): RuntimeTool {
               resolved.relativePath,
               normalizePath(record),
             )
-            if (isSensitiveWorkspacePath(path)) return true
+            if (isVcsWorkspacePath(path) || isSensitiveWorkspacePath(path)) {
+              return true
+            }
             if (paths.length >= limit) {
-              hasMore = true
               return false
             }
             paths.push(path)
@@ -105,23 +118,22 @@ export function createGlobTool(options: GlobToolOptions = {}): RuntimeTool {
       if (result.stopReason === "aborted") {
         return failure("search_aborted", "Glob search was aborted.")
       }
-      const truncated = hasMore || result.stopReason !== undefined
-      const body = paths.length === 0 ? "No files found" : paths.join("\n")
-      const content = `${body}${
-        truncated
-          ? "\n(Results are truncated. Consider using a more specific path or pattern.)"
-          : ""
-      }`
+      if (result.stopReason === "timeout" && paths.length === 0) {
+        return failure(
+          "search_timeout",
+          "Glob search timed out after returning 0 files.",
+        )
+      }
+
+      paths.sort()
+      const truncationReason = publicTruncationReason(result.stopReason)
+      const content = renderGlobContent(paths, truncationReason)
       const output = {
         pattern: parsed.pattern,
         path: resolved.relativePath,
         count: paths.length,
-        truncated,
-        timedOut: result.stopReason === "timeout",
-        ...(result.stopReason === undefined ||
-        result.stopReason === "consumer_limit"
-          ? {}
-          : { limitReason: result.stopReason }),
+        truncated: truncationReason !== undefined,
+        ...(truncationReason === undefined ? {} : { truncationReason }),
         content,
       }
       return { ok: true, output, content }
@@ -138,7 +150,6 @@ function buildRipgrepArguments(
     "--null",
     "--hidden",
     "--no-require-git",
-    "--sortr=modified",
     ...VCS_DIRECTORIES.flatMap((directory) => ["--glob", `!${directory}`]),
     "--glob",
     pattern,
@@ -147,6 +158,46 @@ function buildRipgrepArguments(
     "--",
     ".",
   ]
+}
+
+// TODO(search-truncation): Align grep with glob's public
+// truncated/truncationReason protocol after the glob behavior is validated.
+function publicTruncationReason(
+  stopReason: RipgrepRecordStopReason | undefined,
+): GlobTruncationReason | undefined {
+  if (stopReason === "consumer_limit") return "result_limit"
+  if (stopReason === "timeout") return "timeout"
+  if (stopReason === "raw_byte_limit" || stopReason === "record_byte_limit") {
+    return "output_byte_limit"
+  }
+  return undefined
+}
+
+function renderGlobContent(
+  paths: readonly string[],
+  truncationReason: GlobTruncationReason | undefined,
+): string {
+  if (paths.length === 0 && truncationReason === undefined) {
+    return "No files found."
+  }
+  const noun = paths.length === 1 ? "file" : "files"
+  const summary =
+    truncationReason === "timeout"
+      ? `Glob returned ${paths.length} ${noun} before timing out.`
+      : `Glob returned ${paths.length} ${noun}.`
+  const footer =
+    truncationReason === "result_limit"
+      ? "(Results truncated at the result limit.)"
+      : truncationReason === "timeout"
+        ? "(Search timed out; partial results shown.)"
+        : truncationReason === "output_byte_limit"
+          ? paths.length === 0
+            ? "(Search output exceeded the byte limit before a complete file path was returned.)"
+            : "(Search output exceeded the byte limit; partial results shown.)"
+          : undefined
+  return [summary, ...paths, ...(footer === undefined ? [] : [footer])].join(
+    "\n",
+  )
 }
 
 function parseGlobInput(input: unknown):
@@ -193,6 +244,10 @@ function workspaceRelativePath(searchPath: string, listedPath: string): string {
 
 function normalizePath(path: string): string {
   return path.replaceAll("\\", "/").replace(/^\.\//u, "")
+}
+
+function isVcsWorkspacePath(path: string): boolean {
+  return path.split("/").some((part) => VCS_DIRECTORIES.includes(part))
 }
 
 function failure(code: string, message: string): ToolExecutionResult {
