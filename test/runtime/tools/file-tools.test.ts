@@ -272,16 +272,13 @@ describe("bounded file tools", () => {
       await writeFile(join(workspace, "rebase.txt"), before)
       const fileObservations = createFileObservationStore()
       fileObservations.recordSuccess(
-        "grep",
+        "read_file",
         {},
         {
-          observations: [
-            {
-              path: "rebase.txt",
-              sha256: sha256(before),
-              ranges: [{ startLine: 1, endLine: 1 }],
-            },
-          ],
+          path: "rebase.txt",
+          sha256: sha256(before),
+          truncated: true,
+          range: { offset: 1, limit: 1, requestedLimit: 1 },
         },
       )
       await writeFile(join(workspace, "rebase.txt"), `${before}external\n`)
@@ -306,7 +303,7 @@ describe("bounded file tools", () => {
           observedSha256: sha256(before),
           changedRanges: [{ startLine: 2, endLine: 2 }],
           observation: {
-            kind: "grep_snippet",
+            kind: "ranged_read",
             complete: false,
             editWithinObservedRanges: false,
           },

@@ -42,7 +42,7 @@ describe("file observations", () => {
     })
   })
 
-  it("distinguishes whole reads, ranged reads, and grep snippets", () => {
+  it("ignores legacy grep observations and distinguishes ranged and whole reads", () => {
     const store = createFileObservationStore()
     store.recordSuccess(
       "grep",
@@ -58,29 +58,7 @@ describe("file observations", () => {
         ],
       },
     )
-    expect(store.latest("src/value.ts")).toEqual({
-      sha256: "a".repeat(64),
-      complete: false,
-      observation: "grep_snippet",
-      ranges: [{ startLine: 7, endLine: 9 }],
-    })
-    store.recordSuccess(
-      "grep",
-      {},
-      {
-        observations: [
-          {
-            path: "src/value.ts",
-            sha256: "a".repeat(64),
-            ranges: [{ startLine: 10, endLine: 11 }],
-          },
-        ],
-      },
-    )
-    expect(store.latest("src/value.ts")).toMatchObject({
-      observation: "grep_snippet",
-      ranges: [{ startLine: 7, endLine: 11 }],
-    })
+    expect(store.latest("src/value.ts")).toBeUndefined()
 
     store.recordSuccess(
       "read_file",
@@ -89,7 +67,7 @@ describe("file observations", () => {
         path: "src/value.ts",
         sha256: "a".repeat(64),
         truncated: true,
-        range: { offset: 1, requestedLimit: 20 },
+        range: { offset: 1, limit: 20, requestedLimit: 20 },
       },
     )
     expect(store.latest("src/value.ts")).toMatchObject({
@@ -104,7 +82,7 @@ describe("file observations", () => {
         path: "src/value.ts",
         sha256: "a".repeat(64),
         truncated: false,
-        range: { offset: 1, requestedLimit: 200 },
+        range: { offset: 1, limit: 200, requestedLimit: 200 },
       },
     )
     expect(store.latest("src/value.ts")).toMatchObject({
@@ -118,7 +96,7 @@ describe("file observations", () => {
         path: "src/value.ts",
         sha256: "a".repeat(64),
         truncated: true,
-        range: { offset: 50, requestedLimit: 10 },
+        range: { offset: 50, limit: 10, requestedLimit: 10 },
       },
     )
     expect(store.latest("src/value.ts")).toMatchObject({

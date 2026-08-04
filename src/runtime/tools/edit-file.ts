@@ -75,7 +75,7 @@ export function createEditFileTool(
         return editFailure(
           "file_not_observed",
           `${resolved.relativePath} is not visible in the current model context.`,
-          { suggestion: "Read it first with read_file or grep." },
+          { suggestion: "Read it first with read_file." },
         )
       }
       const observedSha256 = observed.sha256

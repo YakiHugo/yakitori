@@ -2,7 +2,6 @@ import type { JsonValue, ToolProjection } from "../../kernel/index.ts"
 
 export type FileObservationKind =
   | "edit"
-  | "grep_snippet"
   | "ranged_read"
   | "whole_file_read"
   | "write"
@@ -129,37 +128,6 @@ function applySuccessfulResult(
     })
     return
   }
-
-  if (name !== "grep" || !Array.isArray(output.observations)) return
-  for (const observation of output.observations) {
-    if (!isRecord(observation)) continue
-    const path = stringField(observation, "path")
-    const sha256 = shaField(observation)
-    if (path !== undefined && sha256 !== undefined) {
-      const normalized = normalizePath(path)
-      const previous = revisions.get(normalized)
-      if (previous !== undefined && previous.sha256 !== sha256) {
-        continuations.delete(normalized)
-      }
-      if (
-        previous?.sha256 === sha256 &&
-        previous.observation !== "grep_snippet"
-      ) {
-        continue
-      }
-      const observedRanges = rangesField(observation)
-      const ranges =
-        previous?.sha256 === sha256 && previous.observation === "grep_snippet"
-          ? mergeRanges(previous.ranges, observedRanges)
-          : observedRanges
-      revisions.set(normalized, {
-        sha256,
-        complete: false,
-        observation: "grep_snippet",
-        ...(ranges === undefined ? {} : { ranges }),
-      })
-    }
-  }
 }
 
 function mergeRanges(
@@ -179,26 +147,6 @@ function mergeRanges(
     }
   }
   return merged.length === 0 ? undefined : merged
-}
-
-function rangesField(value: Record<string, unknown>) {
-  if (!Array.isArray(value.ranges)) return undefined
-  const ranges = value.ranges.flatMap((range) => {
-    if (!isRecord(range)) return []
-    const startLine = numberField(range, "startLine")
-    const endLine = numberField(range, "endLine")
-    if (
-      startLine === undefined ||
-      endLine === undefined ||
-      !Number.isInteger(startLine) ||
-      !Number.isInteger(endLine) ||
-      startLine < 1 ||
-      endLine < startLine
-    )
-      return []
-    return [{ startLine, endLine }]
-  })
-  return ranges.length === 0 ? undefined : ranges
 }
 
 function normalizePath(path: string): string {
