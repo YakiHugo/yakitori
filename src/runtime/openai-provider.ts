@@ -19,13 +19,19 @@ export type OpenAIProviderOptions = {
   readonly apiKey: string
   readonly model: string
   readonly client?: OpenAI
+  // Compatible endpoints (e.g. xAI at https://api.x.ai/v1) override the default.
+  readonly baseURL?: string
 }
 
 export function createOpenAIProvider(options: OpenAIProviderOptions): StreamFn {
   // SDK-internal retries stay disabled: withRetries owns the retry policy.
   const client =
     options.client ??
-    new OpenAI({ apiKey: options.apiKey, maxRetries: 0 })
+    new OpenAI({
+      apiKey: options.apiKey,
+      baseURL: options.baseURL,
+      maxRetries: 0,
+    })
   return (request) => streamOpenAI(client, options.model, request)
 }
 

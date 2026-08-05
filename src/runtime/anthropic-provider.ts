@@ -19,6 +19,10 @@ export type AnthropicProviderOptions = {
   readonly apiKey: string
   readonly model: string
   readonly client?: Anthropic
+  // Compatible endpoints (e.g. Kimi Code at https://api.kimi.com/coding/v1)
+  // override the default and may require extra identity headers.
+  readonly baseURL?: string
+  readonly defaultHeaders?: Record<string, string>
 }
 
 export function createAnthropicProvider(
@@ -29,6 +33,8 @@ export function createAnthropicProvider(
     options.client ??
     new Anthropic({
       apiKey: options.apiKey,
+      baseURL: options.baseURL,
+      defaultHeaders: options.defaultHeaders,
       maxRetries: 0,
     })
 

@@ -9,6 +9,7 @@ import {
   type YakitoriApplication,
   type YakitoriApplicationOptions,
 } from "../server/index.ts"
+import { loadLocalEnvFile } from "../server/env-file.ts"
 
 // The bundle lands at dist/desktop/main.js, so the repo root is two levels up.
 // (No new URL("./x", import.meta.url) — the bundler inlines that as a data: URL.)
@@ -17,6 +18,12 @@ const appRoot = path.resolve(
   "..",
   "..",
 )
+
+// Packaged installs have no checkout .env; users configure keys via their
+// shell environment instead.
+if (!app.isPackaged) {
+  loadLocalEnvFile(path.join(appRoot, ".env"))
+}
 
 const maxLoadAttempts = 20
 const loadRetryDelayMs = 500
