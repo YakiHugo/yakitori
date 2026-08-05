@@ -9,5 +9,6 @@ build/
 coverage/
 release/
 .yakitori/
+.yakitori-desktop/
 
 .references/

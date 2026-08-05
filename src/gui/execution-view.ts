@@ -32,6 +32,8 @@ export type ExecutionEntry =
       readonly state: string
       readonly resultText?: string
       readonly resultError?: boolean
+      readonly diff?: ToolDiff
+      readonly commandResult?: CommandResult
     }
   | {
       readonly kind: "permission"
@@ -55,6 +57,20 @@ export type ExecutionEntry =
       readonly summary: string
       readonly createdAt: string
     }
+
+export type ToolDiff = {
+  readonly text: string
+  readonly truncated: boolean
+}
+
+export type CommandResult = {
+  readonly exitCode: number | null
+  readonly signal: string | null
+  readonly stdout: string
+  readonly stderr: string
+  readonly truncated: boolean
+  readonly timedOut: boolean
+}
 
 export type ExecutionView = {
   readonly entries: readonly ExecutionEntry[]
@@ -258,6 +274,7 @@ export function projectExecutionView(state: ExecutionViewState): ExecutionView {
       continue
     }
     if (event.type === "tool.result") {
+      const structured = parseToolOutput(event.data.output)
       updateTool(tools, entries, event.data.toolCallId, {
         state: event.data.error === undefined ? "completed" : "failed",
         resultText:
@@ -265,6 +282,10 @@ export function projectExecutionView(state: ExecutionViewState): ExecutionView {
             ? event.data.content.text
             : JSON.stringify(event.data.content.value),
         ...(event.data.error === undefined ? {} : { resultError: true }),
+        ...(structured.diff === undefined ? {} : { diff: structured.diff }),
+        ...(structured.commandResult === undefined
+          ? {}
+          : { commandResult: structured.commandResult }),
       })
       continue
     }
@@ -448,6 +469,56 @@ function updatePermission(
       entry.permissionRequestId === permissionRequestId,
   )
   if (index >= 0) entries[index] = next
+}
+
+function parseToolOutput(output: unknown): {
+  readonly diff?: ToolDiff
+  readonly commandResult?: CommandResult
+} {
+  if (!isRecord(output)) return {}
+  const diff = parseDiff(output.diff)
+  const commandResult = parseCommandResult(output)
+  return {
+    ...(diff === undefined ? {} : { diff }),
+    ...(commandResult === undefined ? {} : { commandResult }),
+  }
+}
+
+function parseDiff(value: unknown): ToolDiff | undefined {
+  if (!isRecord(value)) return undefined
+  if (
+    value.format !== "unified" ||
+    typeof value.text !== "string" ||
+    typeof value.truncated !== "boolean"
+  ) {
+    return undefined
+  }
+  return { text: value.text, truncated: value.truncated }
+}
+
+function parseCommandResult(output: Record<string, unknown>):
+  | CommandResult
+  | undefined {
+  if (
+    typeof output.stdout !== "string" ||
+    typeof output.stderr !== "string" ||
+    typeof output.truncated !== "boolean"
+  ) {
+    return undefined
+  }
+  const exitCode =
+    typeof output.exitCode === "number" || output.exitCode === null
+      ? output.exitCode
+      : null
+  const signal = typeof output.signal === "string" ? output.signal : null
+  return {
+    exitCode,
+    signal,
+    stdout: output.stdout,
+    stderr: output.stderr,
+    truncated: output.truncated,
+    timedOut: output.timedOut === true,
+  }
 }
 
 function summarizeTool(name: string, input: unknown): string {
