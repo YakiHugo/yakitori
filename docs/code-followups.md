@@ -21,20 +21,13 @@ Open questions the redesign should answer explicitly:
 
 ## Dead code deletion candidates
 
-Each can land first as an independent small change:
-
-- `src/actors.ts` and its re-export in `src/index.ts` — no internal caller;
-  reintroduce with the collaboration stage that needs it.
-- `createToolCallId` in `src/kernel/ids.ts` — never called; tool call IDs
-  come from the model response.
-- `ItemProjection.metadata` in `src/kernel/session-projector.ts` — declared
-  but never assigned.
-- `ModelRequest.metadata` / `ModelResponse.metadata` in
-  `src/runtime/model.ts` — only the faux provider plumbs them.
 - `approvalPolicy` in `TurnExecutionContext` — recorded on `turn.started` but
   never consumed; actual approval behavior is driven by
   `RuntimeTool.autoAllow`. Removing it changes the `turn.started` fact shape
-  and requires an explicit envelope-version decision.
+  and requires an explicit envelope-version decision; it remains deferred
+  pending that decision. (The other recorded candidates — `src/actors.ts`,
+  `createToolCallId`, `ItemProjection.metadata`, and the model
+  request/response `metadata` fields — were deleted on 2026-08-05.)
 
 ## Stale wording in code
 

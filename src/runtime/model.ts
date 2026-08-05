@@ -60,7 +60,6 @@ export type ModelRequest = {
   readonly provider: string
   readonly model: string
   readonly signal?: AbortSignal
-  readonly metadata?: JsonObject
 }
 
 export type ModelUsage = {
@@ -80,7 +79,6 @@ export type ModelResponse = {
   readonly usage?: ModelUsage
   readonly error?: ModelError
   readonly providerRequestId?: string
-  readonly metadata?: JsonObject
 }
 
 export type ModelStreamSnapshotEvent = {

@@ -40,10 +40,6 @@ export function createSessionId(): string {
   return createPrefixedId(IdPrefix.Session)
 }
 
-export function createToolCallId(): string {
-  return createPrefixedId(IdPrefix.ToolCall)
-}
-
 export function createTurnId(): string {
   return createPrefixedId(IdPrefix.Turn)
 }
