@@ -17,7 +17,6 @@ export type FauxScriptedResponse = {
   readonly error?: ModelResponse["error"]
   readonly usage?: ModelResponse["usage"]
   readonly providerRequestId?: string
-  readonly metadata?: ModelResponse["metadata"]
   readonly throwBefore?: unknown
   readonly throwDuring?: unknown
   readonly endWithoutResponse?: boolean
@@ -112,7 +111,6 @@ async function* streamScriptedResponse(
       ...(step.providerRequestId === undefined
         ? {}
         : { providerRequestId: step.providerRequestId }),
-      ...(step.metadata === undefined ? {} : { metadata: step.metadata }),
     },
   }
 }
@@ -137,8 +135,5 @@ function cloneRequest(request: ModelRequest): ModelRequest {
     provider: request.provider,
     model: request.model,
     ...(request.signal === undefined ? {} : { signal: request.signal }),
-    ...(request.metadata === undefined
-      ? {}
-      : { metadata: structuredClone(request.metadata) }),
   }
 }

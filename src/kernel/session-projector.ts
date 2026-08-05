@@ -111,7 +111,6 @@ export type ItemProjection = {
   readonly appendedAt: string
   readonly updatedAt: string
   readonly providerMetadata?: EventMetadata
-  readonly metadata?: EventMetadata
 }
 
 export type PermissionProjection = {
