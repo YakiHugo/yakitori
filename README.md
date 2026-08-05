@@ -142,17 +142,25 @@ pnpm dev
 
 ### Environment variables
 
+Both entry points (`pnpm dev:server` and the desktop shell) load a gitignored
+`.env` from the checkout root, so provider keys live there instead of in
+command lines or shell history. Copy `.env.example` to `.env` and fill in what
+you use; real environment variables always override the file.
+
 | Name | Purpose |
 | --- | --- |
 | `YAKITORI_STORE_DIR` | Store directory (default `.yakitori`) |
 | `YAKITORI_WORKSPACE` | Canonical workspace root (default `process.cwd()`) |
 | `YAKITORI_GUI_DIR` | Static GUI directory served by the server (default `./dist/gui` when it exists) |
 | `YAKITORI_MATE_ID` | Explicit active Mate when multiple exist |
-| `YAKITORI_PROVIDER` | `faux` (default), `openai`, or `anthropic` |
+| `YAKITORI_PROVIDER` | `faux` (default), `openai`, `anthropic`, `grok`, or `kimi` |
 | `YAKITORI_FAUX_SCENARIO` | Faux scenario: `text`, `file`, `command`, `error` |
 | `YAKITORI_MODEL` | Required when a network provider is selected |
 | `OPENAI_API_KEY` | Required when `YAKITORI_PROVIDER=openai` |
 | `ANTHROPIC_API_KEY` | Required when `YAKITORI_PROVIDER=anthropic` |
+| `XAI_API_KEY` | Used when `YAKITORI_PROVIDER=grok`; falls back to the Grok CLI OIDC login when unset |
+| `GROK_CREDENTIALS` | Grok CLI credentials file (default `~/.grok/auth.json`) |
+| `KIMI_API_KEY` | Required when `YAKITORI_PROVIDER=kimi` (official Kimi Code console key) |
 | `HOST` / `PORT` | Server listen address (default `127.0.0.1:4141`) |
 
 Example faux command-approval flow:
@@ -175,6 +183,22 @@ Example Anthropic Messages:
 
 ```sh
 YAKITORI_PROVIDER=anthropic YAKITORI_MODEL=claude-sonnet-4-20250514 ANTHROPIC_API_KEY=… pnpm dev
+```
+
+Example Grok (xAI, OpenAI-Responses-compatible). With no `XAI_API_KEY` set it
+reads the official Grok CLI's OIDC login (testing only — an undocumented
+subscription path that may break or be revoked). The login is used read-only;
+when it expires, run `grok` and log in again:
+
+```sh
+YAKITORI_PROVIDER=grok YAKITORI_MODEL=grok-4.5 pnpm dev
+```
+
+Example Kimi Code subscription, using an official API key from the Kimi Code
+console (`sk-kimi-…`):
+
+```sh
+YAKITORI_PROVIDER=kimi YAKITORI_MODEL=kimi-for-coding KIMI_API_KEY=… pnpm dev
 ```
 
 Never commit API key values. `pnpm test` and `pnpm check` never require network

@@ -55,6 +55,24 @@ describe("run_command process lifecycle", () => {
       }
     },
   )
+  it("hides provider secrets from spawned commands", async () => {
+    process.env.YAKITORI_TEST_API_KEY = "secret-value"
+    process.env.YAKITORI_TEST_VISIBLE = "visible-value"
+    try {
+      const result = await createRunCommandTool().execute(
+        {
+          command:
+            'echo "key=$YAKITORI_TEST_API_KEY visible=$YAKITORI_TEST_VISIBLE"',
+        },
+        { workspaceRoot: process.cwd() },
+      )
+      expect(result.content).toContain("visible=visible-value")
+      expect(result.content).not.toContain("secret-value")
+    } finally {
+      delete process.env.YAKITORI_TEST_API_KEY
+      delete process.env.YAKITORI_TEST_VISIBLE
+    }
+  })
 })
 
 async function waitForFile(path: string): Promise<void> {

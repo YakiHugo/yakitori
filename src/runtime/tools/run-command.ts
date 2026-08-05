@@ -214,6 +214,19 @@ function invalid(
   }
 }
 
+// Provider keys reach process.env via .env or the shell. Model-approved
+// commands must never see them: any test runner or install script could read
+// them, and command output flows into durable facts and model context.
+const SECRET_ENV_PATTERN = /(api[_-]?key|auth[_-]?token|secret|password)/i
+
+export function commandEnv(): NodeJS.ProcessEnv {
+  return Object.fromEntries(
+    Object.entries(process.env).filter(
+      ([name]) => !SECRET_ENV_PATTERN.test(name),
+    ),
+  )
+}
+
 async function launchCommand(input: {
   readonly command: string
   readonly cwd: string
@@ -240,7 +253,7 @@ async function launchCommand(input: {
       cwd: input.cwd,
       detached: process.platform !== "win32",
       shell: true,
-      env: process.env,
+      env: commandEnv(),
       stdio: ["ignore", "pipe", "pipe"],
     })
   } catch (error) {

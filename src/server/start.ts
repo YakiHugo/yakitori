@@ -1,6 +1,9 @@
 import { existsSync } from "node:fs"
 import { join } from "node:path"
 import { createYakitoriApplication } from "./application.ts"
+import { loadLocalEnvFile } from "./env-file.ts"
+
+loadLocalEnvFile(".env")
 
 const host = process.env.HOST ?? "127.0.0.1"
 const port = Number(process.env.PORT ?? 4141)

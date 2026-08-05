@@ -22,8 +22,10 @@ import {
   createSessionRunner,
   createToolRegistry,
   createTransientEventHub,
+  GROK_API_BASE_URL,
   ModelStopReason,
   recoverSessions,
+  resolveGrokAccessToken,
   type PermissionGate,
   type RuntimeLock,
   type SessionRunner,
@@ -45,6 +47,12 @@ const defaultMateProfile = {
   name: "Yakitori",
   role: "Assistant",
 } as const
+
+// Kimi Code subscription endpoint. The Anthropic SDK appends /v1/messages
+// itself, so this omits the /v1 suffix. Requests keep the SDK's real client
+// identity — Kimi's terms warn that spoofing another client can suspend
+// membership benefits.
+const KIMI_CODE_API_BASE_URL = "https://api.kimi.com/coding"
 
 export type YakitoriApplicationOptions = {
   readonly activeMateId?: string
@@ -133,7 +141,7 @@ export async function createYakitoriApplication(
       options.provider ?? process.env.YAKITORI_PROVIDER ?? "faux"
     const provider =
       options.stream === undefined
-        ? createDefaultProvider(
+        ? await createDefaultProvider(
             providerName,
             options.model ?? process.env.YAKITORI_MODEL ?? undefined,
             options.fauxScenario ?? process.env.YAKITORI_FAUX_SCENARIO,
@@ -380,15 +388,15 @@ async function listAllActiveMateIds(mateKernel: MateKernel): Promise<string[]> {
   }
 }
 
-function createDefaultProvider(
+async function createDefaultProvider(
   provider: string,
   model: string | undefined,
   fauxScenario: string | undefined,
-): {
+): Promise<{
   readonly stream: StreamFn
   readonly provider: string
   readonly model: string
-} {
+}> {
   if (provider === "faux") {
     const scenario = fauxScenario ?? "text"
     return {
@@ -433,8 +441,44 @@ function createDefaultProvider(
       model,
     }
   }
+  if (provider === "grok") {
+    if (!model) {
+      throw new Error("YAKITORI_MODEL is required when YAKITORI_PROVIDER=grok.")
+    }
+    // XAI_API_KEY wins; otherwise reuse the Grok CLI's OIDC login. OAuth
+    // tokens expire, so resolve per model call (cached until near expiry).
+    const stream: StreamFn = async function* (request) {
+      const apiKey = process.env.XAI_API_KEY ?? (await resolveGrokAccessToken())
+      yield* createOpenAIProvider({
+        apiKey,
+        model,
+        baseURL: GROK_API_BASE_URL,
+      })(request)
+    }
+    return { stream: withRetries(stream), provider, model }
+  }
+  if (provider === "kimi") {
+    const apiKey = process.env.KIMI_API_KEY
+    if (!apiKey) {
+      throw new Error("KIMI_API_KEY is required when YAKITORI_PROVIDER=kimi.")
+    }
+    if (!model) {
+      throw new Error("YAKITORI_MODEL is required when YAKITORI_PROVIDER=kimi.")
+    }
+    return {
+      stream: withRetries(
+        createAnthropicProvider({
+          apiKey,
+          model,
+          baseURL: KIMI_CODE_API_BASE_URL,
+        }),
+      ),
+      provider,
+      model,
+    }
+  }
   throw new Error(
-    `Provider "${provider}" is not configured. Use YAKITORI_PROVIDER=faux|openai|anthropic or inject a stream.`,
+    `Provider "${provider}" is not configured. Use YAKITORI_PROVIDER=faux|openai|anthropic|grok|kimi or inject a stream.`,
   )
 }
 
