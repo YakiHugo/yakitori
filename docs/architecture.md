@@ -271,21 +271,33 @@ can be monitored before deciding whether range authorization should become a
 hard rule. Successful writes and edits also record a bounded unified diff in
 structured output.
 
-`read_file` opens the source once and derives bytes, SHA, UTF-8 validation,
-line count, newline style, and the returned 1-based line-prefixed slice during
-one bounded-memory stream over that file descriptor. Descriptor metadata is
-checked before and after capture so an in-place concurrent change is rejected.
-This avoids the prior analyze-then-reopen TOCTOU without loading a large file
-wholesale.
-Model input contains only `path`, `offset`, and `limit`; a continuation exposes
-only its next offset while Runtime binds that offset to the snapshot SHA in the
-Session observation projection and rejects a changed next page internally.
-Output is capped at 2,000 lines, 2,000 characters per displayed line, and 50 KB
-and reports LF, CRLF, CR, mixed, or absent line endings plus final-newline state.
-Every successful read result remains bounded and self-contained in recorded
-facts. Model-context assembly deduplicates identical selected read results by
-showing one body and short references for the other tool calls; compaction and
-resume therefore recompute deduplication without relying on a persisted stub.
+`read_file` opens one regular file and scans only far enough to reach the
+requested 1-based page plus bounded lookahead. Reaching a line offset still
+requires scanning preceding bytes because ordinary text files have no line
+index, but a partial page no longer scans onward to EOF merely to compute full
+metadata. `offset` is a positive integer, `limit` is explicitly bounded from 1
+through 2,000, and pagination rereads the file's current contents without a
+cross-page revision promise. Descriptor metadata is checked before and after
+the scan so an in-place concurrent change is rejected; an atomic path
+replacement may still yield the already-open inode, with later write
+preconditions protecting the replacement path.
+
+Output is capped at 2,000 lines, 2,000 characters per displayed line, and 50
+KB. Only a read from line 1 that reaches EOF without byte, line, or long-line
+display clipping is a complete observation and records the full SHA, byte and
+line counts, newline style, and final-newline state. Partial pages carry no
+revision. Every successful read result remains bounded and self-contained in
+recorded facts. Model-context assembly may deduplicate identical complete read
+results by showing one body and short references for the other tool calls;
+live partial pages are not revision-keyed or deduplicated. Compaction and resume
+recompute delivery from durable self-contained facts rather than persisting a
+stub.
+
+Direct reads reject directories, FIFOs, sockets, devices, and other non-regular
+targets before opening them. Bounded command execution with a timeout is the
+explicit stream-consumption path. Images and other rich media remain outside
+the text-read protocol, and future additional roots must pass a Runtime path
+permission boundary whose read authority does not imply write authority.
 `grep` and `glob` use ripgrep, respect ignore rules, filter secret-bearing paths,
 and have independent result caps. The same sensitive-path policy applies to
 direct file reads and writes.
@@ -319,18 +331,27 @@ it does not expose a revision or claim snapshot consistency. Stable pagination
 requires a future bounded materialized result artifact rather than a token over
 unrelated observation state.
 
-File state has two derived views. The durable per-Session observation projection
-rebuilds the latest SHA, observed ranges, and read continuation preconditions
-from all successful recorded tool results. Separately, each model request
-derives a visible-observation projection from only final, untruncated result
-Items in that request; a result truncated again by model-context assembly is
-visible as text but conservatively grants no file observation. `edit_file` uses
-this frozen view, so a read issued alongside an edit cannot retroactively
-authorize it. `grep` locates files and lines but produces no file observation;
-the model must use `read_file` before editing an existing file. A successful
-full-file write or create-if-absent edit establishes authorship of the new
-revision. Filesystem SHA comparison at the synchronized write boundary remains
-the final concurrency check.
+File observation is one immutable request-scoped derived view. After final
+context selection and tool-result truncation, Runtime projects only successful
+results whose complete text is actually present in that model request. Visible
+complete and ranged reads establish behavioral edit visibility; visible
+whole-file writes and create-if-absent edits establish authorship. A normal edit
+advances a revision only when its visible prerequisite is also present, so an
+edit summary left behind after compaction cannot silently recreate authority.
+Results truncated again by model-context assembly conservatively grant no
+observation. All tool calls produced by one model response share the same frozen
+view, so a sibling read cannot retroactively authorize an edit; the next model
+request rebuilds a new view from its final context.
+
+The journal retains original `tool.result` facts for transcript, GUI, repair,
+debugging, and offline analysis, but Runtime does not rebuild a mutable file
+authorization cache from the complete Session history. `grep` locates files and
+lines but produces no file observation; the model must use `read_file` before
+editing an existing file. A complete visible read supplies `write_file`'s
+internal compare-and-write revision. A ranged read supplies no revision, so
+`edit_file` rereads the current file and accepts only an exact current anchor
+before committing against those current bytes. Filesystem SHA comparison at the
+synchronized write boundary remains the final concurrency check.
 
 Tool results retain the coarse durable `{ content, output?, error? }` shape.
 `content` is bounded, concise plain text for the model; `output` carries

@@ -55,7 +55,7 @@ Each can land first as an independent small change:
 - `dev:desktop` shares port 4141 with `dev:server`; running both at once
   collides on the runtime lock and the port.
 
-## Coding-tool protocol status (recorded 2026-08-03)
+## Coding-tool protocol status (recorded 2026-08-05)
 
 These items came from comparing the current file tools with the pinned Codex,
 OpenCode, Grok, and Claude Code references, an installed Claude Code 2.1.150
@@ -63,31 +63,34 @@ binary, and the official Claude Code changelog through 2.1.220. They are
 a record of what has landed and what remains deferred, without expanding the
 kernel fact protocol ahead of a concrete consumer.
 
-### Read delivery and compaction correctness — implemented
+### Live read delivery and request-scoped observation — implemented
 
-- Separate durable file revision evidence from model-context delivery state.
-  `FileObservationStore` may rebuild the latest observed SHA and continuation
-  preconditions from successful recorded tool results, but a historical read
-  fact must not prove that its text is still visible after compaction.
+- Keep the Session journal as transcript, GUI, debugging, and analysis evidence,
+  but do not rebuild file authorization from its complete history. Build one
+  immutable `VisibleFileObservations` projection from final, untruncated tool
+  results in each exact model request. A historical read dropped by compaction
+  grants nothing unless a real read result is delivered again.
 - Remove the Session-wide `reads` set and `read_file`'s durable
   `read_unchanged` result. Every successful read records its own bounded,
   self-contained result. Deduplicate only in `buildModelContext`: among
-  selected results with the same path, SHA, requested range, and rendering
-  limits, render one real result and replace the other model-visible copies
-  with short references to it. This also lets duplicate reads from one model
-  response show the model one body without making a later tool result depend
-  on an in-memory cache.
+  selected complete results with the same path, SHA, requested range, and
+  rendering limits, render one real result and replace the other model-visible
+  copies with short references to it. Live partial pages carry no revision and
+  are not deduplicated.
 - Apply result deduplication before context byte/block accounting and select a
   real representative from the results that remain in the assembled context.
   Compaction, truncation, and resume then recompute the representative from
   durable self-contained facts; no persisted stub can outlive the content it
   references. If only one result remains, it renders normally.
-- Keep any visible-observation gate separate from durable revision evidence.
-  The former is derived from final, untruncated tool results in the exact
-  context used for the model call; results truncated again by context assembly
-  conservatively grant no observation. The latter may be rebuilt from the
-  complete journal for SHA and continuation checks. Do not include historical
-  read-delivery identities in a hot-path file revision checkpoint.
+- Use live best-effort page reads: positive 1-based offsets, a 1..2,000 line
+  limit, and no continuation revision guard. Only an unclipped read from line 1
+  through EOF records a full SHA and metadata. A ranged read establishes
+  behavioral edit visibility without pretending to identify a whole-file
+  revision.
+- Apply visible results in context order. Complete reads, whole-file writes, and
+  edit creations establish a revision; a normal edit advances only an already
+  visible prerequisite. Results truncated by context assembly grant nothing,
+  and all calls in one model response share the same frozen projection.
 
 ### Grep pagination — implemented
 
@@ -121,18 +124,17 @@ kernel fact protocol ahead of a concrete consumer.
 - Treat read-before-edit as an observed-file behavioral gate, not as strict
   revision CAS. An existing file must have a qualifying observation in the
   model context that produced the edit call. A complete or ranged `read_file`
-  result qualifies; grep results do not. Durable observations that disappeared
-  behind compaction still supply revision evidence but do not prove current
-  model visibility.
-- If the current SHA still equals the observed SHA, apply the deterministic
-  exact edit. If it changed, a single-target edit may proceed only when
-  `oldString` still has exactly one exact match in the current file; record the
-  optimistic rebase in the result. Do not apply this relaxation to whole-file
-  `write_file` replacement or `replaceAll`, which keep an exact current-SHA
-  precondition. `write_file` derives that SHA internally from a complete
-  visible observation instead of asking the model to echo it. New-file creation
-  remains the separate no-clobber path: `edit_file` may enter it only with an
-  empty `oldString`, which never overwrites an existing target.
+  result qualifies; grep results do not. Observations that disappeared behind
+  compaction supply neither visibility nor revision authority.
+- If a complete visible SHA still matches, apply the deterministic edit. If it
+  changed, a single-target edit may proceed only when `oldString` still has one
+  exact unique match in the current file; record the optimistic rebase. A
+  ranged read carries no SHA, so it also requires one exact unique current
+  anchor. Do not apply this relaxation to whole-file `write_file` replacement
+  or `replaceAll`, which require a complete visible revision. `write_file`
+  derives that SHA internally instead of asking the model to echo it. New-file
+  creation remains the separate no-clobber path: `edit_file` may enter it only
+  with an empty `oldString`, which never overwrites an existing target.
 - This deliberately permits an exact unique edit outside the lines shown by a
   partial observation, while still requiring that the file was visible and
   refusing similarity edits. Keep the stricter alternative as deferred work:
