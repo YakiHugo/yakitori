@@ -31,9 +31,9 @@ Open questions the redesign should answer explicitly:
 
 ## Stale wording in code
 
-- `src/server/handlers.ts` error messages say "in Stage 1" while stage 1 is
-  archived (`docs/archive/`). Reword to describe the restriction without
-  naming a stage (for example, "in the current single-Mate stage").
+- `src/server/handlers.ts` error messages said "in Stage 1" while stage 1 is
+  archived (`docs/archive/`). Reworded on 2026-08-05 to name the current
+  single-Mate stage restriction without citing a stage number.
 
 ## Desktop shell follow-ups (recorded 2026-07-31)
 

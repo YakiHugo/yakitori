@@ -355,7 +355,7 @@ async function applySessionCreateDefaults(
     )
     if (requestedWorkspace !== defaults.workingDirectory) {
       throw invalidInput(
-        "workingDirectory must match the configured workspace in Stage 1.",
+        "workingDirectory must match the configured workspace in the current single-Mate stage.",
         {
           field: "workingDirectory",
           requested: request.workingDirectory,
@@ -367,7 +367,7 @@ async function applySessionCreateDefaults(
 
   if (request.mateId !== undefined && request.mateId !== defaults.mateId) {
     throw invalidInput(
-      "mateId cannot override the configured active Mate in Stage 1.",
+      "mateId cannot override the configured active Mate in the current single-Mate stage.",
       { field: "mateId" },
     )
   }
@@ -377,7 +377,7 @@ async function applySessionCreateDefaults(
     request.mateRevisionId !== defaults.mateRevisionId
   ) {
     throw invalidInput(
-      "mateRevisionId cannot override the configured active Mate revision in Stage 1.",
+      "mateRevisionId cannot override the configured active Mate revision in the current single-Mate stage.",
       { field: "mateRevisionId" },
     )
   }
