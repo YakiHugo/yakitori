@@ -124,6 +124,158 @@ describe("execution view", () => {
     ])
   })
 
+  it("extracts structured diff and command results from tool output", () => {
+    const facts = [
+      {
+        type: EventType.ToolCall,
+        data: {
+          toolCallId: "tool_1",
+          itemId: "item_call_1",
+          turnId: "turn_1",
+          name: "edit_file",
+          input: { path: "src/index.ts" },
+          requiresPermission: false,
+        },
+      },
+      {
+        type: EventType.ToolResult,
+        data: {
+          toolResultId: "item_result_1",
+          toolCallId: "tool_1",
+          turnId: "turn_1",
+          content: { kind: "text" as const, text: "edited src/index.ts" },
+          output: {
+            path: "src/index.ts",
+            sha256: "abc",
+            diff: {
+              format: "unified",
+              text: "--- a/src/index.ts\n+++ b/src/index.ts\n@@ -1 +1 @@\n-old\n+new",
+              truncated: false,
+            },
+          },
+        },
+      },
+      {
+        type: EventType.ToolCall,
+        data: {
+          toolCallId: "tool_2",
+          itemId: "item_call_2",
+          turnId: "turn_1",
+          name: "run_command",
+          input: { command: "pnpm test" },
+          requiresPermission: true,
+        },
+      },
+      {
+        type: EventType.ToolResult,
+        data: {
+          toolResultId: "item_result_2",
+          toolCallId: "tool_2",
+          turnId: "turn_1",
+          content: { kind: "text" as const, text: "all green" },
+          output: {
+            exitCode: 0,
+            signal: null,
+            stdout: "all green",
+            stderr: "",
+            truncated: false,
+          },
+        },
+      },
+    ]
+    const state = facts.reduce(
+      (current, event, index) =>
+        reduceExecutionView(current, {
+          type: "durable",
+          event: createEventEnvelope({ sessionId, seq: index + 1, event }),
+        }),
+      createExecutionViewState(),
+    )
+
+    expect(projectExecutionView(state).entries).toEqual([
+      expect.objectContaining({
+        kind: "tool",
+        toolCallId: "tool_1",
+        diff: {
+          text: "--- a/src/index.ts\n+++ b/src/index.ts\n@@ -1 +1 @@\n-old\n+new",
+          truncated: false,
+        },
+      }),
+      expect.objectContaining({
+        kind: "tool",
+        toolCallId: "tool_2",
+        commandResult: {
+          exitCode: 0,
+          signal: null,
+          stdout: "all green",
+          stderr: "",
+          truncated: false,
+          timedOut: false,
+        },
+      }),
+    ])
+  })
+
+  it("projects a timed-out command result with partial output and no exit code", () => {
+    const facts = [
+      {
+        type: EventType.ToolCall,
+        data: {
+          toolCallId: "tool_1",
+          itemId: "item_call_1",
+          turnId: "turn_1",
+          name: "run_command",
+          input: { command: "sleep 60" },
+          requiresPermission: true,
+        },
+      },
+      {
+        type: EventType.ToolResult,
+        data: {
+          toolResultId: "item_result_1",
+          toolCallId: "tool_1",
+          turnId: "turn_1",
+          content: {
+            kind: "text" as const,
+            text: "Command timed out after 30s.",
+          },
+          output: {
+            timedOut: true,
+            stdout: "partial",
+            stderr: "",
+            truncated: false,
+          },
+          error: { code: "command_timeout", message: "Command timed out." },
+        },
+      },
+    ]
+    const state = facts.reduce(
+      (current, event, index) =>
+        reduceExecutionView(current, {
+          type: "durable",
+          event: createEventEnvelope({ sessionId, seq: index + 1, event }),
+        }),
+      createExecutionViewState(),
+    )
+
+    expect(projectExecutionView(state).entries).toEqual([
+      expect.objectContaining({
+        kind: "tool",
+        toolCallId: "tool_1",
+        state: "failed",
+        resultError: true,
+        commandResult: {
+          exitCode: null,
+          signal: null,
+          stdout: "partial",
+          stderr: "",
+          truncated: false,
+          timedOut: true,
+        },
+      }),
+    ])
+  })
+
   it("renders interruption separately from failure", () => {
     const facts = [
       {

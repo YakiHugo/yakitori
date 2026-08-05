@@ -59,4 +59,65 @@ describe("tool cell", () => {
     expect(await screen.findByText(/\$ pnpm test/)).toBeTruthy()
     expect(screen.getByText(/all green/)).toBeTruthy()
   })
+
+  it("renders a structured command result with exit status and stderr", async () => {
+    const user = userEvent.setup()
+    render(
+      <ToolCell
+        entry={{
+          kind: "tool",
+          toolCallId: "tool_3",
+          turnId: "turn_1",
+          name: "run_command",
+          summary: "pnpm lint",
+          input: { command: "pnpm lint" },
+          state: "failed",
+          resultText: "lint failed",
+          commandResult: {
+            exitCode: 1,
+            signal: null,
+            stdout: "checking…",
+            stderr: "2 errors",
+            truncated: false,
+            timedOut: false,
+          },
+        }}
+      />,
+    )
+
+    await user.click(screen.getByRole("button"))
+
+    expect(await screen.findByText(/\$ pnpm lint/)).toBeTruthy()
+    expect(screen.getByText(/checking…/)).toBeTruthy()
+    expect(screen.getByText(/\[stderr\]/)).toBeTruthy()
+    expect(screen.getByText("exit 1")).toBeTruthy()
+  })
+
+  it("renders a diff view instead of raw input for edit_file results", async () => {
+    const user = userEvent.setup()
+    render(
+      <ToolCell
+        entry={{
+          kind: "tool",
+          toolCallId: "tool_4",
+          turnId: "turn_1",
+          name: "edit_file",
+          summary: "src/index.ts",
+          input: { path: "src/index.ts", oldString: "old", newString: "new" },
+          state: "completed",
+          resultText: "edited src/index.ts",
+          diff: {
+            text: "--- a/src/index.ts\n+++ b/src/index.ts\n@@ -1 +1 @@\n-old\n+new",
+            truncated: false,
+          },
+        }}
+      />,
+    )
+
+    await user.click(screen.getByRole("button"))
+
+    expect(await screen.findByText("-old")).toBeTruthy()
+    expect(screen.getByText("+new")).toBeTruthy()
+    expect(screen.queryByText(/"oldString"/)).toBeNull()
+  })
 })
