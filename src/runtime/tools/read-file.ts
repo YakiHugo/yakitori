@@ -1,11 +1,12 @@
 import { RuntimeLimits } from "../limits.ts"
 import { resolveReadPath } from "./path-policy.ts"
 import {
-  captureTextFileSnapshot,
+  captureTextFilePage,
   type CapturedLine,
-  FileChangedDuringSnapshotError,
-  type TextFileSnapshot,
-} from "./read-file-snapshot.ts"
+  FileChangedDuringReadError,
+  type TextFilePage,
+  UnsupportedTextFileTypeError,
+} from "./read-file-page.ts"
 import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
 
 const DEFAULT_LINE_CHARACTERS = 2_000
@@ -22,10 +23,14 @@ export function createReadFileTool(
   maxLines = RuntimeLimits.modelVisibleToolResultLines,
   maxLineCharacters = DEFAULT_LINE_CHARACTERS,
 ): RuntimeTool {
+  const lineLimit = Math.min(
+    maxLines,
+    RuntimeLimits.modelVisibleToolResultLines,
+  )
   return {
     name: "read_file",
     description:
-      "Read a UTF-8 text file or a bounded line range from one file snapshot. Lines are prefixed {N}\\t for display; never include those prefixes in edit_file oldString. offset is 1-based and may be negative from the end. Output is capped at 2,000 lines, 2,000 characters per displayed line, and 50 KB. Continuation revision checks are maintained internally.",
+      "Read a live, bounded page from a regular UTF-8 text file. Lines are prefixed {N}\\t for display; never include those prefixes in edit_file oldString. offset is a 1-based starting line and limit is 1-2000. Pagination is best effort against the file's current contents. Output is capped at 2,000 lines, 2,000 characters per displayed line, and 50 KB.",
     autoAllow: true,
     inputSchema: {
       type: "object",
@@ -34,16 +39,15 @@ export function createReadFileTool(
         path: { type: "string" },
         offset: {
           type: "integer",
-          description:
-            "1-based starting line; a negative value counts backward from the final line.",
-          anyOf: [{ minimum: 1 }, { minimum: -maxLines, maximum: -1 }],
+          minimum: 1,
+          description: "1-based starting line. Defaults to 1.",
         },
-        limit: { type: "integer", minimum: 1 },
+        limit: { type: "integer", minimum: 1, maximum: lineLimit },
       },
       required: ["path"],
     },
     async execute(input, context): Promise<ToolExecutionResult> {
-      const parsed = parseReadInput(input, maxLines)
+      const parsed = parseReadInput(input, lineLimit)
       if (!parsed.ok) return parsed.result
 
       const resolved = await resolveReadPath(context.workspaceRoot, parsed.path)
@@ -51,22 +55,28 @@ export function createReadFileTool(
         return readFailure(resolved.error.code, resolved.error.message)
       }
 
-      let snapshot: TextFileSnapshot
+      let page: TextFilePage
       try {
-        snapshot = await captureTextFileSnapshot({
+        page = await captureTextFilePage({
           absolutePath: resolved.absolutePath,
           offset: parsed.offset,
-          limit: Math.min(parsed.limit, maxLines),
+          limit: parsed.limit,
           maxLineCharacters,
           ...(context.signal === undefined ? {} : { signal: context.signal }),
         })
       } catch (error) {
         if (isAbortError(error)) throw error
-        if (error instanceof FileChangedDuringSnapshotError) {
+        if (error instanceof FileChangedDuringReadError) {
           return readFailure(
             "file_changed_during_read",
-            "The file changed while read_file was capturing its snapshot.",
+            "The file changed while read_file was capturing its page.",
             { suggestion: "Retry read_file against the latest file contents." },
+          )
+        }
+        if (error instanceof UnsupportedTextFileTypeError) {
+          return readFailure(
+            "unsupported_file_type",
+            "read_file only reads regular files; streams and device files require a bounded command.",
           )
         }
         return readFailure(
@@ -74,57 +84,60 @@ export function createReadFileTool(
           "The file could not be read safely as UTF-8 text.",
         )
       }
-      if (snapshot.binary) {
+      if (page.binary) {
         return readFailure(
           "binary_file",
           "read_file only supports UTF-8 text; the first 4 KB appears binary.",
         )
       }
 
-      const start = resolveOffset(parsed.offset, snapshot.lineCount)
-      if (start === undefined) {
-        return readFailure(
-          "offset_out_of_bounds",
-          `offset ${parsed.offset} is outside this file's ${snapshot.lineCount} lines.`,
-          { lineCount: snapshot.lineCount },
-        )
-      }
-      const continuationSha = context.fileObservations?.continuationSha(
-        resolved.relativePath,
-        start,
-      )
       if (
-        continuationSha !== undefined &&
-        continuationSha !== snapshot.sha256
+        page.reachedEof &&
+        page.lineCount !== undefined &&
+        parsed.offset > Math.max(1, page.lineCount)
       ) {
         return readFailure(
-          "read_stale",
-          "The file changed since the previous read_file page.",
-          {
-            suggestion:
-              "Restart reading this file at offset 1 before continuing.",
-          },
+          "offset_out_of_bounds",
+          `offset ${parsed.offset} is outside this file's ${page.lineCount} lines.`,
+          { lineCount: page.lineCount },
         )
       }
 
-      const selected = selectSnapshotLines({
-        lines: snapshot.lines,
-        lineCount: snapshot.lineCount,
-        start,
-        limit: Math.min(parsed.limit, maxLines),
+      const selected = selectPageLines({
+        lines: page.lines,
+        start: parsed.offset,
+        limit: parsed.limit,
         byteBudget: maxBytes > 4_096 ? maxBytes - 2_048 : maxBytes,
         maxLineCharacters,
       })
+      const canContinue = page.hasMore || selected.truncatedByBytes
       const nextOffset =
-        start - 1 + selected.lineCount < snapshot.lineCount
-          ? start + selected.lineCount
+        canContinue && selected.lineCount > 0
+          ? parsed.offset + selected.lineCount
           : undefined
-      const truncatedByLines =
-        nextOffset !== undefined && !selected.truncatedByBytes
-      const truncated =
-        selected.truncatedByBytes ||
-        selected.truncatedLineCount > 0 ||
-        nextOffset !== undefined
+      const fullMetadata =
+        page.sha256 !== undefined &&
+        page.byteCount !== undefined &&
+        page.lineCount !== undefined &&
+        page.lineEnding !== undefined &&
+        page.finalNewline !== undefined
+          ? {
+              sha256: page.sha256,
+              byteCount: page.byteCount,
+              lineCount: page.lineCount,
+              lineEnding: page.lineEnding,
+              finalNewline: page.finalNewline,
+            }
+          : undefined
+      const complete =
+        parsed.offset === 1 &&
+        page.reachedEof &&
+        fullMetadata !== undefined &&
+        selected.lineCount === (page.lineCount ?? 0) &&
+        !selected.truncatedByBytes &&
+        selected.truncatedLineCount === 0
+      const truncatedByLines = page.hasMore
+      const truncated = !complete
       const hint =
         nextOffset === undefined
           ? selected.truncatedLineCount > 0
@@ -133,24 +146,25 @@ export function createReadFileTool(
           : `\n(${
               selected.truncatedByBytes
                 ? `Output capped at ${formatBytes(maxBytes)}. `
-                : selected.lineCount === maxLines
-                  ? `Output capped at ${maxLines} lines. `
+                : selected.lineCount === lineLimit
+                  ? `Output capped at ${lineLimit} lines. `
                   : ""
-            }Showing lines ${start}-${Math.max(start, nextOffset - 1)}. Use offset=${nextOffset} to continue; revision checking is automatic.)`
+            }Showing lines ${parsed.offset}-${Math.max(parsed.offset, nextOffset - 1)}. Use offset=${nextOffset} to continue from the file's current contents.)`
       const visibleContent =
-        snapshot.lineCount === 0
+        page.reachedEof && page.lineCount === 0
           ? "(File is empty.)"
           : maxBytes <= 4_096 && selected.truncatedByBytes
             ? addShortTruncationMarker(selected.content, maxBytes)
             : fitUtf8(`${selected.content}${hint}`, maxBytes)
       const output = {
         path: resolved.relativePath,
-        sha256: snapshot.sha256,
-        byteCount: snapshot.byteCount,
-        lineCount: snapshot.lineCount,
-        lineEnding: snapshot.lineEnding,
-        finalNewline: snapshot.finalNewline,
-        empty: snapshot.lineCount === 0,
+        complete,
+        ...(complete && fullMetadata !== undefined
+          ? fullMetadata
+          : page.lineCount === undefined
+            ? {}
+            : { lineCount: page.lineCount }),
+        empty: page.reachedEof && page.lineCount === 0,
         truncated,
         truncatedByBytes: selected.truncatedByBytes,
         truncatedByLines,
@@ -158,7 +172,7 @@ export function createReadFileTool(
         truncatedLineCount: selected.truncatedLineCount,
         lineCharacterLimit: maxLineCharacters,
         range: {
-          offset: start,
+          offset: parsed.offset,
           limit: selected.lineCount,
           requestedLimit: parsed.limit,
         },
@@ -170,9 +184,8 @@ export function createReadFileTool(
   }
 }
 
-function selectSnapshotLines(input: {
+function selectPageLines(input: {
   readonly lines: ReadonlyMap<number, CapturedLine>
-  readonly lineCount: number
   readonly start: number
   readonly limit: number
   readonly byteBudget: number
@@ -187,9 +200,8 @@ function selectSnapshotLines(input: {
   let bytes = 0
   let truncatedByBytes = false
   let truncatedLineCount = 0
-  const end = Math.min(input.lineCount, input.start - 1 + input.limit)
-  for (let index = input.start - 1; index < end; index += 1) {
-    const number = index + 1
+  const end = input.start + input.limit
+  for (let number = input.start; number < end; number += 1) {
     const line = input.lines.get(number)
     if (line === undefined) break
     const bounded = renderBoundedLine(number, line, input.maxLineCharacters)
@@ -263,21 +275,21 @@ function parseReadInput(
   }
   if (
     input.offset !== undefined &&
-    !(
-      Number.isInteger(input.offset) &&
-      input.offset !== 0 &&
-      (input.offset as number) >= -defaultLimit
-    )
+    !(Number.isInteger(input.offset) && (input.offset as number) >= 1)
   ) {
-    return readInputFailure(
-      `read_file offset must be a non-zero integer no less than -${defaultLimit}.`,
-    )
+    return readInputFailure("read_file offset must be a positive integer.")
   }
   if (
     input.limit !== undefined &&
-    !(Number.isInteger(input.limit) && (input.limit as number) > 0)
+    !(
+      Number.isInteger(input.limit) &&
+      (input.limit as number) > 0 &&
+      (input.limit as number) <= defaultLimit
+    )
   ) {
-    return readInputFailure("read_file limit must be a positive integer.")
+    return readInputFailure(
+      `read_file limit must be an integer from 1 through ${defaultLimit}.`,
+    )
   }
   return {
     ok: true,
@@ -285,12 +297,6 @@ function parseReadInput(
     offset: typeof input.offset === "number" ? input.offset : 1,
     limit: typeof input.limit === "number" ? input.limit : defaultLimit,
   }
-}
-
-function resolveOffset(offset: number, lineCount: number): number | undefined {
-  if (lineCount === 0) return offset === 1 ? 1 : undefined
-  const resolved = offset < 0 ? lineCount + offset + 1 : offset
-  return resolved >= 1 && resolved <= lineCount ? resolved : undefined
 }
 
 function fitUtf8(value: string, maxBytes: number): string {

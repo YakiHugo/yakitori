@@ -34,9 +34,9 @@ import {
   type StreamFn,
 } from "./model.ts"
 import { createPermissionGate, type PermissionGate } from "./permission-gate.ts"
-import { createFileObservationStore } from "./tools/file-observations.ts"
 import { resolveWorkspaceRoot } from "./tools/path-policy.ts"
 import { createToolRegistry, type ToolRegistry } from "./tools/registry.ts"
+import { createVisibleFileObservations } from "./tools/visible-file-observations.ts"
 
 export type SessionRunnerOptions = {
   readonly kernel: SessionKernel
@@ -169,7 +169,6 @@ export function createSessionRunner(
   ): Promise<void> {
     if (closed) return
     const executionContext = await buildExecutionContext(session)
-    const fileObservations = createFileObservationStore(session.tools)
     if (closed) return
     const started = await startTurnUnlessInputConsumed(
       session.id,
@@ -193,7 +192,6 @@ export function createSessionRunner(
         turnId: started.turnId,
         inputId,
         executionContext,
-        fileObservations,
         signal: abort.signal,
       })
     } catch (error) {
@@ -298,7 +296,6 @@ export function createSessionRunner(
     readonly inputId: string
     readonly executionContext: TurnExecutionContext
     readonly signal: AbortSignal
-    readonly fileObservations: ReturnType<typeof createFileObservationStore>
   }): Promise<void> {
     const mate = await options.mateKernel.readMate({
       mateId: input.executionContext.mateId,
@@ -364,7 +361,7 @@ export function createSessionRunner(
       const observationEligibleToolResultItemIds = new Set(
         context.observationEligibleToolResultItemIds,
       )
-      const visibleFileObservations = createFileObservationStore(
+      const visibleFileObservations = createVisibleFileObservations(
         session.tools.filter(
           (tool) =>
             tool.resultItemId !== undefined &&
@@ -472,7 +469,6 @@ export function createSessionRunner(
               : { providerRequestId: response.providerRequestId }),
           },
           signal: input.signal,
-          fileObservations: input.fileObservations,
           visibleFileObservations,
         })
         continue
@@ -622,9 +618,8 @@ export function createSessionRunner(
     readonly executionContext: TurnExecutionContext
     readonly contextMetadata: EventMetadata
     readonly signal: AbortSignal
-    readonly fileObservations: ReturnType<typeof createFileObservationStore>
     readonly visibleFileObservations: ReturnType<
-      typeof createFileObservationStore
+      typeof createVisibleFileObservations
     >
   }): Promise<void> {
     const recorded = await options.kernel.recordAssistantOutput({
@@ -732,7 +727,6 @@ export function createSessionRunner(
           : await tool.execute(call.input, {
               workspaceRoot,
               signal: input.signal,
-              fileObservations: input.fileObservations,
               visibleFileObservations: input.visibleFileObservations,
             })
 
@@ -745,11 +739,6 @@ export function createSessionRunner(
           content: { kind: "text", text: result.content },
         })
         publishDurable(resolved.events)
-        input.fileObservations.recordSuccess(
-          call.name,
-          call.input,
-          result.output,
-        )
         continue
       }
 

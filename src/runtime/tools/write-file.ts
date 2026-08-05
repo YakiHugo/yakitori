@@ -46,7 +46,10 @@ export function createWriteFileTool(
           "Read the complete file before replacing it.",
         )
       }
-      if (observed !== undefined && !observed.complete) {
+      if (
+        observed !== undefined &&
+        (!observed.complete || observed.sha256 === undefined)
+      ) {
         return writeFailure(
           "file_not_fully_observed",
           `${resolved.relativePath} has only been partially observed.`,

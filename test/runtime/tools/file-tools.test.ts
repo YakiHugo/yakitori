@@ -5,15 +5,17 @@ import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import {
   createEditFileTool,
-  createFileObservationStore,
   createReadFileTool,
   createToolRegistry,
+  createVisibleFileObservations,
   createWriteFileTool,
   resolveWorkspaceRoot,
+  ToolState,
+  type ToolProjection,
 } from "../../../src/index.ts"
 
 describe("bounded file tools", () => {
-  it("reads UTF-8 content with sha256 and truncation metadata", async () => {
+  it("reads a live UTF-8 page without a full-file revision", async () => {
     await withWorkspace(async (workspace) => {
       const path = join(workspace, "notes.txt")
       await writeFile(path, "line1\nline2\nline3\n")
@@ -26,11 +28,13 @@ describe("bounded file tools", () => {
       if (!result.ok) return
       expect(result.output).toMatchObject({
         path: "notes.txt",
+        complete: false,
         truncated: true,
         truncatedByLines: true,
-        lineCount: 3,
         content: expect.stringContaining("1\tline1\n2\tline2"),
       })
+      expect(result.output).not.toHaveProperty("sha256")
+      expect(result.output).not.toHaveProperty("lineCount")
     })
   })
 
@@ -110,17 +114,11 @@ describe("bounded file tools", () => {
         code: "file_not_observed",
       })
 
-      const partial = createFileObservationStore()
-      partial.recordSuccess(
-        "read_file",
-        {},
-        {
-          path: "revision.txt",
-          sha256: sha256("before"),
-          truncated: true,
-          range: { offset: 1, limit: 1, requestedLimit: 1 },
-        },
-      )
+      const partial = visibleReadObservation({
+        path: "revision.txt",
+        complete: false,
+        range: { offset: 1, limit: 1, requestedLimit: 1 },
+      })
       expect(
         await write.execute(
           { path: "revision.txt", content: "after" },
@@ -238,7 +236,6 @@ describe("bounded file tools", () => {
   it("creates files from an empty oldString and observes the authored content", async () => {
     await withWorkspace(async (workspace) => {
       const edit = createEditFileTool()
-      const fileObservations = createFileObservationStore()
       const created = await edit.execute(
         {
           path: "created-by-edit.ts",
@@ -272,12 +269,10 @@ describe("bounded file tools", () => {
       expect(created.output).not.toHaveProperty("changedRanges")
       expect(created.output).not.toHaveProperty("optimisticRebase")
 
-      fileObservations.recordSuccess(
-        "edit_file",
-        { path: "created-by-edit.ts", oldString: "" },
-        created.output,
-      )
-      expect(fileObservations.latest("created-by-edit.ts")).toEqual({
+      const visibleFileObservations = createVisibleFileObservations([
+        toolProjection("edit_file", created.output),
+      ])
+      expect(visibleFileObservations.latest("created-by-edit.ts")).toEqual({
         sha256: sha256("const value = 1\n"),
         complete: true,
         observation: "edit",
@@ -291,8 +286,7 @@ describe("bounded file tools", () => {
         },
         {
           workspaceRoot: workspace,
-          fileObservations,
-          visibleFileObservations: fileObservations,
+          visibleFileObservations,
         },
       )
       expect(replaced).toMatchObject({ ok: true })
@@ -432,21 +426,15 @@ describe("bounded file tools", () => {
     })
   })
 
-  it("rebases a single exact unique edit and records its observation risk", async () => {
+  it("uses an exact unique current anchor after a revisionless ranged read", async () => {
     await withWorkspace(async (workspace) => {
       const before = "first\ntarget = 1\nlast\n"
       await writeFile(join(workspace, "rebase.txt"), before)
-      const fileObservations = createFileObservationStore()
-      fileObservations.recordSuccess(
-        "read_file",
-        {},
-        {
-          path: "rebase.txt",
-          sha256: sha256(before),
-          truncated: true,
-          range: { offset: 1, limit: 1, requestedLimit: 1 },
-        },
-      )
+      const visibleFileObservations = visibleReadObservation({
+        path: "rebase.txt",
+        complete: false,
+        range: { offset: 1, limit: 1, requestedLimit: 1 },
+      })
       await writeFile(join(workspace, "rebase.txt"), `${before}external\n`)
 
       const result = await createEditFileTool().execute(
@@ -457,16 +445,15 @@ describe("bounded file tools", () => {
         },
         {
           workspaceRoot: workspace,
-          fileObservations,
-          visibleFileObservations: fileObservations,
+          visibleFileObservations,
         },
       )
 
       expect(result).toMatchObject({
         ok: true,
         output: {
-          optimisticRebase: true,
-          observedSha256: sha256(before),
+          optimisticRebase: false,
+          observedRevisionKnown: false,
           changedRanges: [{ startLine: 2, endLine: 2 }],
           observation: {
             kind: "ranged_read",
@@ -477,6 +464,58 @@ describe("bounded file tools", () => {
       })
       expect(await readFile(join(workspace, "rebase.txt"), "utf8")).toBe(
         `${before.replace("target = 1", "target = 2")}external\n`,
+      )
+    })
+  })
+
+  it("keeps exact-only matching after an edit advances a ranged observation", async () => {
+    await withWorkspace(async (workspace) => {
+      const path = "ranged-edits.ts"
+      const before = "const count = 1\nconst message = “hello”\n"
+      await writeFile(join(workspace, path), before)
+      const edit = createEditFileTool()
+      const rangedRead = toolProjection("read_file", {
+        path,
+        complete: false,
+        range: { offset: 1, limit: 1, requestedLimit: 1 },
+      })
+      const first = await edit.execute(
+        {
+          path,
+          oldString: "const count = 1",
+          newString: "const count = 2",
+        },
+        {
+          workspaceRoot: workspace,
+          visibleFileObservations: createVisibleFileObservations([rangedRead]),
+        },
+      )
+      expect(first).toMatchObject({ ok: true })
+      if (!first.ok) return
+
+      const visibleFileObservations = createVisibleFileObservations([
+        rangedRead,
+        toolProjection("edit_file", first.output),
+      ])
+      expect(visibleFileObservations.latest(path)).toMatchObject({
+        complete: false,
+        sha256: expect.any(String),
+      })
+      const second = await edit.execute(
+        {
+          path,
+          oldString: 'const message = "hello"',
+          newString: 'const message = "goodbye"',
+        },
+        { workspaceRoot: workspace, visibleFileObservations },
+      )
+
+      expect(second).toMatchObject({
+        ok: false,
+        code: "old_string_not_found",
+      })
+      expect(await readFile(join(workspace, path), "utf8")).toBe(
+        before.replace("count = 1", "count = 2"),
       )
     })
   })
@@ -643,14 +682,13 @@ describe("bounded file tools", () => {
 
       const yaml = "items:\n  - one\n"
       await writeFile(join(workspace, "config.yaml"), yaml)
-      observe(context.fileObservations, "config.yaml", yaml)
       const yamlResult = await createEditFileTool().execute(
         {
           path: "config.yaml",
           oldString: "items:\n    - one",
           newString: "items:\n    - two",
         },
-        context,
+        observedContext(workspace, "config.yaml", yaml),
       )
       expect(yamlResult).toMatchObject({
         ok: false,
@@ -704,6 +742,27 @@ describe("bounded file tools", () => {
       const edit = createEditFileTool()
       await writeFile(join(workspace, "flags.txt"), before)
       const context = observedContext(workspace, "flags.txt", before)
+
+      const ranged = await edit.execute(
+        {
+          path: "flags.txt",
+          oldString: "enabled = false",
+          newString: "enabled = true",
+          replaceAll: true,
+        },
+        {
+          workspaceRoot: workspace,
+          visibleFileObservations: visibleReadObservation({
+            path: "flags.txt",
+            complete: false,
+            range: { offset: 1, limit: 1, requestedLimit: 1 },
+          }),
+        },
+      )
+      expect(ranged).toMatchObject({
+        ok: false,
+        code: "file_not_fully_observed",
+      })
 
       await writeFile(
         join(workspace, "flags.txt"),
@@ -844,7 +903,7 @@ describe("bounded file tools", () => {
     })
   })
 
-  it("keeps read content bounded while hashing the complete file", async () => {
+  it("keeps read content bounded without exposing a clipped revision", async () => {
     await withWorkspace(async (workspace) => {
       const body = "界".repeat(400_000)
       await writeFile(join(workspace, "large.txt"), body)
@@ -856,11 +915,12 @@ describe("bounded file tools", () => {
       expect(result.ok).toBe(true)
       if (!result.ok) return
       expect(result.output).toMatchObject({
-        sha256: createHash("sha256").update(body).digest("hex"),
-        byteCount: Buffer.byteLength(body),
+        complete: false,
         truncated: true,
         truncatedByBytes: true,
       })
+      expect(result.output).not.toHaveProperty("sha256")
+      expect(result.output).not.toHaveProperty("byteCount")
       const content = String(
         (result.output as { readonly content: unknown }).content,
       )
@@ -955,29 +1015,40 @@ function isObject(value: unknown): value is Record<string, unknown> {
 }
 
 function observedContext(workspaceRoot: string, path: string, content: string) {
-  const fileObservations = createFileObservationStore()
-  observe(fileObservations, path, content)
   return {
     workspaceRoot,
-    fileObservations,
-    visibleFileObservations: fileObservations,
+    visibleFileObservations: visibleReadObservation({
+      path,
+      complete: true,
+      sha256: sha256(content),
+      range: { offset: 1, limit: 2_000, requestedLimit: 2_000 },
+    }),
   }
 }
 
-function observe(
-  store: ReturnType<typeof createFileObservationStore>,
-  path: string,
-  content: string,
-): void {
-  store.recordSuccess(
-    "read_file",
-    { path },
-    {
-      path,
-      sha256: sha256(content),
-      truncated: false,
-      range: { offset: 1, requestedLimit: 2_000 },
-      content: "",
-    },
-  )
+function visibleReadObservation(
+  output: Exclude<ToolProjection["output"], undefined>,
+) {
+  return createVisibleFileObservations([toolProjection("read_file", output)])
+}
+
+let toolProjectionIndex = 0
+
+function toolProjection(
+  name: string,
+  output: Exclude<ToolProjection["output"], undefined>,
+): ToolProjection {
+  toolProjectionIndex += 1
+  return {
+    toolCallId: `tool_observation_${toolProjectionIndex}`,
+    turnId: "turn_observation",
+    name,
+    input: {},
+    state: ToolState.Completed,
+    requestedAt: "2026-08-05T00:00:00.000Z",
+    updatedAt: "2026-08-05T00:00:01.000Z",
+    requestItemId: `item_observation_${toolProjectionIndex}`,
+    requiresPermission: false,
+    output,
+  }
 }

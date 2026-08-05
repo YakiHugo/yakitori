@@ -1,134 +1,164 @@
+import { execFile } from "node:child_process"
 import { createHash } from "node:crypto"
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { promisify } from "node:util"
 import { describe, expect, it } from "vitest"
+import { createReadFileTool, resolveWorkspaceRoot } from "../../../src/index.ts"
 import {
-  createFileObservationStore,
-  createReadFileTool,
-  resolveWorkspaceRoot,
-} from "../../../src/index.ts"
+  captureTextFilePage,
+  UnsupportedTextFileTypeError,
+} from "../../../src/runtime/tools/read-file-page.ts"
+
+const execFileAsync = promisify(execFile)
 
 describe("read_file contract", () => {
-  it("uses 1-based and negative offsets with internally guarded continuation", async () => {
+  it("uses 1-based live best-effort pagination without revision guards", async () => {
     await withWorkspace(async (workspace) => {
-      const body = "one\ntwo\nthree\nfour\n"
-      await writeFile(join(workspace, "lines.txt"), body)
+      await writeFile(join(workspace, "lines.txt"), "one\ntwo\nthree\nfour\n")
       const read = createReadFileTool()
-      const observations = createFileObservationStore()
-      const context = {
-        workspaceRoot: workspace,
-        fileObservations: observations,
-      }
-      const tail = await read.execute(
-        { path: "lines.txt", offset: -2, limit: 1 },
-        context,
+
+      const first = await read.execute(
+        { path: "lines.txt", offset: 1, limit: 2 },
+        { workspaceRoot: workspace },
       )
-      expect(tail).toMatchObject({
+      expect(first).toMatchObject({
         ok: true,
         output: {
-          sha256: sha256(body),
-          range: { offset: 3, limit: 1, requestedLimit: 1 },
-          continuation: { nextOffset: 4 },
-          content: expect.stringContaining("3\tthree"),
+          complete: false,
+          range: { offset: 1, limit: 2, requestedLimit: 2 },
+          continuation: { nextOffset: 3 },
+          content: expect.stringContaining("1\tone\n2\ttwo"),
         },
       })
-      if (!tail.ok) return
-      observations.recordSuccess("read_file", {}, tail.output)
+      if (!first.ok) return
+      expect(first.output).not.toHaveProperty("sha256")
+      expect(first.content).toContain("file's current contents")
 
-      await writeFile(join(workspace, "lines.txt"), `${body}five\n`)
-      const stale = await read.execute(
-        { path: "lines.txt", offset: 4 },
-        context,
+      await writeFile(
+        join(workspace, "lines.txt"),
+        "zero\none\ntwo\nthree\nfour\n",
       )
-      expect(stale).toMatchObject({ ok: false, code: "read_stale" })
-      if (!stale.ok) expect(stale.content).not.toContain(sha256(body))
+      const continued = await read.execute(
+        { path: "lines.txt", offset: 3, limit: 2 },
+        { workspaceRoot: workspace },
+      )
+      expect(continued).toMatchObject({
+        ok: true,
+        output: {
+          complete: false,
+          content: expect.stringContaining("3\ttwo\n4\tthree"),
+        },
+      })
 
-      const restarted = await read.execute(
-        { path: "lines.txt", offset: 1, limit: 1 },
-        context,
-      )
-      expect(restarted).toMatchObject({ ok: true })
+      expect(
+        await read.execute(
+          { path: "lines.txt", offset: -1 },
+          { workspaceRoot: workspace },
+        ),
+      ).toMatchObject({
+        ok: false,
+        code: "invalid_tool_input",
+        message: "read_file offset must be a positive integer.",
+      })
     })
   })
 
-  it("removes revision guards from model input", async () => {
+  it("keeps model input bounded and rejects unknown revision arguments", async () => {
     const schema = createReadFileTool().inputSchema
     expect(schema).toMatchObject({
       additionalProperties: false,
       required: ["path"],
       properties: {
         path: { type: "string" },
-        offset: { type: "integer" },
-        limit: { type: "integer" },
+        offset: { type: "integer", minimum: 1 },
+        limit: { type: "integer", minimum: 1, maximum: 2_000 },
       },
     })
     expect(schema.properties).not.toHaveProperty("expectedSha256")
 
     await withWorkspace(async (workspace) => {
       await writeFile(join(workspace, "value.txt"), "value\n")
-      const rejected = await createReadFileTool().execute(
-        { path: "value.txt", expectedSha256: "0".repeat(64) },
-        { workspaceRoot: workspace },
-      )
-      expect(rejected).toMatchObject({
+      const read = createReadFileTool()
+      expect(
+        await read.execute(
+          { path: "value.txt", expectedSha256: "0".repeat(64) },
+          { workspaceRoot: workspace },
+        ),
+      ).toMatchObject({ ok: false, code: "invalid_tool_input" })
+      expect(
+        await read.execute(
+          { path: "value.txt", limit: 0 },
+          { workspaceRoot: workspace },
+        ),
+      ).toMatchObject({ ok: false, code: "invalid_tool_input" })
+      expect(
+        await read.execute(
+          { path: "value.txt", limit: 2_001 },
+          { workspaceRoot: workspace },
+        ),
+      ).toMatchObject({
         ok: false,
         code: "invalid_tool_input",
+        message: "read_file limit must be an integer from 1 through 2000.",
       })
     })
   })
 
-  it("reports newline style and final-newline state", async () => {
+  it("emits a revision and full metadata only for an undisplayed complete read", async () => {
     await withWorkspace(async (workspace) => {
-      await writeFile(join(workspace, "lf.txt"), "one\ntwo\n")
-      await writeFile(join(workspace, "crlf.txt"), "one\r\ntwo\r\n")
-      await writeFile(join(workspace, "mixed.txt"), "one\r\ntwo\nthree\r")
-      await writeFile(join(workspace, "none.txt"), "one")
+      const body = "one\r\ntwo\r\n"
+      await writeFile(join(workspace, "complete.txt"), body)
       const read = createReadFileTool()
 
-      expect(
-        await read.execute({ path: "lf.txt" }, { workspaceRoot: workspace }),
-      ).toMatchObject({
+      const complete = await read.execute(
+        { path: "complete.txt" },
+        { workspaceRoot: workspace },
+      )
+      expect(complete).toMatchObject({
         ok: true,
-        output: { lineEnding: "LF", finalNewline: true, lineCount: 2 },
+        output: {
+          complete: true,
+          sha256: sha256(body),
+          byteCount: Buffer.byteLength(body),
+          lineCount: 2,
+          lineEnding: "CRLF",
+          finalNewline: true,
+          truncated: false,
+        },
       })
-      expect(
-        await read.execute({ path: "crlf.txt" }, { workspaceRoot: workspace }),
-      ).toMatchObject({
+
+      const suffix = await read.execute(
+        { path: "complete.txt", offset: 2 },
+        { workspaceRoot: workspace },
+      )
+      expect(suffix).toMatchObject({
         ok: true,
-        output: { lineEnding: "CRLF", finalNewline: true, lineCount: 2 },
+        output: { complete: false, lineCount: 2, content: "2\ttwo" },
       })
-      expect(
-        await read.execute({ path: "mixed.txt" }, { workspaceRoot: workspace }),
-      ).toMatchObject({
-        ok: true,
-        output: { lineEnding: "mixed", finalNewline: true, lineCount: 3 },
-      })
-      expect(
-        await read.execute({ path: "none.txt" }, { workspaceRoot: workspace }),
-      ).toMatchObject({
-        ok: true,
-        output: { lineEnding: "none", finalNewline: false, lineCount: 1 },
-      })
+      if (!suffix.ok) return
+      expect(suffix.output).not.toHaveProperty("sha256")
+      expect(suffix.output).not.toHaveProperty("lineEnding")
     })
   })
 
-  it("detects CRLF across stream chunk boundaries", async () => {
+  it("detects CRLF across stream chunk boundaries on a complete read", async () => {
     await withWorkspace(async (workspace) => {
       const body = `${"x".repeat(65_535)}\r\nnext`
       await writeFile(join(workspace, "boundary.txt"), body)
-      const result = await createReadFileTool().execute(
-        { path: "boundary.txt", offset: 2, limit: 1 },
+      const result = await createReadFileTool(100_000, 2_000, 100_000).execute(
+        { path: "boundary.txt" },
         { workspaceRoot: workspace },
       )
       expect(result).toMatchObject({
         ok: true,
         output: {
+          complete: true,
           sha256: sha256(body),
           lineCount: 2,
           lineEnding: "CRLF",
           finalNewline: false,
-          content: "2\tnext",
         },
       })
     })
@@ -147,6 +177,7 @@ describe("read_file contract", () => {
       expect(result).toMatchObject({
         ok: true,
         output: {
+          complete: false,
           truncated: true,
           truncatedByLineLength: true,
           truncatedLineCount: 1,
@@ -155,6 +186,7 @@ describe("read_file contract", () => {
         },
       })
       if (!result.ok || !isObject(result.output)) return
+      expect(result.output).not.toHaveProperty("sha256")
       const displayed = String(result.output.content).split("\n")[0] ?? ""
       expect(displayed.length).toBeLessThanOrEqual(80)
       expect(displayed).toContain("const start")
@@ -162,34 +194,24 @@ describe("read_file contract", () => {
     })
   })
 
-  it("records a self-contained result for an unchanged duplicate range", async () => {
+  it("returns self-contained duplicate live pages", async () => {
     await withWorkspace(async (workspace) => {
       const body = "one\ntwo\n"
       await writeFile(join(workspace, "same.txt"), body)
-      const observations = createFileObservationStore()
-      const context = {
-        workspaceRoot: workspace,
-        fileObservations: observations,
-      }
-      const first = await createReadFileTool().execute(
+      const read = createReadFileTool()
+      const first = await read.execute(
         { path: "same.txt", offset: 1, limit: 2 },
-        context,
+        { workspaceRoot: workspace },
       )
-      expect(first.ok).toBe(true)
-      if (!first.ok) return
-      observations.recordSuccess(
-        "read_file",
-        { path: "same.txt" },
-        first.output,
-      )
-
-      const duplicate = await createReadFileTool().execute(
+      const duplicate = await read.execute(
         { path: "same.txt", offset: 1, limit: 2 },
-        context,
+        { workspaceRoot: workspace },
       )
+      expect(first).toMatchObject({ ok: true })
       expect(duplicate).toMatchObject({
         ok: true,
         output: {
+          complete: true,
           sha256: sha256(body),
           content: "1\tone\n2\ttwo",
         },
@@ -210,23 +232,23 @@ describe("read_file contract", () => {
         await read.execute({ path: "empty.txt" }, { workspaceRoot: workspace }),
       ).toMatchObject({
         ok: true,
-        output: { empty: true, lineCount: 0, content: "(File is empty.)" },
+        output: {
+          complete: true,
+          sha256: sha256(""),
+          empty: true,
+          lineCount: 0,
+          content: "(File is empty.)",
+        },
       })
       expect(
         await read.execute(
           { path: "binary.dat" },
           { workspaceRoot: workspace },
         ),
-      ).toMatchObject({
-        ok: false,
-        code: "binary_file",
-      })
+      ).toMatchObject({ ok: false, code: "binary_file" })
       expect(
         await read.execute({ path: "folder" }, { workspaceRoot: workspace }),
-      ).toMatchObject({
-        ok: false,
-        code: "directory_not_supported",
-      })
+      ).toMatchObject({ ok: false, code: "directory_not_supported" })
       expect(
         await read.execute(
           { path: "correct-name.txt", offset: 2 },
@@ -242,10 +264,7 @@ describe("read_file contract", () => {
           { path: ".env.local" },
           { workspaceRoot: workspace },
         ),
-      ).toMatchObject({
-        ok: false,
-        code: "sensitive_path",
-      })
+      ).toMatchObject({ ok: false, code: "sensitive_path" })
       const typo = await read.execute(
         { path: "corect-name.txt" },
         { workspaceRoot: workspace },
@@ -253,6 +272,68 @@ describe("read_file contract", () => {
       expect(typo).toMatchObject({ ok: false, code: "path_not_found" })
       if (!typo.ok)
         expect(typo.message).toContain('Did you mean "correct-name.txt"?')
+    })
+  })
+
+  it("rejects FIFO streams instead of risking an unbounded read", async () => {
+    if (process.platform === "win32") return
+    await withWorkspace(async (workspace) => {
+      await execFileAsync("mkfifo", [join(workspace, "events.fifo")])
+      const result = await createReadFileTool().execute(
+        { path: "events.fifo" },
+        { workspaceRoot: workspace },
+      )
+      expect(result).toMatchObject({
+        ok: false,
+        code: "unsupported_file_type",
+      })
+    })
+  })
+
+  it("rechecks the opened descriptor before reading a special file", async () => {
+    if (process.platform === "win32") return
+    await withWorkspace(async (workspace) => {
+      const path = join(workspace, "opened.fifo")
+      await execFileAsync("mkfifo", [path])
+
+      await expect(
+        captureTextFilePage({
+          absolutePath: path,
+          offset: 1,
+          limit: 1,
+          maxLineCharacters: 2_000,
+        }),
+      ).rejects.toBeInstanceOf(UnsupportedTextFileTypeError)
+    })
+  })
+
+  it("validates UTF-8 only through the requested live page", async () => {
+    await withWorkspace(async (workspace) => {
+      await writeFile(
+        join(workspace, "invalid-after-page.txt"),
+        Buffer.concat([Buffer.from("visible\n"), Buffer.from([0xff])]),
+      )
+      const read = createReadFileTool()
+
+      expect(
+        await read.execute(
+          { path: "invalid-after-page.txt", offset: 1, limit: 1 },
+          { workspaceRoot: workspace },
+        ),
+      ).toMatchObject({
+        ok: true,
+        output: {
+          complete: false,
+          content: expect.stringContaining("1\tvisible"),
+          continuation: { nextOffset: 2 },
+        },
+      })
+      expect(
+        await read.execute(
+          { path: "invalid-after-page.txt" },
+          { workspaceRoot: workspace },
+        ),
+      ).toMatchObject({ ok: false, code: "read_failed" })
     })
   })
 })

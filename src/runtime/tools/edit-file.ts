@@ -29,7 +29,7 @@ export function createEditFileTool(
   return {
     name: "edit_file",
     description:
-      "Replace text in an existing UTF-8 file, or create a new file by setting oldString to an empty string. An empty oldString never overwrites an existing file. Read existing files before editing them. Supply the smallest unique non-empty oldString, usually 2-4 lines, and exclude read_file's {N}\\t line prefixes. Matching is exact first, followed only by deterministic line-ending, curly-quote, and trailing-whitespace equivalence. Indentation, internal whitespace, and single-vs-double quote delimiters remain exact. No similarity edit is ever applied. Set replaceAll only when every match should change.",
+      "Replace text in an existing UTF-8 file, or create a new file by setting oldString to an empty string. An empty oldString never overwrites an existing file. Read existing files before editing them. Supply the smallest unique non-empty oldString, usually 2-4 lines, and exclude read_file's {N}\\t line prefixes. A ranged read requires an exact unique oldString; replaceAll requires a complete read. For a complete unchanged revision, matching is exact first, followed only by deterministic line-ending, curly-quote, and trailing-whitespace equivalence. Indentation, internal whitespace, and single-vs-double quote delimiters remain exact. No similarity edit is ever applied.",
     autoAllow: true,
     inputSchema: {
       type: "object",
@@ -112,6 +112,13 @@ export function createEditFileTool(
         )
       }
       const observedSha256 = observed.sha256
+      if (!observed.complete && parsed.replaceAll) {
+        return editFailure(
+          "file_not_fully_observed",
+          "replaceAll requires a complete visible file revision.",
+          { suggestion: "Read the complete file before retrying replaceAll." },
+        )
+      }
 
       let bytes: Buffer
       try {
@@ -133,7 +140,10 @@ export function createEditFileTool(
       }
 
       const currentSha256 = sha256(bytes)
-      const optimisticRebase = currentSha256 !== observedSha256
+      const observedRevisionKnown = observedSha256 !== undefined
+      const optimisticRebase =
+        observedRevisionKnown && currentSha256 !== observedSha256
+      const exactAnchorRequired = !observed.complete || optimisticRebase
       if (optimisticRebase && parsed.replaceAll) {
         return editFailure(
           "file_changed_since_observation",
@@ -157,10 +167,26 @@ export function createEditFileTool(
       }
 
       const located = locateEditMatches(content, parsed.oldString)
-      if (
-        optimisticRebase &&
-        (located.mode !== "exact" || located.matches.length !== 1)
-      ) {
+      if (exactAnchorRequired && located.mode !== "exact") {
+        if (optimisticRebase) {
+          return editFailure(
+            "file_changed_since_observation",
+            "The file changed since it was observed and the edit anchor no longer matches exactly.",
+            {
+              suggestion:
+                "Read the file again and rebuild the edit from its latest contents.",
+            },
+          )
+        }
+        return editFailure(
+          "old_string_not_found",
+          `oldString was not found exactly in the current ${resolved.relativePath}.`,
+          {
+            suggestion: "Read the current text and use an exact unique anchor.",
+          },
+        )
+      }
+      if (optimisticRebase && located.matches.length !== 1) {
         return editFailure(
           "file_changed_since_observation",
           "The file changed since it was observed and the exact edit anchor is no longer unique.",
@@ -256,7 +282,8 @@ export function createEditFileTool(
         replacementCount: matches.length,
         matchMode: located.mode,
         optimisticRebase,
-        observedSha256,
+        observedRevisionKnown,
+        ...(observedSha256 === undefined ? {} : { observedSha256 }),
         changedRanges,
         observation: {
           kind: observed.observation,

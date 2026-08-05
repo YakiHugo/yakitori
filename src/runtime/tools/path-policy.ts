@@ -80,6 +80,12 @@ export async function resolveReadPath(
         "read_file does not read directories. Use glob to list matching files.",
       )
     }
+    if (!stats.isFile()) {
+      return pathError(
+        "unsupported_file_type",
+        "read_file only reads regular files; streams and device files require a bounded command.",
+      )
+    }
     return {
       ok: true,
       absolutePath,
