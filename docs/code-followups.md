@@ -44,16 +44,21 @@ Each can land first as an independent small change:
 
 ## Desktop shell follow-ups (recorded 2026-07-31)
 
-- Packaged builds launched from Finder resolve the default workspace/store
-  from `process.cwd()` (which is `/`). Before shipping packaged builds, add a
-  workspace picker or a user-data default with an explicit project-open flow
-  (decision 0010, Deferred Work).
+- Packaged builds resolve the workspace once via a native folder picker and
+  remember it in `userData/workspace.json` (implemented 2026-08-05);
+  cancelling the picker falls back to `~/Yakitori`. Changing the workspace
+  later still means editing or deleting that config; an in-app project-open
+  flow remains deferred (decision 0010, Deferred Work).
 - Static GUI serving is GET-only (no HEAD); add HEAD if a real client needs
   it.
 - `pnpm package:desktop` produces an unsigned `dir` build only; signed
   `dmg`, notarization, and auto-update are unconfigured.
-- `dev:desktop` shares port 4141 with `dev:server`; running both at once
-  collides on the runtime lock and the port.
+- `dev:desktop` now runs its own server on port 4142 with a separate
+  `.yakitori-desktop` store (implemented 2026-08-05), so it no longer
+  collides with `dev:server` on the port or the runtime lock. Both GUI dev
+  servers still share vite port 5173 and now start with `--strictPort`, so a
+  conflict fails loudly at startup instead of cross-wiring the shell to the
+  other app's GUI.
 
 ## Coding-tool protocol status (recorded 2026-08-05)
 

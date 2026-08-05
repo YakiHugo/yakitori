@@ -67,8 +67,8 @@ export default defineConfig(({ mode }) => {
     },
     server: {
       proxy: {
-        "/health": "http://127.0.0.1:4141",
-        "/sessions": "http://127.0.0.1:4141",
+        "/health": `http://127.0.0.1:${process.env.YAKITORI_API_PORT ?? "4141"}`,
+        "/sessions": `http://127.0.0.1:${process.env.YAKITORI_API_PORT ?? "4141"}`,
       },
     },
     test: {

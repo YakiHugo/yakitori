@@ -1,8 +1,8 @@
-import { existsSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import type { Server } from "node:http"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
-import { app, BrowserWindow } from "electron"
+import { app, BrowserWindow, dialog } from "electron"
 import {
   createYakitoriApplication,
   listen,
@@ -58,7 +58,7 @@ app.on("will-quit", (event) => {
 })
 
 async function start(): Promise<void> {
-  const workspace = process.env.YAKITORI_WORKSPACE ?? process.cwd()
+  const workspace = await resolveWorkspace()
   const storeDir =
     process.env.YAKITORI_STORE_DIR ?? path.join(workspace, ".yakitori")
   application = await createYakitoriApplication(
@@ -68,6 +68,63 @@ async function start(): Promise<void> {
   const serverUrl = await bindHttpServer(httpServer)
   console.log(`yakitori: listening on ${serverUrl}`)
   openMainWindow(process.env.ELECTRON_RENDERER_URL ?? serverUrl)
+}
+
+// Dev launches resolve the workspace from the checkout (process.cwd()).
+// Packaged launches from Finder have cwd "/", so they pick once via a native
+// dialog and remember the choice in the user-data config.
+async function resolveWorkspace(): Promise<string> {
+  const configured = process.env.YAKITORI_WORKSPACE
+  if (configured !== undefined) return configured
+  if (!app.isPackaged) return process.cwd()
+  const saved = readSavedWorkspace()
+  if (saved !== undefined) return saved
+  const picked = await dialog.showOpenDialog({
+    title: "Choose a Yakitori workspace",
+    properties: ["openDirectory", "createDirectory"],
+  })
+  const fallback = path.join(app.getPath("home"), "Yakitori")
+  const workspace = picked.canceled
+    ? fallback
+    : (picked.filePaths[0] ?? fallback)
+  mkdirSync(workspace, { recursive: true })
+  // Losing the saved choice only means the picker reappears next launch;
+  // it must not fail this startup.
+  try {
+    writeFileSync(
+      workspaceConfigPath(),
+      `${JSON.stringify({ workspace }, null, 2)}\n`,
+    )
+  } catch (error) {
+    console.error("yakitori: could not persist workspace choice", error)
+  }
+  return workspace
+}
+
+function readSavedWorkspace(): string | undefined {
+  if (!existsSync(workspaceConfigPath())) return undefined
+  // A corrupt config must not block startup; fall back to the picker.
+  try {
+    const parsed: unknown = JSON.parse(
+      readFileSync(workspaceConfigPath(), "utf8"),
+    )
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      !("workspace" in parsed) ||
+      typeof parsed.workspace !== "string" ||
+      !existsSync(parsed.workspace)
+    ) {
+      return undefined
+    }
+    return parsed.workspace
+  } catch {
+    return undefined
+  }
+}
+
+function workspaceConfigPath(): string {
+  return path.join(app.getPath("userData"), "workspace.json")
 }
 
 function applicationOptions(
