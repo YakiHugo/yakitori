@@ -478,6 +478,142 @@ describe("model context", () => {
       },
     ])
   })
+
+  it("shows one body for duplicate self-contained read results", async () => {
+    const { context, firstResultItemId } = await withAttributedSession(
+      async ({ kernel, sessionId }) => {
+        const active = await admitAndStartTurn(kernel, sessionId, "read twice")
+        const calls = ["tool_read_first", "tool_read_second"]
+        await kernel.recordAssistantOutput({
+          sessionId,
+          turnId: active.turnId,
+          toolCalls: calls.map((id) => ({
+            id,
+            name: "read_file",
+            input: { path: "src/value.ts", offset: 1, limit: 2 },
+            requiresPermission: false,
+          })),
+        })
+        let firstResultItemId = ""
+        for (const toolCallId of calls) {
+          await kernel.requireToolExecutionAllowed({
+            sessionId,
+            turnId: active.turnId,
+            toolCallId,
+          })
+          const result = await kernel.recordToolResult({
+            sessionId,
+            turnId: active.turnId,
+            toolCallId,
+            content: { kind: "text", text: "1\talpha\n2\tbeta" },
+            output: {
+              path: "src/value.ts",
+              sha256: "a".repeat(64),
+              lineCharacterLimit: 2_000,
+              range: { offset: 1, limit: 2, requestedLimit: 2 },
+              content: "1\talpha\n2\tbeta",
+            },
+          })
+          if (firstResultItemId.length === 0) {
+            firstResultItemId = result.itemId
+          }
+        }
+        const read = await kernel.readSession({ sessionId })
+        if (!read.session) throw new Error("missing session")
+        return {
+          context: buildModelContext({
+            session: read.session,
+            currentInputId: active.inputId,
+            limits: generousLimits(),
+          }),
+          firstResultItemId,
+        }
+      },
+    )
+
+    const results = context.messages.filter(
+      (message) => message.role === "tool",
+    )
+    expect(results).toEqual([
+      {
+        role: "tool",
+        toolCallId: "tool_read_first",
+        content: "1\talpha\n2\tbeta",
+      },
+      {
+        role: "tool",
+        toolCallId: "tool_read_second",
+        content: "Duplicate read; same content as tool call tool_read_first.",
+      },
+    ])
+    expect(context.observationEligibleToolResultItemIds).toEqual([
+      firstResultItemId,
+    ])
+  })
+
+  it("does not mark a context-truncated tool result as fully visible", async () => {
+    const { context, resultItemId } = await withAttributedSession(
+      async ({ kernel, sessionId }) => {
+        const active = await admitAndStartTurn(kernel, sessionId, "read file")
+        await kernel.recordAssistantOutput({
+          sessionId,
+          turnId: active.turnId,
+          toolCalls: [
+            {
+              id: "tool_read_truncated",
+              name: "read_file",
+              input: { path: "src/value.ts" },
+              requiresPermission: false,
+            },
+          ],
+        })
+        await kernel.requireToolExecutionAllowed({
+          sessionId,
+          turnId: active.turnId,
+          toolCallId: "tool_read_truncated",
+        })
+        const result = await kernel.recordToolResult({
+          sessionId,
+          turnId: active.turnId,
+          toolCallId: "tool_read_truncated",
+          content: { kind: "text", text: "1\talpha\n2\tbeta" },
+          output: {
+            path: "src/value.ts",
+            sha256: "a".repeat(64),
+            range: { offset: 1, limit: 2, requestedLimit: 2 },
+            content: "1\talpha\n2\tbeta",
+          },
+        })
+        const read = await kernel.readSession({ sessionId })
+        if (!read.session) throw new Error("missing session")
+        return {
+          context: buildModelContext({
+            session: read.session,
+            currentInputId: active.inputId,
+            limits: {
+              ...generousLimits(),
+              modelVisibleToolResultLines: 1,
+            },
+          }),
+          resultItemId: result.itemId,
+        }
+      },
+    )
+
+    expect(context.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: "tool",
+          toolCallId: "tool_read_truncated",
+          content: "1\talpha\n...[truncated 1 lines]",
+        }),
+      ]),
+    )
+    expect(context.selectedItemIds).toContain(resultItemId)
+    expect(context.observationEligibleToolResultItemIds).not.toContain(
+      resultItemId,
+    )
+  })
 })
 
 function generousLimits() {

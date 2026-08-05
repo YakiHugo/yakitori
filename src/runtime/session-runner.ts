@@ -36,6 +36,7 @@ import {
 import { createPermissionGate, type PermissionGate } from "./permission-gate.ts"
 import { resolveWorkspaceRoot } from "./tools/path-policy.ts"
 import { createToolRegistry, type ToolRegistry } from "./tools/registry.ts"
+import { createVisibleFileObservations } from "./tools/visible-file-observations.ts"
 
 export type SessionRunnerOptions = {
   readonly kernel: SessionKernel
@@ -357,6 +358,16 @@ export function createSessionRunner(
         model: input.executionContext.model,
         signal: input.signal,
       }
+      const observationEligibleToolResultItemIds = new Set(
+        context.observationEligibleToolResultItemIds,
+      )
+      const visibleFileObservations = createVisibleFileObservations(
+        session.tools.filter(
+          (tool) =>
+            tool.resultItemId !== undefined &&
+            observationEligibleToolResultItemIds.has(tool.resultItemId),
+        ),
+      )
 
       const streamId = `stream_${input.turnId}_${modelCallIndex + 1}`
       const response = await consumeModelStream({
@@ -445,6 +456,9 @@ export function createSessionRunner(
           executionContext: input.executionContext,
           contextMetadata: {
             selectedItemIds: [...context.selectedItemIds],
+            observationEligibleToolResultItemIds: [
+              ...context.observationEligibleToolResultItemIds,
+            ],
             droppedTurnCount: context.droppedTurnCount,
             truncatedToolResultCount: context.truncatedToolResultCount,
             ...(context.droppedCompactionCheckpoint
@@ -455,6 +469,7 @@ export function createSessionRunner(
               : { providerRequestId: response.providerRequestId }),
           },
           signal: input.signal,
+          visibleFileObservations,
         })
         continue
       }
@@ -504,6 +519,9 @@ export function createSessionRunner(
           callIndex: modelCallIndex,
           streamId,
           selectedItemIds: [...context.selectedItemIds],
+          observationEligibleToolResultItemIds: [
+            ...context.observationEligibleToolResultItemIds,
+          ],
           droppedTurnCount: context.droppedTurnCount,
           truncatedToolResultCount: context.truncatedToolResultCount,
           ...(context.droppedCompactionCheckpoint
@@ -600,6 +618,9 @@ export function createSessionRunner(
     readonly executionContext: TurnExecutionContext
     readonly contextMetadata: EventMetadata
     readonly signal: AbortSignal
+    readonly visibleFileObservations: ReturnType<
+      typeof createVisibleFileObservations
+    >
   }): Promise<void> {
     const recorded = await options.kernel.recordAssistantOutput({
       sessionId: input.sessionId,
@@ -706,6 +727,7 @@ export function createSessionRunner(
           : await tool.execute(call.input, {
               workspaceRoot,
               signal: input.signal,
+              visibleFileObservations: input.visibleFileObservations,
             })
 
       if (result.ok) {
@@ -724,6 +746,7 @@ export function createSessionRunner(
         sessionId: input.sessionId,
         turnId: input.turnId,
         toolCallId: call.id,
+        ...(result.output === undefined ? {} : { output: result.output }),
         error: {
           code: result.code,
           message: result.message,

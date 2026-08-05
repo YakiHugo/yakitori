@@ -1,4 +1,7 @@
 import type { ModelToolDefinition } from "../model.ts"
+import { createEditFileTool } from "./edit-file.ts"
+import { createGlobTool } from "./glob.ts"
+import { createGrepTool } from "./grep.ts"
 import { createReadFileTool } from "./read-file.ts"
 import { createRunCommandTool } from "./run-command.ts"
 import type {
@@ -22,6 +25,9 @@ export type ToolRegistry = {
 export function createToolRegistry(
   tools: readonly RuntimeTool[] = [
     createReadFileTool(),
+    createGrepTool(),
+    createGlobTool(),
+    createEditFileTool(),
     createWriteFileTool(),
     createRunCommandTool(),
   ],

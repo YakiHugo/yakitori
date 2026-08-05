@@ -1,215 +1,357 @@
-import { createHash } from "node:crypto"
-import { createReadStream } from "node:fs"
-import { StringDecoder } from "node:string_decoder"
 import { RuntimeLimits } from "../limits.ts"
 import { resolveReadPath } from "./path-policy.ts"
+import {
+  captureTextFilePage,
+  type CapturedLine,
+  FileChangedDuringReadError,
+  type TextFilePage,
+  UnsupportedTextFileTypeError,
+} from "./read-file-page.ts"
 import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
 
+const DEFAULT_LINE_CHARACTERS = 2_000
+const LINE_TRUNCATION_MARKER = "…[line truncated]…"
+
+type ReadInput = {
+  readonly path: string
+  readonly offset: number
+  readonly limit: number
+}
+
 export function createReadFileTool(
-  maxBytes = RuntimeLimits.rawFileReadBytes,
+  maxBytes = RuntimeLimits.modelVisibleToolResultBytes,
+  maxLines = RuntimeLimits.modelVisibleToolResultLines,
+  maxLineCharacters = DEFAULT_LINE_CHARACTERS,
 ): RuntimeTool {
+  const lineLimit = Math.min(
+    maxLines,
+    RuntimeLimits.modelVisibleToolResultLines,
+  )
   return {
     name: "read_file",
     description:
-      "Read a UTF-8 text file from the session workspace. Returns content, SHA-256, and truncation metadata.",
+      "Read a live, bounded page from a regular UTF-8 text file. Lines are prefixed {N}\\t for display; never include those prefixes in edit_file oldString. offset is a 1-based starting line and limit is 1-2000. Pagination is best effort against the file's current contents. Output is capped at 2,000 lines, 2,000 characters per displayed line, and 50 KB.",
     autoAllow: true,
     inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: {
         path: { type: "string" },
-        offset: { type: "integer", minimum: 0 },
-        limit: { type: "integer", minimum: 1 },
+        offset: {
+          type: "integer",
+          minimum: 1,
+          description: "1-based starting line. Defaults to 1.",
+        },
+        limit: { type: "integer", minimum: 1, maximum: lineLimit },
       },
       required: ["path"],
     },
     async execute(input, context): Promise<ToolExecutionResult> {
-      const parsed = parseReadInput(input)
+      const parsed = parseReadInput(input, lineLimit)
       if (!parsed.ok) return parsed.result
 
       const resolved = await resolveReadPath(context.workspaceRoot, parsed.path)
       if (!resolved.ok) {
-        return {
-          ok: false,
-          code: resolved.error.code,
-          message: resolved.error.message,
-          content: resolved.error.message,
+        return readFailure(resolved.error.code, resolved.error.message)
+      }
+
+      let page: TextFilePage
+      try {
+        page = await captureTextFilePage({
+          absolutePath: resolved.absolutePath,
+          offset: parsed.offset,
+          limit: parsed.limit,
+          maxLineCharacters,
+          ...(context.signal === undefined ? {} : { signal: context.signal }),
+        })
+      } catch (error) {
+        if (isAbortError(error)) throw error
+        if (error instanceof FileChangedDuringReadError) {
+          return readFailure(
+            "file_changed_during_read",
+            "The file changed while read_file was capturing its page.",
+            { suggestion: "Retry read_file against the latest file contents." },
+          )
         }
-      }
-
-      const startLine = parsed.offset ?? 0
-      const selectedEnd =
-        parsed.limit === undefined
-          ? Number.POSITIVE_INFINITY
-          : startLine + parsed.limit
-      const hash = createHash("sha256")
-      const decoder = new StringDecoder("utf8")
-      const selectedChars: string[] = []
-      let selectedBytes = 0
-      let totalBytes = 0
-      let totalLines = 1
-      let currentLine = 0
-      let pendingNewline = false
-      let truncatedByBytes = false
-
-      const append = (value: string) => {
-        const bytes = Buffer.byteLength(value, "utf8")
-        if (selectedBytes + bytes > maxBytes) {
-          truncatedByBytes = true
-          return
+        if (error instanceof UnsupportedTextFileTypeError) {
+          return readFailure(
+            "unsupported_file_type",
+            "read_file only reads regular files; streams and device files require a bounded command.",
+          )
         }
-        selectedChars.push(value)
-        selectedBytes += bytes
+        return readFailure(
+          "read_failed",
+          "The file could not be read safely as UTF-8 text.",
+        )
       }
-      const processText = (text: string) => {
-        for (const char of text) {
-          const selected = currentLine >= startLine && currentLine < selectedEnd
-          if (selected && pendingNewline) {
-            append("\n")
-            pendingNewline = false
-          }
-          if (char !== "\n") {
-            if (selected) append(char)
-            continue
-          }
-
-          currentLine += 1
-          totalLines += 1
-          pendingNewline =
-            selected && currentLine >= startLine && currentLine < selectedEnd
-        }
+      if (page.binary) {
+        return readFailure(
+          "binary_file",
+          "read_file only supports UTF-8 text; the first 4 KB appears binary.",
+        )
       }
 
-      for await (const chunk of createReadStream(resolved.absolutePath, {
-        ...(context.signal === undefined ? {} : { signal: context.signal }),
-      })) {
-        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
-        totalBytes += buffer.byteLength
-        hash.update(buffer)
-        processText(decoder.write(buffer))
-      }
-      processText(decoder.end())
       if (
-        pendingNewline &&
-        currentLine >= startLine &&
-        currentLine < selectedEnd
+        page.reachedEof &&
+        page.lineCount !== undefined &&
+        parsed.offset > Math.max(1, page.lineCount)
       ) {
-        append("\n")
+        return readFailure(
+          "offset_out_of_bounds",
+          `offset ${parsed.offset} is outside this file's ${page.lineCount} lines.`,
+          { lineCount: page.lineCount },
+        )
       }
 
-      const endLine = Math.min(totalLines, selectedEnd)
-      const truncatedByLines = endLine < totalLines || startLine > 0
-      const selected = truncatedByBytes
-        ? addTruncationMarker(selectedChars.join(""), maxBytes)
-        : selectedChars.join("")
-
-      const truncated = truncatedByLines || truncatedByBytes
+      const selected = selectPageLines({
+        lines: page.lines,
+        start: parsed.offset,
+        limit: parsed.limit,
+        byteBudget: maxBytes > 4_096 ? maxBytes - 2_048 : maxBytes,
+        maxLineCharacters,
+      })
+      const canContinue = page.hasMore || selected.truncatedByBytes
+      const nextOffset =
+        canContinue && selected.lineCount > 0
+          ? parsed.offset + selected.lineCount
+          : undefined
+      const fullMetadata =
+        page.sha256 !== undefined &&
+        page.byteCount !== undefined &&
+        page.lineCount !== undefined &&
+        page.lineEnding !== undefined &&
+        page.finalNewline !== undefined
+          ? {
+              sha256: page.sha256,
+              byteCount: page.byteCount,
+              lineCount: page.lineCount,
+              lineEnding: page.lineEnding,
+              finalNewline: page.finalNewline,
+            }
+          : undefined
+      const complete =
+        parsed.offset === 1 &&
+        page.reachedEof &&
+        fullMetadata !== undefined &&
+        selected.lineCount === (page.lineCount ?? 0) &&
+        !selected.truncatedByBytes &&
+        selected.truncatedLineCount === 0
+      const truncatedByLines = page.hasMore
+      const truncated = !complete
+      const hint =
+        nextOffset === undefined
+          ? selected.truncatedLineCount > 0
+            ? `\n(${selected.truncatedLineCount} displayed line${selected.truncatedLineCount === 1 ? " was" : "s were"} capped at ${maxLineCharacters} characters.)`
+            : ""
+          : `\n(${
+              selected.truncatedByBytes
+                ? `Output capped at ${formatBytes(maxBytes)}. `
+                : selected.lineCount === lineLimit
+                  ? `Output capped at ${lineLimit} lines. `
+                  : ""
+            }Showing lines ${parsed.offset}-${Math.max(parsed.offset, nextOffset - 1)}. Use offset=${nextOffset} to continue from the file's current contents.)`
+      const visibleContent =
+        page.reachedEof && page.lineCount === 0
+          ? "(File is empty.)"
+          : maxBytes <= 4_096 && selected.truncatedByBytes
+            ? addShortTruncationMarker(selected.content, maxBytes)
+            : fitUtf8(`${selected.content}${hint}`, maxBytes)
       const output = {
         path: resolved.relativePath,
-        content: selected,
-        sha256: hash.digest("hex"),
-        byteCount: totalBytes,
-        lineCount: totalLines,
+        complete,
+        ...(complete && fullMetadata !== undefined
+          ? fullMetadata
+          : page.lineCount === undefined
+            ? {}
+            : { lineCount: page.lineCount }),
+        empty: page.reachedEof && page.lineCount === 0,
         truncated,
-        truncatedByBytes,
+        truncatedByBytes: selected.truncatedByBytes,
         truncatedByLines,
+        truncatedByLineLength: selected.truncatedLineCount > 0,
+        truncatedLineCount: selected.truncatedLineCount,
+        lineCharacterLimit: maxLineCharacters,
         range: {
-          offset: startLine,
-          limit: Math.max(0, endLine - startLine),
+          offset: parsed.offset,
+          limit: selected.lineCount,
+          requestedLimit: parsed.limit,
         },
+        ...(nextOffset === undefined ? {} : { continuation: { nextOffset } }),
+        content: visibleContent,
       }
-
-      return {
-        ok: true,
-        output,
-        content: JSON.stringify(output),
-      }
+      return { ok: true, output, content: visibleContent }
     },
   }
 }
 
-function parseReadInput(input: unknown):
-  | {
-      readonly ok: true
-      readonly path: string
-      readonly offset?: number
-      readonly limit?: number
+function selectPageLines(input: {
+  readonly lines: ReadonlyMap<number, CapturedLine>
+  readonly start: number
+  readonly limit: number
+  readonly byteBudget: number
+  readonly maxLineCharacters: number
+}): {
+  readonly content: string
+  readonly lineCount: number
+  readonly truncatedByBytes: boolean
+  readonly truncatedLineCount: number
+} {
+  const parts: string[] = []
+  let bytes = 0
+  let truncatedByBytes = false
+  let truncatedLineCount = 0
+  const end = input.start + input.limit
+  for (let number = input.start; number < end; number += 1) {
+    const line = input.lines.get(number)
+    if (line === undefined) break
+    const bounded = renderBoundedLine(number, line, input.maxLineCharacters)
+    const value = parts.length === 0 ? bounded.content : `\n${bounded.content}`
+    const width = Buffer.byteLength(value, "utf8")
+    if (bytes + width > input.byteBudget) {
+      truncatedByBytes = true
+      break
     }
+    if (bounded.truncated) truncatedLineCount += 1
+    parts.push(value)
+    bytes += width
+  }
+  return {
+    content: parts.join(""),
+    lineCount: parts.length,
+    truncatedByBytes,
+    truncatedLineCount,
+  }
+}
+
+function renderBoundedLine(
+  number: number,
+  line: CapturedLine,
+  maxCharacters: number,
+): { readonly content: string; readonly truncated: boolean } {
+  const prefix = `${number}\t`
+  if (line.full !== undefined && prefix.length + line.length <= maxCharacters) {
+    return { content: `${prefix}${line.full}`, truncated: false }
+  }
+  if (prefix.length >= maxCharacters) {
+    return {
+      content: prefix.slice(0, Math.max(0, maxCharacters)),
+      truncated: true,
+    }
+  }
+  const marker = LINE_TRUNCATION_MARKER.slice(
+    0,
+    Math.max(0, maxCharacters - prefix.length),
+  )
+  const available = Math.max(0, maxCharacters - prefix.length - marker.length)
+  const leading = Math.ceil(available / 2)
+  const trailing = Math.floor(available / 2)
+  const head = line.full ?? line.head ?? ""
+  const tail = line.full ?? line.tail ?? ""
+  return {
+    content: `${prefix}${head.slice(0, leading)}${marker}${tail.slice(tail.length - trailing)}`,
+    truncated: true,
+  }
+}
+
+function parseReadInput(
+  input: unknown,
+  defaultLimit: number,
+):
+  | ({ readonly ok: true } & ReadInput)
   | { readonly ok: false; readonly result: ToolExecutionResult } {
-  if (typeof input !== "object" || input === null || Array.isArray(input)) {
-    return {
-      ok: false,
-      result: {
-        ok: false,
-        code: "invalid_tool_input",
-        message: "read_file input must be an object.",
-        content: "read_file input must be an object.",
-      },
-    }
+  if (!isRecord(input)) {
+    return readInputFailure("read_file input must be an object.")
   }
-  const record = input as Record<string, unknown>
-  if (typeof record.path !== "string") {
-    return {
-      ok: false,
-      result: {
-        ok: false,
-        code: "invalid_tool_input",
-        message: "read_file path must be a string.",
-        content: "read_file path must be a string.",
-      },
-    }
+  const unsupported = Object.keys(input).find(
+    (key) => key !== "path" && key !== "offset" && key !== "limit",
+  )
+  if (unsupported !== undefined) {
+    return readInputFailure(
+      `read_file does not accept the ${unsupported} argument.`,
+    )
+  }
+  if (typeof input.path !== "string") {
+    return readInputFailure("read_file path must be a string.")
   }
   if (
-    record.offset !== undefined &&
-    !(Number.isInteger(record.offset) && (record.offset as number) >= 0)
+    input.offset !== undefined &&
+    !(Number.isInteger(input.offset) && (input.offset as number) >= 1)
   ) {
-    return {
-      ok: false,
-      result: {
-        ok: false,
-        code: "invalid_tool_input",
-        message: "read_file offset must be a non-negative integer.",
-        content: "read_file offset must be a non-negative integer.",
-      },
-    }
+    return readInputFailure("read_file offset must be a positive integer.")
   }
   if (
-    record.limit !== undefined &&
-    !(Number.isInteger(record.limit) && (record.limit as number) > 0)
+    input.limit !== undefined &&
+    !(
+      Number.isInteger(input.limit) &&
+      (input.limit as number) > 0 &&
+      (input.limit as number) <= defaultLimit
+    )
   ) {
-    return {
-      ok: false,
-      result: {
-        ok: false,
-        code: "invalid_tool_input",
-        message: "read_file limit must be a positive integer.",
-        content: "read_file limit must be a positive integer.",
-      },
-    }
+    return readInputFailure(
+      `read_file limit must be an integer from 1 through ${defaultLimit}.`,
+    )
   }
   return {
     ok: true,
-    path: record.path,
-    ...(record.offset === undefined ? {} : { offset: record.offset as number }),
-    ...(record.limit === undefined ? {} : { limit: record.limit as number }),
+    path: input.path,
+    offset: typeof input.offset === "number" ? input.offset : 1,
+    limit: typeof input.limit === "number" ? input.limit : defaultLimit,
   }
 }
 
-function addTruncationMarker(value: string, maxBytes: number): string {
-  const marker = "\n...[truncated bytes]"
-  const markerBytes = Buffer.byteLength(marker, "utf8")
-  if (markerBytes >= maxBytes) return truncateUtf8(marker, maxBytes)
-  return `${truncateUtf8(value, maxBytes - markerBytes)}${marker}`
-}
-
-function truncateUtf8(value: string, maxBytes: number): string {
+function fitUtf8(value: string, maxBytes: number): string {
+  if (Buffer.byteLength(value, "utf8") <= maxBytes) return value
   let bytes = 0
   let end = 0
   for (const char of value) {
-    const charBytes = Buffer.byteLength(char, "utf8")
-    if (bytes + charBytes > maxBytes) break
-    bytes += charBytes
+    const width = Buffer.byteLength(char, "utf8")
+    if (bytes + width > maxBytes) break
+    bytes += width
     end += char.length
   }
   return value.slice(0, end)
+}
+
+function addShortTruncationMarker(value: string, maxBytes: number): string {
+  const marker = "\n...[truncated bytes]"
+  const available = Math.max(0, maxBytes - Buffer.byteLength(marker, "utf8"))
+  return `${fitUtf8(value, available)}${fitUtf8(marker, maxBytes - available)}`
+}
+
+function formatBytes(bytes: number): string {
+  return bytes % 1024 === 0 ? `${bytes / 1024} KB` : `${bytes} bytes`
+}
+
+function readInputFailure(message: string): {
+  readonly ok: false
+  readonly result: ToolExecutionResult
+} {
+  return { ok: false, result: readFailure("invalid_tool_input", message) }
+}
+
+function readFailure(
+  code: string,
+  message: string,
+  details: Record<string, string | number> = {},
+): ToolExecutionResult {
+  return {
+    ok: false,
+    code,
+    message,
+    content: [
+      `${code}: ${message}`,
+      ...(typeof details.suggestion === "string"
+        ? [`Suggestion: ${details.suggestion}`]
+        : []),
+    ].join("\n"),
+    ...(Object.keys(details).length === 0 ? {} : { output: details }),
+  }
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError"
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
 }

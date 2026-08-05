@@ -230,6 +230,138 @@ survive process restarts.
 - A Mate does not inherit another Mate's personal memory, credentials,
   or approvals.
 
+Text-file replacement goes through one Runtime-owned compare-and-write
+boundary. It resolves workspace containment, serializes writers by canonical
+path, checks the protocol's internal revision precondition, writes and
+synchronizes a temporary file in the target directory, then resolves the path
+and checks the revision again before publishing the replacement. File tools
+may define different model-facing edit protocols, but they must reuse this
+commit boundary instead of implementing independent write paths.
+
+`write_file` exposes only `path` and complete desired `content`; revision hashes
+remain internal Runtime state rather than model-authored arguments. A missing
+target takes the atomic no-clobber creation path. Replacing an existing target
+requires a complete observation in the frozen model-context view, and Runtime
+uses that observation's SHA as the compare-and-write precondition. Missing,
+partial, and stale observations fail with instructions to read the complete
+current file before retrying.
+
+The default `edit_file` protocol treats an empty `oldString` as an atomic
+create-if-absent operation; it never overwrites an existing file and reuses the
+same no-clobber commit path as `write_file`. A non-empty `oldString` performs
+one flat `oldString`/`newString` replacement, with optional `replaceAll` for one
+search string. Its model-facing input does not carry a revision hash: Runtime
+derives the write precondition from an observation still present in the model
+context that produced the edit call. It tries exact text first, then only
+deterministic line-ending, straight-versus-curly quote, and trailing-whitespace
+equivalence.
+Single-versus-double quote delimiters, indentation, and internal whitespace
+remain exact for every file format. Replacement text always adopts the file's
+dominant line-ending style. If the file changed after observation, a
+single-target edit may rebase only when the exact `oldString` remains unique;
+`replaceAll` keeps the observed-revision requirement and is invalid for
+create-if-absent. The tool never applies similarity or nearest-match guesses.
+
+Missing-target diagnostics return only bounded, nonzero-score nearby text;
+ambiguous-target diagnostics return exact line ranges without repeating the
+same matched body. Diagnostics never choose a write target or encode a retry
+action. Successful edits record whether they rebased and whether their changed
+ranges were inside the visible observation, so the softer observed-file policy
+can be monitored before deciding whether range authorization should become a
+hard rule. Successful writes and edits also record a bounded unified diff in
+structured output.
+
+`read_file` opens one regular file and scans only far enough to reach the
+requested 1-based page plus bounded lookahead. Reaching a line offset still
+requires scanning preceding bytes because ordinary text files have no line
+index, but a partial page no longer scans onward to EOF merely to compute full
+metadata. `offset` is a positive integer, `limit` is explicitly bounded from 1
+through 2,000, and pagination rereads the file's current contents without a
+cross-page revision promise. Descriptor metadata is checked before and after
+the scan so an in-place concurrent change is rejected; an atomic path
+replacement may still yield the already-open inode, with later write
+preconditions protecting the replacement path.
+
+Output is capped at 2,000 lines, 2,000 characters per displayed line, and 50
+KB. Only a read from line 1 that reaches EOF without byte, line, or long-line
+display clipping is a complete observation and records the full SHA, byte and
+line counts, newline style, and final-newline state. Partial pages carry no
+revision. Every successful read result remains bounded and self-contained in
+recorded facts. Model-context assembly may deduplicate identical complete read
+results by showing one body and short references for the other tool calls;
+live partial pages are not revision-keyed or deduplicated. Compaction and resume
+recompute delivery from durable self-contained facts rather than persisting a
+stub.
+
+Direct reads reject directories, FIFOs, sockets, devices, and other non-regular
+targets before opening them. Bounded command execution with a timeout is the
+explicit stream-consumption path. Images and other rich media remain outside
+the text-read protocol, and future additional roots must pass a Runtime path
+permission boundary whose read authority does not imply write authority.
+`grep` and `glob` use ripgrep, respect ignore rules, filter secret-bearing paths,
+and have independent result caps. The same sensitive-path policy applies to
+direct file reads and writes.
+`glob` exposes only Claude-compatible `pattern` and optional `path` inputs. It
+streams paths in ripgrep's traversal order and stops on the first valid path
+beyond its 100-result hard cap, then sorts only the retained paths
+lexicographically. Truncated selection is therefore best effort rather than a
+workspace-wide top-N ordering. Its public result distinguishes result, timeout,
+and output-byte truncation; a timeout with no complete path is a tool failure.
+Ignored files may be enabled only through construction-time Runtime
+configuration, not by a model-supplied argument.
+
+`grep` exposes the common Claude/Kimi search surface, including context,
+file-type, multiline, offset, and head-limit controls; Kimi's `count_matches`
+spelling is accepted as an alias for Claude's `count`. Ignored-file discovery
+is Runtime construction state rather than a model argument. `head_limit` is
+bounded from 1 through the Runtime cap (250 by default), and multiline search
+enables ripgrep's multiline and dotall modes together. Ripgrep output is
+consumed as a stream under hard time, result, record, line, raw-byte, and
+model-visible byte limits. Result and model-output limits expose a usable next
+offset only after at least one complete result was returned; raw/record limits,
+empty bounded pages, and timeouts do not. Runtime rejects output budgets too
+small for the minimum result envelope, and an irreducible oversized envelope
+fails instead of violating the configured cap. Timeout is recorded separately
+from output-boundary truncation, and line shortening does not make the search
+itself truncated. `grep` file lists use reverse mtime ordering; content and
+counts use ripgrep's stable path ordering, with content retaining line order.
+
+Grep `offset` pagination reruns the live search and is explicitly best effort;
+it does not expose a revision or claim snapshot consistency. Stable pagination
+requires a future bounded materialized result artifact rather than a token over
+unrelated observation state.
+
+File observation is one immutable request-scoped derived view. After final
+context selection and tool-result truncation, Runtime projects only successful
+results whose complete text is actually present in that model request. Visible
+complete and ranged reads establish behavioral edit visibility; visible
+whole-file writes and create-if-absent edits establish authorship. A normal edit
+advances a revision only when its visible prerequisite is also present, so an
+edit summary left behind after compaction cannot silently recreate authority.
+Results truncated again by model-context assembly conservatively grant no
+observation. All tool calls produced by one model response share the same frozen
+view, so a sibling read cannot retroactively authorize an edit; the next model
+request rebuilds a new view from its final context.
+
+The journal retains original `tool.result` facts for transcript, GUI, repair,
+debugging, and offline analysis, but Runtime does not rebuild a mutable file
+authorization cache from the complete Session history. `grep` locates files and
+lines but produces no file observation; the model must use `read_file` before
+editing an existing file. A complete visible read supplies `write_file`'s
+internal compare-and-write revision. A ranged read supplies no revision, so
+`edit_file` rereads the current file and accepts only an exact current anchor
+before committing against those current bytes. Filesystem SHA comparison at the
+synchronized write boundary remains the final concurrency check.
+
+Tool results retain the coarse durable `{ content, output?, error? }` shape.
+`content` is bounded, concise plain text for the model; `output` carries
+structured metadata for projections and the GUI rather than being stringified
+back into model context.
+
+Alternative model-specific protocols such as hashline or GPT-only
+grammar-constrained patching must be exposed as mutually exclusive toolsets and
+reuse the same compare-and-write boundary.
+
 Agent-to-agent wakeups also require loop controls:
 
 - each Delivery is consumed at most once

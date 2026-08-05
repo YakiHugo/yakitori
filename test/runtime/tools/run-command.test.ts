@@ -5,6 +5,24 @@ import { describe, expect, it } from "vitest"
 import { createRunCommandTool } from "../../../src/index.ts"
 
 describe("run_command process lifecycle", () => {
+  it("renders command output as plain model-facing text", async () => {
+    const result = await createRunCommandTool({
+      launch: async () => ({
+        exitCode: 2,
+        signal: null,
+        stdout: "out",
+        stderr: "warning",
+        truncated: false,
+        timedOut: false,
+      }),
+    }).execute({ command: "example" }, { workspaceRoot: "/workspace" })
+
+    expect(result).toMatchObject({
+      ok: true,
+      content: "out\n[stderr]\nwarning\n(exit 2)",
+    })
+  })
+
   it.skipIf(process.platform === "win32")(
     "kills descendants that ignore SIGTERM when the Turn is aborted",
     async () => {

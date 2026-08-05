@@ -1,8 +1,10 @@
 import type { JsonObject, JsonValue } from "../../kernel/index.ts"
+import type { VisibleFileObservations } from "./visible-file-observations.ts"
 
 export type ToolExecutionContext = {
   readonly workspaceRoot: string
   readonly signal?: AbortSignal
+  readonly visibleFileObservations?: VisibleFileObservations
 }
 
 export type ToolSuccess = {

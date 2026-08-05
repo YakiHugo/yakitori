@@ -86,22 +86,18 @@ export function createRunCommandTool(
         }
       }
       if (result.timedOut) {
+        const output = {
+          timedOut: true,
+          stdout: result.stdout,
+          stderr: result.stderr,
+          truncated: result.truncated,
+        }
         return {
           ok: false,
           code: "command_timeout",
           message: `Command timed out after ${parsed.timeoutSeconds}s.`,
-          content: JSON.stringify({
-            timedOut: true,
-            stdout: result.stdout,
-            stderr: result.stderr,
-            truncated: result.truncated,
-          }),
-          output: {
-            timedOut: true,
-            stdout: result.stdout,
-            stderr: result.stderr,
-            truncated: result.truncated,
-          },
+          content: renderCommandContent(output, "Command timed out."),
+          output,
         }
       }
 
@@ -115,10 +111,39 @@ export function createRunCommandTool(
       return {
         ok: true,
         output,
-        content: JSON.stringify(output),
+        content: renderCommandContent(output),
       }
     },
   }
+}
+
+function renderCommandContent(
+  output: {
+    readonly stdout: string
+    readonly stderr: string
+    readonly truncated: boolean
+    readonly exitCode?: number | null
+    readonly signal?: string | null
+  },
+  status?: string,
+): string {
+  const sections = [
+    ...(status === undefined ? [] : [status]),
+    ...(output.stdout.length === 0 ? [] : [output.stdout]),
+    ...(output.stderr.length === 0 ? [] : [`[stderr]\n${output.stderr}`]),
+    `(${
+      [
+        ...(output.exitCode === undefined
+          ? []
+          : [`exit ${String(output.exitCode)}`]),
+        ...(output.signal === undefined || output.signal === null
+          ? []
+          : [`signal ${output.signal}`]),
+        ...(output.truncated ? ["output truncated"] : []),
+      ].join(", ") || "no output"
+    })`,
+  ]
+  return sections.join("\n")
 }
 
 function parseRunCommandInput(

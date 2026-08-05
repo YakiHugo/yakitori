@@ -1,10 +1,39 @@
 import { lstat, realpath } from "node:fs/promises"
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
+import {
+  basename,
+  dirname,
+  extname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path"
+import { runRipgrep } from "./ripgrep.ts"
 
 export type PathPolicyError = {
   readonly code: string
   readonly message: string
 }
+
+export const SensitivePathGlobs = [
+  "!**/.env*",
+  "!**/.ssh/**",
+  "!**/.git-credentials",
+  "!**/.netrc",
+  "!**/.npmrc",
+  "!**/.pypirc",
+  "!**/.aws/credentials",
+  "!**/.docker/config.json",
+  "!**/.kube/config",
+  "!**/*.key",
+  "!**/*.pem",
+  "!**/*.p12",
+  "!**/*.pfx",
+  "!**/credentials.json",
+  "!**/secrets.json",
+  "!**/service-account*.json",
+] as const
 
 export type ResolvedWorkspacePath =
   | {
@@ -46,7 +75,16 @@ export async function resolveReadPath(
     }
     const stats = await lstat(absolutePath)
     if (stats.isDirectory()) {
-      return pathDenied("Path is a directory; a file is required.")
+      return pathError(
+        "directory_not_supported",
+        "read_file does not read directories. Use glob to list matching files.",
+      )
+    }
+    if (!stats.isFile()) {
+      return pathError(
+        "unsupported_file_type",
+        "read_file only reads regular files; streams and device files require a bounded command.",
+      )
     }
     return {
       ok: true,
@@ -55,7 +93,13 @@ export async function resolveReadPath(
       exists: true,
     }
   } catch {
-    return pathDenied("Path does not exist.")
+    const suggestion = await suggestWorkspacePath(workspaceRoot, relativePath)
+    return pathError(
+      "path_not_found",
+      suggestion === undefined
+        ? "Path does not exist."
+        : `Path does not exist. Did you mean "${suggestion}"?`,
+    )
   }
 }
 
@@ -114,6 +158,32 @@ export async function resolveWritePath(
   }
 }
 
+export async function resolveSearchPath(
+  workspaceRoot: string,
+  relativePath: string,
+): Promise<ResolvedWorkspacePath> {
+  const validated = validateRelativePathInput(relativePath)
+  if (!validated.ok) return validated
+  const candidate = resolve(workspaceRoot, validated.relativePath)
+  if (!isInsideWorkspace(workspaceRoot, candidate)) {
+    return pathDenied("Path escapes the workspace.")
+  }
+  try {
+    const absolutePath = await realpath(candidate)
+    if (!isInsideWorkspace(workspaceRoot, absolutePath)) {
+      return pathDenied("Path escapes the workspace via symlink.")
+    }
+    return {
+      ok: true,
+      absolutePath,
+      relativePath: toRelativePath(workspaceRoot, absolutePath) || ".",
+      exists: true,
+    }
+  } catch {
+    return pathDenied("Search path does not exist.")
+  }
+}
+
 function validateRelativePathInput(
   relativePath: string,
 ):
@@ -131,7 +201,38 @@ function validateRelativePathInput(
   if (relativePath.split(/[/\\]/).includes("..")) {
     return pathDenied("Path must not contain parent directory segments.")
   }
+  if (isSensitiveWorkspacePath(relativePath)) {
+    return pathError(
+      "sensitive_path",
+      "Access to credential and secret-bearing paths is not allowed.",
+    )
+  }
   return { ok: true, relativePath }
+}
+
+export function isSensitiveWorkspacePath(path: string): boolean {
+  const normalized = path.replaceAll("\\", "/").toLowerCase()
+  const segments = normalized.split("/").filter(Boolean)
+  const name = segments.at(-1) ?? ""
+  if (name.startsWith(".env")) return true
+  if (segments.includes(".ssh")) return true
+  if ([".git-credentials", ".netrc", ".npmrc", ".pypirc"].includes(name)) {
+    return true
+  }
+  if (
+    normalized.endsWith("/.aws/credentials") ||
+    normalized.endsWith("/.docker/config.json") ||
+    normalized.endsWith("/.kube/config")
+  ) {
+    return true
+  }
+  if ([".key", ".p12", ".pem", ".pfx"].includes(extname(name))) return true
+  return (
+    name === "application_default_credentials.json" ||
+    name === "credentials.json" ||
+    name === "secrets.json" ||
+    /^service-account.*\.json$/u.test(name)
+  )
 }
 
 function isInsideWorkspace(
@@ -156,11 +257,75 @@ function pathDenied(message: string): {
   readonly ok: false
   readonly error: PathPolicyError
 } {
+  return pathError("path_denied", message)
+}
+
+function pathError(
+  code: string,
+  message: string,
+): {
+  readonly ok: false
+  readonly error: PathPolicyError
+} {
   return {
     ok: false,
     error: {
-      code: "path_denied",
+      code,
       message,
     },
   }
+}
+
+async function suggestWorkspacePath(
+  workspaceRoot: string,
+  requested: string,
+): Promise<string | undefined> {
+  // TODO(path-not-found-hints): Promote bounded path suggestions to a
+  // structured, shared path-policy result so edit, read, and search tools can
+  // render consistent recovery hints without parsing or replacing messages.
+  const listed = await runRipgrep(
+    [
+      "--files",
+      "--hidden",
+      "--no-require-git",
+      "--glob",
+      "!.git/**",
+      ...SensitivePathGlobs.flatMap((glob) => ["--glob", glob]),
+    ],
+    { cwd: workspaceRoot },
+  )
+  if (!listed.ok) return undefined
+  const requestedName = basename(requested).toLowerCase()
+  let best: { readonly path: string; readonly distance: number } | undefined
+  for (const candidate of listed.stdout.split("\n")) {
+    if (candidate.length === 0 || isSensitiveWorkspacePath(candidate)) continue
+    const distance = editDistance(
+      requestedName,
+      basename(candidate).toLowerCase(),
+    )
+    if (best === undefined || distance < best.distance) {
+      best = { path: candidate.replaceAll("\\", "/"), distance }
+    }
+  }
+  const threshold = Math.max(2, Math.floor(requestedName.length * 0.35))
+  return best !== undefined && best.distance <= threshold
+    ? best.path
+    : undefined
+}
+
+function editDistance(left: string, right: string): number {
+  let previous = Array.from({ length: right.length + 1 }, (_, index) => index)
+  for (let leftIndex = 1; leftIndex <= left.length; leftIndex += 1) {
+    const current = [leftIndex]
+    for (let rightIndex = 1; rightIndex <= right.length; rightIndex += 1) {
+      current[rightIndex] = Math.min(
+        (current[rightIndex - 1] ?? 0) + 1,
+        (previous[rightIndex] ?? 0) + 1,
+        (previous[rightIndex - 1] ?? 0) +
+          (left[leftIndex - 1] === right[rightIndex - 1] ? 0 : 1),
+      )
+    }
+    previous = current
+  }
+  return previous[right.length] ?? left.length
 }

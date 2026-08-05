@@ -1,0 +1,144 @@
+import { describe, expect, it } from "vitest"
+import {
+  createVisibleFileObservations,
+  ToolState,
+  type ToolProjection,
+} from "../../../src/index.ts"
+
+describe("visible file observations", () => {
+  it("projects only the successful tool results supplied for one model request", () => {
+    const visible = createVisibleFileObservations([
+      toolProjection("read_file", {
+        path: "src/value.ts",
+        complete: true,
+        sha256: "a".repeat(64),
+        range: { offset: 1, limit: 20, requestedLimit: 20 },
+      }),
+      toolProjection("edit_file", {
+        path: "src/value.ts",
+        sha256: "b".repeat(64),
+        optimisticRebase: false,
+      }),
+    ])
+    expect(visible.latest("src/value.ts")).toEqual({
+      sha256: "b".repeat(64),
+      complete: true,
+      observation: "edit",
+    })
+
+    const editWithoutVisibleBase = createVisibleFileObservations([
+      toolProjection("edit_file", {
+        path: "src/value.ts",
+        sha256: "b".repeat(64),
+      }),
+    ])
+    expect(editWithoutVisibleBase.latest("src/value.ts")).toBeUndefined()
+  })
+
+  it("treats visible whole-file writes and edit creations as authorship", () => {
+    const visible = createVisibleFileObservations([
+      toolProjection("edit_file", {
+        path: "created-by-edit.ts",
+        sha256: "d".repeat(64),
+        created: true,
+      }),
+      toolProjection("write_file", {
+        path: "new.ts",
+        sha256: "c".repeat(64),
+        created: true,
+      }),
+    ])
+    expect(visible.latest("created-by-edit.ts")).toEqual({
+      sha256: "d".repeat(64),
+      complete: true,
+      observation: "edit",
+    })
+    expect(visible.latest("new.ts")).toEqual({
+      sha256: "c".repeat(64),
+      complete: true,
+      observation: "write",
+    })
+  })
+
+  it("keeps live ranged reads revisionless and merges their visible lines", () => {
+    const visible = createVisibleFileObservations([
+      toolProjection("grep", {
+        observations: [
+          {
+            path: "src/value.ts",
+            sha256: "a".repeat(64),
+            kind: "grep_snippet",
+            ranges: [{ startLine: 7, endLine: 9 }],
+          },
+        ],
+      }),
+      toolProjection("read_file", {
+        path: "src/value.ts",
+        complete: false,
+        range: { offset: 1, limit: 20, requestedLimit: 20 },
+      }),
+      toolProjection("read_file", {
+        path: "src/value.ts",
+        complete: false,
+        range: { offset: 21, limit: 10, requestedLimit: 10 },
+      }),
+    ])
+
+    expect(visible.latest("src/value.ts")).toEqual({
+      complete: false,
+      observation: "ranged_read",
+      ranges: [{ startLine: 1, endLine: 30 }],
+    })
+  })
+
+  it("requires an explicit complete read and degrades after a later live page", () => {
+    const complete = toolProjection("read_file", {
+      path: "src/value.ts",
+      complete: true,
+      sha256: "a".repeat(64),
+      range: { offset: 1, limit: 20, requestedLimit: 20 },
+    })
+    expect(
+      createVisibleFileObservations([complete]).latest("src/value.ts"),
+    ).toEqual({
+      sha256: "a".repeat(64),
+      complete: true,
+      observation: "whole_file_read",
+    })
+
+    const degraded = createVisibleFileObservations([
+      complete,
+      toolProjection("read_file", {
+        path: "src/value.ts",
+        complete: false,
+        range: { offset: 100, limit: 20, requestedLimit: 20 },
+      }),
+    ])
+    expect(degraded.latest("src/value.ts")).toEqual({
+      complete: false,
+      observation: "ranged_read",
+      ranges: [{ startLine: 100, endLine: 119 }],
+    })
+  })
+})
+
+let toolIndex = 0
+
+function toolProjection(
+  name: string,
+  output: Exclude<ToolProjection["output"], undefined>,
+): ToolProjection {
+  toolIndex += 1
+  return {
+    toolCallId: `tool_${toolIndex}`,
+    turnId: "turn_1",
+    name,
+    input: {},
+    state: ToolState.Completed,
+    requestedAt: "2026-08-02T00:00:00.000Z",
+    updatedAt: "2026-08-02T00:00:01.000Z",
+    requestItemId: `item_${toolIndex}`,
+    requiresPermission: false,
+    output,
+  }
+}

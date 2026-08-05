@@ -91,7 +91,8 @@ Stage 1 MVP runtime is implemented as one vertical slice:
   per-Turn environment context block in the system prompt (decision 0013)
 - scripted faux provider (default tests), OpenAI Responses adapter, and
   optional Anthropic Messages adapter
-- bounded tools: `read_file`, `write_file` (compare-and-write), `run_command`
+- bounded tools: line-addressed `read_file`, ripgrep-backed `grep` and `glob`,
+  atomic `edit_file`, `write_file` (compare-and-write), `run_command`
 - durable permission gate for host commands (never auto-approved in production)
 - dual event delivery: durable SSE (`session.event`) + transient snapshots
 - React + Tailwind v4 + shadcn/ui workbench GUI with streaming markdown,
