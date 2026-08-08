@@ -69,6 +69,10 @@ export type ApiReadSessionResponse = {
   readonly session: ApiSessionDetail
 }
 
+export type ApiDeleteSessionResponse = {
+  readonly sessionId: string
+}
+
 export type ApiAdmitInputRequest = {
   readonly sessionId: string
   readonly requestId: string

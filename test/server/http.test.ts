@@ -58,6 +58,41 @@ describe("HTTP server", () => {
     })
   })
 
+  it("routes session deletion", async () => {
+    await withHttpServer(async (baseUrl) => {
+      const created = await postJson<ApiCreateSessionResponse>(
+        `${baseUrl}/sessions`,
+        {},
+      )
+      const sessionId = created.body.session.id
+
+      const deleted = await fetch(`${baseUrl}/sessions/${sessionId}`, {
+        method: "DELETE",
+      })
+      expect(deleted.status).toBe(200)
+      expect(await deleted.json()).toEqual({ sessionId })
+
+      const read = await fetch(`${baseUrl}/sessions/${sessionId}`)
+      expect(read.status).toBe(404)
+
+      const invalid = await fetch(`${baseUrl}/sessions/session_bad`, {
+        method: "DELETE",
+      })
+      expect(invalid.status).toBe(400)
+      expect(await invalid.json()).toMatchObject({
+        error: { code: ApiErrorCode.InvalidInput },
+      })
+
+      const missing = await fetch(`${baseUrl}/sessions/${createSessionId()}`, {
+        method: "DELETE",
+      })
+      expect(missing.status).toBe(404)
+      expect(await missing.json()).toMatchObject({
+        error: { code: ApiErrorCode.NotFound },
+      })
+    })
+  })
+
   it("returns explicit JSON errors for invalid requests", async () => {
     await withHttpServer(async (baseUrl) => {
       const response = await fetch(`${baseUrl}/sessions`, {

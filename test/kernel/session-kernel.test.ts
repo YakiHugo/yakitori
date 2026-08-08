@@ -4,6 +4,7 @@ import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import {
   createJsonlEventStore,
+  createSessionId,
   createSessionKernel,
   type EventStore,
   EventType,
@@ -83,6 +84,58 @@ for (const implementation of ["memory", "jsonl"] as const) {
             inputId: second.inputId,
           }),
         ).rejects.toThrow("already has active Turn")
+      })
+    })
+
+    it("rejects deleting unknown or busy sessions", async () => {
+      await withKernel(implementation, async ({ kernel }) => {
+        await expect(
+          kernel.deleteSession({ sessionId: createSessionId() }),
+        ).rejects.toThrow("has not been created")
+
+        const queued = await kernel.createSession()
+        await admit(kernel, queued.sessionId, "queued")
+        await expect(
+          kernel.deleteSession({ sessionId: queued.sessionId }),
+        ).rejects.toThrow("cancel its queued inputs")
+
+        const busy = await kernel.createSession()
+        const input = await admit(kernel, busy.sessionId, "busy")
+        await kernel.startTurn({
+          sessionId: busy.sessionId,
+          inputId: input.inputId,
+        })
+        await expect(
+          kernel.deleteSession({ sessionId: busy.sessionId }),
+        ).rejects.toThrow("has an active turn")
+      })
+    })
+
+    it("deletes an idle session", async () => {
+      await withKernel(implementation, async ({ kernel }) => {
+        const kept = await kernel.createSession({ title: "Kept" })
+        const doomed = await kernel.createSession({ title: "Doomed" })
+        const input = await admit(kernel, doomed.sessionId, "done")
+        await kernel.cancelInput({
+          sessionId: doomed.sessionId,
+          inputId: input.inputId,
+        })
+
+        const deleted = await kernel.deleteSession({
+          sessionId: doomed.sessionId,
+        })
+
+        expect(deleted).toEqual({ sessionId: doomed.sessionId })
+        expect(
+          (await kernel.readSession({ sessionId: doomed.sessionId })).session,
+        ).toBeUndefined()
+        expect(
+          (await kernel.readEvents({ sessionId: doomed.sessionId })).events,
+        ).toEqual([])
+        const listed = await kernel.listSessions()
+        expect(listed.sessions.map((summary) => summary.sessionId)).toEqual([
+          kept.sessionId,
+        ])
       })
     })
 
