@@ -1,4 +1,4 @@
-import { realpath } from "node:fs/promises"
+import { realpath, stat } from "node:fs/promises"
 import {
   IdPrefix,
   InputRole,
@@ -23,6 +23,7 @@ import {
   type ApiCancelInputResponse,
   type ApiCancelTurnResponse,
   type ApiCreateSessionResponse,
+  type ApiDeleteSessionResponse,
   type ApiHandlerResult,
   type ApiListSessionsResponse,
   type ApiReadSessionEventsResponse,
@@ -65,6 +66,9 @@ export type ServerHandlers = {
     input?: unknown,
   ): Promise<ApiHandlerResult<ApiListSessionsResponse>>
   readSession(input: unknown): Promise<ApiHandlerResult<ApiReadSessionResponse>>
+  deleteSession(
+    input: unknown,
+  ): Promise<ApiHandlerResult<ApiDeleteSessionResponse>>
   admitInput(input: unknown): Promise<ApiHandlerResult<ApiAdmitInputResponse>>
   cancelInput(input: unknown): Promise<ApiHandlerResult<ApiCancelInputResponse>>
   cancelTurn(input: unknown): Promise<ApiHandlerResult<ApiCancelTurnResponse>>
@@ -108,10 +112,17 @@ export function createServerHandlers(
         const request = requireListSessionsRequest(input)
         const result = await kernel.listSessions({
           limit: request.limit,
+          ...(request.workingDirectory === undefined
+            ? {}
+            : { workingDirectory: request.workingDirectory }),
           ...(request.cursor === undefined
             ? {}
             : {
-                cursor: decodeSessionListCursor(request.cursor, request.limit),
+                cursor: decodeSessionListCursor(
+                  request.cursor,
+                  request.limit,
+                  request.workingDirectory,
+                ),
               }),
         })
 
@@ -123,6 +134,7 @@ export function createServerHandlers(
                 nextCursor: encodeSessionListCursor(
                   result.nextCursor,
                   request.limit,
+                  request.workingDirectory,
                 ),
               }),
         })
@@ -147,6 +159,16 @@ export function createServerHandlers(
         return ok(200, {
           session: mapSessionDetail(result.session),
         })
+      } catch (error) {
+        return fail(error)
+      }
+    },
+
+    async deleteSession(input) {
+      try {
+        const request = requireDeleteSessionRequest(input)
+        await kernel.deleteSession({ sessionId: request.sessionId })
+        return ok(200, { sessionId: request.sessionId })
       } catch (error) {
         return fail(error)
       }
@@ -349,21 +371,10 @@ async function applySessionCreateDefaults(
 ) {
   if (defaults === undefined) return request
 
-  if (request.workingDirectory !== undefined) {
-    const requestedWorkspace = await resolveOptionalWorkspace(
-      request.workingDirectory,
-    )
-    if (requestedWorkspace !== defaults.workingDirectory) {
-      throw invalidInput(
-        "workingDirectory must match the configured workspace in the current single-Mate stage.",
-        {
-          field: "workingDirectory",
-          requested: request.workingDirectory,
-          workspace: defaults.workingDirectory,
-        },
-      )
-    }
-  }
+  const workingDirectory = await resolveSessionWorkspace(
+    request.workingDirectory,
+    defaults.workingDirectory,
+  )
 
   if (request.mateId !== undefined && request.mateId !== defaults.mateId) {
     throw invalidInput(
@@ -384,17 +395,35 @@ async function applySessionCreateDefaults(
 
   return {
     ...request,
-    workingDirectory: defaults.workingDirectory,
+    workingDirectory,
     mateId: defaults.mateId,
     mateRevisionId: defaults.mateRevisionId,
   }
 }
 
-async function resolveOptionalWorkspace(workspace: string): Promise<string> {
+async function resolveSessionWorkspace(
+  requested: string | undefined,
+  fallback: string,
+): Promise<string> {
+  if (requested === undefined) return fallback
+  const resolved = await resolveOptionalWorkspace(requested)
+  if (resolved === undefined) {
+    throw invalidInput("workingDirectory must be an existing directory.", {
+      field: "workingDirectory",
+      requested,
+    })
+  }
+  return resolved
+}
+
+async function resolveOptionalWorkspace(
+  workspace: string,
+): Promise<string | undefined> {
   try {
-    return await realpath(workspace)
+    const resolved = await realpath(workspace)
+    return (await stat(resolved)).isDirectory() ? resolved : undefined
   } catch {
-    return workspace
+    return undefined
   }
 }
 
@@ -402,15 +431,30 @@ function requireListSessionsRequest(input: unknown) {
   const record = requireRecord(input, "Session list request must be an object.")
   const limit = requireOptionalLimit(record.limit)
   const cursor = requireOptionalString(record.cursor, "cursor")
+  const workingDirectory = requireOptionalString(
+    record.workingDirectory,
+    "workingDirectory",
+  )
 
   return {
     limit,
     ...(cursor === undefined ? {} : { cursor }),
+    ...(workingDirectory === undefined ? {} : { workingDirectory }),
   }
 }
 
 function requireReadSessionRequest(input: unknown) {
   const record = requireRecord(input, "Session read request must be an object.")
+  return {
+    sessionId: requireSessionId(record.sessionId, "sessionId"),
+  }
+}
+
+function requireDeleteSessionRequest(input: unknown) {
+  const record = requireRecord(
+    input,
+    "Session delete request must be an object.",
+  )
   return {
     sessionId: requireSessionId(record.sessionId, "sessionId"),
   }
@@ -662,7 +706,11 @@ function optionalMetadataField(
   })
 }
 
-function encodeSessionListCursor(anchor: string, limit: number): string {
+function encodeSessionListCursor(
+  anchor: string,
+  limit: number,
+  workingDirectory: string | undefined,
+): string {
   return Buffer.from(
     JSON.stringify({
       version: 1,
@@ -670,18 +718,24 @@ function encodeSessionListCursor(anchor: string, limit: number): string {
       order: sessionListOrder,
       limit,
       anchor,
+      ...(workingDirectory === undefined ? {} : { workingDirectory }),
     }),
     "utf8",
   ).toString("base64url")
 }
 
-function decodeSessionListCursor(cursor: string, limit: number): string {
+function decodeSessionListCursor(
+  cursor: string,
+  limit: number,
+  workingDirectory: string | undefined,
+): string {
   const payload = parseCursorPayload(cursor)
   if (
     payload.version === 1 &&
     payload.resource === "sessions" &&
     payload.order === sessionListOrder &&
     payload.limit === limit &&
+    payload.workingDirectory === workingDirectory &&
     typeof payload.anchor === "string"
   ) {
     return payload.anchor

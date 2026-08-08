@@ -233,7 +233,7 @@ describe("application composition", () => {
     })
   })
 
-  it("rejects a missing path, a file, and a conflicting per-request workspace", async () => {
+  it("rejects a missing path, a file, and a nonexistent per-request working directory", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
       await expect(
         resolveWorkspaceDirectory(join(rootDir, "missing-workspace")),
@@ -250,20 +250,22 @@ describe("application composition", () => {
       )
       try {
         const rejected = await application.handlers.createSession({
-          workingDirectory: rootDir,
+          workingDirectory: join(rootDir, "missing-dir"),
         })
         expectError(rejected, 400, ApiErrorCode.InvalidInput)
         expect(rejected.body.error.message).toContain(
-          "workingDirectory must match the configured workspace",
+          "workingDirectory must be an existing directory",
         )
 
+        const other = join(rootDir, "other-project")
+        await mkdir(other)
         const accepted = await application.handlers.createSession({
-          workingDirectory: workspace,
-          title: "Same workspace",
+          workingDirectory: other,
+          title: "Other project",
         })
         expectOk(accepted)
         expect(accepted.body.session.workingDirectory).toBe(
-          application.workspace,
+          await realpath(other),
         )
         expect(accepted.body.session.mateId).toBe(application.activeMate.mateId)
         expect(accepted.body.session.mateRevisionId).toBe(

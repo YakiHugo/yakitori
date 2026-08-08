@@ -101,6 +101,9 @@ Current stage — the coding agent:
   if yes, record honestly instead.
 - Treat the GUI as the only product client of the harness core/server. Runtime,
   schedulers, and adapters are internal modules behind explicit boundaries.
+- Projects are registered directories; Sessions carry their own
+  workingDirectory and are listed per project; there is one shared Session
+  store.
 - Be careful with external integration surfaces: local server APIs, persisted
   event formats, configuration loading, and memory deletion.
 

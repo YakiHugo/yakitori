@@ -4,6 +4,7 @@ import {
   open,
   readdir,
   readFile,
+  rm,
   stat,
 } from "node:fs/promises"
 import { dirname, join } from "node:path"
@@ -573,6 +574,27 @@ export function createJsonlEventStore(
         }
         return paginateSessionSummaries(summaries, input)
       })
+    },
+    async deleteSession(sessionId: string) {
+      assertEventStoreSessionId(sessionId)
+      return runStoreOperation(() =>
+        runForSession(sessionId, async () => {
+          await discardLoadedSession(sessionId)
+          // A delayed summary write recreates the directory after rm; settle
+          // the pending job before removing it.
+          const summaryJob = summaryJobs.get(sessionId)
+          if (summaryJob !== undefined) {
+            summaryJobs.delete(sessionId)
+            await summaryJob.promise
+          }
+          await rm(sessionDirectory(sessionId), {
+            recursive: true,
+            force: true,
+          })
+          await syncDirectory(sessionsDir)
+          unconfirmedSessions.delete(sessionId)
+        }),
+      )
     },
     close() {
       if (closePromise !== undefined) return closePromise

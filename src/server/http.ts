@@ -10,6 +10,7 @@ import {
   createSessionKernel,
   type EventEnvelope,
   type EventStore,
+  isYakitoriError,
   type SessionKernel,
   type StoredEventEnvelope,
 } from "../kernel/index.ts"
@@ -19,6 +20,7 @@ import type {
 } from "../runtime/live-events.ts"
 import { createDurableEventHub, type DurableEventHub } from "./event-hub.ts"
 import { createServerHandlers, type ServerHandlers } from "./handlers.ts"
+import type { ProjectRegistry } from "./project-registry.ts"
 import { ApiErrorCode, type ApiHandlerResult } from "./protocol.ts"
 
 export type YakitoriStaticAssets = {
@@ -29,6 +31,7 @@ type YakitoriHttpServerCommonOptions = {
   readonly eventHub?: DurableEventHub
   readonly transientHub?: TransientEventHub
   readonly staticAssets?: YakitoriStaticAssets
+  readonly projectRegistry?: ProjectRegistry
 }
 
 export type YakitoriHttpServerOptions = YakitoriHttpServerCommonOptions &
@@ -56,6 +59,7 @@ export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
   const handlers =
     options.handlers ??
     createServerHandlers(resolveServerKernel(options), { eventHub })
+  const projectRegistry = options.projectRegistry
 
   const staticAssets =
     options.staticAssets === undefined
@@ -69,6 +73,7 @@ export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
       handlers,
       eventHub,
       transientHub,
+      projectRegistry,
       staticAssets,
     ).catch((error) => {
       writeUnhandledError(response, error)
@@ -106,6 +111,7 @@ async function handleRequest(
   handlers: ServerHandlers,
   eventHub: DurableEventHub,
   transientHub: TransientEventHub | undefined,
+  projectRegistry: ProjectRegistry | undefined,
   staticAssets: StaticAssetContext | undefined,
 ): Promise<void> {
   const origin = requestOrigin(request)
@@ -133,12 +139,58 @@ async function handleRequest(
     return
   }
 
+  if (route.kind === "listProjects") {
+    if (projectRegistry === undefined) {
+      writeResult(
+        response,
+        errorResult(404, ApiErrorCode.NotFound, "Route not found."),
+      )
+      return
+    }
+    writeJson(response, 200, { projects: await projectRegistry.list() })
+    return
+  }
+
+  if (route.kind === "addProject") {
+    if (projectRegistry === undefined) {
+      writeResult(
+        response,
+        errorResult(404, ApiErrorCode.NotFound, "Route not found."),
+      )
+      return
+    }
+    const body = await readJson(request)
+    if (!body.ok) {
+      writeResult(response, body.result)
+      return
+    }
+    const path = requireBodyRecord(body.value).path
+    if (typeof path !== "string" || path.trim() === "") {
+      writeResult(
+        response,
+        errorResult(
+          400,
+          ApiErrorCode.InvalidInput,
+          "path must be a non-empty string.",
+        ),
+      )
+      return
+    }
+    try {
+      writeJson(response, 200, { projects: await projectRegistry.add(path) })
+    } catch (error) {
+      writeResult(response, projectRegistryError(error))
+    }
+    return
+  }
+
   if (route.kind === "listSessions") {
     writeResult(
       response,
       await handlers.listSessions({
         ...optionalQueryNumber(url, "limit"),
         ...optionalQueryString(url, "cursor"),
+        ...optionalQueryString(url, "workingDirectory"),
       }),
     )
     return
@@ -158,6 +210,14 @@ async function handleRequest(
     writeResult(
       response,
       await handlers.readSession({ sessionId: route.sessionId }),
+    )
+    return
+  }
+
+  if (route.kind === "deleteSession") {
+    writeResult(
+      response,
+      await handlers.deleteSession({ sessionId: route.sessionId }),
     )
     return
   }
@@ -290,12 +350,28 @@ function routeRequest(method: string, url: URL): Route {
     return { kind: "createSession" }
   }
 
+  if (method === "GET" && segments.length === 1 && segments[0] === "projects") {
+    return { kind: "listProjects" }
+  }
+
+  if (
+    method === "POST" &&
+    segments.length === 1 &&
+    segments[0] === "projects"
+  ) {
+    return { kind: "addProject" }
+  }
+
   if (segments[0] !== "sessions" || typeof segments[1] !== "string") {
     return { kind: "notFound", segments }
   }
 
   if (method === "GET" && segments.length === 2) {
     return { kind: "readSession", sessionId: segments[1] }
+  }
+
+  if (method === "DELETE" && segments.length === 2) {
+    return { kind: "deleteSession", sessionId: segments[1] }
   }
 
   if (method === "POST" && segments.length === 3 && segments[2] === "inputs") {
@@ -557,6 +633,19 @@ function errorResult(
   }
 }
 
+function projectRegistryError(error: unknown): ApiHandlerResult<never> {
+  // resolveWorkspaceDirectory rejects invalid paths with a plain Error;
+  // anything else is an unexpected registry failure.
+  if (error instanceof Error && !isYakitoriError(error)) {
+    return errorResult(400, ApiErrorCode.InvalidInput, error.message)
+  }
+  return errorResult(
+    500,
+    ApiErrorCode.InternalError,
+    "Unexpected server error.",
+  )
+}
+
 function writeUnhandledError(response: ServerResponse, error: unknown): void {
   if (response.headersSent || response.writableEnded) {
     response.destroy(error instanceof Error ? error : undefined)
@@ -576,7 +665,11 @@ function writeUnhandledError(response: ServerResponse, error: unknown): void {
 }
 
 function isApiPath(segments: readonly string[]): boolean {
-  return segments[0] === "sessions" || segments[0] === "health"
+  return (
+    segments[0] === "sessions" ||
+    segments[0] === "health" ||
+    segments[0] === "projects"
+  )
 }
 
 type StaticAssetContext = {
@@ -787,7 +880,7 @@ function applyCorsHeaders(
     response.setHeader("Access-Control-Allow-Origin", origin)
     response.setHeader("Vary", "Origin")
   }
-  response.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+  response.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS")
   response.setHeader("Access-Control-Allow-Headers", "content-type")
 }
 
@@ -832,10 +925,13 @@ type Route =
       readonly turnId: string
     }
   | { readonly kind: "createSession" }
+  | { readonly kind: "deleteSession"; readonly sessionId: string }
   | { readonly kind: "health" }
   | { readonly kind: "listSessions" }
   | { readonly kind: "notFound"; readonly segments: readonly string[] }
   | { readonly kind: "readSession"; readonly sessionId: string }
+  | { readonly kind: "listProjects" }
+  | { readonly kind: "addProject" }
   | {
       readonly kind: "resolvePermission"
       readonly sessionId: string

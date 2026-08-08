@@ -28,7 +28,7 @@ export async function requestJson<T>(
   path: string,
   init: {
     readonly body?: unknown
-    readonly method?: "GET" | "POST"
+    readonly method?: "GET" | "POST" | "DELETE"
   } = {},
 ): Promise<T> {
   const request =
