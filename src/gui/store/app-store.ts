@@ -59,6 +59,7 @@ export type AppStoreActions = {
   boot(): Promise<void>
   loadSessions(input?: { readonly append?: boolean }): Promise<boolean>
   createSession(): Promise<void>
+  deleteSession(sessionId: string): Promise<void>
   selectSession(sessionId: string): Promise<void>
   admitInput(text: string): Promise<void>
   cancelTurn(turnId: string): Promise<void>
@@ -387,6 +388,40 @@ export const useAppStore = create<AppStore>()((set, get) => {
           get().apiRevision === apiRevision &&
           get().sessionSelectionIntentRevision === intentRevision,
       )
+    },
+
+    deleteSession: async (sessionId) => {
+      const key = `delete:${sessionId}`
+      if (get().inFlightActions.has(key)) return
+      set((state) => ({
+        inFlightActions: new Set(state.inFlightActions).add(key),
+      }))
+      await runTask(async () => {
+        await requestJson(
+          get().apiBase,
+          `/sessions/${encodeURIComponent(sessionId)}`,
+          { method: "DELETE" },
+        )
+        if (get().selection.sessionId === sessionId) {
+          closeStream()
+          clearSessionSelection(get().selection)
+          set((state) => ({
+            selection: { ...state.selection },
+            sessionDetailRevision: state.sessionDetailRevision + 1,
+            sessionSelectionIntentRevision:
+              state.sessionSelectionIntentRevision + 1,
+            selectedSession: undefined,
+            events: [],
+            execution: createExecutionViewState(),
+          }))
+        }
+        await get().loadSessions()
+      })
+      set((state) => {
+        const inFlightActions = new Set(state.inFlightActions)
+        inFlightActions.delete(key)
+        return { inFlightActions }
+      })
     },
 
     selectSession: async (sessionId) => {

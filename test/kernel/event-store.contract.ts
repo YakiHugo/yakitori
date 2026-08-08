@@ -299,4 +299,53 @@ export function defineEventStoreContract(options: {
       expect(await store.readProjection(sessionId)).toBeUndefined()
     })
   })
+
+  it(`${options.name}: deletes a session's events, projection, and listing`, async () => {
+    await options.run(async (store) => {
+      const sessionId = "session_00000000-0000-4000-8000-000000000012"
+      const otherId = "session_00000000-0000-4000-8000-000000000013"
+      await store.appendEvent(
+        sessionId,
+        { type: EventType.SessionCreated, data: { title: "Doomed" } },
+        { expectedSeq: 0 },
+      )
+      await store.appendEvent(
+        otherId,
+        { type: EventType.SessionCreated, data: { title: "Kept" } },
+        { expectedSeq: 0 },
+      )
+
+      await store.deleteSession(sessionId)
+
+      expect(await store.readEvents(sessionId)).toEqual([])
+      expect(await store.readProjection(sessionId)).toBeUndefined()
+      expect(
+        (await store.listSessions()).sessions.map(
+          (summary) => summary.sessionId,
+        ),
+      ).toEqual([otherId])
+      expect(await store.readProjection(otherId)).toMatchObject({
+        title: "Kept",
+      })
+      expect(await store.readEvents(otherId)).toHaveLength(1)
+    })
+  })
+
+  it(`${options.name}: deleting a session twice is idempotent`, async () => {
+    await options.run(async (store) => {
+      const sessionId = "session_00000000-0000-4000-8000-000000000014"
+      await store.appendEvent(
+        sessionId,
+        { type: EventType.SessionCreated, data: {} },
+        { expectedSeq: 0 },
+      )
+
+      await store.deleteSession(sessionId)
+      await store.deleteSession(sessionId)
+      await store.deleteSession("session_00000000-0000-4000-8000-000000000015")
+
+      expect(await store.readProjection(sessionId)).toBeUndefined()
+      expect((await store.listSessions()).sessions).toEqual([])
+    })
+  })
 }

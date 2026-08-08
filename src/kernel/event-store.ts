@@ -30,6 +30,7 @@ export type EventStore = {
   listSessions(
     input?: EventStoreListSessionsInput,
   ): Promise<EventStoreListSessionsResult>
+  deleteSession(sessionId: string): Promise<void>
 }
 
 export type EventStoreAppendOptions = {

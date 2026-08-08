@@ -43,6 +43,7 @@ export type SessionKernel = {
   createSession(input?: CreateSessionInput): Promise<CreateSessionResult>
   listSessions(input?: ListSessionsInput): Promise<ListSessionsResult>
   readSession(input: ReadSessionInput): Promise<ReadSessionResult>
+  deleteSession(input: DeleteSessionInput): Promise<DeleteSessionResult>
   readEvents(input: ReadEventsInput): Promise<ReadEventsResult>
   replaySession(input: ReplaySessionInput): Promise<ReplaySessionResult>
   admitInput(input: AdmitInputInput): Promise<AdmitInputResult>
@@ -110,6 +111,8 @@ export type ListSessionsResult = {
 }
 export type ReadSessionInput = { readonly sessionId: string }
 export type ReadSessionResult = { readonly session?: SessionProjection }
+export type DeleteSessionInput = { readonly sessionId: string }
+export type DeleteSessionResult = { readonly sessionId: string }
 export type ReadEventsInput = {
   readonly sessionId: string
   readonly after?: number
@@ -315,6 +318,22 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
     async readSession(input) {
       const session = await eventStore.readProjection(input.sessionId)
       return session ? { session } : {}
+    },
+
+    deleteSession(input) {
+      return command(input.sessionId, async () => {
+        const session = await requireSession(eventStore, input.sessionId)
+        if (session.activeTurn !== undefined)
+          invalidState(
+            `Session ${session.id} has an active turn; cancel it before deleting the session.`,
+          )
+        if (session.pendingInputs.length > 0)
+          invalidState(
+            `Session ${session.id} has queued inputs; cancel its queued inputs before deleting the session.`,
+          )
+        await eventStore.deleteSession(input.sessionId)
+        return { sessionId: input.sessionId }
+      })
     },
 
     async readEvents(input) {

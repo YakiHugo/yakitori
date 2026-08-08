@@ -162,6 +162,14 @@ async function handleRequest(
     return
   }
 
+  if (route.kind === "deleteSession") {
+    writeResult(
+      response,
+      await handlers.deleteSession({ sessionId: route.sessionId }),
+    )
+    return
+  }
+
   if (route.kind === "admitInput") {
     const body = await readJson(request)
     if (!body.ok) {
@@ -296,6 +304,10 @@ function routeRequest(method: string, url: URL): Route {
 
   if (method === "GET" && segments.length === 2) {
     return { kind: "readSession", sessionId: segments[1] }
+  }
+
+  if (method === "DELETE" && segments.length === 2) {
+    return { kind: "deleteSession", sessionId: segments[1] }
   }
 
   if (method === "POST" && segments.length === 3 && segments[2] === "inputs") {
@@ -787,7 +799,7 @@ function applyCorsHeaders(
     response.setHeader("Access-Control-Allow-Origin", origin)
     response.setHeader("Vary", "Origin")
   }
-  response.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+  response.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS")
   response.setHeader("Access-Control-Allow-Headers", "content-type")
 }
 
@@ -832,6 +844,7 @@ type Route =
       readonly turnId: string
     }
   | { readonly kind: "createSession" }
+  | { readonly kind: "deleteSession"; readonly sessionId: string }
   | { readonly kind: "health" }
   | { readonly kind: "listSessions" }
   | { readonly kind: "notFound"; readonly segments: readonly string[] }

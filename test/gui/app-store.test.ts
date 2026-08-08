@@ -325,6 +325,78 @@ describe("cancel queued input", () => {
   })
 })
 
+describe("delete session", () => {
+  function summary(id: string) {
+    return {
+      id,
+      seq: 1,
+      createdAt: "2026-07-24T00:00:00.000Z",
+      updatedAt: "2026-07-24T00:00:00.000Z",
+    }
+  }
+
+  function stubDeleteFetch(sessionsAfterDelete: unknown[]) {
+    return vi.fn(async (input: unknown, init?: RequestInit) => {
+      const url = String(input)
+      if (init?.method === "DELETE") {
+        return jsonResponse({ sessionId: url.split("/").at(-1) })
+      }
+      if (url === "http://api.test/sessions?limit=30") {
+        return jsonResponse({ sessions: sessionsAfterDelete })
+      }
+      if (url === "http://api.test/sessions/session_1") {
+        return jsonResponse({ session: sessionDetail })
+      }
+      return errorResponse(404)
+    })
+  }
+
+  it("removes the session from state", async () => {
+    const fetchMock = stubDeleteFetch([summary("session_2")])
+    vi.stubGlobal("fetch", fetchMock)
+    useAppStore.setState({
+      sessions: [summary("session_1"), summary("session_2")],
+    })
+
+    await useAppStore.getState().deleteSession("session_1")
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://api.test/sessions/session_1",
+      expect.objectContaining({ method: "DELETE" }),
+    )
+    expect(useAppStore.getState().sessions.map((session) => session.id)).toEqual(
+      ["session_2"],
+    )
+    expect(useAppStore.getState().inFlightActions.size).toBe(0)
+  })
+
+  it("clears the selection when the selected session is deleted", async () => {
+    vi.stubGlobal("fetch", stubDeleteFetch([]))
+
+    await useAppStore.getState().selectSession("session_1")
+    expect(useAppStore.getState().selectedSession?.id).toBe("session_1")
+    const source = FakeEventSource.instances[0]
+
+    await useAppStore.getState().deleteSession("session_1")
+
+    expect(useAppStore.getState().selectedSession).toBeUndefined()
+    expect(useAppStore.getState().selection.sessionId).toBeUndefined()
+    expect(useAppStore.getState().events).toEqual([])
+    expect(useAppStore.getState().sessions).toEqual([])
+    expect(source?.closed).toBe(true)
+  })
+
+  it("keeps the selection when another session is deleted", async () => {
+    vi.stubGlobal("fetch", stubDeleteFetch([summary("session_1")]))
+
+    await useAppStore.getState().selectSession("session_1")
+    await useAppStore.getState().deleteSession("session_2")
+
+    expect(useAppStore.getState().selectedSession?.id).toBe("session_1")
+    expect(useAppStore.getState().selection.sessionId).toBe("session_1")
+  })
+})
+
 function detailCallCount(fetchMock: ReturnType<typeof vi.fn>): number {
   return fetchMock.mock.calls.filter(
     ([input]) => String(input) === "http://api.test/sessions/session_1",

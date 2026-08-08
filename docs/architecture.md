@@ -400,6 +400,10 @@ later context builds replace covered turns with it (decision 0011). Transient
 provider errors are retried with bounded backoff (decision 0012), and every
 Turn's system prompt carries a bounded environment block (decision 0013).
 
+Sessions can be deleted through `DELETE /sessions/:id`; deletion removes the
+Session directory and is refused with 409 while a Turn is active or Inputs are
+queued.
+
 The per-fact journal decision
 (`docs/decisions/0009-per-fact-journal-lines.md`) is implemented. Its historical
 stage plan is archived at `docs/archive/stage-2-fact-journal.md`; the continuing

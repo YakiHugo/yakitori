@@ -230,6 +230,54 @@ describe("server handlers", () => {
       expect(events.body.events).toEqual([admitted.body.event])
     })
   })
+
+  it("deletes an idle session and maps busy or missing sessions to errors", async () => {
+    const kernel = createSessionKernel(createMemoryEventStore())
+    const server = createServerHandlers(kernel)
+
+    expectError(
+      await server.deleteSession({ sessionId: "session_bad" }),
+      400,
+      ApiErrorCode.InvalidInput,
+    )
+    expectError(
+      await server.deleteSession({ sessionId: createSessionId() }),
+      404,
+      ApiErrorCode.NotFound,
+    )
+
+    const busy = await server.createSession()
+    expectOk(busy)
+    const admitted = await server.admitInput({
+      sessionId: busy.body.session.id,
+      requestId: "request_handler-delete",
+      content: { kind: "text", text: "keep me busy" },
+    })
+    expectOk(admitted)
+    await kernel.startTurn({
+      sessionId: busy.body.session.id,
+      inputId: admitted.body.inputId,
+    })
+    expectError(
+      await server.deleteSession({ sessionId: busy.body.session.id }),
+      409,
+      ApiErrorCode.Conflict,
+    )
+
+    const idle = await server.createSession()
+    expectOk(idle)
+    const deleted = await server.deleteSession({
+      sessionId: idle.body.session.id,
+    })
+    expectOk(deleted)
+    expect(deleted.status).toBe(200)
+    expect(deleted.body).toEqual({ sessionId: idle.body.session.id })
+    expectError(
+      await server.readSession({ sessionId: idle.body.session.id }),
+      404,
+      ApiErrorCode.NotFound,
+    )
+  })
 })
 
 async function withServer(

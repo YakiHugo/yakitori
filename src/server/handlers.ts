@@ -23,6 +23,7 @@ import {
   type ApiCancelInputResponse,
   type ApiCancelTurnResponse,
   type ApiCreateSessionResponse,
+  type ApiDeleteSessionResponse,
   type ApiHandlerResult,
   type ApiListSessionsResponse,
   type ApiReadSessionEventsResponse,
@@ -65,6 +66,9 @@ export type ServerHandlers = {
     input?: unknown,
   ): Promise<ApiHandlerResult<ApiListSessionsResponse>>
   readSession(input: unknown): Promise<ApiHandlerResult<ApiReadSessionResponse>>
+  deleteSession(
+    input: unknown,
+  ): Promise<ApiHandlerResult<ApiDeleteSessionResponse>>
   admitInput(input: unknown): Promise<ApiHandlerResult<ApiAdmitInputResponse>>
   cancelInput(input: unknown): Promise<ApiHandlerResult<ApiCancelInputResponse>>
   cancelTurn(input: unknown): Promise<ApiHandlerResult<ApiCancelTurnResponse>>
@@ -147,6 +151,16 @@ export function createServerHandlers(
         return ok(200, {
           session: mapSessionDetail(result.session),
         })
+      } catch (error) {
+        return fail(error)
+      }
+    },
+
+    async deleteSession(input) {
+      try {
+        const request = requireDeleteSessionRequest(input)
+        await kernel.deleteSession({ sessionId: request.sessionId })
+        return ok(200, { sessionId: request.sessionId })
       } catch (error) {
         return fail(error)
       }
@@ -411,6 +425,16 @@ function requireListSessionsRequest(input: unknown) {
 
 function requireReadSessionRequest(input: unknown) {
   const record = requireRecord(input, "Session read request must be an object.")
+  return {
+    sessionId: requireSessionId(record.sessionId, "sessionId"),
+  }
+}
+
+function requireDeleteSessionRequest(input: unknown) {
+  const record = requireRecord(
+    input,
+    "Session delete request must be an object.",
+  )
   return {
     sessionId: requireSessionId(record.sessionId, "sessionId"),
   }
