@@ -5,6 +5,7 @@ import { DiagnosticsDrawer } from "./components/diagnostics-drawer.tsx"
 import { StatusSurface } from "./components/status-surface.tsx"
 import { ThreadList } from "./components/thread-list.tsx"
 import { Transcript } from "./components/transcript.tsx"
+import { ProjectSwitcher } from "./components/project-switcher.tsx"
 import { Button } from "./components/ui/button.tsx"
 import { Separator } from "./components/ui/separator.tsx"
 import {
@@ -30,6 +31,7 @@ export function App() {
             </div>
             <NewSessionButton />
           </div>
+          <ProjectSwitcher />
           <Separator />
           <ThreadList />
           <Separator />

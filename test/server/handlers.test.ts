@@ -86,6 +86,67 @@ describe("server handlers", () => {
     })
   })
 
+  it("filters the session list by working directory and binds it to the cursor", async () => {
+    await withServer(async (server) => {
+      const first = await server.createSession({
+        title: "A1",
+        workingDirectory: "/project/a",
+      })
+      const second = await server.createSession({
+        title: "B1",
+        workingDirectory: "/project/b",
+      })
+      const third = await server.createSession({
+        title: "A2",
+        workingDirectory: "/project/a",
+      })
+      expectOk(first)
+      expectOk(second)
+      expectOk(third)
+
+      const filtered = await server.listSessions({
+        workingDirectory: "/project/a",
+      })
+      expectOk(filtered)
+      expect(
+        filtered.body.sessions.map((session) => session.id).sort(),
+      ).toEqual([first.body.session.id, third.body.session.id].sort())
+
+      const firstPage = await server.listSessions({
+        limit: 1,
+        workingDirectory: "/project/a",
+      })
+      expectOk(firstPage)
+      expect(firstPage.body.sessions).toHaveLength(1)
+      const secondPage = await server.listSessions({
+        limit: 1,
+        workingDirectory: "/project/a",
+        cursor: firstPage.body.nextCursor,
+      })
+      expectOk(secondPage)
+      expect(
+        new Set([
+          firstPage.body.sessions[0]?.id,
+          secondPage.body.sessions[0]?.id,
+        ]),
+      ).toEqual(new Set([first.body.session.id, third.body.session.id]))
+
+      expectError(
+        await server.listSessions({
+          limit: 1,
+          workingDirectory: "/project/b",
+          cursor: firstPage.body.nextCursor,
+        }),
+        400,
+        ApiErrorCode.InvalidCursor,
+      )
+
+      const unfiltered = await server.listSessions({})
+      expectOk(unfiltered)
+      expect(unfiltered.body.sessions).toHaveLength(3)
+    })
+  })
+
   it("returns explicit errors for invalid cursors and missing sessions", async () => {
     await withServer(async (server) => {
       expectError(

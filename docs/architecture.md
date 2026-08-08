@@ -400,9 +400,14 @@ later context builds replace covered turns with it (decision 0011). Transient
 provider errors are retried with bounded backoff (decision 0012), and every
 Turn's system prompt carries a bounded environment block (decision 0013).
 
-Sessions can be deleted through `DELETE /sessions/:id`; deletion removes the
-Session directory and is refused with 409 while a Turn is active or Inputs are
-queued.
+The server keeps a project registry (`src/server/project-registry.ts`, the
+Codex GUI "project" parallel): registered project directories live in
+`projects.json` under `YAKITORI_HOME` (default `~/.yakitori`), with the
+configured workspace always present. Each Session records its own
+`workingDirectory`, and `GET /sessions?workingDirectory=` filters the list by
+project; one shared Session store serves every project. Sessions can be
+deleted through `DELETE /sessions/:id`; deletion removes the Session directory
+and is refused with 409 while a Turn is active or Inputs are queued.
 
 The per-fact journal decision
 (`docs/decisions/0009-per-fact-journal-lines.md`) is implemented. Its historical

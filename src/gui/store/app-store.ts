@@ -8,6 +8,7 @@ import type {
   ApiReadSessionResponse,
   ApiSessionDetail,
   ApiSessionSummary,
+  ApiListProjectsResponse,
 } from "../../server/protocol.ts"
 import { acknowledgeAdmission, reserveAdmission } from "../admission-outbox.ts"
 import {
@@ -45,6 +46,7 @@ export type AppStoreData = {
   message: string | undefined
   nextCursor: string | undefined
   promptDraft: string | undefined
+  projects: string[]
   selection: SessionSelectionState
   sessionDetailRevision: number
   sessionListRevision: number
@@ -53,13 +55,17 @@ export type AppStoreData = {
   sessions: ApiSessionSummary[]
   stream: EventSource | undefined
   streamStatus: StreamStatus
+  currentProject: string | undefined
 }
 
 export type AppStoreActions = {
   boot(): Promise<void>
   loadSessions(input?: { readonly append?: boolean }): Promise<boolean>
+  loadProjects(): Promise<void>
   createSession(): Promise<void>
   deleteSession(sessionId: string): Promise<void>
+  selectProject(path: string): Promise<void>
+  addProject(path: string): Promise<void>
   selectSession(sessionId: string): Promise<void>
   admitInput(text: string): Promise<void>
   cancelTurn(turnId: string): Promise<void>
@@ -86,6 +92,7 @@ export function createInitialAppState(): AppStoreData {
     message: undefined,
     nextCursor: undefined,
     promptDraft: undefined,
+    projects: [],
     selection: createSessionSelectionState(),
     sessionDetailRevision: 0,
     sessionListRevision: 0,
@@ -94,6 +101,7 @@ export function createInitialAppState(): AppStoreData {
     sessions: [],
     stream: undefined,
     streamStatus: "idle",
+    currentProject: undefined,
   }
 }
 
@@ -290,6 +298,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
     boot: async () => {
       const apiRevision = get().apiRevision
       const intentRevision = get().sessionSelectionIntentRevision
+      await get().loadProjects()
       const loaded = await get().loadSessions()
       if (
         !loaded ||
@@ -320,12 +329,13 @@ export const useAppStore = create<AppStore>()((set, get) => {
       set({ sessionListRevision: requestRevision })
       const existingSessions = get().sessions
       const cursor = input.append ? get().nextCursor : undefined
+      const workingDirectory = get().currentProject
       let applied = false
       const completed = await runTask(
         async () => {
           const response = await requestJson<ApiListSessionsResponse>(
             get().apiBase,
-            `/sessions?limit=30${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
+            `/sessions?limit=30${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}${workingDirectory === undefined ? "" : `&workingDirectory=${encodeURIComponent(workingDirectory)}`}`,
           )
           if (
             get().apiRevision !== apiRevision ||
@@ -348,6 +358,31 @@ export const useAppStore = create<AppStore>()((set, get) => {
       return completed && applied
     },
 
+    loadProjects: async () => {
+      try {
+        const response = await requestJson<ApiListProjectsResponse>(
+          get().apiBase,
+          "/projects",
+        )
+        const projects = [...response.projects]
+        const current = get().currentProject
+        const remembered = window.localStorage.getItem("yakitori.project")
+        const currentProject =
+          current !== undefined && projects.includes(current)
+            ? current
+            : remembered !== null && projects.includes(remembered)
+              ? remembered
+              : projects[0]
+        set({
+          projects,
+          ...(currentProject === undefined ? {} : { currentProject }),
+        })
+      } catch {
+        // Older servers without the projects route return 404; project state
+        // stays empty and the switcher stays hidden.
+      }
+    },
+
     createSession: async () => {
       const apiRevision = get().apiRevision
       const intentRevision = get().sessionSelectionIntentRevision + 1
@@ -364,6 +399,9 @@ export const useAppStore = create<AppStore>()((set, get) => {
                   hour: "2-digit",
                   minute: "2-digit",
                 })}`,
+                ...(get().currentProject === undefined
+                  ? {}
+                  : { workingDirectory: get().currentProject }),
               },
             },
           )
@@ -421,6 +459,48 @@ export const useAppStore = create<AppStore>()((set, get) => {
         const inFlightActions = new Set(state.inFlightActions)
         inFlightActions.delete(key)
         return { inFlightActions }
+      })
+    },
+
+    selectProject: async (path) => {
+      if (get().currentProject === path) return
+      set({ currentProject: path })
+      window.localStorage.setItem("yakitori.project", path)
+      closeStream()
+      clearSessionSelection(get().selection)
+      set((state) => ({
+        selection: { ...state.selection },
+        sessionDetailRevision: state.sessionDetailRevision + 1,
+        sessionListRevision: state.sessionListRevision + 1,
+        sessionSelectionIntentRevision:
+          state.sessionSelectionIntentRevision + 1,
+        selectedSession: undefined,
+        events: [],
+        execution: createExecutionViewState(),
+        nextCursor: undefined,
+        promptDraft: undefined,
+      }))
+      await get().loadSessions()
+    },
+
+    addProject: async (path) => {
+      const trimmed = path.trim()
+      if (trimmed === "") return
+      await runTask(async () => {
+        const previous = get().projects
+        const response = await requestJson<ApiListProjectsResponse>(
+          get().apiBase,
+          "/projects",
+          { method: "POST", body: { path: trimmed } },
+        )
+        const projects = [...response.projects]
+        set({ projects })
+        // The response carries only the list; the previously unknown entry is
+        // the server's resolved realpath for the added project.
+        const added = projects.find(
+          (candidate) => !previous.includes(candidate),
+        )
+        await get().selectProject(added ?? trimmed)
       })
     },
 

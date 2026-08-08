@@ -92,6 +92,7 @@ export type ListSessionsInput = {
   readonly limit?: number
   readonly cursor?: string
   readonly order?: "recent" | "created"
+  readonly workingDirectory?: string
 }
 export type SessionSummary = {
   readonly sessionId: string

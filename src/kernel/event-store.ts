@@ -54,6 +54,7 @@ export type EventStoreListSessionsInput = {
   readonly limit?: number
   readonly cursor?: string
   readonly order?: "recent" | "created"
+  readonly workingDirectory?: string
 }
 
 export type EventStoreListSessionsResult = {
@@ -137,7 +138,13 @@ export function paginateSessionSummaries(
     })
   }
   const order = input.order ?? "recent"
-  const ordered = [...summaries].sort((left, right) => {
+  const filtered =
+    input.workingDirectory === undefined
+      ? summaries
+      : summaries.filter(
+          (summary) => summary.workingDirectory === input.workingDirectory,
+        )
+  const ordered = [...filtered].sort((left, right) => {
     const timestamp =
       order === "created"
         ? left.createdAt.localeCompare(right.createdAt)

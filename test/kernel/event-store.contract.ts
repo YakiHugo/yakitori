@@ -348,4 +348,52 @@ export function defineEventStoreContract(options: {
       expect((await store.listSessions()).sessions).toEqual([])
     })
   })
+
+  it(`${options.name}: filters the session list by working directory`, async () => {
+    await options.run(async (store) => {
+      const first = "session_00000000-0000-4000-8000-000000000016"
+      const second = "session_00000000-0000-4000-8000-000000000017"
+      const third = "session_00000000-0000-4000-8000-000000000018"
+      await store.appendEvent(
+        first,
+        {
+          type: EventType.SessionCreated,
+          data: { workingDirectory: "/project/a" },
+        },
+        { expectedSeq: 0 },
+      )
+      await store.appendEvent(
+        second,
+        {
+          type: EventType.SessionCreated,
+          data: { workingDirectory: "/project/b" },
+        },
+        { expectedSeq: 0 },
+      )
+      await store.appendEvent(
+        third,
+        {
+          type: EventType.SessionCreated,
+          data: { workingDirectory: "/project/a" },
+        },
+        { expectedSeq: 0 },
+      )
+
+      const filtered = await store.listSessions({
+        workingDirectory: "/project/a",
+      })
+      expect(
+        filtered.sessions.map((summary) => summary.sessionId).sort(),
+      ).toEqual([first, third].sort())
+      expect(
+        (await store.listSessions({ workingDirectory: "/project/nowhere" }))
+          .sessions,
+      ).toEqual([])
+      expect(
+        (await store.listSessions()).sessions
+          .map((summary) => summary.sessionId)
+          .sort(),
+      ).toEqual([first, second, third].sort())
+    })
+  })
 }

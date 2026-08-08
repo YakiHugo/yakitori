@@ -1,4 +1,11 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
+import {
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises"
 import type { AddressInfo } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -12,6 +19,7 @@ import {
   type ApiReadSessionResponse,
   createInputId,
   createJsonlEventStore,
+  createProjectRegistry,
   createSessionId,
   createSessionKernel,
   createYakitoriHttpServer,
@@ -720,6 +728,75 @@ describe("HTTP static assets", () => {
           message: "Route not found.",
         },
       })
+    })
+  })
+
+  it("serves project routes from the configured registry", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "yakitori-http-projects-"))
+    const projectA = join(rootDir, "project-a")
+    const projectB = join(rootDir, "project-b")
+    await mkdir(projectA)
+    await mkdir(projectB)
+    try {
+      const projectRegistry = createProjectRegistry({
+        registryPath: join(rootDir, "projects.json"),
+        defaultProject: await realpath(projectA),
+      })
+
+      await withListeningServer(
+        createYakitoriHttpServer({
+          kernel: createSessionKernel(createMemoryEventStore()),
+          projectRegistry,
+        }),
+        async (baseUrl) => {
+          const listed = await getJson<{ projects: string[] }>(
+            `${baseUrl}/projects`,
+          )
+          expect(listed.status).toBe(200)
+          expect(listed.body.projects).toEqual([await realpath(projectA)])
+
+          const added = await postJson<{ projects: string[] }>(
+            `${baseUrl}/projects`,
+            { path: projectB },
+          )
+          expect(added.status).toBe(200)
+          expect(added.body.projects).toEqual([
+            await realpath(projectA),
+            await realpath(projectB),
+          ])
+
+          for (const invalid of [{}, { path: "  " }, { path: 42 }]) {
+            const rejected = await postJson(`${baseUrl}/projects`, invalid)
+            expect(rejected.status).toBe(400)
+            expect(rejected.body).toMatchObject({
+              error: { code: ApiErrorCode.InvalidInput },
+            })
+          }
+
+          const nonexistent = await postJson(`${baseUrl}/projects`, {
+            path: join(projectB, "missing"),
+          })
+          expect(nonexistent.status).toBe(400)
+          expect(nonexistent.body).toMatchObject({
+            error: {
+              code: ApiErrorCode.InvalidInput,
+              message: expect.stringContaining("Workspace path does not exist"),
+            },
+          })
+        },
+      )
+    } finally {
+      await rm(rootDir, { recursive: true, force: true })
+    }
+  })
+
+  it("keeps project routes at 404 without a registry", async () => {
+    await withHttpServer(async (baseUrl) => {
+      const listed = await fetch(`${baseUrl}/projects`)
+      expect(listed.status).toBe(404)
+
+      const added = await postJson(`${baseUrl}/projects`, { path: "/tmp" })
+      expect(added.status).toBe(404)
     })
   })
 })

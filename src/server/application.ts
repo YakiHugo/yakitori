@@ -40,6 +40,10 @@ import {
   type ServerHandlers,
 } from "./handlers.ts"
 import { createYakitoriHttpServer } from "./http.ts"
+import {
+  createProjectRegistry,
+  type ProjectRegistry,
+} from "./project-registry.ts"
 
 const defaultMateProfile = {
   instructions:
@@ -75,6 +79,7 @@ export type YakitoriApplication = {
   readonly mateKernel: MateKernel
   readonly mateDatabasePath: string
   readonly permissionGate: PermissionGate
+  readonly projectRegistry: ProjectRegistry
   readonly runner: SessionRunner
   readonly rootDir: string
   readonly sessionDefaults: SessionCreateDefaults
@@ -130,6 +135,9 @@ export async function createYakitoriApplication(
     const eventHub = createDurableEventHub()
     const transientHub = createTransientEventHub()
     const permissionGate = createPermissionGate()
+    const projectRegistry = createProjectRegistry({
+      defaultProject: workspace,
+    })
     const toolRegistry = createToolRegistry()
     const activeMate = await resolveActiveMate(mateKernel, activeMateId)
     const sessionDefaults: SessionCreateDefaults = {
@@ -206,6 +214,7 @@ export async function createYakitoriApplication(
       mateKernel,
       mateDatabasePath,
       permissionGate,
+      projectRegistry,
       runner,
       rootDir,
       sessionDefaults,
@@ -223,6 +232,7 @@ export async function createYakitoriApplication(
           eventHub,
           transientHub,
           handlers,
+          projectRegistry,
           ...(options.guiStaticDir === undefined
             ? {}
             : { staticAssets: { directory: options.guiStaticDir } }),

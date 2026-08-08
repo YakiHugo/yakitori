@@ -364,9 +364,9 @@ describe("delete session", () => {
       "http://api.test/sessions/session_1",
       expect.objectContaining({ method: "DELETE" }),
     )
-    expect(useAppStore.getState().sessions.map((session) => session.id)).toEqual(
-      ["session_2"],
-    )
+    expect(
+      useAppStore.getState().sessions.map((session) => session.id),
+    ).toEqual(["session_2"])
     expect(useAppStore.getState().inFlightActions.size).toBe(0)
   })
 
@@ -394,6 +394,134 @@ describe("delete session", () => {
 
     expect(useAppStore.getState().selectedSession?.id).toBe("session_1")
     expect(useAppStore.getState().selection.sessionId).toBe("session_1")
+  })
+})
+
+describe("project state", () => {
+  it("loads projects, falls back to the first project, and tolerates 404", async () => {
+    window.localStorage.clear()
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: unknown) => {
+        if (String(input) === "http://api.test/projects") {
+          return jsonResponse({ projects: ["/p/a", "/p/old"] })
+        }
+        return errorResponse(404)
+      }),
+    )
+
+    await useAppStore.getState().loadProjects()
+
+    expect(useAppStore.getState().projects).toEqual(["/p/a", "/p/old"])
+    expect(useAppStore.getState().currentProject).toBe("/p/a")
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => errorResponse(404)),
+    )
+    await useAppStore.getState().loadProjects()
+
+    expect(useAppStore.getState().projects).toEqual(["/p/a", "/p/old"])
+    expect(useAppStore.getState().message).toBeUndefined()
+  })
+
+  it("prefers a remembered project that is still registered", async () => {
+    window.localStorage.clear()
+    window.localStorage.setItem("yakitori.project", "/p/old")
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: unknown) => {
+        if (String(input) === "http://api.test/projects") {
+          return jsonResponse({ projects: ["/p/a", "/p/old"] })
+        }
+        return errorResponse(404)
+      }),
+    )
+
+    await useAppStore.getState().loadProjects()
+
+    expect(useAppStore.getState().currentProject).toBe("/p/old")
+  })
+
+  it("selectProject persists the choice and filters session loads", async () => {
+    window.localStorage.clear()
+    const fetchMock = vi.fn(async (input: unknown) => {
+      const url = String(input)
+      if (url.startsWith("http://api.test/sessions?")) {
+        return jsonResponse({ sessions: [] })
+      }
+      return errorResponse(404)
+    })
+    vi.stubGlobal("fetch", fetchMock)
+    useAppStore.setState({
+      projects: ["/p/a", "/p/b"],
+      currentProject: "/p/a",
+    })
+
+    await useAppStore.getState().selectProject("/p/b")
+
+    expect(useAppStore.getState().currentProject).toBe("/p/b")
+    expect(window.localStorage.getItem("yakitori.project")).toBe("/p/b")
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://api.test/sessions?limit=30&workingDirectory=%2Fp%2Fb",
+      expect.objectContaining({ method: "GET" }),
+    )
+    expect(useAppStore.getState().sessions).toEqual([])
+  })
+
+  it("addProject updates the list and selects the resolved path", async () => {
+    window.localStorage.clear()
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: unknown, init?: RequestInit) => {
+        const url = String(input)
+        if (url === "http://api.test/projects" && init?.method === "POST") {
+          return jsonResponse({ projects: ["/p/a", "/private/p/b"] })
+        }
+        if (url.startsWith("http://api.test/sessions?")) {
+          return jsonResponse({ sessions: [] })
+        }
+        return errorResponse(404)
+      }),
+    )
+    useAppStore.setState({ projects: ["/p/a"], currentProject: "/p/a" })
+
+    await useAppStore.getState().addProject(" /p/b ")
+
+    expect(useAppStore.getState().projects).toEqual(["/p/a", "/private/p/b"])
+    expect(useAppStore.getState().currentProject).toBe("/private/p/b")
+  })
+
+  it("createSession sends the current project as workingDirectory", async () => {
+    window.localStorage.clear()
+    const created = createEventEnvelope({
+      sessionId: "session_1",
+      seq: 1,
+      event: { type: EventType.SessionCreated, data: {} },
+    })
+    const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
+      const url = String(input)
+      if (url === "http://api.test/sessions" && init?.method === "POST") {
+        return jsonResponse({ session: sessionDetail, event: created })
+      }
+      if (url.startsWith("http://api.test/sessions?")) {
+        return jsonResponse({ sessions: [sessionDetail] })
+      }
+      return errorResponse(404)
+    })
+    vi.stubGlobal("fetch", fetchMock)
+    useAppStore.setState({ projects: ["/p/a"], currentProject: "/p/a" })
+
+    await useAppStore.getState().createSession()
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://api.test/sessions",
+      expect.objectContaining({
+        method: "POST",
+        body: expect.stringContaining('"workingDirectory":"/p/a"'),
+      }),
+    )
+    expect(useAppStore.getState().selectedSession?.id).toBe("session_1")
   })
 })
 
