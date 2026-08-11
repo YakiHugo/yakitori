@@ -1,15 +1,9 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
-import type { Server } from "node:http"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { app, BrowserWindow, dialog } from "electron"
-import {
-  createYakitoriApplication,
-  listen,
-  type YakitoriApplication,
-  type YakitoriApplicationOptions,
-} from "../server/index.ts"
 import { loadLocalEnvFile } from "../server/env-file.ts"
+import { spawnServerProcess, type ServerProcess } from "./server-process.ts"
 
 // The bundle lands at dist/desktop/main.js, so the repo root is two levels up.
 // (No new URL("./x", import.meta.url) — the bundler inlines that as a data: URL.)
@@ -19,8 +13,9 @@ const appRoot = path.resolve(
   "..",
 )
 
-// Packaged installs have no checkout .env; users configure keys via their
-// shell environment instead.
+// Dev spawns the sidecar from the checkout with cwd at the repo root, so the
+// child picks up the local .env itself. Packaged installs have no checkout
+// .env; users configure keys via their shell environment instead.
 if (!app.isPackaged) {
   loadLocalEnvFile(path.join(appRoot, ".env"))
 }
@@ -29,8 +24,8 @@ const maxLoadAttempts = 20
 const loadRetryDelayMs = 500
 const forceQuitDelayMs = 10_000
 
-let application: YakitoriApplication | undefined
-let httpServer: Server | undefined
+let serverProcess: ServerProcess | undefined
+let stopping = false
 let shutdown: Promise<void> | undefined
 
 // .then(start, failStartup) would miss rejections from start() itself.
@@ -46,12 +41,13 @@ app.on("will-quit", (event) => {
   // hatch: it falls through without preventDefault, so Electron exits now.
   if (shutdown !== undefined) return
   event.preventDefault()
+  stopping = true
   const forceQuit = setTimeout(() => {
     app.exit(1)
   }, forceQuitDelayMs)
   // Backstop only; the timer must never keep the process alive by itself.
   forceQuit.unref()
-  shutdown = shutdownDesktop().then(
+  shutdown = (serverProcess?.stop() ?? Promise.resolve()).then(
     () => {
       clearTimeout(forceQuit)
       app.quit()
@@ -64,17 +60,69 @@ app.on("will-quit", (event) => {
   )
 })
 
+// Thin shell: the main process only spawns/manages the sidecar server child
+// and the window. Dev and prod share the topology; only the spawn differs.
 async function start(): Promise<void> {
   const workspace = await resolveWorkspace()
   const storeDir =
     process.env.YAKITORI_STORE_DIR ?? path.join(workspace, ".yakitori")
-  application = await createYakitoriApplication(
-    applicationOptions(workspace, storeDir),
+  const child = app.isPackaged
+    ? await spawnServerProcess({
+        command: process.execPath,
+        args: [packagedServerEntry()],
+        env: {
+          ...process.env,
+          ELECTRON_RUN_AS_NODE: "1",
+          YAKITORI_WORKSPACE: workspace,
+          YAKITORI_STORE_DIR: storeDir,
+          YAKITORI_GUI_DIR: path.join(process.resourcesPath, "gui"),
+        },
+      })
+    : await spawnServerProcess({
+        command: "node",
+        // --watch restarts the child on server edits without touching the
+        // window. A fixed dev port keeps the GUI's api param valid across
+        // restarts; prod binds ephemeral ports instead.
+        args: ["--watch", path.join(appRoot, "src", "server", "start.ts")],
+        cwd: appRoot,
+        env: {
+          ...process.env,
+          PORT: process.env.PORT ?? "4142",
+          YAKITORI_WORKSPACE: workspace,
+          YAKITORI_STORE_DIR: storeDir,
+        },
+      })
+  serverProcess = child
+  child.child.on("exit", (code, signal) => {
+    if (stopping) return
+    console.error(
+      `yakitori: sidecar server exited unexpectedly (code ${code}, signal ${signal})`,
+    )
+    app.exit(1)
+  })
+  console.log(`yakitori: sidecar listening on ${child.url}`)
+  openMainWindow(windowTarget(child.url))
+}
+
+function windowTarget(serverUrl: string): string {
+  const renderer = process.env.ELECTRON_RENDERER_URL
+  // Prod serves the built GUI same-origin from the sidecar itself.
+  if (renderer === undefined) return serverUrl
+  const url = new URL(renderer)
+  url.searchParams.set("api", serverUrl)
+  return url.toString()
+}
+
+// asar contents are unreadable to a plain Node child, so the server entry is
+// unpacked from the bundle and spawned with ELECTRON_RUN_AS_NODE.
+function packagedServerEntry(): string {
+  return path.join(
+    process.resourcesPath,
+    "app.asar.unpacked",
+    "dist",
+    "desktop",
+    "server.js",
   )
-  httpServer = application.createHttpServer()
-  const serverUrl = await bindHttpServer(httpServer)
-  console.log(`yakitori: listening on ${serverUrl}`)
-  openMainWindow(process.env.ELECTRON_RENDERER_URL ?? serverUrl)
 }
 
 // Dev launches resolve the workspace from the checkout (process.cwd()).
@@ -134,39 +182,6 @@ function workspaceConfigPath(): string {
   return path.join(app.getPath("userData"), "workspace.json")
 }
 
-function applicationOptions(
-  workspace: string,
-  storeDir: string,
-): YakitoriApplicationOptions {
-  const guiStaticDir = app.isPackaged
-    ? path.join(process.resourcesPath, "gui")
-    : path.join(appRoot, "dist", "gui")
-  return {
-    rootDir: storeDir,
-    workspace,
-    ...(existsSync(guiStaticDir) ? { guiStaticDir } : {}),
-  }
-}
-
-async function bindHttpServer(server: Server): Promise<string> {
-  const configuredPort = process.env.PORT
-  if (configuredPort === undefined) return listen(server)
-  const port = Number(configuredPort)
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject)
-    server.listen(port, "127.0.0.1", () => {
-      server.off("error", reject)
-      resolve()
-    })
-  })
-  // PORT=0 binds an ephemeral port, so derive the URL from the bound address.
-  const address = server.address()
-  if (address === null || typeof address === "string") {
-    throw new Error("Expected HTTP server to listen on a TCP address.")
-  }
-  return `http://127.0.0.1:${address.port}`
-}
-
 function openMainWindow(targetUrl: string): void {
   const window = new BrowserWindow({
     width: 1440,
@@ -223,35 +238,14 @@ async function loadWithRetry(
   }
 }
 
-async function shutdownDesktop(): Promise<void> {
-  const server = httpServer
-  httpServer = undefined
-  if (server !== undefined) {
-    // SSE streams keep connections open; force them closed after close().
-    const closed = new Promise<void>((resolve) => {
-      server.close(() => {
-        resolve()
-      })
-    })
-    server.closeAllConnections()
-    await closed
-  }
-  await application?.close()
-}
-
 function failStartup(error: unknown): void {
   console.error("yakitori: startup failed", error)
-  // Startup may already have created the application (e.g. bindHttpServer
-  // failed with EADDRINUSE); close it before exiting so the store is not
-  // left open.
-  if (application === undefined) {
-    app.exit(1)
-    return
-  }
-  void application
-    .close()
-    .catch((closeError: unknown) => {
-      console.error("yakitori: application close failed", closeError)
+  stopping = true
+  // Startup may already have spawned the sidecar (e.g. the window load
+  // failed); stop it before exiting so no orphaned server is left behind.
+  void (serverProcess?.stop() ?? Promise.resolve())
+    .catch((stopError: unknown) => {
+      console.error("yakitori: sidecar stop failed", stopError)
     })
     .finally(() => {
       app.exit(1)

@@ -1,6 +1,10 @@
 appId: com.yakitori.app
 productName: Yakitori
 asar: true
+# The sidecar server entry runs under plain Node (ELECTRON_RUN_AS_NODE),
+# which cannot read inside the asar archive — unpack the desktop bundle.
+asarUnpack:
+  - dist/desktop/**
 # The desktop bundle inlines all npm dependencies, so node_modules must not
 # be packaged.
 files:

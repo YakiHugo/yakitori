@@ -32,8 +32,13 @@ export default defineConfig(({ mode }) => {
         // chunks must not land in the Electron main bundle).
         ssr: true,
         lib: {
-          entry: "src/desktop/main.ts",
-          fileName: "main",
+          entry: {
+            main: "src/desktop/main.ts",
+            // The sidecar server entry runs under plain Node
+            // (ELECTRON_RUN_AS_NODE) in the packaged app.
+            server: "src/server/desktop-entry.ts",
+          },
+          fileName: (_format, entryName) => `${entryName}.js`,
           formats: ["es"],
         },
         outDir: "dist/desktop",
@@ -65,13 +70,9 @@ export default defineConfig(({ mode }) => {
       outDir: "dist/gui",
       sourcemap: true,
     },
-    server: {
-      proxy: {
-        "/health": `http://127.0.0.1:${process.env.YAKITORI_API_PORT ?? "4141"}`,
-        "/projects": `http://127.0.0.1:${process.env.YAKITORI_API_PORT ?? "4141"}`,
-        "/sessions": `http://127.0.0.1:${process.env.YAKITORI_API_PORT ?? "4141"}`,
-      },
-    },
+    // No dev-server proxy: the renderer always talks to the API origin
+    // directly (the Electron shell appends ?api=<sidecar-url>), so a new
+    // route can never silently 404 behind a missing proxy entry.
     test: {
       include: ["test/**/*.test.ts", "test/**/*.test.tsx"],
       setupFiles: ["test/gui/setup-localstorage.ts"],

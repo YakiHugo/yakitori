@@ -163,10 +163,12 @@ design reference for this stage):
 - The GUI (`src/gui/`) is a React 19 + Tailwind v4 + shadcn/ui application.
   The from-scratch rule applies to the agent loop only; the GUI uses ordinary
   frontend libraries.
-- The product ships as an Electron desktop app (decision 0010):
-  `src/desktop/main.ts` embeds the application in the main process and the
-  local server serves the built GUI same-origin. Electron adds no privileged
-  IPC bridge — the HTTP API stays the only GUI↔core channel.
+- The product ships as an Electron desktop app (decisions 0010 and 0014):
+  `src/desktop/main.ts` is a thin shell that spawns the server as a sidecar
+  child process (`node --watch` in dev, the bundled entry under
+  `ELECTRON_RUN_AS_NODE` in prod) and reads the bound URL from the child's
+  stdout; in prod the sidecar serves the built GUI same-origin. Electron adds
+  no privileged IPC bridge — the HTTP API stays the only GUI↔core channel.
 - `src/gui/components/ui/` holds vendored shadcn/ui primitives; treat them as
   generated output — re-vendor or edit locally, never hand-tune their API
   shape ad hoc.

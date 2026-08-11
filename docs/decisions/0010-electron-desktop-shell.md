@@ -6,6 +6,11 @@ Accepted on 2026-07-31. This decision records the product-packaging direction
 and the server-served-GUI boundary it required. It does not change any kernel,
 persistence, or API contract.
 
+Amended on 2026-08-11: the "Electron main embeds the application in-process"
+half is superseded by decision 0014 — the server runs as a sidecar child
+process in both dev and prod. The same-origin serving decision and the
+HTTP-only GUI↔core channel stand.
+
 ## Context
 
 The workbench ran as two browser-era pieces: a local HTTP server

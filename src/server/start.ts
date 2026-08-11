@@ -2,6 +2,7 @@ import { existsSync } from "node:fs"
 import { join } from "node:path"
 import { createYakitoriApplication } from "./application.ts"
 import { loadLocalEnvFile } from "./env-file.ts"
+import { shutdownHttpApplication } from "./shutdown.ts"
 
 loadLocalEnvFile(".env")
 
@@ -18,7 +19,14 @@ const server = application.createHttpServer()
 let shuttingDown = false
 
 server.listen(port, host, () => {
-  console.log(`Yakitori server listening on http://${host}:${port}`)
+  const address = server.address()
+  const listeningUrl =
+    address === null || typeof address === "string"
+      ? `http://${host}:${port}`
+      : `http://${host}:${address.port}`
+  console.log(`Yakitori server listening on ${listeningUrl}`)
+  // Machine-readable line for parent processes (Electron sidecar spawn).
+  console.log(`yakitori-listening ${listeningUrl}`)
   console.log(
     `workspace=${application.workspace} mate=${application.activeMate.mateId} revision=${application.activeMate.mateRevisionId}`,
   )
@@ -37,22 +45,21 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
     if (shuttingDown) return
     shuttingDown = true
-    server.close((serverError) => {
-      void application.close().then(
-        () => {
-          if (serverError)
-            console.error("HTTP server close failed", serverError)
-          process.exit(serverError ? 1 : 0)
-        },
-        (error: unknown) => {
-          console.error("Yakitori shutdown failed", error)
-          process.exit(1)
-        },
-      )
-    })
-    server.closeAllConnections()
+    void shutdownHttpApplication({
+      server,
+      closeApplication: () => application.close(),
+    }).then(
+      (clean) => {
+        process.exit(clean ? 0 : 1)
+      },
+      (error: unknown) => {
+        console.error("Yakitori shutdown failed", error)
+        process.exit(1)
+      },
+    )
+    // Backstop only: a wedged event loop must never outlive this timer.
     setTimeout(() => {
       process.exit(1)
-    }, 10_000).unref()
+    }, 5_000).unref()
   })
 }

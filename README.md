@@ -98,8 +98,8 @@ Stage 1 MVP runtime is implemented as one vertical slice:
 - React + Tailwind v4 + shadcn/ui workbench GUI with streaming markdown,
   collapsible tool cells, approval bar, queued-input cancel, interrupt, and
   diagnostics drawer
-- Electron desktop shell: the main process embeds the application and serves
-  the GUI same-origin from the local server (decision 0010)
+- Electron desktop shell: a thin main process spawns the server as a sidecar
+  child process and serves the GUI same-origin from it (decision 0010)
 
 Still deferred to later stages: Room/Task/Assignment/Delivery collaboration,
 governed memory, worktrees, multi-provider selection UI, subagents.
@@ -116,13 +116,14 @@ pnpm install
 ```
 
 Run the desktop app (production-style: builds the GUI and desktop bundle,
-embeds the server, serves the GUI same-origin):
+spawns the bundled server as a sidecar child, serves the GUI same-origin):
 
 ```sh
 pnpm start:desktop
 ```
 
-Desktop development with vite HMR (embedded server on port `4141`):
+Desktop development with vite HMR; the shell spawns `node --watch` on the
+server, so server edits hot-restart the sidecar without touching the window:
 
 ```sh
 pnpm dev:desktop
@@ -134,7 +135,9 @@ Run server + GUI in a browser instead:
 pnpm dev
 ```
 
-- GUI: `http://127.0.0.1:5173`
+- GUI: `http://127.0.0.1:5173?api=http://127.0.0.1:4141` — the vite dev server
+  has no API proxy; the `api` query param (or the remembered
+  `yakitori.apiBase`) points the GUI at the server.
 - API default: `http://127.0.0.1:4141`
 - The server also serves the built GUI itself when `dist/gui` exists (or
   `YAKITORI_GUI_DIR` points elsewhere), so `http://127.0.0.1:4141` works
@@ -269,9 +272,10 @@ Run the local server and GUI together:
 pnpm dev
 ```
 
-Open `http://127.0.0.1:5173`. Vite proxies the local session API and event
-stream to the server on port `4141`. Use `pnpm dev:gui` or `pnpm dev:server`
-when only one side is needed.
+Open `http://127.0.0.1:5173?api=http://127.0.0.1:4141`. The GUI talks to the
+API origin directly (there is no vite proxy), so the `api` query param must
+point at the server. Use `pnpm dev:gui` or `pnpm dev:server` when only one
+side is needed.
 
 Useful individual commands:
 
@@ -287,8 +291,9 @@ pnpm package:desktop
 ```
 
 The build keeps the library entry at `dist/index.js`, writes the GUI to
-`dist/gui`, and writes the Electron main bundle to `dist/desktop`.
-`pnpm package:desktop` produces an unsigned unpacked app under `release/`.
+`dist/gui`, and writes the Electron main bundle plus the sidecar server entry
+to `dist/desktop`. `pnpm package:desktop` produces an unsigned unpacked app
+under `release/`.
 
 ## Agent Instructions
 
