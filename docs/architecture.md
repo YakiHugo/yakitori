@@ -390,9 +390,12 @@ are not required by this architecture.
 
 The MVP runtime drives Turns end to end through the witness-style kernel and
 per-Session JSONL journals. The product ships as an Electron desktop app whose
-main process embeds the application and serves the GUI from the same local
-server, same-origin (decision 0010); the HTTP API remains the only GUI↔core
-channel.
+main process is a thin shell: it spawns the server as a sidecar child process
+(`node --watch` on the checkout in dev, the bundled entry under
+`ELECTRON_RUN_AS_NODE` in prod), learns the bound URL from the child's stdout,
+and loads the GUI from the vite dev server with an `?api=` override in dev or
+same-origin from the sidecar in prod (decision 0010); the HTTP API remains the
+only GUI↔core channel.
 
 Context pressure is handled by compaction: an append-only `context.compacted`
 fact records the exact source boundary and a bounded checkpoint summary, and
