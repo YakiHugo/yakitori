@@ -72,11 +72,15 @@ async function* streamOpenAI(
                 effort: request.target.effort as ReasoningEffort,
               },
             }),
-        // Speed tiers: only "fast" maps onto the wire ("priority"); anything
-        // else falls through to the server default.
-        ...(request.target.speed === "fast"
-          ? { service_tier: "priority" as const }
-          : {}),
+        // Speed: catalog service-tier ids (e.g. codex "priority"). Legacy
+        // "fast" is accepted as an alias of "priority".
+        ...(serviceTierForRequest(request.target.speed) === undefined
+          ? {}
+          : {
+              service_tier: serviceTierForRequest(
+                request.target.speed,
+              ) as "priority",
+            }),
       },
       request.signal === undefined ? undefined : { signal: request.signal },
     )
@@ -332,6 +336,13 @@ function retryableDetails(error: unknown): JsonObject | undefined {
     return { retryable: true, status: error.status }
   }
   return undefined
+}
+
+function serviceTierForRequest(speed: string | undefined): string | undefined {
+  if (speed === undefined || speed === "standard") return undefined
+  // Catalog ids (codex service_tiers) pass through; "fast" is a legacy alias.
+  if (speed === "fast") return "priority"
+  return speed
 }
 
 function abortedResponse(): ModelStreamEvent {

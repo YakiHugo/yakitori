@@ -79,16 +79,12 @@ describe("model selector", () => {
             {
               id: "gpt-5.1-codex",
               displayName: "GPT 5.1 Codex",
-              family: "gpt",
               efforts: ["low", "medium", "high"],
-              speeds: ["standard", "fast"],
             },
             {
               id: "gpt-5",
               displayName: "GPT-5",
-              family: "gpt",
               efforts: ["low", "medium", "high"],
-              speeds: ["standard", "fast"],
             },
           ],
         },
@@ -98,9 +94,10 @@ describe("model selector", () => {
             {
               id: "gpt-5.6-sol",
               displayName: "GPT-5.6 Sol",
-              family: "gpt",
-              efforts: ["low", "medium", "high", "xhigh"],
-              speeds: ["standard", "fast"],
+              description: "Latest frontier agentic coding model.",
+              efforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
+              defaultEffort: "low",
+              speeds: ["standard", "priority"],
             },
           ],
         },
@@ -110,13 +107,11 @@ describe("model selector", () => {
             {
               id: "kimi-for-coding",
               displayName: "Kimi for Coding",
-              family: "kimi",
               efforts: ["on", "off"],
             },
             {
               id: "k3",
               displayName: "Kimi K3",
-              family: "kimi",
               efforts: ["max"],
             },
           ],
@@ -127,8 +122,8 @@ describe("model selector", () => {
             {
               id: "claude-sonnet-4-6",
               displayName: "Claude Sonnet 4.6",
-              family: "anthropic",
               efforts: ["low", "medium", "high"],
+              defaultEffort: "high",
             },
           ],
         },
@@ -138,13 +133,13 @@ describe("model selector", () => {
             {
               id: "grok-4.20-non-reasoning",
               displayName: "Grok 4.20 Non-Reasoning",
-              family: "default",
             },
           ],
         },
       ],
       defaultProvider: "openai",
       defaultModel: "gpt-5.1-codex",
+      defaultModelSelection: undefined,
     }
   }
 
@@ -215,14 +210,11 @@ describe("model selector", () => {
     expect(screen.getByRole("button", { name: "low" })).toBeDefined()
     expect(screen.getByRole("button", { name: "medium" })).toBeDefined()
     expect(screen.getByRole("button", { name: "high" })).toBeDefined()
-
-    // And it has speed tiers.
-    expect(screen.getByText("速度")).toBeDefined()
-    expect(screen.getByRole("button", { name: "标准" })).toBeDefined()
-    expect(screen.getByRole("button", { name: "快速" })).toBeDefined()
+    // Public OpenAI entries declare no speed tiers.
+    expect(screen.queryByText("速度")).toBeNull()
   })
 
-  it("persists a clicked model per session, keeping a supported effort", async () => {
+  it("persists a clicked model per session and as the global default", async () => {
     const user = userEvent.setup()
     window.localStorage.clear()
     useAppStore.setState({
@@ -239,12 +231,24 @@ describe("model selector", () => {
     expect(useAppStore.getState().modelSelections).toEqual({
       session_1: { provider: "openai", model: "gpt-5.1-codex", effort: "low" },
     })
+    expect(useAppStore.getState().defaultModelSelection).toEqual({
+      provider: "openai",
+      model: "gpt-5.1-codex",
+      effort: "low",
+    })
     expect(
       JSON.parse(
         window.localStorage.getItem("yakitori.modelSelections") ?? "{}",
       ),
     ).toEqual({
       session_1: { provider: "openai", model: "gpt-5.1-codex", effort: "low" },
+    })
+    expect(
+      JSON.parse(window.localStorage.getItem("yakitori.defaultModel") ?? "{}"),
+    ).toEqual({
+      provider: "openai",
+      model: "gpt-5.1-codex",
+      effort: "low",
     })
 
     // Claude offers the same effort levels, so the pinned effort survives.
@@ -291,6 +295,26 @@ describe("model selector", () => {
     expect(useAppStore.getState().modelSelections).toEqual({
       session_1: { provider: "openai", model: "gpt-5.1-codex" },
     })
+  })
+
+  it("labels the Default effort row with the model defaultEffort", async () => {
+    const user = userEvent.setup()
+    window.localStorage.clear()
+    useAppStore.setState({
+      ...selectModelState(),
+      modelSelections: {
+        session_1: { provider: "codex", model: "gpt-5.6-sol" },
+      },
+    })
+    render(<Composer />)
+
+    await user.click(screen.getByRole("button", { name: "Select model" }))
+    expect(
+      screen.getByRole("button", { name: "Default (low)" }),
+    ).toBeDefined()
+    expect(
+      screen.getByRole("button", { name: "GPT-5.6 Sol" }).getAttribute("title"),
+    ).toBe("Latest frontier agentic coding model.")
   })
 
   it("hides the effort section when the effective model offers none", async () => {
@@ -353,13 +377,13 @@ describe("model selector", () => {
     await user.click(screen.getByRole("button", { name: "Select model" }))
     await user.click(screen.getByRole("button", { name: "快速" }))
 
-    // Picking a speed keeps the pinned effort.
+    // Picking a speed keeps the pinned effort; tier id is catalog service_tier.
     expect(useAppStore.getState().modelSelections).toEqual({
       session_1: {
         provider: "codex",
         model: "gpt-5.6-sol",
         effort: "high",
-        speed: "fast",
+        speed: "priority",
       },
     })
     expect(
@@ -371,7 +395,7 @@ describe("model selector", () => {
         provider: "codex",
         model: "gpt-5.6-sol",
         effort: "high",
-        speed: "fast",
+        speed: "priority",
       },
     })
 

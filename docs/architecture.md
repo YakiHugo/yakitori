@@ -412,6 +412,15 @@ alone translate cache boundaries and wire formats. Official Anthropic requests
 spend their final cache point on the latest dynamic message so tool-loop calls
 can reuse preceding history (decisions 0013 and 0018).
 
+The GUI model picker is fed by `GET /providers`, assembled from
+provider-native directories with snapshot and curated fallbacks (decision
+0020): Codex backend `/models`, Anthropic `/v1/models`, Grok OpenAI-compatible
+`/models`, models.dev for public OpenAI, and curated lists for Kimi and faux.
+Entries declare per-model efforts, optional default effort, and codex service
+tiers only. Prompt family IDs stay server-internal. Selection is frozen per
+Turn in kernel facts; the GUI also writes a user-level default in localStorage
+so new sessions inherit the last explicit choice after per-session overrides.
+
 The server keeps a project registry (`src/server/project-registry.ts`, the
 Codex GUI "project" parallel): registered project directories live in
 `projects.json` under `YAKITORI_HOME` (default `~/.yakitori`), with the

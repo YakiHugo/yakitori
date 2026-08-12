@@ -807,9 +807,7 @@ describe("HTTP static assets", () => {
         {
           name: "faux",
           defaultModel: "scripted",
-          models: [
-            { id: "scripted", displayName: "scripted", family: "default" },
-          ],
+          models: [{ id: "scripted", displayName: "scripted" }],
         },
         {
           name: "openai",
@@ -817,7 +815,6 @@ describe("HTTP static assets", () => {
             {
               id: "gpt-5.1-codex",
               displayName: "GPT-5.1 Codex",
-              family: "gpt",
               efforts: ["low", "medium", "high"],
             },
           ],

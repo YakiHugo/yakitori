@@ -1,0 +1,88 @@
+{
+  "generated": true,
+  "source": "codex-rs models-manager/models.json (visibility=list)",
+  "update": "Re-copy list-visible models from codex models.json; map slug\u2192id, display_name, description, supported_reasoning_levels\u2192efforts, default_reasoning_level\u2192defaultEffort, service_tiers\u2192speeds (with standard).",
+  "models": [
+    {
+      "id": "gpt-5.6-sol",
+      "displayName": "GPT-5.6-Sol",
+      "description": "Latest frontier agentic coding model.",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "defaultEffort": "low",
+      "speeds": [
+        "standard",
+        "priority"
+      ]
+    },
+    {
+      "id": "gpt-5.6-terra",
+      "displayName": "GPT-5.6-Terra",
+      "description": "Balanced agentic coding model for everyday work.",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "defaultEffort": "medium",
+      "speeds": [
+        "standard",
+        "priority"
+      ]
+    },
+    {
+      "id": "gpt-5.6-luna",
+      "displayName": "GPT-5.6-Luna",
+      "description": "Fast and affordable agentic coding model.",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "defaultEffort": "medium",
+      "speeds": [
+        "standard",
+        "priority"
+      ]
+    },
+    {
+      "id": "gpt-5.5",
+      "displayName": "GPT-5.5",
+      "description": "Frontier model for complex coding, research, and real-world work.",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "defaultEffort": "medium",
+      "speeds": [
+        "standard",
+        "priority"
+      ]
+    },
+    {
+      "id": "gpt-5.2",
+      "displayName": "GPT-5.2",
+      "description": "Optimized for professional work and long-running agents.",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "defaultEffort": "medium"
+    }
+  ]
+}

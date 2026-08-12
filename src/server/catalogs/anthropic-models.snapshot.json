@@ -1,0 +1,34 @@
+{
+  "generated": true,
+  "source": "curated Claude Code picker seed (opus/sonnet 4.6+, haiku 4.5)",
+  "update": "Refresh when Anthropic ships new coding-agent flagship models; effort only for opus/sonnet 4.6+.",
+  "models": [
+    {
+      "id": "claude-opus-4-6",
+      "displayName": "Claude Opus 4.6",
+      "description": "Most capable Claude for complex coding and reasoning.",
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "defaultEffort": "high"
+    },
+    {
+      "id": "claude-sonnet-4-6",
+      "displayName": "Claude Sonnet 4.6",
+      "description": "Balanced Claude for everyday coding work.",
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "defaultEffort": "high"
+    },
+    {
+      "id": "claude-haiku-4-5",
+      "displayName": "Claude Haiku 4.5",
+      "description": "Fast, cost-efficient Claude for lighter tasks."
+    }
+  ]
+}

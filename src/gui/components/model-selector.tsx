@@ -13,18 +13,20 @@ import { Button } from "./ui/button.tsx"
 
 const SPEED_LABELS: Readonly<Record<string, string>> = {
   fast: "快速",
+  priority: "快速",
   standard: "标准",
 }
 
 export type EffectiveModelInput = {
   readonly events: readonly StoredEventEnvelope[]
   readonly override: ModelSelection | undefined
+  readonly globalDefault: ModelSelection | undefined
   readonly defaultProvider: string | undefined
   readonly defaultModel: string | undefined
 }
 
-// The recorded Turn wins over the saved override so the label reflects what
-// actually ran; the override only applies to the next input.
+// Resolution order aligns with codex TurnContext + config.toml defaults:
+// last recorded turn > per-session override > global default > app default.
 export function resolveEffectiveModel(
   input: EffectiveModelInput,
 ): ModelSelection | undefined {
@@ -41,6 +43,7 @@ export function resolveEffectiveModel(
     }
   }
   if (input.override !== undefined) return input.override
+  if (input.globalDefault !== undefined) return input.globalDefault
   if (input.defaultProvider === undefined || input.defaultModel === undefined) {
     return undefined
   }
@@ -63,6 +66,7 @@ export function ModelSelector() {
   const defaultProvider = useAppStore((state) => state.defaultProvider)
   const defaultModel = useAppStore((state) => state.defaultModel)
   const events = useAppStore((state) => state.events)
+  const globalDefault = useAppStore((state) => state.defaultModelSelection)
   const override = useAppStore((state) =>
     state.selection.sessionId === undefined
       ? undefined
@@ -76,6 +80,7 @@ export function ModelSelector() {
   const effective = resolveEffectiveModel({
     events,
     override,
+    globalDefault,
     defaultProvider,
     defaultModel,
   })
@@ -143,6 +148,10 @@ export function ModelSelector() {
           ?.models.find((model) => model.id === effective.model)
   const effectiveEfforts = effectiveEntry?.efforts
   const effectiveSpeeds = effectiveEntry?.speeds
+  const defaultEffortLabel =
+    effectiveEntry?.defaultEffort === undefined
+      ? "Default"
+      : `Default (${effectiveEntry.defaultEffort})`
 
   return (
     <div className="relative">
@@ -157,7 +166,7 @@ export function ModelSelector() {
         {label}
       </Button>
       {open ? (
-        <div className="absolute bottom-full left-0 z-10 mb-1 w-64 space-y-1 rounded-md border bg-popover p-2 text-sm shadow-md">
+        <div className="absolute bottom-full left-0 z-10 mb-1 w-72 space-y-1 rounded-md border bg-popover p-2 text-sm shadow-md">
           <div className="px-2 text-xs text-muted-foreground">模型</div>
           {[...providers]
             .sort((left, right) => {
@@ -177,6 +186,9 @@ export function ModelSelector() {
                     <PanelRow
                       key={`${provider.name}/${model.id}`}
                       label={model.displayName ?? model.id}
+                      {...(model.description === undefined
+                        ? {}
+                        : { description: model.description })}
                       checked={
                         effective?.provider === provider.name &&
                         effective.model === model.id
@@ -195,7 +207,7 @@ export function ModelSelector() {
                 推理强度
               </div>
               <PanelRow
-                label="Default"
+                label={defaultEffortLabel}
                 checked={effective?.effort === undefined}
                 onSelect={() => selectEffort(undefined)}
               />
@@ -238,19 +250,31 @@ export function ModelSelector() {
 
 function PanelRow(input: {
   readonly label: string
+  readonly description?: string
   readonly checked: boolean
   readonly onSelect: () => void
 }) {
   return (
     <button
       type="button"
+      title={input.description}
       className={cn(
         "flex w-full items-center gap-2 rounded px-2 py-1 text-left hover:bg-accent",
         input.checked && "bg-accent",
       )}
       onClick={input.onSelect}
     >
-      <span className="min-w-0 flex-1 truncate">{input.label}</span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate">{input.label}</span>
+        {input.description === undefined ? null : (
+          <span
+            className="block truncate text-xs text-muted-foreground"
+            aria-hidden="true"
+          >
+            {input.description}
+          </span>
+        )}
+      </span>
       {input.checked && <Check className="size-4 shrink-0" />}
     </button>
   )

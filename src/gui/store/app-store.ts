@@ -48,6 +48,9 @@ export type AppStoreData = {
   execution: ExecutionViewState
   inFlightActions: ReadonlySet<string>
   message: string | undefined
+  // User-level default written with every picker change (codex config.toml /
+  // claude userSettings parallel). Per-session overrides win when present.
+  defaultModelSelection: ModelSelection | undefined
   modelSelections: Record<string, ModelSelection>
   nextCursor: string | undefined
   promptDraft: string | undefined
@@ -103,6 +106,7 @@ export function createInitialAppState(): AppStoreData {
     execution: createExecutionViewState(),
     inFlightActions: new Set(),
     message: undefined,
+    defaultModelSelection: initialDefaultModelSelection(),
     modelSelections: initialModelSelections(),
     nextCursor: undefined,
     promptDraft: undefined,
@@ -721,6 +725,20 @@ export const useAppStore = create<AppStore>()((set, get) => {
       const modelSelections = { ...get().modelSelections }
       if (selection === undefined) delete modelSelections[sessionId]
       else modelSelections[sessionId] = selection
+      // Picker changes also pin the global default so new sessions inherit
+      // the last explicit choice (codex writes config.toml; we use localStorage).
+      if (selection !== undefined) {
+        set({ modelSelections, defaultModelSelection: selection })
+        window.localStorage.setItem(
+          "yakitori.modelSelections",
+          JSON.stringify(modelSelections),
+        )
+        window.localStorage.setItem(
+          "yakitori.defaultModel",
+          JSON.stringify(selection),
+        )
+        return
+      }
       set({ modelSelections })
       window.localStorage.setItem(
         "yakitori.modelSelections",
@@ -761,6 +779,33 @@ function initialModelSelections(): Record<string, ModelSelection> {
     return parsed as Record<string, ModelSelection>
   } catch {
     return {}
+  }
+}
+
+function initialDefaultModelSelection(): ModelSelection | undefined {
+  const raw = window.localStorage.getItem("yakitori.defaultModel")
+  if (raw === null) return undefined
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      return undefined
+    }
+    const record = parsed as Record<string, unknown>
+    if (typeof record.provider !== "string" || typeof record.model !== "string") {
+      return undefined
+    }
+    return {
+      provider: record.provider,
+      model: record.model,
+      ...(typeof record.effort === "string" ? { effort: record.effort } : {}),
+      ...(typeof record.speed === "string" ? { speed: record.speed } : {}),
+    }
+  } catch {
+    return undefined
   }
 }
 

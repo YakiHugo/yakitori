@@ -111,6 +111,11 @@ Current stage — the coding agent:
   Inject bounded project instructions as contextual user content, keep native
   tool definitions separate from prompt prose, and let provider adapters own
   cache-control syntax (decisions 0017 and 0018).
+- Source the GUI model list from provider-native catalogs with snapshot/curated
+  fallbacks (decision 0020): codex backend `/models`, Anthropic models API,
+  Grok OpenAI-compatible `/models`, models.dev for public OpenAI only, curated
+  Kimi/faux. Do not invent provider-wide speed tiers; effort and speed come
+  from catalog entries. Keep `promptId` resolution server-internal.
 
 Later stage — Rooms and multi-Mate collaboration (the Raft product is the
 design reference for this stage):

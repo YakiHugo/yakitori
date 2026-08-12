@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted on 2026-08-10. Amends decision 0018.
+Accepted on 2026-08-10. Amends decision 0018. Amended by decision 0020 on
+2026-08-12 (provider-native model catalogs and codex-style switching; list
+payload no longer carries prompt family).
 
 ## Context
 

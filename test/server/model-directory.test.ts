@@ -1,7 +1,13 @@
+import { mkdtemp, readFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { describe, expect, it, vi } from "vitest"
-import { createModelDirectory, directoryAllowlist } from "../../src/index.ts"
+import {
+  createModelDirectory,
+  directoryAllowlist,
+} from "../../src/index.ts"
 
-const directoryFixture = {
+const modelsDevFixture = {
   openai: {
     id: "openai",
     models: {
@@ -39,133 +45,192 @@ const directoryFixture = {
         status: "deprecated",
         modalities: { input: ["text"], output: ["text"] },
       },
-      "gpt-4o-alpha": {
-        id: "gpt-4o-alpha",
-        name: "GPT-4o alpha",
-        tool_call: true,
-        status: "alpha",
-        modalities: { input: ["text"], output: ["text"] },
-      },
-      "gpt-4o-audio": {
-        id: "gpt-4o-audio",
-        name: "GPT-4o Audio",
-        tool_call: true,
-        modalities: { input: ["audio"], output: ["audio"] },
-      },
       "gpt-broken": "not-a-record",
     },
   },
-  anthropic: {
-    id: "anthropic",
-    models: {
-      // Fixture order deliberately differs from the allowlist order.
-      "claude-haiku-4-5": {
-        id: "claude-haiku-4-5",
-        name: "Claude Haiku 4.5",
-        reasoning: true,
-        tool_call: true,
-        modalities: { input: ["text"], output: ["text"] },
-      },
-      "claude-sonnet-4-6": {
-        id: "claude-sonnet-4-6",
-        name: "Claude Sonnet 4.6",
-        reasoning: true,
-        tool_call: true,
-        modalities: { input: ["text", "image"], output: ["text"] },
-      },
-    },
-  },
-  xai: {
-    id: "xai",
-    models: {
-      // Fixture order deliberately differs from the allowlist order.
-      "grok-4.3": {
-        id: "grok-4.3",
-        name: "Grok 4.3",
-        reasoning: true,
-        tool_call: true,
-        modalities: { input: ["text"], output: ["text"] },
-      },
-      "grok-4.5": {
-        id: "grok-4.5",
-        name: "Grok 4.5",
-        reasoning: true,
-        tool_call: true,
-        modalities: { input: ["text"], output: ["text"] },
-      },
-      "grok-code-fast-1": {
-        id: "grok-code-fast-1",
-        name: "Grok Code Fast 1",
-        reasoning: true,
-        tool_call: true,
-        modalities: { input: ["text"], output: ["text"] },
-      },
-    },
-  },
 }
 
-function fetchFixture(payload: unknown = directoryFixture) {
-  return vi.fn(
-    async () => new Response(JSON.stringify(payload)),
-  ) as typeof fetch
+const codexLiveFixture = {
+  models: [
+    {
+      slug: "gpt-5.6-sol",
+      display_name: "GPT-5.6-Sol",
+      description: "Latest frontier agentic coding model.",
+      visibility: "list",
+      default_reasoning_level: "low",
+      supported_reasoning_levels: [
+        { effort: "low" },
+        { effort: "medium" },
+        { effort: "high" },
+        { effort: "xhigh" },
+        { effort: "max" },
+        { effort: "ultra" },
+      ],
+      service_tiers: [{ id: "priority", name: "Fast" }],
+    },
+    {
+      slug: "gpt-5.4",
+      display_name: "GPT-5.4",
+      visibility: "hide",
+      supported_reasoning_levels: [{ effort: "medium" }],
+      service_tiers: [],
+    },
+    {
+      slug: "gpt-5.2",
+      display_name: "GPT-5.2",
+      description: "Long-running agents.",
+      visibility: "list",
+      default_reasoning_level: "medium",
+      supported_reasoning_levels: [
+        { effort: "low" },
+        { effort: "medium" },
+        { effort: "high" },
+        { effort: "xhigh" },
+      ],
+      service_tiers: [],
+    },
+  ],
+}
+
+const anthropicLiveFixture = {
+  data: [
+    { id: "claude-haiku-4-5", display_name: "Claude Haiku 4.5" },
+    { id: "claude-sonnet-4-6", display_name: "Claude Sonnet 4.6" },
+    { id: "claude-opus-4-6", display_name: "Claude Opus 4.6" },
+    { id: "claude-sonnet-4-5", display_name: "Claude Sonnet 4.5" },
+  ],
+}
+
+const grokLiveFixture = {
+  data: [
+    { id: "grok-4.3" },
+    { id: "grok-4.5" },
+    { id: "grok-code-fast-1" },
+  ],
+}
+
+function jsonResponse(payload: unknown, status = 200): Response {
+  return new Response(JSON.stringify(payload), { status })
 }
 
 describe("model directory", () => {
-  it("filters and orders models.dev entries through the curated allowlist", async () => {
-    const directory = createModelDirectory({ fetchFn: fetchFixture() })
+  it("serves openai from models.dev through the curated allowlist without speeds", async () => {
+    const fetchFn = vi.fn(async (url: unknown) => {
+      expect(String(url)).toContain("models.dev")
+      return jsonResponse(modelsDevFixture)
+    }) as unknown as typeof fetch
+    const directory = createModelDirectory({
+      fetchFn,
+      disableDiskCache: true,
+      resolveCodexAuth: async () => undefined,
+      resolveGrokToken: async () => undefined,
+      anthropicApiKey: () => undefined,
+    })
 
-    // Allowlist order wins over directory order; allowlisted ids absent from
-    // the directory (gpt-5.6-sol) drop out silently. OpenAI reasoning models
-    // also accept service tiers.
+    // Allowlist order wins; allowlisted ids absent from the directory drop out.
+    // Speeds are omitted for public OpenAI (no per-entry service_tiers).
     expect(await directory.listModels("openai")).toEqual([
       {
         id: "gpt-5.1-codex",
         displayName: "GPT 5.1 Codex",
-        family: "gpt",
         efforts: ["low", "medium", "high"],
-        speeds: ["standard", "fast"],
       },
       {
         id: "gpt-5",
         displayName: "GPT-5",
-        family: "gpt",
         efforts: ["low", "medium", "high"],
-        speeds: ["standard", "fast"],
       },
     ])
   })
 
-  it("maps the grok provider to the xai key and marks anthropic reasoning efforts", async () => {
-    const directory = createModelDirectory({ fetchFn: fetchFixture() })
+  it("maps codex live ModelInfo with visibility filter and full effort ladder", async () => {
+    const fetchFn = vi.fn(async (url: unknown, init?: RequestInit) => {
+      expect(String(url)).toContain("/models")
+      expect(String(url)).toContain("client_version=")
+      expect(init?.headers).toMatchObject({
+        Authorization: "Bearer tok",
+        "chatgpt-account-id": "acct",
+      })
+      return jsonResponse(codexLiveFixture)
+    }) as unknown as typeof fetch
+    const directory = createModelDirectory({
+      fetchFn,
+      disableDiskCache: true,
+      resolveCodexAuth: async () => ({
+        accessToken: "tok",
+        accountId: "acct",
+      }),
+      clientVersion: "0.0.0",
+    })
 
-    // grok-code-fast-1 is sanitized but not in the grok allowlist; allowlist
-    // order wins over fixture order.
-    expect(await directory.listModels("grok")).toEqual([
+    expect(await directory.listModels("codex")).toEqual([
       {
-        id: "grok-4.5",
-        displayName: "Grok 4.5",
-        family: "default",
-        efforts: ["low", "medium", "high"],
+        id: "gpt-5.6-sol",
+        displayName: "GPT-5.6-Sol",
+        description: "Latest frontier agentic coding model.",
+        efforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
+        defaultEffort: "low",
+        speeds: ["standard", "priority"],
       },
       {
-        id: "grok-4.3",
-        displayName: "Grok 4.3",
-        family: "default",
-        efforts: ["low", "medium", "high"],
+        id: "gpt-5.2",
+        displayName: "GPT-5.2",
+        description: "Long-running agents.",
+        efforts: ["low", "medium", "high", "xhigh"],
+        defaultEffort: "medium",
       },
     ])
-    // Anthropic reasoning models offer efforts since the effort beta landed.
+  })
+
+  it("gates anthropic efforts to opus/sonnet 4.6+ and omits haiku", async () => {
+    const fetchFn = vi.fn(async () =>
+      jsonResponse(anthropicLiveFixture),
+    ) as unknown as typeof fetch
+    const directory = createModelDirectory({
+      fetchFn,
+      disableDiskCache: true,
+      anthropicApiKey: "sk-ant-test",
+    })
+
+    // Allowlist order; sonnet-4-5 is not allowlisted and drops out.
     expect(await directory.listModels("anthropic")).toEqual([
+      {
+        id: "claude-opus-4-6",
+        displayName: "Claude Opus 4.6",
+        efforts: ["low", "medium", "high"],
+      },
       {
         id: "claude-sonnet-4-6",
         displayName: "Claude Sonnet 4.6",
-        family: "anthropic",
         efforts: ["low", "medium", "high"],
       },
       {
         id: "claude-haiku-4-5",
         displayName: "Claude Haiku 4.5",
-        family: "anthropic",
+      },
+    ])
+  })
+
+  it("filters grok live models through the allowlist", async () => {
+    const fetchFn = vi.fn(async (url: unknown) => {
+      expect(String(url)).toContain("api.x.ai")
+      return jsonResponse(grokLiveFixture)
+    }) as unknown as typeof fetch
+    const directory = createModelDirectory({
+      fetchFn,
+      disableDiskCache: true,
+      resolveGrokToken: async () => "grok-tok",
+    })
+
+    expect(await directory.listModels("grok")).toEqual([
+      {
+        id: "grok-4.5",
+        displayName: "grok-4.5",
+        efforts: ["low", "medium", "high"],
+      },
+      {
+        id: "grok-4.3",
+        displayName: "grok-4.3",
         efforts: ["low", "medium", "high"],
       },
     ])
@@ -177,112 +242,114 @@ describe("model directory", () => {
       "gpt-5.1-codex",
       "gpt-5",
     ])
-    // Providers without an entry pass every sanitized model through.
     expect(directoryAllowlist("faux")).toBeUndefined()
     expect(directoryAllowlist("unknown")).toBeUndefined()
   })
 
-  it("falls back to the curated catalog when the fetch fails", async () => {
+  it("falls back to the bundled codex snapshot when live auth is missing", async () => {
+    const fetchFn = vi.fn(async () => {
+      throw new Error("should not fetch")
+    }) as unknown as typeof fetch
+    const directory = createModelDirectory({
+      fetchFn,
+      disableDiskCache: true,
+      resolveCodexAuth: async () => undefined,
+    })
+
+    const models = await directory.listModels("codex")
+    expect(fetchFn).not.toHaveBeenCalled()
+    expect(models.map((model) => model.id)).toEqual([
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "gpt-5.6-luna",
+      "gpt-5.5",
+      "gpt-5.2",
+    ])
+    expect(models[0]).toMatchObject({
+      id: "gpt-5.6-sol",
+      efforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
+      defaultEffort: "low",
+      speeds: ["standard", "priority"],
+    })
+  })
+
+  it("falls back to curated openai entries when models.dev fails", async () => {
     const fetchFn = vi.fn(async () => {
       throw new Error("network down")
     }) as unknown as typeof fetch
-    const directory = createModelDirectory({ fetchFn })
+    const directory = createModelDirectory({
+      fetchFn,
+      disableDiskCache: true,
+    })
 
     expect(await directory.listModels("openai")).toEqual([
-      { id: "gpt-5.1-codex", displayName: "gpt-5.1-codex", family: "gpt" },
-      { id: "gpt-5", displayName: "gpt-5", family: "gpt" },
+      { id: "gpt-5.1-codex", displayName: "gpt-5.1-codex" },
+      { id: "gpt-5", displayName: "gpt-5" },
     ])
   })
 
-  it("falls back to the curated catalog for malformed payloads", async () => {
+  it("falls back to curated openai for malformed models.dev payloads", async () => {
     for (const payload of [[], { openai: "junk" }, "nope"]) {
-      const directory = createModelDirectory({ fetchFn: fetchFixture(payload) })
+      const directory = createModelDirectory({
+        fetchFn: vi.fn(async () =>
+          jsonResponse(payload),
+        ) as unknown as typeof fetch,
+        disableDiskCache: true,
+      })
       expect(await directory.listModels("openai")).toEqual([
-        { id: "gpt-5.1-codex", displayName: "gpt-5.1-codex", family: "gpt" },
-        { id: "gpt-5", displayName: "gpt-5", family: "gpt" },
+        { id: "gpt-5.1-codex", displayName: "gpt-5.1-codex" },
+        { id: "gpt-5", displayName: "gpt-5" },
       ])
     }
   })
 
-  it("serves faux from the curated catalog without fetching", async () => {
-    const fetchFn = fetchFixture()
-    const directory = createModelDirectory({ fetchFn })
+  it("serves faux and kimi from the curated catalog without fetching", async () => {
+    const fetchFn = vi.fn(async () => {
+      throw new Error("should not fetch")
+    }) as unknown as typeof fetch
+    const directory = createModelDirectory({
+      fetchFn,
+      disableDiskCache: true,
+    })
 
     expect(await directory.listModels("faux")).toEqual([
-      { id: "scripted", displayName: "scripted", family: "default" },
+      { id: "scripted", displayName: "scripted" },
     ])
-    expect(fetchFn).not.toHaveBeenCalled()
-  })
-
-  it("serves kimi and codex from curated entries, never from models.dev", async () => {
-    const fetchFn = fetchFixture()
-    const directory = createModelDirectory({ fetchFn })
-
     expect(await directory.listModels("kimi")).toEqual([
       {
         id: "kimi-for-coding",
         displayName: "Kimi for Coding",
-        family: "kimi",
         efforts: ["on", "off"],
       },
       {
         id: "kimi-for-coding-highspeed",
         displayName: "Kimi for Coding HighSpeed",
-        family: "kimi",
         efforts: ["on", "off"],
       },
       {
         id: "k3",
         displayName: "Kimi K3",
-        family: "kimi",
         efforts: ["max"],
-      },
-    ])
-    expect(await directory.listModels("codex")).toEqual([
-      {
-        id: "gpt-5.6-sol",
-        displayName: "GPT-5.6 Sol",
-        family: "gpt",
-        efforts: ["low", "medium", "high", "xhigh"],
-        speeds: ["standard", "fast"],
-      },
-      {
-        id: "gpt-5.6-terra",
-        displayName: "GPT-5.6 Terra",
-        family: "gpt",
-        efforts: ["low", "medium", "high", "xhigh"],
-        speeds: ["standard", "fast"],
-      },
-      {
-        id: "gpt-5.6-luna",
-        displayName: "GPT-5.6 Luna",
-        family: "gpt",
-        efforts: ["low", "medium", "high", "xhigh"],
-        speeds: ["standard", "fast"],
-      },
-      {
-        id: "gpt-5.5",
-        displayName: "GPT-5.5",
-        family: "gpt",
-        efforts: ["low", "medium", "high", "xhigh"],
-        speeds: ["standard", "fast"],
       },
     ])
     expect(fetchFn).not.toHaveBeenCalled()
   })
 
-  it("caches the payload for the TTL and refetches after it", async () => {
+  it("caches live results in memory for the TTL and refetches after it", async () => {
     let now = 1_000
-    const fetchFn = fetchFixture()
+    const fetchFn = vi.fn(async () =>
+      jsonResponse(modelsDevFixture),
+    ) as unknown as typeof fetch
     const directory = createModelDirectory({
       fetchFn,
       now: () => now,
       ttlMs: 100,
+      disableDiskCache: true,
     })
 
     await directory.listModels("openai")
     now = 1_050
-    await directory.listModels("grok")
+    await directory.listModels("openai")
     expect(fetchFn).toHaveBeenCalledTimes(1)
 
     now = 1_200
@@ -290,17 +357,18 @@ describe("model directory", () => {
     expect(fetchFn).toHaveBeenCalledTimes(2)
   })
 
-  it("serves the stale cache when a refresh after expiry fails", async () => {
+  it("serves the stale memory cache when a refresh after expiry fails", async () => {
     let now = 1_000
     let fail = false
-    const fetchFn = vi.fn(async (_url: unknown, _init?: unknown) => {
+    const fetchFn = vi.fn(async () => {
       if (fail) throw new Error("network down")
-      return fetchFixture()(_url as string | URL)
-    })
+      return jsonResponse(modelsDevFixture)
+    }) as unknown as typeof fetch
     const directory = createModelDirectory({
-      fetchFn: fetchFn as unknown as typeof fetch,
+      fetchFn,
       now: () => now,
       ttlMs: 100,
+      disableDiskCache: true,
     })
 
     const fresh = await directory.listModels("openai")
@@ -310,17 +378,104 @@ describe("model directory", () => {
     expect(stale).toEqual(fresh)
   })
 
-  it("bounds the models.dev fetch with a timeout signal", async () => {
-    const fetchFn = vi.fn(async (_url: unknown, _init?: unknown) => {
-      void _url
-      return new Response("{}", { status: 200 })
+  it("persists live results to the disk cache and reuses a fresh disk entry", async () => {
+    const cacheDir = await mkdtemp(join(tmpdir(), "yakitori-catalog-"))
+    const cachePath = join(cacheDir, "model-catalogs.json")
+    const now = 1_000
+    const fetchFn = vi.fn(async () =>
+      jsonResponse(modelsDevFixture),
+    ) as unknown as typeof fetch
+
+    const first = createModelDirectory({
+      fetchFn,
+      now: () => now,
+      ttlMs: 100,
+      cachePath,
     })
+    const models = await first.listModels("openai")
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+
+    const onDisk = JSON.parse(await readFile(cachePath, "utf8")) as {
+      providers: { openai: { fetchedAt: number; models: unknown[] } }
+    }
+    expect(onDisk.providers.openai.fetchedAt).toBe(1_000)
+    expect(onDisk.providers.openai.models).toEqual(models)
+
+    // New directory instance: memory empty, disk still fresh — no network.
+    const second = createModelDirectory({
+      fetchFn,
+      now: () => now,
+      ttlMs: 100,
+      cachePath,
+    })
+    expect(await second.listModels("openai")).toEqual(models)
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
+
+  it("falls back to a stale disk cache when live fails and memory is empty", async () => {
+    const cacheDir = await mkdtemp(join(tmpdir(), "yakitori-catalog-"))
+    const cachePath = join(cacheDir, "model-catalogs.json")
+    let now = 1_000
+    const fetchFn = vi.fn(async () =>
+      jsonResponse(modelsDevFixture),
+    ) as unknown as typeof fetch
+
+    const writer = createModelDirectory({
+      fetchFn,
+      now: () => now,
+      ttlMs: 100,
+      cachePath,
+    })
+    const models = await writer.listModels("openai")
+
+    now = 10_000
+    const failingFetch = vi.fn(async () => {
+      throw new Error("network down")
+    }) as unknown as typeof fetch
+    const reader = createModelDirectory({
+      fetchFn: failingFetch,
+      now: () => now,
+      ttlMs: 100,
+      cachePath,
+    })
+    expect(await reader.listModels("openai")).toEqual(models)
+  })
+
+  it("bounds every live fetch with a 15s timeout signal", async () => {
+    const fetchFn = vi.fn(
+      async (_url: unknown, _init?: unknown) => jsonResponse(modelsDevFixture),
+    )
     const directory = createModelDirectory({
       fetchFn: fetchFn as unknown as typeof fetch,
+      disableDiskCache: true,
     })
 
     await directory.listModels("openai")
     const init = fetchFn.mock.calls[0]?.[1] as { signal?: AbortSignal }
     expect(init.signal).toBeInstanceOf(AbortSignal)
+  })
+
+  it("falls back to the anthropic snapshot when no API key is configured", async () => {
+    const fetchFn = vi.fn(async () => {
+      throw new Error("should not fetch")
+    }) as unknown as typeof fetch
+    const directory = createModelDirectory({
+      fetchFn,
+      disableDiskCache: true,
+      anthropicApiKey: () => undefined,
+    })
+
+    const models = await directory.listModels("anthropic")
+    expect(fetchFn).not.toHaveBeenCalled()
+    expect(models.map((model) => model.id)).toEqual([
+      "claude-opus-4-6",
+      "claude-sonnet-4-6",
+      "claude-haiku-4-5",
+    ])
+    expect(models.find((model) => model.id === "claude-haiku-4-5")).toEqual({
+      id: "claude-haiku-4-5",
+      displayName: "Claude Haiku 4.5",
+      description: "Fast, cost-efficient Claude for lighter tasks.",
+    })
   })
 })

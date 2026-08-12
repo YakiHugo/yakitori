@@ -29,7 +29,6 @@ import {
   readCodexLogin,
   recoverSessions,
   resolveGrokAccessToken,
-  resolveModel,
   type CodexLogin,
   type PermissionGate,
   type RuntimeLock,
@@ -180,8 +179,15 @@ export async function createYakitoriApplication(
     )
     // Auto-registered providers pick the model per request, so only the
     // primary provider carries its configured default model. The payload is
-    // assembled per request: the model directory resolves lazily.
-    const modelDirectory = options.modelDirectory ?? createModelDirectory()
+    // assembled per request: the model directory resolves lazily. Disk cache
+    // lives under the store root so test roots and desktop store dirs stay
+    // isolated; production can still point YAKITORI_HOME elsewhere for shared
+    // user config by injecting modelDirectory.
+    const modelDirectory =
+      options.modelDirectory ??
+      createModelDirectory({
+        cachePath: join(rootDir, "model-catalogs.json"),
+      })
     const providers = async (): Promise<ApiListProvidersResponse> => ({
       providers: await Promise.all(
         providerRegistry.providers.map((name) =>
@@ -311,14 +317,20 @@ async function providerSummary(
     (entry) => ({
       id: entry.id,
       displayName: entry.displayName,
-      family: entry.family as string,
+      ...(entry.description === undefined
+        ? {}
+        : { description: entry.description }),
       ...(entry.efforts === undefined ? {} : { efforts: entry.efforts }),
+      ...(entry.defaultEffort === undefined
+        ? {}
+        : { defaultEffort: entry.defaultEffort }),
       ...(entry.speeds === undefined ? {} : { speeds: entry.speeds }),
     }),
   )
   if (configuredModel === undefined) return { name, models }
   // The configured default always comes first; one outside the directory is
-  // synthesized so the running configuration stays selectable.
+  // synthesized so the running configuration stays selectable. promptId stays
+  // server-internal (resolveModel) and is not part of the /providers payload.
   const listed = models.find(
     (entry) => entry.id.toLowerCase() === configuredModel.toLowerCase(),
   )
@@ -328,8 +340,6 @@ async function providerSummary(
           {
             id: configuredModel,
             displayName: configuredModel,
-            family: resolveModel({ provider: name, model: configuredModel })
-              .promptId,
           },
           ...models,
         ]

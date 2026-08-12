@@ -6,6 +6,7 @@ import {
   ApiErrorCode,
   createFauxProvider,
   createMateKernel,
+  createModelDirectory,
   createSqliteMateStore,
   createYakitoriApplication,
   listen,
@@ -457,10 +458,9 @@ describe("application composition", () => {
                 {
                   id: "gpt-5.1-codex",
                   displayName: "GPT-5.1 Codex",
-                  family: "gpt",
                   efforts: ["low", "medium", "high"],
                 },
-                { id: "gpt-5", displayName: "GPT-5", family: "gpt" },
+                { id: "gpt-5", displayName: "GPT-5" },
               ]
             }
             if (provider === "grok") {
@@ -468,7 +468,6 @@ describe("application composition", () => {
                 {
                   id: "grok-code-fast-1",
                   displayName: "Grok Code Fast 1",
-                  family: "default",
                   efforts: ["low", "medium", "high"],
                 },
               ]
@@ -492,14 +491,13 @@ describe("application composition", () => {
           name: "openai",
           defaultModel: "gpt-custom-9",
           models: [
-            { id: "gpt-custom-9", displayName: "gpt-custom-9", family: "gpt" },
+            { id: "gpt-custom-9", displayName: "gpt-custom-9" },
             {
               id: "gpt-5.1-codex",
               displayName: "GPT-5.1 Codex",
-              family: "gpt",
               efforts: ["low", "medium", "high"],
             },
-            { id: "gpt-5", displayName: "GPT-5", family: "gpt" },
+            { id: "gpt-5", displayName: "GPT-5" },
           ],
         })
         expect(
@@ -510,7 +508,6 @@ describe("application composition", () => {
             {
               id: "grok-code-fast-1",
               displayName: "Grok Code Fast 1",
-              family: "default",
               efforts: ["low", "medium", "high"],
             },
           ],
@@ -538,9 +535,7 @@ describe("application composition", () => {
         modelDirectory: {
           async listModels(provider) {
             if (provider === "faux") {
-              return [
-                { id: "scripted", displayName: "Scripted", family: "default" },
-              ]
+              return [{ id: "scripted", displayName: "Scripted" }]
             }
             return []
           },
@@ -557,9 +552,7 @@ describe("application composition", () => {
         ).toEqual({
           name: "faux",
           defaultModel: "scripted",
-          models: [
-            { id: "scripted", displayName: "Scripted", family: "default" },
-          ],
+          models: [{ id: "scripted", displayName: "Scripted" }],
         })
       } finally {
         await new Promise<void>((resolve, reject) => {
@@ -692,9 +685,19 @@ describe("codex login registration", () => {
       await writeFile(join(codexHome, "auth.json"), JSON.stringify(login))
     }
     process.env.CODEX_HOME = codexHome
-    const application = await createYakitoriApplication(
-      testApplicationOptions({ rootDir, workspace }),
-    )
+    // Offline catalog: fixture-driven snapshots/curated entries, no live net.
+    const application = await createYakitoriApplication({
+      ...testApplicationOptions({ rootDir, workspace }),
+      modelDirectory: createModelDirectory({
+        disableDiskCache: true,
+        resolveCodexAuth: async () => undefined,
+        resolveGrokToken: async () => undefined,
+        anthropicApiKey: () => undefined,
+        fetchFn: async () => {
+          throw new Error("network disabled in application tests")
+        },
+      }),
+    })
     const server = application.createHttpServer()
     try {
       const baseUrl = await listen(server)
@@ -730,16 +733,19 @@ describe("codex login registration", () => {
       })
 
       const codex = body.providers.find((provider) => provider.name === "codex")
+      // Snapshot-backed when live catalog is not fetched in this test path.
       expect(codex?.models.map((model) => model.id)).toEqual([
         "gpt-5.6-sol",
         "gpt-5.6-terra",
         "gpt-5.6-luna",
         "gpt-5.5",
+        "gpt-5.2",
       ])
       expect(codex?.models[0]).toMatchObject({
-        displayName: "GPT-5.6 Sol",
-        family: "gpt",
-        efforts: ["low", "medium", "high", "xhigh"],
+        displayName: "GPT-5.6-Sol",
+        efforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
+        defaultEffort: "low",
+        speeds: ["standard", "priority"],
       })
     })
   })

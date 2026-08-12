@@ -87,8 +87,9 @@ export type ApiProviderModel = {
   // Optional: servers before the model-directory work omit it; the GUI falls
   // back to the id.
   readonly displayName?: string
-  readonly family: string
+  readonly description?: string
   readonly efforts?: readonly string[]
+  readonly defaultEffort?: string
   readonly speeds?: readonly string[]
 }
 

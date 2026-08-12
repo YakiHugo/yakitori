@@ -237,46 +237,48 @@ describe("OpenAI Responses provider", () => {
     })
   })
 
-  it("maps a pinned fast speed to the priority service tier", async () => {
-    let body: unknown
-    const client = {
-      responses: {
-        async create(input: unknown) {
-          body = input
-          return (async function* () {
-            yield {
-              type: "response.completed",
-              response: responseFixture({ output: [] }),
-            }
-          })()
+  it("maps catalog speed ids and the legacy fast alias to service_tier", async () => {
+    for (const speed of ["priority", "fast"] as const) {
+      let body: unknown
+      const client = {
+        responses: {
+          async create(input: unknown) {
+            body = input
+            return (async function* () {
+              yield {
+                type: "response.completed",
+                response: responseFixture({ output: [] }),
+              }
+            })()
+          },
         },
-      },
-    } as unknown as OpenAI
-    const stream = createOpenAIProvider({
-      apiKey: "test",
-      model: "gpt-default",
-      client,
-    })
+      } as unknown as OpenAI
+      const stream = createOpenAIProvider({
+        apiKey: "test",
+        model: "gpt-default",
+        client,
+      })
 
-    for await (const _event of stream(
-      requestFixture({
-        target: {
-          provider: "codex",
-          model: "gpt-5.6-sol",
-          promptId: "gpt",
-          effort: "high",
-          speed: "fast",
-        },
-      }),
-    )) {
-      // Drain the stream.
+      for await (const _event of stream(
+        requestFixture({
+          target: {
+            provider: "codex",
+            model: "gpt-5.6-sol",
+            promptId: "gpt",
+            effort: "high",
+            speed,
+          },
+        }),
+      )) {
+        // Drain the stream.
+      }
+
+      expect(body).toMatchObject({
+        model: "gpt-5.6-sol",
+        reasoning: { effort: "high" },
+        service_tier: "priority",
+      })
     }
-
-    expect(body).toMatchObject({
-      model: "gpt-5.6-sol",
-      reasoning: { effort: "high" },
-      service_tier: "priority",
-    })
   })
 
   it("omits service_tier for standard or absent speed", async () => {
