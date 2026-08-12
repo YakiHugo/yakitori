@@ -197,6 +197,178 @@ describe("OpenAI Responses provider", () => {
     })
   })
 
+  it("passes a pinned reasoning effort through to the request params", async () => {
+    let body: unknown
+    const client = {
+      responses: {
+        async create(input: unknown) {
+          body = input
+          return (async function* () {
+            yield {
+              type: "response.completed",
+              response: responseFixture({ output: [] }),
+            }
+          })()
+        },
+      },
+    } as unknown as OpenAI
+    const stream = createOpenAIProvider({
+      apiKey: "test",
+      model: "gpt-default",
+      client,
+    })
+
+    for await (const _event of stream(
+      requestFixture({
+        target: {
+          provider: "openai",
+          model: "gpt-request",
+          promptId: "gpt",
+          effort: "high",
+        },
+      }),
+    )) {
+      // Drain the stream.
+    }
+
+    expect(body).toMatchObject({
+      model: "gpt-request",
+      reasoning: { effort: "high" },
+    })
+  })
+
+  it("maps a pinned fast speed to the priority service tier", async () => {
+    let body: unknown
+    const client = {
+      responses: {
+        async create(input: unknown) {
+          body = input
+          return (async function* () {
+            yield {
+              type: "response.completed",
+              response: responseFixture({ output: [] }),
+            }
+          })()
+        },
+      },
+    } as unknown as OpenAI
+    const stream = createOpenAIProvider({
+      apiKey: "test",
+      model: "gpt-default",
+      client,
+    })
+
+    for await (const _event of stream(
+      requestFixture({
+        target: {
+          provider: "codex",
+          model: "gpt-5.6-sol",
+          promptId: "gpt",
+          effort: "high",
+          speed: "fast",
+        },
+      }),
+    )) {
+      // Drain the stream.
+    }
+
+    expect(body).toMatchObject({
+      model: "gpt-5.6-sol",
+      reasoning: { effort: "high" },
+      service_tier: "priority",
+    })
+  })
+
+  it("omits service_tier for standard or absent speed", async () => {
+    for (const speed of ["standard", undefined]) {
+      let body: unknown
+      const client = {
+        responses: {
+          async create(input: unknown) {
+            body = input
+            return (async function* () {
+              yield {
+                type: "response.completed",
+                response: responseFixture({ output: [] }),
+              }
+            })()
+          },
+        },
+      } as unknown as OpenAI
+      const stream = createOpenAIProvider({
+        apiKey: "test",
+        model: "gpt-default",
+        client,
+      })
+
+      for await (const _event of stream(
+        requestFixture({
+          target: {
+            provider: "codex",
+            model: "gpt-5.6-sol",
+            promptId: "gpt",
+            ...(speed === undefined ? {} : { speed }),
+          },
+        }),
+      )) {
+        // Drain the stream.
+      }
+
+      expect(body).not.toHaveProperty("service_tier")
+    }
+  })
+
+  it("omits reasoning params when no effort is pinned", async () => {
+    let body: unknown
+    const client = {
+      responses: {
+        async create(input: unknown) {
+          body = input
+          return (async function* () {
+            yield {
+              type: "response.completed",
+              response: responseFixture({ output: [] }),
+            }
+          })()
+        },
+      },
+    } as unknown as OpenAI
+    const stream = createOpenAIProvider({
+      apiKey: "test",
+      model: "gpt-default",
+      client,
+    })
+
+    for await (const _event of stream(requestFixture())) {
+      // Drain the stream.
+    }
+
+    expect(body).not.toHaveProperty("reasoning")
+  })
+})
+
+describe("OpenAI provider error classification", () => {
+  it("marks a 429 API error as retryable with its status", async () => {
+    const error = new OpenAI.APIError(429, undefined, undefined, new Headers())
+
+    const events = await collectWithThrowingClient(error)
+
+    expect(events).toEqual([
+      {
+        type: "response",
+        response: {
+          stopReason: ModelStopReason.Error,
+          content: [],
+          error: {
+            code: "openai_error",
+            message: error.message,
+            details: { retryable: true, status: 429 },
+          },
+        },
+      },
+    ])
+  })
+
   it("keeps a 400 API error free of retry details", async () => {
     const error = new OpenAI.APIError(400, undefined, undefined, new Headers())
 

@@ -186,6 +186,76 @@ describe("session runner", () => {
     })
   })
 
+  it("carries a selected effort into the context and inherits it for later Inputs", async () => {
+    await withRuntime(async (runtime) => {
+      const provider = createFauxProvider([
+        { content: [{ type: "text", text: "selected" }] },
+        { content: [{ type: "text", text: "inherited" }] },
+      ])
+      const providers = createProviderRegistry({ openai: provider.stream })
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: providers.stream,
+        provider: "faux",
+        model: "scripted",
+      })
+      const session = await createAttributedSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        requestId: "request_effort",
+        content: { kind: "text", text: "first" },
+        modelSelection: {
+          provider: "openai",
+          model: "gpt-5.1-codex",
+          effort: "high",
+          speed: "fast",
+        },
+      })
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        requestId: "request_inherit_effort",
+        content: { kind: "text", text: "second" },
+      })
+
+      await runner.wake(session.sessionId)
+
+      const read = await runtime.kernel.readSession({
+        sessionId: session.sessionId,
+      })
+      expect(
+        read.session?.turns.map((turn) => ({
+          provider: turn.executionContext?.provider,
+          model: turn.executionContext?.model,
+          effort: turn.executionContext?.effort,
+          speed: turn.executionContext?.speed,
+        })),
+      ).toEqual([
+        {
+          provider: "openai",
+          model: "gpt-5.1-codex",
+          effort: "high",
+          speed: "fast",
+        },
+        {
+          provider: "openai",
+          model: "gpt-5.1-codex",
+          effort: "high",
+          speed: "fast",
+        },
+      ])
+      expect(
+        provider.requests.map((request) => ({
+          effort: request.target.effort,
+          speed: request.target.speed,
+        })),
+      ).toEqual([
+        { effort: "high", speed: "fast" },
+        { effort: "high", speed: "fast" },
+      ])
+    })
+  })
+
   it("shares one execution lane across concurrent wakes", async () => {
     await withRuntime(async (runtime) => {
       let activeCalls = 0

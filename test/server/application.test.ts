@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import {
   ApiErrorCode,
   createFauxProvider,
@@ -12,6 +12,7 @@ import {
   MateLifecycle,
   resolveWorkspaceDirectory,
   type ApiHandlerResult,
+  type ApiListProvidersResponse,
 } from "../../src/index.ts"
 
 function testApplicationOptions(input: {
@@ -440,6 +441,142 @@ describe("application composition", () => {
     })
   })
 
+  it("serves catalog models per provider and prepends a configured default outside the catalog", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const application = await createYakitoriApplication({
+        rootDir,
+        workspace,
+        recoverOnStart: false,
+        stream: createFauxProvider([]).stream,
+        provider: "openai",
+        model: "gpt-custom-9",
+        modelDirectory: {
+          async listModels(provider) {
+            if (provider === "openai") {
+              return [
+                {
+                  id: "gpt-5.1-codex",
+                  displayName: "GPT-5.1 Codex",
+                  family: "gpt",
+                  efforts: ["low", "medium", "high"],
+                },
+                { id: "gpt-5", displayName: "GPT-5", family: "gpt" },
+              ]
+            }
+            if (provider === "grok") {
+              return [
+                {
+                  id: "grok-code-fast-1",
+                  displayName: "Grok Code Fast 1",
+                  family: "default",
+                  efforts: ["low", "medium", "high"],
+                },
+              ]
+            }
+            return []
+          },
+        },
+      })
+      const server = application.createHttpServer()
+      try {
+        const baseUrl = await listen(server)
+        const response = await fetch(`${baseUrl}/providers`)
+        expect(response.status).toBe(200)
+        const body = (await response.json()) as ApiListProvidersResponse
+
+        expect(body.defaultProvider).toBe("openai")
+        expect(body.defaultModel).toBe("gpt-custom-9")
+        expect(
+          body.providers.find((provider) => provider.name === "openai"),
+        ).toEqual({
+          name: "openai",
+          defaultModel: "gpt-custom-9",
+          models: [
+            { id: "gpt-custom-9", displayName: "gpt-custom-9", family: "gpt" },
+            {
+              id: "gpt-5.1-codex",
+              displayName: "GPT-5.1 Codex",
+              family: "gpt",
+              efforts: ["low", "medium", "high"],
+            },
+            { id: "gpt-5", displayName: "GPT-5", family: "gpt" },
+          ],
+        })
+        expect(
+          body.providers.find((provider) => provider.name === "grok"),
+        ).toEqual({
+          name: "grok",
+          models: [
+            {
+              id: "grok-code-fast-1",
+              displayName: "Grok Code Fast 1",
+              family: "default",
+              efforts: ["low", "medium", "high"],
+            },
+          ],
+        })
+      } finally {
+        await new Promise<void>((resolve, reject) => {
+          server.close((error) => {
+            if (error) {
+              reject(error)
+              return
+            }
+            resolve()
+          })
+          server.closeAllConnections()
+        })
+        await application.close()
+      }
+    })
+  })
+
+  it("does not duplicate a configured default that is already in the catalog", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const application = await createYakitoriApplication({
+        ...testApplicationOptions({ rootDir, workspace }),
+        modelDirectory: {
+          async listModels(provider) {
+            if (provider === "faux") {
+              return [
+                { id: "scripted", displayName: "Scripted", family: "default" },
+              ]
+            }
+            return []
+          },
+        },
+      })
+      const server = application.createHttpServer()
+      try {
+        const baseUrl = await listen(server)
+        const response = await fetch(`${baseUrl}/providers`)
+        const body = (await response.json()) as ApiListProvidersResponse
+
+        expect(
+          body.providers.find((provider) => provider.name === "faux"),
+        ).toEqual({
+          name: "faux",
+          defaultModel: "scripted",
+          models: [
+            { id: "scripted", displayName: "Scripted", family: "default" },
+          ],
+        })
+      } finally {
+        await new Promise<void>((resolve, reject) => {
+          server.close((error) => {
+            if (error) {
+              reject(error)
+              return
+            }
+            resolve()
+          })
+          server.closeAllConnections()
+        })
+        await application.close()
+      }
+    })
+  })
+
   it("serves the built GUI when guiStaticDir is configured", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const guiStaticDir = join(rootDir, "gui")
@@ -521,6 +658,136 @@ describe("application composition", () => {
       } finally {
         await started.close()
       }
+    })
+  })
+})
+
+describe("codex login registration", () => {
+  const touchedEnv = ["CODEX_HOME", "OPENAI_API_KEY"] as const
+  let savedEnv: Record<(typeof touchedEnv)[number], string | undefined>
+
+  beforeEach(() => {
+    savedEnv = Object.fromEntries(
+      touchedEnv.map((key) => [key, process.env[key]]),
+    ) as typeof savedEnv
+    delete process.env.OPENAI_API_KEY
+  })
+
+  afterEach(() => {
+    for (const key of touchedEnv) {
+      const value = savedEnv[key]
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  })
+
+  async function providersWithLogin(
+    rootDir: string,
+    workspace: string,
+    login: unknown | undefined,
+  ): Promise<ApiListProvidersResponse> {
+    const codexHome = join(rootDir, "codex-home")
+    await mkdir(codexHome, { recursive: true })
+    if (login !== undefined) {
+      await writeFile(join(codexHome, "auth.json"), JSON.stringify(login))
+    }
+    process.env.CODEX_HOME = codexHome
+    const application = await createYakitoriApplication(
+      testApplicationOptions({ rootDir, workspace }),
+    )
+    const server = application.createHttpServer()
+    try {
+      const baseUrl = await listen(server)
+      const response = await fetch(`${baseUrl}/providers`)
+      return (await response.json()) as ApiListProvidersResponse
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error)
+            return
+          }
+          resolve()
+        })
+        server.closeAllConnections()
+      })
+      await application.close()
+    }
+  }
+
+  it("registers the codex provider with the curated catalog for ChatGPT logins", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const body = await providersWithLogin(rootDir, workspace, {
+        auth_mode: "chatgpt",
+        OPENAI_API_KEY: null,
+        tokens: {
+          id_token: "id",
+          access_token: "access",
+          refresh_token: "refresh",
+          account_id: "account-1",
+        },
+        last_refresh: "2026-08-10T00:00:00.000Z",
+      })
+
+      const codex = body.providers.find((provider) => provider.name === "codex")
+      expect(codex?.models.map((model) => model.id)).toEqual([
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.5",
+      ])
+      expect(codex?.models[0]).toMatchObject({
+        displayName: "GPT-5.6 Sol",
+        family: "gpt",
+        efforts: ["low", "medium", "high", "xhigh"],
+      })
+    })
+  })
+
+  it("registers plain openai for API-key logins when no env key claims it", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const body = await providersWithLogin(rootDir, workspace, {
+        auth_mode: "apikey",
+        OPENAI_API_KEY: "sk-from-auth-json",
+        tokens: null,
+      })
+
+      expect(
+        body.providers.some((provider) => provider.name === "openai"),
+      ).toBe(true)
+      expect(body.providers.some((provider) => provider.name === "codex")).toBe(
+        false,
+      )
+    })
+  })
+
+  it("prefers the environment key over the auth.json API key", async () => {
+    process.env.OPENAI_API_KEY = "sk-from-env"
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const body = await providersWithLogin(rootDir, workspace, {
+        auth_mode: "apikey",
+        OPENAI_API_KEY: "sk-from-auth-json",
+        tokens: null,
+      })
+
+      expect(
+        body.providers.filter((provider) => provider.name === "openai"),
+      ).toHaveLength(1)
+      expect(body.providers.some((provider) => provider.name === "codex")).toBe(
+        false,
+      )
+    })
+  })
+
+  it("registers neither codex nor openai without a login or env key", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const body = await providersWithLogin(rootDir, workspace, undefined)
+
+      expect(
+        body.providers.some(
+          (provider) => provider.name === "codex" || provider.name === "openai",
+        ),
+      ).toBe(false)
     })
   })
 })

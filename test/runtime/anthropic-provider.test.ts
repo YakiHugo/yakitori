@@ -334,7 +334,286 @@ describe("anthropic provider conversion", () => {
 
     expect(toAnthropicSystem(request.system)).toBe("base\n\nenvironment")
   })
+
+  it("adds output_config and the effort beta header for official anthropic", async () => {
+    let body: Record<string, unknown> | undefined
+    let options: Record<string, unknown> | undefined
+    const client = {
+      messages: {
+        stream(input: Record<string, unknown>, opts: Record<string, unknown>) {
+          body = input
+          options = opts
+          return {
+            async *[Symbol.asyncIterator]() {},
+            async finalMessage() {
+              return {
+                id: "msg_effort",
+                stop_reason: "end_turn",
+                content: [{ type: "text", text: "ok" }],
+              }
+            },
+          }
+        },
+      },
+    } as unknown as Anthropic
+    const stream = createAnthropicProvider({
+      apiKey: "test",
+      model: "claude-test",
+      client,
+    })
+
+    for await (const _event of stream(effortRequest("anthropic", "high")))
+      void _event
+
+    expect(body).toMatchObject({
+      model: "claude-test",
+      output_config: { effort: "high" },
+    })
+    expect(options).toMatchObject({
+      headers: { "anthropic-beta": "effort-2025-11-24" },
+    })
+  })
+
+  it("omits output_config and the beta header without an effort", async () => {
+    let body: Record<string, unknown> | undefined
+    let options: unknown = "not-passed"
+    const client = {
+      messages: {
+        stream(input: Record<string, unknown>, opts?: unknown) {
+          body = input
+          options = opts ?? "not-passed"
+          return {
+            async *[Symbol.asyncIterator]() {},
+            async finalMessage() {
+              return {
+                id: "msg_no_effort",
+                stop_reason: "end_turn",
+                content: [{ type: "text", text: "ok" }],
+              }
+            },
+          }
+        },
+      },
+    } as unknown as Anthropic
+    const stream = createAnthropicProvider({
+      apiKey: "test",
+      model: "claude-test",
+      client,
+    })
+
+    for await (const _event of stream(effortRequest("anthropic", undefined)))
+      void _event
+
+    expect(body).not.toHaveProperty("output_config")
+    expect(options).toBe("not-passed")
+  })
+
+  it("sends the effort beta for the kimi coding endpoint", async () => {
+    let body: Record<string, unknown> | undefined
+    let options: Record<string, unknown> | undefined
+    const client = {
+      messages: {
+        stream(input: Record<string, unknown>, opts: Record<string, unknown>) {
+          body = input
+          options = opts
+          return {
+            async *[Symbol.asyncIterator]() {},
+            async finalMessage() {
+              return {
+                id: "msg_kimi_effort",
+                stop_reason: "end_turn",
+                content: [{ type: "text", text: "ok" }],
+              }
+            },
+          }
+        },
+      },
+    } as unknown as Anthropic
+    const stream = createAnthropicProvider({
+      apiKey: "test",
+      model: "kimi-for-coding",
+      client,
+    })
+
+    for await (const _event of stream(effortRequest("kimi", "max"))) void _event
+
+    expect(body).toMatchObject({
+      model: "kimi-for-coding",
+      output_config: { effort: "max" },
+    })
+    expect(options).toMatchObject({
+      headers: { "anthropic-beta": "effort-2025-11-24" },
+    })
+    // Cache-control stays official-Anthropic-only, even with effort.
+    expect(JSON.stringify(body)).not.toContain("cache_control")
+  })
+
+  it("omits output_config and the beta header for kimi without an effort", async () => {
+    let body: Record<string, unknown> | undefined
+    let options: unknown = "not-passed"
+    const client = {
+      messages: {
+        stream(input: Record<string, unknown>, opts?: unknown) {
+          body = input
+          options = opts ?? "not-passed"
+          return {
+            async *[Symbol.asyncIterator]() {},
+            async finalMessage() {
+              return {
+                id: "msg_kimi_plain",
+                stop_reason: "end_turn",
+                content: [{ type: "text", text: "ok" }],
+              }
+            },
+          }
+        },
+      },
+    } as unknown as Anthropic
+    const stream = createAnthropicProvider({
+      apiKey: "test",
+      model: "kimi-for-coding",
+      client,
+    })
+
+    for await (const _event of stream(effortRequest("kimi", undefined)))
+      void _event
+
+    expect(body).not.toHaveProperty("output_config")
+    expect(options).toBe("not-passed")
+  })
+
+  it("maps effort off to thinking.disabled without the beta header", async () => {
+    let body: Record<string, unknown> | undefined
+    let options: unknown = "not-passed"
+    const client = {
+      messages: {
+        stream(input: Record<string, unknown>, opts?: unknown) {
+          body = input
+          options = opts ?? "not-passed"
+          return {
+            async *[Symbol.asyncIterator]() {},
+            async finalMessage() {
+              return {
+                id: "msg_kimi_off",
+                stop_reason: "end_turn",
+                content: [{ type: "text", text: "ok" }],
+              }
+            },
+          }
+        },
+      },
+    } as unknown as Anthropic
+    const stream = createAnthropicProvider({
+      apiKey: "test",
+      model: "kimi-for-coding",
+      client,
+    })
+
+    for await (const _event of stream(effortRequest("kimi", "off"))) void _event
+
+    expect(body).toMatchObject({ thinking: { type: "disabled" } })
+    expect(body).not.toHaveProperty("output_config")
+    // The effort beta header belongs to output_config only.
+    expect(options).toBe("not-passed")
+  })
+
+  it("sends nothing for effort on (the endpoint default)", async () => {
+    let body: Record<string, unknown> | undefined
+    let options: unknown = "not-passed"
+    const client = {
+      messages: {
+        stream(input: Record<string, unknown>, opts?: unknown) {
+          body = input
+          options = opts ?? "not-passed"
+          return {
+            async *[Symbol.asyncIterator]() {},
+            async finalMessage() {
+              return {
+                id: "msg_kimi_on",
+                stop_reason: "end_turn",
+                content: [{ type: "text", text: "ok" }],
+              }
+            },
+          }
+        },
+      },
+    } as unknown as Anthropic
+    const stream = createAnthropicProvider({
+      apiKey: "test",
+      model: "kimi-for-coding",
+      client,
+    })
+
+    for await (const _event of stream(effortRequest("kimi", "on"))) void _event
+
+    expect(body).not.toHaveProperty("output_config")
+    expect(body).not.toHaveProperty("thinking")
+    expect(options).toBe("not-passed")
+  })
+
+  it("omits the effort beta for compatible-but-not-official providers", async () => {
+    let body: Record<string, unknown> | undefined
+    let options: unknown = "not-passed"
+    const client = {
+      messages: {
+        stream(input: Record<string, unknown>, opts?: unknown) {
+          body = input
+          options = opts ?? "not-passed"
+          return {
+            async *[Symbol.asyncIterator]() {},
+            async finalMessage() {
+              return {
+                id: "msg_other_effort",
+                stop_reason: "end_turn",
+                content: [{ type: "text", text: "ok" }],
+              }
+            },
+          }
+        },
+      },
+    } as unknown as Anthropic
+    const stream = createAnthropicProvider({
+      apiKey: "test",
+      model: "other-model",
+      client,
+    })
+
+    for await (const _event of stream(effortRequest("other", "high")))
+      void _event
+
+    expect(body).not.toHaveProperty("output_config")
+    expect(options).toBe("not-passed")
+  })
 })
+
+function effortRequest(
+  provider: string,
+  effort: string | undefined,
+): ModelRequest {
+  const known: Record<
+    string,
+    { readonly model: string; readonly promptId: string }
+  > = {
+    anthropic: { model: "claude-test", promptId: "anthropic" },
+    kimi: { model: "kimi-for-coding", promptId: "kimi" },
+  }
+  const target = known[provider] ?? {
+    model: "other-model",
+    promptId: "default",
+  }
+  return {
+    target: {
+      provider,
+      model: target.model,
+      promptId: target.promptId,
+      ...(effort === undefined ? {} : { effort }),
+    },
+    system: [{ id: "base", revision: "base-1", text: "Be helpful." }],
+    contextual: [],
+    messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+    tools: [],
+  }
+}
 
 describe("anthropic provider error classification", () => {
   it("marks a 429 API error as retryable with its status", async () => {

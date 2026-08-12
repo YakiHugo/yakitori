@@ -106,6 +106,8 @@ export type TurnExecutionLimits = {
 export type ModelSelection = {
   readonly provider: string
   readonly model: string
+  readonly effort?: string
+  readonly speed?: string
 }
 
 export type TurnExecutionContext = {
@@ -113,6 +115,8 @@ export type TurnExecutionContext = {
   readonly mateRevisionId: string
   readonly provider: string
   readonly model: string
+  readonly effort?: string
+  readonly speed?: string
   /** Missing only on events written before prompt attribution was introduced. */
   readonly promptId?: string
   readonly workingDirectory: string
@@ -589,11 +593,15 @@ function isTextContent(value: unknown): value is TextContent {
 function isModelSelection(value: unknown): value is ModelSelection {
   return (
     isRecord(value) &&
-    onlyKeys(value, ["provider", "model"]) &&
+    onlyKeys(value, ["provider", "model", "effort", "speed"]) &&
     isString(value.provider) &&
     value.provider.length > 0 &&
     isString(value.model) &&
-    value.model.length > 0
+    value.model.length > 0 &&
+    (value.effort === undefined ||
+      (isString(value.effort) && value.effort.length > 0)) &&
+    (value.speed === undefined ||
+      (isString(value.speed) && value.speed.length > 0))
   )
 }
 
@@ -634,6 +642,8 @@ function isTurnExecutionContext(value: unknown): value is TurnExecutionContext {
     isString(value.mateRevisionId) &&
     isString(value.provider) &&
     isString(value.model) &&
+    (value.effort === undefined || isString(value.effort)) &&
+    (value.speed === undefined || isString(value.speed)) &&
     (value.promptId === undefined || isString(value.promptId)) &&
     isString(value.workingDirectory) &&
     isString(value.approvalPolicy) &&

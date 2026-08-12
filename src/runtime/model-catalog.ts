@@ -8,6 +8,43 @@ export type ResolvedModel = {
   readonly promptId: PromptId
 }
 
+export type CatalogModel = {
+  readonly model: string
+  readonly promptId: PromptId
+  readonly displayName?: string
+  readonly efforts?: readonly string[]
+  readonly speeds?: readonly string[]
+}
+
+export function listCatalogModels(provider: string): CatalogModel[] {
+  const normalized = provider.toLowerCase()
+  return catalog.models
+    .filter((entry) => entry.provider.toLowerCase() === normalized)
+    .map((entry) => ({
+      model: entry.model,
+      promptId: requirePromptId(entry.promptId),
+      ...("displayName" in entry && entry.displayName !== undefined
+        ? { displayName: entry.displayName }
+        : {}),
+      ...("efforts" in entry && entry.efforts !== undefined
+        ? { efforts: entry.efforts }
+        : {}),
+      ...("speeds" in entry && entry.speeds !== undefined
+        ? { speeds: entry.speeds }
+        : {}),
+    }))
+}
+
+// Opt-in curation of the models.dev firehose: providers with an entry show
+// only these ids, in this order; others show every sanitized model.
+export function directoryAllowlist(
+  provider: string,
+): readonly string[] | undefined {
+  return catalog.directoryAllowlist[
+    provider.toLowerCase() as keyof typeof catalog.directoryAllowlist
+  ]
+}
+
 export function resolveModel(input: {
   readonly provider: string
   readonly model: string

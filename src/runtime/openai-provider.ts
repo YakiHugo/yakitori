@@ -4,6 +4,7 @@ import type {
   Response,
   ResponseInput,
 } from "openai/resources/responses/responses"
+import type { ReasoningEffort } from "openai/resources/shared"
 import type { JsonObject, JsonValue } from "../kernel/index.ts"
 import {
   flattenModelSystem,
@@ -22,6 +23,9 @@ export type OpenAIProviderOptions = {
   readonly client?: OpenAI
   // Compatible endpoints (e.g. xAI at https://api.x.ai/v1) override the default.
   readonly baseURL?: string
+  // Extra per-endpoint identity headers (e.g. chatgpt-account-id for the
+  // codex ChatGPT backend).
+  readonly defaultHeaders?: Record<string, string>
 }
 
 export function createOpenAIProvider(options: OpenAIProviderOptions): StreamFn {
@@ -31,6 +35,7 @@ export function createOpenAIProvider(options: OpenAIProviderOptions): StreamFn {
     new OpenAI({
       apiKey: options.apiKey,
       baseURL: options.baseURL,
+      defaultHeaders: options.defaultHeaders,
       maxRetries: 0,
     })
   return (request) => streamOpenAI(client, options.model, request)
@@ -60,6 +65,18 @@ async function* streamOpenAI(
         max_output_tokens: 8_192,
         store: false,
         stream: true,
+        ...(request.target.effort === undefined
+          ? {}
+          : {
+              reasoning: {
+                effort: request.target.effort as ReasoningEffort,
+              },
+            }),
+        // Speed tiers: only "fast" maps onto the wire ("priority"); anything
+        // else falls through to the server default.
+        ...(request.target.speed === "fast"
+          ? { service_tier: "priority" as const }
+          : {}),
       },
       request.signal === undefined ? undefined : { signal: request.signal },
     )

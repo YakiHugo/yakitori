@@ -238,15 +238,33 @@ describe("server handlers", () => {
       sessionId: created.body.session.id,
       requestId: "request_selected-provider",
       content: { kind: "text", text: "use this model" },
-      modelSelection: { provider: "openai", model: "gpt-5.6-sol" },
+      modelSelection: {
+        provider: "openai",
+        model: "gpt-5.6-sol",
+        effort: "high",
+        speed: "fast",
+      },
     })
     expectOk(admitted)
     expect(admitted.body.event).toMatchObject({
       type: EventType.InputAdmitted,
       data: {
-        modelSelection: { provider: "openai", model: "gpt-5.6-sol" },
+        modelSelection: {
+          provider: "openai",
+          model: "gpt-5.6-sol",
+          effort: "high",
+          speed: "fast",
+        },
       },
     })
+
+    const badSpeed = await server.admitInput({
+      sessionId: created.body.session.id,
+      requestId: "request_bad-speed",
+      content: { kind: "text", text: "use this model" },
+      modelSelection: { provider: "openai", model: "gpt-5.6-sol", speed: "" },
+    })
+    expectError(badSpeed, 400, ApiErrorCode.InvalidInput)
   })
 
   it("returns the original admission for an exact request retry", async () => {

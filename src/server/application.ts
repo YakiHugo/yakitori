@@ -17,6 +17,7 @@ import {
 import {
   acquireRuntimeLock,
   createAnthropicProvider,
+  createCodexProvider,
   createOpenAIProvider,
   createPermissionGate,
   createProviderRegistry,
@@ -25,8 +26,11 @@ import {
   createTransientEventHub,
   GROK_API_BASE_URL,
   ModelStopReason,
+  readCodexLogin,
   recoverSessions,
   resolveGrokAccessToken,
+  resolveModel,
+  type CodexLogin,
   type PermissionGate,
   type RuntimeLock,
   type SessionRunner,
@@ -41,6 +45,12 @@ import {
   type ServerHandlers,
 } from "./handlers.ts"
 import { createYakitoriHttpServer } from "./http.ts"
+import { createModelDirectory, type ModelDirectory } from "./model-directory.ts"
+import type {
+  ApiListProvidersResponse,
+  ApiProviderModel,
+  ApiProviderSummary,
+} from "./protocol.ts"
 import {
   createProjectRegistry,
   type ProjectRegistry,
@@ -68,6 +78,7 @@ export type YakitoriApplicationOptions = {
   readonly workspace?: string
   readonly stream?: StreamFn
   readonly providerStreams?: Readonly<Record<string, StreamFn>>
+  readonly modelDirectory?: ModelDirectory
   readonly provider?: string
   readonly model?: string
   readonly fauxScenario?: string
@@ -165,8 +176,25 @@ export async function createYakitoriApplication(
               (providerName === "faux" ? "scripted" : "injected"),
           }
     const providerRegistry = createProviderRegistry(
-      createConfiguredProviderStreams(provider, options.providerStreams),
+      await createConfiguredProviderStreams(provider, options.providerStreams),
     )
+    // Auto-registered providers pick the model per request, so only the
+    // primary provider carries its configured default model. The payload is
+    // assembled per request: the model directory resolves lazily.
+    const modelDirectory = options.modelDirectory ?? createModelDirectory()
+    const providers = async (): Promise<ApiListProvidersResponse> => ({
+      providers: await Promise.all(
+        providerRegistry.providers.map((name) =>
+          providerSummary(
+            modelDirectory,
+            name,
+            name === provider.provider ? provider.model : undefined,
+          ),
+        ),
+      ),
+      defaultProvider: provider.provider,
+      defaultModel: provider.model,
+    })
 
     const runner = createSessionRunner({
       kernel: sessionKernel,
@@ -239,6 +267,7 @@ export async function createYakitoriApplication(
           transientHub,
           handlers,
           projectRegistry,
+          providers,
           ...(options.guiStaticDir === undefined
             ? {}
             : { staticAssets: { directory: options.guiStaticDir } }),
@@ -273,13 +302,48 @@ export async function createYakitoriApplication(
   }
 }
 
-function createConfiguredProviderStreams(
+async function providerSummary(
+  directory: ModelDirectory,
+  name: string,
+  configuredModel: string | undefined,
+): Promise<ApiProviderSummary> {
+  const models: ApiProviderModel[] = (await directory.listModels(name)).map(
+    (entry) => ({
+      id: entry.id,
+      displayName: entry.displayName,
+      family: entry.family as string,
+      ...(entry.efforts === undefined ? {} : { efforts: entry.efforts }),
+      ...(entry.speeds === undefined ? {} : { speeds: entry.speeds }),
+    }),
+  )
+  if (configuredModel === undefined) return { name, models }
+  // The configured default always comes first; one outside the directory is
+  // synthesized so the running configuration stays selectable.
+  const listed = models.find(
+    (entry) => entry.id.toLowerCase() === configuredModel.toLowerCase(),
+  )
+  const ordered =
+    listed === undefined
+      ? [
+          {
+            id: configuredModel,
+            displayName: configuredModel,
+            family: resolveModel({ provider: name, model: configuredModel })
+              .promptId,
+          },
+          ...models,
+        ]
+      : [listed, ...models.filter((entry) => entry !== listed)]
+  return { name, defaultModel: configuredModel, models: ordered }
+}
+
+async function createConfiguredProviderStreams(
   primary: {
     readonly provider: string
     readonly stream: StreamFn
   },
   injected: Readonly<Record<string, StreamFn>> | undefined,
-): Readonly<Record<string, StreamFn>> {
+): Promise<Readonly<Record<string, StreamFn>>> {
   const providers: Record<string, StreamFn> = { ...injected }
   const anthropicApiKey = process.env.ANTHROPIC_API_KEY
   if (anthropicApiKey && providers.anthropic === undefined) {
@@ -310,8 +374,40 @@ function createConfiguredProviderStreams(
     )
   }
   providers.grok ??= createGrokStream()
+  await registerCodexLogin(providers)
   providers[primary.provider] = primary.stream
   return providers
+}
+
+// Registers the codex provider from the local codex CLI login, or the plain
+// openai provider for API-key logins when no environment key already claims
+// it. A missing or unreadable login disables codex without breaking startup.
+async function registerCodexLogin(
+  providers: Record<string, StreamFn>,
+): Promise<void> {
+  let login: CodexLogin | undefined
+  try {
+    login = await readCodexLogin()
+  } catch (error) {
+    console.warn(
+      "Codex login could not be read; codex provider disabled.",
+      error,
+    )
+    return
+  }
+  if (login === undefined) return
+  if (login.kind === "chatgpt") {
+    providers.codex ??= createCodexProvider()
+    return
+  }
+  if (providers.openai === undefined) {
+    providers.openai = withRetries(
+      createOpenAIProvider({
+        apiKey: login.apiKey,
+        model: "selected-at-request-time",
+      }),
+    )
+  }
 }
 
 async function closeApplicationResources(

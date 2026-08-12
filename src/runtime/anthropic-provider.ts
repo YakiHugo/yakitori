@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk"
 import type {
   MessageParam,
+  OutputConfig,
   TextBlockParam,
   Tool,
   ToolResultBlockParam,
@@ -60,6 +61,18 @@ async function* streamAnthropic(
   try {
     const explicitPromptCaching = request.target.provider === "anthropic"
     const tools = toAnthropicTools(request.tools, explicitPromptCaching)
+    // Effort is only sent where support is confirmed: official Anthropic and
+    // Kimi's Anthropic-compatible coding endpoint (which mirrors Claude Code).
+    // Cache-control stays official-Anthropic-only. Kimi boolean-thinking
+    // models take "on"/"off": "off" maps to thinking.disabled, "on" is the
+    // endpoint default and sends nothing; real levels use the effort beta.
+    const effort = EFFORT_BETA_PROVIDERS.has(request.target.provider)
+      ? request.target.effort
+      : undefined
+    const effortLevel =
+      effort === undefined || effort === "on" || effort === "off"
+        ? undefined
+        : effort
     stream = client.messages.stream(
       {
         model: request.target.model || defaultModel,
@@ -71,8 +84,25 @@ async function* streamAnthropic(
           explicitPromptCaching,
         ),
         ...(tools === undefined ? {} : { tools }),
+        ...(effort === "off"
+          ? { thinking: { type: "disabled" as const } }
+          : {}),
+        ...(effortLevel === undefined
+          ? {}
+          : {
+              output_config: {
+                effort: effortLevel as NonNullable<OutputConfig["effort"]>,
+              },
+            }),
       },
-      request.signal === undefined ? undefined : { signal: request.signal },
+      request.signal === undefined && effortLevel === undefined
+        ? undefined
+        : {
+            ...(request.signal === undefined ? {} : { signal: request.signal }),
+            ...(effortLevel === undefined
+              ? {}
+              : { headers: { "anthropic-beta": "effort-2025-11-24" } }),
+          },
     )
   } catch (error) {
     yield {
@@ -332,6 +362,12 @@ function terminalError(error: unknown): ModelResponse {
 
 const RETRYABLE_STATUSES: ReadonlySet<number> = new Set([
   408, 409, 429, 500, 502, 503, 504, 529,
+])
+
+// Providers whose Anthropic-compatible endpoint accepts the effort beta.
+const EFFORT_BETA_PROVIDERS: ReadonlySet<string> = new Set([
+  "anthropic",
+  "kimi",
 ])
 
 // Mid-stream SSE error events carry no HTTP status; these error types are the

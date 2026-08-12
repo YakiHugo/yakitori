@@ -2,6 +2,7 @@ import type {
   EventEnvelope,
   EventMetadata,
   InputRole,
+  ModelSelection,
   StoredEventEnvelope,
   TextContent,
 } from "../kernel/index.ts"
@@ -81,10 +82,33 @@ export type ApiAddProjectResponse = {
   readonly projects: readonly string[]
 }
 
+export type ApiProviderModel = {
+  readonly id: string
+  // Optional: servers before the model-directory work omit it; the GUI falls
+  // back to the id.
+  readonly displayName?: string
+  readonly family: string
+  readonly efforts?: readonly string[]
+  readonly speeds?: readonly string[]
+}
+
+export type ApiProviderSummary = {
+  readonly name: string
+  readonly defaultModel?: string
+  readonly models: readonly ApiProviderModel[]
+}
+
+export type ApiListProvidersResponse = {
+  readonly providers: readonly ApiProviderSummary[]
+  readonly defaultProvider: string
+  readonly defaultModel: string
+}
+
 export type ApiAdmitInputRequest = {
   readonly sessionId: string
   readonly requestId: string
   readonly content: TextContent
+  readonly modelSelection?: ModelSelection
   readonly role?: InputRole
   readonly parentInputId?: string
   readonly metadata?: EventMetadata

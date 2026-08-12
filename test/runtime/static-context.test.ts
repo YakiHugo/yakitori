@@ -17,6 +17,7 @@ describe("model catalog", () => {
     ["kimi", "opaque-coding-model", "kimi"],
     ["opencode", "muse-spark-1", "default"],
     ["opencode", "trinity-large", "default"],
+    ["codex", "gpt-9-future", "gpt"],
     ["faux", "scripted", "default"],
   ] as const)("maps %s/%s to %s", (provider, model, promptId) => {
     expect(resolveModel({ provider, model }).promptId).toBe(promptId)

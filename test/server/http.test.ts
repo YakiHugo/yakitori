@@ -15,6 +15,7 @@ import {
   type ApiCancelInputResponse,
   type ApiCreateSessionResponse,
   ApiErrorCode,
+  type ApiListProvidersResponse,
   type ApiListSessionsResponse,
   type ApiReadSessionResponse,
   createInputId,
@@ -797,6 +798,54 @@ describe("HTTP static assets", () => {
 
       const added = await postJson(`${baseUrl}/projects`, { path: "/tmp" })
       expect(added.status).toBe(404)
+    })
+  })
+
+  it("serves the provider catalog from the configured option", async () => {
+    const providers: ApiListProvidersResponse = {
+      providers: [
+        {
+          name: "faux",
+          defaultModel: "scripted",
+          models: [
+            { id: "scripted", displayName: "scripted", family: "default" },
+          ],
+        },
+        {
+          name: "openai",
+          models: [
+            {
+              id: "gpt-5.1-codex",
+              displayName: "GPT-5.1 Codex",
+              family: "gpt",
+              efforts: ["low", "medium", "high"],
+            },
+          ],
+        },
+      ],
+      defaultProvider: "faux",
+      defaultModel: "scripted",
+    }
+
+    await withListeningServer(
+      createYakitoriHttpServer({
+        kernel: createSessionKernel(createMemoryEventStore()),
+        providers: async () => providers,
+      }),
+      async (baseUrl) => {
+        const listed = await getJson<ApiListProvidersResponse>(
+          `${baseUrl}/providers`,
+        )
+        expect(listed.status).toBe(200)
+        expect(listed.body).toEqual(providers)
+      },
+    )
+  })
+
+  it("keeps the providers route at 404 without a catalog", async () => {
+    await withHttpServer(async (baseUrl) => {
+      const listed = await fetch(`${baseUrl}/providers`)
+      expect(listed.status).toBe(404)
     })
   })
 })
