@@ -36,7 +36,19 @@ export function buildCompactionRequest(input: {
   readonly signal?: AbortSignal
 }): ModelRequest {
   return {
-    system: COMPACTION_SYSTEM_PROMPT,
+    target: {
+      provider: input.provider,
+      model: input.model,
+      promptId: "compaction",
+    },
+    system: [
+      {
+        id: "compaction.instructions",
+        revision: "1",
+        text: COMPACTION_SYSTEM_PROMPT,
+      },
+    ],
+    contextual: [],
     messages: [
       ...input.source.flatMap((group) => group.messages),
       {
@@ -47,8 +59,6 @@ export function buildCompactionRequest(input: {
       },
     ],
     tools: [],
-    provider: input.provider,
-    model: input.model,
     ...(input.signal === undefined ? {} : { signal: input.signal }),
   }
 }

@@ -129,11 +129,11 @@ function waitForAbort(signal: AbortSignal | undefined): Promise<void> {
 
 function cloneRequest(request: ModelRequest): ModelRequest {
   return {
-    system: request.system,
+    target: structuredClone(request.target),
+    system: structuredClone(request.system),
+    contextual: structuredClone(request.contextual),
     messages: structuredClone(request.messages),
     tools: structuredClone(request.tools),
-    provider: request.provider,
-    model: request.model,
     ...(request.signal === undefined ? {} : { signal: request.signal }),
   }
 }

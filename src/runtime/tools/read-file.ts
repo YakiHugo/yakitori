@@ -36,13 +36,21 @@ export function createReadFileTool(
       type: "object",
       additionalProperties: false,
       properties: {
-        path: { type: "string" },
+        path: {
+          type: "string",
+          description: "Workspace-relative path of the UTF-8 text file.",
+        },
         offset: {
           type: "integer",
           minimum: 1,
           description: "1-based starting line. Defaults to 1.",
         },
-        limit: { type: "integer", minimum: 1, maximum: lineLimit },
+        limit: {
+          type: "integer",
+          minimum: 1,
+          maximum: lineLimit,
+          description: `Maximum number of lines to return. Defaults to ${lineLimit}.`,
+        },
       },
       required: ["path"],
     },

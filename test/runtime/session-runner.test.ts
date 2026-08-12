@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it, vi } from "vitest"
@@ -6,6 +6,7 @@ import {
   createDurableEventHub,
   createFauxProvider,
   createMateKernel,
+  createProviderRegistry,
   createRuntimeLimits,
   createSessionKernel,
   createSessionRunner,
@@ -110,6 +111,76 @@ describe("session runner", () => {
         {
           role: "user",
           content: [{ type: "text", text: "second" }],
+        },
+      ])
+    })
+  })
+
+  it("switches the next Turn target and inherits it for later Inputs", async () => {
+    await withRuntime(async (runtime) => {
+      const defaultProvider = createFauxProvider([
+        { content: [{ type: "text", text: "default" }] },
+      ])
+      const selectedProvider = createFauxProvider([
+        { content: [{ type: "text", text: "selected" }] },
+        { content: [{ type: "text", text: "inherited" }] },
+      ])
+      const providers = createProviderRegistry({
+        faux: defaultProvider.stream,
+        anthropic: selectedProvider.stream,
+      })
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: providers.stream,
+        provider: "faux",
+        model: "scripted",
+      })
+      const session = await createAttributedSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        requestId: "request_default",
+        content: { kind: "text", text: "first" },
+      })
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        requestId: "request_switch",
+        content: { kind: "text", text: "second" },
+        modelSelection: {
+          provider: "anthropic",
+          model: "claude-opus-4-6",
+        },
+      })
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        requestId: "request_inherit",
+        content: { kind: "text", text: "third" },
+      })
+
+      await runner.wake(session.sessionId)
+
+      expect(defaultProvider.callCount).toBe(1)
+      expect(selectedProvider.callCount).toBe(2)
+      const read = await runtime.kernel.readSession({
+        sessionId: session.sessionId,
+      })
+      expect(
+        read.session?.turns.map((turn) => ({
+          provider: turn.executionContext?.provider,
+          model: turn.executionContext?.model,
+          promptId: turn.executionContext?.promptId,
+        })),
+      ).toEqual([
+        { provider: "faux", model: "scripted", promptId: "default" },
+        {
+          provider: "anthropic",
+          model: "claude-opus-4-6",
+          promptId: "anthropic",
+        },
+        {
+          provider: "anthropic",
+          model: "claude-opus-4-6",
+          promptId: "anthropic",
         },
       ])
     })
@@ -338,6 +409,7 @@ describe("session runner", () => {
 
   it("adds an environment block to the system prompt", async () => {
     await withRuntime(async (runtime) => {
+      await writeFile(join(runtime.rootDir, "AGENTS.md"), "Use focused tests.")
       const provider = createFauxProvider([
         { content: [{ type: "text", text: "ok" }] },
       ])
@@ -354,9 +426,24 @@ describe("session runner", () => {
       await runner.wake(session.sessionId)
 
       const system = provider.requests[0]?.system
-      expect(system).toContain("Answer briefly.")
-      expect(system).toContain("<environment>")
-      expect(system).toContain(`Working directory: ${runtime.rootDir}`)
+      expect(system?.[0]?.text).toContain(
+        "You are Yakitori, a coding agent working with the user in their local workspace.",
+      )
+      expect(system?.[1]?.text).toBe(
+        "<agent_instructions>\nAnswer briefly.\n</agent_instructions>",
+      )
+      expect(system?.[2]?.text).toContain("<environment>")
+      expect(system?.[2]?.text).toContain(
+        `Working directory: ${runtime.rootDir}`,
+      )
+      expect(system?.map((section) => section.id)).toEqual([
+        "model.instructions",
+        "agent.instructions",
+        "environment",
+      ])
+      expect(
+        provider.requests[0]?.contextual[0]?.message.content[0]?.text,
+      ).toContain("Use focused tests.")
     })
   })
 
@@ -388,8 +475,45 @@ describe("session runner", () => {
       await runner.wake(session.sessionId)
 
       const system = provider.requests[0]?.system
-      expect(system?.startsWith("<environment>")).toBe(true)
-      expect(system).toContain(`Working directory: ${runtime.rootDir}`)
+      expect(system?.[0]?.text.startsWith("You are Yakitori")).toBe(true)
+      expect(system?.map((section) => section.id)).toEqual([
+        "model.instructions",
+        "environment",
+      ])
+      expect(system?.[1]?.text).toContain(
+        `Working directory: ${runtime.rootDir}`,
+      )
+    })
+  })
+
+  it("fails the Turn when project instruction discovery fails", async () => {
+    await withRuntime(async (runtime) => {
+      const provider = createFauxProvider([
+        { content: [{ type: "text", text: "must not run" }] },
+      ])
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+        loadProjectInstructions: async () => {
+          throw new Error("instruction read failed")
+        },
+      })
+      const session = await createAttributedSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "hi" },
+      })
+
+      await runner.wake(session.sessionId)
+
+      const read = await runtime.kernel.readSession({
+        sessionId: session.sessionId,
+      })
+      expect(provider.callCount).toBe(0)
+      expect(read.session?.failedTurns[0]?.error?.message).toContain(
+        "instruction read failed",
+      )
     })
   })
 
@@ -651,7 +775,7 @@ describe("session runner", () => {
       // tools, and folds the previous checkpoint into its instruction.
       const firstSummary = provider.requests[2]
       expect(firstSummary?.tools).toEqual([])
-      expect(firstSummary?.system).toContain("checkpoint")
+      expect(firstSummary?.system[0]?.text).toContain("checkpoint")
       const firstSummaryText = JSON.stringify(firstSummary?.messages)
       expect(firstSummaryText).toContain("first question")
       expect(firstSummaryText).toContain("first answer")

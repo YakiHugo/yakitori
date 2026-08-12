@@ -5,6 +5,7 @@ import {
   fromAnthropicMessage,
   ModelStopReason,
   toAnthropicMessages,
+  toAnthropicSystem,
   toAnthropicTools,
   type ModelRequest,
   type ModelStreamEvent,
@@ -127,6 +128,211 @@ describe("anthropic provider conversion", () => {
         content: [{ type: "text", text: "cut" }],
       }).stopReason,
     ).toBe(ModelStopReason.Length)
+  })
+
+  it("places cache breakpoints after tools, stable system prefixes, and dynamic history", async () => {
+    let body: Record<string, unknown> | undefined
+    const client = {
+      messages: {
+        stream(input: Record<string, unknown>) {
+          body = input
+          return {
+            async *[Symbol.asyncIterator]() {},
+            async finalMessage() {
+              return {
+                id: "msg_cache",
+                stop_reason: "end_turn",
+                content: [{ type: "text", text: "ok" }],
+              }
+            },
+          }
+        },
+      },
+    } as unknown as Anthropic
+    const stream = createAnthropicProvider({
+      apiKey: "test",
+      model: "claude-test",
+      client,
+    })
+    const request: ModelRequest = {
+      target: {
+        provider: "anthropic",
+        model: "claude-test",
+        promptId: "anthropic",
+      },
+      system: [
+        { id: "base", revision: "base-1", text: "base" },
+        { id: "environment", revision: "environment-1", text: "environment" },
+      ],
+      contextual: [
+        {
+          id: "project.instructions",
+          revision: "project-1",
+          message: {
+            role: "user",
+            content: [{ type: "text", text: "project rules" }],
+          },
+        },
+      ],
+      messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+      tools: [
+        {
+          name: "read_file",
+          description: "Read a file",
+          inputSchema: { type: "object" },
+        },
+      ],
+    }
+
+    for await (const _event of stream(request)) void _event
+
+    expect(body).toMatchObject({
+      system: [
+        {
+          type: "text",
+          text: "base",
+          cache_control: { type: "ephemeral" },
+        },
+        {
+          type: "text",
+          text: "environment",
+          cache_control: { type: "ephemeral" },
+        },
+      ],
+      tools: [
+        expect.objectContaining({
+          name: "read_file",
+          cache_control: { type: "ephemeral" },
+        }),
+      ],
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: "project rules",
+            },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: "hello",
+              cache_control: { type: "ephemeral" },
+            },
+          ],
+        },
+      ],
+    })
+  })
+
+  it("moves the dynamic breakpoint through a tool loop", async () => {
+    let body: Record<string, unknown> | undefined
+    const client = {
+      messages: {
+        stream(input: Record<string, unknown>) {
+          body = input
+          return {
+            async *[Symbol.asyncIterator]() {},
+            async finalMessage() {
+              return {
+                id: "msg_tool_cache",
+                stop_reason: "end_turn",
+                content: [{ type: "text", text: "ok" }],
+              }
+            },
+          }
+        },
+      },
+    } as unknown as Anthropic
+    const stream = createAnthropicProvider({
+      apiKey: "test",
+      model: "claude-test",
+      client,
+    })
+
+    for await (const _event of stream({
+      target: {
+        provider: "anthropic",
+        model: "claude-test",
+        promptId: "anthropic",
+      },
+      system: [{ id: "base", revision: "base-1", text: "base" }],
+      contextual: [],
+      messages: [
+        { role: "user", content: [{ type: "text", text: "read" }] },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_call",
+              id: "tool_1",
+              name: "read_file",
+              input: { path: "a.txt" },
+            },
+          ],
+        },
+        {
+          role: "tool",
+          toolCallId: "tool_1",
+          content: "file body",
+        },
+      ],
+      tools: [],
+    })) {
+      void _event
+    }
+
+    expect(body?.messages).toEqual([
+      {
+        role: "user",
+        content: [{ type: "text", text: "read" }],
+      },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "tool_1",
+            name: "read_file",
+            input: { path: "a.txt" },
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "tool_1",
+            content: "file body",
+            cache_control: { type: "ephemeral" },
+          },
+        ],
+      },
+    ])
+  })
+
+  it("keeps cache-control extensions off Anthropic-compatible providers", () => {
+    const request: ModelRequest = {
+      target: {
+        provider: "kimi",
+        model: "kimi-for-coding",
+        promptId: "kimi",
+      },
+      system: [
+        { id: "base", revision: "base-1", text: "base" },
+        { id: "environment", revision: "environment-1", text: "environment" },
+      ],
+      contextual: [],
+      messages: [],
+      tools: [],
+    }
+
+    expect(toAnthropicSystem(request.system)).toBe("base\n\nenvironment")
   })
 })
 
@@ -269,9 +475,13 @@ async function collectWithClient(
   })
 
   const request: ModelRequest = {
-    provider: "anthropic",
-    model: "claude-test",
-    system: "Be helpful.",
+    target: {
+      provider: "anthropic",
+      model: "claude-test",
+      promptId: "anthropic",
+    },
+    system: [{ id: "base", revision: "base-1", text: "Be helpful." }],
+    contextual: [],
     messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
     tools: [],
   }

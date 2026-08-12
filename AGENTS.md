@@ -106,6 +106,11 @@ Current stage — the coding agent:
   store.
 - Be careful with external integration surfaces: local server APIs, persisted
   event formats, configuration loading, and memory deletion.
+- Assemble static model context in stable cache order: the selected complete
+  model-family coding-agent prompt, Mate instructions, then environment.
+  Inject bounded project instructions as contextual user content, keep native
+  tool definitions separate from prompt prose, and let provider adapters own
+  cache-control syntax (decisions 0017 and 0018).
 
 Later stage — Rooms and multi-Mate collaboration (the Raft product is the
 design reference for this stage):

@@ -103,11 +103,18 @@ export type TurnExecutionLimits = {
   readonly assistantResponseBytes: number
 }
 
+export type ModelSelection = {
+  readonly provider: string
+  readonly model: string
+}
+
 export type TurnExecutionContext = {
   readonly mateId: string
   readonly mateRevisionId: string
   readonly provider: string
   readonly model: string
+  /** Missing only on events written before prompt attribution was introduced. */
+  readonly promptId?: string
   readonly workingDirectory: string
   readonly enabledTools: readonly string[]
   readonly approvalPolicy: string
@@ -133,6 +140,7 @@ export type InputAdmittedEvent = {
     readonly inputId: string
     readonly role: InputRole
     readonly content: TextContent
+    readonly modelSelection?: ModelSelection
     readonly parentInputId?: string
     readonly metadata?: EventMetadata
   }
@@ -354,13 +362,16 @@ function requireKernelEvent(value: unknown): asserts value is KernelEvent {
             "inputId",
             "role",
             "content",
+            "modelSelection",
             "parentInputId",
             "metadata",
           ]) &&
           isString(data.requestId) &&
           isString(data.inputId) &&
           isInputRole(data.role) &&
-          isTextContent(data.content)
+          isTextContent(data.content) &&
+          (data.modelSelection === undefined ||
+            isModelSelection(data.modelSelection))
         )
       case EventType.InputCancelled:
         return onlyKeys(data, ["inputId", "reason"]) && isString(data.inputId)
@@ -575,6 +586,17 @@ function isTextContent(value: unknown): value is TextContent {
   )
 }
 
+function isModelSelection(value: unknown): value is ModelSelection {
+  return (
+    isRecord(value) &&
+    onlyKeys(value, ["provider", "model"]) &&
+    isString(value.provider) &&
+    value.provider.length > 0 &&
+    isString(value.model) &&
+    value.model.length > 0
+  )
+}
+
 function isItemContent(value: unknown): value is ItemContent {
   if (!isRecord(value)) return false
   if (value.kind === "text")
@@ -612,6 +634,7 @@ function isTurnExecutionContext(value: unknown): value is TurnExecutionContext {
     isString(value.mateRevisionId) &&
     isString(value.provider) &&
     isString(value.model) &&
+    (value.promptId === undefined || isString(value.promptId)) &&
     isString(value.workingDirectory) &&
     isString(value.approvalPolicy) &&
     Array.isArray(value.enabledTools) &&

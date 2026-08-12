@@ -53,13 +53,37 @@ export type ModelToolDefinition = {
   readonly inputSchema: JsonObject
 }
 
-export type ModelRequest = {
-  readonly system: string
-  readonly messages: readonly ModelMessage[]
-  readonly tools: readonly ModelToolDefinition[]
+export type ModelTarget = {
   readonly provider: string
   readonly model: string
+  readonly promptId: string
+}
+
+export type ModelSystemSection = {
+  readonly id: string
+  readonly revision: string
+  readonly text: string
+}
+
+export type ModelContextMessage = {
+  readonly id: string
+  readonly revision: string
+  readonly message: ModelUserMessage
+}
+
+export type ModelRequest = {
+  readonly target: ModelTarget
+  readonly system: readonly ModelSystemSection[]
+  readonly contextual: readonly ModelContextMessage[]
+  readonly messages: readonly ModelMessage[]
+  readonly tools: readonly ModelToolDefinition[]
   readonly signal?: AbortSignal
+}
+
+export function flattenModelSystem(
+  sections: readonly ModelSystemSection[],
+): string {
+  return sections.map((section) => section.text).join("\n\n")
 }
 
 export type ModelUsage = {

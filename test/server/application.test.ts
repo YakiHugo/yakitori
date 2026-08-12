@@ -316,6 +316,94 @@ describe("application composition", () => {
     })
   })
 
+  it("routes an admitted next-Turn selection through another registered provider", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const primary = createFauxProvider([
+        { content: [{ type: "text", text: "unused" }] },
+      ])
+      const selected = createFauxProvider([
+        { content: [{ type: "text", text: "selected provider" }] },
+      ])
+      const application = await createYakitoriApplication({
+        rootDir,
+        workspace,
+        recoverOnStart: false,
+        stream: primary.stream,
+        provider: "faux",
+        model: "scripted",
+        providerStreams: { openai: selected.stream },
+      })
+      try {
+        const created = await application.handlers.createSession()
+        expectOk(created)
+        const admitted = await application.handlers.admitInput({
+          sessionId: created.body.session.id,
+          requestId: "request_switch_provider",
+          content: { kind: "text", text: "switch" },
+          modelSelection: { provider: "openai", model: "gpt-5.6-sol" },
+        })
+        expectOk(admitted)
+        await application.runner.wake(created.body.session.id)
+
+        expect(primary.callCount).toBe(0)
+        expect(selected.callCount).toBe(1)
+        expect(selected.requests[0]?.target).toEqual({
+          provider: "openai",
+          model: "gpt-5.6-sol",
+          promptId: "gpt",
+        })
+      } finally {
+        await application.close()
+      }
+    })
+  })
+
+  it("registers the lazy Grok CLI provider when another provider is primary", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const previousApiKey = process.env.XAI_API_KEY
+      const previousCredentials = process.env.GROK_CREDENTIALS
+      delete process.env.XAI_API_KEY
+      process.env.GROK_CREDENTIALS = join(rootDir, "missing-grok-auth.json")
+      const application = await createYakitoriApplication({
+        rootDir,
+        workspace,
+        recoverOnStart: false,
+        provider: "faux",
+        fauxScenario: "text",
+      })
+      try {
+        const created = await application.handlers.createSession()
+        expectOk(created)
+        const admitted = await application.handlers.admitInput({
+          sessionId: created.body.session.id,
+          requestId: "request_switch_grok_oidc",
+          content: { kind: "text", text: "use grok" },
+          modelSelection: { provider: "grok", model: "grok-4.5" },
+        })
+        expectOk(admitted)
+        await application.runner.wake(created.body.session.id)
+
+        const read = await application.sessionKernel.readSession({
+          sessionId: created.body.session.id,
+        })
+        expect(read.session?.failedTurns[0]?.executionContext).toMatchObject({
+          provider: "grok",
+          model: "grok-4.5",
+        })
+        expect(read.session?.failedTurns[0]?.error?.message).toContain(
+          "Grok credentials not found",
+        )
+      } finally {
+        await application.close()
+        if (previousApiKey === undefined) delete process.env.XAI_API_KEY
+        else process.env.XAI_API_KEY = previousApiKey
+        if (previousCredentials === undefined)
+          delete process.env.GROK_CREDENTIALS
+        else process.env.GROK_CREDENTIALS = previousCredentials
+      }
+    })
+  })
+
   it("reuses the default faux scenario across sequential Inputs", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const application = await createYakitoriApplication({

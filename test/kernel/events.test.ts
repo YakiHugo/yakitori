@@ -61,6 +61,62 @@ describe("kernel facts", () => {
     ).toThrow("Invalid event data")
   })
 
+  it("accepts modelSelection and rejects malformed ones", () => {
+    const admitted = (modelSelection: unknown) =>
+      isKernelEvent({
+        type: EventType.InputAdmitted,
+        data: {
+          requestId: "request-1",
+          inputId: "input_1",
+          role: InputRole.User,
+          content: { kind: "text", text: "hello" },
+          modelSelection,
+        },
+      })
+
+    expect(admitted({ provider: "openai", model: "gpt-5.1-codex" })).toBe(true)
+    expect(admitted({ provider: "openai", model: "" })).toBe(false)
+    expect(admitted({ provider: "", model: "gpt-5.1-codex" })).toBe(false)
+    expect(
+      admitted({ provider: "openai", model: "gpt-5.1-codex", extra: true }),
+    ).toBe(false)
+  })
+
+  it("accepts turn.started execution contexts with or without promptId", () => {
+    const started = (executionContext: Record<string, unknown>) =>
+      isKernelEvent({
+        type: EventType.TurnStarted,
+        data: {
+          turnId: "turn_1",
+          inputId: "input_1",
+          executionContext: {
+            mateId: "mate_1",
+            mateRevisionId: "revision_1",
+            provider: "openai",
+            model: "gpt-5.1-codex",
+            workingDirectory: "/p/a",
+            enabledTools: [],
+            approvalPolicy: "on-request",
+            limits: {
+              modelCallsPerTurn: 1,
+              toolCallsPerTurn: 1,
+              modelVisibleMessageBlocks: 1,
+              modelVisibleContextBytes: 1,
+              modelVisibleToolResultBytes: 1,
+              modelVisibleToolResultLines: 1,
+              assistantResponseBytes: 1,
+            },
+            ...executionContext,
+          },
+        },
+      })
+
+    // Facts written before prompt attribution existed must still validate.
+    expect(started({})).toBe(true)
+    expect(started({ promptId: "gpt" })).toBe(true)
+    expect(started({ promptId: 1 })).toBe(false)
+  })
+
   it("recognizes valid tool facts", () => {
     expect(
       isKernelEvent({

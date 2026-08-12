@@ -10,6 +10,7 @@ import {
   type ItemStatus as ItemStatusType,
   type JsonValue,
   type KernelError,
+  type ModelSelection,
   type PermissionBehavior,
   type PermissionDecisionReason,
   type StoredEventEnvelope,
@@ -74,6 +75,7 @@ export type InputProjection = {
   readonly inputId: string
   readonly role: InputRole
   readonly content: TextContent
+  readonly modelSelection?: ModelSelection
   readonly state: InputStateType
   readonly admittedAt: string
   readonly updatedAt: string
@@ -337,6 +339,9 @@ function applyKnownEvent(
         inputId: event.data.inputId,
         role: event.data.role,
         content: event.data.content,
+        ...(event.data.modelSelection === undefined
+          ? {}
+          : { modelSelection: event.data.modelSelection }),
         state: InputState.Admitted,
         admittedAt: event.createdAt,
         updatedAt: event.createdAt,

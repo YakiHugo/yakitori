@@ -45,17 +45,22 @@ export function createRunCommandTool(
   return {
     name: "run_command",
     description:
-      "Run a shell command in the session workspace. Requires explicit user approval. The command runs with the host user's full authority.",
+      "Run one shell command in the session workspace. Use this for version control, dependency operations, builds, tests, and tasks without a dedicated tool. Prefer glob, grep, read_file, edit_file, and write_file for file operations. Requires explicit user approval and runs with the host user's full authority.",
     autoAllow: false,
     inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: {
-        command: { type: "string" },
+        command: {
+          type: "string",
+          description:
+            "The shell command to execute. It already runs from the session workspace, so do not prepend cd to that directory.",
+        },
         timeoutSeconds: {
           type: "integer",
           minimum: 1,
           maximum: maxTimeoutSeconds,
+          description: `Timeout in seconds. Defaults to ${defaultTimeoutSeconds}; maximum ${maxTimeoutSeconds}.`,
         },
       },
       required: ["command"],

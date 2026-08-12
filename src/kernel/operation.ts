@@ -4,6 +4,7 @@ import type {
   InputRole,
   JsonObject,
   JsonValue,
+  ModelSelection,
   TextContent,
 } from "./events.ts"
 
@@ -14,12 +15,16 @@ export function fingerprintOperation(value: JsonValue): string {
 export function fingerprintInputAdmission(data: {
   readonly role: InputRole
   readonly content: TextContent
+  readonly modelSelection?: ModelSelection | undefined
   readonly parentInputId?: string | undefined
   readonly metadata?: EventMetadata | undefined
 }): string {
   return fingerprintOperation({
     role: data.role,
     content: data.content,
+    ...(data.modelSelection === undefined
+      ? {}
+      : { modelSelection: data.modelSelection }),
     parentInputId: data.parentInputId ?? null,
     metadata: data.metadata ?? null,
   })

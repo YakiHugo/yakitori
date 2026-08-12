@@ -9,7 +9,7 @@ export function createWriteFileTool(
   return {
     name: "write_file",
     description:
-      "Create or intentionally replace a complete UTF-8 text file using compare-and-write. New files are created without a prior read. Before replacing an existing file, read the complete current file; write_file rejects missing, partial, or stale observations. Prefer edit_file for modifications. NEVER create *.md files unless the user explicitly requested one.",
+      "Create or intentionally replace a complete UTF-8 text file using compare-and-write. New files are created without a prior read. Before replacing an existing file, read the complete current file; write_file rejects missing, partial, or stale observations. Prefer edit_file for focused modifications.",
     autoAllow: true,
     inputSchema: {
       type: "object",

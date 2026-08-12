@@ -15,7 +15,7 @@
     "build": "pnpm build:lib && pnpm build:gui",
     "build:lib": "vite build --mode lib",
     "build:gui": "vite build",
-    "build:desktop": "vite build --mode desktop",
+    "build:desktop": "vite build --mode desktop && node scripts/verify-desktop-prompts.ts",
     "start:desktop": "pnpm build:gui && pnpm build:desktop && electron .",
     "dev:desktop": "pnpm build:desktop && pnpm run --parallel \"/^dev:desktop:(gui|shell)$/\"",
     "dev:desktop:gui": "vite --host 127.0.0.1 --strictPort",

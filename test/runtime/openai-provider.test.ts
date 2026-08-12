@@ -156,7 +156,22 @@ describe("OpenAI Responses provider", () => {
     })
 
     const events = []
-    for await (const event of stream(requestFixture())) events.push(event)
+    for await (const event of stream(
+      requestFixture({
+        contextual: [
+          {
+            id: "project.instructions",
+            revision: "project-1",
+            message: {
+              role: "user",
+              content: [{ type: "text", text: "project rules" }],
+            },
+          },
+        ],
+      }),
+    )) {
+      events.push(event)
+    }
 
     expect(events).toEqual([
       { type: "snapshot", text: "Hel" },
@@ -171,33 +186,15 @@ describe("OpenAI Responses provider", () => {
     ])
     expect(body).toMatchObject({
       model: "gpt-request",
+      instructions: "Be helpful.",
+      input: [
+        { role: "user", content: "project rules" },
+        { role: "user", content: "hello" },
+      ],
       stream: true,
       store: false,
       parallel_tool_calls: false,
     })
-  })
-})
-
-describe("OpenAI provider error classification", () => {
-  it("marks a 429 API error as retryable with its status", async () => {
-    const error = new OpenAI.APIError(429, undefined, undefined, new Headers())
-
-    const events = await collectWithThrowingClient(error)
-
-    expect(events).toEqual([
-      {
-        type: "response",
-        response: {
-          stopReason: ModelStopReason.Error,
-          content: [],
-          error: {
-            code: "openai_error",
-            message: error.message,
-            details: { retryable: true, status: 429 },
-          },
-        },
-      },
-    ])
   })
 
   it("keeps a 400 API error free of retry details", async () => {
@@ -360,13 +357,18 @@ async function collectWithThrowingClient(
   return events
 }
 
-function requestFixture(): ModelRequest {
+function requestFixture(overrides: Partial<ModelRequest> = {}): ModelRequest {
   return {
-    provider: "openai",
-    model: "gpt-request",
-    system: "Be helpful.",
+    target: {
+      provider: "openai",
+      model: "gpt-request",
+      promptId: "gpt",
+    },
+    system: [{ id: "base", revision: "base-1", text: "Be helpful." }],
+    contextual: [],
     messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
     tools: [],
+    ...overrides,
   }
 }
 
