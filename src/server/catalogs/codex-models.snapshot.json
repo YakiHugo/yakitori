@@ -1,7 +1,7 @@
 {
   "generated": true,
-  "source": "codex-rs models-manager/models.json (visibility=list)",
-  "update": "Re-copy list-visible models from codex models.json; map slug\u2192id, display_name, description, supported_reasoning_levels\u2192efforts, default_reasoning_level\u2192defaultEffort, service_tiers\u2192speeds (with standard).",
+  "source": "live GET chatgpt.com/backend-api/codex/models (visibility=list); seed historically from codex-rs models-manager/models.json",
+  "update": "With a ChatGPT codex login: curl the backend /models?client_version=<ver>, keep visibility=list, map slug\u2192id, display_name, description, supported_reasoning_levels\u2192efforts, default_reasoning_level\u2192defaultEffort, service_tiers\u2192speeds (prepend standard). Prefer live over packaging models.json when they diverge.",
   "models": [
     {
       "id": "gpt-5.6-sol",
@@ -73,9 +73,25 @@
       ]
     },
     {
-      "id": "gpt-5.2",
-      "displayName": "GPT-5.2",
-      "description": "Optimized for professional work and long-running agents.",
+      "id": "gpt-5.4",
+      "displayName": "GPT-5.4",
+      "description": "Strong model for everyday coding.",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "defaultEffort": "medium",
+      "speeds": [
+        "standard",
+        "priority"
+      ]
+    },
+    {
+      "id": "gpt-5.4-mini",
+      "displayName": "GPT-5.4-Mini",
+      "description": "Small, fast, and cost-efficient model for simpler coding tasks.",
       "efforts": [
         "low",
         "medium",
@@ -83,6 +99,18 @@
         "xhigh"
       ],
       "defaultEffort": "medium"
+    },
+    {
+      "id": "gpt-5.3-codex-spark",
+      "displayName": "GPT-5.3-Codex-Spark",
+      "description": "Ultra-fast coding model.",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "defaultEffort": "high"
     }
   ]
 }

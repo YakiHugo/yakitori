@@ -189,3 +189,26 @@ kernel fact protocol ahead of a concrete consumer.
   16 MiB. Do not copy either entry count as a Yakitori invariant; copy the
   durable lesson that the hot projection needs both count/byte bounds and must
   not retain full file bodies when hashes suffice.
+
+## Provider-native model catalogs (recorded 2026-08-12)
+
+Decision 0020 landed per-provider live catalogs, disk cache, and vendored
+snapshots. Non-blocking follow-ups:
+
+- **Codex snapshot drift.** Offline users see the vendored
+  `src/server/catalogs/codex-models.snapshot.json`, which lags the live
+  backend when OpenAI adds or unhides picker models. Acceptable (file header
+  has an update recipe); refresh the snapshot after material live deltas, or
+  after a release when offline parity matters.
+- **Effort ladders from models.dev `reasoning_options`.** OpenAI and Grok
+  currently hard-code `["low","medium","high"]`; Anthropic gates effort with
+  a model-id regex (Claude Code precedent). models.dev already publishes
+  per-model `reasoning_options` (including Grok `none` and model-specific
+  ladders). Prefer that field for openai/grok (and as a cross-check for
+  anthropic) when wiring a richer effort source — not a regression, unused
+  better data.
+- **Kimi endpoint verification.** Curated efforts for `kimi-for-coding`
+  (`on`/`off`) and `k3` (`max`) still need a live call against the Kimi Code
+  endpoint to confirm the adapter maps them onto real request fields. Until
+  then, treat them as catalog-declared UI options backed by the existing
+  Anthropic-compatible effort path, not as proven product behavior.

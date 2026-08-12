@@ -739,7 +739,9 @@ describe("codex login registration", () => {
         "gpt-5.6-terra",
         "gpt-5.6-luna",
         "gpt-5.5",
-        "gpt-5.2",
+        "gpt-5.4",
+        "gpt-5.4-mini",
+        "gpt-5.3-codex-spark",
       ])
       expect(codex?.models[0]).toMatchObject({
         displayName: "GPT-5.6-Sol",
