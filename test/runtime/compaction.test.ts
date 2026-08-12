@@ -18,10 +18,19 @@ describe("compaction request", () => {
       model: "scripted",
     })
 
-    expect(request.system).toBe(COMPACTION_SYSTEM_PROMPT)
+    expect(request.system).toEqual([
+      {
+        id: "compaction.instructions",
+        revision: "1",
+        text: COMPACTION_SYSTEM_PROMPT,
+      },
+    ])
     expect(request.tools).toEqual([])
-    expect(request.provider).toBe("faux")
-    expect(request.model).toBe("scripted")
+    expect(request.target).toEqual({
+      provider: "faux",
+      model: "scripted",
+      promptId: "compaction",
+    })
     expect(request.messages).toEqual([
       ...sourceTurn().messages,
       {
@@ -202,11 +211,11 @@ function sourceTurn(): DroppedTurn {
 
 function compactionRequest(signal?: AbortSignal): ModelRequest {
   return {
-    system: "sys",
+    target: { provider: "faux", model: "scripted", promptId: "compaction" },
+    system: [{ id: "compaction", revision: "1", text: "sys" }],
+    contextual: [],
     messages: [],
     tools: [],
-    provider: "faux",
-    model: "scripted",
     ...(signal === undefined ? {} : { signal }),
   }
 }

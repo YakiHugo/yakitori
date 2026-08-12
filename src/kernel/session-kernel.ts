@@ -10,6 +10,7 @@ import {
   type JsonValue,
   type KernelError,
   type KernelEvent,
+  type ModelSelection,
   PermissionBehavior,
   type PermissionDecisionReason,
   type StoredEventEnvelope,
@@ -130,6 +131,7 @@ export type AdmitInputInput = {
   readonly sessionId: string
   readonly requestId?: string
   readonly content: TextContent
+  readonly modelSelection?: ModelSelection
   readonly role?: InputRole
   readonly parentInputId?: string
   readonly metadata?: EventMetadata
@@ -370,6 +372,7 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
               inputId,
               role: input.role ?? InputRole.User,
               content: input.content,
+              modelSelection: input.modelSelection,
               parentInputId: input.parentInputId,
               metadata: input.metadata,
             }),
@@ -381,6 +384,7 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
               fingerprint: fingerprintInputAdmission({
                 role: input.role ?? InputRole.User,
                 content: input.content,
+                modelSelection: input.modelSelection,
                 parentInputId: input.parentInputId,
                 metadata: input.metadata,
               }),

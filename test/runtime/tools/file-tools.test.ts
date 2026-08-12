@@ -847,6 +847,19 @@ describe("bounded file tools", () => {
       definitions.find((tool) => tool.name === "write_file")?.inputSchema
         .properties,
     ).not.toHaveProperty("expectedSha256")
+
+    for (const definition of definitions) {
+      expect(definition.description.trim().length).toBeGreaterThan(0)
+      const properties = definition.inputSchema.properties
+      expect(isObject(properties)).toBe(true)
+      if (!isObject(properties)) continue
+      for (const property of Object.values(properties)) {
+        expect(isObject(property)).toBe(true)
+        if (!isObject(property)) continue
+        expect(property.description).toEqual(expect.any(String))
+        expect(String(property.description).trim().length).toBeGreaterThan(0)
+      }
+    }
   })
 
   it("rejects path traversal and symlink escapes", async () => {

@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "defaultPromptId": "default",
+  "models": [
+    { "provider": "openai", "model": "gpt-5.1-codex", "promptId": "gpt" },
+    { "provider": "openai", "model": "gpt-5", "promptId": "gpt" },
+    {
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-6",
+      "promptId": "anthropic"
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-opus-4-6",
+      "promptId": "anthropic"
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-haiku-4-5",
+      "promptId": "anthropic"
+    },
+    { "provider": "kimi", "model": "kimi-for-coding", "promptId": "kimi" },
+    { "provider": "grok", "model": "grok-code-fast-1", "promptId": "default" },
+    { "provider": "faux", "model": "scripted", "promptId": "default" }
+  ],
+  "fallbackRules": [
+    { "promptId": "gpt", "modelContainsAny": ["gpt"] },
+    { "promptId": "anthropic", "modelContainsAny": ["claude"] },
+    { "promptId": "kimi", "modelContainsAny": ["kimi"] }
+  ],
+  "providerDefaults": {
+    "anthropic": "anthropic",
+    "kimi": "kimi",
+    "openai": "gpt"
+  }
+}

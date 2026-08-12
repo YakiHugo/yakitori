@@ -56,9 +56,15 @@ describe("faux provider", () => {
       },
     ])
 
-    const first = await collect(provider.stream(baseRequest({ model: "a" })))
-    const second = await collect(provider.stream(baseRequest({ model: "b" })))
-    const third = await collect(provider.stream(baseRequest({ model: "c" })))
+    const first = await collect(
+      provider.stream(baseRequest({ target: target("a") })),
+    )
+    const second = await collect(
+      provider.stream(baseRequest({ target: target("b") })),
+    )
+    const third = await collect(
+      provider.stream(baseRequest({ target: target("c") })),
+    )
 
     expect(first.at(-1)).toMatchObject({
       type: "response",
@@ -76,7 +82,7 @@ describe("faux provider", () => {
       response: { content: [{ type: "text", text: "done" }] },
     })
     expect(provider.callCount).toBe(3)
-    expect(provider.requests.map((request) => request.model)).toEqual([
+    expect(provider.requests.map((request) => request.target.model)).toEqual([
       "a",
       "b",
       "c",
@@ -135,7 +141,7 @@ describe("faux provider", () => {
     const provider = createFauxProvider([
       {
         assertRequest: (request) => {
-          expect(request.system).toBe("be careful")
+          expect(request.system[0]?.text).toBe("be careful")
           expect(request.messages).toEqual([
             {
               role: "user",
@@ -148,7 +154,7 @@ describe("faux provider", () => {
     ])
 
     const request = baseRequest({
-      system: "be careful",
+      system: [{ id: "base", revision: "base-1", text: "be careful" }],
       messages: [
         {
           role: "user",
@@ -160,11 +166,14 @@ describe("faux provider", () => {
 
     const retained = provider.requests[0]
     expect(retained).toEqual(request)
-    if (retained === undefined)
-      throw new Error("Expected retained request.")
-      // Mutating the retained copy must not change the provider's next read.
-    ;(retained as { system: string }).system = "mutated"
-    expect(provider.requests[0]?.system).toBe("be careful")
+    if (retained === undefined) throw new Error("Expected retained request.")
+    const retainedSystem = retained.system[0]
+    if (retainedSystem === undefined) {
+      throw new Error("Expected retained system section.")
+    }
+    // Mutating the retained copy must not change the provider's next read.
+    ;(retainedSystem as { text: string }).text = "mutated"
+    expect(provider.requests[0]?.system[0]?.text).toBe("be careful")
   })
 
   it("throws when the script is exhausted", async () => {
@@ -177,7 +186,9 @@ describe("faux provider", () => {
 
 function baseRequest(overrides: Partial<ModelRequest> = {}): ModelRequest {
   return {
-    system: "system",
+    target: target("scripted"),
+    system: [{ id: "base", revision: "base-1", text: "system" }],
+    contextual: [],
     messages: [
       {
         role: "user",
@@ -185,10 +196,12 @@ function baseRequest(overrides: Partial<ModelRequest> = {}): ModelRequest {
       },
     ],
     tools: [],
-    provider: "faux",
-    model: "scripted",
     ...overrides,
   }
+}
+
+function target(model: string): ModelRequest["target"] {
+  return { provider: "faux", model, promptId: "default" }
 }
 
 async function collect(

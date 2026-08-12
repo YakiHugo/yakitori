@@ -19,6 +19,7 @@ import {
   createAnthropicProvider,
   createOpenAIProvider,
   createPermissionGate,
+  createProviderRegistry,
   createSessionRunner,
   createToolRegistry,
   createTransientEventHub,
@@ -66,6 +67,7 @@ export type YakitoriApplicationOptions = {
   readonly sessionStoreRoot?: string
   readonly workspace?: string
   readonly stream?: StreamFn
+  readonly providerStreams?: Readonly<Record<string, StreamFn>>
   readonly provider?: string
   readonly model?: string
   readonly fauxScenario?: string
@@ -162,11 +164,14 @@ export async function createYakitoriApplication(
               process.env.YAKITORI_MODEL ??
               (providerName === "faux" ? "scripted" : "injected"),
           }
+    const providerRegistry = createProviderRegistry(
+      createConfiguredProviderStreams(provider, options.providerStreams),
+    )
 
     const runner = createSessionRunner({
       kernel: sessionKernel,
       mateKernel,
-      stream: provider.stream,
+      stream: providerRegistry.stream,
       provider: provider.provider,
       model: provider.model,
       durableHub: eventHub,
@@ -193,6 +198,7 @@ export async function createYakitoriApplication(
       interruptTurn: async (input) => {
         await runner.interrupt(input)
       },
+      availableProviders: providerRegistry.providers,
     })
 
     if (shouldRecover) {
@@ -265,6 +271,47 @@ export async function createYakitoriApplication(
     }
     throw error
   }
+}
+
+function createConfiguredProviderStreams(
+  primary: {
+    readonly provider: string
+    readonly stream: StreamFn
+  },
+  injected: Readonly<Record<string, StreamFn>> | undefined,
+): Readonly<Record<string, StreamFn>> {
+  const providers: Record<string, StreamFn> = { ...injected }
+  const anthropicApiKey = process.env.ANTHROPIC_API_KEY
+  if (anthropicApiKey && providers.anthropic === undefined) {
+    providers.anthropic = withRetries(
+      createAnthropicProvider({
+        apiKey: anthropicApiKey,
+        model: "selected-at-request-time",
+      }),
+    )
+  }
+  const openaiApiKey = process.env.OPENAI_API_KEY
+  if (openaiApiKey && providers.openai === undefined) {
+    providers.openai = withRetries(
+      createOpenAIProvider({
+        apiKey: openaiApiKey,
+        model: "selected-at-request-time",
+      }),
+    )
+  }
+  const kimiApiKey = process.env.KIMI_API_KEY
+  if (kimiApiKey && providers.kimi === undefined) {
+    providers.kimi = withRetries(
+      createAnthropicProvider({
+        apiKey: kimiApiKey,
+        model: "selected-at-request-time",
+        baseURL: KIMI_CODE_API_BASE_URL,
+      }),
+    )
+  }
+  providers.grok ??= createGrokStream()
+  providers[primary.provider] = primary.stream
+  return providers
 }
 
 async function closeApplicationResources(
@@ -455,17 +502,7 @@ async function createDefaultProvider(
     if (!model) {
       throw new Error("YAKITORI_MODEL is required when YAKITORI_PROVIDER=grok.")
     }
-    // XAI_API_KEY wins; otherwise reuse the Grok CLI's OIDC login. OAuth
-    // tokens expire, so resolve per model call (cached until near expiry).
-    const stream: StreamFn = async function* (request) {
-      const apiKey = process.env.XAI_API_KEY ?? (await resolveGrokAccessToken())
-      yield* createOpenAIProvider({
-        apiKey,
-        model,
-        baseURL: GROK_API_BASE_URL,
-      })(request)
-    }
-    return { stream: withRetries(stream), provider, model }
+    return { stream: createGrokStream(), provider, model }
   }
   if (provider === "kimi") {
     const apiKey = process.env.KIMI_API_KEY
@@ -490,6 +527,22 @@ async function createDefaultProvider(
   throw new Error(
     `Provider "${provider}" is not configured. Use YAKITORI_PROVIDER=faux|openai|anthropic|grok|kimi or inject a stream.`,
   )
+}
+
+function createGrokStream(): StreamFn {
+  // XAI_API_KEY wins; otherwise reuse the Grok CLI's OIDC login. OAuth
+  // tokens expire, so resolve per model call rather than freezing one token at
+  // application startup. The same lazy stream supports primary and switched
+  // Grok Turns.
+  const stream: StreamFn = async function* (request) {
+    const apiKey = process.env.XAI_API_KEY ?? (await resolveGrokAccessToken())
+    yield* createOpenAIProvider({
+      apiKey,
+      model: request.target.model,
+      baseURL: GROK_API_BASE_URL,
+    })(request)
+  }
+  return withRetries(stream)
 }
 
 function createFauxScenarioStream(scenario: string): StreamFn {

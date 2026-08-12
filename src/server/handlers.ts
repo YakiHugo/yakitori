@@ -9,6 +9,7 @@ import {
   type EventEnvelope,
   type EventMetadata,
   type JsonValue,
+  type ModelSelection,
   type PermissionDecisionReason,
   type SessionKernel,
   type SessionProjection,
@@ -56,6 +57,7 @@ export type ServerHandlerOptions = {
     readonly reason?: string
   }) => Promise<void>
   readonly maxInputBytes?: number
+  readonly availableProviders?: readonly string[]
 }
 
 export type ServerHandlers = {
@@ -179,6 +181,10 @@ export function createServerHandlers(
         const request = requireAdmitInputRequest(
           input,
           options.maxInputBytes ?? RuntimeLimits.modelVisibleContextBytes,
+        )
+        requireAvailableProvider(
+          request.modelSelection?.provider,
+          options.availableProviders,
         )
         const admitted = await kernel.admitInput(request)
         if (admitted.created) options.eventHub?.publish([admitted.event])
@@ -469,10 +475,46 @@ function requireAdmitInputRequest(input: unknown, maxInputBytes: number) {
     sessionId: requireSessionId(record.sessionId, "sessionId"),
     requestId: requireRequestId(record.requestId),
     content: requireTextContent(record.content, maxInputBytes),
+    ...optionalModelSelectionField(record, "modelSelection"),
     ...optionalInputRoleField(record, "role"),
     ...optionalStringField(record, "parentInputId"),
     ...optionalMetadataField(record, "metadata"),
   }
+}
+
+function optionalModelSelectionField(
+  record: Record<string, unknown>,
+  field: string,
+): { readonly modelSelection?: ModelSelection } {
+  const value = record[field]
+  if (value === undefined) return {}
+  if (!isRecord(value)) {
+    throw invalidInput(`${field} must be an object.`, { field })
+  }
+  return {
+    modelSelection: {
+      provider: requireString(value.provider, `${field}.provider`),
+      model: requireString(value.model, `${field}.model`),
+    },
+  }
+}
+
+function requireAvailableProvider(
+  provider: string | undefined,
+  availableProviders: readonly string[] | undefined,
+): void {
+  if (
+    provider === undefined ||
+    availableProviders === undefined ||
+    availableProviders.includes(provider)
+  ) {
+    return
+  }
+  throw invalidInput(`Provider ${provider} is not configured.`, {
+    field: "modelSelection.provider",
+    provider,
+    availableProviders,
+  })
 }
 
 function requireCancelInputRequest(input: unknown) {

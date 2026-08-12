@@ -400,8 +400,17 @@ only GUI↔core channel.
 Context pressure is handled by compaction: an append-only `context.compacted`
 fact records the exact source boundary and a bounded checkpoint summary, and
 later context builds replace covered turns with it (decision 0011). Transient
-provider errors are retried with bounded backoff (decision 0012), and every
-Turn's system prompt carries a bounded environment block (decision 0013).
+provider errors are retried with bounded backoff (decision 0012). An admitted
+Input may select the provider/model for its next Turn; an omitted selection
+inherits the preceding Turn target or the application default. At the Turn
+boundary, a bundled catalog resolves that target to a complete, revisioned
+coding-agent prompt. The runtime then freezes that prompt, the
+selected Mate revision's coding-agent instructions, a bounded environment,
+bounded `AGENTS.md` context, and the enabled native tool definitions. Dynamic
+conversation history is rebuilt for every model step, while provider adapters
+alone translate cache boundaries and wire formats. Official Anthropic requests
+spend their final cache point on the latest dynamic message so tool-loop calls
+can reuse preceding history (decisions 0013 and 0018).
 
 The server keeps a project registry (`src/server/project-registry.ts`, the
 Codex GUI "project" parallel): registered project directories live in

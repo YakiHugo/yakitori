@@ -1,11 +1,13 @@
 import Anthropic from "@anthropic-ai/sdk"
 import type {
   MessageParam,
+  TextBlockParam,
   Tool,
   ToolResultBlockParam,
 } from "@anthropic-ai/sdk/resources/messages"
 import type { JsonObject, JsonValue } from "../kernel/index.ts"
 import {
+  flattenModelSystem,
   ModelStopReason,
   type ModelContentBlock,
   type ModelMessage,
@@ -56,13 +58,18 @@ async function* streamAnthropic(
 
   let stream: Awaited<ReturnType<typeof client.messages.stream>>
   try {
-    const tools = toAnthropicTools(request.tools)
+    const explicitPromptCaching = request.target.provider === "anthropic"
+    const tools = toAnthropicTools(request.tools, explicitPromptCaching)
     stream = client.messages.stream(
       {
-        model: request.model || defaultModel,
+        model: request.target.model || defaultModel,
         max_tokens: 8_192,
-        system: request.system,
-        messages: toAnthropicMessages(request.messages),
+        system: toAnthropicSystem(request.system, explicitPromptCaching),
+        messages: toAnthropicRequestMessages(
+          request.contextual.map((entry) => entry.message),
+          request.messages,
+          explicitPromptCaching,
+        ),
         ...(tools === undefined ? {} : { tools }),
       },
       request.signal === undefined ? undefined : { signal: request.signal },
@@ -174,13 +181,74 @@ export function toAnthropicMessages(
 
 export function toAnthropicTools(
   tools: ModelRequest["tools"],
+  cacheBreakpoint = false,
 ): Tool[] | undefined {
   if (tools.length === 0) return undefined
-  return tools.map((tool) => ({
+  return tools.map((tool, index) => ({
     name: tool.name,
     description: tool.description,
     input_schema: tool.inputSchema as Tool["input_schema"],
+    ...(cacheBreakpoint && index === tools.length - 1
+      ? { cache_control: { type: "ephemeral" as const } }
+      : {}),
   }))
+}
+
+export function toAnthropicSystem(
+  sections: ModelRequest["system"],
+  cacheBreakpoints = false,
+): string | TextBlockParam[] {
+  if (!cacheBreakpoints || sections.length === 0) {
+    return flattenModelSystem(sections)
+  }
+  return sections.map((section, index) => ({
+    type: "text",
+    text: section.text,
+    ...(index === 0 || index === sections.length - 1
+      ? { cache_control: { type: "ephemeral" as const } }
+      : {}),
+  }))
+}
+
+function toAnthropicRequestMessages(
+  contextualMessages: readonly ModelMessage[],
+  messages: readonly ModelMessage[],
+  cacheBreakpoint: boolean,
+): MessageParam[] {
+  const contextual = toAnthropicMessages(contextualMessages)
+  const dynamic = toAnthropicMessages(messages)
+  if (cacheBreakpoint && !markLastModelContentBlockCacheable(dynamic)) {
+    markLastModelContentBlockCacheable(contextual)
+  }
+  return [...contextual, ...dynamic]
+}
+
+function markLastModelContentBlockCacheable(messages: MessageParam[]): boolean {
+  for (
+    let messageIndex = messages.length - 1;
+    messageIndex >= 0;
+    messageIndex -= 1
+  ) {
+    const content = messages[messageIndex]?.content
+    if (!Array.isArray(content)) continue
+    for (
+      let blockIndex = content.length - 1;
+      blockIndex >= 0;
+      blockIndex -= 1
+    ) {
+      const block = content[blockIndex]
+      if (
+        block?.type !== "text" &&
+        block?.type !== "tool_use" &&
+        block?.type !== "tool_result"
+      ) {
+        continue
+      }
+      block.cache_control = { type: "ephemeral" }
+      return true
+    }
+  }
+  return false
 }
 
 export function fromAnthropicMessage(message: {

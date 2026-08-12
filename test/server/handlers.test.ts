@@ -218,6 +218,37 @@ describe("server handlers", () => {
     )
   })
 
+  it("validates and records the provider selected for the next Turn", async () => {
+    const server = createServerHandlers(
+      createSessionKernel(createMemoryEventStore()),
+      { availableProviders: ["openai"] },
+    )
+    const created = await server.createSession()
+    expectOk(created)
+
+    const rejected = await server.admitInput({
+      sessionId: created.body.session.id,
+      requestId: "request_unknown-provider",
+      content: { kind: "text", text: "use another model" },
+      modelSelection: { provider: "anthropic", model: "claude-test" },
+    })
+    expectError(rejected, 400, ApiErrorCode.InvalidInput)
+
+    const admitted = await server.admitInput({
+      sessionId: created.body.session.id,
+      requestId: "request_selected-provider",
+      content: { kind: "text", text: "use this model" },
+      modelSelection: { provider: "openai", model: "gpt-5.6-sol" },
+    })
+    expectOk(admitted)
+    expect(admitted.body.event).toMatchObject({
+      type: EventType.InputAdmitted,
+      data: {
+        modelSelection: { provider: "openai", model: "gpt-5.6-sol" },
+      },
+    })
+  })
+
   it("returns the original admission for an exact request retry", async () => {
     await withServer(async (server) => {
       const created = await server.createSession()
@@ -246,6 +277,14 @@ describe("server handlers", () => {
             kind: "text",
             text: "changed admission",
           },
+        }),
+        409,
+        ApiErrorCode.Conflict,
+      )
+      expectError(
+        await server.admitInput({
+          ...request,
+          modelSelection: { provider: "openai", model: "gpt-5.6-sol" },
         }),
         409,
         ApiErrorCode.Conflict,

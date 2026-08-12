@@ -43,18 +43,65 @@ export const GrepInputSchema: JsonObject = {
       type: "string",
       enum: ["content", "files_with_matches", "count", "count_matches"],
       default: "files_with_matches",
+      description:
+        "Return matching lines, matching file paths, or match counts. Defaults to files_with_matches; count_matches is an alias for count.",
     },
-    "-B": { type: "integer", minimum: 0, maximum: 20 },
-    "-A": { type: "integer", minimum: 0, maximum: 20 },
-    "-C": { type: "integer", minimum: 0, maximum: 20 },
-    context: { type: "integer", minimum: 0, maximum: 20 },
-    "-n": { type: "boolean" },
-    "-i": { type: "boolean" },
-    "-o": { type: "boolean" },
-    type: { type: "string" },
-    head_limit: { type: "integer", minimum: 1, maximum: MAX_HEAD_LIMIT },
-    offset: { type: "integer", minimum: 0 },
-    multiline: { type: "boolean" },
+    "-B": {
+      type: "integer",
+      minimum: 0,
+      maximum: 20,
+      description: "Lines of context to include before each match.",
+    },
+    "-A": {
+      type: "integer",
+      minimum: 0,
+      maximum: 20,
+      description: "Lines of context to include after each match.",
+    },
+    "-C": {
+      type: "integer",
+      minimum: 0,
+      maximum: 20,
+      description: "Lines of context to include before and after each match.",
+    },
+    context: {
+      type: "integer",
+      minimum: 0,
+      maximum: 20,
+      description: "Alias for -C; takes precedence when both are provided.",
+    },
+    "-n": {
+      type: "boolean",
+      description: "Include line numbers in content output. Defaults to true.",
+    },
+    "-i": {
+      type: "boolean",
+      description: "Use case-insensitive matching. Defaults to false.",
+    },
+    "-o": {
+      type: "boolean",
+      description: "Return only the matching portion of each line.",
+    },
+    type: {
+      type: "string",
+      description: 'Restrict search to a ripgrep file type such as "ts".',
+    },
+    head_limit: {
+      type: "integer",
+      minimum: 1,
+      maximum: MAX_HEAD_LIMIT,
+      description: "Maximum results to return on this page.",
+    },
+    offset: {
+      type: "integer",
+      minimum: 0,
+      description: "Zero-based result offset for pagination. Defaults to 0.",
+    },
+    multiline: {
+      type: "boolean",
+      description:
+        "Allow patterns to span lines and make dot match newlines. Defaults to false.",
+    },
   },
   required: ["pattern"],
 }

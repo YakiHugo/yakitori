@@ -6,6 +6,7 @@ import type {
 } from "openai/resources/responses/responses"
 import type { JsonObject, JsonValue } from "../kernel/index.ts"
 import {
+  flattenModelSystem,
   ModelStopReason,
   type ModelContentBlock,
   type ModelMessage,
@@ -48,9 +49,12 @@ async function* streamOpenAI(
   try {
     const stream = await client.responses.create(
       {
-        model: request.model || defaultModel,
-        instructions: request.system,
-        input: toOpenAIInput(request.messages),
+        model: request.target.model || defaultModel,
+        instructions: flattenModelSystem(request.system),
+        input: toOpenAIInput([
+          ...request.contextual.map((entry) => entry.message),
+          ...request.messages,
+        ]),
         tools: toOpenAITools(request.tools),
         parallel_tool_calls: false,
         max_output_tokens: 8_192,

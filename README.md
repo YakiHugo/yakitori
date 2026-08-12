@@ -159,11 +159,11 @@ you use; real environment variables always override the file.
 | `YAKITORI_PROVIDER` | `faux` (default), `openai`, `anthropic`, `grok`, or `kimi` |
 | `YAKITORI_FAUX_SCENARIO` | Faux scenario: `text`, `file`, `command`, `error` |
 | `YAKITORI_MODEL` | Required when a network provider is selected |
-| `OPENAI_API_KEY` | Required when `YAKITORI_PROVIDER=openai` |
-| `ANTHROPIC_API_KEY` | Required when `YAKITORI_PROVIDER=anthropic` |
-| `XAI_API_KEY` | Used when `YAKITORI_PROVIDER=grok`; falls back to the Grok CLI OIDC login when unset |
+| `OPENAI_API_KEY` | Configures OpenAI as the default or a next-Turn provider |
+| `ANTHROPIC_API_KEY` | Configures Anthropic as the default or a next-Turn provider |
+| `XAI_API_KEY` | Configures Grok; every Grok Turn falls back to the Grok CLI OIDC login when unset |
 | `GROK_CREDENTIALS` | Grok CLI credentials file (default `~/.grok/auth.json`) |
-| `KIMI_API_KEY` | Required when `YAKITORI_PROVIDER=kimi` (official Kimi Code console key) |
+| `KIMI_API_KEY` | Configures Kimi as the default or a next-Turn provider (official Kimi Code console key) |
 | `HOST` / `PORT` | Server listen address (default `127.0.0.1:4141`) |
 
 Example faux command-approval flow:

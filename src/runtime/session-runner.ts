@@ -5,8 +5,10 @@ import {
   type EventEnvelope,
   type EventMetadata,
   type KernelError,
+  type ModelSelection,
   type SessionKernel,
   type SessionProjection,
+  type InputProjection,
   type TokenUsage,
   type TurnExecutionContext,
   YakitoriErrorCode,
@@ -33,7 +35,10 @@ import {
   type ModelUsage,
   type StreamFn,
 } from "./model.ts"
+import { requirePromptId, resolveModel } from "./model-catalog.ts"
 import { createPermissionGate, type PermissionGate } from "./permission-gate.ts"
+import { loadProjectInstructions } from "./project-instructions.ts"
+import { buildStaticContext } from "./static-context.ts"
 import { resolveWorkspaceRoot } from "./tools/path-policy.ts"
 import { createToolRegistry, type ToolRegistry } from "./tools/registry.ts"
 import { createVisibleFileObservations } from "./tools/visible-file-observations.ts"
@@ -53,6 +58,7 @@ export type SessionRunnerOptions = {
   readonly limits?: RuntimeLimits
   readonly enabledTools?: readonly string[]
   readonly approvalPolicy?: string
+  readonly loadProjectInstructions?: typeof loadProjectInstructions
   readonly onRuntimeError?: (error: unknown) => void
 }
 
@@ -84,6 +90,8 @@ export function createSessionRunner(
   const enabledTools =
     options.enabledTools ?? toolRegistry.tools.map((tool) => tool.name)
   const approvalPolicy = options.approvalPolicy ?? "auto_file_tools"
+  const projectInstructionLoader =
+    options.loadProjectInstructions ?? loadProjectInstructions
   const lanes = new Map<string, LaneState>()
   let closed = false
 
@@ -159,20 +167,20 @@ export function createSessionRunner(
       if (!nextInput) return
 
       if (closed) return
-      await runTurn(session, nextInput.inputId)
+      await runTurn(session, nextInput)
     }
   }
 
   async function runTurn(
     session: SessionProjection,
-    inputId: string,
+    queuedInput: InputProjection,
   ): Promise<void> {
     if (closed) return
-    const executionContext = await buildExecutionContext(session)
+    const executionContext = await buildExecutionContext(session, queuedInput)
     if (closed) return
     const started = await startTurnUnlessInputConsumed(
       session.id,
-      inputId,
+      queuedInput.inputId,
       executionContext,
     )
     if (started === undefined) return
@@ -190,7 +198,7 @@ export function createSessionRunner(
       await executeTextTurn({
         sessionId: session.id,
         turnId: started.turnId,
-        inputId,
+        inputId: queuedInput.inputId,
         executionContext,
         signal: abort.signal,
       })
@@ -232,6 +240,7 @@ export function createSessionRunner(
 
   async function buildExecutionContext(
     session: SessionProjection,
+    queuedInput: InputProjection,
   ): Promise<TurnExecutionContext> {
     if (session.mateId === undefined || session.mateRevisionId === undefined) {
       throw createYakitoriError({
@@ -270,11 +279,22 @@ export function createSessionRunner(
       })
     }
 
+    const previousTarget = session.turns.at(-1)?.executionContext
+    const selectedTarget: ModelSelection =
+      queuedInput.modelSelection ??
+      (previousTarget === undefined
+        ? { provider, model }
+        : {
+            provider: previousTarget.provider,
+            model: previousTarget.model,
+          })
+    const resolvedModel = resolveModel(selectedTarget)
     return {
       mateId: session.mateId,
       mateRevisionId: session.mateRevisionId,
-      provider,
-      model,
+      provider: resolvedModel.provider,
+      model: resolvedModel.model,
+      promptId: resolvedModel.promptId,
       workingDirectory: session.workingDirectory,
       enabledTools: [...enabledTools],
       approvalPolicy,
@@ -310,13 +330,32 @@ export function createSessionRunner(
       })
     }
 
-    const environment = buildEnvironmentContext({
+    const projectInstructions = await projectInstructionLoader({
       workingDirectory: input.executionContext.workingDirectory,
     })
-    const system =
-      revision.instructions.length === 0
-        ? environment
-        : `${revision.instructions}\n\n${environment}`
+    const resolvedModel = {
+      model: input.executionContext.model,
+      provider: input.executionContext.provider,
+      promptId:
+        input.executionContext.promptId === undefined
+          ? resolveModel({
+              model: input.executionContext.model,
+              provider: input.executionContext.provider,
+            }).promptId
+          : requirePromptId(input.executionContext.promptId),
+    }
+    const staticContext = buildStaticContext({
+      environment: buildEnvironmentContext({
+        workingDirectory: input.executionContext.workingDirectory,
+      }),
+      mateInstructions: revision.instructions,
+      mateRevisionId: revision.id,
+      model: resolvedModel,
+      ...(projectInstructions === undefined ? {} : { projectInstructions }),
+    })
+    const tools = toolRegistry
+      .definitions()
+      .filter((tool) => input.executionContext.enabledTools.includes(tool.name))
 
     let modelCallIndex = 0
     let toolCallCount = 0
@@ -347,15 +386,11 @@ export function createSessionRunner(
       }
 
       const request: ModelRequest = {
-        system,
+        target: staticContext.target,
+        system: staticContext.system,
+        contextual: staticContext.contextual,
         messages: context.messages,
-        tools: toolRegistry
-          .definitions()
-          .filter((tool) =>
-            input.executionContext.enabledTools.includes(tool.name),
-          ),
-        provider: input.executionContext.provider,
-        model: input.executionContext.model,
+        tools,
         signal: input.signal,
       }
       const observationEligibleToolResultItemIds = new Set(
