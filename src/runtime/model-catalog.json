@@ -19,7 +19,59 @@
       "model": "claude-haiku-4-5",
       "promptId": "anthropic"
     },
-    { "provider": "kimi", "model": "kimi-for-coding", "promptId": "kimi" },
+    {
+      "provider": "kimi",
+      "model": "kimi-for-coding",
+      "promptId": "kimi",
+      "displayName": "Kimi for Coding",
+      "efforts": ["on", "off"]
+    },
+    {
+      "provider": "kimi",
+      "model": "kimi-for-coding-highspeed",
+      "promptId": "kimi",
+      "displayName": "Kimi for Coding HighSpeed",
+      "efforts": ["on", "off"]
+    },
+    {
+      "provider": "kimi",
+      "model": "k3",
+      "promptId": "kimi",
+      "displayName": "Kimi K3",
+      "efforts": ["max"]
+    },
+    {
+      "provider": "codex",
+      "model": "gpt-5.6-sol",
+      "promptId": "gpt",
+      "displayName": "GPT-5.6 Sol",
+      "efforts": ["low", "medium", "high", "xhigh"],
+      "speeds": ["standard", "fast"]
+    },
+    {
+      "provider": "codex",
+      "model": "gpt-5.6-terra",
+      "promptId": "gpt",
+      "displayName": "GPT-5.6 Terra",
+      "efforts": ["low", "medium", "high", "xhigh"],
+      "speeds": ["standard", "fast"]
+    },
+    {
+      "provider": "codex",
+      "model": "gpt-5.6-luna",
+      "promptId": "gpt",
+      "displayName": "GPT-5.6 Luna",
+      "efforts": ["low", "medium", "high", "xhigh"],
+      "speeds": ["standard", "fast"]
+    },
+    {
+      "provider": "codex",
+      "model": "gpt-5.5",
+      "promptId": "gpt",
+      "displayName": "GPT-5.5",
+      "efforts": ["low", "medium", "high", "xhigh"],
+      "speeds": ["standard", "fast"]
+    },
     { "provider": "grok", "model": "grok-code-fast-1", "promptId": "default" },
     { "provider": "faux", "model": "scripted", "promptId": "default" }
   ],
@@ -30,7 +82,13 @@
   ],
   "providerDefaults": {
     "anthropic": "anthropic",
+    "codex": "gpt",
     "kimi": "kimi",
     "openai": "gpt"
+  },
+  "directoryAllowlist": {
+    "openai": ["gpt-5.6-sol", "gpt-5.1-codex", "gpt-5"],
+    "anthropic": ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"],
+    "grok": ["grok-4.5", "grok-4.3"]
   }
 }

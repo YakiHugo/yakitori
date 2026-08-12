@@ -525,6 +525,217 @@ describe("project state", () => {
   })
 })
 
+describe("model selection", () => {
+  it("persists selections per session and rehydrates from localStorage", () => {
+    window.localStorage.clear()
+
+    useAppStore.getState().setModelSelection("session_1", {
+      provider: "openai",
+      model: "gpt-5.1-codex",
+      effort: "high",
+    })
+    useAppStore
+      .getState()
+      .setModelSelection("session_2", { provider: "kimi", model: "k2" })
+
+    const expected = {
+      session_1: { provider: "openai", model: "gpt-5.1-codex", effort: "high" },
+      session_2: { provider: "kimi", model: "k2" },
+    }
+    expect(useAppStore.getState().modelSelections).toEqual(expected)
+    expect(
+      JSON.parse(
+        window.localStorage.getItem("yakitori.modelSelections") ?? "{}",
+      ),
+    ).toEqual(expected)
+    expect(createInitialAppState().modelSelections).toEqual(expected)
+
+    useAppStore.getState().setModelSelection("session_1", undefined)
+    expect(useAppStore.getState().modelSelections).toEqual({
+      session_2: { provider: "kimi", model: "k2" },
+    })
+  })
+
+  it("loads providers and tolerates a 404 from older servers", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: unknown) => {
+        if (String(input) === "http://api.test/providers") {
+          return jsonResponse({
+            providers: [
+              {
+                name: "faux",
+                defaultModel: "scripted",
+                models: [
+                  {
+                    id: "scripted",
+                    displayName: "scripted",
+                    family: "default",
+                  },
+                ],
+              },
+              {
+                name: "anthropic",
+                models: [
+                  {
+                    id: "claude-sonnet-4-6",
+                    displayName: "Claude Sonnet 4.6",
+                    family: "anthropic",
+                  },
+                ],
+              },
+            ],
+            defaultProvider: "faux",
+            defaultModel: "scripted",
+          })
+        }
+        return errorResponse(404)
+      }),
+    )
+
+    await useAppStore.getState().loadProviders()
+
+    expect(useAppStore.getState().providers).toEqual([
+      {
+        name: "faux",
+        defaultModel: "scripted",
+        models: [
+          { id: "scripted", displayName: "scripted", family: "default" },
+        ],
+      },
+      {
+        name: "anthropic",
+        models: [
+          {
+            id: "claude-sonnet-4-6",
+            displayName: "Claude Sonnet 4.6",
+            family: "anthropic",
+          },
+        ],
+      },
+    ])
+    expect(useAppStore.getState().defaultProvider).toBe("faux")
+    expect(useAppStore.getState().defaultModel).toBe("scripted")
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => errorResponse(404)),
+    )
+    await useAppStore.getState().loadProviders()
+
+    expect(useAppStore.getState().providers).toHaveLength(2)
+    expect(useAppStore.getState().message).toBeUndefined()
+  })
+
+  it("sends the saved modelSelection with admitted input", async () => {
+    window.localStorage.clear()
+    const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
+      const url = String(input)
+      if (url === "http://api.test/sessions/session_1/inputs") {
+        const body = JSON.parse(String(init?.body)) as { requestId: string }
+        return jsonResponse({
+          requestId: body.requestId,
+          inputId: "input_1",
+          event: createEventEnvelope({
+            sessionId: "session_1",
+            seq: 2,
+            event: {
+              type: EventType.InputAdmitted,
+              data: {
+                requestId: body.requestId,
+                inputId: "input_1",
+                role: InputRole.User,
+                content: { kind: "text", text: "hello" },
+              },
+            },
+          }),
+        })
+      }
+      if (url === "http://api.test/sessions/session_1") {
+        return jsonResponse({ session: sessionDetail })
+      }
+      if (url.startsWith("http://api.test/sessions?")) {
+        return jsonResponse({ sessions: [] })
+      }
+      return errorResponse(404)
+    })
+    vi.stubGlobal("fetch", fetchMock)
+    useAppStore.setState({
+      selection: { revision: 1, sessionId: "session_1" },
+      modelSelections: {
+        session_1: {
+          provider: "openai",
+          model: "gpt-5.1-codex",
+          effort: "low",
+        },
+      },
+    })
+
+    await useAppStore.getState().admitInput("hello")
+
+    const admitCall = fetchMock.mock.calls.find(([input]) =>
+      String(input).endsWith("/inputs"),
+    )
+    expect(admitCall).toBeDefined()
+    expect(JSON.parse(String(admitCall?.[1]?.body))).toMatchObject({
+      content: { kind: "text", text: "hello" },
+      modelSelection: {
+        provider: "openai",
+        model: "gpt-5.1-codex",
+        effort: "low",
+      },
+    })
+    expect(useAppStore.getState().message).toBeUndefined()
+  })
+
+  it("omits modelSelection when no override is saved", async () => {
+    window.localStorage.clear()
+    const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
+      const url = String(input)
+      if (url === "http://api.test/sessions/session_1/inputs") {
+        const body = JSON.parse(String(init?.body)) as { requestId: string }
+        return jsonResponse({
+          requestId: body.requestId,
+          inputId: "input_1",
+          event: createEventEnvelope({
+            sessionId: "session_1",
+            seq: 2,
+            event: {
+              type: EventType.InputAdmitted,
+              data: {
+                requestId: body.requestId,
+                inputId: "input_1",
+                role: InputRole.User,
+                content: { kind: "text", text: "hello" },
+              },
+            },
+          }),
+        })
+      }
+      if (url === "http://api.test/sessions/session_1") {
+        return jsonResponse({ session: sessionDetail })
+      }
+      if (url.startsWith("http://api.test/sessions?")) {
+        return jsonResponse({ sessions: [] })
+      }
+      return errorResponse(404)
+    })
+    vi.stubGlobal("fetch", fetchMock)
+    useAppStore.setState({
+      selection: { revision: 1, sessionId: "session_1" },
+    })
+
+    await useAppStore.getState().admitInput("hello")
+
+    const admitCall = fetchMock.mock.calls.find(([input]) =>
+      String(input).endsWith("/inputs"),
+    )
+    expect(JSON.parse(String(admitCall?.[1]?.body))).not.toHaveProperty(
+      "modelSelection",
+    )
+  })
+})
+
 function detailCallCount(fetchMock: ReturnType<typeof vi.fn>): number {
   return fetchMock.mock.calls.filter(
     ([input]) => String(input) === "http://api.test/sessions/session_1",

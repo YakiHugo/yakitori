@@ -1,5 +1,6 @@
 import { useLayoutEffect, useRef } from "react"
 import { useAppStore, useExecutionView } from "../store/app-store.ts"
+import { ModelSelector } from "./model-selector.tsx"
 import { Button } from "./ui/button.tsx"
 
 export function Composer() {
@@ -62,11 +63,14 @@ export function Composer() {
         className="max-h-50 min-h-9 w-full resize-none rounded-md border bg-transparent px-3 py-2 text-sm outline-none placeholder:text-muted-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:opacity-50"
       />
       <div className="flex items-center justify-between gap-2">
-        <span className="text-xs text-muted-foreground">
-          {view.lastTurnUsage === undefined
-            ? "Enter to send · Shift+Enter for newline"
-            : `last turn · ↑ ${view.lastTurnUsage.inputTokens} · ↓ ${view.lastTurnUsage.outputTokens} tokens`}
-        </span>
+        <div className="flex items-center gap-2">
+          <ModelSelector />
+          <span className="text-xs text-muted-foreground">
+            {view.lastTurnUsage === undefined
+              ? "Enter to send · Shift+Enter for newline"
+              : `last turn · ↑ ${view.lastTurnUsage.inputTokens} · ↓ ${view.lastTurnUsage.outputTokens} tokens`}
+          </span>
+        </div>
         <Button type="submit" size="sm" disabled={!canSend}>
           Send
         </Button>

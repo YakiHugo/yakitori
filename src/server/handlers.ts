@@ -495,6 +495,12 @@ function optionalModelSelectionField(
     modelSelection: {
       provider: requireString(value.provider, `${field}.provider`),
       model: requireString(value.model, `${field}.model`),
+      ...(value.effort === undefined
+        ? {}
+        : { effort: requireString(value.effort, `${field}.effort`) }),
+      ...(value.speed === undefined
+        ? {}
+        : { speed: requireString(value.speed, `${field}.speed`) }),
     },
   }
 }

@@ -21,7 +21,11 @@ import type {
 import { createDurableEventHub, type DurableEventHub } from "./event-hub.ts"
 import { createServerHandlers, type ServerHandlers } from "./handlers.ts"
 import type { ProjectRegistry } from "./project-registry.ts"
-import { ApiErrorCode, type ApiHandlerResult } from "./protocol.ts"
+import {
+  ApiErrorCode,
+  type ApiHandlerResult,
+  type ApiListProvidersResponse,
+} from "./protocol.ts"
 
 export type YakitoriStaticAssets = {
   readonly directory: string
@@ -32,6 +36,7 @@ type YakitoriHttpServerCommonOptions = {
   readonly transientHub?: TransientEventHub
   readonly staticAssets?: YakitoriStaticAssets
   readonly projectRegistry?: ProjectRegistry
+  readonly providers?: () => Promise<ApiListProvidersResponse>
 }
 
 export type YakitoriHttpServerOptions = YakitoriHttpServerCommonOptions &
@@ -60,6 +65,7 @@ export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
     options.handlers ??
     createServerHandlers(resolveServerKernel(options), { eventHub })
   const projectRegistry = options.projectRegistry
+  const providers = options.providers
 
   const staticAssets =
     options.staticAssets === undefined
@@ -74,6 +80,7 @@ export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
       eventHub,
       transientHub,
       projectRegistry,
+      providers,
       staticAssets,
     ).catch((error) => {
       writeUnhandledError(response, error)
@@ -112,6 +119,7 @@ async function handleRequest(
   eventHub: DurableEventHub,
   transientHub: TransientEventHub | undefined,
   projectRegistry: ProjectRegistry | undefined,
+  providers: (() => Promise<ApiListProvidersResponse>) | undefined,
   staticAssets: StaticAssetContext | undefined,
 ): Promise<void> {
   const origin = requestOrigin(request)
@@ -181,6 +189,18 @@ async function handleRequest(
     } catch (error) {
       writeResult(response, projectRegistryError(error))
     }
+    return
+  }
+
+  if (route.kind === "listProviders") {
+    if (providers === undefined) {
+      writeResult(
+        response,
+        errorResult(404, ApiErrorCode.NotFound, "Route not found."),
+      )
+      return
+    }
+    writeJson(response, 200, await providers())
     return
   }
 
@@ -360,6 +380,14 @@ function routeRequest(method: string, url: URL): Route {
     segments[0] === "projects"
   ) {
     return { kind: "addProject" }
+  }
+
+  if (
+    method === "GET" &&
+    segments.length === 1 &&
+    segments[0] === "providers"
+  ) {
+    return { kind: "listProviders" }
   }
 
   if (segments[0] !== "sessions" || typeof segments[1] !== "string") {
@@ -668,7 +696,8 @@ function isApiPath(segments: readonly string[]): boolean {
   return (
     segments[0] === "sessions" ||
     segments[0] === "health" ||
-    segments[0] === "projects"
+    segments[0] === "projects" ||
+    segments[0] === "providers"
   )
 }
 
@@ -932,6 +961,7 @@ type Route =
   | { readonly kind: "readSession"; readonly sessionId: string }
   | { readonly kind: "listProjects" }
   | { readonly kind: "addProject" }
+  | { readonly kind: "listProviders" }
   | {
       readonly kind: "resolvePermission"
       readonly sessionId: string

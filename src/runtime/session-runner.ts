@@ -287,6 +287,12 @@ export function createSessionRunner(
         : {
             provider: previousTarget.provider,
             model: previousTarget.model,
+            ...(previousTarget.effort === undefined
+              ? {}
+              : { effort: previousTarget.effort }),
+            ...(previousTarget.speed === undefined
+              ? {}
+              : { speed: previousTarget.speed }),
           })
     const resolvedModel = resolveModel(selectedTarget)
     return {
@@ -295,6 +301,12 @@ export function createSessionRunner(
       provider: resolvedModel.provider,
       model: resolvedModel.model,
       promptId: resolvedModel.promptId,
+      ...(selectedTarget.effort === undefined
+        ? {}
+        : { effort: selectedTarget.effort }),
+      ...(selectedTarget.speed === undefined
+        ? {}
+        : { speed: selectedTarget.speed }),
       workingDirectory: session.workingDirectory,
       enabledTools: [...enabledTools],
       approvalPolicy,
@@ -386,7 +398,15 @@ export function createSessionRunner(
       }
 
       const request: ModelRequest = {
-        target: staticContext.target,
+        target: {
+          ...staticContext.target,
+          ...(input.executionContext.effort === undefined
+            ? {}
+            : { effort: input.executionContext.effort }),
+          ...(input.executionContext.speed === undefined
+            ? {}
+            : { speed: input.executionContext.speed }),
+        },
         system: staticContext.system,
         contextual: staticContext.contextual,
         messages: context.messages,

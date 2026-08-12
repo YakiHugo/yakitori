@@ -1,4 +1,6 @@
 export * from "./anthropic-provider.ts"
+export * from "./codex-credentials.ts"
+export * from "./codex-provider.ts"
 export * from "./compaction.ts"
 export * from "./faux-provider.ts"
 export * from "./grok-credentials.ts"

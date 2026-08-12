@@ -1,10 +1,12 @@
 import { useMemo } from "react"
 import { create } from "zustand"
-import type { StoredEventEnvelope } from "../../kernel/index.ts"
+import type { ModelSelection, StoredEventEnvelope } from "../../kernel/index.ts"
 import type {
   ApiAdmitInputResponse,
   ApiCreateSessionResponse,
+  ApiListProvidersResponse,
   ApiListSessionsResponse,
+  ApiProviderSummary,
   ApiReadSessionResponse,
   ApiSessionDetail,
   ApiSessionSummary,
@@ -40,13 +42,17 @@ export type AppStoreData = {
   apiBase: string
   apiRevision: number
   busy: boolean
+  defaultModel: string | undefined
+  defaultProvider: string | undefined
   events: StoredEventEnvelope[]
   execution: ExecutionViewState
   inFlightActions: ReadonlySet<string>
   message: string | undefined
+  modelSelections: Record<string, ModelSelection>
   nextCursor: string | undefined
   promptDraft: string | undefined
   projects: string[]
+  providers: ApiProviderSummary[]
   selection: SessionSelectionState
   sessionDetailRevision: number
   sessionListRevision: number
@@ -62,6 +68,7 @@ export type AppStoreActions = {
   boot(): Promise<void>
   loadSessions(input?: { readonly append?: boolean }): Promise<boolean>
   loadProjects(): Promise<void>
+  loadProviders(): Promise<void>
   createSession(): Promise<void>
   deleteSession(sessionId: string): Promise<void>
   selectProject(path: string): Promise<void>
@@ -77,6 +84,10 @@ export type AppStoreActions = {
   ): Promise<void>
   connectApiBase(apiBase: string): void
   setPromptDraft(text: string): void
+  setModelSelection(
+    sessionId: string,
+    selection: ModelSelection | undefined,
+  ): void
 }
 
 export type AppStore = AppStoreData & AppStoreActions
@@ -86,13 +97,17 @@ export function createInitialAppState(): AppStoreData {
     apiBase: initialApiBase(),
     apiRevision: 0,
     busy: false,
+    defaultModel: undefined,
+    defaultProvider: undefined,
     events: [],
     execution: createExecutionViewState(),
     inFlightActions: new Set(),
     message: undefined,
+    modelSelections: initialModelSelections(),
     nextCursor: undefined,
     promptDraft: undefined,
     projects: [],
+    providers: [],
     selection: createSessionSelectionState(),
     sessionDetailRevision: 0,
     sessionListRevision: 0,
@@ -298,6 +313,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
     boot: async () => {
       const apiRevision = get().apiRevision
       const intentRevision = get().sessionSelectionIntentRevision
+      await get().loadProviders()
       await get().loadProjects()
       const loaded = await get().loadSessions()
       if (
@@ -380,6 +396,23 @@ export const useAppStore = create<AppStore>()((set, get) => {
       } catch {
         // Older servers without the projects route return 404; project state
         // stays empty and the switcher stays hidden.
+      }
+    },
+
+    loadProviders: async () => {
+      try {
+        const response = await requestJson<ApiListProvidersResponse>(
+          get().apiBase,
+          "/providers",
+        )
+        set({
+          providers: [...response.providers],
+          defaultProvider: response.defaultProvider,
+          defaultModel: response.defaultModel,
+        })
+      } catch {
+        // Older servers without the providers route return 404; the model
+        // selector stays hidden.
       }
     },
 
@@ -533,6 +566,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
 
       await runTask(
         async () => {
+          const modelSelection = get().modelSelections[selection.sessionId]
           const pendingAdmission = await reserveAdmission(window.localStorage, {
             apiBase: get().apiBase,
             sessionId: selection.sessionId,
@@ -550,6 +584,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
                   kind: "text",
                   text,
                 },
+                ...(modelSelection === undefined ? {} : { modelSelection }),
               },
             },
           )
@@ -681,6 +716,17 @@ export const useAppStore = create<AppStore>()((set, get) => {
     setPromptDraft: (text) => {
       set({ promptDraft: text })
     },
+
+    setModelSelection: (sessionId, selection) => {
+      const modelSelections = { ...get().modelSelections }
+      if (selection === undefined) delete modelSelections[sessionId]
+      else modelSelections[sessionId] = selection
+      set({ modelSelections })
+      window.localStorage.setItem(
+        "yakitori.modelSelections",
+        JSON.stringify(modelSelections),
+      )
+    },
   }
 })
 
@@ -697,6 +743,25 @@ function initialApiBase(): string {
   return (
     window.localStorage.getItem("yakitori.apiBase") ?? window.location.origin
   )
+}
+
+function initialModelSelections(): Record<string, ModelSelection> {
+  // Same window indirection as initialApiBase for the Node 24 stub.
+  const raw = window.localStorage.getItem("yakitori.modelSelections")
+  if (raw === null) return {}
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      return {}
+    }
+    return parsed as Record<string, ModelSelection>
+  } catch {
+    return {}
+  }
 }
 
 function errorMessage(error: unknown, fallback: string): string {

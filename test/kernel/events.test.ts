@@ -61,7 +61,7 @@ describe("kernel facts", () => {
     ).toThrow("Invalid event data")
   })
 
-  it("accepts modelSelection and rejects malformed ones", () => {
+  it("accepts modelSelection with effort/speed and rejects malformed ones", () => {
     const admitted = (modelSelection: unknown) =>
       isKernelEvent({
         type: EventType.InputAdmitted,
@@ -75,14 +75,37 @@ describe("kernel facts", () => {
       })
 
     expect(admitted({ provider: "openai", model: "gpt-5.1-codex" })).toBe(true)
+    expect(
+      admitted({ provider: "openai", model: "gpt-5.1-codex", effort: "high" }),
+    ).toBe(true)
+    expect(
+      admitted({
+        provider: "codex",
+        model: "gpt-5.6-sol",
+        effort: "high",
+        speed: "fast",
+      }),
+    ).toBe(true)
     expect(admitted({ provider: "openai", model: "" })).toBe(false)
     expect(admitted({ provider: "", model: "gpt-5.1-codex" })).toBe(false)
+    expect(
+      admitted({ provider: "openai", model: "gpt-5.1-codex", effort: "" }),
+    ).toBe(false)
+    expect(
+      admitted({ provider: "codex", model: "gpt-5.6-sol", speed: "" }),
+    ).toBe(false)
+    expect(
+      admitted({ provider: "codex", model: "gpt-5.6-sol", speed: 2 }),
+    ).toBe(false)
+    expect(
+      admitted({ provider: "openai", model: "gpt-5.1-codex", effort: 3 }),
+    ).toBe(false)
     expect(
       admitted({ provider: "openai", model: "gpt-5.1-codex", extra: true }),
     ).toBe(false)
   })
 
-  it("accepts turn.started execution contexts with or without promptId", () => {
+  it("accepts turn.started execution contexts with or without promptId, effort, and speed", () => {
     const started = (executionContext: Record<string, unknown>) =>
       isKernelEvent({
         type: EventType.TurnStarted,
@@ -111,10 +134,15 @@ describe("kernel facts", () => {
         },
       })
 
-    // Facts written before prompt attribution existed must still validate.
+    // Facts written before prompt attribution and effort/speed existed
+    // must still validate.
     expect(started({})).toBe(true)
     expect(started({ promptId: "gpt" })).toBe(true)
     expect(started({ promptId: 1 })).toBe(false)
+    expect(started({ effort: "low" })).toBe(true)
+    expect(started({ effort: "low", speed: "fast" })).toBe(true)
+    expect(started({ effort: 1 })).toBe(false)
+    expect(started({ speed: 2 })).toBe(false)
   })
 
   it("recognizes valid tool facts", () => {

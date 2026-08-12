@@ -57,6 +57,8 @@ export type ModelTarget = {
   readonly provider: string
   readonly model: string
   readonly promptId: string
+  readonly effort?: string
+  readonly speed?: string
 }
 
 export type ModelSystemSection = {
