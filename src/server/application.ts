@@ -55,6 +55,7 @@ import {
   createProjectRegistry,
   type ProjectRegistry,
 } from "./project-registry.ts"
+import { createUserConfigStore } from "./user-config.ts"
 
 const defaultMateProfile = {
   instructions:
@@ -79,6 +80,7 @@ export type YakitoriApplicationOptions = {
   readonly stream?: StreamFn
   readonly providerStreams?: Readonly<Record<string, StreamFn>>
   readonly modelDirectory?: ModelDirectory
+  readonly userConfigPath?: string
   readonly provider?: string
   readonly model?: string
   readonly fauxScenario?: string
@@ -151,6 +153,11 @@ export async function createYakitoriApplication(
     const projectRegistry = createProjectRegistry({
       defaultProject: workspace,
     })
+    const userConfig = createUserConfigStore({
+      ...(options.userConfigPath === undefined
+        ? {}
+        : { configPath: options.userConfigPath }),
+    })
     const toolRegistry = createToolRegistry()
     const activeMate = await resolveActiveMate(mateKernel, activeMateId)
     const sessionDefaults: SessionCreateDefaults = {
@@ -182,19 +189,26 @@ export async function createYakitoriApplication(
     // primary provider carries its configured default model. The payload is
     // assembled per request: the model directory resolves lazily.
     const modelDirectory = options.modelDirectory ?? createModelDirectory()
-    const providers = async (): Promise<ApiListProvidersResponse> => ({
-      providers: await Promise.all(
-        providerRegistry.providers.map((name) =>
-          providerSummary(
-            modelDirectory,
-            name,
-            name === provider.provider ? provider.model : undefined,
+    const providers = async (): Promise<ApiListProvidersResponse> => {
+      const [summaries, userPreference] = await Promise.all([
+        Promise.all(
+          providerRegistry.providers.map((name) =>
+            providerSummary(
+              modelDirectory,
+              name,
+              name === provider.provider ? provider.model : undefined,
+            ),
           ),
         ),
-      ),
-      defaultProvider: provider.provider,
-      defaultModel: provider.model,
-    })
+        userConfig.read(),
+      ])
+      return {
+        providers: summaries,
+        defaultProvider: provider.provider,
+        defaultModel: provider.model,
+        ...(userPreference === undefined ? {} : { userPreference }),
+      }
+    }
 
     const runner = createSessionRunner({
       kernel: sessionKernel,
@@ -268,6 +282,8 @@ export async function createYakitoriApplication(
           handlers,
           projectRegistry,
           providers,
+          userConfig,
+          availableProviders: providerRegistry.providers,
           ...(options.guiStaticDir === undefined
             ? {}
             : { staticAssets: { directory: options.guiStaticDir } }),

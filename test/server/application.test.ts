@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
+import type { Server as HttpServer } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
@@ -24,6 +25,7 @@ function testApplicationOptions(input: {
     ...input,
     recoverOnStart: false,
     stream: createFauxProvider([]).stream,
+    userConfigPath: join(input.rootDir, "config.toml"),
   }
 }
 
@@ -286,6 +288,7 @@ describe("application composition", () => {
       const application = await createYakitoriApplication({
         rootDir,
         workspace,
+        userConfigPath: join(rootDir, "config.toml"),
         recoverOnStart: false,
         stream: provider.stream,
         provider: "openai",
@@ -446,6 +449,7 @@ describe("application composition", () => {
       const application = await createYakitoriApplication({
         rootDir,
         workspace,
+        userConfigPath: join(rootDir, "config.toml"),
         recoverOnStart: false,
         stream: createFauxProvider([]).stream,
         provider: "openai",
@@ -486,6 +490,7 @@ describe("application composition", () => {
 
         expect(body.defaultProvider).toBe("openai")
         expect(body.defaultModel).toBe("gpt-custom-9")
+        expect(body.userPreference).toBeUndefined()
         expect(
           body.providers.find((provider) => provider.name === "openai"),
         ).toEqual({
@@ -527,6 +532,56 @@ describe("application composition", () => {
           server.closeAllConnections()
         })
         await application.close()
+      }
+    })
+  })
+
+  it("persists the user preference outside Session storage across restarts", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const userConfigPath = join(rootDir, "user-home", "config.toml")
+      const options = {
+        ...testApplicationOptions({ rootDir, workspace }),
+        userConfigPath,
+        modelDirectory: {
+          async listModels() {
+            return []
+          },
+        },
+      }
+      const first = await createYakitoriApplication(options)
+      const firstServer = first.createHttpServer()
+      try {
+        const baseUrl = await listen(firstServer)
+        const updated = await fetch(`${baseUrl}/user-preference`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            provider: "faux",
+            model: "arbitrary-model-slug",
+            speed: "priority",
+          }),
+        })
+        expect(updated.status).toBe(200)
+      } finally {
+        await closeServer(firstServer)
+        await first.close()
+      }
+
+      const second = await createYakitoriApplication(options)
+      const secondServer = second.createHttpServer()
+      try {
+        const baseUrl = await listen(secondServer)
+        const response = await fetch(`${baseUrl}/providers`)
+        expect(response.status).toBe(200)
+        const body = (await response.json()) as ApiListProvidersResponse
+        expect(body.userPreference).toEqual({
+          provider: "faux",
+          model: "arbitrary-model-slug",
+          speed: "priority",
+        })
+      } finally {
+        await closeServer(secondServer)
+        await second.close()
       }
     })
   })
@@ -803,6 +858,16 @@ async function withApplicationRoot(
     await rm(rootDir, { recursive: true, force: true })
     await rm(workspace, { recursive: true, force: true })
   }
+}
+
+async function closeServer(server: HttpServer): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => {
+      if (error) reject(error)
+      else resolve()
+    })
+    server.closeAllConnections()
+  })
 }
 
 function expectOk<T>(

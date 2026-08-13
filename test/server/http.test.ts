@@ -18,11 +18,13 @@ import {
   type ApiListProvidersResponse,
   type ApiListSessionsResponse,
   type ApiReadSessionResponse,
+  type ApiUpdateUserModelPreferenceResponse,
   createInputId,
   createJsonlEventStore,
   createProjectRegistry,
   createSessionId,
   createSessionKernel,
+  createUserConfigStore,
   createYakitoriHttpServer,
   type EventEnvelope,
   EventType,
@@ -848,6 +850,73 @@ describe("HTTP static assets", () => {
       expect(listed.status).toBe(404)
     })
   })
+
+  it("validates and persists user model preferences", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "yakitori-http-config-"))
+    try {
+      const userConfig = createUserConfigStore({
+        configPath: join(rootDir, "config.toml"),
+      })
+      await withListeningServer(
+        createYakitoriHttpServer({
+          kernel: createSessionKernel(createMemoryEventStore()),
+          userConfig,
+          availableProviders: ["anthropic", "faux"],
+        }),
+        async (baseUrl) => {
+          for (const invalid of [
+            { provider: "", model: "claude-custom" },
+            { provider: "anthropic", model: "" },
+            { provider: "anthropic", model: "claude-custom", effort: " " },
+            { provider: "missing", model: "arbitrary-slug" },
+          ]) {
+            const response = await putJson(
+              `${baseUrl}/user-preference`,
+              invalid,
+            )
+            expect(response.status).toBe(400)
+            expect(response.body).toMatchObject({
+              error: { code: ApiErrorCode.InvalidInput },
+            })
+          }
+
+          const accepted = await putJson<ApiUpdateUserModelPreferenceResponse>(
+            `${baseUrl}/user-preference`,
+            {
+              provider: "anthropic",
+              model: "unknown-but-valid-slug",
+              effort: "high",
+            },
+          )
+          expect(accepted).toEqual({
+            status: 200,
+            body: {
+              userPreference: {
+                provider: "anthropic",
+                model: "unknown-but-valid-slug",
+                effort: "high",
+              },
+            },
+          })
+          await expect(userConfig.read()).resolves.toEqual(
+            accepted.body.userPreference,
+          )
+        },
+      )
+    } finally {
+      await rm(rootDir, { recursive: true, force: true })
+    }
+  })
+
+  it("keeps the user preference route at 404 without a store", async () => {
+    await withHttpServer(async (baseUrl) => {
+      const response = await putJson(`${baseUrl}/user-preference`, {
+        provider: "faux",
+        model: "scripted",
+      })
+      expect(response.status).toBe(404)
+    })
+  })
 })
 
 async function withHttpServer(
@@ -929,6 +998,20 @@ async function withListeningServer(
 async function postJson<T = unknown>(url: string, body: unknown) {
   const response = await fetch(url, {
     method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  })
+  return {
+    status: response.status,
+    body: (await response.json()) as T,
+  }
+}
+
+async function putJson<T = unknown>(url: string, body: unknown) {
+  const response = await fetch(url, {
+    method: "PUT",
     headers: {
       "Content-Type": "application/json",
     },

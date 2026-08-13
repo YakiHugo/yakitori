@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted on 2026-08-10. Supersedes decision 0017. Amended by decision 0019.
+Accepted on 2026-08-10. Supersedes decision 0017. Amended by decisions 0019
+and 0022.
 
 ## Context
 

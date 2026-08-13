@@ -25,7 +25,9 @@ import {
   ApiErrorCode,
   type ApiHandlerResult,
   type ApiListProvidersResponse,
+  type ApiUserModelPreference,
 } from "./protocol.ts"
+import type { UserConfigStore } from "./user-config.ts"
 
 export type YakitoriStaticAssets = {
   readonly directory: string
@@ -37,6 +39,8 @@ type YakitoriHttpServerCommonOptions = {
   readonly staticAssets?: YakitoriStaticAssets
   readonly projectRegistry?: ProjectRegistry
   readonly providers?: () => Promise<ApiListProvidersResponse>
+  readonly userConfig?: UserConfigStore
+  readonly availableProviders?: readonly string[]
 }
 
 export type YakitoriHttpServerOptions = YakitoriHttpServerCommonOptions &
@@ -66,6 +70,8 @@ export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
     createServerHandlers(resolveServerKernel(options), { eventHub })
   const projectRegistry = options.projectRegistry
   const providers = options.providers
+  const userConfig = options.userConfig
+  const availableProviders = options.availableProviders
 
   const staticAssets =
     options.staticAssets === undefined
@@ -81,6 +87,8 @@ export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
       transientHub,
       projectRegistry,
       providers,
+      userConfig,
+      availableProviders,
       staticAssets,
     ).catch((error) => {
       writeUnhandledError(response, error)
@@ -120,6 +128,8 @@ async function handleRequest(
   transientHub: TransientEventHub | undefined,
   projectRegistry: ProjectRegistry | undefined,
   providers: (() => Promise<ApiListProvidersResponse>) | undefined,
+  userConfig: UserConfigStore | undefined,
+  availableProviders: readonly string[] | undefined,
   staticAssets: StaticAssetContext | undefined,
 ): Promise<void> {
   const origin = requestOrigin(request)
@@ -201,6 +211,33 @@ async function handleRequest(
       return
     }
     writeJson(response, 200, await providers())
+    return
+  }
+
+  if (route.kind === "updateUserPreference") {
+    if (userConfig === undefined) {
+      writeResult(
+        response,
+        errorResult(404, ApiErrorCode.NotFound, "Route not found."),
+      )
+      return
+    }
+    const body = await readJson(request)
+    if (!body.ok) {
+      writeResult(response, body.result)
+      return
+    }
+    const preference = requireUserModelPreference(
+      body.value,
+      availableProviders ?? [],
+    )
+    if (!preference.ok) {
+      writeResult(response, preference.result)
+      return
+    }
+    writeJson(response, 200, {
+      userPreference: await userConfig.write(preference.value),
+    })
     return
   }
 
@@ -388,6 +425,14 @@ function routeRequest(method: string, url: URL): Route {
     segments[0] === "providers"
   ) {
     return { kind: "listProviders" }
+  }
+
+  if (
+    method === "PUT" &&
+    segments.length === 1 &&
+    segments[0] === "user-preference"
+  ) {
+    return { kind: "updateUserPreference" }
   }
 
   if (segments[0] !== "sessions" || typeof segments[1] !== "string") {
@@ -626,6 +671,85 @@ function requireBodyRecord(value: unknown): Record<string, unknown> {
   return {}
 }
 
+function requireUserModelPreference(
+  value: unknown,
+  availableProviders: readonly string[],
+):
+  | { readonly ok: true; readonly value: ApiUserModelPreference }
+  | { readonly ok: false; readonly result: ApiHandlerResult<never> } {
+  const record = requireBodyRecord(value)
+  const provider = nonEmptyString(record.provider)
+  if (provider === undefined) {
+    return {
+      ok: false,
+      result: errorResult(
+        400,
+        ApiErrorCode.InvalidInput,
+        "provider must be a non-empty string.",
+      ),
+    }
+  }
+  if (!availableProviders.includes(provider)) {
+    return {
+      ok: false,
+      result: errorResult(
+        400,
+        ApiErrorCode.InvalidInput,
+        "provider must name a registered provider.",
+      ),
+    }
+  }
+  const model = nonEmptyString(record.model)
+  if (model === undefined) {
+    return {
+      ok: false,
+      result: errorResult(
+        400,
+        ApiErrorCode.InvalidInput,
+        "model must be a non-empty string.",
+      ),
+    }
+  }
+  const effort = optionalNonEmptyString(record, "effort")
+  if (!effort.ok) return effort
+  const speed = optionalNonEmptyString(record, "speed")
+  if (!speed.ok) return speed
+  return {
+    ok: true,
+    value: {
+      provider,
+      model,
+      ...(effort.value === undefined ? {} : { effort: effort.value }),
+      ...(speed.value === undefined ? {} : { speed: speed.value }),
+    },
+  }
+}
+
+function optionalNonEmptyString(
+  record: Record<string, unknown>,
+  field: "effort" | "speed",
+):
+  | { readonly ok: true; readonly value: string | undefined }
+  | { readonly ok: false; readonly result: ApiHandlerResult<never> } {
+  if (!(field in record)) return { ok: true, value: undefined }
+  const value = nonEmptyString(record[field])
+  if (value !== undefined) return { ok: true, value }
+  return {
+    ok: false,
+    result: errorResult(
+      400,
+      ApiErrorCode.InvalidInput,
+      `${field} must be a non-empty string when provided.`,
+    ),
+  }
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined
+  const trimmed = value.trim()
+  return trimmed === "" ? undefined : trimmed
+}
+
 function writeResult<T>(
   response: ServerResponse,
   result: ApiHandlerResult<T>,
@@ -697,7 +821,8 @@ function isApiPath(segments: readonly string[]): boolean {
     segments[0] === "sessions" ||
     segments[0] === "health" ||
     segments[0] === "projects" ||
-    segments[0] === "providers"
+    segments[0] === "providers" ||
+    segments[0] === "user-preference"
   )
 }
 
@@ -909,7 +1034,10 @@ function applyCorsHeaders(
     response.setHeader("Access-Control-Allow-Origin", origin)
     response.setHeader("Vary", "Origin")
   }
-  response.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS")
+  response.setHeader(
+    "Access-Control-Allow-Methods",
+    "GET,POST,PUT,DELETE,OPTIONS",
+  )
   response.setHeader("Access-Control-Allow-Headers", "content-type")
 }
 
@@ -962,6 +1090,7 @@ type Route =
   | { readonly kind: "listProjects" }
   | { readonly kind: "addProject" }
   | { readonly kind: "listProviders" }
+  | { readonly kind: "updateUserPreference" }
   | {
       readonly kind: "resolvePermission"
       readonly sessionId: string

@@ -1,50 +1,14 @@
 import { Check } from "lucide-react"
 import { useState } from "react"
-import {
-  EventType,
-  type ModelSelection,
-  type StoredEventEnvelope,
-  type TurnStartedEvent,
-} from "../../kernel/events.ts"
+import type { ModelSelection } from "../../kernel/events.ts"
 import type { ApiProviderSummary } from "../../server/protocol.ts"
 import { cn } from "../lib/utils.ts"
-import { useAppStore } from "../store/app-store.ts"
+import { resolveEffectiveModel, useAppStore } from "../store/app-store.ts"
 import { Button } from "./ui/button.tsx"
 
 const SPEED_LABELS: Readonly<Record<string, string>> = {
   fast: "快速",
   standard: "标准",
-}
-
-export type EffectiveModelInput = {
-  readonly events: readonly StoredEventEnvelope[]
-  readonly override: ModelSelection | undefined
-  readonly defaultProvider: string | undefined
-  readonly defaultModel: string | undefined
-}
-
-// The recorded Turn wins over the saved override so the label reflects what
-// actually ran; the override only applies to the next input.
-export function resolveEffectiveModel(
-  input: EffectiveModelInput,
-): ModelSelection | undefined {
-  for (const event of [...input.events].reverse()) {
-    if (event.type !== EventType.TurnStarted) continue
-    const context = (event.data as TurnStartedEvent["data"]).executionContext
-    if (context !== undefined) {
-      return {
-        provider: context.provider,
-        model: context.model,
-        ...(context.effort === undefined ? {} : { effort: context.effort }),
-        ...(context.speed === undefined ? {} : { speed: context.speed }),
-      }
-    }
-  }
-  if (input.override !== undefined) return input.override
-  if (input.defaultProvider === undefined || input.defaultModel === undefined) {
-    return undefined
-  }
-  return { provider: input.defaultProvider, model: input.defaultModel }
 }
 
 function displayName(
@@ -62,8 +26,8 @@ export function ModelSelector() {
   const providers = useAppStore((state) => state.providers)
   const defaultProvider = useAppStore((state) => state.defaultProvider)
   const defaultModel = useAppStore((state) => state.defaultModel)
-  const events = useAppStore((state) => state.events)
-  const override = useAppStore((state) =>
+  const userPreference = useAppStore((state) => state.userPreference)
+  const sessionCurrent = useAppStore((state) =>
     state.selection.sessionId === undefined
       ? undefined
       : state.modelSelections[state.selection.sessionId],
@@ -74,8 +38,8 @@ export function ModelSelector() {
   if (sessionId === undefined || providers.length === 0) return null
 
   const effective = resolveEffectiveModel({
-    events,
-    override,
+    sessionCurrent,
+    userPreference,
     defaultProvider,
     defaultModel,
   })

@@ -1,6 +1,11 @@
 import { useMemo } from "react"
 import { create } from "zustand"
-import type { ModelSelection, StoredEventEnvelope } from "../../kernel/index.ts"
+import {
+  EventType,
+  type ModelSelection,
+  type StoredEventEnvelope,
+  type TurnStartedEvent,
+} from "../../kernel/events.ts"
 import type {
   ApiAdmitInputResponse,
   ApiCreateSessionResponse,
@@ -10,6 +15,8 @@ import type {
   ApiReadSessionResponse,
   ApiSessionDetail,
   ApiSessionSummary,
+  ApiUpdateUserModelPreferenceResponse,
+  ApiUserModelPreference,
   ApiListProjectsResponse,
 } from "../../server/protocol.ts"
 import { acknowledgeAdmission, reserveAdmission } from "../admission-outbox.ts"
@@ -53,6 +60,7 @@ export type AppStoreData = {
   promptDraft: string | undefined
   projects: string[]
   providers: ApiProviderSummary[]
+  userPreference: ApiUserModelPreference | undefined
   selection: SessionSelectionState
   sessionDetailRevision: number
   sessionListRevision: number
@@ -108,6 +116,7 @@ export function createInitialAppState(): AppStoreData {
     promptDraft: undefined,
     projects: [],
     providers: [],
+    userPreference: undefined,
     selection: createSessionSelectionState(),
     sessionDetailRevision: 0,
     sessionListRevision: 0,
@@ -123,6 +132,7 @@ export function createInitialAppState(): AppStoreData {
 let activeTaskCount = 0
 
 export const useAppStore = create<AppStore>()((set, get) => {
+  const restoringModelSelections = new Set<string>()
   const runTask = async (
     task: () => Promise<void>,
     isCurrent: () => boolean = () => true,
@@ -163,6 +173,14 @@ export const useAppStore = create<AppStore>()((set, get) => {
   const mergeEvent = (event: StoredEventEnvelope): void => {
     const state = get()
     if (state.events.some((candidate) => candidate.id === event.id)) return
+    const restored = restoringModelSelections.has(event.sessionId)
+      ? modelSelectionFromTurn(event)
+      : undefined
+    const modelSelections =
+      restored === undefined
+        ? state.modelSelections
+        : { ...state.modelSelections, [event.sessionId]: restored }
+    if (restored !== undefined) persistModelSelections(modelSelections)
     set({
       events: [...state.events, event].sort(
         (left, right) => left.seq - right.seq,
@@ -174,6 +192,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
           ? {}
           : { session: state.selectedSession }),
       }),
+      modelSelections,
     })
   }
 
@@ -290,6 +309,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
 
   const clearSessionState = (): void => {
     const state = get()
+    restoringModelSelections.clear()
     clearSessionSelection(state.selection)
     set({
       apiRevision: state.apiRevision + 1,
@@ -409,6 +429,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
           providers: [...response.providers],
           defaultProvider: response.defaultProvider,
           defaultModel: response.defaultModel,
+          userPreference: response.userPreference,
         })
       } catch {
         // Older servers without the providers route return 404; the model
@@ -542,6 +563,11 @@ export const useAppStore = create<AppStore>()((set, get) => {
         sessionSelectionIntentRevision:
           state.sessionSelectionIntentRevision + 1,
       }))
+      if (get().modelSelections[sessionId] === undefined) {
+        restoringModelSelections.add(sessionId)
+      } else {
+        restoringModelSelections.delete(sessionId)
+      }
       const selection = activateSession(sessionId)
       closeStream()
       set({
@@ -566,7 +592,13 @@ export const useAppStore = create<AppStore>()((set, get) => {
 
       await runTask(
         async () => {
-          const modelSelection = get().modelSelections[selection.sessionId]
+          const state = get()
+          const modelSelection = resolveEffectiveModel({
+            sessionCurrent: state.modelSelections[selection.sessionId],
+            userPreference: state.userPreference,
+            defaultProvider: state.defaultProvider,
+            defaultModel: state.defaultModel,
+          })
           const pendingAdmission = await reserveAdmission(window.localStorage, {
             apiBase: get().apiBase,
             sessionId: selection.sessionId,
@@ -718,17 +750,40 @@ export const useAppStore = create<AppStore>()((set, get) => {
     },
 
     setModelSelection: (sessionId, selection) => {
+      restoringModelSelections.delete(sessionId)
       const modelSelections = { ...get().modelSelections }
       if (selection === undefined) delete modelSelections[sessionId]
       else modelSelections[sessionId] = selection
-      set({ modelSelections })
-      window.localStorage.setItem(
-        "yakitori.modelSelections",
-        JSON.stringify(modelSelections),
-      )
+      set({
+        modelSelections,
+        ...(selection === undefined ? {} : { userPreference: selection }),
+      })
+      persistModelSelections(modelSelections)
+      if (selection === undefined) return
+      void runTask(async () => {
+        await requestJson<ApiUpdateUserModelPreferenceResponse>(
+          get().apiBase,
+          "/user-preference",
+          { method: "PUT", body: selection },
+        )
+      })
     },
   }
 })
+
+export function resolveEffectiveModel(input: {
+  readonly sessionCurrent: ModelSelection | undefined
+  readonly userPreference: ApiUserModelPreference | undefined
+  readonly defaultProvider: string | undefined
+  readonly defaultModel: string | undefined
+}): ModelSelection | undefined {
+  if (input.sessionCurrent !== undefined) return input.sessionCurrent
+  if (input.userPreference !== undefined) return input.userPreference
+  if (input.defaultProvider === undefined || input.defaultModel === undefined) {
+    return undefined
+  }
+  return { provider: input.defaultProvider, model: input.defaultModel }
+}
 
 export function useExecutionView(): ExecutionView {
   const execution = useAppStore((state) => state.execution)
@@ -762,6 +817,29 @@ function initialModelSelections(): Record<string, ModelSelection> {
   } catch {
     return {}
   }
+}
+
+function modelSelectionFromTurn(
+  event: StoredEventEnvelope,
+): ModelSelection | undefined {
+  if (event.type !== EventType.TurnStarted) return undefined
+  const context = (event.data as TurnStartedEvent["data"]).executionContext
+  if (context === undefined) return undefined
+  return {
+    provider: context.provider,
+    model: context.model,
+    ...(context.effort === undefined ? {} : { effort: context.effort }),
+    ...(context.speed === undefined ? {} : { speed: context.speed }),
+  }
+}
+
+function persistModelSelections(
+  modelSelections: Readonly<Record<string, ModelSelection>>,
+): void {
+  window.localStorage.setItem(
+    "yakitori.modelSelections",
+    JSON.stringify(modelSelections),
+  )
 }
 
 function errorMessage(error: unknown, fallback: string): string {
