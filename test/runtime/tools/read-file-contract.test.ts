@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process"
 import { createHash } from "node:crypto"
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { promisify } from "node:util"
@@ -219,13 +219,15 @@ describe("read_file contract", () => {
     })
   })
 
-  it("reports empty, binary, directory, bounds, sensitive paths, and suggestions", async () => {
+  it("reports empty, binary, directory listings, bounds, and suggestions", async () => {
     await withWorkspace(async (workspace) => {
       await writeFile(join(workspace, "empty.txt"), "")
       await writeFile(join(workspace, "binary.dat"), Buffer.from([0, 1, 2]))
       await writeFile(join(workspace, "correct-name.txt"), "text")
       await writeFile(join(workspace, ".env.local"), "TOKEN=secret")
+      await writeFile(join(workspace, "..hidden.txt"), "dotdot")
       await mkdir(join(workspace, "folder"))
+      await writeFile(join(workspace, "folder", "inside.ts"), "inside")
       const read = createReadFileTool()
 
       expect(
@@ -248,7 +250,14 @@ describe("read_file contract", () => {
       ).toMatchObject({ ok: false, code: "binary_file" })
       expect(
         await read.execute({ path: "folder" }, { workspaceRoot: workspace }),
-      ).toMatchObject({ ok: false, code: "directory_not_supported" })
+      ).toMatchObject({
+        ok: true,
+        output: {
+          kind: "directory",
+          count: 1,
+          content: expect.stringContaining("inside.ts"),
+        },
+      })
       expect(
         await read.execute(
           { path: "correct-name.txt", offset: 2 },
@@ -264,7 +273,19 @@ describe("read_file contract", () => {
           { path: ".env.local" },
           { workspaceRoot: workspace },
         ),
-      ).toMatchObject({ ok: false, code: "sensitive_path" })
+      ).toMatchObject({
+        ok: true,
+        output: { complete: true, content: expect.stringContaining("TOKEN") },
+      })
+      expect(
+        await read.execute(
+          { path: "..hidden.txt" },
+          { workspaceRoot: workspace },
+        ),
+      ).toMatchObject({
+        ok: true,
+        output: { content: expect.stringContaining("dotdot") },
+      })
       const typo = await read.execute(
         { path: "corect-name.txt" },
         { workspaceRoot: workspace },

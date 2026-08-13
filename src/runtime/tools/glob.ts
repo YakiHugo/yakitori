@@ -1,10 +1,6 @@
 import { stat } from "node:fs/promises"
-import {
-  isSensitiveWorkspacePath,
-  resolveSearchPath,
-  SensitivePathGlobs,
-} from "./path-policy.ts"
-import { runRipgrepRecords, type RipgrepRecordStopReason } from "./ripgrep.ts"
+import { resolveSearchPath } from "./path-policy.ts"
+import { type RipgrepRecordStopReason, runRipgrepRecords } from "./ripgrep.ts"
 import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
 
 const DEFAULT_LIMIT = 100
@@ -41,6 +37,7 @@ export function createGlobTool(
     description:
       "Fast file pattern matching that works with any codebase size. Supports patterns such as **/*.js and src/**/*.ts, returns workspace-relative file paths sorted lexicographically, and caps results at 100 files. Use glob to find files by name pattern or wildcard.",
     autoAllow: true,
+    effect: "observe",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -103,7 +100,7 @@ export function createGlobTool(
               resolved.relativePath,
               normalizePath(record),
             )
-            if (isVcsWorkspacePath(path) || isSensitiveWorkspacePath(path)) {
+            if (isVcsWorkspacePath(path)) {
               return true
             }
             if (paths.length >= limit) {
@@ -153,7 +150,6 @@ function buildRipgrepArguments(
     ...VCS_DIRECTORIES.flatMap((directory) => ["--glob", `!${directory}`]),
     "--glob",
     pattern,
-    ...SensitivePathGlobs.flatMap((glob) => ["--glob", glob]),
     ...(includeIgnored ? ["--no-ignore"] : []),
     "--",
     ".",

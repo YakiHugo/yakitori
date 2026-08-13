@@ -11,6 +11,7 @@ export function createWriteFileTool(
     description:
       "Create or intentionally replace a complete UTF-8 text file using compare-and-write. New files are created without a prior read. Before replacing an existing file, read the complete current file; write_file rejects missing, partial, or stale observations. Prefer edit_file for focused modifications.",
     autoAllow: true,
+    effect: "mutate",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -57,12 +58,14 @@ export function createWriteFileTool(
         )
       }
 
-      return compareAndWriteTextFile({
+      const written = await compareAndWriteTextFile({
         workspaceRoot: context.workspaceRoot,
         path: resolved.relativePath,
         content: parsed.content,
         expectedSha256: observed?.sha256 ?? null,
       })
+      if (!written.ok) return written
+      return withFileObservation(written, "write")
     },
   }
 }
@@ -121,6 +124,37 @@ function parseWriteInput(
     path: record.path,
     content: record.content,
   }
+}
+
+function withFileObservation(
+  written: Extract<ToolExecutionResult, { readonly ok: true }>,
+  kind: "write" | "edit",
+): ToolExecutionResult {
+  if (!isRecord(written.output) || typeof written.output.path !== "string") {
+    return written
+  }
+  const sha256 =
+    typeof written.output.sha256 === "string"
+      ? written.output.sha256
+      : undefined
+  if (sha256 === undefined) return written
+  return {
+    ...written,
+    output: {
+      ...written.output,
+      fileObservation: {
+        path: written.output.path,
+        kind,
+        complete: true,
+        sha256,
+        ...(written.output.created === true ? { created: true } : {}),
+      },
+    },
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
 function writeFailure(

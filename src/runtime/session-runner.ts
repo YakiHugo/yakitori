@@ -1,47 +1,55 @@
 import {
   createYakitoriError,
-  PermissionBehavior,
-  PermissionState,
   type EventEnvelope,
   type EventMetadata,
+  type InputProjection,
   type KernelError,
   type ModelSelection,
+  PermissionBehavior,
+  PermissionState,
   type SessionKernel,
   type SessionProjection,
-  type InputProjection,
   type TokenUsage,
   type TurnExecutionContext,
   YakitoriErrorCode,
 } from "../kernel/index.ts"
 import type { MateKernel } from "../mates/index.ts"
+import { buildCompactionRequest, runCompaction } from "./compaction.ts"
+import { buildEnvironmentContext } from "./environment-context.ts"
+import { createRuntimeLimits, type RuntimeLimits } from "./limits.ts"
 import {
   createCoalescingSnapshotPublisher,
   type TransientEventHub,
 } from "./live-events.ts"
-import { buildEnvironmentContext } from "./environment-context.ts"
-import { buildCompactionRequest, runCompaction } from "./compaction.ts"
-import { createRuntimeLimits, type RuntimeLimits } from "./limits.ts"
 import {
-  buildModelContext,
-  type DroppedTurn,
-  type ModelContextBuildResult,
-} from "./model-context.ts"
-import {
-  ModelStopReason,
   type ModelContentBlock,
   type ModelRequest,
   type ModelResponse,
+  ModelStopReason,
   type ModelToolCallBlock,
   type ModelUsage,
   type StreamFn,
 } from "./model.ts"
 import { requirePromptId, resolveModel } from "./model-catalog.ts"
+import {
+  buildModelContext,
+  type DroppedTurn,
+  type ModelContextBuildResult,
+} from "./model-context.ts"
 import { createPermissionGate, type PermissionGate } from "./permission-gate.ts"
 import { loadProjectInstructions } from "./project-instructions.ts"
 import { buildStaticContext } from "./static-context.ts"
 import { resolveWorkspaceRoot } from "./tools/path-policy.ts"
 import { createToolRegistry, type ToolRegistry } from "./tools/registry.ts"
-import { createVisibleFileObservations } from "./tools/visible-file-observations.ts"
+import type {
+  RuntimeTool,
+  ToolEffect,
+  ToolExecutionResult,
+} from "./tools/types.ts"
+import {
+  createVisibleFileObservations,
+  grantFromToolOutput,
+} from "./tools/visible-file-observations.ts"
 
 export type SessionRunnerOptions = {
   readonly kernel: SessionKernel
@@ -707,109 +715,224 @@ export function createSessionRunner(
     const workspaceRoot = await resolveWorkspaceRoot(
       input.executionContext.workingDirectory,
     )
+    const observations = input.visibleFileObservations
+    const firstBarrier = input.toolCalls.findIndex((call) => {
+      const tool = input.executionContext.enabledTools.includes(call.name)
+        ? toolRegistry.get(call.name)
+        : undefined
+      return toolEffect(tool) !== "observe"
+    })
+    const prefix =
+      firstBarrier < 0
+        ? input.toolCalls
+        : input.toolCalls.slice(0, firstBarrier)
+    const rest = firstBarrier < 0 ? [] : input.toolCalls.slice(firstBarrier)
 
-    for (const call of input.toolCalls) {
+    const prefixOutcomes = await Promise.all(
+      prefix.map(async (call) => {
+        try {
+          return {
+            call,
+            result: await executeRecordedTool({
+              sessionId: input.sessionId,
+              turnId: input.turnId,
+              call,
+              executionContext: input.executionContext,
+              workspaceRoot,
+              signal: input.signal,
+              observations,
+              record: false,
+            }),
+          }
+        } catch (error) {
+          if (isAbortError(error)) {
+            return { call, result: "aborted" as const }
+          }
+          throw error
+        }
+      }),
+    )
+    let prefixAborted = input.signal.aborted
+    for (const outcome of prefixOutcomes) {
+      if (outcome.result === "aborted") {
+        prefixAborted = true
+        continue
+      }
+      const recorded = await recordExecutedTool({
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        call: outcome.call,
+        result: outcome.result,
+        observations,
+      })
+      if (recorded === "aborted") prefixAborted = true
+    }
+    if (prefixAborted || input.signal.aborted) {
+      await cancelAfterRuntimeAbort(input.sessionId, input.turnId)
+      return
+    }
+
+    for (const call of rest) {
       if (input.signal.aborted) {
         await cancelAfterRuntimeAbort(input.sessionId, input.turnId)
         return
       }
-      const tool = input.executionContext.enabledTools.includes(call.name)
-        ? toolRegistry.get(call.name)
-        : undefined
-      let permissionRequestId: string | undefined
-      if (tool !== undefined && !tool.autoAllow) {
-        const command =
-          typeof call.input === "object" &&
-          call.input !== null &&
-          "command" in call.input &&
-          typeof (call.input as { command: unknown }).command === "string"
-            ? (call.input as { command: string }).command
-            : call.name
-        const permission = await options.kernel.requestPermission({
+      try {
+        const result = await executeRecordedTool({
           sessionId: input.sessionId,
           turnId: input.turnId,
-          toolCallId: call.id,
-          action: call.name,
-          subject: command,
-          reason:
-            "Command runs with the host user's filesystem, process, environment, and network authority.",
-        })
-        publishDurable([permission.event])
-        permissionRequestId = permission.permissionRequestId
-      }
-
-      if (permissionRequestId !== undefined) {
-        const allowed = await waitForPermissionAllow({
-          sessionId: input.sessionId,
-          turnId: input.turnId,
-          permissionRequestId,
+          call,
+          executionContext: input.executionContext,
+          workspaceRoot,
           signal: input.signal,
+          observations,
+          record: true,
         })
-        if (!allowed.ok) {
-          const denied = await options.kernel.recordToolResult({
-            sessionId: input.sessionId,
-            turnId: input.turnId,
-            toolCallId: call.id,
-            error: {
-              code: allowed.kind,
-              message: allowed.message,
-            },
-            content: { kind: "text", text: allowed.message },
-          })
-          publishDurable(denied.events)
-          if (allowed.kind === "aborted") {
-            await cancelAfterRuntimeAbort(input.sessionId, input.turnId)
-            return
-          }
-          continue
+        if (result === "aborted") {
+          await cancelAfterRuntimeAbort(input.sessionId, input.turnId)
+          return
         }
+      } catch (error) {
+        if (isAbortError(error)) {
+          await cancelAfterRuntimeAbort(input.sessionId, input.turnId)
+          return
+        }
+        throw error
       }
+    }
+  }
 
-      await options.kernel.requireToolExecutionAllowed({
+  async function executeRecordedTool(input: {
+    readonly sessionId: string
+    readonly turnId: string
+    readonly call: ModelToolCallBlock
+    readonly executionContext: TurnExecutionContext
+    readonly workspaceRoot: string
+    readonly signal: AbortSignal
+    readonly observations: ReturnType<typeof createVisibleFileObservations>
+    readonly record: boolean
+  }): Promise<ToolExecutionResult | "aborted"> {
+    const tool = input.executionContext.enabledTools.includes(input.call.name)
+      ? toolRegistry.get(input.call.name)
+      : undefined
+    let permissionRequestId: string | undefined
+    if (tool !== undefined && !tool.autoAllow) {
+      const command =
+        typeof input.call.input === "object" &&
+        input.call.input !== null &&
+        "command" in input.call.input &&
+        typeof (input.call.input as { command: unknown }).command === "string"
+          ? (input.call.input as { command: string }).command
+          : input.call.name
+      const permission = await options.kernel.requestPermission({
         sessionId: input.sessionId,
         turnId: input.turnId,
-        toolCallId: call.id,
+        toolCallId: input.call.id,
+        action: input.call.name,
+        subject: command,
+        reason:
+          "Command runs with the host user's filesystem, process, environment, and network authority.",
       })
+      publishDurable([permission.event])
+      permissionRequestId = permission.permissionRequestId
+    }
 
-      const result =
-        tool === undefined
-          ? {
-              ok: false as const,
-              code: "tool_unavailable",
-              message: `Tool is not enabled for this Turn: ${call.name}`,
-              content: `Tool is not enabled for this Turn: ${call.name}`,
-            }
-          : await tool.execute(call.input, {
-              workspaceRoot,
-              signal: input.signal,
-              visibleFileObservations: input.visibleFileObservations,
-            })
-
-      if (result.ok) {
-        const resolved = await options.kernel.recordToolResult({
-          sessionId: input.sessionId,
-          turnId: input.turnId,
-          toolCallId: call.id,
-          output: result.output,
-          content: { kind: "text", text: result.content },
-        })
-        publishDurable(resolved.events)
-        continue
+    if (permissionRequestId !== undefined) {
+      const allowed = await waitForPermissionAllow({
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        permissionRequestId,
+        signal: input.signal,
+      })
+      if (!allowed.ok) {
+        const denied: ToolExecutionResult = {
+          ok: false,
+          code: allowed.kind,
+          message: allowed.message,
+          content: allowed.message,
+        }
+        if (input.record) {
+          const recorded = await recordExecutedTool({
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            call: input.call,
+            result: denied,
+            observations: input.observations,
+          })
+          return recorded === "aborted" ? "aborted" : denied
+        }
+        return denied
       }
+    }
 
+    await options.kernel.requireToolExecutionAllowed({
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      toolCallId: input.call.id,
+    })
+
+    const result =
+      tool === undefined
+        ? {
+            ok: false as const,
+            code: "tool_unavailable",
+            message: `Tool is not enabled for this Turn: ${input.call.name}`,
+            content: `Tool is not enabled for this Turn: ${input.call.name}`,
+          }
+        : await tool.execute(input.call.input, {
+            workspaceRoot: input.workspaceRoot,
+            signal: input.signal,
+            visibleFileObservations: input.observations,
+          })
+    if (!input.record) return result
+    const recorded = await recordExecutedTool({
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      call: input.call,
+      result,
+      observations: input.observations,
+    })
+    return recorded === "aborted" ? "aborted" : result
+  }
+
+  async function recordExecutedTool(input: {
+    readonly sessionId: string
+    readonly turnId: string
+    readonly call: ModelToolCallBlock
+    readonly result: ToolExecutionResult
+    readonly observations: ReturnType<typeof createVisibleFileObservations>
+  }): Promise<"ok" | "aborted"> {
+    if (input.result.ok) {
       const resolved = await options.kernel.recordToolResult({
         sessionId: input.sessionId,
         turnId: input.turnId,
-        toolCallId: call.id,
-        ...(result.output === undefined ? {} : { output: result.output }),
-        error: {
-          code: result.code,
-          message: result.message,
-        },
-        content: { kind: "text", text: result.content },
+        toolCallId: input.call.id,
+        output: input.result.output,
+        content: { kind: "text", text: input.result.content },
       })
       publishDurable(resolved.events)
+      const grant = grantFromToolOutput(input.call.name, input.result.output)
+      if (grant?.kind === "edit" || grant?.kind === "write") {
+        input.observations.apply(grant)
+      }
+      return "ok"
     }
+
+    const resolved = await options.kernel.recordToolResult({
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      toolCallId: input.call.id,
+      ...(input.result.output === undefined
+        ? {}
+        : { output: input.result.output }),
+      error: {
+        code: input.result.code,
+        message: input.result.message,
+      },
+      content: { kind: "text", text: input.result.content },
+    })
+    publishDurable(resolved.events)
+    return input.result.code === "aborted" ? "aborted" : "ok"
   }
 
   async function waitForPermissionAllow(input: {
@@ -1098,6 +1221,10 @@ export function createSessionRunner(
       )
     },
   }
+}
+
+function toolEffect(tool: RuntimeTool | undefined): ToolEffect {
+  return tool?.effect ?? "opaque"
 }
 
 function isInvalidState(error: unknown): boolean {

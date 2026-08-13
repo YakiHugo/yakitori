@@ -1,11 +1,10 @@
 import {
   buildGrepArguments,
+  type GrepInput,
   GrepInputSchema,
   parseGrepInput,
-  type GrepInput,
-  type GrepOutputMode,
 } from "./grep-input.ts"
-import { isSensitiveWorkspacePath, resolveSearchPath } from "./path-policy.ts"
+import { resolveSearchPath } from "./path-policy.ts"
 import { runRipgrepRecords } from "./ripgrep.ts"
 import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
 
@@ -69,6 +68,7 @@ export function createGrepTool(
     description:
       "Search file contents with ripgrep. Read the relevant file before editing it. Supports regex, file globs, file types, context lines, case-insensitive and multiline search. files_with_matches is sorted newest-first; content and count are sorted by path and line. Results are paginated and bounded.",
     autoAllow: true,
+    effect: "observe",
     inputSchema: GrepInputSchema,
     async execute(input, context): Promise<ToolExecutionResult> {
       const parsed = parseGrepInput(input, limits.maxResults)
@@ -92,16 +92,6 @@ export function createGrepTool(
       )
       const contentBudget = Math.max(1, limits.maxOutputBytes - metadataReserve)
       const accept = (entry: SearchEntry) => {
-        if (
-          entry.match !== undefined &&
-          isSensitiveWorkspacePath(entry.match.path)
-        ) {
-          return true
-        }
-        if (entry.match === undefined) {
-          const path = entryPath(entry.content, parsed.outputMode)
-          if (path !== undefined && isSensitiveWorkspacePath(path)) return true
-        }
         if (encountered++ < parsed.offset) return true
         if (entries.length >= parsed.headLimit) {
           hasMore = true
@@ -380,13 +370,6 @@ function boundLine(entry: SearchEntry, maxCharacters: number) {
     )}`,
     lineTruncated: true,
   }
-}
-
-function entryPath(content: string, mode: GrepOutputMode): string | undefined {
-  if (mode === "files_with_matches") return content
-  if (mode !== "count") return undefined
-  const separator = content.lastIndexOf(":")
-  return separator < 0 ? undefined : content.slice(0, separator)
 }
 
 function normalizePath(path: string): string {

@@ -88,7 +88,10 @@ kernel fact protocol ahead of a concrete consumer.
 - Apply visible results in context order. Complete reads, whole-file writes, and
   edit creations establish a revision; a normal edit advances only an already
   visible prerequisite. Results truncated by context assembly grant nothing,
-  and all calls in one model response share the same frozen projection.
+  and a sibling read in the same model response still cannot authorize an
+  edit. Successful writes in that response update an in-memory overlay so a
+  later write can continue from the just-written revision. A later ranged
+  read no longer drops a complete revision that is still in context.
 
 ### Grep pagination — implemented
 

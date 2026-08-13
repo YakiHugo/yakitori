@@ -1,6 +1,8 @@
 import type { JsonObject, JsonValue } from "../../kernel/index.ts"
 import type { VisibleFileObservations } from "./visible-file-observations.ts"
 
+export type ToolEffect = "observe" | "mutate" | "opaque"
+
 export type ToolExecutionContext = {
   readonly workspaceRoot: string
   readonly signal?: AbortSignal
@@ -28,6 +30,7 @@ export type RuntimeTool = {
   readonly description: string
   readonly inputSchema: JsonObject
   readonly autoAllow: boolean
+  readonly effect: ToolEffect
   execute(
     input: unknown,
     context: ToolExecutionContext,

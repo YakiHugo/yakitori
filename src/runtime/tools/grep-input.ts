@@ -1,5 +1,4 @@
 import type { JsonObject } from "../../kernel/index.ts"
-import { SensitivePathGlobs } from "./path-policy.ts"
 
 export type GrepOutputMode = "content" | "count" | "files_with_matches"
 
@@ -235,7 +234,6 @@ export function buildGrepArguments(
     "--hidden",
     "--no-require-git",
     ...VCS_DIRECTORIES.flatMap((directory) => ["--glob", `!${directory}`]),
-    ...SensitivePathGlobs.flatMap((glob) => ["--glob", glob]),
     ...(includeIgnored ? ["--no-ignore"] : []),
     ...(input.caseInsensitive ? ["-i"] : []),
     ...(input.glob === undefined ? [] : ["--glob", input.glob]),

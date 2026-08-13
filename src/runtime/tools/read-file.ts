@@ -1,8 +1,9 @@
+import { readdir } from "node:fs/promises"
 import { RuntimeLimits } from "../limits.ts"
 import { resolveReadPath } from "./path-policy.ts"
 import {
-  captureTextFilePage,
   type CapturedLine,
+  captureTextFilePage,
   FileChangedDuringReadError,
   type TextFilePage,
   UnsupportedTextFileTypeError,
@@ -11,6 +12,7 @@ import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
 
 const DEFAULT_LINE_CHARACTERS = 2_000
 const LINE_TRUNCATION_MARKER = "…[line truncated]…"
+const MAX_DIRECTORY_ENTRIES = 100
 
 type ReadInput = {
   readonly path: string
@@ -30,8 +32,9 @@ export function createReadFileTool(
   return {
     name: "read_file",
     description:
-      "Read a live, bounded page from a regular UTF-8 text file. Lines are prefixed {N}\\t for display; never include those prefixes in edit_file oldString. offset is a 1-based starting line and limit is 1-2000. Pagination is best effort against the file's current contents. Output is capped at 2,000 lines, 2,000 characters per displayed line, and 50 KB.",
+      "Read a live, bounded page from a regular UTF-8 text file, or list a directory. File lines are prefixed {N}\\t for display; never include those prefixes in edit_file oldString. offset is a 1-based starting line and limit is 1-2000. Pagination is best effort against the file's current contents. Output is capped at 2,000 lines, 2,000 characters per displayed line, and 50 KB. Directory listings do not authorize edits.",
     autoAllow: true,
+    effect: "observe",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -61,6 +64,9 @@ export function createReadFileTool(
       const resolved = await resolveReadPath(context.workspaceRoot, parsed.path)
       if (!resolved.ok) {
         return readFailure(resolved.error.code, resolved.error.message)
+      }
+      if (resolved.kind === "directory") {
+        return listDirectory(resolved.relativePath, resolved.absolutePath)
       }
 
       let page: TextFilePage
@@ -164,6 +170,27 @@ export function createReadFileTool(
           : maxBytes <= 4_096 && selected.truncatedByBytes
             ? addShortTruncationMarker(selected.content, maxBytes)
             : fitUtf8(`${selected.content}${hint}`, maxBytes)
+      const fileObservation =
+        complete && fullMetadata !== undefined
+          ? {
+              path: resolved.relativePath,
+              kind: "whole_file_read" as const,
+              complete: true,
+              sha256: fullMetadata.sha256,
+            }
+          : selected.lineCount > 0
+            ? {
+                path: resolved.relativePath,
+                kind: "ranged_read" as const,
+                complete: false,
+                ranges: [
+                  {
+                    startLine: parsed.offset,
+                    endLine: parsed.offset + selected.lineCount - 1,
+                  },
+                ],
+              }
+            : undefined
       const output = {
         path: resolved.relativePath,
         complete,
@@ -186,9 +213,44 @@ export function createReadFileTool(
         },
         ...(nextOffset === undefined ? {} : { continuation: { nextOffset } }),
         content: visibleContent,
+        ...(fileObservation === undefined ? {} : { fileObservation }),
       }
       return { ok: true, output, content: visibleContent }
     },
+  }
+}
+
+async function listDirectory(
+  relativePath: string,
+  absolutePath: string,
+): Promise<ToolExecutionResult> {
+  let names: string[]
+  try {
+    names = await readdir(absolutePath)
+  } catch {
+    return readFailure("read_failed", "The directory could not be listed.")
+  }
+  names.sort()
+  const truncated = names.length > MAX_DIRECTORY_ENTRIES
+  const entries = names.slice(0, MAX_DIRECTORY_ENTRIES)
+  const noun = entries.length === 1 ? "entry" : "entries"
+  const content = [
+    `Listed ${entries.length} ${noun} in ${relativePath}.`,
+    ...entries,
+    ...(truncated
+      ? [`(Listing truncated at ${MAX_DIRECTORY_ENTRIES} entries.)`]
+      : []),
+  ].join("\n")
+  return {
+    ok: true,
+    output: {
+      path: relativePath,
+      kind: "directory",
+      count: entries.length,
+      truncated,
+      content,
+    },
+    content,
   }
 }
 

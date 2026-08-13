@@ -293,14 +293,16 @@ live partial pages are not revision-keyed or deduplicated. Compaction and resume
 recompute delivery from durable self-contained facts rather than persisting a
 stub.
 
-Direct reads reject directories, FIFOs, sockets, devices, and other non-regular
-targets before opening them. Bounded command execution with a timeout is the
+`read_file` lists a directory as a bounded name listing and does not grant a
+file observation. FIFOs, sockets, devices, and other non-regular targets are
+rejected before opening them. Bounded command execution with a timeout is the
 explicit stream-consumption path. Images and other rich media remain outside
 the text-read protocol, and future additional roots must pass a Runtime path
 permission boundary whose read authority does not imply write authority.
-`grep` and `glob` use ripgrep, respect ignore rules, filter secret-bearing paths,
-and have independent result caps. The same sensitive-path policy applies to
-direct file reads and writes.
+`grep` and `glob` use ripgrep, respect ignore rules, and have independent
+result caps. Secret-bearing files are not hardcoded-denied at the tool
+boundary; search follows gitignore, and a later user deny rule surface can
+narrow reads the same way Claude Code and OpenCode do.
 `glob` exposes only Claude-compatible `pattern` and optional `path` inputs. It
 streams paths in ripgrep's traversal order and stops on the first valid path
 beyond its 100-result hard cap, then sorts only the retained paths
@@ -331,17 +333,25 @@ it does not expose a revision or claim snapshot consistency. Stable pagination
 requires a future bounded materialized result artifact rather than a token over
 unrelated observation state.
 
-File observation is one immutable request-scoped derived view. After final
-context selection and tool-result truncation, Runtime projects only successful
-results whose complete text is actually present in that model request. Visible
-complete and ranged reads establish behavioral edit visibility; visible
-whole-file writes and create-if-absent edits establish authorship. A normal edit
-advances a revision only when its visible prerequisite is also present, so an
-edit summary left behind after compaction cannot silently recreate authority.
-Results truncated again by model-context assembly conservatively grant no
-observation. All tool calls produced by one model response share the same frozen
-view, so a sibling read cannot retroactively authorize an edit; the next model
-request rebuilds a new view from its final context.
+File observation is a request-scoped derived view. After final context
+selection and tool-result truncation, Runtime projects only successful results
+whose complete text is actually present in that model request. Tools emit a
+structured `fileObservation` grant; Runtime applies those grants to maintain
+the view. A later ranged read does not drop an earlier complete revision that
+is still in context. Visible complete and ranged reads establish behavioral
+edit visibility; visible whole-file writes and create-if-absent edits
+establish authorship. A normal edit advances a revision only when its visible
+prerequisite is also present, so an edit summary left behind after compaction
+cannot silently recreate authority. Results truncated again by model-context
+assembly conservatively grant no observation.
+
+The context snapshot is frozen for the model call that produced the tool
+batch, so a sibling `read_file` in the same response cannot authorize an
+edit. Successful writes in that batch do update the in-memory overlay, so a
+later `edit_file` or `write_file` in the same response can continue from the
+just-written revision. Observe-only tools before the first mutating or
+opaque call run concurrently; remaining calls stay in model order. The next
+model request rebuilds a new snapshot from its final context.
 
 The journal retains original `tool.result` facts for transcript, GUI, repair,
 debugging, and offline analysis, but Runtime does not rebuild a mutable file
