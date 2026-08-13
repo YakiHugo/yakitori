@@ -4,6 +4,7 @@ import { createEventEnvelope, EventType, InputRole } from "../../src/index.ts"
 import { projectExecutionView } from "../../src/gui/execution-view.ts"
 import {
   createInitialAppState,
+  normalizeKimiModelSelection,
   resolveEffectiveModel,
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
@@ -544,6 +545,23 @@ describe("project state", () => {
 })
 
 describe("model selection", () => {
+  it("drops obsolete boolean thinking values from K2.7 selections", () => {
+    expect(
+      normalizeKimiModelSelection({
+        provider: "kimi",
+        model: "kimi-for-coding-highspeed",
+        effort: "off",
+      }),
+    ).toEqual({ provider: "kimi", model: "kimi-for-coding-highspeed" })
+    expect(
+      normalizeKimiModelSelection({
+        provider: "kimi",
+        model: "k3",
+        effort: "max",
+      }),
+    ).toEqual({ provider: "kimi", model: "k3", effort: "max" })
+  })
+
   it("persists selections per session and rehydrates from localStorage", () => {
     window.localStorage.clear()
 
