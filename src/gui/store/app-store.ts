@@ -47,7 +47,6 @@ export type StreamStatus = "connected" | "connecting" | "disconnected" | "idle"
 
 export type AppStoreData = {
   apiBase: string
-  apiRevision: number
   busy: boolean
   defaultModel: string | undefined
   defaultProvider: string | undefined
@@ -91,7 +90,6 @@ export type AppStoreActions = {
     permissionRequestId: string,
     behavior: "allow" | "deny",
   ): Promise<void>
-  connectApiBase(apiBase: string): void
   setPromptDraft(text: string): void
   setModelSelection(
     sessionId: string,
@@ -104,7 +102,6 @@ export type AppStore = AppStoreData & AppStoreActions
 export function createInitialAppState(): AppStoreData {
   return {
     apiBase: initialApiBase(),
-    apiRevision: 0,
     busy: false,
     defaultModel: undefined,
     defaultProvider: undefined,
@@ -320,45 +317,16 @@ export const useAppStore = create<AppStore>()((set, get) => {
     }
   }
 
-  const clearSessionState = (): void => {
-    const state = get()
-    restoringModelSelections.clear()
-    userPreferenceRevision += 1
-    clearSessionSelection(state.selection)
-    set({
-      apiRevision: state.apiRevision + 1,
-      providers: [],
-      defaultProvider: undefined,
-      defaultModel: undefined,
-      userPreference: undefined,
-      modelSelectionReady: true,
-      events: [],
-      execution: createExecutionViewState(),
-      inFlightActions: new Set(),
-      selection: { ...state.selection },
-      sessionDetailRevision: state.sessionDetailRevision + 1,
-      sessionListRevision: state.sessionListRevision + 1,
-      sessionSelectionIntentRevision: state.sessionSelectionIntentRevision + 1,
-      sessions: [],
-      nextCursor: undefined,
-      promptDraft: undefined,
-      selectedSession: undefined,
-    })
-  }
-
   return {
     ...createInitialAppState(),
 
     boot: async () => {
-      const apiRevision = get().apiRevision
       const intentRevision = get().sessionSelectionIntentRevision
       await get().loadProviders()
       await get().loadProjects()
       const loaded = await get().loadSessions()
       if (
-        !loaded ||
-        get().apiRevision !== apiRevision ||
-        get().sessionSelectionIntentRevision !== intentRevision
+        !loaded || get().sessionSelectionIntentRevision !== intentRevision
       ) {
         return
       }
@@ -379,7 +347,6 @@ export const useAppStore = create<AppStore>()((set, get) => {
     },
 
     loadSessions: async (input = {}) => {
-      const apiRevision = get().apiRevision
       const requestRevision = get().sessionListRevision + 1
       set({ sessionListRevision: requestRevision })
       const existingSessions = get().sessions
@@ -392,10 +359,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
             get().apiBase,
             `/sessions?limit=30${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}${workingDirectory === undefined ? "" : `&workingDirectory=${encodeURIComponent(workingDirectory)}`}`,
           )
-          if (
-            get().apiRevision !== apiRevision ||
-            get().sessionListRevision !== requestRevision
-          ) {
+          if (get().sessionListRevision !== requestRevision) {
             return
           }
           set({
@@ -406,9 +370,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
           })
           applied = true
         },
-        () =>
-          get().apiRevision === apiRevision &&
-          get().sessionListRevision === requestRevision,
+        () => get().sessionListRevision === requestRevision,
       )
       return completed && applied
     },
@@ -439,16 +401,12 @@ export const useAppStore = create<AppStore>()((set, get) => {
     },
 
     loadProviders: async () => {
-      const apiRevision = get().apiRevision
       const apiBase = get().apiBase
       try {
         const response = await requestJson<ApiListProvidersResponse>(
           apiBase,
           "/providers",
         )
-        if (get().apiRevision !== apiRevision || get().apiBase !== apiBase) {
-          return
-        }
         set({
           providers: [...response.providers],
           defaultProvider: response.defaultProvider,
@@ -462,7 +420,6 @@ export const useAppStore = create<AppStore>()((set, get) => {
     },
 
     createSession: async () => {
-      const apiRevision = get().apiRevision
       const intentRevision = get().sessionSelectionIntentRevision + 1
       set({ sessionSelectionIntentRevision: intentRevision })
       await runTask(
@@ -484,7 +441,6 @@ export const useAppStore = create<AppStore>()((set, get) => {
             },
           )
 
-          if (get().apiRevision !== apiRevision) return
           await get().loadSessions()
           if (get().sessionSelectionIntentRevision !== intentRevision) return
           const selection = activateSession(response.session.id)
@@ -500,9 +456,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
           })
           connectEvents(selection, response.event.seq)
         },
-        () =>
-          get().apiRevision === apiRevision &&
-          get().sessionSelectionIntentRevision === intentRevision,
+        () => get().sessionSelectionIntentRevision === intentRevision,
       )
     },
 
@@ -768,14 +722,6 @@ export const useAppStore = create<AppStore>()((set, get) => {
       })
     },
 
-    connectApiBase: (apiBase) => {
-      set({ apiBase })
-      window.localStorage.setItem("yakitori.apiBase", apiBase)
-      closeStream()
-      clearSessionState()
-      void get().boot()
-    },
-
     setPromptDraft: (text) => {
       set({ promptDraft: text })
     },
@@ -783,7 +729,6 @@ export const useAppStore = create<AppStore>()((set, get) => {
     setModelSelection: (sessionId, selection) => {
       userPreferenceRevision += 1
       const preferenceRevision = userPreferenceRevision
-      const apiRevision = get().apiRevision
       const apiBase = get().apiBase
       restoringModelSelections.delete(sessionId)
       const modelSelections = { ...get().modelSelections }
@@ -802,7 +747,6 @@ export const useAppStore = create<AppStore>()((set, get) => {
             )
           if (
             preferenceRevision !== userPreferenceRevision ||
-            apiRevision !== get().apiRevision ||
             apiBase !== get().apiBase
           ) {
             return
@@ -811,7 +755,6 @@ export const useAppStore = create<AppStore>()((set, get) => {
         },
         () =>
           preferenceRevision === userPreferenceRevision &&
-          apiRevision === get().apiRevision &&
           apiBase === get().apiBase,
       )
     },
@@ -858,15 +801,12 @@ export function useExecutionView(): ExecutionView {
 function initialApiBase(): string {
   const queryApi = new URLSearchParams(window.location.search).get("api")
   if (queryApi) return queryApi
-  // Read via window: Node 24 exposes a bare global localStorage stub whose
-  // methods throw, and test environments leave it in place.
-  return (
-    window.localStorage.getItem("yakitori.apiBase") ?? window.location.origin
-  )
+  return window.location.origin
 }
 
 function initialModelSelections(): Record<string, ModelSelection> {
-  // Same window indirection as initialApiBase for the Node 24 stub.
+  // Read via window: Node 24 exposes a bare global localStorage stub whose
+  // methods throw, and test environments leave it in place.
   const raw = window.localStorage.getItem("yakitori.modelSelections")
   if (raw === null) return {}
   try {
