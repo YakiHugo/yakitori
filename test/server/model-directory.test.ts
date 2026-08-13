@@ -221,21 +221,25 @@ describe("model directory", () => {
     expect(await directory.listModels("kimi")).toEqual([
       {
         id: "kimi-for-coding",
-        displayName: "Kimi for Coding",
+        displayName: "K2.7 Coding",
         family: "kimi",
-        efforts: ["on", "off"],
       },
       {
         id: "kimi-for-coding-highspeed",
-        displayName: "Kimi for Coding HighSpeed",
+        displayName: "K2.7 Coding Highspeed",
         family: "kimi",
-        efforts: ["on", "off"],
       },
       {
         id: "k3",
-        displayName: "Kimi K3",
+        displayName: "K3",
         family: "kimi",
-        efforts: ["max"],
+        efforts: ["low", "high", "max"],
+      },
+      {
+        id: "k3-256k",
+        displayName: "K3-256k",
+        family: "kimi",
+        efforts: ["low", "high", "max"],
       },
     ])
     expect(await directory.listModels("codex")).toEqual([

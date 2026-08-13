@@ -23,22 +23,27 @@
       "provider": "kimi",
       "model": "kimi-for-coding",
       "promptId": "kimi",
-      "displayName": "Kimi for Coding",
-      "efforts": ["on", "off"]
+      "displayName": "K2.7 Coding"
     },
     {
       "provider": "kimi",
       "model": "kimi-for-coding-highspeed",
       "promptId": "kimi",
-      "displayName": "Kimi for Coding HighSpeed",
-      "efforts": ["on", "off"]
+      "displayName": "K2.7 Coding Highspeed"
     },
     {
       "provider": "kimi",
       "model": "k3",
       "promptId": "kimi",
-      "displayName": "Kimi K3",
-      "efforts": ["max"]
+      "displayName": "K3",
+      "efforts": ["low", "high", "max"]
+    },
+    {
+      "provider": "kimi",
+      "model": "k3-256k",
+      "promptId": "kimi",
+      "displayName": "K3-256k",
+      "efforts": ["low", "high", "max"]
     },
     {
       "provider": "codex",
