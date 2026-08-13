@@ -4,6 +4,7 @@ import { createEventEnvelope, EventType, InputRole } from "../../src/index.ts"
 import { projectExecutionView } from "../../src/gui/execution-view.ts"
 import {
   createInitialAppState,
+  resolveEffectiveModel,
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
 import type { ApiSessionDetail } from "../../src/server/protocol.ts"
@@ -61,6 +62,20 @@ beforeEach(() => {
   vi.stubGlobal("EventSource", FakeEventSource)
   useAppStore.setState(createInitialAppState())
   useAppStore.setState({ apiBase: "http://api.test" })
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: unknown, init?: RequestInit) => {
+      if (
+        String(input) === "http://api.test/user-preference" &&
+        init?.method === "PUT"
+      ) {
+        return jsonResponse({
+          userPreference: JSON.parse(String(init.body)) as unknown,
+        })
+      }
+      return errorResponse(404)
+    }),
+  )
 })
 
 afterEach(() => {
@@ -90,6 +105,7 @@ describe("app store event stream", () => {
 
     source?.emit("open")
     expect(useAppStore.getState().streamStatus).toBe("connected")
+    expect(useAppStore.getState().modelSelectionReady).toBe(false)
 
     const admitted = createEventEnvelope({
       sessionId: "session_1",
@@ -110,6 +126,8 @@ describe("app store event stream", () => {
         admitted.id,
       )
     })
+    source?.emit("session.replay-complete")
+    expect(useAppStore.getState().modelSelectionReady).toBe(true)
 
     source?.emit("session.transient", {
       type: "assistant.snapshot",
@@ -587,6 +605,11 @@ describe("model selection", () => {
             ],
             defaultProvider: "faux",
             defaultModel: "scripted",
+            userPreference: {
+              provider: "anthropic",
+              model: "claude-sonnet-4-6",
+              effort: "high",
+            },
           })
         }
         return errorResponse(404)
@@ -616,6 +639,11 @@ describe("model selection", () => {
     ])
     expect(useAppStore.getState().defaultProvider).toBe("faux")
     expect(useAppStore.getState().defaultModel).toBe("scripted")
+    expect(useAppStore.getState().userPreference).toEqual({
+      provider: "anthropic",
+      model: "claude-sonnet-4-6",
+      effort: "high",
+    })
 
     vi.stubGlobal(
       "fetch",
@@ -625,6 +653,56 @@ describe("model selection", () => {
 
     expect(useAppStore.getState().providers).toHaveLength(2)
     expect(useAppStore.getState().message).toBeUndefined()
+  })
+
+  it("ignores a provider response from an API base that was disconnected", async () => {
+    let resolveOld: ((response: Response) => void) | undefined
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: unknown) => {
+        const url = String(input)
+        if (url === "http://api.test/providers") {
+          return await new Promise<Response>((resolve) => {
+            resolveOld = resolve
+          })
+        }
+        return errorResponse(404)
+      }),
+    )
+    const loading = useAppStore.getState().loadProviders()
+
+    useAppStore.getState().connectApiBase("http://new-api.test")
+    resolveOld?.(
+      jsonResponse({
+        providers: [
+          {
+            name: "anthropic",
+            models: [
+              {
+                id: "claude-sonnet-4-6",
+                displayName: "Claude Sonnet 4.6",
+                family: "anthropic",
+              },
+            ],
+          },
+        ],
+        defaultProvider: "anthropic",
+        defaultModel: "claude-sonnet-4-6",
+        userPreference: {
+          provider: "anthropic",
+          model: "claude-sonnet-4-6",
+        },
+      }),
+    )
+    await loading
+
+    expect(useAppStore.getState()).toMatchObject({
+      apiBase: "http://new-api.test",
+      providers: [],
+      defaultProvider: undefined,
+      defaultModel: undefined,
+      userPreference: undefined,
+    })
   })
 
   it("sends the saved modelSelection with admitted input", async () => {
@@ -688,7 +766,257 @@ describe("model selection", () => {
     expect(useAppStore.getState().message).toBeUndefined()
   })
 
-  it("omits modelSelection when no override is saved", async () => {
+  it("uses a picker choice immediately for the pill, admission, and user preference", async () => {
+    window.localStorage.clear()
+    const fetchMock = admissionFetchMock()
+    vi.stubGlobal("fetch", fetchMock)
+    useAppStore.setState({
+      selection: { revision: 1, sessionId: "session_1" },
+      defaultProvider: "openai",
+      defaultModel: "gpt-5.6-sol",
+      modelSelections: {
+        session_1: {
+          provider: "openai",
+          model: "gpt-5.6-sol",
+          effort: "high",
+        },
+      },
+    })
+
+    const picked = {
+      provider: "anthropic",
+      model: "claude-sonnet-4-6",
+      effort: "low",
+    }
+    useAppStore.getState().setModelSelection("session_1", picked)
+
+    expect(
+      resolveEffectiveModel({
+        sessionCurrent: useAppStore.getState().modelSelections.session_1,
+        userPreference: useAppStore.getState().userPreference,
+        defaultProvider: "openai",
+        defaultModel: "gpt-5.6-sol",
+      }),
+    ).toEqual(picked)
+
+    await useAppStore.getState().admitInput("hello")
+
+    const bodies = fetchMock.mock.calls.map(([, init]) =>
+      JSON.parse(String(init?.body ?? "{}")),
+    )
+    expect(bodies).toContainEqual(picked)
+    expect(bodies).toContainEqual(
+      expect.objectContaining({ modelSelection: picked }),
+    )
+  })
+
+  it("restores old session current from its last turn without leaking across sessions", async () => {
+    window.localStorage.clear()
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: unknown) => {
+        if (String(input) === "http://api.test/sessions/session_1") {
+          return jsonResponse({ session: sessionDetail })
+        }
+        return errorResponse(404)
+      }),
+    )
+    useAppStore.setState({
+      modelSelections: {},
+      userPreference: {
+        provider: "anthropic",
+        model: "claude-sonnet-4-6",
+      },
+      defaultProvider: "faux",
+      defaultModel: "scripted",
+    })
+
+    await useAppStore.getState().selectSession("session_1")
+    const source = FakeEventSource.instances[0]
+    source?.emit(
+      "session.event",
+      turnStartedEvent(2, "openai", "gpt-5.1-codex", "medium"),
+    )
+    source?.emit(
+      "session.event",
+      turnStartedEvent(3, "codex", "gpt-5.6-sol", "high"),
+    )
+    source?.emit("session.replay-complete")
+
+    await vi.waitFor(() => {
+      expect(useAppStore.getState().modelSelections.session_1).toEqual({
+        provider: "codex",
+        model: "gpt-5.6-sol",
+        effort: "high",
+      })
+    })
+    useAppStore.setState({
+      userPreference: { provider: "faux", model: "new-global-default" },
+    })
+
+    const state = useAppStore.getState()
+    expect(
+      resolveEffectiveModel({
+        sessionCurrent: state.modelSelections.session_1,
+        userPreference: state.userPreference,
+        defaultProvider: state.defaultProvider,
+        defaultModel: state.defaultModel,
+      }),
+    ).toEqual({
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      effort: "high",
+    })
+    expect(
+      resolveEffectiveModel({
+        sessionCurrent: state.modelSelections.session_2,
+        userPreference: state.userPreference,
+        defaultProvider: state.defaultProvider,
+        defaultModel: state.defaultModel,
+      }),
+    ).toEqual({ provider: "faux", model: "new-global-default" })
+    expect(
+      JSON.parse(
+        window.localStorage.getItem("yakitori.modelSelections") ?? "{}",
+      ),
+    ).toMatchObject({
+      session_1: {
+        provider: "codex",
+        model: "gpt-5.6-sol",
+        effort: "high",
+      },
+    })
+  })
+
+  it("does not admit an old Session input before model restoration completes", async () => {
+    window.localStorage.clear()
+    const fetchMock = admissionFetchMock()
+    vi.stubGlobal("fetch", fetchMock)
+    useAppStore.setState({
+      modelSelections: {},
+      userPreference: {
+        provider: "anthropic",
+        model: "claude-sonnet-4-6",
+      },
+    })
+
+    await useAppStore.getState().selectSession("session_1")
+    await useAppStore.getState().admitInput("too early")
+    expect(
+      fetchMock.mock.calls.some(([input]) => String(input).endsWith("/inputs")),
+    ).toBe(false)
+
+    const source = FakeEventSource.instances[0]
+    source?.emit(
+      "session.event",
+      turnStartedEvent(2, "codex", "gpt-5.6-sol", "high"),
+    )
+    source?.emit("session.replay-complete")
+    await useAppStore.getState().admitInput("restored")
+
+    const admitCall = fetchMock.mock.calls.find(([input]) =>
+      String(input).endsWith("/inputs"),
+    )
+    expect(JSON.parse(String(admitCall?.[1]?.body))).toMatchObject({
+      modelSelection: {
+        provider: "codex",
+        model: "gpt-5.6-sol",
+        effort: "high",
+      },
+    })
+  })
+
+  it("keeps a failed preference write scoped to the current Session", async () => {
+    window.localStorage.clear()
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => errorResponse(500)),
+    )
+    useAppStore.setState({
+      selection: { revision: 1, sessionId: "session_1" },
+      userPreference: { provider: "faux", model: "scripted" },
+      modelSelections: {},
+    })
+
+    useAppStore.getState().setModelSelection("session_1", {
+      provider: "anthropic",
+      model: "claude-sonnet-4-6",
+    })
+
+    await vi.waitFor(() => {
+      expect(useAppStore.getState().message).toBe("not found")
+    })
+    expect(useAppStore.getState().modelSelections.session_1).toEqual({
+      provider: "anthropic",
+      model: "claude-sonnet-4-6",
+    })
+    expect(useAppStore.getState().userPreference).toEqual({
+      provider: "faux",
+      model: "scripted",
+    })
+  })
+
+  it("unlocks admission when the user picks a model during restoration", async () => {
+    window.localStorage.clear()
+    vi.stubGlobal("fetch", admissionFetchMock())
+    useAppStore.setState({ modelSelections: {} })
+
+    await useAppStore.getState().selectSession("session_1")
+    expect(useAppStore.getState().modelSelectionReady).toBe(false)
+
+    useAppStore.getState().setModelSelection("session_1", {
+      provider: "codex",
+      model: "gpt-5.6-sol",
+    })
+
+    expect(useAppStore.getState().modelSelectionReady).toBe(true)
+  })
+
+  it("ignores a stale preference write failure after a newer choice", async () => {
+    let resolveFirst: ((response: Response) => void) | undefined
+    const first = new Promise<Response>((resolve) => {
+      resolveFirst = resolve
+    })
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: unknown, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body)) as { model: string }
+        if (body.model === "first") return await first
+        return jsonResponse({ userPreference: body })
+      }),
+    )
+    useAppStore.setState({
+      selection: { revision: 1, sessionId: "session_1" },
+      modelSelections: {},
+    })
+
+    useAppStore.getState().setModelSelection("session_1", {
+      provider: "faux",
+      model: "first",
+    })
+    useAppStore.getState().setModelSelection("session_1", {
+      provider: "faux",
+      model: "second",
+    })
+    await vi.waitFor(() => {
+      expect(useAppStore.getState().userPreference).toEqual({
+        provider: "faux",
+        model: "second",
+      })
+    })
+    resolveFirst?.(errorResponse(500))
+    await vi.waitFor(() => {
+      expect(useAppStore.getState().busy).toBe(false)
+    })
+
+    expect(useAppStore.getState().message).toBeUndefined()
+    expect(useAppStore.getState().userPreference).toEqual({
+      provider: "faux",
+      model: "second",
+    })
+  })
+
+  it("stamps the user preference on a new session's first input", async () => {
     window.localStorage.clear()
     const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
       const url = String(input)
@@ -723,6 +1051,14 @@ describe("model selection", () => {
     vi.stubGlobal("fetch", fetchMock)
     useAppStore.setState({
       selection: { revision: 1, sessionId: "session_1" },
+      modelSelections: {},
+      defaultProvider: "faux",
+      defaultModel: "scripted",
+      userPreference: {
+        provider: "anthropic",
+        model: "claude-sonnet-4-6",
+        effort: "high",
+      },
     })
 
     await useAppStore.getState().admitInput("hello")
@@ -730,9 +1066,13 @@ describe("model selection", () => {
     const admitCall = fetchMock.mock.calls.find(([input]) =>
       String(input).endsWith("/inputs"),
     )
-    expect(JSON.parse(String(admitCall?.[1]?.body))).not.toHaveProperty(
-      "modelSelection",
-    )
+    expect(JSON.parse(String(admitCall?.[1]?.body))).toMatchObject({
+      modelSelection: {
+        provider: "anthropic",
+        model: "claude-sonnet-4-6",
+        effort: "high",
+      },
+    })
   })
 })
 
@@ -740,6 +1080,82 @@ function detailCallCount(fetchMock: ReturnType<typeof vi.fn>): number {
   return fetchMock.mock.calls.filter(
     ([input]) => String(input) === "http://api.test/sessions/session_1",
   ).length
+}
+
+function admissionFetchMock() {
+  return vi.fn(async (input: unknown, init?: RequestInit) => {
+    const url = String(input)
+    if (url === "http://api.test/user-preference") {
+      return jsonResponse({
+        userPreference: JSON.parse(String(init?.body)) as unknown,
+      })
+    }
+    if (url === "http://api.test/sessions/session_1/inputs") {
+      const body = JSON.parse(String(init?.body)) as { requestId: string }
+      return jsonResponse({
+        requestId: body.requestId,
+        inputId: "input_1",
+        event: createEventEnvelope({
+          sessionId: "session_1",
+          seq: 2,
+          event: {
+            type: EventType.InputAdmitted,
+            data: {
+              requestId: body.requestId,
+              inputId: "input_1",
+              role: InputRole.User,
+              content: { kind: "text", text: "hello" },
+            },
+          },
+        }),
+      })
+    }
+    if (url === "http://api.test/sessions/session_1") {
+      return jsonResponse({ session: sessionDetail })
+    }
+    if (url.startsWith("http://api.test/sessions?")) {
+      return jsonResponse({ sessions: [] })
+    }
+    return errorResponse(404)
+  })
+}
+
+function turnStartedEvent(
+  seq: number,
+  provider: string,
+  model: string,
+  effort: string,
+) {
+  return createEventEnvelope({
+    sessionId: "session_1",
+    seq,
+    event: {
+      type: EventType.TurnStarted,
+      data: {
+        turnId: `turn_${seq}`,
+        inputId: `input_${seq}`,
+        executionContext: {
+          mateId: "mate_1",
+          mateRevisionId: "revision_1",
+          provider,
+          model,
+          effort,
+          workingDirectory: "/p/a",
+          enabledTools: [],
+          approvalPolicy: "on-request",
+          limits: {
+            modelCallsPerTurn: 10,
+            toolCallsPerTurn: 10,
+            modelVisibleMessageBlocks: 10,
+            modelVisibleContextBytes: 10,
+            modelVisibleToolResultBytes: 10,
+            modelVisibleToolResultLines: 10,
+            assistantResponseBytes: 10,
+          },
+        },
+      },
+    },
+  })
 }
 
 function jsonResponse(body: unknown): Response {

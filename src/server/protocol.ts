@@ -98,10 +98,22 @@ export type ApiProviderSummary = {
   readonly models: readonly ApiProviderModel[]
 }
 
+export type ApiUserModelPreference = {
+  readonly provider: string
+  readonly model: string
+  readonly effort?: string
+  readonly speed?: string
+}
+
 export type ApiListProvidersResponse = {
   readonly providers: readonly ApiProviderSummary[]
   readonly defaultProvider: string
   readonly defaultModel: string
+  readonly userPreference?: ApiUserModelPreference
+}
+
+export type ApiUpdateUserModelPreferenceResponse = {
+  readonly userPreference: ApiUserModelPreference
 }
 
 export type ApiAdmitInputRequest = {

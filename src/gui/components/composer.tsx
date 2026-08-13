@@ -6,6 +6,7 @@ import { Button } from "./ui/button.tsx"
 export function Composer() {
   const draft = useAppStore((state) => state.promptDraft) ?? ""
   const busy = useAppStore((state) => state.busy)
+  const modelSelectionReady = useAppStore((state) => state.modelSelectionReady)
   const hasSession = useAppStore(
     (state) => state.selection.sessionId !== undefined,
   )
@@ -23,7 +24,7 @@ export function Composer() {
   })
 
   const text = draft.trim()
-  const canSend = text.length > 0 && hasSession && !busy
+  const canSend = text.length > 0 && hasSession && modelSelectionReady && !busy
 
   const submit = () => {
     if (!canSend) return

@@ -11,6 +11,8 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import {
+  createDurableEventHub,
+  createEventEnvelope,
   type ApiAdmitInputResponse,
   type ApiCancelInputResponse,
   type ApiCreateSessionResponse,
@@ -18,11 +20,14 @@ import {
   type ApiListProvidersResponse,
   type ApiListSessionsResponse,
   type ApiReadSessionResponse,
+  type ApiUpdateUserModelPreferenceResponse,
   createInputId,
   createJsonlEventStore,
   createProjectRegistry,
+  createServerHandlers,
   createSessionId,
   createSessionKernel,
+  createUserConfigStore,
   createYakitoriHttpServer,
   type EventEnvelope,
   EventType,
@@ -271,6 +276,60 @@ describe("HTTP server", () => {
         type: EventType.SessionCreated,
       })
     })
+  })
+
+  it("flushes events buffered during replay before replay-complete", async () => {
+    const eventHub = createDurableEventHub()
+    let resolveReplayStarted: (() => void) | undefined
+    let resolveFinishReplay: (() => void) | undefined
+    const replayStarted = new Promise<void>((resolve) => {
+      resolveReplayStarted = resolve
+    })
+    const finishReplay = new Promise<void>((resolve) => {
+      resolveFinishReplay = resolve
+    })
+    const buffered = createEventEnvelope({
+      sessionId: "session_1",
+      seq: 2,
+      event: {
+        type: EventType.InputAdmitted,
+        data: {
+          requestId: "request_buffered",
+          inputId: createInputId(),
+          role: "user",
+          content: { kind: "text", text: "during replay" },
+        },
+      },
+    })
+    const handlers = {
+      ...createServerHandlers(createSessionKernel(createMemoryEventStore())),
+      async readSessionEvents() {
+        resolveReplayStarted?.()
+        await finishReplay
+        return { ok: true as const, status: 200, body: { events: [] } }
+      },
+    }
+
+    await withListeningServer(
+      createYakitoriHttpServer({ handlers, eventHub }),
+      async (baseUrl) => {
+        const abort = new AbortController()
+        const responsePromise = fetch(
+          `${baseUrl}/sessions/session_1/events?after=0`,
+          { signal: abort.signal },
+        )
+        await replayStarted
+        eventHub.publish([buffered])
+        resolveFinishReplay?.()
+        const response = await responsePromise
+        const text = await readSseUntilReplayComplete(response)
+        abort.abort()
+
+        expect(text.indexOf(`data: ${JSON.stringify(buffered)}`)).toBeLessThan(
+          text.indexOf("event: session.replay-complete"),
+        )
+      },
+    )
   })
 
   it("resumes streams after the latest query or Last-Event-ID cursor", async () => {
@@ -848,6 +907,73 @@ describe("HTTP static assets", () => {
       expect(listed.status).toBe(404)
     })
   })
+
+  it("validates and persists user model preferences", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "yakitori-http-config-"))
+    try {
+      const userConfig = createUserConfigStore({
+        configPath: join(rootDir, "config.toml"),
+      })
+      await withListeningServer(
+        createYakitoriHttpServer({
+          kernel: createSessionKernel(createMemoryEventStore()),
+          userConfig,
+          availableProviders: ["anthropic", "faux"],
+        }),
+        async (baseUrl) => {
+          for (const invalid of [
+            { provider: "", model: "claude-custom" },
+            { provider: "anthropic", model: "" },
+            { provider: "anthropic", model: "claude-custom", effort: " " },
+            { provider: "missing", model: "arbitrary-slug" },
+          ]) {
+            const response = await putJson(
+              `${baseUrl}/user-preference`,
+              invalid,
+            )
+            expect(response.status).toBe(400)
+            expect(response.body).toMatchObject({
+              error: { code: ApiErrorCode.InvalidInput },
+            })
+          }
+
+          const accepted = await putJson<ApiUpdateUserModelPreferenceResponse>(
+            `${baseUrl}/user-preference`,
+            {
+              provider: "anthropic",
+              model: "unknown-but-valid-slug",
+              effort: "high",
+            },
+          )
+          expect(accepted).toEqual({
+            status: 200,
+            body: {
+              userPreference: {
+                provider: "anthropic",
+                model: "unknown-but-valid-slug",
+                effort: "high",
+              },
+            },
+          })
+          await expect(userConfig.read()).resolves.toEqual(
+            accepted.body.userPreference,
+          )
+        },
+      )
+    } finally {
+      await rm(rootDir, { recursive: true, force: true })
+    }
+  })
+
+  it("keeps the user preference route at 404 without a store", async () => {
+    await withHttpServer(async (baseUrl) => {
+      const response = await putJson(`${baseUrl}/user-preference`, {
+        provider: "faux",
+        model: "scripted",
+      })
+      expect(response.status).toBe(404)
+    })
+  })
 })
 
 async function withHttpServer(
@@ -940,6 +1066,20 @@ async function postJson<T = unknown>(url: string, body: unknown) {
   }
 }
 
+async function putJson<T = unknown>(url: string, body: unknown) {
+  const response = await fetch(url, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  })
+  return {
+    status: response.status,
+    body: (await response.json()) as T,
+  }
+}
+
 async function getJson<T>(url: string) {
   const response = await fetch(url)
   return {
@@ -968,9 +1108,28 @@ async function readNextSessionEvent(
   })
 }
 
+async function readSseUntilReplayComplete(response: Response): Promise<string> {
+  if (!response.body) throw new Error("Expected a streaming response body.")
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ""
+
+  return await withTimeout(async () => {
+    while (!buffer.includes("event: session.replay-complete")) {
+      const chunk = await reader.read()
+      if (chunk.done) throw new Error("SSE stream ended during replay.")
+      buffer += decoder.decode(chunk.value, { stream: true })
+    }
+    return buffer
+  })
+}
+
 function parseSseEvent(buffer: string): EventEnvelope | undefined {
   const block = buffer.split("\n\n").find((candidate) => {
-    return candidate.includes("\ndata: ") || candidate.startsWith("data: ")
+    return (
+      (candidate.includes("\ndata: ") || candidate.startsWith("data: ")) &&
+      !candidate.includes("event: session.replay-complete")
+    )
   })
   const data = block
     ?.split("\n")

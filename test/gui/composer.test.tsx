@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { cleanup, render, screen } from "@testing-library/react"
+import { cleanup, render, screen, waitFor } from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { createEventEnvelope, EventType } from "../../src/index.ts"
@@ -11,10 +11,18 @@ import {
 
 beforeEach(() => {
   useAppStore.setState(createInitialAppState())
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (_input: unknown, init?: RequestInit) => {
+      const userPreference = JSON.parse(String(init?.body ?? "{}")) as unknown
+      return new Response(JSON.stringify({ userPreference }), { status: 200 })
+    }),
+  )
 })
 
 afterEach(() => {
   cleanup()
+  vi.unstubAllGlobals()
 })
 
 describe("composer", () => {
@@ -57,6 +65,20 @@ describe("composer", () => {
     useAppStore.setState({
       selection: { revision: 1, sessionId: "session_1" },
       promptDraft: "   ",
+    })
+    render(<Composer />)
+
+    expect(screen.getByRole("button", { name: "Send" })).toHaveProperty(
+      "disabled",
+      true,
+    )
+  })
+
+  it("keeps sending disabled until an old Session model is restored", () => {
+    useAppStore.setState({
+      selection: { revision: 1, sessionId: "session_1" },
+      promptDraft: "hello",
+      modelSelectionReady: false,
     })
     render(<Composer />)
 
@@ -148,7 +170,7 @@ describe("model selector", () => {
     }
   }
 
-  it("labels the pill with the display name and effort of the last started turn", () => {
+  it("labels the pill with session current instead of the last started turn", () => {
     const started = createEventEnvelope({
       sessionId: "session_1",
       seq: 2,
@@ -182,13 +204,19 @@ describe("model selector", () => {
     useAppStore.setState({
       ...selectModelState(),
       events: [started],
-      modelSelections: { session_1: { provider: "kimi", model: "k2" } },
+      modelSelections: {
+        session_1: {
+          provider: "anthropic",
+          model: "claude-sonnet-4-6",
+          effort: "low",
+        },
+      },
     })
     render(<Composer />)
 
     expect(
       screen.getByRole("button", { name: "Select model" }).textContent,
-    ).toBe("GPT 5.1 Codex · high")
+    ).toBe("Claude Sonnet 4.6 · low")
   })
 
   it("groups model rows by provider and offers efforts for reasoning models", async () => {
@@ -238,6 +266,19 @@ describe("model selector", () => {
 
     expect(useAppStore.getState().modelSelections).toEqual({
       session_1: { provider: "openai", model: "gpt-5.1-codex", effort: "low" },
+    })
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        expect.stringMatching(/\/user-preference$/),
+        expect.objectContaining({
+          method: "PUT",
+          body: JSON.stringify({
+            provider: "openai",
+            model: "gpt-5.1-codex",
+            effort: "low",
+          }),
+        }),
+      )
     })
     expect(
       JSON.parse(
@@ -381,6 +422,30 @@ describe("model selector", () => {
     expect(useAppStore.getState().modelSelections).toEqual({
       session_1: { provider: "codex", model: "gpt-5.6-sol", effort: "high" },
     })
+  })
+
+  it("checks the standard row for an explicit standard speed", async () => {
+    const user = userEvent.setup()
+    useAppStore.setState({
+      ...selectModelState(),
+      modelSelections: {
+        session_1: {
+          provider: "codex",
+          model: "gpt-5.6-sol",
+          speed: "standard",
+        },
+      },
+    })
+    render(<Composer />)
+
+    await user.click(screen.getByRole("button", { name: "Select model" }))
+
+    expect(
+      screen.getByRole("button", { name: "标准" }).querySelector("svg"),
+    ).not.toBeNull()
+    expect(
+      screen.getByRole("button", { name: "快速" }).querySelector("svg"),
+    ).toBeNull()
   })
 
   it("hides the speed section for providers without tiers", async () => {
