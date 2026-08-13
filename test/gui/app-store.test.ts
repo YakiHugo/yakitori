@@ -673,56 +673,6 @@ describe("model selection", () => {
     expect(useAppStore.getState().message).toBeUndefined()
   })
 
-  it("ignores a provider response from an API base that was disconnected", async () => {
-    let resolveOld: ((response: Response) => void) | undefined
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: unknown) => {
-        const url = String(input)
-        if (url === "http://api.test/providers") {
-          return await new Promise<Response>((resolve) => {
-            resolveOld = resolve
-          })
-        }
-        return errorResponse(404)
-      }),
-    )
-    const loading = useAppStore.getState().loadProviders()
-
-    useAppStore.getState().connectApiBase("http://new-api.test")
-    resolveOld?.(
-      jsonResponse({
-        providers: [
-          {
-            name: "anthropic",
-            models: [
-              {
-                id: "claude-sonnet-4-6",
-                displayName: "Claude Sonnet 4.6",
-                family: "anthropic",
-              },
-            ],
-          },
-        ],
-        defaultProvider: "anthropic",
-        defaultModel: "claude-sonnet-4-6",
-        userPreference: {
-          provider: "anthropic",
-          model: "claude-sonnet-4-6",
-        },
-      }),
-    )
-    await loading
-
-    expect(useAppStore.getState()).toMatchObject({
-      apiBase: "http://new-api.test",
-      providers: [],
-      defaultProvider: undefined,
-      defaultModel: undefined,
-      userPreference: undefined,
-    })
-  })
-
   it("sends the saved modelSelection with admitted input", async () => {
     window.localStorage.clear()
     const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {

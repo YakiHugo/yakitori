@@ -62,7 +62,8 @@ quits the shell with an error instead of leaving a zombie window.
 - Server development needs no Electron restart; `pnpm dev:desktop` is the
   fast loop.
 - The browser dev flow (`pnpm dev`) loses the vite proxy: the GUI must be
-  opened with `?api=http://127.0.0.1:4141` (or a remembered `yakitori.apiBase`).
+  opened with `?api=http://127.0.0.1:4141`. The API origin is startup wiring,
+  not an end-user switcher in the workbench.
 - Packaging ships `dist/desktop/server.js` unpacked; `electron-builder.yml`
   carries the `asarUnpack` rule.
 - `src/server/start.ts` gained a bounded shutdown helper

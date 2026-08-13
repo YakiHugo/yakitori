@@ -34,8 +34,6 @@ export function App() {
           <ProjectSwitcher />
           <Separator />
           <ThreadList />
-          <Separator />
-          <ApiConnectForm />
         </aside>
         <main className="flex min-w-0 flex-1 flex-col">
           {message !== undefined && message !== "" && (
@@ -81,34 +79,6 @@ function NewSessionButton() {
       </TooltipTrigger>
       <TooltipContent>New session</TooltipContent>
     </Tooltip>
-  )
-}
-
-function ApiConnectForm() {
-  const apiBase = useAppStore((state) => state.apiBase)
-  const connectApiBase = useAppStore((state) => state.connectApiBase)
-  return (
-    <form
-      className="flex items-center gap-2 p-2"
-      onSubmit={(event) => {
-        event.preventDefault()
-        const data = new FormData(event.currentTarget)
-        connectApiBase(String(data.get("apiBase") ?? "").trim())
-      }}
-    >
-      <label htmlFor="apiBase" className="text-xs text-muted-foreground">
-        API
-      </label>
-      <input
-        id="apiBase"
-        name="apiBase"
-        defaultValue={apiBase}
-        className="h-8 min-w-0 flex-1 rounded-md border bg-transparent px-2 text-xs outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
-      />
-      <Button type="submit" size="sm" variant="secondary">
-        Connect
-      </Button>
-    </form>
   )
 }
 
