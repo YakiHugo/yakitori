@@ -11,6 +11,8 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import {
+  createDurableEventHub,
+  createEventEnvelope,
   type ApiAdmitInputResponse,
   type ApiCancelInputResponse,
   type ApiCreateSessionResponse,
@@ -22,6 +24,7 @@ import {
   createInputId,
   createJsonlEventStore,
   createProjectRegistry,
+  createServerHandlers,
   createSessionId,
   createSessionKernel,
   createUserConfigStore,
@@ -273,6 +276,60 @@ describe("HTTP server", () => {
         type: EventType.SessionCreated,
       })
     })
+  })
+
+  it("flushes events buffered during replay before replay-complete", async () => {
+    const eventHub = createDurableEventHub()
+    let resolveReplayStarted: (() => void) | undefined
+    let resolveFinishReplay: (() => void) | undefined
+    const replayStarted = new Promise<void>((resolve) => {
+      resolveReplayStarted = resolve
+    })
+    const finishReplay = new Promise<void>((resolve) => {
+      resolveFinishReplay = resolve
+    })
+    const buffered = createEventEnvelope({
+      sessionId: "session_1",
+      seq: 2,
+      event: {
+        type: EventType.InputAdmitted,
+        data: {
+          requestId: "request_buffered",
+          inputId: createInputId(),
+          role: "user",
+          content: { kind: "text", text: "during replay" },
+        },
+      },
+    })
+    const handlers = {
+      ...createServerHandlers(createSessionKernel(createMemoryEventStore())),
+      async readSessionEvents() {
+        resolveReplayStarted?.()
+        await finishReplay
+        return { ok: true as const, status: 200, body: { events: [] } }
+      },
+    }
+
+    await withListeningServer(
+      createYakitoriHttpServer({ handlers, eventHub }),
+      async (baseUrl) => {
+        const abort = new AbortController()
+        const responsePromise = fetch(
+          `${baseUrl}/sessions/session_1/events?after=0`,
+          { signal: abort.signal },
+        )
+        await replayStarted
+        eventHub.publish([buffered])
+        resolveFinishReplay?.()
+        const response = await responsePromise
+        const text = await readSseUntilReplayComplete(response)
+        abort.abort()
+
+        expect(text.indexOf(`data: ${JSON.stringify(buffered)}`)).toBeLessThan(
+          text.indexOf("event: session.replay-complete"),
+        )
+      },
+    )
   })
 
   it("resumes streams after the latest query or Last-Event-ID cursor", async () => {
@@ -1048,6 +1105,22 @@ async function readNextSessionEvent(
       const event = parseSseEvent(buffer)
       if (event) return event
     }
+  })
+}
+
+async function readSseUntilReplayComplete(response: Response): Promise<string> {
+  if (!response.body) throw new Error("Expected a streaming response body.")
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ""
+
+  return await withTimeout(async () => {
+    while (!buffer.includes("event: session.replay-complete")) {
+      const chunk = await reader.read()
+      if (chunk.done) throw new Error("SSE stream ended during replay.")
+      buffer += decoder.decode(chunk.value, { stream: true })
+    }
+    return buffer
   })
 }
 

@@ -655,6 +655,56 @@ describe("model selection", () => {
     expect(useAppStore.getState().message).toBeUndefined()
   })
 
+  it("ignores a provider response from an API base that was disconnected", async () => {
+    let resolveOld: ((response: Response) => void) | undefined
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: unknown) => {
+        const url = String(input)
+        if (url === "http://api.test/providers") {
+          return await new Promise<Response>((resolve) => {
+            resolveOld = resolve
+          })
+        }
+        return errorResponse(404)
+      }),
+    )
+    const loading = useAppStore.getState().loadProviders()
+
+    useAppStore.getState().connectApiBase("http://new-api.test")
+    resolveOld?.(
+      jsonResponse({
+        providers: [
+          {
+            name: "anthropic",
+            models: [
+              {
+                id: "claude-sonnet-4-6",
+                displayName: "Claude Sonnet 4.6",
+                family: "anthropic",
+              },
+            ],
+          },
+        ],
+        defaultProvider: "anthropic",
+        defaultModel: "claude-sonnet-4-6",
+        userPreference: {
+          provider: "anthropic",
+          model: "claude-sonnet-4-6",
+        },
+      }),
+    )
+    await loading
+
+    expect(useAppStore.getState()).toMatchObject({
+      apiBase: "http://new-api.test",
+      providers: [],
+      defaultProvider: undefined,
+      defaultModel: undefined,
+      userPreference: undefined,
+    })
+  })
+
   it("sends the saved modelSelection with admitted input", async () => {
     window.localStorage.clear()
     const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
@@ -903,6 +953,66 @@ describe("model selection", () => {
     expect(useAppStore.getState().userPreference).toEqual({
       provider: "faux",
       model: "scripted",
+    })
+  })
+
+  it("unlocks admission when the user picks a model during restoration", async () => {
+    window.localStorage.clear()
+    vi.stubGlobal("fetch", admissionFetchMock())
+    useAppStore.setState({ modelSelections: {} })
+
+    await useAppStore.getState().selectSession("session_1")
+    expect(useAppStore.getState().modelSelectionReady).toBe(false)
+
+    useAppStore.getState().setModelSelection("session_1", {
+      provider: "codex",
+      model: "gpt-5.6-sol",
+    })
+
+    expect(useAppStore.getState().modelSelectionReady).toBe(true)
+  })
+
+  it("ignores a stale preference write failure after a newer choice", async () => {
+    let resolveFirst: ((response: Response) => void) | undefined
+    const first = new Promise<Response>((resolve) => {
+      resolveFirst = resolve
+    })
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: unknown, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body)) as { model: string }
+        if (body.model === "first") return await first
+        return jsonResponse({ userPreference: body })
+      }),
+    )
+    useAppStore.setState({
+      selection: { revision: 1, sessionId: "session_1" },
+      modelSelections: {},
+    })
+
+    useAppStore.getState().setModelSelection("session_1", {
+      provider: "faux",
+      model: "first",
+    })
+    useAppStore.getState().setModelSelection("session_1", {
+      provider: "faux",
+      model: "second",
+    })
+    await vi.waitFor(() => {
+      expect(useAppStore.getState().userPreference).toEqual({
+        provider: "faux",
+        model: "second",
+      })
+    })
+    resolveFirst?.(errorResponse(500))
+    await vi.waitFor(() => {
+      expect(useAppStore.getState().busy).toBe(false)
+    })
+
+    expect(useAppStore.getState().message).toBeUndefined()
+    expect(useAppStore.getState().userPreference).toEqual({
+      provider: "faux",
+      model: "second",
     })
   })
 

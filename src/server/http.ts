@@ -570,11 +570,11 @@ async function streamSessionEvents(
   response.write(": connected\n\n")
   lastSequence = after
   lastSequence = writeSseEvents(response, replayed.body.events, lastSequence)
+  lastSequence = writeSseEvents(response, pendingEvents, lastSequence)
+  pendingEvents.length = 0
   response.write("event: session.replay-complete\n")
   response.write("data: {}\n\n")
   live = true
-  lastSequence = writeSseEvents(response, pendingEvents, lastSequence)
-  pendingEvents.length = 0
   for (const event of pendingLive) writeTransientSseEvent(response, event)
   pendingLive.length = 0
 

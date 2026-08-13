@@ -323,9 +323,15 @@ export const useAppStore = create<AppStore>()((set, get) => {
   const clearSessionState = (): void => {
     const state = get()
     restoringModelSelections.clear()
+    userPreferenceRevision += 1
     clearSessionSelection(state.selection)
     set({
       apiRevision: state.apiRevision + 1,
+      providers: [],
+      defaultProvider: undefined,
+      defaultModel: undefined,
+      userPreference: undefined,
+      modelSelectionReady: true,
       events: [],
       execution: createExecutionViewState(),
       inFlightActions: new Set(),
@@ -433,11 +439,16 @@ export const useAppStore = create<AppStore>()((set, get) => {
     },
 
     loadProviders: async () => {
+      const apiRevision = get().apiRevision
+      const apiBase = get().apiBase
       try {
         const response = await requestJson<ApiListProvidersResponse>(
-          get().apiBase,
+          apiBase,
           "/providers",
         )
+        if (get().apiRevision !== apiRevision || get().apiBase !== apiBase) {
+          return
+        }
         set({
           providers: [...response.providers],
           defaultProvider: response.defaultProvider,
@@ -767,23 +778,37 @@ export const useAppStore = create<AppStore>()((set, get) => {
     setModelSelection: (sessionId, selection) => {
       userPreferenceRevision += 1
       const preferenceRevision = userPreferenceRevision
+      const apiRevision = get().apiRevision
+      const apiBase = get().apiBase
       restoringModelSelections.delete(sessionId)
       const modelSelections = { ...get().modelSelections }
       if (selection === undefined) delete modelSelections[sessionId]
       else modelSelections[sessionId] = selection
-      set({ modelSelections })
+      set({ modelSelections, modelSelectionReady: true })
       persistModelSelections(modelSelections)
       if (selection === undefined) return
-      void runTask(async () => {
-        const response =
-          await requestJson<ApiUpdateUserModelPreferenceResponse>(
-            get().apiBase,
-            "/user-preference",
-            { method: "PUT", body: selection },
-          )
-        if (preferenceRevision !== userPreferenceRevision) return
-        set({ userPreference: response.userPreference })
-      })
+      void runTask(
+        async () => {
+          const response =
+            await requestJson<ApiUpdateUserModelPreferenceResponse>(
+              apiBase,
+              "/user-preference",
+              { method: "PUT", body: selection },
+            )
+          if (
+            preferenceRevision !== userPreferenceRevision ||
+            apiRevision !== get().apiRevision ||
+            apiBase !== get().apiBase
+          ) {
+            return
+          }
+          set({ userPreference: response.userPreference })
+        },
+        () =>
+          preferenceRevision === userPreferenceRevision &&
+          apiRevision === get().apiRevision &&
+          apiBase === get().apiBase,
+      )
     },
   }
 })
