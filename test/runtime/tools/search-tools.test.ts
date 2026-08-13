@@ -9,10 +9,11 @@ import {
 } from "../../../src/index.ts"
 
 describe("workspace search tools", () => {
-  it("greps content with bounded ripgrep output and hides sensitive matches", async () => {
+  it("greps content with bounded ripgrep output and respects gitignore", async () => {
     await withWorkspace(async (workspace) => {
       await writeFile(join(workspace, "alpha.ts"), "const Needle = 1\n")
       await writeFile(join(workspace, "beta.ts"), "const needle = 2\n")
+      await writeFile(join(workspace, ".gitignore"), ".env\n")
       await writeFile(join(workspace, ".env"), "needle=secret\n")
 
       const result = await createGrepTool().execute(
@@ -691,10 +692,10 @@ describe("workspace search tools", () => {
         output: {
           pattern: "*.ts",
           path: ".",
-          count: 4,
+          count: 5,
           truncated: false,
           content:
-            "Glob returned 4 files.\n.hidden.ts\nnested/three.ts\none.ts\ntwo.ts",
+            "Glob returned 5 files.\n.env.ts\n.hidden.ts\nnested/three.ts\none.ts\ntwo.ts",
         },
       })
       if (complete.ok) {
@@ -706,13 +707,13 @@ describe("workspace search tools", () => {
         }
         expect(complete.content).toBe(content)
         expect(content.split("\n")).toEqual([
-          "Glob returned 4 files.",
+          "Glob returned 5 files.",
+          ".env.ts",
           ".hidden.ts",
           "nested/three.ts",
           "one.ts",
           "two.ts",
         ])
-        expect(content).not.toContain(".env.ts")
         expect(content).not.toContain(".git")
       }
 
@@ -732,7 +733,6 @@ describe("workspace search tools", () => {
       const content = String((result.output as { content: unknown }).content)
       expect(content).toContain("(Results truncated at the result limit.)")
       expect(content).not.toContain("Consider using")
-      expect(content).not.toContain(".env.ts")
     })
   })
 

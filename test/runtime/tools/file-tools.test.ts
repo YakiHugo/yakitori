@@ -1,5 +1,12 @@
 import { createHash } from "node:crypto"
-import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises"
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
@@ -10,8 +17,8 @@ import {
   createVisibleFileObservations,
   createWriteFileTool,
   resolveWorkspaceRoot,
-  ToolState,
   type ToolProjection,
+  ToolState,
 } from "../../../src/index.ts"
 
 describe("bounded file tools", () => {
@@ -909,10 +916,57 @@ describe("bounded file tools", () => {
             { path: ".env.local", oldString: "", newString: "secret" },
             { workspaceRoot: workspace },
           ),
-        ).toMatchObject({ ok: false, code: "sensitive_path" })
+        ).toMatchObject({ ok: true, output: { created: true } })
       } finally {
         await rm(outside, { recursive: true, force: true })
       }
+    })
+  })
+
+  it("canonicalizes new-file paths and accepts in-workspace parent segments", async () => {
+    await withWorkspace(async (workspace) => {
+      await mkdir(join(workspace, "actual"))
+      await symlink(join(workspace, "actual"), join(workspace, "alias"))
+      const created = await createEditFileTool().execute(
+        {
+          path: "alias/created.ts",
+          oldString: "",
+          newString: "created\n",
+        },
+        { workspaceRoot: workspace },
+      )
+      expect(created).toMatchObject({
+        ok: true,
+        output: {
+          path: "actual/created.ts",
+          fileObservation: { path: "actual/created.ts" },
+        },
+      })
+
+      const dotted = await createEditFileTool().execute(
+        {
+          path: "actual/./second.ts",
+          oldString: "",
+          newString: "second\n",
+        },
+        { workspaceRoot: workspace },
+      )
+      expect(dotted).toMatchObject({
+        ok: true,
+        output: { path: "actual/second.ts" },
+      })
+
+      const read = await createReadFileTool().execute(
+        { path: "alias/../actual/created.ts" },
+        { workspaceRoot: workspace },
+      )
+      expect(read).toMatchObject({
+        ok: true,
+        output: {
+          path: "actual/created.ts",
+          content: expect.stringContaining("created"),
+        },
+      })
     })
   })
 

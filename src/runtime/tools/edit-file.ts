@@ -7,12 +7,12 @@ import {
   matchedEditLocations,
 } from "./edit-file-diagnostics.ts"
 import { locateEditMatches } from "./edit-file-match.ts"
+import { resolveReadPath, resolveWritePath } from "./path-policy.ts"
 import {
   dominantLineEnding,
   normalizeReplacementLineEndings,
   preserveCurlyQuoteStyle,
 } from "./text-file-format.ts"
-import { resolveReadPath, resolveWritePath } from "./path-policy.ts"
 import { compareAndWriteTextFile } from "./text-file-write.ts"
 import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
 
@@ -31,6 +31,7 @@ export function createEditFileTool(
     description:
       "Replace text in an existing UTF-8 file, or create a new file by setting oldString to an empty string. An empty oldString never overwrites an existing file. Read existing files before editing them. Supply the smallest unique non-empty oldString, usually 2-4 lines, and exclude read_file's {N}\\t line prefixes. A ranged read requires an exact unique oldString; replaceAll requires a complete read. For a complete unchanged revision, matching is exact first, followed only by deterministic line-ending, curly-quote, and trailing-whitespace equivalence. Indentation, internal whitespace, and single-vs-double quote delimiters remain exact. No similarity edit is ever applied.",
     autoAllow: true,
+    effect: "mutate",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -81,15 +82,17 @@ export function createEditFileTool(
             ? fileExistsFailure(resolved.relativePath)
             : written
         }
-        const baseOutput =
-          typeof written.output === "object" &&
-          written.output !== null &&
-          !Array.isArray(written.output)
-            ? written.output
-            : {}
+        const baseOutput = asJsonObject(written.output)
+        const createdGrant = writeGrant(baseOutput, "edit", { created: true })
         return {
           ok: true,
-          output: { ...baseOutput, action: "create" },
+          output: {
+            ...baseOutput,
+            action: "create",
+            ...(createdGrant === undefined
+              ? {}
+              : { fileObservation: createdGrant }),
+          },
           content: `Created ${resolved.relativePath} (${Buffer.byteLength(parsed.newString, "utf8")} bytes).`,
         }
       }
@@ -277,6 +280,9 @@ export function createEditFileTool(
         !Array.isArray(written.output)
           ? written.output
           : {}
+      const editGrant = writeGrant(asJsonObject(written.output), "edit", {
+        optimisticRebase,
+      })
       const output = {
         ...baseOutput,
         replacementCount: matches.length,
@@ -290,6 +296,7 @@ export function createEditFileTool(
           complete: observed.complete,
           editWithinObservedRanges,
         },
+        ...(editGrant === undefined ? {} : { fileObservation: editGrant }),
       }
       return {
         ok: true,
@@ -297,6 +304,31 @@ export function createEditFileTool(
         content: `Updated ${resolved.relativePath}: replaced ${matches.length} ${matches.length === 1 ? "match" : "matches"} (${located.mode}).`,
       }
     },
+  }
+}
+
+function asJsonObject(value: unknown): JsonObject {
+  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+    return value as JsonObject
+  }
+  return {}
+}
+
+function writeGrant(
+  output: JsonObject,
+  kind: "edit" | "write",
+  flags: { readonly created?: boolean; readonly optimisticRebase?: boolean },
+): JsonObject | undefined {
+  const path = output.path
+  const sha256 = output.sha256
+  if (typeof path !== "string" || typeof sha256 !== "string") return undefined
+  return {
+    path,
+    kind,
+    complete: flags.created === true || kind === "write",
+    sha256,
+    ...(flags.created === true ? { created: true } : {}),
+    ...(flags.optimisticRebase === true ? { optimisticRebase: true } : {}),
   }
 }
 

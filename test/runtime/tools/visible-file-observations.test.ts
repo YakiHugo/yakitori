@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest"
 import {
   createVisibleFileObservations,
-  ToolState,
   type ToolProjection,
+  ToolState,
 } from "../../../src/index.ts"
 
 describe("visible file observations", () => {
@@ -91,7 +91,7 @@ describe("visible file observations", () => {
     })
   })
 
-  it("requires an explicit complete read and degrades after a later live page", () => {
+  it("keeps a complete revision when a later live page is applied", () => {
     const complete = toolProjection("read_file", {
       path: "src/value.ts",
       complete: true,
@@ -106,7 +106,7 @@ describe("visible file observations", () => {
       observation: "whole_file_read",
     })
 
-    const degraded = createVisibleFileObservations([
+    const stillComplete = createVisibleFileObservations([
       complete,
       toolProjection("read_file", {
         path: "src/value.ts",
@@ -114,10 +114,45 @@ describe("visible file observations", () => {
         range: { offset: 100, limit: 20, requestedLimit: 20 },
       }),
     ])
-    expect(degraded.latest("src/value.ts")).toEqual({
-      complete: false,
-      observation: "ranged_read",
+    expect(stillComplete.latest("src/value.ts")).toEqual({
+      sha256: "a".repeat(64),
+      complete: true,
+      observation: "whole_file_read",
       ranges: [{ startLine: 100, endLine: 119 }],
+    })
+  })
+
+  it("does not infer a legacy grant when fileObservation is present but invalid", () => {
+    const visible = createVisibleFileObservations([
+      toolProjection("read_file", {
+        path: "src/value.ts",
+        complete: true,
+        sha256: "a".repeat(64),
+        range: { offset: 1, limit: 20, requestedLimit: 20 },
+        fileObservation: { kind: "not-a-grant" },
+      }),
+    ])
+    expect(visible.latest("src/value.ts")).toBeUndefined()
+  })
+
+  it("applies a later edit grant without requiring a sibling read", () => {
+    const visible = createVisibleFileObservations([
+      toolProjection("read_file", {
+        path: "src/value.ts",
+        complete: true,
+        sha256: "a".repeat(64),
+      }),
+    ])
+    visible.apply({
+      path: "src/value.ts",
+      kind: "edit",
+      complete: false,
+      sha256: "b".repeat(64),
+    })
+    expect(visible.latest("src/value.ts")).toEqual({
+      sha256: "b".repeat(64),
+      complete: true,
+      observation: "edit",
     })
   })
 })

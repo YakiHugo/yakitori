@@ -47,6 +47,7 @@ export function createRunCommandTool(
     description:
       "Run one shell command in the session workspace. Use this for version control, dependency operations, builds, tests, and tasks without a dedicated tool. Prefer glob, grep, read_file, edit_file, and write_file for file operations. Requires explicit user approval and runs with the host user's full authority.",
     autoAllow: false,
+    effect: "opaque",
     inputSchema: {
       type: "object",
       additionalProperties: false,

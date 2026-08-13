@@ -4,15 +4,17 @@ import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import {
   createFauxProvider,
+  createJsonlEventStore,
   createMateKernel,
+  createReadFileTool,
   createRuntimeLimits,
   createSessionKernel,
   createSessionRunner,
-  createJsonlEventStore,
   createSqliteMateStore,
   createToolRegistry,
   EventType,
   ModelStopReason,
+  type RuntimeTool,
 } from "../../../src/index.ts"
 
 describe("tool loop", () => {
@@ -457,6 +459,160 @@ describe("tool loop", () => {
     })
   })
 
+  it("lets a later edit in the same model call use the previous write grant", async () => {
+    await withToolRuntime(async (runtime) => {
+      await writeFile(join(runtime.workspace, "twice.txt"), "alpha\nbeta\n")
+      const provider = createFauxProvider([
+        {
+          stopReason: ModelStopReason.ToolUse,
+          content: [
+            {
+              type: "tool_call",
+              id: "tool_read_twice",
+              name: "read_file",
+              input: { path: "twice.txt" },
+            },
+          ],
+        },
+        {
+          stopReason: ModelStopReason.ToolUse,
+          content: [
+            {
+              type: "tool_call",
+              id: "tool_edit_alpha",
+              name: "edit_file",
+              input: {
+                path: "twice.txt",
+                oldString: "alpha",
+                newString: "one",
+              },
+            },
+            {
+              type: "tool_call",
+              id: "tool_edit_beta",
+              name: "edit_file",
+              input: {
+                path: "twice.txt",
+                oldString: "beta",
+                newString: "two",
+              },
+            },
+          ],
+        },
+        { content: [{ type: "text", text: "updated twice" }] },
+      ])
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+      })
+      const session = await createSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "edit twice.txt twice" },
+      })
+
+      await runner.wake(session.sessionId)
+
+      expect(await readFile(join(runtime.workspace, "twice.txt"), "utf8")).toBe(
+        "one\ntwo\n",
+      )
+      const read = await runtime.kernel.readSession({
+        sessionId: session.sessionId,
+      })
+      expect(read.session?.tools).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            toolCallId: "tool_edit_alpha",
+            state: "completed",
+          }),
+          expect.objectContaining({
+            toolCallId: "tool_edit_beta",
+            state: "completed",
+            output: expect.objectContaining({ optimisticRebase: false }),
+          }),
+        ]),
+      )
+    })
+  })
+
+  it("records completed observe results when a sibling prefix tool is aborted", async () => {
+    await withToolRuntime(async (runtime) => {
+      await writeFile(join(runtime.workspace, "kept.txt"), "kept")
+      const provider = createFauxProvider([
+        {
+          stopReason: ModelStopReason.ToolUse,
+          content: [
+            {
+              type: "tool_call",
+              id: "tool_kept_read",
+              name: "read_file",
+              input: { path: "kept.txt" },
+            },
+            {
+              type: "tool_call",
+              id: "tool_hang",
+              name: "grep",
+              input: { pattern: "hang" },
+            },
+          ],
+        },
+        { content: [{ type: "text", text: "should not run" }] },
+      ])
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+        toolRegistry: createToolRegistry([
+          createReadFileTool(),
+          hangingObserveTool("grep"),
+        ]),
+      })
+      const session = await createSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "read then hang" },
+      })
+      const wake = runner.wake(session.sessionId)
+      for (;;) {
+        const snapshot = await runtime.kernel.readSession({
+          sessionId: session.sessionId,
+        })
+        const turnId = snapshot.session?.activeTurn?.turnId
+        if (
+          turnId !== undefined &&
+          (snapshot.session?.tools.length ?? 0) >= 2
+        ) {
+          await new Promise((resolve) => setTimeout(resolve, 20))
+          await runner.interrupt({
+            sessionId: session.sessionId,
+            turnId,
+            reason: "user_cancel",
+          })
+          break
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1))
+      }
+      await wake
+
+      const read = await runtime.kernel.readSession({
+        sessionId: session.sessionId,
+      })
+      expect(read.session?.tools).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            toolCallId: "tool_kept_read",
+            state: "completed",
+          }),
+          expect.objectContaining({
+            toolCallId: "tool_hang",
+            state: "requested",
+          }),
+        ]),
+      )
+    })
+  })
+
   it("does not authorize edits from a context-truncated read result", async () => {
     await withToolRuntime(async (runtime) => {
       await writeFile(join(runtime.workspace, "truncated.txt"), "one\ntwo\n")
@@ -711,6 +867,33 @@ describe("tool loop", () => {
     })
   })
 })
+
+function hangingObserveTool(name: string): RuntimeTool {
+  return {
+    name,
+    description: "Test helper that waits until the Turn is aborted.",
+    autoAllow: true,
+    effect: "observe",
+    inputSchema: {
+      type: "object",
+      additionalProperties: true,
+      properties: {},
+    },
+    execute(_input, context) {
+      return new Promise((_, reject) => {
+        if (context.signal?.aborted === true) {
+          reject(new DOMException("Aborted", "AbortError"))
+          return
+        }
+        context.signal?.addEventListener(
+          "abort",
+          () => reject(new DOMException("Aborted", "AbortError")),
+          { once: true },
+        )
+      })
+    },
+  }
+}
 
 type ToolRuntime = {
   readonly kernel: ReturnType<typeof createSessionKernel>

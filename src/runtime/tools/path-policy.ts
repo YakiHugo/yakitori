@@ -1,39 +1,21 @@
-import { lstat, realpath } from "node:fs/promises"
+import { lstat, readdir, realpath } from "node:fs/promises"
 import {
   basename,
   dirname,
-  extname,
   isAbsolute,
   join,
   relative,
   resolve,
   sep,
 } from "node:path"
-import { runRipgrep } from "./ripgrep.ts"
+
+const SUGGESTION_TIMEOUT_MS = 1_000
+const MAX_PATH_SUGGESTIONS = 3
 
 export type PathPolicyError = {
   readonly code: string
   readonly message: string
 }
-
-export const SensitivePathGlobs = [
-  "!**/.env*",
-  "!**/.ssh/**",
-  "!**/.git-credentials",
-  "!**/.netrc",
-  "!**/.npmrc",
-  "!**/.pypirc",
-  "!**/.aws/credentials",
-  "!**/.docker/config.json",
-  "!**/.kube/config",
-  "!**/*.key",
-  "!**/*.pem",
-  "!**/*.p12",
-  "!**/*.pfx",
-  "!**/credentials.json",
-  "!**/secrets.json",
-  "!**/service-account*.json",
-] as const
 
 export type ResolvedWorkspacePath =
   | {
@@ -41,6 +23,7 @@ export type ResolvedWorkspacePath =
       readonly absolutePath: string
       readonly relativePath: string
       readonly exists: boolean
+      readonly kind: "file" | "directory"
     }
   | {
       readonly ok: false
@@ -75,10 +58,13 @@ export async function resolveReadPath(
     }
     const stats = await lstat(absolutePath)
     if (stats.isDirectory()) {
-      return pathError(
-        "directory_not_supported",
-        "read_file does not read directories. Use glob to list matching files.",
-      )
+      return {
+        ok: true,
+        absolutePath,
+        relativePath: toRelativePath(workspaceRoot, absolutePath) || ".",
+        exists: true,
+        kind: "directory",
+      }
     }
     if (!stats.isFile()) {
       return pathError(
@@ -91,14 +77,15 @@ export async function resolveReadPath(
       absolutePath,
       relativePath: toRelativePath(workspaceRoot, absolutePath),
       exists: true,
+      kind: "file",
     }
   } catch {
-    const suggestion = await suggestWorkspacePath(workspaceRoot, relativePath)
+    const suggestion = await formatPathSuggestions(workspaceRoot, relativePath)
     return pathError(
       "path_not_found",
       suggestion === undefined
         ? "Path does not exist."
-        : `Path does not exist. Did you mean "${suggestion}"?`,
+        : `Path does not exist. ${suggestion}`,
     )
   }
 }
@@ -129,6 +116,7 @@ export async function resolveWritePath(
       absolutePath,
       relativePath: toRelativePath(workspaceRoot, absolutePath),
       exists: true,
+      kind: "file",
     }
   } catch {
     // New file: parent must exist and stay inside the workspace.
@@ -142,15 +130,16 @@ export async function resolveWritePath(
       if (!parentStats.isDirectory()) {
         return pathDenied("Parent path is not a directory.")
       }
+      const absolutePath = join(
+        parentPath,
+        validated.relativePath.split(/[/\\]/).at(-1) ?? validated.relativePath,
+      )
       return {
         ok: true,
-        absolutePath: join(
-          parentPath,
-          validated.relativePath.split(/[/\\]/).at(-1) ??
-            validated.relativePath,
-        ),
-        relativePath: validated.relativePath,
+        absolutePath,
+        relativePath: toRelativePath(workspaceRoot, absolutePath),
         exists: false,
+        kind: "file",
       }
     } catch {
       return pathDenied("Parent directory does not exist.")
@@ -173,11 +162,13 @@ export async function resolveSearchPath(
     if (!isInsideWorkspace(workspaceRoot, absolutePath)) {
       return pathDenied("Path escapes the workspace via symlink.")
     }
+    const stats = await lstat(absolutePath)
     return {
       ok: true,
       absolutePath,
       relativePath: toRelativePath(workspaceRoot, absolutePath) || ".",
       exists: true,
+      kind: stats.isDirectory() ? "directory" : "file",
     }
   } catch {
     return pathDenied("Search path does not exist.")
@@ -198,54 +189,17 @@ function validateRelativePathInput(
   if (isAbsolute(relativePath)) {
     return pathDenied("Path must be relative to the workspace.")
   }
-  if (relativePath.split(/[/\\]/).includes("..")) {
-    return pathDenied("Path must not contain parent directory segments.")
-  }
-  if (isSensitiveWorkspacePath(relativePath)) {
-    return pathError(
-      "sensitive_path",
-      "Access to credential and secret-bearing paths is not allowed.",
-    )
-  }
   return { ok: true, relativePath }
 }
 
-export function isSensitiveWorkspacePath(path: string): boolean {
-  const normalized = path.replaceAll("\\", "/").toLowerCase()
-  const segments = normalized.split("/").filter(Boolean)
-  const name = segments.at(-1) ?? ""
-  if (name.startsWith(".env")) return true
-  if (segments.includes(".ssh")) return true
-  if ([".git-credentials", ".netrc", ".npmrc", ".pypirc"].includes(name)) {
-    return true
-  }
-  if (
-    normalized.endsWith("/.aws/credentials") ||
-    normalized.endsWith("/.docker/config.json") ||
-    normalized.endsWith("/.kube/config")
-  ) {
-    return true
-  }
-  if ([".key", ".p12", ".pem", ".pfx"].includes(extname(name))) return true
-  return (
-    name === "application_default_credentials.json" ||
-    name === "credentials.json" ||
-    name === "secrets.json" ||
-    /^service-account.*\.json$/u.test(name)
-  )
-}
-
-function isInsideWorkspace(
+export function isInsideWorkspace(
   workspaceRoot: string,
   absolutePath: string,
 ): boolean {
-  if (absolutePath === workspaceRoot) return true
   const rel = relative(workspaceRoot, absolutePath)
   return (
-    rel !== "" &&
-    !rel.startsWith(`..${sep}`) &&
-    !rel.startsWith("..") &&
-    !isAbsolute(rel)
+    rel === "" ||
+    (!isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`))
   )
 }
 
@@ -276,41 +230,79 @@ function pathError(
   }
 }
 
-async function suggestWorkspacePath(
+async function formatPathSuggestions(
   workspaceRoot: string,
   requested: string,
 ): Promise<string | undefined> {
-  // TODO(path-not-found-hints): Promote bounded path suggestions to a
-  // structured, shared path-policy result so edit, read, and search tools can
-  // render consistent recovery hints without parsing or replacing messages.
-  const listed = await runRipgrep(
-    [
-      "--files",
-      "--hidden",
-      "--no-require-git",
-      "--glob",
-      "!.git/**",
-      ...SensitivePathGlobs.flatMap((glob) => ["--glob", glob]),
-    ],
-    { cwd: workspaceRoot },
-  )
-  if (!listed.ok) return undefined
-  const requestedName = basename(requested).toLowerCase()
-  let best: { readonly path: string; readonly distance: number } | undefined
-  for (const candidate of listed.stdout.split("\n")) {
-    if (candidate.length === 0 || isSensitiveWorkspacePath(candidate)) continue
-    const distance = editDistance(
-      requestedName,
-      basename(candidate).toLowerCase(),
+  let suggestions: readonly string[]
+  try {
+    suggestions = await withTimeout(
+      suggestWorkspacePaths(workspaceRoot, requested),
+      SUGGESTION_TIMEOUT_MS,
     )
-    if (best === undefined || distance < best.distance) {
-      best = { path: candidate.replaceAll("\\", "/"), distance }
-    }
+  } catch {
+    return undefined
   }
+  if (suggestions.length === 0) return undefined
+  if (suggestions.length === 1) return `Did you mean "${suggestions[0]}"?`
+  return `Did you mean one of these?\n${suggestions.join("\n")}`
+}
+
+async function suggestWorkspacePaths(
+  workspaceRoot: string,
+  requested: string,
+): Promise<readonly string[]> {
+  const normalized = requested.replaceAll("\\", "/")
+  const parentRel = dirname(normalized)
+  const parentCandidate =
+    parentRel === "." ? workspaceRoot : resolve(workspaceRoot, parentRel)
+  if (!isInsideWorkspace(workspaceRoot, parentCandidate)) return []
+
+  let parentPath: string
+  try {
+    parentPath = await realpath(parentCandidate)
+  } catch {
+    return []
+  }
+  if (!isInsideWorkspace(workspaceRoot, parentPath)) return []
+
+  let names: string[]
+  try {
+    names = await readdir(parentPath)
+  } catch {
+    return []
+  }
+
+  const requestedName = basename(normalized).toLowerCase()
+  if (requestedName.length === 0) return []
   const threshold = Math.max(2, Math.floor(requestedName.length * 0.35))
-  return best !== undefined && best.distance <= threshold
-    ? best.path
-    : undefined
+  const ranked: { readonly path: string; readonly distance: number }[] = []
+  for (const name of names) {
+    const distance = editDistance(requestedName, name.toLowerCase())
+    if (distance > threshold) continue
+    const relativePath =
+      parentRel === "." ? name : `${parentRel}/${name}`.replaceAll("\\", "/")
+    ranked.push({ path: relativePath, distance })
+  }
+  ranked.sort((left, right) => left.distance - right.distance)
+  return ranked.slice(0, MAX_PATH_SUGGESTIONS).map((entry) => entry.path)
+}
+
+async function withTimeout<T>(task: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      task,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error("path suggestion timed out"))
+        }, timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+    void task.catch(() => undefined)
+  }
 }
 
 function editDistance(left: string, right: string): number {
