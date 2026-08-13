@@ -131,15 +131,14 @@ describe("model selector", () => {
           models: [
             {
               id: "kimi-for-coding",
-              displayName: "Kimi for Coding",
+              displayName: "K2.7 Coding",
               family: "kimi",
-              efforts: ["on", "off"],
             },
             {
               id: "k3",
-              displayName: "Kimi K3",
+              displayName: "K3",
               family: "kimi",
-              efforts: ["max"],
+              efforts: ["low", "high", "max"],
             },
           ],
         },
@@ -300,9 +299,18 @@ describe("model selector", () => {
       },
     })
 
-    // Kimi K3 only offers "max", so switching to it drops the pinned effort.
+    // K3 does not offer OpenAI's "medium", so switching drops that effort.
+    useAppStore.setState({
+      modelSelections: {
+        session_1: {
+          provider: "openai",
+          model: "gpt-5.1-codex",
+          effort: "medium",
+        },
+      },
+    })
     await user.click(screen.getByRole("button", { name: "Select model" }))
-    await user.click(screen.getByRole("button", { name: "Kimi K3" }))
+    await user.click(screen.getByRole("button", { name: "K3" }))
 
     expect(useAppStore.getState().modelSelections).toEqual({
       session_1: { provider: "kimi", model: "k3" },
@@ -355,7 +363,7 @@ describe("model selector", () => {
     expect(selectedRow.querySelector("svg")).not.toBeNull()
   })
 
-  it("shows boolean on/off effort rows for kimi thinking models", async () => {
+  it("keeps K2.7 thinking on without exposing K3 effort levels", async () => {
     const user = userEvent.setup()
     window.localStorage.clear()
     useAppStore.setState({
@@ -368,16 +376,8 @@ describe("model selector", () => {
 
     await user.click(screen.getByRole("button", { name: "Select model" }))
 
-    expect(screen.getByText("推理强度")).toBeDefined()
-    expect(screen.getByRole("button", { name: "on" })).toBeDefined()
-    expect(screen.getByRole("button", { name: "off" })).toBeDefined()
-    // Boolean models have no speed tiers.
+    expect(screen.queryByText("推理强度")).toBeNull()
     expect(screen.queryByText("速度")).toBeNull()
-
-    await user.click(screen.getByRole("button", { name: "off" }))
-    expect(useAppStore.getState().modelSelections).toEqual({
-      session_1: { provider: "kimi", model: "kimi-for-coding", effort: "off" },
-    })
   })
 
   it("pins and clears a speed tier for codex models", async () => {

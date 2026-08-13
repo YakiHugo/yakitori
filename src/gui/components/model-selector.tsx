@@ -3,7 +3,11 @@ import { useState } from "react"
 import type { ModelSelection } from "../../kernel/events.ts"
 import type { ApiProviderSummary } from "../../server/protocol.ts"
 import { cn } from "../lib/utils.ts"
-import { resolveEffectiveModel, useAppStore } from "../store/app-store.ts"
+import {
+  normalizeKimiModelSelection,
+  resolveEffectiveModel,
+  useAppStore,
+} from "../store/app-store.ts"
 import { Button } from "./ui/button.tsx"
 
 const SPEED_LABELS: Readonly<Record<string, string>> = {
@@ -37,12 +41,14 @@ export function ModelSelector() {
 
   if (sessionId === undefined || providers.length === 0) return null
 
-  const effective = resolveEffectiveModel({
-    sessionCurrent,
-    userPreference,
-    defaultProvider,
-    defaultModel,
-  })
+  const effective = normalizeKimiModelSelection(
+    resolveEffectiveModel({
+      sessionCurrent,
+      userPreference,
+      defaultProvider,
+      defaultModel,
+    }),
+  )
   const label =
     effective === undefined
       ? "model"

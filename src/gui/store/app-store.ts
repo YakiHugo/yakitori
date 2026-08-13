@@ -625,6 +625,9 @@ export const useAppStore = create<AppStore>()((set, get) => {
             defaultProvider: state.defaultProvider,
             defaultModel: state.defaultModel,
           })
+          const admittedModelSelection = normalizeKimiModelSelection(
+            modelSelection,
+          )
           const pendingAdmission = await reserveAdmission(window.localStorage, {
             apiBase: get().apiBase,
             sessionId: selection.sessionId,
@@ -642,7 +645,9 @@ export const useAppStore = create<AppStore>()((set, get) => {
                   kind: "text",
                   text,
                 },
-                ...(modelSelection === undefined ? {} : { modelSelection }),
+                ...(admittedModelSelection === undefined
+                  ? {}
+                  : { modelSelection: admittedModelSelection }),
               },
             },
           )
@@ -825,6 +830,24 @@ export function resolveEffectiveModel(input: {
     return undefined
   }
   return { provider: input.defaultProvider, model: input.defaultModel }
+}
+
+export function normalizeKimiModelSelection(
+  selection: ModelSelection | undefined,
+): ModelSelection | undefined {
+  if (
+    selection?.provider !== "kimi" ||
+    (selection.model !== "kimi-for-coding" &&
+      selection.model !== "kimi-for-coding-highspeed") ||
+    (selection.effort !== "on" && selection.effort !== "off")
+  ) {
+    return selection
+  }
+  return {
+    provider: selection.provider,
+    model: selection.model,
+    ...(selection.speed === undefined ? {} : { speed: selection.speed }),
+  }
 }
 
 export function useExecutionView(): ExecutionView {
