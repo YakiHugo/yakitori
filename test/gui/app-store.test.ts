@@ -105,6 +105,7 @@ describe("app store event stream", () => {
 
     source?.emit("open")
     expect(useAppStore.getState().streamStatus).toBe("connected")
+    expect(useAppStore.getState().modelSelectionReady).toBe(false)
 
     const admitted = createEventEnvelope({
       sessionId: "session_1",
@@ -125,6 +126,8 @@ describe("app store event stream", () => {
         admitted.id,
       )
     })
+    source?.emit("session.replay-complete")
+    expect(useAppStore.getState().modelSelectionReady).toBe(true)
 
     source?.emit("session.transient", {
       type: "assistant.snapshot",
@@ -788,6 +791,7 @@ describe("model selection", () => {
       "session.event",
       turnStartedEvent(3, "codex", "gpt-5.6-sol", "high"),
     )
+    source?.emit("session.replay-complete")
 
     await vi.waitFor(() => {
       expect(useAppStore.getState().modelSelections.session_1).toEqual({
@@ -831,6 +835,74 @@ describe("model selection", () => {
         model: "gpt-5.6-sol",
         effort: "high",
       },
+    })
+  })
+
+  it("does not admit an old Session input before model restoration completes", async () => {
+    window.localStorage.clear()
+    const fetchMock = admissionFetchMock()
+    vi.stubGlobal("fetch", fetchMock)
+    useAppStore.setState({
+      modelSelections: {},
+      userPreference: {
+        provider: "anthropic",
+        model: "claude-sonnet-4-6",
+      },
+    })
+
+    await useAppStore.getState().selectSession("session_1")
+    await useAppStore.getState().admitInput("too early")
+    expect(
+      fetchMock.mock.calls.some(([input]) => String(input).endsWith("/inputs")),
+    ).toBe(false)
+
+    const source = FakeEventSource.instances[0]
+    source?.emit(
+      "session.event",
+      turnStartedEvent(2, "codex", "gpt-5.6-sol", "high"),
+    )
+    source?.emit("session.replay-complete")
+    await useAppStore.getState().admitInput("restored")
+
+    const admitCall = fetchMock.mock.calls.find(([input]) =>
+      String(input).endsWith("/inputs"),
+    )
+    expect(JSON.parse(String(admitCall?.[1]?.body))).toMatchObject({
+      modelSelection: {
+        provider: "codex",
+        model: "gpt-5.6-sol",
+        effort: "high",
+      },
+    })
+  })
+
+  it("keeps a failed preference write scoped to the current Session", async () => {
+    window.localStorage.clear()
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => errorResponse(500)),
+    )
+    useAppStore.setState({
+      selection: { revision: 1, sessionId: "session_1" },
+      userPreference: { provider: "faux", model: "scripted" },
+      modelSelections: {},
+    })
+
+    useAppStore.getState().setModelSelection("session_1", {
+      provider: "anthropic",
+      model: "claude-sonnet-4-6",
+    })
+
+    await vi.waitFor(() => {
+      expect(useAppStore.getState().message).toBe("not found")
+    })
+    expect(useAppStore.getState().modelSelections.session_1).toEqual({
+      provider: "anthropic",
+      model: "claude-sonnet-4-6",
+    })
+    expect(useAppStore.getState().userPreference).toEqual({
+      provider: "faux",
+      model: "scripted",
     })
   })
 

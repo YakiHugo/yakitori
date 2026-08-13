@@ -73,6 +73,20 @@ describe("composer", () => {
       true,
     )
   })
+
+  it("keeps sending disabled until an old Session model is restored", () => {
+    useAppStore.setState({
+      selection: { revision: 1, sessionId: "session_1" },
+      promptDraft: "hello",
+      modelSelectionReady: false,
+    })
+    render(<Composer />)
+
+    expect(screen.getByRole("button", { name: "Send" })).toHaveProperty(
+      "disabled",
+      true,
+    )
+  })
 })
 
 describe("model selector", () => {
@@ -408,6 +422,30 @@ describe("model selector", () => {
     expect(useAppStore.getState().modelSelections).toEqual({
       session_1: { provider: "codex", model: "gpt-5.6-sol", effort: "high" },
     })
+  })
+
+  it("checks the standard row for an explicit standard speed", async () => {
+    const user = userEvent.setup()
+    useAppStore.setState({
+      ...selectModelState(),
+      modelSelections: {
+        session_1: {
+          provider: "codex",
+          model: "gpt-5.6-sol",
+          speed: "standard",
+        },
+      },
+    })
+    render(<Composer />)
+
+    await user.click(screen.getByRole("button", { name: "Select model" }))
+
+    expect(
+      screen.getByRole("button", { name: "标准" }).querySelector("svg"),
+    ).not.toBeNull()
+    expect(
+      screen.getByRole("button", { name: "快速" }).querySelector("svg"),
+    ).toBeNull()
   })
 
   it("hides the speed section for providers without tiers", async () => {

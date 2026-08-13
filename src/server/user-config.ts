@@ -2,9 +2,8 @@ import { randomUUID } from "node:crypto"
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
+import { parse, stringify, type TomlTable } from "smol-toml"
 import type { ApiUserModelPreference } from "./protocol.ts"
-
-const preferenceKeys = new Set(["provider", "model", "effort", "speed"])
 
 export type UserConfigStore = {
   read(): Promise<ApiUserModelPreference | undefined>
@@ -48,7 +47,17 @@ async function writePreference(
   preference: ApiUserModelPreference,
 ): Promise<ApiUserModelPreference> {
   const document = await readConfigDocument(configPath)
-  const content = serializeConfig(preference, document?.unknownLines ?? [])
+  const content = stringify({
+    ...(document?.value ?? {}),
+    provider: preference.provider,
+    model: preference.model,
+    ...(preference.effort === undefined
+      ? { effort: undefined }
+      : { effort: preference.effort }),
+    ...(preference.speed === undefined
+      ? { speed: undefined }
+      : { speed: preference.speed }),
+  })
   await mkdir(dirname(configPath), { recursive: true })
   const temporary = `${configPath}.${randomUUID()}.tmp`
   try {
@@ -73,7 +82,7 @@ async function writePreference(
 
 type ConfigDocument = {
   readonly preference?: ApiUserModelPreference
-  readonly unknownLines: readonly string[]
+  readonly value: TomlTable
 }
 
 async function readConfigDocument(
@@ -88,53 +97,38 @@ async function readConfigDocument(
   }
 
   try {
-    return parseConfig(content)
+    const value = parse(content, { integersAsBigInt: "asNeeded" })
+    return { value, ...preferenceFromConfig(value) }
   } catch (error) {
     console.warn(`Ignoring malformed user config at ${configPath}.`, error)
     return undefined
   }
 }
 
-function parseConfig(content: string): ConfigDocument {
-  const values = new Map<string, string>()
-  const unknownLines: string[] = []
-  let inTable = false
-
-  for (const line of content.split(/\r?\n/)) {
-    const trimmed = line.trim()
-    if (trimmed === "" || trimmed.startsWith("#")) {
-      unknownLines.push(line)
-      continue
-    }
-    if (/^\[[^\]]+\](?:\s*#.*)?$/.test(trimmed)) {
-      inTable = true
-      unknownLines.push(line)
-      continue
-    }
-
-    const assignment = /^([A-Za-z0-9_-]+)\s*=\s*(.+)$/.exec(trimmed)
-    if (assignment === null) throw new Error(`Invalid TOML line: ${line}`)
-    const key = assignment[1]
-    if (key === undefined || inTable || !preferenceKeys.has(key)) {
-      unknownLines.push(line)
-      continue
-    }
-    const value = parseTomlString(assignment[2] ?? "")
-    values.set(key, value)
-  }
-
-  const provider = values.get("provider")
-  const model = values.get("model")
-  if (provider === undefined && model === undefined) return { unknownLines }
+function preferenceFromConfig(value: TomlTable): {
+  readonly preference?: ApiUserModelPreference
+} {
+  const provider = value.provider
+  const model = value.model
+  if (provider === undefined && model === undefined) return {}
   if (provider === undefined || model === undefined) {
     throw new Error("provider and model must be configured together.")
   }
-  if (provider.trim() === "" || model.trim() === "") {
+  if (
+    typeof provider !== "string" ||
+    typeof model !== "string" ||
+    provider.trim() === "" ||
+    model.trim() === ""
+  ) {
     throw new Error("provider and model must be non-empty strings.")
   }
-  const effort = values.get("effort")
-  const speed = values.get("speed")
-  if (effort?.trim() === "" || speed?.trim() === "") {
+  const effort = value.effort
+  const speed = value.speed
+  if (
+    (effort !== undefined &&
+      (typeof effort !== "string" || effort.trim() === "")) ||
+    (speed !== undefined && (typeof speed !== "string" || speed.trim() === ""))
+  ) {
     throw new Error("effort and speed must be non-empty when configured.")
   }
   return {
@@ -144,46 +138,7 @@ function parseConfig(content: string): ConfigDocument {
       ...(effort === undefined ? {} : { effort }),
       ...(speed === undefined ? {} : { speed }),
     },
-    unknownLines,
   }
-}
-
-function parseTomlString(value: string): string {
-  const match = /^("(?:[^"\\]|\\.)*")\s*(?:#.*)?$/.exec(value)
-  if (match?.[1] === undefined) {
-    throw new Error("User model preferences must be TOML strings.")
-  }
-  const parsed: unknown = JSON.parse(match[1])
-  if (typeof parsed !== "string") {
-    throw new Error("User model preferences must be TOML strings.")
-  }
-  return parsed
-}
-
-function serializeConfig(
-  preference: ApiUserModelPreference,
-  unknownLines: readonly string[],
-): string {
-  const preferenceLines = [
-    `provider = ${JSON.stringify(preference.provider)}`,
-    `model = ${JSON.stringify(preference.model)}`,
-    ...(preference.effort === undefined
-      ? []
-      : [`effort = ${JSON.stringify(preference.effort)}`]),
-    ...(preference.speed === undefined
-      ? []
-      : [`speed = ${JSON.stringify(preference.speed)}`]),
-  ]
-  const preserved = trimBlankEdges(unknownLines)
-  return `${[...preferenceLines, ...(preserved.length === 0 ? [] : ["", ...preserved])].join("\n")}\n`
-}
-
-function trimBlankEdges(lines: readonly string[]): readonly string[] {
-  const first = lines.findIndex((line) => line.trim() !== "")
-  if (first < 0) return []
-  let last = lines.length - 1
-  while (last > first && lines[last]?.trim() === "") last -= 1
-  return lines.slice(first, last + 1)
 }
 
 function isMissingFile(error: unknown): boolean {

@@ -55,6 +55,7 @@ export type AppStoreData = {
   execution: ExecutionViewState
   inFlightActions: ReadonlySet<string>
   message: string | undefined
+  modelSelectionReady: boolean
   modelSelections: Record<string, ModelSelection>
   nextCursor: string | undefined
   promptDraft: string | undefined
@@ -111,6 +112,7 @@ export function createInitialAppState(): AppStoreData {
     execution: createExecutionViewState(),
     inFlightActions: new Set(),
     message: undefined,
+    modelSelectionReady: true,
     modelSelections: initialModelSelections(),
     nextCursor: undefined,
     promptDraft: undefined,
@@ -133,6 +135,7 @@ let activeTaskCount = 0
 
 export const useAppStore = create<AppStore>()((set, get) => {
   const restoringModelSelections = new Set<string>()
+  let userPreferenceRevision = 0
   const runTask = async (
     task: () => Promise<void>,
     isCurrent: () => boolean = () => true,
@@ -251,6 +254,16 @@ export const useAppStore = create<AppStore>()((set, get) => {
               return
             }
             set({ streamStatus: "connected" })
+          },
+          onReplayComplete: () => {
+            if (
+              get().stream !== source ||
+              !isCurrentSessionSelection(get().selection, selection)
+            ) {
+              return
+            }
+            restoringModelSelections.delete(selection.sessionId)
+            set({ modelSelectionReady: true })
           },
           onEvent: (event) => {
             if (
@@ -565,8 +578,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
       }))
       if (get().modelSelections[sessionId] === undefined) {
         restoringModelSelections.add(sessionId)
+        set({ modelSelectionReady: false })
       } else {
         restoringModelSelections.delete(sessionId)
+        set({ modelSelectionReady: true })
       }
       const selection = activateSession(sessionId)
       closeStream()
@@ -588,7 +603,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
 
     admitInput: async (text) => {
       const selection = currentSessionSelection(get().selection)
-      if (!selection) return
+      if (!selection || !get().modelSelectionReady) return
 
       await runTask(
         async () => {
@@ -750,22 +765,24 @@ export const useAppStore = create<AppStore>()((set, get) => {
     },
 
     setModelSelection: (sessionId, selection) => {
+      userPreferenceRevision += 1
+      const preferenceRevision = userPreferenceRevision
       restoringModelSelections.delete(sessionId)
       const modelSelections = { ...get().modelSelections }
       if (selection === undefined) delete modelSelections[sessionId]
       else modelSelections[sessionId] = selection
-      set({
-        modelSelections,
-        ...(selection === undefined ? {} : { userPreference: selection }),
-      })
+      set({ modelSelections })
       persistModelSelections(modelSelections)
       if (selection === undefined) return
       void runTask(async () => {
-        await requestJson<ApiUpdateUserModelPreferenceResponse>(
-          get().apiBase,
-          "/user-preference",
-          { method: "PUT", body: selection },
-        )
+        const response =
+          await requestJson<ApiUpdateUserModelPreferenceResponse>(
+            get().apiBase,
+            "/user-preference",
+            { method: "PUT", body: selection },
+          )
+        if (preferenceRevision !== userPreferenceRevision) return
+        set({ userPreference: response.userPreference })
       })
     },
   }

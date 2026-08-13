@@ -1053,7 +1053,10 @@ async function readNextSessionEvent(
 
 function parseSseEvent(buffer: string): EventEnvelope | undefined {
   const block = buffer.split("\n\n").find((candidate) => {
-    return candidate.includes("\ndata: ") || candidate.startsWith("data: ")
+    return (
+      (candidate.includes("\ndata: ") || candidate.startsWith("data: ")) &&
+      !candidate.includes("event: session.replay-complete")
+    )
   })
   const data = block
     ?.split("\n")

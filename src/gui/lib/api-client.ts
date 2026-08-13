@@ -68,6 +68,7 @@ export function cancelSessionInput(
 
 export type SessionEventStreamHandlers = {
   readonly onOpen: () => void
+  readonly onReplayComplete: () => void
   readonly onEvent: (event: StoredEventEnvelope) => void
   readonly onTransient: (event: LiveSessionEvent) => void
   readonly onError: () => void
@@ -86,6 +87,9 @@ export function openSessionEventStream(
     ),
   )
   source.addEventListener("open", () => handlers.onOpen())
+  source.addEventListener("session.replay-complete", () =>
+    handlers.onReplayComplete(),
+  )
   source.addEventListener("session.event", (message) => {
     handlers.onEvent(
       JSON.parse((message as MessageEvent<string>).data) as StoredEventEnvelope,

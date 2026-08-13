@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
+import { parse } from "smol-toml"
 import { createUserConfigStore } from "../../src/index.ts"
 
 afterEach(() => {
@@ -21,7 +22,19 @@ describe("user config", () => {
     await withConfigPath(async (configPath) => {
       await writeFile(
         configPath,
-        'theme = "dark"\nprovider = "faux"\nmodel = "scripted"\n',
+        [
+          'provider = "faux"',
+          'model = "scripted"',
+          'ui.theme = "dark"',
+          "",
+          "[[catalog]]",
+          'name = "custom"',
+          "models = [",
+          '  "first",',
+          '  "second",',
+          "]",
+          "",
+        ].join("\n"),
       )
       const store = createUserConfigStore({ configPath })
       const preference = {
@@ -33,9 +46,14 @@ describe("user config", () => {
 
       await expect(store.write(preference)).resolves.toEqual(preference)
       await expect(store.read()).resolves.toEqual(preference)
-      expect(await readFile(configPath, "utf8")).toBe(
-        'provider = "codex"\nmodel = "gpt-5.6-sol"\neffort = "low"\nspeed = "priority"\n\ntheme = "dark"\n',
-      )
+      expect(parse(await readFile(configPath, "utf8"))).toEqual({
+        provider: "codex",
+        model: "gpt-5.6-sol",
+        effort: "low",
+        speed: "priority",
+        ui: { theme: "dark" },
+        catalog: [{ name: "custom", models: ["first", "second"] }],
+      })
     })
   })
 

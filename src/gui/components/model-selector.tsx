@@ -184,7 +184,8 @@ export function ModelSelector() {
                   label={SPEED_LABELS[speed] ?? speed}
                   checked={
                     speed === "standard"
-                      ? effective?.speed === undefined
+                      ? effective?.speed === undefined ||
+                        effective.speed === "standard"
                       : effective?.speed === speed
                   }
                   onSelect={() =>
