@@ -6,6 +6,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises"
+import { existsSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
@@ -305,7 +306,7 @@ describe("run_command process lifecycle", () => {
     }
   })
 
-  it.skipIf(process.platform === "win32")(
+  it.skipIf(process.platform === "win32" || !existsSync("/bin/zsh"))(
     "does not let zsh startup files restore filtered secrets",
     async () => {
       const workspace = await makeWorkspace()
