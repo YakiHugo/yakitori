@@ -71,7 +71,7 @@ describe("tool cell", () => {
           name: "run_command",
           summary: "pnpm lint",
           input: { command: "pnpm lint" },
-          state: "failed",
+          state: "completed",
           resultText: "lint failed",
           commandResult: {
             exitCode: 1,
@@ -80,6 +80,9 @@ describe("tool cell", () => {
             stderr: "2 errors",
             truncated: false,
             timedOut: false,
+            durationMs: 1_240,
+            cwd: "packages/gui",
+            shell: "/bin/zsh",
           },
         }}
       />,
@@ -91,6 +94,82 @@ describe("tool cell", () => {
     expect(screen.getByText(/checking…/)).toBeTruthy()
     expect(screen.getByText(/\[stderr\]/)).toBeTruthy()
     expect(screen.getByText("exit 1")).toBeTruthy()
+    expect(screen.getByText("1.2s")).toBeTruthy()
+    expect(screen.getByText("packages/gui")).toBeTruthy()
+  })
+
+  it("renders blocked commands as failed without implying a process started", async () => {
+    const user = userEvent.setup()
+    render(
+      <ToolCell
+        entry={{
+          kind: "tool",
+          toolCallId: "tool_blocked",
+          turnId: "turn_1",
+          name: "run_command",
+          summary: "Remove root",
+          input: { command: "rm -rf /", description: "Remove root" },
+          state: "failed",
+          resultError: true,
+          resultErrorMessage:
+            "Command blocked by catastrophic-command fuse (rm_root). No process was started.",
+          resultText:
+            "Command blocked by catastrophic-command fuse (rm_root). No process was started.",
+          commandResult: {
+            exitCode: null,
+            signal: null,
+            stdout: "",
+            stderr: "",
+            truncated: false,
+            timedOut: false,
+            durationMs: 0,
+            cwd: ".",
+            shell: "/bin/zsh",
+            blocked: { rule: "rm_root" },
+          },
+        }}
+      />,
+    )
+
+    await user.click(screen.getByRole("button"))
+    expect(await screen.findByText("blocked")).toBeTruthy()
+    expect(screen.getByText(/No process was started/)).toBeTruthy()
+    expect(screen.getByText(".")).toBeTruthy()
+  })
+
+  it("renders structured command execution errors", async () => {
+    const user = userEvent.setup()
+    render(
+      <ToolCell
+        entry={{
+          kind: "tool",
+          toolCallId: "tool_spawn_error",
+          turnId: "turn_1",
+          name: "run_command",
+          summary: "Run command",
+          input: { command: "example" },
+          state: "failed",
+          resultError: true,
+          resultErrorMessage: "Command failed to start: spawn example ENOENT",
+          resultText: "Partial command output",
+          commandResult: {
+            exitCode: null,
+            signal: null,
+            stdout: "",
+            stderr: "",
+            truncated: false,
+            timedOut: false,
+            cwd: ".",
+            shell: "/bin/zsh",
+          },
+        }}
+      />,
+    )
+
+    await user.click(screen.getByRole("button"))
+    expect(
+      await screen.findByText("Command failed to start: spawn example ENOENT"),
+    ).toBeTruthy()
   })
 
   it("renders a diff view instead of raw input for edit_file results", async () => {
