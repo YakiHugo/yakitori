@@ -30,6 +30,9 @@ server.listen(port, host, () => {
   console.log(
     `workspace=${application.workspace} mate=${application.activeMate.mateId} revision=${application.activeMate.mateRevisionId}`,
   )
+  void application.probeUserShellEnv().catch((error: unknown) => {
+    console.warn("run_command shell-env probe failed", error)
+  })
 })
 
 // The built GUI is served only when it exists, so `pnpm dev:server` with the

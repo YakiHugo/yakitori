@@ -20,9 +20,11 @@ import {
   createCodexProvider,
   createOpenAIProvider,
   createPermissionGate,
+  createDefaultTools,
   createProviderRegistry,
   createSessionRunner,
   createToolRegistry,
+  createUserShellEnv,
   createTransientEventHub,
   GROK_API_BASE_URL,
   ModelStopReason,
@@ -36,6 +38,7 @@ import {
   type SessionRunner,
   type StreamFn,
   type TransientEventHub,
+  type UserShellEnv,
 } from "../runtime/index.ts"
 import { withRetries } from "../runtime/retrying-stream.ts"
 import { createDurableEventHub, type DurableEventHub } from "./event-hub.ts"
@@ -85,6 +88,7 @@ export type YakitoriApplicationOptions = {
   readonly model?: string
   readonly fauxScenario?: string
   readonly recoverOnStart?: boolean
+  readonly userShellEnv?: UserShellEnv
 }
 
 export type YakitoriApplication = {
@@ -108,6 +112,7 @@ export type YakitoriApplication = {
     readonly revision: number
   }
   createHttpServer(): ReturnType<typeof createYakitoriHttpServer>
+  probeUserShellEnv(): Promise<"ready" | "unavailable">
   close(): Promise<void>
 }
 
@@ -158,7 +163,13 @@ export async function createYakitoriApplication(
         ? {}
         : { configPath: options.userConfigPath }),
     })
-    const toolRegistry = createToolRegistry()
+    const userShellEnv = options.userShellEnv ?? createUserShellEnv()
+    const toolRegistry = createToolRegistry(
+      createDefaultTools({
+        userShellEnv,
+        runCommandLog: (message) => console.log(message),
+      }),
+    )
     const activeMate = await resolveActiveMate(mateKernel, activeMateId)
     const sessionDefaults: SessionCreateDefaults = {
       workingDirectory: workspace,
@@ -288,6 +299,9 @@ export async function createYakitoriApplication(
             ? {}
             : { staticAssets: { directory: options.guiStaticDir } }),
         })
+      },
+      probeUserShellEnv() {
+        return userShellEnv.probe()
       },
       async close() {
         closePromise ??= closeApplicationResources(
@@ -700,7 +714,7 @@ function createFauxScenarioStream(scenario: string): StreamFn {
               text:
                 scenario === "file"
                   ? "Read README.md via faux tool loop."
-                  : "Command finished under approval.",
+                  : "Command finished.",
             },
           ],
         },

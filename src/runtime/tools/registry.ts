@@ -1,4 +1,5 @@
 import type { ModelToolDefinition } from "../model.ts"
+import type { UserShellEnv } from "../user-shell-env.ts"
 import { createEditFileTool } from "./edit-file.ts"
 import { createGlobTool } from "./glob.ts"
 import { createGrepTool } from "./grep.ts"
@@ -23,14 +24,7 @@ export type ToolRegistry = {
 }
 
 export function createToolRegistry(
-  tools: readonly RuntimeTool[] = [
-    createReadFileTool(),
-    createGrepTool(),
-    createGlobTool(),
-    createEditFileTool(),
-    createWriteFileTool(),
-    createRunCommandTool(),
-  ],
+  tools: readonly RuntimeTool[] = createDefaultTools(),
 ): ToolRegistry {
   const byName = new Map(tools.map((tool) => [tool.name, tool]))
   return {
@@ -58,6 +52,29 @@ export function createToolRegistry(
       return tool.execute(input, context)
     },
   }
+}
+
+export function createDefaultTools(
+  input: {
+    readonly userShellEnv?: UserShellEnv
+    readonly runCommandLog?: (message: string) => void
+  } = {},
+): readonly RuntimeTool[] {
+  return [
+    createReadFileTool(),
+    createGrepTool(),
+    createGlobTool(),
+    createEditFileTool(),
+    createWriteFileTool(),
+    createRunCommandTool({
+      ...(input.userShellEnv === undefined
+        ? {}
+        : { userShellEnv: input.userShellEnv }),
+      ...(input.runCommandLog === undefined
+        ? {}
+        : { log: input.runCommandLog }),
+    }),
+  ]
 }
 
 export type {
