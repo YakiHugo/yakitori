@@ -368,6 +368,18 @@ Tool results retain the coarse durable `{ content, output?, error? }` shape.
 structured metadata for projections and the GUI rather than being stringified
 back into model context.
 
+`run_command` is the one full-host-authority tool (decision 0023). On POSIX it
+uses a verified user shell with `-c`, plus a one-shot login-shell environment
+probe started only after the server is listening. Every call may select only a
+canonical directory inside the Session workspace, receives a secret-filtered
+environment, and remains stateless. It runs without a permission prompt; a
+small bypassable fuse rejects only obvious host-destroying commands before
+spawn and must not be treated as an OS sandbox. Non-zero exit is an observation,
+while timeout, abort, spawn failure, invalid cwd, and fuse rejection are
+recorded failures. Durable output keeps a bounded capture and structured
+process metadata; model content uses an independently bounded 30/70 head-tail
+view so failure tails survive context assembly.
+
 Alternative model-specific protocols such as hashline or GPT-only
 grammar-constrained patching must be exposed as mutually exclusive toolsets and
 reuse the same compare-and-write boundary.
