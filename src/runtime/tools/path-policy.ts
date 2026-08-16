@@ -39,6 +39,44 @@ export async function resolveWorkspaceRoot(workspace: string): Promise<string> {
   return resolved
 }
 
+export async function resolveCommandCwd(
+  workspaceRoot: string,
+  cwd?: string,
+): Promise<ResolvedWorkspacePath> {
+  const canonicalRoot = await resolveWorkspaceRoot(workspaceRoot)
+  if (cwd !== undefined && (cwd.length === 0 || cwd.includes("\0"))) {
+    return pathError("invalid_cwd", "Command cwd must be a non-empty path.")
+  }
+  const candidate =
+    cwd === undefined
+      ? canonicalRoot
+      : isAbsolute(cwd)
+        ? resolve(cwd)
+        : resolve(canonicalRoot, cwd)
+  try {
+    const absolutePath = await realpath(candidate)
+    if (!isInsideWorkspace(canonicalRoot, absolutePath)) {
+      return pathError(
+        "invalid_cwd",
+        "Command cwd escapes the workspace via symlink.",
+      )
+    }
+    const stats = await lstat(absolutePath)
+    if (!stats.isDirectory()) {
+      return pathError("invalid_cwd", "Command cwd must be a directory.")
+    }
+    return {
+      ok: true,
+      absolutePath,
+      relativePath: toRelativePath(canonicalRoot, absolutePath) || ".",
+      exists: true,
+      kind: "directory",
+    }
+  } catch {
+    return pathError("invalid_cwd", "Command cwd does not exist.")
+  }
+}
+
 export async function resolveReadPath(
   workspaceRoot: string,
   relativePath: string,

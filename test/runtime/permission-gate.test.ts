@@ -53,7 +53,7 @@ describe("permission gate", () => {
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
         permissionGate: gate,
-        toolRegistry: createToolRegistry([createRunCommandTool({ launch })]),
+        toolRegistry: createToolRegistry([permissionCommandTool({ launch })]),
       })
       const session = await createSession(runtime)
       await runtime.kernel.admitInput({
@@ -139,7 +139,7 @@ describe("permission gate", () => {
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
         permissionGate: gate,
-        toolRegistry: createToolRegistry([createRunCommandTool({ launch })]),
+        toolRegistry: createToolRegistry([permissionCommandTool({ launch })]),
       })
       const session = await createSession(runtime)
       await runtime.kernel.admitInput({
@@ -205,7 +205,7 @@ describe("permission gate", () => {
         permissionGate: createPermissionGate(),
         limits: createRuntimeLimits({ permissionWaitTimeoutMs: 20 }),
         toolRegistry: createToolRegistry([
-          createRunCommandTool({
+          permissionCommandTool({
             launch: async () => {
               launches += 1
               return {
@@ -288,7 +288,7 @@ describe("permission gate", () => {
           },
         },
         toolRegistry: createToolRegistry([
-          createRunCommandTool({
+          permissionCommandTool({
             launch: async () => {
               launches += 1
               return {
@@ -321,7 +321,76 @@ describe("permission gate", () => {
       expect(read.session?.completedTurns).toHaveLength(1)
     })
   })
+
+  it("never consults the permission gate for production run_command", async () => {
+    await withPermissionRuntime(async (runtime) => {
+      let waits = 0
+      let launches = 0
+      const provider = createFauxProvider([
+        {
+          stopReason: ModelStopReason.ToolUse,
+          content: [
+            {
+              type: "tool_call",
+              id: "tool_yolo",
+              name: "run_command",
+              input: { command: "git status" },
+            },
+          ],
+        },
+        { content: [{ type: "text", text: "done" }] },
+      ])
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+        permissionGate: {
+          notify() {},
+          async wait() {
+            waits += 1
+            return "timeout"
+          },
+        },
+        toolRegistry: createToolRegistry([
+          createRunCommandTool({
+            launch: async () => {
+              launches += 1
+              return {
+                exitCode: 0,
+                signal: null,
+                stdout: "clean",
+                stderr: "",
+                truncated: false,
+                timedOut: false,
+              }
+            },
+          }),
+        ]),
+      })
+      const session = await createSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "status" },
+      })
+
+      await runner.wake(session.sessionId)
+
+      const read = await runtime.kernel.readSession({
+        sessionId: session.sessionId,
+      })
+      expect(launches).toBe(1)
+      expect(waits).toBe(0)
+      expect(read.session?.permissions).toEqual([])
+      expect(read.session?.tools[0]?.state).toBe("completed")
+    })
+  })
 })
+
+function permissionCommandTool(
+  input: Parameters<typeof createRunCommandTool>[0],
+) {
+  return { ...createRunCommandTool(input), autoAllow: false }
+}
 
 async function waitForPermission(
   kernel: ReturnType<typeof createSessionKernel>,

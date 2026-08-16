@@ -93,11 +93,12 @@ Stage 1 MVP runtime is implemented as one vertical slice:
   optional Anthropic Messages adapter
 - bounded tools: line-addressed `read_file`, ripgrep-backed `grep` and `glob`,
   atomic `edit_file`, `write_file` (compare-and-write), `run_command`
-- durable permission gate for host commands (never auto-approved in production)
+- immediate host command execution with bounded capture, filtered environment,
+  and a small catastrophic-command fuse; it is not OS-sandboxed (decision 0023)
 - dual event delivery: durable SSE (`session.event`) + transient snapshots
 - React + Tailwind v4 + shadcn/ui workbench GUI with streaming markdown,
-  collapsible tool cells, approval bar, queued-input cancel, interrupt, and
-  diagnostics drawer
+  collapsible tool cells, queued-input cancel, interrupt, and diagnostics
+  drawer; the approval UI remains for future permission-gated tools
 - Electron desktop shell: a thin main process spawns the server as a sidecar
   child process and serves the GUI same-origin from it (decision 0010)
 
@@ -166,7 +167,7 @@ you use; real environment variables always override the file.
 | `KIMI_API_KEY` | Configures Kimi as the default or a next-Turn provider (official Kimi Code console key) |
 | `HOST` / `PORT` | Server listen address (default `127.0.0.1:4141`) |
 
-Example faux command-approval flow:
+Example faux command flow (runs immediately with host authority):
 
 ```sh
 YAKITORI_PROVIDER=faux YAKITORI_FAUX_SCENARIO=command pnpm dev

@@ -45,6 +45,7 @@ export function ToolCell({
             command={command ?? entry.summary}
             result={entry.commandResult}
             resultText={entry.resultText}
+            errorMessage={entry.resultErrorMessage}
           />
         ) : (
           <>
@@ -82,10 +83,12 @@ function CommandOutput({
   command,
   result,
   resultText,
+  errorMessage,
 }: {
   readonly command: string
   readonly result?: CommandResult | undefined
   readonly resultText?: string | undefined
+  readonly errorMessage?: string | undefined
 }) {
   if (result === undefined) {
     return (
@@ -96,30 +99,70 @@ function CommandOutput({
     )
   }
   const status = [
-    result.timedOut ? "timed out" : undefined,
     result.exitCode === null ? undefined : `exit ${String(result.exitCode)}`,
     result.signal === null ? undefined : `signal ${result.signal}`,
-    result.truncated ? "output truncated" : undefined,
+    result.timedOut ? "timed out" : undefined,
+    result.truncated ? "truncated" : undefined,
+    result.blocked === undefined ? undefined : "blocked",
+    result.binary?.stdout === true || result.binary?.stderr === true
+      ? "binary"
+      : undefined,
+    result.durationMs === undefined
+      ? undefined
+      : formatCommandDuration(result.durationMs),
   ].filter((part) => part !== undefined)
   return (
-    <div className="overflow-x-auto rounded-md bg-zinc-950 p-3 font-mono text-xs leading-5 whitespace-pre-wrap text-zinc-50">
-      <div>{`$ ${command}`}</div>
-      {result.stdout.length > 0 && <div>{result.stdout}</div>}
-      {result.stderr.length > 0 && (
-        <div className="text-zinc-400">{`[stderr]\n${result.stderr}`}</div>
-      )}
-      {status.length > 0 && (
-        <div className="mt-1">
-          <Badge
-            variant="outline"
-            className="border-zinc-700 font-mono text-zinc-400"
+    <div className="overflow-hidden rounded-md border border-zinc-800 bg-zinc-950 font-mono text-xs leading-5 text-zinc-50 shadow-inner">
+      <div className="border-b border-zinc-800 bg-zinc-900/80 px-3 py-1.5 text-[11px] text-zinc-500">
+        {result.cwd === undefined ? "workspace" : result.cwd}
+      </div>
+      <div className="overflow-x-auto p-3 whitespace-pre-wrap">
+        <div className="text-zinc-100">{`$ ${command}`}</div>
+        {result.stdout.length > 0 ? <div>{result.stdout}</div> : null}
+        {result.stderr.length > 0 ? (
+          <div className="text-zinc-400">{`[stderr]\n${result.stderr}`}</div>
+        ) : null}
+        {(errorMessage ??
+          (result.blocked === undefined ? undefined : resultText)) !==
+        undefined ? (
+          <div
+            className={cn(
+              result.blocked === undefined ? "text-red-300" : "text-amber-300",
+            )}
           >
-            {status.join(" · ")}
-          </Badge>
-        </div>
-      )}
+            {errorMessage ?? resultText}
+          </div>
+        ) : null}
+        {result.warnings?.map((warning) => (
+          <div key={warning} className="text-amber-300/80">
+            {`[warning] ${warning}`}
+          </div>
+        ))}
+        {status.length > 0 ? (
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {status.map((part) => (
+              <Badge
+                key={part}
+                variant="outline"
+                className={cn(
+                  "border-zinc-700 font-mono text-zinc-400",
+                  part === "blocked" && "border-amber-700/70 text-amber-300",
+                  part === "timed out" && "border-red-800/70 text-red-300",
+                )}
+              >
+                {part}
+              </Badge>
+            ))}
+          </div>
+        ) : null}
+      </div>
     </div>
   )
+}
+
+function formatCommandDuration(durationMs: number): string {
+  if (durationMs < 1_000) return `${Math.round(durationMs)}ms`
+  return `${(durationMs / 1_000).toFixed(1)}s`
 }
 
 function stateBadgeVariant(

@@ -32,6 +32,7 @@ export type ExecutionEntry =
       readonly state: string
       readonly resultText?: string
       readonly resultError?: boolean
+      readonly resultErrorMessage?: string
       readonly diff?: ToolDiff
       readonly commandResult?: CommandResult
     }
@@ -70,6 +71,17 @@ export type CommandResult = {
   readonly stderr: string
   readonly truncated: boolean
   readonly timedOut: boolean
+  readonly durationMs?: number
+  readonly cwd?: string
+  readonly shell?: string
+  readonly warnings?: readonly string[]
+  readonly blocked?: { readonly rule: string }
+  readonly binary?: {
+    readonly stdout: boolean
+    readonly stderr: boolean
+    readonly stdoutBytes: number
+    readonly stderrBytes: number
+  }
 }
 
 export type ExecutionView = {
@@ -274,7 +286,10 @@ export function projectExecutionView(state: ExecutionViewState): ExecutionView {
       continue
     }
     if (event.type === "tool.result") {
-      const structured = parseToolOutput(event.data.output)
+      const structured = parseToolOutput(
+        event.data.output,
+        state.session?.workingDirectory,
+      )
       updateTool(tools, entries, event.data.toolCallId, {
         state: event.data.error === undefined ? "completed" : "failed",
         resultText:
@@ -282,6 +297,9 @@ export function projectExecutionView(state: ExecutionViewState): ExecutionView {
             ? event.data.content.text
             : JSON.stringify(event.data.content.value),
         ...(event.data.error === undefined ? {} : { resultError: true }),
+        ...(event.data.error === undefined
+          ? {}
+          : { resultErrorMessage: event.data.error.message }),
         ...(structured.diff === undefined ? {} : { diff: structured.diff }),
         ...(structured.commandResult === undefined
           ? {}
@@ -471,13 +489,16 @@ function updatePermission(
   if (index >= 0) entries[index] = next
 }
 
-function parseToolOutput(output: unknown): {
+function parseToolOutput(
+  output: unknown,
+  workspaceRoot?: string,
+): {
   readonly diff?: ToolDiff
   readonly commandResult?: CommandResult
 } {
   if (!isRecord(output)) return {}
   const diff = parseDiff(output.diff)
-  const commandResult = parseCommandResult(output)
+  const commandResult = parseCommandResult(output, workspaceRoot)
   return {
     ...(diff === undefined ? {} : { diff }),
     ...(commandResult === undefined ? {} : { commandResult }),
@@ -496,9 +517,10 @@ function parseDiff(value: unknown): ToolDiff | undefined {
   return { text: value.text, truncated: value.truncated }
 }
 
-function parseCommandResult(output: Record<string, unknown>):
-  | CommandResult
-  | undefined {
+function parseCommandResult(
+  output: Record<string, unknown>,
+  workspaceRoot?: string,
+): CommandResult | undefined {
   if (
     typeof output.stdout !== "string" ||
     typeof output.stderr !== "string" ||
@@ -511,6 +533,16 @@ function parseCommandResult(output: Record<string, unknown>):
       ? output.exitCode
       : null
   const signal = typeof output.signal === "string" ? output.signal : null
+  const binary = parseBinary(output.binary)
+  const warnings = Array.isArray(output.warnings)
+    ? output.warnings.filter(
+        (warning): warning is string => typeof warning === "string",
+      )
+    : undefined
+  const blocked =
+    isRecord(output.blocked) && typeof output.blocked.rule === "string"
+      ? { rule: output.blocked.rule }
+      : undefined
   return {
     exitCode,
     signal,
@@ -518,6 +550,34 @@ function parseCommandResult(output: Record<string, unknown>):
     stderr: output.stderr,
     truncated: output.truncated,
     timedOut: output.timedOut === true,
+    ...(typeof output.durationMs === "number"
+      ? { durationMs: output.durationMs }
+      : {}),
+    ...(typeof output.cwd === "string"
+      ? { cwd: workspaceRelativePath(workspaceRoot, output.cwd) }
+      : {}),
+    ...(typeof output.shell === "string" ? { shell: output.shell } : {}),
+    ...(warnings === undefined || warnings.length === 0 ? {} : { warnings }),
+    ...(blocked === undefined ? {} : { blocked }),
+    ...(binary === undefined ? {} : { binary }),
+  }
+}
+
+function parseBinary(value: unknown): CommandResult["binary"] {
+  if (!isRecord(value)) return undefined
+  if (
+    typeof value.stdout !== "boolean" ||
+    typeof value.stderr !== "boolean" ||
+    typeof value.stdoutBytes !== "number" ||
+    typeof value.stderrBytes !== "number"
+  ) {
+    return undefined
+  }
+  return {
+    stdout: value.stdout,
+    stderr: value.stderr,
+    stdoutBytes: value.stdoutBytes,
+    stderrBytes: value.stderrBytes,
   }
 }
 
@@ -534,10 +594,26 @@ function summarizeTool(name: string, input: unknown): string {
       return input.path
     }
     if (name === "run_command" && typeof input.command === "string") {
+      if (typeof input.description === "string") {
+        return truncateLine(input.description, 80)
+      }
       return truncateLine(input.command, 80)
     }
   }
   return name
+}
+
+function workspaceRelativePath(
+  workspaceRoot: string | undefined,
+  cwd: string,
+): string {
+  if (workspaceRoot === undefined) return cwd
+  const normalizedRoot = workspaceRoot.replaceAll("\\", "/").replace(/\/$/, "")
+  const normalizedCwd = cwd.replaceAll("\\", "/").replace(/\/$/, "")
+  if (normalizedCwd === normalizedRoot) return "."
+  return normalizedCwd.startsWith(`${normalizedRoot}/`)
+    ? normalizedCwd.slice(normalizedRoot.length + 1)
+    : cwd
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
