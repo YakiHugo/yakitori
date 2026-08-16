@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 import {
+  boundCommandContent,
   buildModelContext,
   createMateKernel,
   createSessionKernel,
@@ -613,6 +614,56 @@ describe("model context", () => {
     expect(context.observationEligibleToolResultItemIds).not.toContain(
       resultItemId,
     )
+  })
+
+  it("keeps the run_command tail after generic context truncation", async () => {
+    const context = await withAttributedSession(
+      async ({ kernel, sessionId }) => {
+        const active = await admitAndStartTurn(kernel, sessionId, "run tests")
+        await kernel.recordAssistantOutput({
+          sessionId,
+          turnId: active.turnId,
+          toolCalls: [
+            {
+              id: "tool_command_tail",
+              name: "run_command",
+              input: { command: "long-output" },
+              requiresPermission: false,
+            },
+          ],
+        })
+        const content = boundCommandContent(
+          `${Array.from({ length: 3_000 }, (_, index) => `line-${index}`).join("\n")}\n(exit 1, 4.1s)`,
+        )
+        await kernel.recordToolResult({
+          sessionId,
+          turnId: active.turnId,
+          toolCallId: "tool_command_tail",
+          content: { kind: "text", text: content },
+        })
+        const read = await kernel.readSession({ sessionId })
+        if (!read.session) throw new Error("missing session")
+        return buildModelContext({
+          session: read.session,
+          currentInputId: active.inputId,
+          limits: {
+            ...generousLimits(),
+            modelVisibleToolResultBytes: 50 * 1024,
+          },
+        })
+      },
+    )
+
+    const result = context.messages.find(
+      (message) =>
+        message.role === "tool" && message.toolCallId === "tool_command_tail",
+    )
+    expect(result).toMatchObject({ role: "tool" })
+    if (result?.role !== "tool") throw new Error("missing command result")
+    expect(result.content).toContain("line-2999")
+    expect(result.content).toContain("(exit 1, 4.1s)")
+    expect(result.content).toContain("cmd > out.log 2>&1")
+    expect(context.truncatedToolResultCount).toBe(0)
   })
 })
 
