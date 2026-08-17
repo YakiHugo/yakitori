@@ -1,4 +1,4 @@
-import { Trash2 } from "lucide-react"
+import { GitFork, Trash2 } from "lucide-react"
 import { useState } from "react"
 import { formatTime } from "../lib/format.ts"
 import { cn } from "../lib/utils.ts"
@@ -64,8 +64,13 @@ export function ThreadList() {
                       session.id === selectedId && "bg-accent",
                     )}
                   >
-                    <span className="block truncate text-sm">
-                      {session.title ?? "Untitled session"}
+                    <span className="flex items-center gap-1.5 truncate text-sm">
+                      {session.parentSessionId !== undefined ? (
+                        <GitFork className="size-3 shrink-0 text-muted-foreground" />
+                      ) : null}
+                      <span className="truncate">
+                        {session.title ?? "Untitled session"}
+                      </span>
                     </span>
                     <span className="block text-xs text-muted-foreground">
                       seq {session.seq} · {formatTime(session.updatedAt)}

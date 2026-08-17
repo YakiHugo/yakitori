@@ -1,6 +1,5 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { createEventEnvelope, EventType, InputRole } from "../../src/index.ts"
 import { projectExecutionView } from "../../src/gui/execution-view.ts"
 import {
   createInitialAppState,
@@ -8,6 +7,7 @@ import {
   resolveEffectiveModel,
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
+import { createEventEnvelope, EventType, InputRole } from "../../src/index.ts"
 import type { ApiSessionDetail } from "../../src/server/protocol.ts"
 
 type Listener = (event: unknown) => void
@@ -413,6 +413,116 @@ describe("delete session", () => {
 
     expect(useAppStore.getState().selectedSession?.id).toBe("session_1")
     expect(useAppStore.getState().selection.sessionId).toBe("session_1")
+  })
+})
+
+describe("fork session", () => {
+  it("cancels active work, edits in a fork, and selects the new Session", async () => {
+    window.localStorage.clear()
+    const activeSession: ApiSessionDetail = {
+      ...sessionDetail,
+      seq: 3,
+      activeTurnId: "turn_1",
+      counts: { ...sessionDetail.counts, inputs: 1, turns: 1 },
+    }
+    const forkedSession: ApiSessionDetail = {
+      ...sessionDetail,
+      id: "session_fork",
+      parentSessionId: "session_1",
+      forkedFromInputId: "input_1",
+      forkReason: "edit",
+      counts: { ...sessionDetail.counts, inputs: 1 },
+    }
+    const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
+      const url = String(input)
+      if (url === "http://api.test/sessions/session_1") {
+        return jsonResponse({ session: activeSession })
+      }
+      if (
+        url === "http://api.test/sessions/session_1/turns/turn_1/cancel" &&
+        init?.method === "POST"
+      ) {
+        return jsonResponse({ sessionId: "session_1", turnId: "turn_1" })
+      }
+      if (
+        url === "http://api.test/sessions/session_1/fork" &&
+        init?.method === "POST"
+      ) {
+        return jsonResponse({ session: forkedSession })
+      }
+      if (url === "http://api.test/sessions?limit=30") {
+        return jsonResponse({ sessions: [forkedSession, activeSession] })
+      }
+      return errorResponse(404)
+    })
+    vi.stubGlobal("fetch", fetchMock)
+    useAppStore.setState({
+      modelSelections: {
+        session_1: { provider: "openai", model: "gpt-test", effort: "high" },
+      },
+    })
+
+    await useAppStore.getState().selectSession("session_1")
+    const source = FakeEventSource.instances[0]
+    source?.emit(
+      "session.event",
+      createEventEnvelope({
+        sessionId: "session_1",
+        seq: 2,
+        event: {
+          type: EventType.InputAdmitted,
+          data: {
+            requestId: "request:fork",
+            inputId: "input_1",
+            role: InputRole.User,
+            content: { kind: "text", text: "original" },
+          },
+        },
+      }),
+    )
+    source?.emit(
+      "session.event",
+      createEventEnvelope({
+        sessionId: "session_1",
+        seq: 3,
+        event: {
+          type: EventType.TurnStarted,
+          data: { turnId: "turn_1", inputId: "input_1" },
+        },
+      }),
+    )
+
+    await useAppStore.getState().forkSession("input_1", "edit", "replacement")
+
+    const calls = fetchMock.mock.calls.map(([input]) => String(input))
+    expect(
+      calls.indexOf("http://api.test/sessions/session_1/turns/turn_1/cancel"),
+    ).toBeLessThan(calls.indexOf("http://api.test/sessions/session_1/fork"))
+    const forkCall = fetchMock.mock.calls.find(([input]) =>
+      String(input).endsWith("/fork"),
+    )
+    expect(JSON.parse(String(forkCall?.[1]?.body))).toEqual({
+      atInputId: "input_1",
+      reason: "edit",
+      content: { kind: "text", text: "replacement" },
+      modelSelection: {
+        provider: "openai",
+        model: "gpt-test",
+        effort: "high",
+      },
+    })
+    expect(useAppStore.getState().selectedSession).toEqual(forkedSession)
+    expect(useAppStore.getState().selection.sessionId).toBe("session_fork")
+    expect(useAppStore.getState().modelSelections.session_fork).toEqual({
+      provider: "openai",
+      model: "gpt-test",
+      effort: "high",
+    })
+    expect(useAppStore.getState().composerFocusRevision).toBe(1)
+    expect(source?.closed).toBe(true)
+    expect(FakeEventSource.instances[1]?.url).toBe(
+      "http://api.test/sessions/session_fork/events?after=0",
+    )
   })
 })
 
