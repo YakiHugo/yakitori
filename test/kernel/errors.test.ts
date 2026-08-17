@@ -27,12 +27,5 @@ describe("kernel errors", () => {
       },
       cause,
     })
-    expect(error.toJSON()).toEqual({
-      message: "Invalid event JSON at line 1.",
-      code: YakitoriErrorCode.InvalidEventLog,
-      details: {
-        lineNumber: 1,
-      },
-    })
   })
 })

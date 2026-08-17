@@ -1,7 +1,5 @@
 import { spawn } from "node:child_process"
 
-const RAW_OUTPUT_LIMIT = 5 * 1024 * 1024
-
 export type RipgrepRecordStopReason =
   | "aborted"
   | "consumer_limit"
@@ -15,56 +13,6 @@ export type RipgrepRecordResult =
       readonly stopReason?: RipgrepRecordStopReason
     }
   | { readonly ok: false; readonly message: string }
-
-export async function runRipgrep(
-  args: readonly string[],
-  input: { readonly cwd: string; readonly signal?: AbortSignal },
-): Promise<
-  | { readonly ok: true; readonly stdout: string }
-  | { readonly ok: false; readonly message: string }
-> {
-  return new Promise((resolve, reject) => {
-    const child = spawn("rg", args, {
-      cwd: input.cwd,
-      stdio: ["ignore", "pipe", "pipe"],
-      ...(input.signal === undefined ? {} : { signal: input.signal }),
-    })
-    const stdout: Buffer[] = []
-    const stderr: Buffer[] = []
-    let bytes = 0
-    let overflow = false
-    child.stdout.on("data", (chunk: Buffer) => {
-      bytes += chunk.byteLength
-      if (bytes > RAW_OUTPUT_LIMIT) {
-        overflow = true
-        child.kill()
-        return
-      }
-      stdout.push(chunk)
-    })
-    child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk))
-    child.on("error", (error) => {
-      if (error.name === "AbortError") reject(error)
-      else resolve({ ok: false, message: "ripgrep could not be launched." })
-    })
-    child.on("close", (code) => {
-      if (overflow) {
-        resolve({ ok: false, message: "ripgrep produced too much raw output." })
-        return
-      }
-      if (code === 0 || code === 1) {
-        resolve({ ok: true, stdout: Buffer.concat(stdout).toString("utf8") })
-        return
-      }
-      const detail = Buffer.concat(stderr).toString("utf8").trim()
-      resolve({
-        ok: false,
-        message:
-          detail.length === 0 ? `ripgrep exited with code ${code}.` : detail,
-      })
-    })
-  })
-}
 
 export async function runRipgrepRecords(
   args: readonly string[],

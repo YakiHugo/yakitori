@@ -6,9 +6,9 @@ import {
   IdPrefix,
   InputRole,
   isIdWithPrefix,
+  isJsonValue,
   isRequestId,
   isYakitoriError,
-  type JsonValue,
   type ModelSelection,
   PermissionBehavior,
   type PermissionDecisionReason,
@@ -1021,17 +1021,4 @@ function isInputRole(value: unknown): value is InputRole {
 function isJsonObject(value: unknown): value is EventMetadata {
   if (!isRecord(value)) return false
   return Object.values(value).every(isJsonValue)
-}
-
-function isJsonValue(value: unknown): value is JsonValue {
-  if (
-    value === null ||
-    typeof value === "string" ||
-    typeof value === "boolean"
-  ) {
-    return true
-  }
-  if (typeof value === "number") return Number.isFinite(value)
-  if (Array.isArray(value)) return value.every(isJsonValue)
-  return isJsonObject(value)
 }

@@ -1,4 +1,5 @@
 import type { TokenUsage } from "../kernel/index.ts"
+import { isAbortError } from "./errors.ts"
 import type { DroppedTurn } from "./model-context.ts"
 import {
   ModelStopReason,
@@ -129,13 +130,4 @@ function createAbortError(): Error {
   const error = new Error("Compaction was aborted.")
   error.name = "AbortError"
   return error
-}
-
-function isAbortError(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "name" in error &&
-    (error as { name: unknown }).name === "AbortError"
-  )
 }

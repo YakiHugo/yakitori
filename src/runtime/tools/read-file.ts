@@ -1,4 +1,5 @@
 import { readdir } from "node:fs/promises"
+import { isAbortError } from "../errors.ts"
 import { RuntimeLimits } from "../limits.ts"
 import { resolveReadPath } from "./path-policy.ts"
 import {
@@ -416,10 +417,6 @@ function readFailure(
     ].join("\n"),
     ...(Object.keys(details).length === 0 ? {} : { output: details }),
   }
-}
-
-function isAbortError(error: unknown): boolean {
-  return error instanceof Error && error.name === "AbortError"
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

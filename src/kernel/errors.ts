@@ -1,4 +1,4 @@
-import type { EventMetadata, KernelError as KernelErrorData } from "./events.ts"
+import type { EventMetadata } from "./events.ts"
 
 export const YakitoriErrorCode = {
   InvalidArgument: "invalid_argument",
@@ -26,14 +26,6 @@ export class YakitoriError extends Error {
     this.name = "YakitoriError"
     this.code = input.code
     if (input.details !== undefined) this.details = input.details
-  }
-
-  toJSON(): KernelErrorData {
-    return {
-      message: this.message,
-      code: this.code,
-      ...(this.details === undefined ? {} : { details: this.details }),
-    }
   }
 }
 

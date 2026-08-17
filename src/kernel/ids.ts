@@ -6,7 +6,6 @@ export const IdPrefix = {
   PermissionRequest: "permission",
   Request: "request",
   Session: "session",
-  ToolCall: "tool",
   Turn: "turn",
 } as const
 

@@ -103,8 +103,6 @@ export type TurnProjection = {
   readonly metadata?: EventMetadata
   readonly usage?: TokenUsage
   readonly itemIds: readonly string[]
-  readonly permissionRequestIds: readonly string[]
-  readonly toolCallIds: readonly string[]
 }
 
 export type ItemProjection = {
@@ -169,8 +167,6 @@ export function applySessionFacts(
       {
         ...turn,
         itemIds: [...turn.itemIds],
-        permissionRequestIds: [...turn.permissionRequestIds],
-        toolCallIds: [...turn.toolCallIds],
       },
     ]) ?? [],
   )
@@ -325,16 +321,9 @@ type MutableSession = {
 
 type Mutable<T> = { -readonly [K in keyof T]: T[K] }
 type MutableInput = Mutable<InputProjection>
-type MutableTurn = Mutable<
-  Omit<
-    TurnProjection,
-    "state" | "itemIds" | "permissionRequestIds" | "toolCallIds"
-  >
-> & {
+type MutableTurn = Mutable<Omit<TurnProjection, "state" | "itemIds">> & {
   state: TurnStateType
   itemIds: string[]
-  permissionRequestIds: string[]
-  toolCallIds: string[]
 }
 type MutableTool = Mutable<Omit<ToolProjection, "state">> & {
   state: ToolStateType
@@ -394,8 +383,6 @@ function applyKnownEvent(
         startedAt: event.createdAt,
         updatedAt: event.createdAt,
         itemIds: [],
-        permissionRequestIds: [],
-        toolCallIds: [],
         ...(event.data.parentTurnId === undefined
           ? {}
           : { parentTurnId: event.data.parentTurnId }),
@@ -455,7 +442,7 @@ function applyKnownEvent(
       applyToolResult(turns, items, tools, event)
       return
     case EventType.PermissionRequested:
-      applyPermissionRequested(turns, tools, permissions, event)
+      applyPermissionRequested(tools, permissions, event)
       return
     case EventType.PermissionResolved: {
       const permission = permissions.get(event.data.permissionRequestId)
@@ -591,7 +578,6 @@ function applyToolCall(
       : { providerMetadata: event.data.providerMetadata }),
   })
   turn.itemIds.push(event.data.itemId)
-  turn.toolCallIds.push(event.data.toolCallId)
 }
 
 function applyToolResult(
@@ -624,7 +610,6 @@ function applyToolResult(
 }
 
 function applyPermissionRequested(
-  turns: Map<string, MutableTurn>,
   tools: Map<string, MutableTool>,
   permissions: Map<string, PermissionProjection>,
   event: Extract<EventEnvelope, { type: typeof EventType.PermissionRequested }>,
@@ -647,6 +632,4 @@ function applyPermissionRequested(
   })
   const tool = tools.get(event.data.toolCallId)
   if (tool) tool.permissionRequestId = event.data.permissionRequestId
-  const turn = turns.get(event.data.turnId)
-  turn?.permissionRequestIds.push(event.data.permissionRequestId)
 }

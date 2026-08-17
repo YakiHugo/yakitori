@@ -13,10 +13,20 @@ import {
   createYakitoriApplication,
   EventType,
   InputState,
-  listen,
   MateLifecycle,
   resolveWorkspaceDirectory,
 } from "../../src/index.ts"
+
+async function listen(server: HttpServer): Promise<string> {
+  await new Promise<void>((resolve) => {
+    server.listen(0, "127.0.0.1", resolve)
+  })
+  const address = server.address()
+  if (address === null || typeof address === "string") {
+    throw new Error("Expected HTTP server to listen on a TCP address.")
+  }
+  return `http://${address.address}:${address.port}`
+}
 
 function testApplicationOptions(input: {
   readonly rootDir: string

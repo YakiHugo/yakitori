@@ -771,7 +771,7 @@ describe("tool loop", () => {
     })
   })
 
-  it("rejects a registered tool that is not enabled for the Turn", async () => {
+  it("rejects a tool call that is not in the registry", async () => {
     await withToolRuntime(async (runtime) => {
       const provider = createFauxProvider([
         {
@@ -779,8 +779,8 @@ describe("tool loop", () => {
           content: [
             {
               type: "tool_call",
-              id: "tool_disabled",
-              name: "write_file",
+              id: "tool_unknown",
+              name: "no_such_tool",
               input: {
                 path: "disabled.txt",
                 content: "must not be written",
@@ -794,7 +794,6 @@ describe("tool loop", () => {
         kernel: runtime.kernel,
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
-        enabledTools: [],
       })
       const session = await createSession(runtime)
       await runtime.kernel.admitInput({

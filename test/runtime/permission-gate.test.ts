@@ -384,6 +384,62 @@ describe("permission gate", () => {
       expect(read.session?.tools[0]?.state).toBe("completed")
     })
   })
+
+  it("skips the permission request when the approval policy is never", async () => {
+    await withPermissionRuntime(async (runtime) => {
+      let launches = 0
+      const provider = createFauxProvider([
+        {
+          stopReason: ModelStopReason.ToolUse,
+          content: [
+            {
+              type: "tool_call",
+              id: "tool_never",
+              name: "run_command",
+              input: { command: "echo never" },
+            },
+          ],
+        },
+        { content: [{ type: "text", text: "done" }] },
+      ])
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+        approvalPolicy: "never",
+        toolRegistry: createToolRegistry([
+          permissionCommandTool({
+            launch: async () => {
+              launches += 1
+              return {
+                exitCode: 0,
+                signal: null,
+                stdout: "never",
+                stderr: "",
+                truncated: false,
+                timedOut: false,
+              }
+            },
+          }),
+        ]),
+      })
+      const session = await createSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "run" },
+      })
+
+      await runner.wake(session.sessionId)
+
+      expect(launches).toBe(1)
+      const read = await runtime.kernel.readSession({
+        sessionId: session.sessionId,
+      })
+      expect(read.session?.permissions).toEqual([])
+      expect(read.session?.tools[0]?.state).toBe("completed")
+      expect(read.session?.completedTurns).toHaveLength(1)
+    })
+  })
 })
 
 function permissionCommandTool(
