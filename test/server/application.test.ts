@@ -5,15 +5,17 @@ import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import {
   ApiErrorCode,
+  type ApiHandlerResult,
+  type ApiListProvidersResponse,
   createFauxProvider,
   createMateKernel,
   createSqliteMateStore,
   createYakitoriApplication,
+  EventType,
+  InputState,
   listen,
   MateLifecycle,
   resolveWorkspaceDirectory,
-  type ApiHandlerResult,
-  type ApiListProvidersResponse,
 } from "../../src/index.ts"
 
 function testApplicationOptions(input: {
@@ -438,6 +440,167 @@ describe("application composition", () => {
         })
         expect(read.session?.completedTurns).toHaveLength(2)
         expect(read.session?.failedTurns).toEqual([])
+      } finally {
+        await application.close()
+      }
+    })
+  })
+
+  it("forks, edits, and drives a Turn without touching the source Session", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const provider = createFauxProvider([
+        { content: [{ type: "text", text: "first reply" }] },
+        { content: [{ type: "text", text: "abandoned reply" }] },
+        { content: [{ type: "text", text: "replacement reply" }] },
+      ])
+      const forkModelSelection = {
+        provider: process.env.YAKITORI_PROVIDER ?? "faux",
+        model: "fork-model",
+      }
+      const application = await createYakitoriApplication({
+        rootDir,
+        workspace,
+        recoverOnStart: false,
+        stream: provider.stream,
+      })
+      try {
+        const created = await application.handlers.createSession({
+          title: "Fork source",
+        })
+        expectOk(created)
+        const first = await application.handlers.admitInput({
+          sessionId: created.body.session.id,
+          requestId: "request_fork_first",
+          content: { kind: "text", text: "first" },
+        })
+        expectOk(first)
+        await application.runner.wake(created.body.session.id)
+        const second = await application.handlers.admitInput({
+          sessionId: created.body.session.id,
+          requestId: "request_fork_second",
+          content: { kind: "text", text: "replace this" },
+        })
+        expectOk(second)
+        await application.runner.wake(created.body.session.id)
+
+        const forked = await application.handlers.forkSession({
+          sessionId: created.body.session.id,
+          atInputId: second.body.inputId,
+          reason: "edit",
+          content: { kind: "text", text: "replacement" },
+          modelSelection: forkModelSelection,
+        })
+        expectOk(forked)
+        await application.runner.wake(forked.body.session.id)
+
+        const source = await application.sessionKernel.readSession({
+          sessionId: created.body.session.id,
+        })
+        const target = await application.sessionKernel.readSession({
+          sessionId: forked.body.session.id,
+        })
+        expect(source.session?.completedTurns).toHaveLength(2)
+        expect(
+          source.session?.inputs.map((input) => input.content.text),
+        ).toEqual(["first", "replace this"])
+        expect(target.session?.completedTurns).toHaveLength(2)
+        expect(
+          target.session?.inputs.map((input) => input.content.text),
+        ).toEqual(["first", "replacement"])
+        expect(target.session?.inputs.at(-1)?.parentInputId).toBe(
+          second.body.inputId,
+        )
+        expect(target.session?.inputs.at(-1)?.modelSelection).toEqual(
+          forkModelSelection,
+        )
+        expect(target.session).toMatchObject({
+          parentSessionId: created.body.session.id,
+          forkedFromInputId: second.body.inputId,
+          forkReason: "edit",
+          workingDirectory: application.workspace,
+        })
+        expect(provider.callCount).toBe(3)
+      } finally {
+        await application.close()
+      }
+    })
+  })
+
+  it("cancels queued Inputs inherited by a fork", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const application = await createYakitoriApplication({
+        ...testApplicationOptions({ rootDir, workspace }),
+        stream: createFauxProvider([]).stream,
+      })
+      try {
+        const created = await application.handlers.createSession({
+          title: "Fork source",
+        })
+        expectOk(created)
+        const kernel = application.sessionKernel
+        const first = await application.handlers.admitInput({
+          sessionId: created.body.session.id,
+          requestId: "request_inherited_first",
+          content: { kind: "text", text: "first" },
+        })
+        expectOk(first)
+        const turn = await kernel.startTurn({
+          sessionId: created.body.session.id,
+          inputId: first.body.inputId,
+        })
+        // Admitted mid-Turn, so their admissions sit inside the Turn span.
+        const earlier = await application.handlers.admitInput({
+          sessionId: created.body.session.id,
+          requestId: "request_inherited_earlier",
+          content: { kind: "text", text: "earlier queued" },
+        })
+        expectOk(earlier)
+        const later = await application.handlers.admitInput({
+          sessionId: created.body.session.id,
+          requestId: "request_inherited_later",
+          content: { kind: "text", text: "later queued" },
+        })
+        expectOk(later)
+        await kernel.completeTurn({
+          sessionId: created.body.session.id,
+          turnId: turn.turnId,
+        })
+        // The user discards both queued Inputs on the source before undoing;
+        // those cancellations land after the fork boundary.
+        await kernel.cancelInput({
+          sessionId: created.body.session.id,
+          inputId: earlier.body.inputId,
+        })
+        await kernel.cancelInput({
+          sessionId: created.body.session.id,
+          inputId: later.body.inputId,
+        })
+
+        const forked = await application.handlers.forkSession({
+          sessionId: created.body.session.id,
+          atInputId: later.body.inputId,
+          reason: "undo",
+        })
+        expectOk(forked)
+
+        const target = await kernel.readSession({
+          sessionId: forked.body.session.id,
+        })
+        expect(target.session?.pendingInputs).toEqual([])
+        const inherited = target.session?.inputs.find(
+          (input) => input.content.text === "earlier queued",
+        )
+        expect(inherited).toMatchObject({ state: InputState.Cancelled })
+        const events = await kernel.readEvents({
+          sessionId: forked.body.session.id,
+        })
+        expect(events.events.at(-1)).toMatchObject({
+          type: EventType.InputCancelled,
+          data: {
+            inputId: earlier.body.inputId,
+            reason: "conversation_fork",
+          },
+        })
       } finally {
         await application.close()
       }
