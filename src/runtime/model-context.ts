@@ -2,11 +2,11 @@ import { createHash } from "node:crypto"
 import {
   InputRole,
   ItemKind,
-  ItemStatus,
-  TurnState,
   type ItemProjection,
+  ItemStatus,
   type SessionProjection,
   type TurnProjection,
+  TurnState,
 } from "../kernel/index.ts"
 import type { ModelMessage, ModelToolResultMessage } from "./model.ts"
 
@@ -51,6 +51,7 @@ export function buildModelContext(input: {
     (group) => !coveredTurnIds.has(group.turnId),
   )
   const compactionGroup = buildCompactionGroup(input.session)
+  const forkGroup = buildForkGroup(input.session)
   const activeGroup = buildActiveTurnGroup(input.session, input.currentInputId)
   const currentGroup: ContextGroup = activeGroup ?? {
     kind: "current_input",
@@ -76,6 +77,7 @@ export function buildModelContext(input: {
   let droppedCompactionCheckpoint = false
   let selectedGroups: readonly ContextGroup[] = [
     ...(compactionGroup === undefined ? [] : [compactionGroup]),
+    ...(forkGroup === undefined ? [] : [forkGroup]),
     ...turnGroups,
     currentGroup,
   ]
@@ -149,6 +151,11 @@ type ContextGroup =
       readonly itemIds: readonly string[]
     }
   | {
+      readonly kind: "fork"
+      readonly messages: readonly ModelMessage[]
+      readonly itemIds: readonly string[]
+    }
+  | {
       readonly kind: "current_input"
       readonly inputId: string
       readonly messages: readonly ModelMessage[]
@@ -169,6 +176,26 @@ function buildCompactionGroup(
           {
             type: "text",
             text: `<context_compacted>\nEarlier turns in this session were summarized into this checkpoint. The complete history is preserved on disk.\n${compaction.summary}\n</context_compacted>`,
+          },
+        ],
+      },
+    ],
+    itemIds: [],
+  }
+}
+
+function buildForkGroup(session: SessionProjection): ContextGroup | undefined {
+  if (session.forkReason === undefined) return undefined
+  const action = session.forkReason === "edit" ? "edited" : "undone"
+  return {
+    kind: "fork",
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: `<session_forked reason="${session.forkReason}">\nThis session continues a conversation that was ${action} at an earlier point. Actions taken after that point in the previous session were NOT rolled back: files, command effects, processes, and the environment may still reflect them. Do not rely on remembered file contents or tool results from before this notice; inspect current state and re-read files before editing them.\n</session_forked>`,
           },
         ],
       },

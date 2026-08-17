@@ -275,6 +275,84 @@ describe("model context", () => {
     })
   })
 
+  it.each([
+    "undo",
+    "edit",
+  ] as const)("warns that a %s fork did not roll back the environment", async (reason) => {
+    const context = await withAttributedSession(
+      async ({ kernel, sessionId }) => {
+        const shared = await admitAndStartTurn(
+          kernel,
+          sessionId,
+          "shared question",
+        )
+        const beforeCompaction = await kernel.readSession({ sessionId })
+        const throughSeq = beforeCompaction.session?.seq
+        if (throughSeq === undefined) throw new Error("missing session")
+        await kernel.recordCompaction({
+          sessionId,
+          turnId: shared.turnId,
+          throughSeq,
+          coveredTurnIds: [],
+          summary: "Shared checkpoint.",
+        })
+        await kernel.completeTurnWithAssistantOutput({
+          sessionId,
+          turnId: shared.turnId,
+          content: { kind: "text", text: "shared answer" },
+        })
+        const cut = await kernel.admitInput({
+          sessionId,
+          content: { kind: "text", text: "abandoned question" },
+        })
+        const cutTurn = await kernel.startTurn({
+          sessionId,
+          inputId: cut.inputId,
+        })
+        await kernel.completeTurn({ sessionId, turnId: cutTurn.turnId })
+        const forked = await kernel.forkSession({
+          sessionId,
+          atInputId: cut.inputId,
+          reason,
+        })
+        const current = await kernel.admitInput({
+          sessionId: forked.sessionId,
+          content: { kind: "text", text: "continue from fork" },
+          ...(reason === "edit" ? { parentInputId: cut.inputId } : {}),
+        })
+        const read = await kernel.readSession({ sessionId: forked.sessionId })
+        if (!read.session) throw new Error("missing forked session")
+        return buildModelContext({
+          session: read.session,
+          currentInputId: current.inputId,
+          limits: generousLimits(),
+        })
+      },
+    )
+
+    expect(context.messages[0]).toMatchObject({
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: expect.stringContaining("<context_compacted>"),
+        },
+      ],
+    })
+    const notice = context.messages[1]
+    expect(notice?.role).toBe("user")
+    if (notice?.role !== "user") throw new Error("missing fork notice")
+    expect(notice.content[0]?.text).toContain(
+      `<session_forked reason="${reason}">`,
+    )
+    expect(notice.content[0]?.text).toContain("were NOT rolled back")
+    expect(notice.content[0]?.text).toContain("re-read files")
+    expect(context.messages[2]).toEqual({
+      role: "user",
+      content: [{ type: "text", text: "shared question" }],
+    })
+  })
+
   it("replaces covered Turns with the compaction checkpoint", async () => {
     const context = await withAttributedSession(
       async ({ kernel, sessionId }) => {
