@@ -5,6 +5,7 @@ import {
   type EventEnvelope,
   type EventMetadata,
   EventType,
+  type ForkReason,
   InputRole,
   type ItemContent,
   type JsonValue,
@@ -42,6 +43,7 @@ import {
 
 export type SessionKernel = {
   createSession(input?: CreateSessionInput): Promise<CreateSessionResult>
+  forkSession(input: ForkSessionInput): Promise<ForkSessionResult>
   listSessions(input?: ListSessionsInput): Promise<ListSessionsResult>
   readSession(input: ReadSessionInput): Promise<ReadSessionResult>
   deleteSession(input: DeleteSessionInput): Promise<DeleteSessionResult>
@@ -89,6 +91,16 @@ export type CreateSessionResult = {
   readonly sessionId: string
   readonly event: EventEnvelope
 }
+export type ForkSessionInput = {
+  readonly sessionId: string
+  readonly atInputId: string
+  readonly reason: ForkReason
+}
+export type ForkSessionResult = {
+  readonly sessionId: string
+  readonly session: SessionProjection
+  readonly events: readonly StoredEventEnvelope[]
+}
 export type ListSessionsInput = {
   readonly limit?: number
   readonly cursor?: string
@@ -105,6 +117,8 @@ export type SessionSummary = {
   readonly mateId?: string
   readonly mateRevisionId?: string
   readonly parentSessionId?: string
+  readonly forkedFromInputId?: string
+  readonly forkReason?: ForkReason
   readonly metadata?: EventMetadata
 }
 export type ListSessionsResult = {
@@ -314,6 +328,47 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
       return { sessionId, event }
     },
 
+    forkSession(input) {
+      return command(input.sessionId, async () => {
+        const source = await requireSession(eventStore, input.sessionId)
+        requireInput(source, input.atInputId)
+        if (source.activeTurn !== undefined)
+          invalidState(
+            `Session ${source.id} has an active turn; cancel it before forking the session.`,
+          )
+        if (source.pendingInputs.length > 0)
+          invalidState(
+            `Session ${source.id} has queued inputs; cancel its queued inputs before forking the session.`,
+          )
+
+        const sessionId = createSessionId()
+        const forked = await eventStore.forkSession({
+          sourceSessionId: source.id,
+          targetSessionId: sessionId,
+          atInputId: input.atInputId,
+          expectedSourceSeq: source.seq,
+          created: {
+            type: EventType.SessionCreated,
+            data: compact({
+              title: source.title,
+              workingDirectory: source.workingDirectory,
+              mateId: source.mateId,
+              mateRevisionId: source.mateRevisionId,
+              parentSessionId: source.id,
+              forkedFromInputId: input.atInputId,
+              forkReason: input.reason,
+              metadata: source.metadata,
+            }),
+          },
+        })
+        return {
+          sessionId,
+          session: forked.projection,
+          events: forked.events,
+        }
+      })
+    },
+
     async listSessions(input = {}) {
       return eventStore.listSessions(input)
     },
@@ -358,7 +413,7 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
       return command(input.sessionId, async () => {
         const session = await requireSession(eventStore, input.sessionId)
         if (input.parentInputId !== undefined)
-          requireInput(session, input.parentInputId)
+          requireInputParent(session, input.parentInputId)
         const requestId = input.requestId ?? createRequestId()
         if (!isRequestId(requestId))
           invalidArgument("Invalid request id.", { requestId })
@@ -736,6 +791,11 @@ function requireInput(
   )
   if (input) return input
   return notFound(`Input ${inputId} was not found.`, { inputId })
+}
+
+function requireInputParent(session: SessionProjection, inputId: string): void {
+  if (session.forkedFromInputId === inputId) return
+  requireInput(session, inputId)
 }
 
 function requireTurn(

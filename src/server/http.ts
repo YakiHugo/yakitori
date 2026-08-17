@@ -279,6 +279,22 @@ async function handleRequest(
     return
   }
 
+  if (route.kind === "forkSession") {
+    const body = await readJson(request)
+    if (!body.ok) {
+      writeResult(response, body.result)
+      return
+    }
+    writeResult(
+      response,
+      await handlers.forkSession({
+        ...requireBodyRecord(body.value),
+        sessionId: route.sessionId,
+      }),
+    )
+    return
+  }
+
   if (route.kind === "admitInput") {
     const body = await readJson(request)
     if (!body.ok) {
@@ -445,6 +461,10 @@ function routeRequest(method: string, url: URL): Route {
 
   if (method === "DELETE" && segments.length === 2) {
     return { kind: "deleteSession", sessionId: segments[1] }
+  }
+
+  if (method === "POST" && segments.length === 3 && segments[2] === "fork") {
+    return { kind: "forkSession", sessionId: segments[1] }
   }
 
   if (method === "POST" && segments.length === 3 && segments[2] === "inputs") {
@@ -1085,6 +1105,7 @@ type Route =
     }
   | { readonly kind: "createSession" }
   | { readonly kind: "deleteSession"; readonly sessionId: string }
+  | { readonly kind: "forkSession"; readonly sessionId: string }
   | { readonly kind: "health" }
   | { readonly kind: "listSessions" }
   | { readonly kind: "notFound"; readonly segments: readonly string[] }

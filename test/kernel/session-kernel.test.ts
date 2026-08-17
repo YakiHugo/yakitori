@@ -139,6 +139,225 @@ for (const implementation of ["memory", "jsonl"] as const) {
       })
     })
 
+    it("forks an exact event prefix into a new Session", async () => {
+      await withKernel(implementation, async ({ kernel, store }) => {
+        const source = await kernel.createSession({
+          title: "Fork source",
+          workingDirectory: "/workspace/project",
+          mateId: "mate_default",
+          mateRevisionId: "mate_revision_1",
+          metadata: { source: "test" },
+        })
+        const firstInput = await admit(kernel, source.sessionId, "first")
+        const firstTurn = await kernel.startTurn({
+          sessionId: source.sessionId,
+          inputId: firstInput.inputId,
+        })
+        const beforeCompaction = await kernel.readSession({
+          sessionId: source.sessionId,
+        })
+        const throughSeq = beforeCompaction.session?.seq
+        if (throughSeq === undefined) throw new Error("missing source Session")
+        const compaction = await kernel.recordCompaction({
+          sessionId: source.sessionId,
+          turnId: firstTurn.turnId,
+          throughSeq,
+          coveredTurnIds: [],
+          summary: "Shared compacted history.",
+        })
+        await kernel.completeTurnWithAssistantOutput({
+          sessionId: source.sessionId,
+          turnId: firstTurn.turnId,
+          content: { kind: "text", text: "first reply" },
+        })
+        const cutInput = await admit(kernel, source.sessionId, "replace-me")
+        const cutTurn = await kernel.startTurn({
+          sessionId: source.sessionId,
+          inputId: cutInput.inputId,
+        })
+        await kernel.completeTurn({
+          sessionId: source.sessionId,
+          turnId: cutTurn.turnId,
+        })
+        const sourceEvents = await store.readEvents(source.sessionId)
+        const cutIndex = sourceEvents.findIndex(
+          (event) =>
+            event.type === EventType.InputAdmitted &&
+            event.data.inputId === cutInput.inputId,
+        )
+
+        const forked = await kernel.forkSession({
+          sessionId: source.sessionId,
+          atInputId: cutInput.inputId,
+          reason: "edit",
+        })
+        const targetEvents = await store.readEvents(forked.sessionId)
+
+        expect(targetEvents).toHaveLength(cutIndex)
+        expect(targetEvents[0]).toMatchObject({
+          seq: 1,
+          type: EventType.SessionCreated,
+          data: {
+            title: "Fork source",
+            workingDirectory: "/workspace/project",
+            mateId: "mate_default",
+            mateRevisionId: "mate_revision_1",
+            parentSessionId: source.sessionId,
+            forkedFromInputId: cutInput.inputId,
+            forkReason: "edit",
+            metadata: { source: "test" },
+          },
+        })
+        expect(
+          targetEvents
+            .slice(1)
+            .map(({ sessionId: _sessionId, ...event }) => event),
+        ).toEqual(
+          sourceEvents
+            .slice(1, cutIndex)
+            .map(({ sessionId: _sessionId, ...event }) => event),
+        )
+        expect(forked.session).toEqual(
+          await store.readProjection(forked.sessionId),
+        )
+        expect(forked.session.updatedAt >= forked.session.createdAt).toBe(true)
+        expect(forked.session.compaction).toMatchObject({
+          compactionId: compaction.compactionId,
+          throughSeq,
+          summary: "Shared compacted history.",
+        })
+        expect(await store.readEvents(source.sessionId)).toEqual(sourceEvents)
+
+        const replacement = await kernel.admitInput({
+          sessionId: forked.sessionId,
+          parentInputId: cutInput.inputId,
+          content: { kind: "text", text: "replacement" },
+        })
+        expect(replacement.event).toMatchObject({
+          data: { parentInputId: cutInput.inputId },
+        })
+        await expect(
+          kernel.admitInput({
+            sessionId: forked.sessionId,
+            parentInputId: "input_unrelated",
+            content: { kind: "text", text: "invalid parent" },
+          }),
+        ).rejects.toThrow("Input input_unrelated was not found")
+      })
+    })
+
+    it("forks before the first Input without copying history", async () => {
+      await withKernel(implementation, async ({ kernel, store }) => {
+        const source = await kernel.createSession()
+        const input = await admit(kernel, source.sessionId, "first-cut")
+        await kernel.cancelInput({
+          sessionId: source.sessionId,
+          inputId: input.inputId,
+        })
+
+        const forked = await kernel.forkSession({
+          sessionId: source.sessionId,
+          atInputId: input.inputId,
+          reason: "undo",
+        })
+
+        expect(await store.readEvents(forked.sessionId)).toEqual([
+          expect.objectContaining({
+            seq: 1,
+            type: EventType.SessionCreated,
+            data: expect.objectContaining({
+              parentSessionId: source.sessionId,
+              forkedFromInputId: input.inputId,
+              forkReason: "undo",
+            }),
+          }),
+        ])
+      })
+    })
+
+    it("refuses to fork a busy Session", async () => {
+      await withKernel(implementation, async ({ kernel }) => {
+        const queued = await kernel.createSession()
+        const queuedInput = await admit(kernel, queued.sessionId, "queued-fork")
+        await expect(
+          kernel.forkSession({
+            sessionId: queued.sessionId,
+            atInputId: queuedInput.inputId,
+            reason: "undo",
+          }),
+        ).rejects.toThrow("cancel its queued inputs")
+
+        const active = await kernel.createSession()
+        const activeInput = await admit(kernel, active.sessionId, "active-fork")
+        await kernel.startTurn({
+          sessionId: active.sessionId,
+          inputId: activeInput.inputId,
+        })
+        await expect(
+          kernel.forkSession({
+            sessionId: active.sessionId,
+            atInputId: activeInput.inputId,
+            reason: "undo",
+          }),
+        ).rejects.toThrow("has an active turn")
+      })
+    })
+
+    it("closes a turn left open by a mid-turn fork cut", async () => {
+      await withKernel(implementation, async ({ kernel, store }) => {
+        const source = await kernel.createSession()
+        const firstInput = await admit(kernel, source.sessionId, "first")
+        const firstTurn = await kernel.startTurn({
+          sessionId: source.sessionId,
+          inputId: firstInput.inputId,
+        })
+        // Admitted while the first Turn is still running, so its admission
+        // sits between turn.started and turn.completed in the journal.
+        const midTurnInput = await admit(kernel, source.sessionId, "mid-turn")
+        await kernel.completeTurn({
+          sessionId: source.sessionId,
+          turnId: firstTurn.turnId,
+        })
+        await kernel.cancelInput({
+          sessionId: source.sessionId,
+          inputId: midTurnInput.inputId,
+        })
+
+        const forked = await kernel.forkSession({
+          sessionId: source.sessionId,
+          atInputId: midTurnInput.inputId,
+          reason: "undo",
+        })
+
+        // The cut lands before the first Turn's terminal event, so the fork
+        // must close that Turn instead of leaving it Started forever.
+        expect(forked.session.activeTurn).toBeUndefined()
+        expect(forked.session.interruptedTurns).toEqual([
+          expect.objectContaining({
+            turnId: firstTurn.turnId,
+            state: TurnState.Interrupted,
+            interruptedReason: "The Session was forked before this Turn finished.",
+          }),
+        ])
+        const targetEvents = await store.readEvents(forked.sessionId)
+        expect(targetEvents.at(-1)).toMatchObject({
+          type: EventType.TurnInterrupted,
+          data: { turnId: firstTurn.turnId },
+        })
+        expect(targetEvents.map((event) => event.seq)).toEqual(
+          targetEvents.map((_, index) => index + 1),
+        )
+
+        // The forked Session can start new work immediately.
+        const followUp = await admit(kernel, forked.sessionId, "follow-up")
+        const followUpTurn = await kernel.startTurn({
+          sessionId: forked.sessionId,
+          inputId: followUp.inputId,
+        })
+        expect(followUpTurn.turnId).toBeTruthy()
+      })
+    })
+
     it("cancels an admitted Input once", async () => {
       await withKernel(implementation, async ({ kernel }) => {
         const session = await kernel.createSession()

@@ -6,6 +6,7 @@ import { Button } from "./ui/button.tsx"
 export function Composer() {
   const draft = useAppStore((state) => state.promptDraft) ?? ""
   const busy = useAppStore((state) => state.busy)
+  const focusRevision = useAppStore((state) => state.composerFocusRevision)
   const modelSelectionReady = useAppStore((state) => state.modelSelectionReady)
   const hasSession = useAppStore(
     (state) => state.selection.sessionId !== undefined,
@@ -22,6 +23,10 @@ export function Composer() {
     textarea.style.height = "auto"
     textarea.style.height = `${Math.min(textarea.scrollHeight, 200)}px`
   })
+
+  useLayoutEffect(() => {
+    if (focusRevision > 0) textareaRef.current?.focus()
+  }, [focusRevision])
 
   const text = draft.trim()
   const canSend = text.length > 0 && hasSession && modelSelectionReady && !busy

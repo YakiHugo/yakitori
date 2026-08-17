@@ -1,6 +1,7 @@
 import type {
   EventEnvelope,
   EventMetadata,
+  ForkReason,
   InputRole,
   ModelSelection,
   StoredEventEnvelope,
@@ -50,6 +51,17 @@ export type ApiCreateSessionRequest = {
 export type ApiCreateSessionResponse = {
   readonly session: ApiSessionDetail
   readonly event: EventEnvelope
+}
+
+export type ApiForkSessionRequest = {
+  readonly atInputId: string
+  readonly reason: ForkReason
+  readonly content?: TextContent
+  readonly modelSelection?: ModelSelection
+}
+
+export type ApiForkSessionResponse = {
+  readonly session: ApiSessionDetail
 }
 
 export type ApiListSessionsRequest = {
@@ -192,6 +204,8 @@ export type ApiSessionSummary = {
   readonly mateId?: string
   readonly mateRevisionId?: string
   readonly parentSessionId?: string
+  readonly forkedFromInputId?: string
+  readonly forkReason?: ForkReason
   readonly metadata?: EventMetadata
 }
 

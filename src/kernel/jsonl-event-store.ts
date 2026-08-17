@@ -10,9 +10,12 @@ import {
 import { dirname, join } from "node:path"
 import { createYakitoriError, YakitoriErrorCode } from "./errors.ts"
 import {
+  appendForkCutTurnClosures,
   assertEventStoreSessionId,
   type EventStore,
   type EventStoreAppendOptions,
+  type EventStoreForkSessionInput,
+  type EventStoreForkSessionResult,
   type EventStoreListSessionsInput,
   type EventStoreListSessionsResult,
   type EventStoreReadEventsInput,
@@ -238,6 +241,119 @@ export function createJsonlEventStore(
         return structuredClone(envelopes)
       })
     })
+  }
+
+  async function forkSession(
+    input: EventStoreForkSessionInput,
+  ): Promise<EventStoreForkSessionResult> {
+    assertEventStoreSessionId(input.sourceSessionId)
+    assertEventStoreSessionId(input.targetSessionId)
+    if (input.sourceSessionId === input.targetSessionId) {
+      throw createYakitoriError({
+        code: YakitoriErrorCode.InvalidArgument,
+        message: "A Session cannot be forked onto itself.",
+      })
+    }
+    const snapshot = structuredClone(input)
+    return runStoreOperation(() =>
+      runForSession(snapshot.sourceSessionId, async () => {
+        const source = await loadSession(snapshot.sourceSessionId, false)
+        if (source === undefined) {
+          throw createYakitoriError({
+            code: YakitoriErrorCode.NotFound,
+            message: `Session ${snapshot.sourceSessionId} has not been created.`,
+            details: { sessionId: snapshot.sourceSessionId },
+          })
+        }
+        const sourceSeq = source.events.at(-1)?.seq ?? 0
+        requireExpectedSequence(
+          snapshot.sourceSessionId,
+          snapshot.expectedSourceSeq,
+          sourceSeq,
+        )
+        const cutIndex = source.events.findIndex(
+          (event) =>
+            event.type === EventType.InputAdmitted &&
+            event.data.inputId === snapshot.atInputId,
+        )
+        if (cutIndex === -1) {
+          throw createYakitoriError({
+            code: YakitoriErrorCode.NotFound,
+            message: `Input ${snapshot.atInputId} was not found.`,
+            details: { inputId: snapshot.atInputId },
+          })
+        }
+
+        return runForSession(snapshot.targetSessionId, async () => {
+          if (
+            (await loadSession(snapshot.targetSessionId, false)) !== undefined
+          ) {
+            throw createYakitoriError({
+              code: YakitoriErrorCode.InvalidState,
+              message: `Session ${snapshot.targetSessionId} already exists.`,
+              details: { sessionId: snapshot.targetSessionId },
+            })
+          }
+          const created = createEventEnvelope({
+            sessionId: snapshot.targetSessionId,
+            seq: 1,
+            event: snapshot.created,
+          })
+          const events: StoredEventEnvelope[] = [
+            created,
+            ...source.events.slice(1, cutIndex).map((event) => ({
+              ...structuredClone(event),
+              sessionId: snapshot.targetSessionId,
+            })),
+          ]
+          appendForkCutTurnClosures(snapshot.targetSessionId, events)
+          const projection = projectSession(events)
+          if (projection === undefined) {
+            throw createYakitoriError({
+              code: YakitoriErrorCode.InvalidState,
+              message: `Forking Session ${snapshot.sourceSessionId} did not produce a projection.`,
+              details: {
+                sessionId: snapshot.sourceSessionId,
+                targetSessionId: snapshot.targetSessionId,
+              },
+            })
+          }
+          const admissions = collectNewAdmissions(
+            snapshot.targetSessionId,
+            new Map(),
+            events,
+          )
+          const bytes = Buffer.from(events.map(serializeFactLine).join(""))
+          const target = await loadSession(snapshot.targetSessionId, true)
+          if (target === undefined) {
+            throw new Error(
+              `Failed to create Session journal ${snapshot.targetSessionId}.`,
+            )
+          }
+          try {
+            await writeAll(target.handle, bytes)
+            await target.handle.sync()
+          } catch (cause) {
+            await discardLoadedSession(snapshot.targetSessionId)
+            await rm(sessionDirectory(snapshot.targetSessionId), {
+              recursive: true,
+              force: true,
+            })
+            await syncDirectory(sessionsDir)
+            throw cause
+          }
+
+          target.events.push(...events)
+          target.projection = projection
+          target.journalBytes = bytes.byteLength
+          for (const [requestId, record] of admissions) {
+            target.admissions.set(requestId, record)
+          }
+          scheduleSummary(snapshot.targetSessionId, target)
+          return structuredClone({ events, projection })
+        })
+      }),
+    )
   }
 
   async function loadSession(
@@ -509,6 +625,7 @@ export function createJsonlEventStore(
       return envelope
     },
     appendEvents,
+    forkSession,
     async readEvents(sessionId: string, input: EventStoreReadEventsInput = {}) {
       assertEventStoreSessionId(sessionId)
       return runStoreOperation(() =>
@@ -670,7 +787,7 @@ function requireAdmissionOption(
 function collectNewAdmissions(
   sessionId: string,
   existing: ReadonlyMap<string, AdmissionRecord>,
-  events: readonly EventEnvelope[],
+  events: readonly StoredEventEnvelope[],
 ): Map<string, AdmissionRecord> {
   const collected = new Map<string, AdmissionRecord>()
   for (const event of events) {

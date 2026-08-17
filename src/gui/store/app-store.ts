@@ -9,6 +9,8 @@ import {
 import type {
   ApiAdmitInputResponse,
   ApiCreateSessionResponse,
+  ApiForkSessionResponse,
+  ApiListProjectsResponse,
   ApiListProvidersResponse,
   ApiListSessionsResponse,
   ApiProviderSummary,
@@ -17,7 +19,6 @@ import type {
   ApiSessionSummary,
   ApiUpdateUserModelPreferenceResponse,
   ApiUserModelPreference,
-  ApiListProjectsResponse,
 } from "../../server/protocol.ts"
 import { acknowledgeAdmission, reserveAdmission } from "../admission-outbox.ts"
 import {
@@ -48,6 +49,7 @@ export type StreamStatus = "connected" | "connecting" | "disconnected" | "idle"
 export type AppStoreData = {
   apiBase: string
   busy: boolean
+  composerFocusRevision: number
   defaultModel: string | undefined
   defaultProvider: string | undefined
   events: StoredEventEnvelope[]
@@ -79,6 +81,11 @@ export type AppStoreActions = {
   loadProviders(): Promise<void>
   createSession(): Promise<void>
   deleteSession(sessionId: string): Promise<void>
+  forkSession(
+    atInputId: string,
+    reason: "undo" | "edit",
+    content?: string,
+  ): Promise<void>
   selectProject(path: string): Promise<void>
   addProject(path: string): Promise<void>
   selectSession(sessionId: string): Promise<void>
@@ -103,6 +110,7 @@ export function createInitialAppState(): AppStoreData {
   return {
     apiBase: initialApiBase(),
     busy: false,
+    composerFocusRevision: 0,
     defaultModel: undefined,
     defaultProvider: undefined,
     events: [],
@@ -325,9 +333,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
       await get().loadProviders()
       await get().loadProjects()
       const loaded = await get().loadSessions()
-      if (
-        !loaded || get().sessionSelectionIntentRevision !== intentRevision
-      ) {
+      if (!loaded || get().sessionSelectionIntentRevision !== intentRevision) {
         return
       }
       const session = get().sessions.at(0)
@@ -460,6 +466,97 @@ export const useAppStore = create<AppStore>()((set, get) => {
       )
     },
 
+    forkSession: async (atInputId, reason, content) => {
+      const sourceSelection = currentSessionSelection(get().selection)
+      if (!sourceSelection) return
+      const key = `fork:${sourceSelection.sessionId}:${atInputId}`
+      if (get().inFlightActions.has(key)) return
+      const intentRevision = get().sessionSelectionIntentRevision + 1
+      const state = get()
+      const sourceModelSelection = normalizeKimiModelSelection(
+        resolveEffectiveModel({
+          sessionCurrent: state.modelSelections[sourceSelection.sessionId],
+          userPreference: state.userPreference,
+          defaultProvider: state.defaultProvider,
+          defaultModel: state.defaultModel,
+        }),
+      )
+      set((state) => ({
+        inFlightActions: new Set(state.inFlightActions).add(key),
+        sessionSelectionIntentRevision: intentRevision,
+      }))
+
+      await runTask(
+        async () => {
+          const view = projectExecutionView(get().execution)
+          if (view.activeTurnId !== undefined) {
+            await requestJson(
+              get().apiBase,
+              `/sessions/${encodeURIComponent(sourceSelection.sessionId)}/turns/${encodeURIComponent(view.activeTurnId)}/cancel`,
+              {
+                method: "POST",
+                body: { reason: "conversation_fork" },
+              },
+            )
+          }
+          const cancelledInputs = await Promise.all(
+            view.queuedInputIds.map((inputId) =>
+              cancelSessionInput(
+                get().apiBase,
+                sourceSelection.sessionId,
+                inputId,
+              ),
+            ),
+          )
+          for (const cancelled of cancelledInputs) mergeEvent(cancelled.event)
+
+          const response = await requestJson<ApiForkSessionResponse>(
+            get().apiBase,
+            `/sessions/${encodeURIComponent(sourceSelection.sessionId)}/fork`,
+            {
+              method: "POST",
+              body: {
+                atInputId,
+                reason,
+                ...(content === undefined
+                  ? {}
+                  : { content: { kind: "text", text: content } }),
+                ...(reason !== "edit" || sourceModelSelection === undefined
+                  ? {}
+                  : { modelSelection: sourceModelSelection }),
+              },
+            },
+          )
+          if (sourceModelSelection !== undefined) {
+            get().setModelSelection(response.session.id, sourceModelSelection)
+          }
+          await get().loadSessions()
+          if (get().sessionSelectionIntentRevision !== intentRevision) return
+
+          const selection = activateSession(response.session.id)
+          closeStream()
+          set((state) => ({
+            selectedSession: response.session,
+            events: [],
+            execution: reduceExecutionView(createExecutionViewState(), {
+              type: "session",
+              session: response.session,
+            }),
+            promptDraft: undefined,
+            composerFocusRevision: state.composerFocusRevision + 1,
+          }))
+          connectEvents(selection, 0)
+        },
+        () => get().sessionSelectionIntentRevision === intentRevision,
+      )
+
+      set((state) => {
+        const inFlightActions = new Set(state.inFlightActions)
+        inFlightActions.delete(key)
+        return { inFlightActions }
+      })
+    },
+
     deleteSession: async (sessionId) => {
       const key = `delete:${sessionId}`
       if (get().inFlightActions.has(key)) return
@@ -579,9 +676,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
             defaultProvider: state.defaultProvider,
             defaultModel: state.defaultModel,
           })
-          const admittedModelSelection = normalizeKimiModelSelection(
-            modelSelection,
-          )
+          const admittedModelSelection =
+            normalizeKimiModelSelection(modelSelection)
           const pendingAdmission = await reserveAdmission(window.localStorage, {
             apiBase: get().apiBase,
             sessionId: selection.sessionId,

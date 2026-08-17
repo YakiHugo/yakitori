@@ -1,9 +1,14 @@
 import { createYakitoriError, YakitoriErrorCode } from "./errors.ts"
 import {
+  createEventEnvelope,
   type EventEnvelope,
   type EventMetadata,
+  EventType,
+  type ForkReason,
   isJsonObject,
+  isKernelEvent,
   type KernelEvent,
+  type SessionCreatedEvent,
   type StoredEventEnvelope,
 } from "./events.ts"
 import type { SessionProjection } from "./session-projector.ts"
@@ -19,6 +24,9 @@ export type EventStore = {
     events: readonly KernelEvent[],
     options?: EventStoreAppendOptions,
   ): Promise<EventEnvelope[]>
+  forkSession(
+    input: EventStoreForkSessionInput,
+  ): Promise<EventStoreForkSessionResult>
   readEvents(
     sessionId: string,
     input?: EventStoreReadEventsInput,
@@ -39,6 +47,19 @@ export type EventStoreAppendOptions = {
     readonly requestId: string
     readonly fingerprint: string
   }
+}
+
+export type EventStoreForkSessionInput = {
+  readonly sourceSessionId: string
+  readonly targetSessionId: string
+  readonly atInputId: string
+  readonly expectedSourceSeq: number
+  readonly created: SessionCreatedEvent
+}
+
+export type EventStoreForkSessionResult = {
+  readonly events: readonly StoredEventEnvelope[]
+  readonly projection: SessionProjection
 }
 
 export type EventStoreReadEventsInput = {
@@ -72,6 +93,8 @@ export type EventStoreSessionSummary = {
   readonly mateId?: string
   readonly mateRevisionId?: string
   readonly parentSessionId?: string
+  readonly forkedFromInputId?: string
+  readonly forkReason?: ForkReason
   readonly metadata?: EventMetadata
 }
 
@@ -101,6 +124,48 @@ export function requireExpectedSequence(
   })
 }
 
+// An input admitted mid-turn sits between turn.started and its terminal
+// event, so a fork cutting before that input can leave a turn permanently
+// Started in the target Session — which would block its run lane forever.
+// Close such turns with a synthetic turn.interrupted, the same shape Codex
+// uses when a fork snapshot ends mid-turn.
+export function appendForkCutTurnClosures(
+  sessionId: string,
+  events: StoredEventEnvelope[],
+): void {
+  const open = new Set<string>()
+  for (const event of events) {
+    if (!isKernelEvent(event)) continue
+    if (event.type === EventType.TurnStarted) {
+      open.add(event.data.turnId)
+      continue
+    }
+    if (
+      event.type === EventType.TurnCompleted ||
+      event.type === EventType.TurnFailed ||
+      event.type === EventType.TurnCancelled ||
+      event.type === EventType.TurnInterrupted
+    ) {
+      open.delete(event.data.turnId)
+    }
+  }
+  for (const turnId of open) {
+    events.push(
+      createEventEnvelope({
+        sessionId,
+        seq: events.length + 1,
+        event: {
+          type: EventType.TurnInterrupted,
+          data: {
+            turnId,
+            reason: "The Session was forked before this Turn finished.",
+          },
+        },
+      }),
+    )
+  }
+}
+
 export function summarizeSessionProjection(
   projection: SessionProjection,
 ): EventStoreSessionSummary {
@@ -120,6 +185,12 @@ export function summarizeSessionProjection(
     ...(projection.parentSessionId === undefined
       ? {}
       : { parentSessionId: projection.parentSessionId }),
+    ...(projection.forkedFromInputId === undefined
+      ? {}
+      : { forkedFromInputId: projection.forkedFromInputId }),
+    ...(projection.forkReason === undefined
+      ? {}
+      : { forkReason: projection.forkReason }),
     ...(projection.metadata === undefined
       ? {}
       : { metadata: projection.metadata }),

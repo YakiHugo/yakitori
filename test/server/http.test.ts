@@ -11,16 +11,17 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import {
-  createDurableEventHub,
-  createEventEnvelope,
   type ApiAdmitInputResponse,
   type ApiCancelInputResponse,
   type ApiCreateSessionResponse,
   ApiErrorCode,
+  type ApiForkSessionResponse,
   type ApiListProvidersResponse,
   type ApiListSessionsResponse,
   type ApiReadSessionResponse,
   type ApiUpdateUserModelPreferenceResponse,
+  createDurableEventHub,
+  createEventEnvelope,
   createInputId,
   createJsonlEventStore,
   createProjectRegistry,
@@ -103,6 +104,70 @@ describe("HTTP server", () => {
       expect(missing.status).toBe(404)
       expect(await missing.json()).toMatchObject({
         error: { code: ApiErrorCode.NotFound },
+      })
+    })
+  })
+
+  it("routes pure undo forks and validates fork semantics", async () => {
+    await withHttpServer(async (baseUrl) => {
+      const created = await postJson<ApiCreateSessionResponse>(
+        `${baseUrl}/sessions`,
+        { title: "Fork route" },
+      )
+      const admitted = await postJson<ApiAdmitInputResponse>(
+        `${baseUrl}/sessions/${created.body.session.id}/inputs`,
+        {
+          requestId: "request_http_fork",
+          content: { kind: "text", text: "undo this" },
+        },
+      )
+      await postJson(
+        `${baseUrl}/sessions/${created.body.session.id}/inputs/${admitted.body.inputId}/cancel`,
+        {},
+      )
+      const forkUrl = `${baseUrl}/sessions/${created.body.session.id}/fork`
+
+      for (const invalid of [
+        { atInputId: admitted.body.inputId, reason: "redo" },
+        { atInputId: admitted.body.inputId, reason: "edit" },
+        {
+          atInputId: admitted.body.inputId,
+          reason: "undo",
+          content: { kind: "text", text: "not allowed" },
+        },
+        {
+          atInputId: admitted.body.inputId,
+          reason: "undo",
+          modelSelection: { provider: "openai", model: "gpt-test" },
+        },
+      ]) {
+        const rejected = await postJson(forkUrl, invalid)
+        expect(rejected.status).toBe(400)
+        expect(rejected.body).toMatchObject({
+          error: { code: ApiErrorCode.InvalidInput },
+        })
+      }
+
+      const forked = await postJson<ApiForkSessionResponse>(forkUrl, {
+        atInputId: admitted.body.inputId,
+        reason: "undo",
+      })
+      expect(forked.status).toBe(201)
+      expect(forked.body.session).toMatchObject({
+        parentSessionId: created.body.session.id,
+        forkedFromInputId: admitted.body.inputId,
+        forkReason: "undo",
+        title: "Fork route",
+        counts: { inputs: 0, pendingInputs: 0, turns: 0 },
+      })
+
+      const source = await getJson<ApiReadSessionResponse>(
+        `${baseUrl}/sessions/${created.body.session.id}`,
+      )
+      expect(source.body.session.counts).toMatchObject({
+        inputs: 1,
+        pendingInputs: 0,
+        turns: 0,
       })
     })
   })

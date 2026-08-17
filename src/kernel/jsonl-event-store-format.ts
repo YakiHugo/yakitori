@@ -12,7 +12,7 @@ import {
   type EventStoreSessionSummary,
   parseStoredEventEnvelope,
 } from "./event-store.ts"
-import { isJsonObject, type StoredEventEnvelope } from "./events.ts"
+import { ForkReason, isJsonObject, type StoredEventEnvelope } from "./events.ts"
 
 export const journalRecordVersion = 1
 export const summaryVersion = 1
@@ -122,6 +122,8 @@ export async function readSummaryCache(
     !optionalString(value.mateId) ||
     !optionalString(value.mateRevisionId) ||
     !optionalString(value.parentSessionId) ||
+    !optionalString(value.forkedFromInputId) ||
+    !optionalForkReason(value.forkReason) ||
     (value.metadata !== undefined && !isJsonObject(value.metadata))
   ) {
     return undefined
@@ -148,6 +150,12 @@ export function summaryWithoutCacheFields(
     ...(cached.parentSessionId === undefined
       ? {}
       : { parentSessionId: cached.parentSessionId }),
+    ...(cached.forkedFromInputId === undefined
+      ? {}
+      : { forkedFromInputId: cached.forkedFromInputId }),
+    ...(cached.forkReason === undefined
+      ? {}
+      : { forkReason: cached.forkReason }),
     ...(cached.metadata === undefined ? {} : { metadata: cached.metadata }),
   }
 }
@@ -245,6 +253,14 @@ function isOptionalJournalOperation(value: unknown): boolean {
 
 function optionalString(value: unknown): boolean {
   return value === undefined || typeof value === "string"
+}
+
+function optionalForkReason(value: unknown): boolean {
+  return (
+    value === undefined ||
+    value === ForkReason.Undo ||
+    value === ForkReason.Edit
+  )
 }
 
 function isPositiveInteger(value: unknown): value is number {

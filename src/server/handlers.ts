@@ -1,15 +1,16 @@
 import { realpath, stat } from "node:fs/promises"
 import {
+  type EventEnvelope,
+  type EventMetadata,
+  ForkReason,
   IdPrefix,
   InputRole,
   isIdWithPrefix,
   isRequestId,
   isYakitoriError,
-  PermissionBehavior,
-  type EventEnvelope,
-  type EventMetadata,
   type JsonValue,
   type ModelSelection,
+  PermissionBehavior,
   type PermissionDecisionReason,
   type SessionKernel,
   type SessionProjection,
@@ -19,12 +20,13 @@ import {
 } from "../kernel/index.ts"
 import { RuntimeLimits } from "../runtime/limits.ts"
 import {
-  ApiErrorCode,
   type ApiAdmitInputResponse,
   type ApiCancelInputResponse,
   type ApiCancelTurnResponse,
   type ApiCreateSessionResponse,
   type ApiDeleteSessionResponse,
+  ApiErrorCode,
+  type ApiForkSessionResponse,
   type ApiHandlerResult,
   type ApiListSessionsResponse,
   type ApiReadSessionEventsResponse,
@@ -71,6 +73,7 @@ export type ServerHandlers = {
   deleteSession(
     input: unknown,
   ): Promise<ApiHandlerResult<ApiDeleteSessionResponse>>
+  forkSession(input: unknown): Promise<ApiHandlerResult<ApiForkSessionResponse>>
   admitInput(input: unknown): Promise<ApiHandlerResult<ApiAdmitInputResponse>>
   cancelInput(input: unknown): Promise<ApiHandlerResult<ApiCancelInputResponse>>
   cancelTurn(input: unknown): Promise<ApiHandlerResult<ApiCancelTurnResponse>>
@@ -171,6 +174,48 @@ export function createServerHandlers(
         const request = requireDeleteSessionRequest(input)
         await kernel.deleteSession({ sessionId: request.sessionId })
         return ok(200, { sessionId: request.sessionId })
+      } catch (error) {
+        return fail(error)
+      }
+    },
+
+    async forkSession(input) {
+      try {
+        const request = requireForkSessionRequest(
+          input,
+          options.maxInputBytes ?? RuntimeLimits.modelVisibleContextBytes,
+        )
+        requireAvailableProvider(
+          request.modelSelection?.provider,
+          options.availableProviders,
+        )
+        const forked = await kernel.forkSession(request)
+        // Inputs queued before the fork boundary but cancelled after it are
+        // inherited as pending and would rerun discarded work on wake.
+        for (const pending of forked.session.pendingInputs) {
+          const cancelled = await kernel.cancelInput({
+            sessionId: forked.sessionId,
+            inputId: pending.inputId,
+            reason: "conversation_fork",
+          })
+          options.eventHub?.publish([cancelled.event])
+        }
+        if (request.content !== undefined) {
+          const admitted = await kernel.admitInput({
+            sessionId: forked.sessionId,
+            content: request.content,
+            parentInputId: request.atInputId,
+            ...(request.modelSelection === undefined
+              ? {}
+              : { modelSelection: request.modelSelection }),
+          })
+          options.eventHub?.publish([admitted.event])
+          options.wakeSession?.(forked.sessionId)
+        }
+        const read = await kernel.readSession({ sessionId: forked.sessionId })
+        return ok(201, {
+          session: mapRequiredSession(forked.sessionId, read.session),
+        })
       } catch (error) {
         return fail(error)
       }
@@ -300,6 +345,12 @@ function mapSessionSummary(summary: SessionSummary): ApiSessionSummary {
     ...(summary.parentSessionId === undefined
       ? {}
       : { parentSessionId: summary.parentSessionId }),
+    ...(summary.forkedFromInputId === undefined
+      ? {}
+      : { forkedFromInputId: summary.forkedFromInputId }),
+    ...(summary.forkReason === undefined
+      ? {}
+      : { forkReason: summary.forkReason }),
     ...(summary.metadata === undefined ? {} : { metadata: summary.metadata }),
   }
 }
@@ -321,6 +372,12 @@ function mapSessionDetail(session: SessionProjection): ApiSessionDetail {
     ...(session.parentSessionId === undefined
       ? {}
       : { parentSessionId: session.parentSessionId }),
+    ...(session.forkedFromInputId === undefined
+      ? {}
+      : { forkedFromInputId: session.forkedFromInputId }),
+    ...(session.forkReason === undefined
+      ? {}
+      : { forkReason: session.forkReason }),
     ...(session.metadata === undefined ? {} : { metadata: session.metadata }),
     ...(session.activeTurn === undefined
       ? {}
@@ -463,6 +520,44 @@ function requireDeleteSessionRequest(input: unknown) {
   )
   return {
     sessionId: requireSessionId(record.sessionId, "sessionId"),
+  }
+}
+
+function requireForkSessionRequest(input: unknown, maxInputBytes: number) {
+  const record = requireRecord(input, "Session fork request must be an object.")
+  const reason = record.reason
+  if (reason !== ForkReason.Undo && reason !== ForkReason.Edit) {
+    throw invalidInput('reason must be "undo" or "edit".', { field: "reason" })
+  }
+  const content =
+    record.content === undefined
+      ? undefined
+      : requireTextContent(record.content, maxInputBytes)
+  const modelSelection = optionalModelSelectionField(record, "modelSelection")
+  if (reason === ForkReason.Edit && content === undefined) {
+    throw invalidInput("content is required when reason is edit.", {
+      field: "content",
+    })
+  }
+  if (reason === ForkReason.Undo && content !== undefined) {
+    throw invalidInput("content is not allowed when reason is undo.", {
+      field: "content",
+    })
+  }
+  if (
+    reason === ForkReason.Undo &&
+    modelSelection.modelSelection !== undefined
+  ) {
+    throw invalidInput("modelSelection is not allowed when reason is undo.", {
+      field: "modelSelection",
+    })
+  }
+  return {
+    sessionId: requireSessionId(record.sessionId, "sessionId"),
+    atInputId: requireInputId(record.atInputId, "atInputId"),
+    reason,
+    ...(content === undefined ? {} : { content }),
+    ...modelSelection,
   }
 }
 
