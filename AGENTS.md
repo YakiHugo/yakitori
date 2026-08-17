@@ -21,8 +21,7 @@ Local references:
 - `.references/public/codex`
 - `.references/public/claude-code-sourcemap`
 - `.references/public/grok-build`
-- `.references/public/pi` (minimal reference)
-- `.references/public/dsh`
+- `.references/public/dsh` (DeepSeek's open-source harness, first-party)
 - Public Claude Code documentation and observable product behavior
 - Public Raft documentation (product-design reference for the later
   persistent-colleague collaboration direction — Rooms and mentions, not the
@@ -163,6 +162,22 @@ in a browser before finalizing. Record the exact verification command or URL
 in the final response for the task.
 
 ## Reference Comparison
+
+Design and implementation references may only come from:
+
+- First-party agent products from model vendors (e.g. Claude Code, Codex,
+  Gemini CLI, Kimi Code).
+- Agent products with a large user base (e.g. opencode, Manus; Raft for the
+  later product-design direction).
+
+Do not take design cues from small personal projects, niche frameworks, or
+unaffiliated "industry analysis" sites — their design docs describe their own
+opinions, not validated practice.
+
+By default, adopt the reference's implementation as-is, including the design
+direction its developers or community have publicly planned. Only design an
+independent approach when there is an explicit reason it fits our scenario
+better, and record that reason where the decision lives (ADR or module notes).
 
 When using reference projects for a design decision, record the comparison in
 module notes or code comments only when it affects an implementation boundary.
