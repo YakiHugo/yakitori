@@ -106,14 +106,18 @@ export function createUserShellEnv(
             ? parseNullEnvironment(nul.stdout)
             : undefined
         if (parsed === undefined) {
-          log("run_command shell-env probe: fallback_printenv")
+          log(
+            `run_command shell-env probe: fallback_printenv (${probeFailureReason(nul)})`,
+          )
           const lines = await runProbe(resolved.shell, "printenv")
           if (lines.exitCode === 0 && lines.truncated !== true)
             parsed = parsePrintenvEnvironment(lines.stdout)
-        }
-        if (parsed === undefined) {
-          log("run_command shell-env probe: unavailable")
-          return "unavailable"
+          if (parsed === undefined) {
+            log(
+              `run_command shell-env probe: unavailable (${probeFailureReason(lines)})`,
+            )
+            return "unavailable"
+          }
         }
         probed = Object.freeze(mergeShellEnvironment(appEnv, parsed))
         log("run_command shell-env probe: ready")
@@ -262,6 +266,13 @@ function parseEnvironmentBindings(
     environment[name] = binding.slice(separator + 1)
   }
   return environment
+}
+
+function probeFailureReason(result: ShellProbeResult): string {
+  if (result.error !== undefined) return result.error
+  if (result.truncated === true) return "output truncated"
+  if (result.exitCode !== 0) return `exit code ${result.exitCode ?? "unknown"}`
+  return "unparseable output"
 }
 
 async function runShellProbe(

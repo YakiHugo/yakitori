@@ -3,6 +3,7 @@ import {
   type EventEnvelope,
   type EventMetadata,
   type InputProjection,
+  isJsonValue,
   type KernelError,
   type ModelSelection,
   PermissionBehavior,
@@ -16,6 +17,7 @@ import {
 import type { MateKernel } from "../mates/index.ts"
 import { buildCompactionRequest, runCompaction } from "./compaction.ts"
 import { buildEnvironmentContext } from "./environment-context.ts"
+import { isAbortError } from "./errors.ts"
 import { createRuntimeLimits, type RuntimeLimits } from "./limits.ts"
 import {
   createCoalescingSnapshotPublisher,
@@ -64,8 +66,7 @@ export type SessionRunnerOptions = {
   readonly provider?: string
   readonly model?: string
   readonly limits?: RuntimeLimits
-  readonly enabledTools?: readonly string[]
-  readonly approvalPolicy?: string
+  readonly approvalPolicy?: "auto_file_tools" | "never"
   readonly loadProjectInstructions?: typeof loadProjectInstructions
   readonly onRuntimeError?: (error: unknown) => void
 }
@@ -95,8 +96,7 @@ export function createSessionRunner(
   const model = options.model ?? "scripted"
   const toolRegistry = options.toolRegistry ?? createToolRegistry()
   const permissionGate = options.permissionGate ?? createPermissionGate()
-  const enabledTools =
-    options.enabledTools ?? toolRegistry.tools.map((tool) => tool.name)
+  const enabledTools = toolRegistry.tools.map((tool) => tool.name)
   const approvalPolicy = options.approvalPolicy ?? "auto_file_tools"
   const projectInstructionLoader =
     options.loadProjectInstructions ?? loadProjectInstructions
@@ -373,9 +373,7 @@ export function createSessionRunner(
       model: resolvedModel,
       ...(projectInstructions === undefined ? {} : { projectInstructions }),
     })
-    const tools = toolRegistry
-      .definitions()
-      .filter((tool) => input.executionContext.enabledTools.includes(tool.name))
+    const tools = toolRegistry.definitions()
 
     let modelCallIndex = 0
     let toolCallCount = 0
@@ -699,14 +697,15 @@ export function createSessionRunner(
         ...input.contextMetadata,
       },
       toolCalls: input.toolCalls.map((call) => {
-        const tool = input.executionContext.enabledTools.includes(call.name)
-          ? toolRegistry.get(call.name)
-          : undefined
+        const tool = toolRegistry.get(call.name)
         return {
           id: call.id,
           name: call.name,
           input: call.input,
-          requiresPermission: tool !== undefined && !tool.autoAllow,
+          requiresPermission:
+            tool !== undefined &&
+            !tool.autoAllow &&
+            input.executionContext.approvalPolicy !== "never",
         }
       }),
     })
@@ -717,9 +716,7 @@ export function createSessionRunner(
     )
     const observations = input.visibleFileObservations
     const firstBarrier = input.toolCalls.findIndex((call) => {
-      const tool = input.executionContext.enabledTools.includes(call.name)
-        ? toolRegistry.get(call.name)
-        : undefined
+      const tool = toolRegistry.get(call.name)
       return toolEffect(tool) !== "observe"
     })
     const prefix =
@@ -812,11 +809,15 @@ export function createSessionRunner(
     readonly observations: ReturnType<typeof createVisibleFileObservations>
     readonly record: boolean
   }): Promise<ToolExecutionResult | "aborted"> {
-    const tool = input.executionContext.enabledTools.includes(input.call.name)
-      ? toolRegistry.get(input.call.name)
-      : undefined
+    // The registry owns dispatch; the lookup here is only for permission
+    // metadata (autoAllow), mirroring codex's ToolRouter split.
+    const tool = toolRegistry.get(input.call.name)
     let permissionRequestId: string | undefined
-    if (tool !== undefined && !tool.autoAllow) {
+    if (
+      tool !== undefined &&
+      !tool.autoAllow &&
+      input.executionContext.approvalPolicy !== "never"
+    ) {
       const command =
         typeof input.call.input === "object" &&
         input.call.input !== null &&
@@ -871,19 +872,11 @@ export function createSessionRunner(
       toolCallId: input.call.id,
     })
 
-    const result =
-      tool === undefined
-        ? {
-            ok: false as const,
-            code: "tool_unavailable",
-            message: `Tool is not enabled for this Turn: ${input.call.name}`,
-            content: `Tool is not enabled for this Turn: ${input.call.name}`,
-          }
-        : await tool.execute(input.call.input, {
-            workspaceRoot: input.workspaceRoot,
-            signal: input.signal,
-            visibleFileObservations: input.observations,
-          })
+    const result = await toolRegistry.execute(input.call.name, input.call.input, {
+      workspaceRoot: input.workspaceRoot,
+      signal: input.signal,
+      visibleFileObservations: input.observations,
+    })
     if (!input.record) return result
     const recorded = await recordExecutedTool({
       sessionId: input.sessionId,
@@ -1308,26 +1301,6 @@ function isEventMetadata(value: unknown): value is EventMetadata {
     return false
   }
   return Object.values(value).every((entry) => isJsonValue(entry))
-}
-
-function isJsonValue(value: unknown): boolean {
-  if (value === null) return true
-  if (typeof value === "string" || typeof value === "boolean") return true
-  if (typeof value === "number") return Number.isFinite(value)
-  if (Array.isArray(value)) return value.every(isJsonValue)
-  if (typeof value === "object") {
-    return Object.values(value).every(isJsonValue)
-  }
-  return false
-}
-
-function isAbortError(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "name" in error &&
-    (error as { name: unknown }).name === "AbortError"
-  )
 }
 
 function selectCompactionSource(

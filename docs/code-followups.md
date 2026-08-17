@@ -21,13 +21,12 @@ Open questions the redesign should answer explicitly:
 
 ## Dead code deletion candidates
 
-- `approvalPolicy` in `TurnExecutionContext` — recorded on `turn.started` but
-  never consumed; actual approval behavior is driven by
-  `RuntimeTool.autoAllow`. Removing it changes the `turn.started` fact shape
-  and requires an explicit envelope-version decision; it remains deferred
-  pending that decision. (The other recorded candidates — `src/actors.ts`,
-  `createToolCallId`, `ItemProjection.metadata`, and the model
-  request/response `metadata` fields — were deleted on 2026-08-05.)
+- `approvalPolicy` in `TurnExecutionContext` is no longer a candidate: the
+  runner now reads it at the permission decision (`"never"` skips permission
+  prompts, codex's `AskForApproval::Never` analog; opt-in via
+  `YAKITORI_APPROVAL_POLICY=never`). (The other recorded candidates —
+  `src/actors.ts`, `createToolCallId`, `ItemProjection.metadata`, and the
+  model request/response `metadata` fields — were deleted on 2026-08-05.)
 
 ## Stale wording in code
 

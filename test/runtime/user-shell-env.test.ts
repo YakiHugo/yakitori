@@ -105,7 +105,7 @@ describe("user shell environment", () => {
     expect(calls).toEqual(["env -0", "printenv"])
     expect(logs).toEqual([
       "run_command shell-env probe: pending",
-      "run_command shell-env probe: fallback_printenv",
+      "run_command shell-env probe: fallback_printenv (exit code 1)",
       "run_command shell-env probe: ready",
     ])
     expect(command).toMatchObject({
