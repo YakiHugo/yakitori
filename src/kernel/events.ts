@@ -17,6 +17,13 @@ export const EventType = {
   ContextCompacted: "context.compacted",
 } as const
 
+export const ForkReason = {
+  Undo: "undo",
+  Edit: "edit",
+} as const
+
+export type ForkReason = (typeof ForkReason)[keyof typeof ForkReason]
+
 export const InputRole = {
   Runtime: "runtime",
   System: "system",
@@ -133,6 +140,8 @@ export type SessionCreatedEvent = {
     readonly mateId?: string
     readonly mateRevisionId?: string
     readonly parentSessionId?: string
+    readonly forkedFromInputId?: string
+    readonly forkReason?: ForkReason
     readonly metadata?: EventMetadata
   }
 }
@@ -351,14 +360,19 @@ function requireKernelEvent(value: unknown): asserts value is KernelEvent {
   const valid = (() => {
     switch (value.type) {
       case EventType.SessionCreated:
-        return onlyKeys(data, [
-          "title",
-          "workingDirectory",
-          "mateId",
-          "mateRevisionId",
-          "parentSessionId",
-          "metadata",
-        ])
+        return (
+          onlyKeys(data, [
+            "title",
+            "workingDirectory",
+            "mateId",
+            "mateRevisionId",
+            "parentSessionId",
+            "forkedFromInputId",
+            "forkReason",
+            "metadata",
+          ]) &&
+          (data.forkReason === undefined || isForkReason(data.forkReason))
+        )
       case EventType.InputAdmitted:
         return (
           onlyKeys(data, [
@@ -537,6 +551,7 @@ function optionalFieldsAreValid(
     "mateId",
     "mateRevisionId",
     "parentSessionId",
+    "forkedFromInputId",
     "parentInputId",
     "parentTurnId",
     "outputMessageId",
@@ -546,6 +561,10 @@ function optionalFieldsAreValid(
       return false
   }
   return true
+}
+
+function isForkReason(value: unknown): value is ForkReason {
+  return value === ForkReason.Undo || value === ForkReason.Edit
 }
 
 function onlyKeys(

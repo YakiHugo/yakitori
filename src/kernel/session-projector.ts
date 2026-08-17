@@ -1,13 +1,15 @@
 import {
-  EventType,
-  ItemKind,
-  ItemStatus,
-  isKernelEvent,
   type EventEnvelope,
   type EventMetadata,
+  EventType,
+  type ForkReason,
+  type InputRole,
   type ItemContent,
+  ItemKind,
   type ItemKind as ItemKindType,
+  ItemStatus,
   type ItemStatus as ItemStatusType,
+  isKernelEvent,
   type JsonValue,
   type KernelError,
   type ModelSelection,
@@ -17,16 +19,15 @@ import {
   type TextContent,
   type TokenUsage,
   type TurnExecutionContext,
-  type InputRole,
 } from "./events.ts"
 import {
   InputState,
-  PermissionState,
-  ToolState,
-  TurnState,
   type InputState as InputStateType,
+  PermissionState,
   type PermissionState as PermissionStateType,
+  ToolState,
   type ToolState as ToolStateType,
+  TurnState,
   type TurnState as TurnStateType,
 } from "./session-states.ts"
 
@@ -42,6 +43,8 @@ export type SessionProjection = {
   readonly mateId?: string
   readonly mateRevisionId?: string
   readonly parentSessionId?: string
+  readonly forkedFromInputId?: string
+  readonly forkReason?: ForkReason
   readonly metadata?: EventMetadata
   readonly usage?: TokenUsage
   readonly compaction?: CompactionProjection
@@ -196,7 +199,8 @@ export function applySessionFacts(
     }
     if (!session) continue
     session.seq = Math.max(session.seq, stored.seq)
-    session.updatedAt = stored.createdAt
+    if (stored.createdAt > session.updatedAt)
+      session.updatedAt = stored.createdAt
     if (!isKernelEvent(stored)) continue
     if (stored.type === EventType.ContextCompacted) {
       session.compaction = compactionProjection(stored)
@@ -261,6 +265,12 @@ function createMutableSession(
     ...(created.data.parentSessionId === undefined
       ? {}
       : { parentSessionId: created.data.parentSessionId }),
+    ...(created.data.forkedFromInputId === undefined
+      ? {}
+      : { forkedFromInputId: created.data.forkedFromInputId }),
+    ...(created.data.forkReason === undefined
+      ? {}
+      : { forkReason: created.data.forkReason }),
     ...(created.data.metadata === undefined
       ? {}
       : { metadata: created.data.metadata }),
@@ -284,6 +294,12 @@ function mutableSession(current: SessionProjection): MutableSession {
     ...(current.parentSessionId === undefined
       ? {}
       : { parentSessionId: current.parentSessionId }),
+    ...(current.forkedFromInputId === undefined
+      ? {}
+      : { forkedFromInputId: current.forkedFromInputId }),
+    ...(current.forkReason === undefined
+      ? {}
+      : { forkReason: current.forkReason }),
     ...(current.metadata === undefined ? {} : { metadata: current.metadata }),
     ...(current.compaction === undefined
       ? {}
@@ -301,6 +317,8 @@ type MutableSession = {
   mateId?: string
   mateRevisionId?: string
   parentSessionId?: string
+  forkedFromInputId?: string
+  forkReason?: ForkReason
   metadata?: EventMetadata
   compaction?: CompactionProjection
 }
