@@ -1,9 +1,9 @@
 # Yakitori
 
 Yakitori is a from-scratch learning project for building a local coding-agent
-harness and GUI. Its product direction is a coding workbench centered on
-persistent-memory `Mate`s that can work alone or collaborate in a shared
-task room.
+harness and GUI. The current priority is a solid single-Mate coding agent.
+Persistent-memory Mates collaborating in shared task Rooms are the later
+product direction, not an implemented capability.
 
 The goal is to understand the runtime and product boundaries behind modern
 coding agents by implementing them directly, one reviewable module at a time.
@@ -13,16 +13,16 @@ existing agent framework.
 ## Goals
 
 - Build a local coding-agent harness from first principles.
-- Give each Mate a durable identity, versioned profile, governed memory,
-  and inspectable history across tasks.
-- Let several Mates work on the same Task concurrently, publish findings to
-  one Room, and use structured mentions to request attention.
+- Give each Mate a durable identity, versioned profile, governed memory, and
+  inspectable history across Tasks.
+- Let several Mates eventually work on the same Task concurrently, publish
+  findings to one Room, and use structured mentions to request attention.
 - Keep shared Messages distinct from per-recipient Deliveries and from each
   Mate's private execution Session.
-- Keep the core responsible for structured execution, collaboration, tools,
-  permissions, persistence, and honest recovery.
-- Build a GUI task workbench for shared discussion, Mate activity, terminal,
-  diff, approvals, artifacts, worktrees, and memory provenance.
+- Keep the core responsible for structured execution, tools, permissions,
+  persistence, and honest recovery.
+- Build a GUI task workbench for discussion, Mate activity, terminal, diff,
+  approvals, artifacts, worktrees, and memory provenance.
 - Record coarse, truthful facts sufficient for debugging, repair, and
   evaluation without persisting every runtime transition.
 - Keep each module small enough to understand and replace.
@@ -38,136 +38,72 @@ Codex-style coding task workbench
 + one inspectable execution lane per Mate Assignment
 ```
 
-A Room is not a copy of Slack or Raft's full product shell. It is the shared
-communication boundary inside the coding workbench. A Room Message is stored
-once; durable Deliveries decide which Mates should catch up, wake, or steer.
-Detailed tool output stays in each Mate's execution Session unless the
-Mate explicitly publishes a bounded finding or artifact reference.
-
-## Non-goals
-
-- Do not use LangGraph, AutoGen, OpenAI Agents SDK, Claude Agent SDK, or similar
-  orchestration frameworks.
-- Do not make runtime code depend on local reference repositories.
-- Do not clone product behavior wholesale. Reference projects are used for
-  comparison and learning.
-- Do not treat a Mate as a permanently running process or silently promote
-  every transcript message into long-term memory.
-- Do not turn the GUI into a general-purpose channel application or task board.
-
-## Reference Material
-
-Local reference material may live under `.references/`, which is ignored by
-git. Current intended references are:
-
-- `.references/public/codex` for the primary workbench and system reference
-- `.references/public/opencode-v2` for durable input, transaction, and recovery
-  mechanisms
-- `.references/public/grok-build` for Session-owner persistence and filesystem
-  durability cross-checks
-- `.references/public/opencode` for legacy v1 comparison only
-- `.references/public/pi` for a small model loop and provider/tool boundaries
-- `.references/public/claude-code-sourcemap` as an unofficial research aid
-- public Claude Code documentation and observable behavior for permissions,
-  hooks, instructions, and terminal product behavior
-- public Raft documentation and observable behavior for the persistent
-  colleague and collaboration product promise, not its complete product shape
-
-Reference material is not part of the project source tree and should not be
-required to build, test, or run Yakitori.
-
-## Current Status
-
-Stage 1 MVP runtime is implemented as one vertical slice:
-
-- a witness-style Session/Input/Turn kernel with 14 coarse durable facts
-- one synchronized per-fact JSONL journal per Session with rebuildable cached
-  projections; replay is a repair tool
-- Mate profile store + default active Mate selection at application startup
-- SessionRunner with single-flight wakes, bounded model context, and recovery
-- context compaction: pressure-triggered checkpoint summaries recorded as
-  append-only `context.compacted` facts (decision 0011)
-- transient provider errors retried with bounded backoff (decision 0012);
-  per-Turn environment context block in the system prompt (decision 0013)
-- scripted faux provider (default tests), OpenAI Responses adapter, and
-  optional Anthropic Messages adapter
-- bounded tools: line-addressed `read_file`, ripgrep-backed `grep` and `glob`,
-  atomic `edit_file`, `write_file` (compare-and-write), `run_command`
-- immediate host command execution with bounded capture, filtered environment,
-  and a small catastrophic-command fuse; it is not OS-sandboxed (decision 0023)
-- dual event delivery: durable SSE (`session.event`) + transient snapshots
-- React + Tailwind v4 + shadcn/ui workbench GUI with streaming markdown,
-  collapsible tool cells, queued-input cancel, interrupt, and diagnostics
-  drawer; the approval UI remains for future permission-gated tools
-- Electron desktop shell: a thin main process spawns the server as a sidecar
-  child process and serves the GUI same-origin from it (decision 0010)
-
-Still deferred to later stages: Room/Task/Assignment/Delivery collaboration,
-governed memory, worktrees, multi-provider selection UI, subagents.
-
-The per-fact journal line stage is implemented; its historical plan is archived
-at `docs/archive/stage-2-fact-journal.md`.
-
 ## Local Run
 
-Install:
+Yakitori requires Node.js 24 or newer and uses pnpm 11.7.0.
+
+Install dependencies:
 
 ```sh
 pnpm install
 ```
 
-Run the desktop app (production-style: builds the GUI and desktop bundle,
-spawns the bundled server as a sidecar child, serves the GUI same-origin):
+Run the desktop app in production style. This builds the GUI and desktop
+bundle, spawns the bundled server as a sidecar, and serves the GUI same-origin:
 
 ```sh
 pnpm start:desktop
 ```
 
-Desktop development with vite HMR; the shell spawns `node --watch` on the
-server, so server edits hot-restart the sidecar without touching the window:
+Run desktop development with Vite HMR. The shell spawns `node --watch` for the
+server, so server edits restart the sidecar without restarting the window:
 
 ```sh
 pnpm dev:desktop
 ```
 
-Run server + GUI in a browser instead:
+Run the server and GUI in a browser instead:
 
 ```sh
 pnpm dev
 ```
 
-- GUI: `http://127.0.0.1:5173?api=http://127.0.0.1:4141` — the vite dev server
-  has no API proxy; the `api` query param (or the remembered
-  `yakitori.apiBase`) points the GUI at the server.
-- API default: `http://127.0.0.1:4141`
-- The server also serves the built GUI itself when `dist/gui` exists (or
-  `YAKITORI_GUI_DIR` points elsewhere), so `http://127.0.0.1:4141` works
-  directly after `pnpm build:gui`.
+- GUI: `http://127.0.0.1:5173?api=http://127.0.0.1:4141`
+- Default API: `http://127.0.0.1:4141`
+- The Vite dev server has no API proxy. The `api` query parameter, or the
+  remembered `yakitori.apiBase`, points the GUI at the server.
+- When `dist/gui` exists, the server also serves the built GUI. After
+  `pnpm build:gui`, open `http://127.0.0.1:4141` directly.
 
 ### Environment variables
 
-Both entry points (`pnpm dev:server` and the desktop shell) load a gitignored
-`.env` from the checkout root, so provider keys live there instead of in
-command lines or shell history. Copy `.env.example` to `.env` and fill in what
-you use; real environment variables always override the file.
+Both `pnpm dev:server` and the desktop shell load a gitignored `.env` from the
+checkout root. Copy `.env.example` to `.env` and fill in only the provider
+credentials you use; real process environment variables always override the
+file.
 
 | Name | Purpose |
 | --- | --- |
-| `YAKITORI_STORE_DIR` | Store directory (default `.yakitori`) |
+| `YAKITORI_HOME` | User config and project registry root (default `~/.yakitori`) |
+| `YAKITORI_STORE_DIR` | Session store directory (default `.yakitori`) |
 | `YAKITORI_WORKSPACE` | Canonical workspace root (default `process.cwd()`) |
-| `YAKITORI_GUI_DIR` | Static GUI directory served by the server (default `./dist/gui` when it exists) |
+| `YAKITORI_GUI_DIR` | Static GUI directory served by the server (default `./dist/gui` when present) |
 | `YAKITORI_MATE_ID` | Explicit active Mate when multiple exist |
 | `YAKITORI_PROVIDER` | `faux` (default), `openai`, `anthropic`, `grok`, or `kimi` |
-| `YAKITORI_FAUX_SCENARIO` | Faux scenario: `text`, `file`, `command`, `error` |
+| `YAKITORI_FAUX_SCENARIO` | Faux scenario: `text`, `file`, `command`, or `error` |
 | `YAKITORI_MODEL` | Required when a network provider is selected |
 | `OPENAI_API_KEY` | Configures OpenAI as the default or a next-Turn provider |
 | `ANTHROPIC_API_KEY` | Configures Anthropic as the default or a next-Turn provider |
-| `XAI_API_KEY` | Configures Grok; every Grok Turn falls back to the Grok CLI OIDC login when unset |
+| `XAI_API_KEY` | Configures Grok; when unset, each Grok Turn tries the Grok CLI OIDC login |
 | `GROK_CREDENTIALS` | Grok CLI credentials file (default `~/.grok/auth.json`) |
-| `KIMI_API_KEY` | Configures Kimi as the default or a next-Turn provider (official Kimi Code console key) |
+| `KIMI_API_KEY` | Configures Kimi with an official Kimi Code console key |
 | `HOST` / `PORT` | Server listen address (default `127.0.0.1:4141`) |
 
-Example faux command flow (runs immediately with host authority):
+Every provider example specifies a model so provider-default changes cannot
+silently change the model recorded on a Turn. Model slugs below are examples,
+not application defaults.
+
+Example faux command flow, which runs immediately with host authority:
 
 ```sh
 YAKITORI_PROVIDER=faux YAKITORI_FAUX_SCENARIO=command pnpm dev
@@ -179,26 +115,22 @@ Example OpenAI Responses:
 YAKITORI_PROVIDER=openai YAKITORI_MODEL=gpt-5.6 OPENAI_API_KEY=… pnpm dev
 ```
 
-The model is always explicit so changing provider defaults cannot silently
-change the model recorded on a Turn. `gpt-5.6` is an example, not an
-application default.
-
 Example Anthropic Messages:
 
 ```sh
 YAKITORI_PROVIDER=anthropic YAKITORI_MODEL=claude-sonnet-4-20250514 ANTHROPIC_API_KEY=… pnpm dev
 ```
 
-Example Grok (xAI, OpenAI-Responses-compatible). With no `XAI_API_KEY` set it
-reads the official Grok CLI's OIDC login (testing only — an undocumented
-subscription path that may break or be revoked). The login is used read-only;
-when it expires, run `grok` and log in again:
+Example Grok through its OpenAI-Responses-compatible API. Without
+`XAI_API_KEY`, Yakitori reads the official Grok CLI OIDC login. This is an
+undocumented subscription path for testing only and may break or be revoked.
+When the login expires, run `grok` and sign in again:
 
 ```sh
 YAKITORI_PROVIDER=grok YAKITORI_MODEL=grok-4.5 pnpm dev
 ```
 
-Example Kimi Code subscription, using an official API key from the Kimi Code
+Example Kimi Code subscription using an official API key from the Kimi Code
 console (`sk-kimi-…`):
 
 ```sh
@@ -208,58 +140,7 @@ YAKITORI_PROVIDER=kimi YAKITORI_MODEL=kimi-for-coding KIMI_API_KEY=… pnpm dev
 Never commit API key values. `pnpm test` and `pnpm check` never require network
 access or credentials.
 
-### Verify
-
-```sh
-pnpm format
-pnpm check
-pnpm build
-```
-
-## Expected Shape
-
-The project will grow around these conceptual areas:
-
-```text
-mates      identity, immutable profiles, capabilities, memory policy
-collaboration  rooms, tasks, assignments, messages, deliveries, mentions
-execution      sessions, inputs, turns, derived items, context, repair
-runtime        model loop, scheduling, pending/steer, tool execution
-memory         scoped revisions, provenance, retrieval, consolidation
-tools          permission-checked built-in and extension capabilities
-storage        journals, projections, artifacts, checkpoints
-server         versioned local command, query, and subscription APIs
-gui            task room and inspectable Mate execution lanes
-evals          replay, recovery, collaboration, and memory scenarios
-```
-
-These are domain boundaries, not a committed directory layout or a requirement
-to split the application into services.
-
-## Architecture Documents
-
-- [Current architecture direction](docs/architecture.md)
-- [Initial Session/Turn/Item execution core](docs/decisions/0001-core-shape.md)
-- [Kernel v1 boundary](docs/decisions/0002-kernel-prelude.md)
-- [Local server API boundary](docs/decisions/0003-server-api-boundary.md)
-- [Persistent Mate and Room collaboration](docs/decisions/0004-mate-room-collaboration.md)
-- [Transactional SQLite event storage](docs/decisions/0005-sqlite-event-store.md)
-- [Collaboration foundations](docs/decisions/0006-collaboration-foundations.md)
-- [Kernel as witness](docs/decisions/0007-kernel-as-witness.md)
-- [Per-Session JSONL event storage](docs/decisions/0008-per-session-jsonl-event-store.md)
-- [Per-fact Session journal lines](docs/decisions/0009-per-fact-journal-lines.md)
-- [Electron desktop shell with server-served GUI](docs/decisions/0010-electron-desktop-shell.md)
-- [Context compaction checkpoints](docs/decisions/0011-context-compaction.md)
-- [Provider retry backoff](docs/decisions/0012-provider-retry-backoff.md)
-- [Environment context block](docs/decisions/0013-environment-context-block.md)
-
-## Development
-
-Install dependencies:
-
-```sh
-pnpm install
-```
+## Verification and Development Commands
 
 Run the full local check:
 
@@ -267,36 +148,28 @@ Run the full local check:
 pnpm check
 ```
 
-Run the local server and GUI together:
+Recommended before delivery:
 
 ```sh
-pnpm dev
+pnpm format
+pnpm check
+pnpm build
 ```
 
-Open `http://127.0.0.1:5173?api=http://127.0.0.1:4141`. The GUI talks to the
-API origin directly (there is no vite proxy), so the `api` query param must
-point at the server. Use `pnpm dev:gui` or `pnpm dev:server` when only one
-side is needed.
-
-Useful individual commands:
+Other useful commands:
 
 ```sh
+pnpm dev:gui
+pnpm dev:server
 pnpm typecheck
 pnpm test
+pnpm test:watch
 pnpm lint
-pnpm format
-pnpm build
-pnpm start:desktop
-pnpm dev:desktop
+pnpm build:desktop
 pnpm package:desktop
 ```
 
 The build keeps the library entry at `dist/index.js`, writes the GUI to
-`dist/gui`, and writes the Electron main bundle plus the sidecar server entry
-to `dist/desktop`. `pnpm package:desktop` produces an unsigned unpacked app
-under `release/`.
-
-## Agent Instructions
-
-See `AGENTS.md` for repository maintenance rules, style guidance, reference
-boundaries, and testing expectations.
+`dist/gui`, and writes the Electron main bundle plus sidecar server entry to
+`dist/desktop`. `pnpm package:desktop` produces an unsigned, unnotarized,
+unpacked app under `release/`.
