@@ -44,7 +44,6 @@ export type ExecutionEntry =
       readonly subject?: string
       readonly state: string
       readonly behavior?: string
-      readonly reason?: string
     }
   | {
       readonly kind: "turn_terminal"
@@ -90,7 +89,6 @@ export type ExecutionView = {
   readonly mateId?: string
   readonly mateRevisionId?: string
   readonly workingDirectory?: string
-  readonly pendingPermissionIds: readonly string[]
   readonly queuedInputIds: readonly string[]
   readonly lastModel?: {
     readonly provider: string
@@ -116,27 +114,14 @@ export function createExecutionViewState(): ExecutionViewState {
 export function reduceExecutionView(
   state: ExecutionViewState,
   action:
-    | { readonly type: "reset"; readonly session?: ApiSessionDetail }
     | {
         readonly type: "durable"
         readonly event: StoredEventEnvelope
         readonly session?: ApiSessionDetail
       }
-    | {
-        readonly type: "durable_batch"
-        readonly events: readonly StoredEventEnvelope[]
-        readonly session?: ApiSessionDetail
-      }
     | { readonly type: "transient"; readonly event: LiveSessionEvent }
     | { readonly type: "session"; readonly session: ApiSessionDetail },
 ): ExecutionViewState {
-  if (action.type === "reset") {
-    return {
-      durableEvents: [],
-      snapshots: {},
-      ...(action.session === undefined ? {} : { session: action.session }),
-    }
-  }
   if (action.type === "session") {
     return { ...state, session: action.session }
   }
@@ -149,17 +134,6 @@ export function reduceExecutionView(
         [action.event.streamId]: action.event.text,
       },
     }
-  }
-  if (action.type === "durable_batch") {
-    return action.events.reduce(
-      (current, event) =>
-        reduceExecutionView(current, {
-          type: "durable",
-          event,
-          ...(action.session === undefined ? {} : { session: action.session }),
-        }),
-      state,
-    )
   }
 
   const existing = state.durableEvents.find(
@@ -317,9 +291,6 @@ export function projectExecutionView(state: ExecutionViewState): ExecutionView {
           ? {}
           : { subject: event.data.subject }),
         state: "requested",
-        ...(event.data.reason === undefined
-          ? {}
-          : { reason: event.data.reason }),
       }
       permissions.set(event.data.permissionRequestId, entry)
       entries.push(entry)
@@ -394,13 +365,6 @@ export function projectExecutionView(state: ExecutionViewState): ExecutionView {
     })
   }
 
-  const pendingPermissionIds = entries
-    .filter(
-      (entry): entry is Extract<ExecutionEntry, { kind: "permission" }> =>
-        entry.kind === "permission" && entry.state === "requested",
-    )
-    .map((entry) => entry.permissionRequestId)
-
   const queuedInputIds = admittedInputIds.filter(
     (inputId) =>
       !startedInputIds.has(inputId) && !cancelledInputIds.has(inputId),
@@ -421,7 +385,6 @@ export function projectExecutionView(state: ExecutionViewState): ExecutionView {
     ...(state.session?.workingDirectory === undefined
       ? {}
       : { workingDirectory: state.session.workingDirectory }),
-    pendingPermissionIds,
     queuedInputIds,
     ...(lastModel === undefined ? {} : { lastModel }),
     ...(lastTurnUsage === undefined ? {} : { lastTurnUsage }),

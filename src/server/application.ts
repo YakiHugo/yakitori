@@ -33,15 +33,13 @@ import {
   resolveGrokAccessToken,
   resolveModel,
   type CodexLogin,
-  type PermissionGate,
   type RuntimeLock,
   type SessionRunner,
   type StreamFn,
-  type TransientEventHub,
   type UserShellEnv,
 } from "../runtime/index.ts"
 import { withRetries } from "../runtime/retrying-stream.ts"
-import { createDurableEventHub, type DurableEventHub } from "./event-hub.ts"
+import { createDurableEventHub } from "./event-hub.ts"
 import {
   createServerHandlers,
   type SessionCreateDefaults,
@@ -54,10 +52,7 @@ import type {
   ApiProviderModel,
   ApiProviderSummary,
 } from "./protocol.ts"
-import {
-  createProjectRegistry,
-  type ProjectRegistry,
-} from "./project-registry.ts"
+import { createProjectRegistry } from "./project-registry.ts"
 import { createUserConfigStore } from "./user-config.ts"
 
 const defaultMateProfile = {
@@ -92,16 +87,10 @@ export type YakitoriApplicationOptions = {
 }
 
 export type YakitoriApplication = {
-  readonly eventHub: DurableEventHub
-  readonly transientHub: TransientEventHub
   readonly handlers: ServerHandlers
   readonly mateKernel: MateKernel
   readonly mateDatabasePath: string
-  readonly permissionGate: PermissionGate
-  readonly projectRegistry: ProjectRegistry
   readonly runner: SessionRunner
-  readonly rootDir: string
-  readonly sessionDefaults: SessionCreateDefaults
   readonly sessionKernel: SessionKernel
   readonly sessionStoreRoot: string
   readonly workspace: string
@@ -272,16 +261,10 @@ export async function createYakitoriApplication(
 
     let closePromise: Promise<void> | undefined
     return {
-      eventHub,
-      transientHub,
       handlers,
       mateKernel,
       mateDatabasePath,
-      permissionGate,
-      projectRegistry,
       runner,
-      rootDir,
-      sessionDefaults,
       sessionKernel,
       sessionStoreRoot,
       workspace,

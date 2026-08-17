@@ -5,7 +5,8 @@ import type {
   ResponseInput,
 } from "openai/resources/responses/responses"
 import type { ReasoningEffort } from "openai/resources/shared"
-import type { JsonObject, JsonValue } from "../kernel/index.ts"
+import { isJsonValue, type JsonObject } from "../kernel/index.ts"
+import { isAbortError } from "./errors.ts"
 import {
   flattenModelSystem,
   ModelStopReason,
@@ -339,22 +340,4 @@ function abortedResponse(): ModelStreamEvent {
     type: "response",
     response: { stopReason: ModelStopReason.Aborted, content: [] },
   }
-}
-
-function isAbortError(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "name" in error &&
-    (error as { name: unknown }).name === "AbortError"
-  )
-}
-
-function isJsonValue(value: unknown): value is JsonValue {
-  if (value === null) return true
-  if (typeof value === "string" || typeof value === "boolean") return true
-  if (typeof value === "number") return Number.isFinite(value)
-  if (Array.isArray(value)) return value.every(isJsonValue)
-  if (typeof value === "object") return Object.values(value).every(isJsonValue)
-  return false
 }

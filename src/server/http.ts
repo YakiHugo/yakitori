@@ -4,7 +4,6 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http"
-import type { AddressInfo } from "node:net"
 import { extname, join, resolve, sep } from "node:path"
 import {
   createSessionKernel,
@@ -107,17 +106,6 @@ function resolveServerKernel(
   throw new Error(
     "An injected kernel, eventStore, or handlers is required. Use createYakitoriApplication() for an owned persistent runtime.",
   )
-}
-
-export async function listen(server: ReturnType<typeof createServer>) {
-  await new Promise<void>((resolve) => {
-    server.listen(0, "127.0.0.1", resolve)
-  })
-  const address = server.address()
-  if (!isAddressInfo(address)) {
-    throw new Error("Expected HTTP server to listen on a TCP address.")
-  }
-  return `http://${address.address}:${address.port}`
 }
 
 async function handleRequest(
@@ -1080,15 +1068,6 @@ function isAllowedCorsOrigin(origin: string): boolean {
   } catch {
     return false
   }
-}
-
-function isAddressInfo(value: unknown): value is AddressInfo {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    "address" in value &&
-    "port" in value
-  )
 }
 
 type Route =

@@ -6,7 +6,12 @@ import type {
   Tool,
   ToolResultBlockParam,
 } from "@anthropic-ai/sdk/resources/messages"
-import type { JsonObject, JsonValue } from "../kernel/index.ts"
+import {
+  isJsonValue,
+  type JsonObject,
+  type JsonValue,
+} from "../kernel/index.ts"
+import { isAbortError } from "./errors.ts"
 import {
   flattenModelSystem,
   ModelStopReason,
@@ -401,26 +406,6 @@ function retryableDetails(error: unknown): JsonObject | undefined {
   return undefined
 }
 
-function isAbortError(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "name" in error &&
-    (error as { name: unknown }).name === "AbortError"
-  )
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
-}
-
-function isJsonValue(value: unknown): value is JsonValue {
-  if (value === null) return true
-  if (typeof value === "string" || typeof value === "boolean") return true
-  if (typeof value === "number") return Number.isFinite(value)
-  if (Array.isArray(value)) return value.every(isJsonValue)
-  if (typeof value === "object") {
-    return Object.values(value).every(isJsonValue)
-  }
-  return false
 }

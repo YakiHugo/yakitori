@@ -354,7 +354,6 @@ describe("execution view", () => {
         message: "runtime restart",
       },
     ])
-    expect(projectExecutionView(state).pendingPermissionIds).toEqual([])
   })
 
   it("keeps unknown facts in catch-up state without rendering or throwing", () => {

@@ -30,8 +30,6 @@ export type ModelContextBuildResult = {
   readonly droppedTurns: readonly DroppedTurn[]
   readonly droppedCompactionCheckpoint: boolean
   readonly truncatedToolResultCount: number
-  readonly byteCount: number
-  readonly blockCount: number
 }
 
 export function buildModelContext(input: {
@@ -131,8 +129,6 @@ export function buildModelContext(input: {
     droppedTurns,
     droppedCompactionCheckpoint,
     truncatedToolResultCount: assembled.truncatedToolResultCount,
-    byteCount: assembled.byteCount,
-    blockCount: assembled.blockCount,
   }
 }
 

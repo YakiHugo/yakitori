@@ -169,7 +169,6 @@ pnpm build:desktop
 pnpm package:desktop
 ```
 
-The build keeps the library entry at `dist/index.js`, writes the GUI to
-`dist/gui`, and writes the Electron main bundle plus sidecar server entry to
-`dist/desktop`. `pnpm package:desktop` produces an unsigned, unnotarized,
+The build writes the GUI to `dist/gui`, and the Electron main bundle plus
+sidecar server entry to `dist/desktop`. `pnpm package:desktop` produces an unsigned, unnotarized,
 unpacked app under `release/`.
