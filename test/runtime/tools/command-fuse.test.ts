@@ -12,6 +12,11 @@ describe("catastrophic command fuse", () => {
     ["sudo -u root rm -rf /", "rm_root"],
     ["rm -rf ~/*", "rm_root"],
     ['rm -rf "$HOME"/*', "rm_root"],
+    ["rm -rf $UNSET/*", "rm_root"],
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: the tested command must contain a literal ${...} expansion
+    ["rm -rf ${UNSET}/*", "rm_root"],
+    ['rm -rf "$UNSET"/*', "rm_root"],
+    ["sudo rm -rf $BUILD_DIR/.*", "rm_root"],
     ["env -S 'rm -rf /'", "rm_root"],
     ["env --split-string='rm -rf /'", "rm_root"],
     ["env -S 'rm\\_-rf\\_/'", "rm_root"],
@@ -39,6 +44,8 @@ describe("catastrophic command fuse", () => {
 
   it.each([
     "rm -rf node_modules",
+    "rm -rf $TMPDIR/foo",
+    "rm -rf $BUILD_DIR",
     "rm -f foo.o",
     "rm -rf /usr/local/build",
     "git status",
