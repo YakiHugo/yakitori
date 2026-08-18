@@ -33,7 +33,9 @@ describe("GUI import boundaries", () => {
       for (const match of source.matchAll(importStatement)) {
         const specifier = match[2]
         if (specifier === undefined) continue
-        if (forbiddenValueImportFrom.some((pattern) => pattern.test(specifier))) {
+        if (
+          forbiddenValueImportFrom.some((pattern) => pattern.test(specifier))
+        ) {
           violations.push(`${file}: value import from ${specifier}`)
         }
       }

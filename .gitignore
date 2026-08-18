@@ -10,5 +10,6 @@ coverage/
 release/
 .yakitori/
 .yakitori-desktop/
+.yakitori-verify/
 
 .references/
