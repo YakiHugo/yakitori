@@ -824,6 +824,7 @@ describe("bounded file tools", () => {
       "run_command",
       "web_fetch",
       "web_search",
+      "task",
     ])
     expect(
       definitions.find((tool) => tool.name === "edit_file")?.inputSchema,

@@ -1,9 +1,12 @@
 import {
+  COMPACT_DIRECTIVE,
   createYakitoriError,
   type EventEnvelope,
   type EventMetadata,
   type InputProjection,
+  InputRole,
   isJsonValue,
+  ItemKind,
   type KernelError,
   type ModelSelection,
   PermissionBehavior,
@@ -12,13 +15,22 @@ import {
   type SessionProjection,
   type TokenUsage,
   type TurnExecutionContext,
+  TurnState,
   YakitoriErrorCode,
 } from "../kernel/index.ts"
 import type { MateKernel } from "../mates/index.ts"
-import { buildCompactionRequest, runCompaction } from "./compaction.ts"
+import {
+  buildCompactionRequest,
+  isContextOverflowError,
+  runCompaction,
+} from "./compaction.ts"
 import { buildEnvironmentContext } from "./environment-context.ts"
 import { isAbortError } from "./errors.ts"
-import { createRuntimeLimits, type RuntimeLimits } from "./limits.ts"
+import {
+  createRuntimeLimits,
+  deriveModelVisibleContextBytes,
+  RuntimeLimits,
+} from "./limits.ts"
 import {
   createCoalescingSnapshotPublisher,
   type TransientEventHub,
@@ -32,9 +44,14 @@ import {
   type ModelUsage,
   type StreamFn,
 } from "./model.ts"
-import { requirePromptId, resolveModel } from "./model-catalog.ts"
+import {
+  catalogContextWindowTokens,
+  requirePromptId,
+  resolveModel,
+} from "./model-catalog.ts"
 import {
   buildModelContext,
+  collectUncoveredTurns,
   type DroppedTurn,
   type ModelContextBuildResult,
 } from "./model-context.ts"
@@ -45,6 +62,7 @@ import { resolveWorkspaceRoot } from "./tools/path-policy.ts"
 import { createToolRegistry, type ToolRegistry } from "./tools/registry.ts"
 import type {
   RuntimeTool,
+  SpawnSubagent,
   ToolEffect,
   ToolExecutionResult,
 } from "./tools/types.ts"
@@ -101,6 +119,9 @@ export function createSessionRunner(
   const projectInstructionLoader =
     options.loadProjectInstructions ?? loadProjectInstructions
   const lanes = new Map<string, LaneState>()
+  // Consecutive compaction failures per session; after the cap the lane
+  // stops paying for doomed summary calls until one succeeds again.
+  const compactionFailures = new Map<string, number>()
   let closed = false
 
   const publishDurable = (events: readonly EventEnvelope[]) => {
@@ -203,13 +224,23 @@ export function createSessionRunner(
     if (closed) abort.abort()
 
     try {
-      await executeTextTurn({
-        sessionId: session.id,
-        turnId: started.turnId,
-        inputId: queuedInput.inputId,
-        executionContext,
-        signal: abort.signal,
-      })
+      if (isCompactDirectiveInput(queuedInput)) {
+        await executeCompactTurn({
+          sessionId: session.id,
+          turnId: started.turnId,
+          inputId: queuedInput.inputId,
+          executionContext,
+          signal: abort.signal,
+        })
+      } else {
+        await executeTextTurn({
+          sessionId: session.id,
+          turnId: started.turnId,
+          inputId: queuedInput.inputId,
+          executionContext,
+          signal: abort.signal,
+        })
+      }
     } catch (error) {
       await failActiveTurn(session.id, started.turnId, error)
     } finally {
@@ -303,6 +334,14 @@ export function createSessionRunner(
               : { speed: previousTarget.speed }),
           })
     const resolvedModel = resolveModel(selectedTarget)
+    // Scale the visible-context budget with the model's context window when
+    // the catalog knows it; an explicit limits override always wins.
+    const contextWindowTokens = catalogContextWindowTokens(resolvedModel)
+    const modelVisibleContextBytes =
+      contextWindowTokens === undefined ||
+      limits.modelVisibleContextBytes !== RuntimeLimits.modelVisibleContextBytes
+        ? limits.modelVisibleContextBytes
+        : deriveModelVisibleContextBytes(contextWindowTokens)
     return {
       mateId: session.mateId,
       mateRevisionId: session.mateRevisionId,
@@ -316,13 +355,13 @@ export function createSessionRunner(
         ? {}
         : { speed: selectedTarget.speed }),
       workingDirectory: session.workingDirectory,
-      enabledTools: [...enabledTools],
+      enabledTools: resolveEnabledTools(session, enabledTools),
       approvalPolicy,
       limits: {
         modelCallsPerTurn: limits.modelCallsPerTurn,
         toolCallsPerTurn: limits.toolCallsPerTurn,
         modelVisibleMessageBlocks: limits.modelVisibleMessageBlocks,
-        modelVisibleContextBytes: limits.modelVisibleContextBytes,
+        modelVisibleContextBytes,
         modelVisibleToolResultBytes: limits.modelVisibleToolResultBytes,
         modelVisibleToolResultLines: limits.modelVisibleToolResultLines,
         assistantResponseBytes: limits.assistantResponseBytes,
@@ -373,7 +412,10 @@ export function createSessionRunner(
       model: resolvedModel,
       ...(projectInstructions === undefined ? {} : { projectInstructions }),
     })
-    const tools = toolRegistry.definitions()
+    const enabledToolNames = new Set(input.executionContext.enabledTools)
+    const tools = toolRegistry
+      .definitions()
+      .filter((definition) => enabledToolNames.has(definition.name))
 
     let modelCallIndex = 0
     let toolCallCount = 0
@@ -522,6 +564,9 @@ export function createSessionRunner(
             ],
             droppedTurnCount: context.droppedTurnCount,
             truncatedToolResultCount: context.truncatedToolResultCount,
+            ...(context.prunedToolResultCount > 0
+              ? { prunedToolResultCount: context.prunedToolResultCount }
+              : {}),
             ...(context.droppedCompactionCheckpoint
               ? { droppedCompactionCheckpoint: true }
               : {}),
@@ -531,6 +576,7 @@ export function createSessionRunner(
           },
           signal: input.signal,
           visibleFileObservations,
+          subagentSession: subagentAgent(session) !== undefined,
         })
         continue
       }
@@ -607,8 +653,10 @@ export function createSessionRunner(
   }
 
   // Housekeeping: fold the longest fitting prefix of dropped history into a
-  // durable checkpoint, then rebuild context. Any failure falls back to the
-  // originally built context; an abort surfaces via the normal abort path.
+  // durable checkpoint, then rebuild context. An over-long summary request is
+  // retried with the oldest half of the source removed (up to
+  // MAX_COMPACTION_ATTEMPTS); any other failure falls back to the originally
+  // built context, and repeated failures trip a per-session circuit breaker.
   async function attemptCompaction(input: {
     readonly session: SessionProjection
     readonly turnId: string
@@ -617,28 +665,62 @@ export function createSessionRunner(
     readonly droppedTurns: readonly DroppedTurn[]
     readonly usages: ModelUsage[]
     readonly signal: AbortSignal
-  }): Promise<ModelContextBuildResult | undefined> {
+  }): Promise<ModelContextBuildResult | null | undefined> {
+    const sessionId = input.session.id
+    if (
+      (compactionFailures.get(sessionId) ?? 0) >=
+      MAX_CONSECUTIVE_COMPACTION_FAILURES
+    ) {
+      return undefined
+    }
     try {
       const previousSummary = input.session.compaction?.summary
-      const source = selectCompactionSource(
+      let source = selectCompactionSource(
         input.droppedTurns,
         previousSummary,
-        limits.modelVisibleContextBytes,
+        input.executionContext.limits.modelVisibleContextBytes,
       )
       if (source.length === 0) return undefined
       const throughSeq = input.session.seq
-      const result = await runCompaction({
-        stream: options.stream,
-        request: buildCompactionRequest({
-          source,
-          ...(previousSummary === undefined ? {} : { previousSummary }),
-          provider: input.executionContext.provider,
-          model: input.executionContext.model,
-          signal: input.signal,
-        }),
-      })
+      let result: Awaited<ReturnType<typeof runCompaction>> | undefined
+      let attempts = 0
+      while (result === undefined) {
+        try {
+          result = await runCompaction({
+            stream: options.stream,
+            request: buildCompactionRequest({
+              source,
+              ...(previousSummary === undefined ? {} : { previousSummary }),
+              provider: input.executionContext.provider,
+              model: input.executionContext.model,
+              signal: input.signal,
+            }),
+          })
+        } catch (error) {
+          if (input.signal.aborted || isAbortError(error)) throw error
+          attempts += 1
+          const reduced = dropOldestSourceHalf(source)
+          if (
+            !isContextOverflowError(error) ||
+            attempts >= MAX_COMPACTION_ATTEMPTS ||
+            reduced.length === source.length
+          ) {
+            throw error
+          }
+          source = reduced
+        }
+      }
+      // A checkpoint that is not smaller than the history it replaces buys
+      // nothing. This is not a failure: keep history, skip the error log and
+      // the circuit breaker, and let callers tell the two outcomes apart.
+      const sourceBytes = utf8Bytes(
+        JSON.stringify(source.flatMap((group) => group.messages)),
+      )
+      if (utf8Bytes(result.summary) >= sourceBytes) {
+        return null
+      }
       const recorded = await options.kernel.recordCompaction({
-        sessionId: input.session.id,
+        sessionId,
         turnId: input.turnId,
         throughSeq,
         coveredTurnIds: [
@@ -650,7 +732,8 @@ export function createSessionRunner(
       })
       publishDurable([recorded.event])
       if (result.usage !== undefined) input.usages.push(result.usage)
-      const rebuilt = await requireSession(input.session.id)
+      compactionFailures.delete(sessionId)
+      const rebuilt = await requireSession(sessionId)
       return buildModelContext({
         session: rebuilt,
         currentInputId: input.inputId,
@@ -660,6 +743,10 @@ export function createSessionRunner(
       // A user interrupt mid-summary surfaces here as an AbortError; that is
       // the normal abort path, not a compaction failure worth logging.
       if (!input.signal.aborted) {
+        compactionFailures.set(
+          sessionId,
+          (compactionFailures.get(sessionId) ?? 0) + 1,
+        )
         console.error(
           "Context compaction failed; continuing with dropped history.",
           error,
@@ -667,6 +754,61 @@ export function createSessionRunner(
       }
       return undefined
     }
+  }
+
+  // A compact directive Turn is housekeeping, not conversation: fold every
+  // uncovered completed Turn into a checkpoint, then close with a short note.
+  // The only model call is the summary itself.
+  async function executeCompactTurn(input: {
+    readonly sessionId: string
+    readonly turnId: string
+    readonly inputId: string
+    readonly executionContext: TurnExecutionContext
+    readonly signal: AbortSignal
+  }): Promise<void> {
+    const session = await requireSession(input.sessionId)
+    const source = collectUncoveredTurns(session, input.executionContext.limits)
+    const usages: ModelUsage[] = []
+    let note: string
+    if (source.length === 0) {
+      note =
+        "Nothing to compact: completed history still fits the context budget."
+    } else {
+      // A manual directive bypasses and resets the failure circuit breaker.
+      compactionFailures.delete(input.sessionId)
+      const compacted = await attemptCompaction({
+        session,
+        turnId: input.turnId,
+        inputId: input.inputId,
+        executionContext: input.executionContext,
+        droppedTurns: source,
+        usages,
+        signal: input.signal,
+      })
+      if (input.signal.aborted) {
+        await cancelAfterRuntimeAbort(input.sessionId, input.turnId)
+        return
+      }
+      note =
+        compacted === undefined
+          ? "Context compaction failed; the history was kept intact."
+          : compacted === null
+            ? "The history is already compact enough; summarizing it would not reduce the context."
+            : `Compacted ${source.length} turn(s) into a context checkpoint.`
+    }
+    const usage = aggregateTokenUsage(usages)
+    const completed = await options.kernel.completeTurnWithAssistantOutput({
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      content: { kind: "text", text: note },
+      providerMetadata: {
+        provider: input.executionContext.provider,
+        model: input.executionContext.model,
+        directive: COMPACT_DIRECTIVE,
+      },
+      ...(usage === undefined ? {} : { usage }),
+    })
+    publishDurable(completed.events)
   }
 
   async function persistAssistantAndExecuteTools(input: {
@@ -682,6 +824,7 @@ export function createSessionRunner(
     readonly visibleFileObservations: ReturnType<
       typeof createVisibleFileObservations
     >
+    readonly subagentSession: boolean
   }): Promise<void> {
     const recorded = await options.kernel.recordAssistantOutput({
       sessionId: input.sessionId,
@@ -739,6 +882,7 @@ export function createSessionRunner(
               signal: input.signal,
               observations,
               record: false,
+              subagentSession: input.subagentSession,
             }),
           }
         } catch (error) {
@@ -784,6 +928,7 @@ export function createSessionRunner(
           signal: input.signal,
           observations,
           record: true,
+          subagentSession: input.subagentSession,
         })
         if (result === "aborted") {
           await cancelAfterRuntimeAbort(input.sessionId, input.turnId)
@@ -808,7 +953,30 @@ export function createSessionRunner(
     readonly signal: AbortSignal
     readonly observations: ReturnType<typeof createVisibleFileObservations>
     readonly record: boolean
+    readonly subagentSession: boolean
   }): Promise<ToolExecutionResult | "aborted"> {
+    // Defense in depth: the model only sees enabledTools definitions, but a
+    // session's narrowed tool set must hold even if a call slips through
+    // (e.g. a subagent session attempting task).
+    if (!input.executionContext.enabledTools.includes(input.call.name)) {
+      const disabled: ToolExecutionResult = {
+        ok: false,
+        code: "tool_not_enabled",
+        message: `Tool ${input.call.name} is not enabled in this session.`,
+        content: `tool_not_enabled: Tool ${input.call.name} is not enabled in this session.`,
+      }
+      if (input.record) {
+        const recorded = await recordExecutedTool({
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          call: input.call,
+          result: disabled,
+          observations: input.observations,
+        })
+        return recorded === "aborted" ? "aborted" : disabled
+      }
+      return disabled
+    }
     // The registry owns dispatch; the lookup here is only for permission
     // metadata (autoAllow), mirroring codex's ToolRouter split.
     const tool = toolRegistry.get(input.call.name)
@@ -872,11 +1040,26 @@ export function createSessionRunner(
       toolCallId: input.call.id,
     })
 
-    const result = await toolRegistry.execute(input.call.name, input.call.input, {
-      workspaceRoot: input.workspaceRoot,
-      signal: input.signal,
-      visibleFileObservations: input.observations,
-    })
+    const result = await toolRegistry.execute(
+      input.call.name,
+      input.call.input,
+      {
+        workspaceRoot: input.workspaceRoot,
+        signal: input.signal,
+        visibleFileObservations: input.observations,
+        // Subagent sessions never get spawnSubagent; this caps delegation
+        // depth at 1 alongside task being absent from their enabledTools.
+        ...(input.subagentSession
+          ? {}
+          : {
+              spawnSubagent: createSpawnSubagent(
+                input.sessionId,
+                input.executionContext,
+                input.signal,
+              ),
+            }),
+      },
+    )
     if (!input.record) return result
     const recorded = await recordExecutedTool({
       sessionId: input.sessionId,
@@ -926,6 +1109,132 @@ export function createSessionRunner(
     })
     publishDurable(resolved.events)
     return input.result.code === "aborted" ? "aborted" : "ok"
+  }
+
+  // Spawns a subagent as a child session on this same runner: the child gets
+  // its own lane, so awaiting its wake() cannot deadlock the parent's lane.
+  function createSpawnSubagent(
+    parentSessionId: string,
+    executionContext: TurnExecutionContext,
+    parentSignal: AbortSignal,
+  ): SpawnSubagent {
+    return async ({ agent, description, prompt }) => {
+      // An already-aborted signal never fires listeners, so check it
+      // explicitly at every stage boundary.
+      if (parentSignal.aborted) {
+        return {
+          ok: false as const,
+          sessionId: "",
+          error: "Parent turn was aborted before the subagent started.",
+        }
+      }
+      const created = await options.kernel.createSession({
+        parentSessionId,
+        workingDirectory: executionContext.workingDirectory,
+        mateId: executionContext.mateId,
+        mateRevisionId: executionContext.mateRevisionId,
+        title: description,
+        metadata: { subagent: agent, subagentDescription: description },
+      })
+      publishDurable([created.event])
+      const childSessionId = created.sessionId
+      const onParentAbort = () => {
+        void interruptSubagentTurn(childSessionId).catch((error: unknown) => {
+          options.onRuntimeError?.(error)
+        })
+      }
+      parentSignal.addEventListener("abort", onParentAbort, { once: true })
+      try {
+        const admitted = await options.kernel.admitInput({
+          sessionId: childSessionId,
+          role: InputRole.User,
+          content: { kind: "text", text: prompt },
+          // A subagent extends the turn that spawned it: inherit that turn's
+          // model instead of falling back to the session default.
+          modelSelection: {
+            provider: executionContext.provider,
+            model: executionContext.model,
+            ...(executionContext.effort === undefined
+              ? {}
+              : { effort: executionContext.effort }),
+            ...(executionContext.speed === undefined
+              ? {}
+              : { speed: executionContext.speed }),
+          },
+        })
+        publishDurable([admitted.event])
+        // The abort listener cannot cancel a turn that does not exist yet;
+        // if the parent died during admission, tear the child down instead
+        // of waking it.
+        if (parentSignal.aborted) {
+          await interruptSubagentTurn(childSessionId)
+          return {
+            ok: false as const,
+            sessionId: childSessionId,
+            error: "Parent turn was aborted.",
+          }
+        }
+        await wake(childSessionId)
+      } finally {
+        parentSignal.removeEventListener("abort", onParentAbort)
+      }
+      return readSubagentOutcome(childSessionId)
+    }
+  }
+
+  // Keyed off durable state rather than lane state: on parent abort the
+  // child turn may already be terminal, and losing that race is a no-op.
+  async function interruptSubagentTurn(sessionId: string): Promise<void> {
+    lanes.get(sessionId)?.abort?.abort()
+    const read = await options.kernel.readSession({ sessionId })
+    const session = read.session
+    if (!session) return
+    // The abort can land before the child turn starts, while its Input is
+    // still queued: cancel it so the lane never runs the turn at all.
+    for (const pending of session.pendingInputs) {
+      try {
+        await options.kernel.cancelInput({
+          sessionId,
+          inputId: pending.inputId,
+        })
+      } catch (error) {
+        // Consumed into a turn between the read and the cancel; the
+        // active-turn path below covers that outcome.
+        if (!isInvalidStateError(error)) throw error
+      }
+    }
+    // Re-read: the queued Input may have been consumed into a turn while the
+    // cancellations above were in flight.
+    const active = (await options.kernel.readSession({ sessionId })).session
+      ?.activeTurn
+    if (!active) return
+    lanes.get(sessionId)?.abort?.abort()
+    await cancelActiveTurn(sessionId, active.turnId, "parent_aborted")
+  }
+
+  async function readSubagentOutcome(sessionId: string) {
+    const session = await requireSession(sessionId)
+    const assistantItem = [...session.items]
+      .reverse()
+      .find((item) => item.kind === ItemKind.AssistantMessage)
+    const text =
+      assistantItem?.content.kind === "text"
+        ? assistantItem.content.text
+        : undefined
+    const lastTurn = session.turns.at(-1)
+    if (lastTurn?.state === TurnState.Completed) {
+      return { ok: true as const, sessionId, text: text ?? "" }
+    }
+    const detail =
+      lastTurn?.error?.message ??
+      lastTurn?.cancelledReason ??
+      lastTurn?.interruptedReason
+    return {
+      ok: false as const,
+      sessionId,
+      error: `Subagent turn ${lastTurn?.state ?? "missing"}${detail === undefined ? "." : `: ${detail}`}`,
+      ...(text === undefined ? {} : { partialText: text }),
+    }
   }
 
   async function waitForPermissionAllow(input: {
@@ -1144,6 +1453,15 @@ export function createSessionRunner(
     publishDurable(cancelled.events)
   }
 
+  function isInvalidStateError(error: unknown): boolean {
+    return (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      (error as { code: unknown }).code === YakitoriErrorCode.InvalidState
+    )
+  }
+
   async function cancelAfterRuntimeAbort(
     sessionId: string,
     turnId: string,
@@ -1193,12 +1511,7 @@ export function createSessionRunner(
         )
       } catch (error) {
         // Completion may have won the race; that is a valid terminal outcome.
-        if (
-          typeof error === "object" &&
-          error !== null &&
-          "code" in error &&
-          (error as { code: unknown }).code === YakitoriErrorCode.InvalidState
-        ) {
+        if (isInvalidStateError(error)) {
           return
         }
         throw error
@@ -1219,6 +1532,39 @@ export function createSessionRunner(
 function toolEffect(tool: RuntimeTool | undefined): ToolEffect {
   return tool?.effect ?? "opaque"
 }
+
+// A session is a subagent session when SessionCreated metadata carries a
+// `subagent` marker (forks use forkReason instead, so there is no overlap).
+// Any value other than the two known kinds is treated as "general".
+function subagentAgent(
+  session: SessionProjection,
+): "general" | "explore" | undefined {
+  const marker = session.metadata?.subagent
+  if (marker === undefined) return undefined
+  return marker === "explore" ? "explore" : "general"
+}
+
+// Subagent sessions run with a narrowed tool set: explore is read-only,
+// general keeps everything except task itself (depth is capped at 1).
+function resolveEnabledTools(
+  session: SessionProjection,
+  enabledTools: readonly string[],
+): readonly string[] {
+  const agent = subagentAgent(session)
+  if (agent === undefined) return [...enabledTools]
+  if (agent === "explore") {
+    return enabledTools.filter((name) => EXPLORE_SUBAGENT_TOOLS.has(name))
+  }
+  return enabledTools.filter((name) => name !== "task")
+}
+
+const EXPLORE_SUBAGENT_TOOLS: ReadonlySet<string> = new Set([
+  "read_file",
+  "grep",
+  "glob",
+  "web_fetch",
+  "web_search",
+])
 
 function isInvalidState(error: unknown): boolean {
   return (
@@ -1296,6 +1642,13 @@ function normalizeStreamError(error: unknown): Error {
   })
 }
 
+function isCompactDirectiveInput(input: InputProjection): boolean {
+  return (
+    input.role === InputRole.Runtime &&
+    input.content.text.trim() === COMPACT_DIRECTIVE
+  )
+}
+
 function isEventMetadata(value: unknown): value is EventMetadata {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return false
@@ -1327,6 +1680,18 @@ function truncateSummary(summary: string, budgetBytes: number): string {
     text = text.slice(0, Math.max(0, text.length - 1_024))
   }
   return `${text}${marker}`
+}
+
+const MAX_COMPACTION_ATTEMPTS = 3
+const MAX_CONSECUTIVE_COMPACTION_FAILURES = 3
+
+// Keeps the most recent half of the source; the oldest turns are what an
+// over-long summary request can most afford to lose.
+function dropOldestSourceHalf(
+  source: readonly DroppedTurn[],
+): readonly DroppedTurn[] {
+  const keep = Math.ceil(source.length / 2)
+  return source.slice(source.length - keep)
 }
 
 function utf8Bytes(value: string): number {
