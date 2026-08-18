@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest"
 import {
   ApiErrorCode,
   type ApiHandlerResult,
+  COMPACT_DIRECTIVE,
   createServerHandlers,
   createSessionId,
   createSessionKernel,
   EventType,
+  InputRole,
   type ServerHandlers,
 } from "../../src/index.ts"
 import { createMemoryEventStore } from "../kernel/memory-event-store.ts"
@@ -196,6 +198,53 @@ describe("server handlers", () => {
         pendingInputs: 1,
         turns: 0,
       })
+    })
+  })
+
+  it("admits the compact directive as a runtime-role input", async () => {
+    await withServer(async (server) => {
+      expectError(
+        await server.compactSession({ sessionId: createSessionId() }),
+        404,
+        ApiErrorCode.NotFound,
+      )
+
+      const created = await server.createSession()
+      expectOk(created)
+      const compacted = await server.compactSession({
+        sessionId: created.body.session.id,
+      })
+      expectOk(compacted)
+      expect(compacted.status).toBe(201)
+      expect(compacted.body.event).toMatchObject({
+        type: EventType.InputAdmitted,
+        data: {
+          role: InputRole.Runtime,
+          content: { kind: "text", text: COMPACT_DIRECTIVE },
+        },
+      })
+    })
+  })
+
+  it("replays the compact admission for a repeated requestId", async () => {
+    await withServer(async (server) => {
+      const created = await server.createSession()
+      expectOk(created)
+      const first = await server.compactSession({
+        sessionId: created.body.session.id,
+        requestId: "request_compact_1",
+      })
+      expectOk(first)
+      expect(first.status).toBe(201)
+
+      const replay = await server.compactSession({
+        sessionId: created.body.session.id,
+        requestId: "request_compact_1",
+      })
+      expectOk(replay)
+      expect(replay.status).toBe(200)
+      expect(replay.body.requestId).toBe("request_compact_1")
+      expect(replay.body.inputId).toBe(first.body.inputId)
     })
   })
 

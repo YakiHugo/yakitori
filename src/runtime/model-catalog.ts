@@ -94,6 +94,21 @@ function matchesRule(model: string, rule: FallbackRule): boolean {
   )
 }
 
+export function catalogContextWindowTokens(input: {
+  readonly provider: string
+  readonly model: string
+}): number | undefined {
+  const provider = input.provider.toLowerCase()
+  const model = input.model.toLowerCase()
+  const entry = catalog.models.find(
+    (candidate) =>
+      candidate.provider.toLowerCase() === provider &&
+      candidate.model.toLowerCase() === model,
+  )
+  if (entry === undefined || !("contextWindowTokens" in entry)) return undefined
+  return entry.contextWindowTokens
+}
+
 export function requirePromptId(value: string): PromptId {
   if (
     value === "anthropic" ||

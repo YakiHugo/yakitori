@@ -30,3 +30,15 @@ export function createRuntimeLimits(
     ...overrides,
   }
 }
+
+// Derives the visible-context byte budget from a model's context window:
+// roughly 4 bytes per token with a 0.75 trigger ratio, clamped so unusual
+// windows cannot push the budget to useless extremes.
+export function deriveModelVisibleContextBytes(
+  contextWindowTokens: number,
+): number {
+  return Math.min(
+    1024 * 1024,
+    Math.max(128 * 1024, Math.floor(contextWindowTokens * 3)),
+  )
+}

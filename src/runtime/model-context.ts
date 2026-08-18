@@ -30,7 +30,16 @@ export type ModelContextBuildResult = {
   readonly droppedTurns: readonly DroppedTurn[]
   readonly droppedCompactionCheckpoint: boolean
   readonly truncatedToolResultCount: number
+  readonly prunedToolResultCount: number
 }
+
+// Before any Turn group is dropped, old tool results are replaced with a
+// placeholder — cheaper than summarizing, and usually enough. Only results in
+// the most recent completed Turn groups (plus the current group) stay intact;
+// pruned results stop counting as observations so edit tools force a re-read.
+const PRUNE_PROTECT_RECENT_TURNS = 2
+const PRUNED_TOOL_RESULT_CONTENT =
+  "[Old tool result content cleared to free context budget.]"
 
 export function buildModelContext(input: {
   readonly session: SessionProjection
@@ -81,6 +90,19 @@ export function buildModelContext(input: {
   ]
   let assembled = assembleGroups(selectedGroups, input.limits, readResultKeys)
 
+  // Over budget? First try pruning old tool results; only when that is not
+  // enough do whole Turn groups drop. Pruning stays on for every subsequent
+  // assembly, including the summarization source for dropped groups.
+  const pruneToolResults = exceedsCaps(assembled, input.limits)
+  if (pruneToolResults) {
+    assembled = assembleGroups(
+      selectedGroups,
+      input.limits,
+      readResultKeys,
+      true,
+    )
+  }
+
   // The checkpoint is pinned until last resort and the final group — the
   // current input or active Turn — is never dropped: the oldest remaining
   // completed Turn group drops first, and the compaction group drops only
@@ -96,18 +118,30 @@ export function buildModelContext(input: {
     if (dropped === undefined) break
     if (dropped.kind === "turn") {
       // Reuse per-group assembly so summarization input gets the same
-      // tool-result truncation as selected groups.
+      // tool-result truncation as selected groups. A lone dropped group is
+      // its own most-recent group, so the default recent-turn protection
+      // would shield all of its tool results from pruning; disable it here.
       droppedTurns.push({
         turnId: dropped.turnId,
-        messages: assembleGroups([dropped], input.limits, readResultKeys)
-          .messages,
+        messages: assembleGroups(
+          [dropped],
+          input.limits,
+          readResultKeys,
+          pruneToolResults,
+          0,
+        ).messages,
       })
     }
     if (dropped.kind === "compaction") {
       droppedCompactionCheckpoint = true
     }
     selectedGroups = selectedGroups.filter((_, index) => index !== dropIndex)
-    assembled = assembleGroups(selectedGroups, input.limits, readResultKeys)
+    assembled = assembleGroups(
+      selectedGroups,
+      input.limits,
+      readResultKeys,
+      pruneToolResults,
+    )
   }
 
   if (selectedGroups.length === 1 && exceedsCaps(assembled, input.limits)) {
@@ -129,7 +163,24 @@ export function buildModelContext(input: {
     droppedTurns,
     droppedCompactionCheckpoint,
     truncatedToolResultCount: assembled.truncatedToolResultCount,
+    prunedToolResultCount: assembled.prunedToolResultCount,
   }
+}
+
+// Manual compaction source: every completed, still-uncovered Turn group,
+// assembled with the same tool-result truncation as a real context build.
+export function collectUncoveredTurns(
+  session: SessionProjection,
+  limits: ModelContextLimits,
+): readonly DroppedTurn[] {
+  const coveredTurnIds = new Set(session.compaction?.coveredTurnIds ?? [])
+  const readResultKeys = buildReadResultKeys(session)
+  return buildTurnGroups(session)
+    .filter((group) => !coveredTurnIds.has(group.turnId))
+    .map((group) => ({
+      turnId: group.turnId,
+      messages: assembleGroups([group], limits, readResultKeys).messages,
+    }))
 }
 
 type TurnContextGroup = {
@@ -374,11 +425,14 @@ function assembleGroups(
   groups: readonly ContextGroup[],
   limits: ModelContextLimits,
   readResultKeys: ReadonlyMap<string, string>,
+  pruneToolResults = false,
+  protectRecentTurnCount = PRUNE_PROTECT_RECENT_TURNS,
 ): {
   readonly messages: readonly ModelMessage[]
   readonly itemIds: readonly string[]
   readonly visibleToolCallIds: readonly string[]
   readonly truncatedToolResultCount: number
+  readonly prunedToolResultCount: number
   readonly byteCount: number
   readonly blockCount: number
 } {
@@ -387,11 +441,34 @@ function assembleGroups(
   const visibleToolCallIds: string[] = []
   const visibleReads = new Map<string, string>()
   let truncatedToolResultCount = 0
+  let prunedToolResultCount = 0
+
+  const protectedTurnIds = new Set(
+    // slice(-0) would return every element, so guard the zero case.
+    protectRecentTurnCount === 0
+      ? []
+      : groups
+          .filter((group) => group.kind === "turn")
+          .slice(-protectRecentTurnCount)
+          .map((group) => group.turnId),
+  )
 
   for (const group of groups) {
     itemIds.push(...group.itemIds)
+    const prunable =
+      pruneToolResults &&
+      group.kind === "turn" &&
+      !protectedTurnIds.has(group.turnId)
     for (const message of group.messages) {
       if (message.role === "tool") {
+        // Pruned results carry no content: they neither register as read
+        // representatives nor count as file observations, so edit tools
+        // force the model to re-read before mutating.
+        if (prunable) {
+          prunedToolResultCount += 1
+          messages.push({ ...message, content: PRUNED_TOOL_RESULT_CONTENT })
+          continue
+        }
         const readKey = readResultKeys.get(message.toolCallId)
         const representative =
           readKey === undefined ? undefined : visibleReads.get(readKey)
@@ -424,6 +501,7 @@ function assembleGroups(
     itemIds,
     visibleToolCallIds,
     truncatedToolResultCount,
+    prunedToolResultCount,
     byteCount,
     blockCount,
   }

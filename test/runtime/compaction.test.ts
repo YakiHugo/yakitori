@@ -3,6 +3,7 @@ import {
   buildCompactionRequest,
   COMPACTION_SYSTEM_PROMPT,
   type DroppedTurn,
+  isContextOverflowError,
   type ModelRequest,
   type ModelStreamEvent,
   ModelStopReason,
@@ -219,3 +220,23 @@ function compactionRequest(signal?: AbortSignal): ModelRequest {
     ...(signal === undefined ? {} : { signal }),
   }
 }
+
+describe("isContextOverflowError", () => {
+  it.each([
+    "prompt is too long: 250000 tokens > 200000 maximum",
+    "This model's maximum context length is 200000 tokens",
+    "context_length_exceeded",
+    "Request too large for model",
+    "HTTP 413",
+  ])("recognizes %s", (message) => {
+    expect(isContextOverflowError(new Error(message))).toBe(true)
+  })
+
+  it.each([
+    "summarizer down",
+    "HTTP 500",
+    "rate limit exceeded",
+  ])("rejects %s", (message) => {
+    expect(isContextOverflowError(new Error(message))).toBe(false)
+  })
+})
