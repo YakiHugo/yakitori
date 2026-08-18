@@ -10,6 +10,8 @@ import type {
   ToolExecutionContext,
   ToolExecutionResult,
 } from "./types.ts"
+import { createWebFetchTool } from "./web-fetch.ts"
+import { createWebSearchTool } from "./web-search.ts"
 import { createWriteFileTool } from "./write-file.ts"
 
 export type ToolRegistry = {
@@ -74,6 +76,8 @@ export function createDefaultTools(
         ? {}
         : { log: input.runCommandLog }),
     }),
+    createWebFetchTool(),
+    createWebSearchTool(),
   ]
 }
 
