@@ -10,7 +10,7 @@ export default defineConfig(({ mode }) => {
     return {
       // Prompt markdown ships as assets next to the bundle so the runtime
       // reads real files; verify-desktop-prompts guards the copy.
-      plugins: [desktopPromptAssets()],
+      plugins: [desktopPromptAssets(), desktopPreloadAsset()],
       build: {
         // Node target: resolve node export conditions and skip package.json
         // "browser" field shims (e.g. @anthropic-ai/sdk's node.browser
@@ -81,6 +81,22 @@ function desktopPromptAssets(): Plugin {
           source: readFileSync(`${promptDirectory}/${fileName}`),
         })
       }
+    },
+  }
+}
+
+function desktopPreloadAsset(): Plugin {
+  const preloadPath = fileURLToPath(
+    new URL("./src/desktop/preload.cjs", import.meta.url),
+  )
+  return {
+    name: "yakitori-desktop-preload-asset",
+    generateBundle() {
+      this.emitFile({
+        type: "asset",
+        fileName: "preload.cjs",
+        source: readFileSync(preloadPath),
+      })
     },
   }
 }
