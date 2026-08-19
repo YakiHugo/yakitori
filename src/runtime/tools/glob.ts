@@ -129,6 +129,7 @@ export function createGlobTool(
         pattern: parsed.pattern,
         path: resolved.relativePath,
         count: paths.length,
+        paths,
         truncated: truncationReason !== undefined,
         ...(truncationReason === undefined ? {} : { truncationReason }),
         content,

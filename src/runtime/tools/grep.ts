@@ -282,6 +282,9 @@ function makeOutput(input: Parameters<typeof buildSuccess>[0]) {
       : { truncationReason: input.truncationReason }),
     timedOut: input.timedOut,
     lineTruncated,
+    locations: input.entries.map((entry) =>
+      searchLocation(entry, input.parsed.outputMode),
+    ),
     content: renderContent(
       input.entries,
       input.hasMore,
@@ -309,6 +312,24 @@ function makeOutput(input: Parameters<typeof buildSuccess>[0]) {
         : {}),
     },
   }
+}
+
+function searchLocation(
+  entry: SearchEntry,
+  outputMode: GrepInput["outputMode"],
+) {
+  if (entry.match !== undefined) {
+    return { path: entry.match.path, line: entry.match.line }
+  }
+  if (outputMode === "count") {
+    const separator = entry.content.lastIndexOf(":")
+    const count = Number(entry.content.slice(separator + 1))
+    return {
+      path: entry.content.slice(0, separator),
+      ...(Number.isFinite(count) ? { count } : {}),
+    }
+  }
+  return { path: entry.content }
 }
 
 function renderContent(
