@@ -31,6 +31,7 @@ describe("workspace search tools", () => {
         ok: true,
         output: {
           count: 1,
+          locations: [{ path: "alpha.ts", line: 1 }],
           truncated: true,
           truncationReason: "result_limit",
           timedOut: false,
@@ -693,6 +694,13 @@ describe("workspace search tools", () => {
           pattern: "*.ts",
           path: ".",
           count: 5,
+          paths: [
+            ".env.ts",
+            ".hidden.ts",
+            "nested/three.ts",
+            "one.ts",
+            "two.ts",
+          ],
           truncated: false,
           content:
             "Glob returned 5 files.\n.env.ts\n.hidden.ts\nnested/three.ts\none.ts\ntwo.ts",

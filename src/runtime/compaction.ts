@@ -92,7 +92,7 @@ export async function runCompaction(input: {
   let terminal: ModelResponse | undefined
   try {
     for await (const event of input.stream(input.request)) {
-      if (event.type === "snapshot") continue
+      if (event.type !== "response") continue
       if (terminal !== undefined) {
         throw new Error("Model stream emitted more than one terminal response.")
       }

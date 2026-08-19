@@ -51,6 +51,87 @@ describe("model context", () => {
     expect(context.droppedTurnCount).toBe(0)
   })
 
+  it("preserves durable reasoning continuation data through a tool loop", async () => {
+    const context = await withAttributedSession(
+      async ({ kernel, sessionId }) => {
+        const input = await kernel.admitInput({
+          sessionId,
+          content: { kind: "text", text: "inspect" },
+        })
+        const turn = await kernel.startTurn({
+          sessionId,
+          inputId: input.inputId,
+        })
+        await kernel.recordAssistantOutput({
+          sessionId,
+          turnId: turn.turnId,
+          content: [
+            {
+              type: "reasoning",
+              text: "Read the file first.",
+              providerMetadata: {
+                openai: { id: "reasoning_1", encryptedContent: "secret" },
+              },
+            },
+          ],
+          toolCalls: [
+            {
+              id: "tool_1",
+              name: "read_file",
+              input: { path: "README.md" },
+              requiresPermission: false,
+            },
+          ],
+        })
+        await kernel.requireToolExecutionAllowed({
+          sessionId,
+          turnId: turn.turnId,
+          toolCallId: "tool_1",
+        })
+        await kernel.recordToolResult({
+          sessionId,
+          turnId: turn.turnId,
+          toolCallId: "tool_1",
+          content: { kind: "text", text: "contents" },
+        })
+        const read = await kernel.readSession({ sessionId })
+        if (!read.session) throw new Error("missing session")
+        return buildModelContext({
+          session: read.session,
+          currentInputId: input.inputId,
+          limits: generousLimits(),
+        })
+      },
+    )
+
+    expect(context.messages).toEqual([
+      { role: "user", content: [{ type: "text", text: "inspect" }] },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "reasoning",
+            text: "Read the file first.",
+            providerMetadata: {
+              openai: { id: "reasoning_1", encryptedContent: "secret" },
+            },
+          },
+          {
+            type: "tool_call",
+            id: "tool_1",
+            name: "read_file",
+            input: { path: "README.md" },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        toolCallId: "tool_1",
+        content: "contents",
+      },
+    ])
+  })
+
   it("drops oldest complete Turn groups when caps are exceeded", async () => {
     const context = await withAttributedSession(
       async ({ kernel, sessionId }) => {
@@ -299,7 +380,7 @@ describe("model context", () => {
         await kernel.completeTurnWithAssistantOutput({
           sessionId,
           turnId: shared.turnId,
-          content: { kind: "text", text: "shared answer" },
+          content: [{ type: "text", text: "shared answer" }],
         })
         const cut = await kernel.admitInput({
           sessionId,
@@ -535,7 +616,8 @@ describe("model context", () => {
           {
             role: "tool",
             toolCallId: "tool_long",
-            content: "[Old tool result content cleared to free context budget.]",
+            content:
+              "[Old tool result content cleared to free context budget.]",
           },
         ],
       },
@@ -933,7 +1015,7 @@ async function completeTextTurn(
   await kernel.completeTurnWithAssistantOutput({
     sessionId,
     turnId: started.turnId,
-    content: { kind: "text", text: assistantText },
+    content: [{ type: "text", text: assistantText }],
     providerMetadata: {
       streamId: "stream_test",
       kind: ItemKind.AssistantMessage,

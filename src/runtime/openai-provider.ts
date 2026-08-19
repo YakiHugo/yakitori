@@ -5,7 +5,7 @@ import type {
   ResponseInput,
 } from "openai/resources/responses/responses"
 import type { ReasoningEffort } from "openai/resources/shared"
-import { isJsonValue, type JsonObject } from "../kernel/index.ts"
+import { isJsonObject, isJsonValue, type JsonObject } from "../kernel/index.ts"
 import { isAbortError } from "./errors.ts"
 import {
   flattenModelSystem,
@@ -66,11 +66,17 @@ async function* streamOpenAI(
         max_output_tokens: 8_192,
         store: false,
         stream: true,
-        ...(request.target.effort === undefined
+        ...(request.target.effort === undefined &&
+        !REASONING_SUMMARY_PROVIDERS.has(request.target.provider)
           ? {}
           : {
               reasoning: {
-                effort: request.target.effort as ReasoningEffort,
+                ...(request.target.effort === undefined
+                  ? {}
+                  : { effort: request.target.effort as ReasoningEffort }),
+                ...(REASONING_SUMMARY_PROVIDERS.has(request.target.provider)
+                  ? { summary: "auto" as const }
+                  : {}),
               },
             }),
         // Speed tiers: only "fast" maps onto the wire ("priority"); anything
@@ -82,6 +88,7 @@ async function* streamOpenAI(
       request.signal === undefined ? undefined : { signal: request.signal },
     )
     let text = ""
+    let reasoning = ""
     for await (const event of stream) {
       if (request.signal?.aborted) {
         yield abortedResponse()
@@ -90,6 +97,11 @@ async function* streamOpenAI(
       if (event.type === "response.output_text.delta") {
         text += event.delta
         yield { type: "snapshot", text }
+        continue
+      }
+      if (event.type === "response.reasoning_summary_text.delta") {
+        reasoning += event.delta
+        yield { type: "reasoning_snapshot", text: reasoning }
         continue
       }
       if (
@@ -160,6 +172,12 @@ export function toOpenAIInput(
       text = ""
     }
     for (const block of message.content) {
+      if (block.type === "reasoning") {
+        flushText()
+        const reasoning = toOpenAIReasoningItem(block)
+        if (reasoning !== undefined) input.push(reasoning)
+        continue
+      }
       if (block.type === "text") {
         text += block.text
         continue
@@ -213,6 +231,23 @@ export function fromOpenAIResponse(response: Response): ModelResponse {
 
   const content: ModelContentBlock[] = []
   for (const item of response.output) {
+    if (item.type === "reasoning") {
+      const text = item.summary.map((summary) => summary.text).join("\n\n")
+      content.push({
+        type: "reasoning",
+        text,
+        providerMetadata: {
+          openai: {
+            id: item.id,
+            ...(item.encrypted_content === undefined
+              ? {}
+              : { encryptedContent: item.encrypted_content }),
+            ...(item.status === undefined ? {} : { status: item.status }),
+          },
+        },
+      })
+      continue
+    }
     if (item.type === "message") {
       for (const part of item.content) {
         if (part.type === "output_text") {
@@ -259,6 +294,33 @@ export function fromOpenAIResponse(response: Response): ModelResponse {
       : ModelStopReason.EndTurn,
     content,
   )
+}
+
+function toOpenAIReasoningItem(
+  block: Extract<ModelContentBlock, { readonly type: "reasoning" }>,
+): ResponseInput[number] | undefined {
+  const metadata = block.providerMetadata?.openai
+  if (!isJsonObject(metadata) || typeof metadata.id !== "string") {
+    return undefined
+  }
+  const encryptedContent = metadata.encryptedContent
+  const status = metadata.status
+  return {
+    type: "reasoning",
+    id: metadata.id,
+    summary:
+      block.text.length === 0
+        ? []
+        : [{ type: "summary_text", text: block.text }],
+    ...(typeof encryptedContent === "string"
+      ? { encrypted_content: encryptedContent }
+      : {}),
+    ...(status === "in_progress" ||
+    status === "completed" ||
+    status === "incomplete"
+      ? { status }
+      : {}),
+  }
 }
 
 function responseResult(
@@ -316,6 +378,11 @@ const RETRYABLE_STATUSES: ReadonlySet<number> = new Set([
 const TRANSIENT_ERROR_CODES: ReadonlySet<string> = new Set([
   "server_error",
   "rate_limit_exceeded",
+])
+
+const REASONING_SUMMARY_PROVIDERS: ReadonlySet<string> = new Set([
+  "openai",
+  "codex",
 ])
 
 // Transient failures carry retryable details for withRetries: retryable HTTP

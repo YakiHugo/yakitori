@@ -3,7 +3,8 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { app, BrowserWindow, dialog } from "electron"
 import { loadLocalEnvFile } from "../server/env-file.ts"
-import { spawnServerProcess, type ServerProcess } from "./server-process.ts"
+import { registerResourceOpener } from "./resource-opener.ts"
+import { type ServerProcess, spawnServerProcess } from "./server-process.ts"
 
 // The bundle lands at dist/desktop/main.js, so the repo root is two levels up.
 // (No new URL("./x", import.meta.url) — the bundler inlines that as a data: URL.)
@@ -101,7 +102,7 @@ async function start(): Promise<void> {
     app.exit(1)
   })
   console.log(`yakitori: sidecar listening on ${child.url}`)
-  openMainWindow(windowTarget(child.url))
+  openMainWindow(windowTarget(child.url), workspace)
 }
 
 function windowTarget(serverUrl: string): string {
@@ -182,7 +183,7 @@ function workspaceConfigPath(): string {
   return path.join(app.getPath("userData"), "workspace.json")
 }
 
-function openMainWindow(targetUrl: string): void {
+function openMainWindow(targetUrl: string, workspace: string): void {
   const window = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -191,7 +192,17 @@ function openMainWindow(targetUrl: string): void {
     title: "Yakitori",
     backgroundColor: "#0a0a0a",
     show: false,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      preload: path.join(
+        path.dirname(fileURLToPath(import.meta.url)),
+        "preload.cjs",
+      ),
+    },
   })
+  registerResourceOpener(workspace, window)
   window.once("ready-to-show", () => {
     window.show()
   })

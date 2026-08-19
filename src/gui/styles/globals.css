@@ -145,3 +145,34 @@
   padding: 0.25rem 0.5rem;
   text-align: left;
 }
+
+@keyframes tool-running-shimmer {
+  0%,
+  100% {
+    background-position: 180% 50%;
+  }
+  50% {
+    background-position: -80% 50%;
+  }
+}
+
+.tool-running-label {
+  color: transparent;
+  background-image: linear-gradient(
+    100deg,
+    color-mix(in oklab, var(--muted-foreground) 72%, transparent) 25%,
+    var(--foreground) 48%,
+    color-mix(in oklab, var(--muted-foreground) 72%, transparent) 72%
+  );
+  background-size: 240% 100%;
+  background-clip: text;
+  animation: tool-running-shimmer 1.8s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tool-running-label {
+    color: var(--foreground);
+    background: none;
+    animation: none;
+  }
+}

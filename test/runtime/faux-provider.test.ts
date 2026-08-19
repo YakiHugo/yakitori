@@ -11,7 +11,11 @@ describe("faux provider", () => {
     const provider = createFauxProvider([
       {
         snapshots: ["Hel", "Hello"],
-        content: [{ type: "text", text: "Hello" }],
+        reasoningSnapshots: ["Check", "Check context"],
+        content: [
+          { type: "reasoning", text: "Check context" },
+          { type: "text", text: "Hello" },
+        ],
         stopReason: ModelStopReason.EndTurn,
         usage: { inputTokens: 3, outputTokens: 1 },
         providerRequestId: "faux_1",
@@ -21,13 +25,18 @@ describe("faux provider", () => {
     const events = await collect(provider.stream(baseRequest()))
 
     expect(events).toEqual([
+      { type: "reasoning_snapshot", text: "Check" },
+      { type: "reasoning_snapshot", text: "Check context" },
       { type: "snapshot", text: "Hel" },
       { type: "snapshot", text: "Hello" },
       {
         type: "response",
         response: {
           stopReason: ModelStopReason.EndTurn,
-          content: [{ type: "text", text: "Hello" }],
+          content: [
+            { type: "reasoning", text: "Check context" },
+            { type: "text", text: "Hello" },
+          ],
           usage: { inputTokens: 3, outputTokens: 1 },
           providerRequestId: "faux_1",
         },

@@ -263,7 +263,7 @@ export type CompleteTurnResult = {
 export type CompleteTurnWithAssistantOutputInput = {
   readonly sessionId: string
   readonly turnId: string
-  readonly content: TextContent
+  readonly content: readonly AssistantContentBlock[]
   readonly providerMetadata?: EventMetadata
   readonly usage?: TokenUsage
   readonly metadata?: EventMetadata
@@ -688,7 +688,7 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
             data: compact({
               messageId: itemId,
               turnId: input.turnId,
-              content: [{ type: "text" as const, text: input.content.text }],
+              content: input.content,
               providerMetadata: input.providerMetadata,
             }),
           },

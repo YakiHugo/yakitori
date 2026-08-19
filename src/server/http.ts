@@ -562,8 +562,7 @@ async function streamSessionEvents(
       // Coalesce by stream id for slow subscribers during replay.
       const index = pendingLive.findIndex(
         (candidate) =>
-          candidate.type === "assistant.snapshot" &&
-          event.type === "assistant.snapshot" &&
+          candidate.type === event.type &&
           candidate.streamId === event.streamId,
       )
       if (index >= 0) pendingLive[index] = event

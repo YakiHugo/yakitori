@@ -1,9 +1,10 @@
 import { useLayoutEffect } from "react"
 import { usePinnedScroll } from "../hooks/use-pinned-scroll.ts"
-import { useExecutionView } from "../store/app-store.ts"
+import { useAppStore, useExecutionView } from "../store/app-store.ts"
 import { AssistantMessageCell } from "./cells/assistant-message-cell.tsx"
 import { CompactionCell } from "./cells/compaction-cell.tsx"
 import { PermissionCell } from "./cells/permission-cell.tsx"
+import { ReasoningCell } from "./cells/reasoning-cell.tsx"
 import { ToolCell } from "./cells/tool-cell.tsx"
 import { TurnTerminalCell } from "./cells/turn-terminal-cell.tsx"
 import { UserMessageCell } from "./cells/user-message-cell.tsx"
@@ -11,6 +12,8 @@ import { ScrollArea } from "./ui/scroll-area.tsx"
 
 export function Transcript() {
   const view = useExecutionView()
+  const selectSession = useAppStore((state) => state.selectSession)
+  const sessionId = useAppStore((state) => state.selectedSession?.id)
   const { viewportRef, onScroll, pinToBottom } = usePinnedScroll()
 
   useLayoutEffect(() => {
@@ -48,9 +51,21 @@ export function Transcript() {
                     entry={entry}
                   />
                 )
+              case "reasoning":
+                return (
+                  <ReasoningCell
+                    key={`reasoning:${entry.itemId ?? entry.streamId ?? entry.at}`}
+                    entry={entry}
+                  />
+                )
               case "tool":
                 return (
-                  <ToolCell key={`tool:${entry.toolCallId}`} entry={entry} />
+                  <ToolCell
+                    key={`tool:${sessionId ?? "loading"}:${entry.toolCallId}`}
+                    entry={entry}
+                    workspaceRoot={view.workingDirectory}
+                    onOpenSession={selectSession}
+                  />
                 )
               case "permission":
                 return (

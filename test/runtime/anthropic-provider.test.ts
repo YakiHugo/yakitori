@@ -130,6 +130,133 @@ describe("anthropic provider conversion", () => {
     ).toBe(ModelStopReason.Length)
   })
 
+  it("maps summarized and redacted thinking with continuation metadata", () => {
+    expect(
+      fromAnthropicMessage({
+        stop_reason: "end_turn",
+        content: [
+          {
+            type: "thinking",
+            thinking: "Inspect the event log.",
+            signature: "signature_1",
+          },
+          { type: "redacted_thinking", data: "redacted_1" },
+          { type: "text", text: "Done." },
+        ],
+      }).content,
+    ).toEqual([
+      {
+        type: "reasoning",
+        text: "Inspect the event log.",
+        providerMetadata: {
+          anthropic: { signature: "signature_1" },
+        },
+      },
+      {
+        type: "reasoning",
+        text: "",
+        providerMetadata: {
+          anthropic: { redactedData: "redacted_1" },
+        },
+      },
+      { type: "text", text: "Done." },
+    ])
+
+    expect(
+      toAnthropicMessages([
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "reasoning",
+              text: "Inspect the event log.",
+              providerMetadata: {
+                anthropic: { signature: "signature_1" },
+              },
+            },
+            {
+              type: "reasoning",
+              text: "",
+              providerMetadata: {
+                anthropic: { redactedData: "redacted_1" },
+              },
+            },
+          ],
+        },
+      ]),
+    ).toEqual([
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "thinking",
+            thinking: "Inspect the event log.",
+            signature: "signature_1",
+          },
+          { type: "redacted_thinking", data: "redacted_1" },
+        ],
+      },
+    ])
+  })
+
+  it("requests and streams summarized adaptive thinking", async () => {
+    let body: Record<string, unknown> | undefined
+    const client = {
+      messages: {
+        stream(input: Record<string, unknown>) {
+          body = input
+          return {
+            async *[Symbol.asyncIterator]() {
+              yield {
+                type: "content_block_delta",
+                delta: { type: "thinking_delta", thinking: "Inspect" },
+              }
+              yield {
+                type: "content_block_delta",
+                delta: { type: "thinking_delta", thinking: " files" },
+              }
+            },
+            async finalMessage() {
+              return {
+                id: "msg_reasoning",
+                stop_reason: "end_turn",
+                content: [{ type: "text", text: "Done." }],
+              }
+            },
+          }
+        },
+      },
+    } as unknown as Anthropic
+    const stream = createAnthropicProvider({
+      apiKey: "test",
+      model: "claude-sonnet-4-6",
+      client,
+    })
+    const request: ModelRequest = {
+      target: {
+        provider: "anthropic",
+        model: "claude-sonnet-4-6",
+        promptId: "anthropic",
+      },
+      system: [],
+      contextual: [],
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      tools: [],
+    }
+
+    const events: ModelStreamEvent[] = []
+    for await (const event of stream(request)) events.push(event)
+
+    expect(body).toMatchObject({
+      thinking: { type: "adaptive", display: "summarized" },
+    })
+    expect(events).toEqual([
+      { type: "reasoning_snapshot", text: "Inspect" },
+      { type: "reasoning_snapshot", text: "Inspect files" },
+      expect.objectContaining({ type: "response" }),
+    ])
+  })
+
   it("places cache breakpoints after tools, stable system prefixes, and dynamic history", async () => {
     let body: Record<string, unknown> | undefined
     const client = {

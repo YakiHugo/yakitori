@@ -16,6 +16,12 @@ export type ModelTextBlock = {
   readonly text: string
 }
 
+export type ModelReasoningBlock = {
+  readonly type: "reasoning"
+  readonly text: string
+  readonly providerMetadata?: JsonObject
+}
+
 export type ModelToolCallBlock = {
   readonly type: "tool_call"
   readonly id: string
@@ -23,7 +29,10 @@ export type ModelToolCallBlock = {
   readonly input: JsonValue
 }
 
-export type ModelContentBlock = ModelTextBlock | ModelToolCallBlock
+export type ModelContentBlock =
+  | ModelTextBlock
+  | ModelReasoningBlock
+  | ModelToolCallBlock
 
 export type ModelUserMessage = {
   readonly role: "user"
@@ -112,6 +121,11 @@ export type ModelStreamSnapshotEvent = {
   readonly text: string
 }
 
+export type ModelStreamReasoningSnapshotEvent = {
+  readonly type: "reasoning_snapshot"
+  readonly text: string
+}
+
 export type ModelStreamResponseEvent = {
   readonly type: "response"
   readonly response: ModelResponse
@@ -119,6 +133,7 @@ export type ModelStreamResponseEvent = {
 
 export type ModelStreamEvent =
   | ModelStreamSnapshotEvent
+  | ModelStreamReasoningSnapshotEvent
   | ModelStreamResponseEvent
 
 export type StreamFn = (

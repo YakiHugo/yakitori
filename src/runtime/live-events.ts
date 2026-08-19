@@ -7,7 +7,16 @@ export type LiveAssistantSnapshot = {
   readonly createdAt: string
 }
 
-export type LiveSessionEvent = LiveAssistantSnapshot
+export type LiveReasoningSnapshot = {
+  readonly type: "reasoning.snapshot"
+  readonly sessionId: string
+  readonly turnId: string
+  readonly streamId: string
+  readonly text: string
+  readonly createdAt: string
+}
+
+export type LiveSessionEvent = LiveAssistantSnapshot | LiveReasoningSnapshot
 
 export type LiveEventListener = (
   event: LiveSessionEvent,
@@ -75,6 +84,7 @@ export type SnapshotPublisher = {
 export function createCoalescingSnapshotPublisher(
   hub: TransientEventHub,
   publicationsPerSecond: number,
+  type: LiveSessionEvent["type"] = "assistant.snapshot",
 ): SnapshotPublisher {
   const minIntervalMs = Math.max(1, Math.floor(1000 / publicationsPerSecond))
   let pending:
@@ -96,7 +106,7 @@ export function createCoalescingSnapshotPublisher(
   }) => {
     lastPublishedAt = Date.now()
     hub.publish({
-      type: "assistant.snapshot",
+      type,
       sessionId: input.sessionId,
       turnId: input.turnId,
       streamId: input.streamId,

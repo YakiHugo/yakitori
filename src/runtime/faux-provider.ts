@@ -12,6 +12,7 @@ export type FauxRequestAssertion = (request: ModelRequest) => void
 
 export type FauxScriptedResponse = {
   readonly snapshots?: readonly string[]
+  readonly reasoningSnapshots?: readonly string[]
   readonly content?: readonly ModelContentBlock[]
   readonly stopReason?: ModelStopReason
   readonly error?: ModelResponse["error"]
@@ -70,6 +71,20 @@ async function* streamScriptedResponse(
 
   if (step.waitForAbort) {
     await waitForAbort(request.signal)
+  }
+
+  for (const text of step.reasoningSnapshots ?? []) {
+    if (request.signal?.aborted) {
+      yield {
+        type: "response",
+        response: {
+          stopReason: StopReason.Aborted,
+          content: [],
+        },
+      }
+      return
+    }
+    yield { type: "reasoning_snapshot", text }
   }
 
   for (const text of step.snapshots ?? []) {

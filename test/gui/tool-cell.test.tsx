@@ -9,7 +9,7 @@ afterEach(() => {
 })
 
 describe("tool cell", () => {
-  it("collapses to one row and expands to show input and output", async () => {
+  it("collapses to one row and expands to show the useful result", async () => {
     const user = userEvent.setup()
     render(
       <ToolCell
@@ -29,10 +29,12 @@ describe("tool cell", () => {
     expect(screen.queryByText("file contents")).toBeNull()
     expect(screen.queryByText(/"path"/)).toBeNull()
 
-    await user.click(screen.getByRole("button"))
+    await user.click(
+      screen.getByRole("button", { name: /Read src\/index\.ts/ }),
+    )
 
     expect(await screen.findByText("file contents")).toBeTruthy()
-    expect(screen.getByText(/"path"/)).toBeTruthy()
+    expect(screen.queryByText(/"path"/)).toBeNull()
   })
 
   it("renders run_command entries as a terminal card when expanded", async () => {
@@ -54,7 +56,7 @@ describe("tool cell", () => {
 
     expect(screen.queryByText(/\$ pnpm test/)).toBeNull()
 
-    await user.click(screen.getByRole("button"))
+    await user.click(screen.getByRole("button", { name: /Run pnpm test/ }))
 
     expect(await screen.findByText(/\$ pnpm test/)).toBeTruthy()
     expect(screen.getByText(/all green/)).toBeTruthy()
@@ -88,7 +90,7 @@ describe("tool cell", () => {
       />,
     )
 
-    await user.click(screen.getByRole("button"))
+    await user.click(screen.getByRole("button", { name: /Run pnpm lint/ }))
 
     expect(await screen.findByText(/\$ pnpm lint/)).toBeTruthy()
     expect(screen.getByText(/checking…/)).toBeTruthy()
@@ -99,7 +101,6 @@ describe("tool cell", () => {
   })
 
   it("renders blocked commands as failed without implying a process started", async () => {
-    const user = userEvent.setup()
     render(
       <ToolCell
         entry={{
@@ -131,14 +132,13 @@ describe("tool cell", () => {
       />,
     )
 
-    await user.click(screen.getByRole("button"))
-    expect(await screen.findByText("blocked")).toBeTruthy()
+    // Failed tools open themselves so the reason is not hidden.
+    expect(await screen.findAllByText(/blocked/)).toHaveLength(3)
     expect(screen.getByText(/No process was started/)).toBeTruthy()
     expect(screen.getByText(".")).toBeTruthy()
   })
 
   it("renders structured command execution errors", async () => {
-    const user = userEvent.setup()
     render(
       <ToolCell
         entry={{
@@ -166,10 +166,12 @@ describe("tool cell", () => {
       />,
     )
 
-    await user.click(screen.getByRole("button"))
+    // Failed tools open themselves so the reason is not hidden.
     expect(
-      await screen.findByText("Command failed to start: spawn example ENOENT"),
-    ).toBeTruthy()
+      await screen.findAllByText(
+        "Command failed to start: spawn example ENOENT",
+      ),
+    ).toHaveLength(2)
   })
 
   it("renders a diff view instead of raw input for edit_file results", async () => {
@@ -193,10 +195,77 @@ describe("tool cell", () => {
       />,
     )
 
-    await user.click(screen.getByRole("button"))
+    await user.click(
+      screen.getByRole("button", { name: /Edit src\/index\.ts/ }),
+    )
 
     expect(await screen.findByText("-old")).toBeTruthy()
     expect(screen.getByText("+new")).toBeTruthy()
     expect(screen.queryByText(/"oldString"/)).toBeNull()
+  })
+
+  it("uses a text shimmer instead of a status badge while running", () => {
+    render(
+      <ToolCell
+        entry={{
+          kind: "tool",
+          toolCallId: "tool_running",
+          turnId: "turn_1",
+          name: "grep",
+          summary: "src",
+          input: { pattern: "needle", path: "src" },
+          state: "requested",
+        }}
+      />,
+    )
+
+    expect(screen.getByText("Searching").className).toContain(
+      "tool-running-label",
+    )
+    expect(screen.queryByText("requested")).toBeNull()
+    expect(screen.queryByText("completed")).toBeNull()
+  })
+
+  it("defaults running tools closed and preserves an explicit expansion on completion", async () => {
+    const user = userEvent.setup()
+    const { rerender } = render(
+      <ToolCell
+        entry={{
+          kind: "tool",
+          toolCallId: "tool_replayed",
+          turnId: "turn_1",
+          name: "read_file",
+          summary: "src/index.ts",
+          input: { path: "src/index.ts" },
+          state: "requested",
+        }}
+      />,
+    )
+
+    expect(screen.queryByText("Waiting for a result…")).toBeNull()
+
+    await user.click(
+      screen.getByRole("button", { name: /Reading src\/index\.ts/ }),
+    )
+
+    expect(screen.getByText("Waiting for a result…")).toBeTruthy()
+
+    rerender(
+      <ToolCell
+        entry={{
+          kind: "tool",
+          toolCallId: "tool_replayed",
+          turnId: "turn_1",
+          name: "read_file",
+          summary: "src/index.ts",
+          input: { path: "src/index.ts" },
+          state: "completed",
+          resultText: "file contents",
+        }}
+      />,
+    )
+
+    expect(await screen.findByText("Read")).toBeTruthy()
+    expect(screen.getByText("file contents")).toBeTruthy()
   })
 })

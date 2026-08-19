@@ -168,7 +168,7 @@ for (const implementation of ["memory", "jsonl"] as const) {
         await kernel.completeTurnWithAssistantOutput({
           sessionId: source.sessionId,
           turnId: firstTurn.turnId,
-          content: { kind: "text", text: "first reply" },
+          content: [{ type: "text", text: "first reply" }],
         })
         const cutInput = await admit(kernel, source.sessionId, "replace-me")
         const cutTurn = await kernel.startTurn({
@@ -430,8 +430,8 @@ for (const implementation of ["memory", "jsonl"] as const) {
           output: { bytes: 8 },
         })
         expect(read.session?.items.map((item) => item.kind)).toEqual([
-          "assistant_message",
           "reasoning",
+          "assistant_message",
           "tool_call",
           "tool_result",
         ])

@@ -1,4 +1,12 @@
-import { LoaderCircle, Square, X } from "lucide-react"
+import {
+  LoaderCircle,
+  MessageSquareMore,
+  ShieldAlert,
+  Square,
+  Wrench,
+  X,
+} from "lucide-react"
+import type { ActiveTurnActivity } from "../execution-view.ts"
 import { useElapsedSeconds } from "../hooks/use-elapsed-time.ts"
 import { formatElapsed } from "../lib/format.ts"
 import { useAppStore, useExecutionView } from "../store/app-store.ts"
@@ -8,7 +16,6 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip.tsx"
 
 export function StatusSurface() {
   const view = useExecutionView()
-  const busy = useAppStore((state) => state.busy)
   const inFlightActions = useAppStore((state) => state.inFlightActions)
   const cancelTurn = useAppStore((state) => state.cancelTurn)
   const cancelQueuedInput = useAppStore((state) => state.cancelQueuedInput)
@@ -26,17 +33,18 @@ export function StatusSurface() {
 
   const activeTurnId = view.activeTurnId
   if (activeTurnId === undefined && queued.length === 0) return null
-  const cancelling =
-    activeTurnId === undefined ||
-    busy ||
-    inFlightActions.has(`cancel:${activeTurnId}`)
+  const stopping =
+    activeTurnId !== undefined && inFlightActions.has(`cancel:${activeTurnId}`)
 
   return (
     <div className="space-y-1 border-t bg-muted/40 px-4 py-2">
       {activeTurnId !== undefined && (
-        <div className="flex items-center gap-2 text-sm">
-          <LoaderCircle className="size-4 animate-spin text-muted-foreground" />
-          <span>Working · {formatElapsed(elapsed)}</span>
+        <div className="flex items-center gap-2 text-sm" aria-live="polite">
+          <ActivityIcon activity={view.activeActivity} stopping={stopping} />
+          <span>{activityLabel(view.activeActivity, stopping)}</span>
+          <span className="text-muted-foreground">
+            · {formatElapsed(elapsed)}
+          </span>
           {view.lastModel !== undefined && (
             <span className="truncate text-muted-foreground">
               {view.lastModel.provider} · {view.lastModel.model}
@@ -47,10 +55,18 @@ export function StatusSurface() {
             variant="ghost"
             size="sm"
             className="ml-auto"
-            disabled={cancelling}
+            disabled={stopping}
             onClick={() => void cancelTurn(activeTurnId)}
           >
-            <Square /> Interrupt
+            {stopping ? (
+              <>
+                <LoaderCircle className="animate-spin" /> Stopping…
+              </>
+            ) : (
+              <>
+                <Square /> Interrupt
+              </>
+            )}
           </Button>
         </div>
       )}
@@ -81,4 +97,52 @@ export function StatusSurface() {
       ))}
     </div>
   )
+}
+
+function ActivityIcon({
+  activity,
+  stopping,
+}: {
+  readonly activity: ActiveTurnActivity | undefined
+  readonly stopping: boolean
+}) {
+  if (stopping) {
+    return (
+      <LoaderCircle className="size-4 animate-spin text-muted-foreground" />
+    )
+  }
+  if (activity?.kind === "responding") {
+    return <MessageSquareMore className="size-4 text-sky-600" />
+  }
+  if (activity?.kind === "waiting_permission") {
+    return <ShieldAlert className="size-4 text-amber-600" />
+  }
+  if (activity?.kind === "running_tool") {
+    return <Wrench className="size-4 text-emerald-600" />
+  }
+  return <ReasoningPulse />
+}
+
+function ReasoningPulse() {
+  return (
+    <span className="relative flex size-4 items-center justify-center">
+      <span className="absolute size-3 animate-ping rounded-full border border-foreground/20" />
+      <span className="size-1.5 rounded-full bg-foreground/55" />
+    </span>
+  )
+}
+
+function activityLabel(
+  activity: ActiveTurnActivity | undefined,
+  stopping: boolean,
+): string {
+  if (stopping) return "Stopping"
+  if (activity?.kind === "responding") return "Responding"
+  if (activity?.kind === "waiting_permission") {
+    return `Waiting for approval · ${activity.action}`
+  }
+  if (activity?.kind === "running_tool") {
+    return `Running · ${activity.name}`
+  }
+  return "Reasoning"
 }

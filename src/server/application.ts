@@ -669,12 +669,16 @@ function createFauxScenarioStream(scenario: string): StreamFn {
   let toolCallSequence = 0
   return async function* (request) {
     if (scenario === "text") {
+      yield { type: "reasoning_snapshot", text: "Preparing a concise reply." }
       yield { type: "snapshot", text: "Hel" }
       yield { type: "snapshot", text: "Hello from faux." }
       yield {
         type: "response",
         response: {
-          content: [{ type: "text", text: "Hello from faux." }],
+          content: [
+            { type: "reasoning", text: "Preparing a concise reply." },
+            { type: "text", text: "Hello from faux." },
+          ],
           stopReason: ModelStopReason.EndTurn,
         },
       }
