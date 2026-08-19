@@ -14,6 +14,10 @@ import {
 import type { SessionProjection } from "./session-projector.ts"
 
 export type EventStore = {
+  createSession(
+    sessionId: string,
+    created: SessionCreatedEvent,
+  ): Promise<EventEnvelope>
   appendEvent(
     sessionId: string,
     event: KernelEvent,
@@ -39,6 +43,7 @@ export type EventStore = {
     input?: EventStoreListSessionsInput,
   ): Promise<EventStoreListSessionsResult>
   deleteSession(sessionId: string): Promise<void>
+  deleteConversation(conversationId: string): Promise<void>
 }
 
 export type EventStoreAppendOptions = {
@@ -55,15 +60,20 @@ export type EventStoreForkSessionInput = {
   readonly atInputId: string
   readonly expectedSourceSeq: number
   readonly created: SessionCreatedEvent
+  readonly initialEvents?: readonly KernelEvent[]
 }
 
 export type EventStoreForkSessionResult = {
+  readonly historyEndSeqExclusive: number
   readonly events: readonly StoredEventEnvelope[]
+  readonly localEvents: readonly StoredEventEnvelope[]
   readonly projection: SessionProjection
 }
 
 export type EventStoreReadEventsInput = {
   readonly after?: number
+  readonly through?: number
+  readonly limit?: number
 }
 
 export type EventStoreRebuildProjectionResult = {
@@ -85,6 +95,7 @@ export type EventStoreListSessionsResult = {
 
 export type EventStoreSessionSummary = {
   readonly sessionId: string
+  readonly conversationId: string
   readonly seq: number
   readonly createdAt: string
   readonly updatedAt: string
@@ -171,6 +182,7 @@ export function summarizeSessionProjection(
 ): EventStoreSessionSummary {
   return {
     sessionId: projection.id,
+    conversationId: projection.conversationId,
     seq: projection.seq,
     createdAt: projection.createdAt,
     updatedAt: projection.updatedAt,
@@ -244,6 +256,40 @@ export function paginateSessionSummaries(
       ? { nextCursor: sessionSummaryCursor(last, order) }
       : {}),
   }
+}
+
+export function collapseSessionConversations(
+  summaries: readonly EventStoreSessionSummary[],
+): EventStoreSessionSummary[] {
+  const groups = new Map<string, EventStoreSessionSummary[]>()
+  for (const summary of summaries) {
+    const group = groups.get(summary.conversationId)
+    if (group === undefined) groups.set(summary.conversationId, [summary])
+    else group.push(summary)
+  }
+  return [...groups.values()].flatMap((group) => {
+    const continued = new Set(
+      group.flatMap((summary) =>
+        summary.parentSessionId === undefined ||
+        summary.forkReason === undefined
+          ? []
+          : [summary.parentSessionId],
+      ),
+    )
+    const leaves = group.filter((summary) => !continued.has(summary.sessionId))
+    const candidates = leaves.length === 0 ? group : leaves
+    const latest = candidates.reduce((current, summary) => {
+      if (
+        summary.updatedAt > current.updatedAt ||
+        (summary.updatedAt === current.updatedAt &&
+          summary.sessionId > current.sessionId)
+      ) {
+        return summary
+      }
+      return current
+    })
+    return [latest]
+  })
 }
 
 export function parseStoredEventEnvelope(

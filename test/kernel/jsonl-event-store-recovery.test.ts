@@ -165,12 +165,15 @@ describe("JSONL recovery fault models", () => {
 
   it("retains a complete fact prefix when writeAll fails mid-buffer", async () => {
     const sessionId = "session_00000000-0000-4000-8000-000000000105"
-    const fixture = await createJournalFixture(sessionId, [])
-    await fixture.store.appendEvents(
-      sessionId,
-      [
-        { type: EventType.SessionCreated, data: {} },
-        {
+    const fixture = await createJournalFixture(sessionId, [
+      serializeFactLine(
+        storedFact(sessionId, 1, "event_partial_session", {
+          type: EventType.SessionCreated,
+          data: {},
+        }),
+      ),
+      serializeFactLine(
+        storedFact(sessionId, 2, "event_partial_input", {
           type: EventType.InputAdmitted,
           data: {
             requestId: "request:partial-write",
@@ -178,18 +181,18 @@ describe("JSONL recovery fault models", () => {
             role: "user",
             content: { kind: "text", text: "partial" },
           },
-        },
-        {
+        }),
+      ),
+      serializeFactLine(
+        storedFact(sessionId, 3, "event_partial_turn", {
           type: EventType.TurnStarted,
           data: {
             turnId: "turn_partial_write",
             inputId: "input_partial_write",
           },
-        },
-      ],
-      { expectedSeq: 0 },
-    )
-    await fixture.reopen()
+        }),
+      ),
+    ])
     await fixture.store.readEvents(sessionId)
     const failure = new Error("simulated second write failure")
     const { originalWrite, write } = await spyOnFileHandleWrite(fixture.journal)

@@ -9,11 +9,7 @@ export function defineEventStoreContract(options: {
   it(`${options.name}: writes events and projection together`, async () => {
     await options.run(async (store) => {
       const sessionId = "session_00000000-0000-4000-8000-000000000001"
-      await store.appendEvent(
-        sessionId,
-        { type: EventType.SessionCreated, data: { title: "Projected" } },
-        { expectedSeq: 0 },
-      )
+      await createSession(store, sessionId, { title: "Projected" })
       expect(await store.readProjection(sessionId)).toMatchObject({
         id: sessionId,
         seq: 1,
@@ -25,19 +21,14 @@ export function defineEventStoreContract(options: {
   it(`${options.name}: persistently rebuilds a projection from facts`, async () => {
     await options.run(async (store) => {
       const sessionId = "session_00000000-0000-4000-8000-00000000000a"
-      await store.appendEvents(
+      await createSession(store, sessionId, { title: "Rebuilt" })
+      await store.appendEvent(
         sessionId,
-        [
-          {
-            type: EventType.SessionCreated,
-            data: { title: "Rebuilt" },
-          },
-          {
-            type: EventType.InputCancelled,
-            data: { inputId: "input_missing" },
-          },
-        ],
-        { expectedSeq: 0 },
+        {
+          type: EventType.InputCancelled,
+          data: { inputId: "input_missing" },
+        },
+        { expectedSeq: 1 },
       )
 
       const rebuilt = await store.rebuildProjection(sessionId)
@@ -52,14 +43,31 @@ export function defineEventStoreContract(options: {
     })
   })
 
+  it(`${options.name}: rejects fork metadata through ordinary append`, async () => {
+    await options.run(async (store) => {
+      const sessionId = "session_00000000-0000-4000-8000-000000000019"
+      await expect(
+        store.appendEvent(
+          sessionId,
+          {
+            type: EventType.SessionCreated,
+            data: {
+              parentSessionId: "session_00000000-0000-4000-8000-000000000018",
+              forkedFromInputId: "input_forbidden",
+              forkReason: "undo",
+            },
+          },
+          { expectedSeq: 0 },
+        ),
+      ).rejects.toThrow("session.created can only be written by createSession")
+      expect(await store.readEvents(sessionId)).toEqual([])
+    })
+  })
+
   it(`${options.name}: rejects stale compare-and-append`, async () => {
     await options.run(async (store) => {
       const sessionId = "session_00000000-0000-4000-8000-000000000002"
-      await store.appendEvent(
-        sessionId,
-        { type: EventType.SessionCreated, data: {} },
-        { expectedSeq: 0 },
-      )
+      await createSession(store, sessionId)
       await expect(
         store.appendEvent(
           sessionId,
@@ -76,11 +84,7 @@ export function defineEventStoreContract(options: {
   it(`${options.name}: returns the original event for an idempotent admission`, async () => {
     await options.run(async (store) => {
       const sessionId = "session_00000000-0000-4000-8000-000000000003"
-      await store.appendEvent(
-        sessionId,
-        { type: EventType.SessionCreated, data: {} },
-        { expectedSeq: 0 },
-      )
+      await createSession(store, sessionId)
       const data = {
         requestId: "request:contract",
         inputId: "input_contract",
@@ -116,11 +120,7 @@ export function defineEventStoreContract(options: {
   it(`${options.name}: rejects a request id reused with a different fingerprint`, async () => {
     await options.run(async (store) => {
       const sessionId = "session_00000000-0000-4000-8000-000000000004"
-      await store.appendEvent(
-        sessionId,
-        { type: EventType.SessionCreated, data: {} },
-        { expectedSeq: 0 },
-      )
+      await createSession(store, sessionId)
       const firstData = {
         requestId: "request:reused",
         inputId: "input_1",
@@ -169,16 +169,14 @@ export function defineEventStoreContract(options: {
   it(`${options.name}: reads only facts after the requested sequence`, async () => {
     await options.run(async (store) => {
       const sessionId = "session_00000000-0000-4000-8000-000000000005"
-      await store.appendEvents(
+      await createSession(store, sessionId)
+      await store.appendEvent(
         sessionId,
-        [
-          { type: EventType.SessionCreated, data: {} },
-          {
-            type: EventType.InputCancelled,
-            data: { inputId: "input_1" },
-          },
-        ],
-        { expectedSeq: 0 },
+        {
+          type: EventType.InputCancelled,
+          data: { inputId: "input_1" },
+        },
+        { expectedSeq: 1 },
       )
 
       expect(await store.readEvents(sessionId, { after: 1 })).toEqual([
@@ -190,14 +188,10 @@ export function defineEventStoreContract(options: {
   it(`${options.name}: does not expose mutable storage references`, async () => {
     await options.run(async (store) => {
       const sessionId = "session_00000000-0000-4000-8000-000000000006"
-      await store.appendEvent(
-        sessionId,
-        {
-          type: EventType.SessionCreated,
-          data: { title: "Original", metadata: { source: "Original" } },
-        },
-        { expectedSeq: 0 },
-      )
+      await createSession(store, sessionId, {
+        title: "Original",
+        metadata: { source: "Original" },
+      })
       const event = (await store.readEvents(sessionId))[0] as unknown as {
         data: { title?: string }
       }
@@ -226,11 +220,7 @@ export function defineEventStoreContract(options: {
   it(`${options.name}: snapshots mutable append inputs before admission`, async () => {
     await options.run(async (store) => {
       const sessionId = "session_00000000-0000-4000-8000-000000000011"
-      await store.appendEvent(
-        sessionId,
-        { type: EventType.SessionCreated, data: {} },
-        { expectedSeq: 0 },
-      )
+      await createSession(store, sessionId)
       const event = {
         type: EventType.InputAdmitted,
         data: {
@@ -294,7 +284,7 @@ export function defineEventStoreContract(options: {
           },
           { expectedSeq: 0 },
         ),
-      ).rejects.toThrow("projection")
+      ).rejects.toThrow("has not been created")
       expect(await store.readEvents(sessionId)).toEqual([])
       expect(await store.readProjection(sessionId)).toBeUndefined()
     })
@@ -304,16 +294,8 @@ export function defineEventStoreContract(options: {
     await options.run(async (store) => {
       const sessionId = "session_00000000-0000-4000-8000-000000000012"
       const otherId = "session_00000000-0000-4000-8000-000000000013"
-      await store.appendEvent(
-        sessionId,
-        { type: EventType.SessionCreated, data: { title: "Doomed" } },
-        { expectedSeq: 0 },
-      )
-      await store.appendEvent(
-        otherId,
-        { type: EventType.SessionCreated, data: { title: "Kept" } },
-        { expectedSeq: 0 },
-      )
+      await createSession(store, sessionId, { title: "Doomed" })
+      await createSession(store, otherId, { title: "Kept" })
 
       await store.deleteSession(sessionId)
 
@@ -334,11 +316,7 @@ export function defineEventStoreContract(options: {
   it(`${options.name}: deleting a session twice is idempotent`, async () => {
     await options.run(async (store) => {
       const sessionId = "session_00000000-0000-4000-8000-000000000014"
-      await store.appendEvent(
-        sessionId,
-        { type: EventType.SessionCreated, data: {} },
-        { expectedSeq: 0 },
-      )
+      await createSession(store, sessionId)
 
       await store.deleteSession(sessionId)
       await store.deleteSession(sessionId)
@@ -354,30 +332,9 @@ export function defineEventStoreContract(options: {
       const first = "session_00000000-0000-4000-8000-000000000016"
       const second = "session_00000000-0000-4000-8000-000000000017"
       const third = "session_00000000-0000-4000-8000-000000000018"
-      await store.appendEvent(
-        first,
-        {
-          type: EventType.SessionCreated,
-          data: { workingDirectory: "/project/a" },
-        },
-        { expectedSeq: 0 },
-      )
-      await store.appendEvent(
-        second,
-        {
-          type: EventType.SessionCreated,
-          data: { workingDirectory: "/project/b" },
-        },
-        { expectedSeq: 0 },
-      )
-      await store.appendEvent(
-        third,
-        {
-          type: EventType.SessionCreated,
-          data: { workingDirectory: "/project/a" },
-        },
-        { expectedSeq: 0 },
-      )
+      await createSession(store, first, { workingDirectory: "/project/a" })
+      await createSession(store, second, { workingDirectory: "/project/b" })
+      await createSession(store, third, { workingDirectory: "/project/a" })
 
       const filtered = await store.listSessions({
         workingDirectory: "/project/a",
@@ -395,5 +352,16 @@ export function defineEventStoreContract(options: {
           .sort(),
       ).toEqual([first, second, third].sort())
     })
+  })
+}
+
+function createSession(
+  store: EventStore,
+  sessionId: string,
+  data: Parameters<EventStore["createSession"]>[1]["data"] = {},
+) {
+  return store.createSession(sessionId, {
+    type: EventType.SessionCreated,
+    data,
   })
 }

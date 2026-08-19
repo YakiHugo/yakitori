@@ -4,14 +4,17 @@ import {
   open,
   readdir,
   readFile,
+  rename,
   rm,
   stat,
 } from "node:fs/promises"
+import { randomUUID } from "node:crypto"
 import { dirname, join } from "node:path"
 import { createYakitoriError, YakitoriErrorCode } from "./errors.ts"
 import {
   appendForkCutTurnClosures,
   assertEventStoreSessionId,
+  collapseSessionConversations,
   type EventStore,
   type EventStoreAppendOptions,
   type EventStoreForkSessionInput,
@@ -33,6 +36,8 @@ import {
   EventType,
   isKernelEvent,
   type KernelEvent,
+  type SessionCreatedEvent,
+  type SessionHistoryPosition,
   type StoredEventEnvelope,
 } from "./events.ts"
 import { isRequestId } from "./ids.ts"
@@ -85,6 +90,35 @@ type SummaryJob = {
   promise: Promise<void>
 }
 
+type ForkReference = {
+  readonly parentSessionId: string
+  readonly atInputId: string
+  readonly historyBase: SessionHistoryPosition
+}
+
+type JournalHeader = {
+  readonly created: StoredEventEnvelope & {
+    readonly type: typeof EventType.SessionCreated
+  }
+  readonly headerBytes: number
+  readonly journalBytes: number
+}
+
+type HistorySegment = {
+  readonly sessionId: string
+  readonly startByteOffset: number
+  readonly endByteOffset: number
+  readonly startSeq: number
+  readonly endSeqExclusive: number
+}
+
+type PhysicalEventRecord = {
+  readonly event: StoredEventEnvelope
+  readonly lineStart: number
+  readonly lineEnd: number
+  readonly eventIndex: number
+}
+
 export function createJsonlEventStore(
   options: JsonlEventStoreOptions = {},
 ): JsonlEventStore {
@@ -94,6 +128,9 @@ export function createJsonlEventStore(
   const sessionGates = new Map<string, Promise<void>>()
   const storeOperations = new Set<Promise<void>>()
   const summaryJobs = new Map<string, SummaryJob>()
+  let graphGate = Promise.resolve()
+  let recoveryPromise: Promise<void> | undefined
+  let sessionsDirectoryNeedsSync = false
   let closing = false
   let closePromise: Promise<void> | undefined
 
@@ -117,7 +154,7 @@ export function createJsonlEventStore(
 
   function runStoreOperation<T>(task: () => Promise<T>): Promise<T> {
     requireOpen()
-    const result = Promise.resolve().then(task)
+    const result = ensureStoreRecovered().then(task)
     const settled = result.then(
       () => undefined,
       () => undefined,
@@ -128,6 +165,141 @@ export function createJsonlEventStore(
     })
   }
 
+  function ensureStoreRecovered(): Promise<void> {
+    recoveryPromise ??= cleanupStagingDirectories()
+    return recoveryPromise
+  }
+
+  async function cleanupStagingDirectories(): Promise<void> {
+    const entries = await readdir(sessionsDir, { withFileTypes: true }).catch(
+      (error: unknown) => {
+        if (isNotFound(error)) return []
+        throw error
+      },
+    )
+    const staging = entries.filter(
+      (entry) => entry.isDirectory() && entry.name.startsWith(".staging-"),
+    )
+    await Promise.all(
+      staging.map((entry) =>
+        rm(join(sessionsDir, entry.name), { recursive: true, force: true }),
+      ),
+    )
+    if (staging.length > 0) await syncDirectory(sessionsDir)
+  }
+
+  function runGraphOperation<T>(task: () => Promise<T>): Promise<T> {
+    const result = graphGate.then(task)
+    graphGate = result.then(
+      () => undefined,
+      () => undefined,
+    )
+    return result
+  }
+
+  async function publishSessionJournal(
+    sessionId: string,
+    events: readonly StoredEventEnvelope[],
+  ): Promise<void> {
+    const sessionsDirectoryExisted = await pathExists(sessionsDir)
+    await mkdir(sessionsDir, { recursive: true, mode: 0o700 })
+    if (!sessionsDirectoryExisted) await syncDirectory(dirname(sessionsDir))
+    const target = sessionDirectory(sessionId)
+    if (await pathExists(target)) {
+      throw createYakitoriError({
+        code: YakitoriErrorCode.InvalidState,
+        message: `Session ${sessionId} already exists.`,
+        details: { sessionId },
+      })
+    }
+    const staging = join(sessionsDir, `.staging-${sessionId}-${randomUUID()}`)
+    await mkdir(staging, { mode: 0o700 })
+    const stagingJournal = join(staging, "events.jsonl")
+    let handle: FileHandle | undefined
+    try {
+      handle = await open(stagingJournal, "wx", 0o600)
+      await writeAll(
+        handle,
+        Buffer.from(events.map(serializeFactLine).join("")),
+      )
+      await handle.sync()
+      await handle.close()
+      handle = undefined
+      await syncDirectory(staging)
+      await rename(staging, target)
+      await confirmSessionsDirectoryMutation()
+    } catch (cause) {
+      await handle?.close()
+      await rm(staging, { recursive: true, force: true })
+      throw cause
+    }
+  }
+
+  async function confirmSessionsDirectoryMutation(): Promise<void> {
+    try {
+      await syncDirectory(sessionsDir)
+      sessionsDirectoryNeedsSync = false
+    } catch (error) {
+      // rename/unlink is the visibility commit point. Reporting the operation
+      // as failed after that point would invite a retry even though the target
+      // is already published. Keep the durability barrier pending and retry it
+      // on a later mutation or close instead.
+      sessionsDirectoryNeedsSync = true
+      console.warn(
+        `Failed to sync Session directory ${sessionsDir}; durability confirmation is pending.`,
+        error,
+      )
+    }
+  }
+
+  async function createSession(
+    sessionId: string,
+    created: SessionCreatedEvent,
+  ): Promise<EventEnvelope> {
+    assertEventStoreSessionId(sessionId)
+    const snapshot = structuredClone(created)
+    if (
+      snapshot.data.historyBase !== undefined ||
+      snapshot.data.forkedFromInputId !== undefined ||
+      snapshot.data.forkReason !== undefined
+    ) {
+      throw createYakitoriError({
+        code: YakitoriErrorCode.InvalidArgument,
+        message: "A root Session cannot carry fork history metadata.",
+        details: { sessionId },
+      })
+    }
+    const event = createEventEnvelope({
+      sessionId,
+      seq: 1,
+      event: {
+        ...snapshot,
+        data: {
+          ...snapshot.data,
+          conversationId: snapshot.data.conversationId ?? sessionId,
+        },
+      },
+    })
+    return runStoreOperation(() =>
+      runForSession(sessionId, async () => {
+        if (await pathExists(journalPath(sessionId))) {
+          throw createYakitoriError({
+            code: YakitoriErrorCode.InvalidState,
+            message: `Session ${sessionId} already exists.`,
+            details: { sessionId },
+          })
+        }
+        await publishSessionJournal(sessionId, [event])
+        const loaded = await loadSession(sessionId, false)
+        if (loaded?.projection === undefined) {
+          throw new Error(`Failed to load created Session ${sessionId}.`)
+        }
+        scheduleSummary(sessionId, loaded)
+        return structuredClone(event)
+      }),
+    )
+  }
+
   async function appendEvents(
     sessionId: string,
     events: readonly KernelEvent[],
@@ -136,13 +308,26 @@ export function createJsonlEventStore(
     assertEventStoreSessionId(sessionId)
     const eventSnapshot = structuredClone(events)
     const optionsSnapshot = structuredClone(appendOptions)
+    if (
+      eventSnapshot.some((event) => event.type === EventType.SessionCreated)
+    ) {
+      throw createYakitoriError({
+        code: YakitoriErrorCode.InvalidArgument,
+        message: "session.created can only be written by createSession.",
+        details: { sessionId },
+      })
+    }
     requireAdmissionOption(sessionId, eventSnapshot, optionsSnapshot.admission)
     return runStoreOperation(async () => {
       if (eventSnapshot.length === 0) return []
       return runForSession(sessionId, async () => {
-        const loaded = await loadSession(sessionId, true)
+        const loaded = await loadSession(sessionId, false)
         if (loaded === undefined) {
-          throw new Error(`Failed to create Session journal ${sessionId}.`)
+          throw createYakitoriError({
+            code: YakitoriErrorCode.NotFound,
+            message: `Session ${sessionId} has not been created.`,
+            details: { sessionId },
+          })
         }
         const admission =
           optionsSnapshot.admission === undefined
@@ -254,105 +439,164 @@ export function createJsonlEventStore(
         message: "A Session cannot be forked onto itself.",
       })
     }
+    if (
+      input.created.data.parentSessionId !== input.sourceSessionId ||
+      input.created.data.forkedFromInputId !== input.atInputId ||
+      input.created.data.forkReason === undefined ||
+      input.created.data.historyBase !== undefined
+    ) {
+      throw createYakitoriError({
+        code: YakitoriErrorCode.InvalidArgument,
+        message:
+          "A forked Session must record its source, input boundary, and reason.",
+        details: {
+          sourceSessionId: input.sourceSessionId,
+          targetSessionId: input.targetSessionId,
+        },
+      })
+    }
+    if (
+      input.initialEvents?.some(
+        (event) => event.type === EventType.SessionCreated,
+      )
+    ) {
+      throw createYakitoriError({
+        code: YakitoriErrorCode.InvalidArgument,
+        message: "Fork initial events cannot contain session.created.",
+        details: { targetSessionId: input.targetSessionId },
+      })
+    }
     const snapshot = structuredClone(input)
     return runStoreOperation(() =>
-      runForSession(snapshot.sourceSessionId, async () => {
-        const source = await loadSession(snapshot.sourceSessionId, false)
-        if (source === undefined) {
-          throw createYakitoriError({
-            code: YakitoriErrorCode.NotFound,
-            message: `Session ${snapshot.sourceSessionId} has not been created.`,
-            details: { sessionId: snapshot.sourceSessionId },
-          })
-        }
-        const sourceSeq = source.events.at(-1)?.seq ?? 0
-        requireExpectedSequence(
-          snapshot.sourceSessionId,
-          snapshot.expectedSourceSeq,
-          sourceSeq,
-        )
-        const cutIndex = source.events.findIndex(
-          (event) =>
-            event.type === EventType.InputAdmitted &&
-            event.data.inputId === snapshot.atInputId,
-        )
-        if (cutIndex === -1) {
-          throw createYakitoriError({
-            code: YakitoriErrorCode.NotFound,
-            message: `Input ${snapshot.atInputId} was not found.`,
-            details: { inputId: snapshot.atInputId },
-          })
-        }
-
-        return runForSession(snapshot.targetSessionId, async () => {
-          if (
-            (await loadSession(snapshot.targetSessionId, false)) !== undefined
-          ) {
+      runGraphOperation(() =>
+        runForSession(snapshot.sourceSessionId, async () => {
+          const source = await loadSession(snapshot.sourceSessionId, false)
+          if (source === undefined) {
             throw createYakitoriError({
-              code: YakitoriErrorCode.InvalidState,
-              message: `Session ${snapshot.targetSessionId} already exists.`,
-              details: { sessionId: snapshot.targetSessionId },
+              code: YakitoriErrorCode.NotFound,
+              message: `Session ${snapshot.sourceSessionId} has not been created.`,
+              details: { sessionId: snapshot.sourceSessionId },
             })
           }
-          const created = createEventEnvelope({
-            sessionId: snapshot.targetSessionId,
-            seq: 1,
-            event: snapshot.created,
-          })
-          const events: StoredEventEnvelope[] = [
-            created,
-            ...source.events.slice(1, cutIndex).map((event) => ({
-              ...structuredClone(event),
-              sessionId: snapshot.targetSessionId,
-            })),
-          ]
-          appendForkCutTurnClosures(snapshot.targetSessionId, events)
-          const projection = projectSession(events)
-          if (projection === undefined) {
+          const sourceSeq = source.events.at(-1)?.seq ?? 0
+          requireExpectedSequence(
+            snapshot.sourceSessionId,
+            snapshot.expectedSourceSeq,
+            sourceSeq,
+          )
+          const cutIndex = source.events.findIndex(
+            (event) =>
+              event.type === EventType.InputAdmitted &&
+              event.data.inputId === snapshot.atInputId,
+          )
+          if (cutIndex === -1) {
             throw createYakitoriError({
-              code: YakitoriErrorCode.InvalidState,
-              message: `Forking Session ${snapshot.sourceSessionId} did not produce a projection.`,
-              details: {
-                sessionId: snapshot.sourceSessionId,
-                targetSessionId: snapshot.targetSessionId,
+              code: YakitoriErrorCode.NotFound,
+              message: `Input ${snapshot.atInputId} was not found.`,
+              details: { inputId: snapshot.atInputId },
+            })
+          }
+          const cutEvent = source.events[cutIndex]
+          if (cutEvent === undefined) {
+            throw new Error("Fork boundary disappeared from loaded history.")
+          }
+          const historyBase = await findHistoryPosition(
+            snapshot.sourceSessionId,
+            cutEvent.seq,
+          )
+
+          return runForSession(snapshot.targetSessionId, async () => {
+            if (
+              (await loadSession(snapshot.targetSessionId, false)) !== undefined
+            ) {
+              throw createYakitoriError({
+                code: YakitoriErrorCode.InvalidState,
+                message: `Session ${snapshot.targetSessionId} already exists.`,
+                details: { sessionId: snapshot.targetSessionId },
+              })
+            }
+            const created = createEventEnvelope({
+              sessionId: snapshot.targetSessionId,
+              seq: 1,
+              event: {
+                ...snapshot.created,
+                data: {
+                  ...snapshot.created.data,
+                  conversationId:
+                    snapshot.created.data.conversationId ??
+                    source.projection?.conversationId ??
+                    snapshot.sourceSessionId,
+                  historyBase,
+                },
               },
             })
-          }
-          const admissions = collectNewAdmissions(
-            snapshot.targetSessionId,
-            new Map(),
-            events,
-          )
-          const bytes = Buffer.from(events.map(serializeFactLine).join(""))
-          const target = await loadSession(snapshot.targetSessionId, true)
-          if (target === undefined) {
-            throw new Error(
-              `Failed to create Session journal ${snapshot.targetSessionId}.`,
-            )
-          }
-          try {
-            await writeAll(target.handle, bytes)
-            await target.handle.sync()
-          } catch (cause) {
-            await discardLoadedSession(snapshot.targetSessionId)
-            await rm(sessionDirectory(snapshot.targetSessionId), {
-              recursive: true,
-              force: true,
+            const events: StoredEventEnvelope[] = [
+              created,
+              ...source.events.slice(1, cutIndex).map((event) => ({
+                ...structuredClone(event),
+                sessionId: snapshot.targetSessionId,
+              })),
+            ]
+            appendForkCutTurnClosures(snapshot.targetSessionId, events)
+            const inheritedProjection = projectSession(events)
+            if (inheritedProjection === undefined) {
+              throw new Error("Expected a forked Session projection.")
+            }
+            for (const pending of inheritedProjection.pendingInputs) {
+              events.push(
+                createEventEnvelope({
+                  sessionId: snapshot.targetSessionId,
+                  seq: events.length + 1,
+                  event: {
+                    type: EventType.InputCancelled,
+                    data: {
+                      inputId: pending.inputId,
+                      reason: "conversation_fork",
+                    },
+                  },
+                }),
+              )
+            }
+            for (const event of snapshot.initialEvents ?? []) {
+              events.push(
+                createEventEnvelope({
+                  sessionId: snapshot.targetSessionId,
+                  seq: events.length + 1,
+                  event,
+                }),
+              )
+            }
+            const localEvents = [created, ...events.slice(cutIndex)]
+            const projection = projectSession(events)
+            if (projection === undefined) {
+              throw createYakitoriError({
+                code: YakitoriErrorCode.InvalidState,
+                message: `Forking Session ${snapshot.sourceSessionId} did not produce a projection.`,
+                details: {
+                  sessionId: snapshot.sourceSessionId,
+                  targetSessionId: snapshot.targetSessionId,
+                },
+              })
+            }
+            collectNewAdmissions(snapshot.targetSessionId, new Map(), events)
+            await publishSessionJournal(snapshot.targetSessionId, localEvents)
+            const target = await loadSession(snapshot.targetSessionId, false)
+            if (target?.projection === undefined) {
+              throw new Error(
+                `Failed to load forked Session ${snapshot.targetSessionId}.`,
+              )
+            }
+            scheduleSummary(snapshot.targetSessionId, target)
+            await discardLoadedSession(snapshot.sourceSessionId)
+            return structuredClone({
+              historyEndSeqExclusive: historyBase.endSeqExclusive,
+              events,
+              localEvents,
+              projection,
             })
-            await syncDirectory(sessionsDir)
-            throw cause
-          }
-
-          target.events.push(...events)
-          target.projection = projection
-          target.journalBytes = bytes.byteLength
-          for (const [requestId, record] of admissions) {
-            target.admissions.set(requestId, record)
-          }
-          scheduleSummary(snapshot.targetSessionId, target)
-          return structuredClone({ events, projection })
-        })
-      }),
+          })
+        }),
+      ),
     )
   }
 
@@ -365,38 +609,13 @@ export function createJsonlEventStore(
       await synchronizeIfNeeded(sessionId, cached)
       return cached
     }
-    const directory = sessionDirectory(sessionId)
     const journal = journalPath(sessionId)
     const exists = await pathExists(journal)
     if (!exists && !create) return undefined
     if (!exists) {
-      const directoryExisted = await pathExists(directory)
-      const sessionsDirectoryExisted = await pathExists(sessionsDir)
-      await mkdir(directory, { recursive: true, mode: 0o700 })
-      const handle = await open(journal, "a+", 0o600)
-      try {
-        await syncDirectory(directory)
-        if (!directoryExisted) await syncDirectory(sessionsDir)
-        if (!sessionsDirectoryExisted) await syncDirectory(dirname(sessionsDir))
-      } catch (cause) {
-        await handle.close()
-        throw cause
-      }
-      const loaded: LoadedSession = {
-        handle,
-        events: [],
-        admissions: new Map(),
-        journalBytes: 0,
-      }
-      loadedSessions.set(sessionId, loaded)
-      try {
-        await synchronizeIfNeeded(sessionId, loaded)
-        return loaded
-      } catch (cause) {
-        loadedSessions.delete(sessionId)
-        await handle.close()
-        throw cause
-      }
+      throw new Error(
+        `Session journal ${sessionId} must be created atomically.`,
+      )
     }
 
     const handle = await open(journal, "a+")
@@ -424,72 +643,16 @@ export function createJsonlEventStore(
       await handle.truncate(committedBytes)
       await handle.sync()
     }
-    const lines = content
-      .subarray(0, committedBytes)
-      .toString("utf8")
-      .split("\n")
-      .slice(0, -1)
-    const storedEvents: StoredEventEnvelope[] = []
-    const admissions = new Map<string, AdmissionRecord>()
-    let expectedSeq = 1
-
-    for (const [recordIndex, line] of lines.entries()) {
-      const recordNumber = recordIndex + 1
-      const parsed = parseJournalLine(line, recordNumber)
-      const record = isCommitRecord(parsed) ? parsed : undefined
-      if (record !== undefined && record.sessionId !== sessionId) {
-        throw invalidEventLog(
-          `Session journal record ${recordNumber} belongs to another Session.`,
-          {
-            sessionId,
-            recordNumber,
-            recordSessionId: record.sessionId,
-          },
-        )
-      }
-      if (record !== undefined && record.firstSeq !== expectedSeq) {
-        throw invalidEventLog(
-          `Session journal record ${recordNumber} is not contiguous.`,
-          { sessionId, recordNumber, expectedSeq, actualSeq: record.firstSeq },
-        )
-      }
-      const parsedEvents = isCommitRecord(parsed)
-        ? parsed.events.map((event, eventIndex) =>
-            parseStoredEventEnvelope(
-              JSON.stringify(event),
-              recordNumber * 1_000_000 + eventIndex + 1,
-            ),
-          )
-        : [parsed]
-      for (const [eventIndex, event] of parsedEvents.entries()) {
-        if (event.sessionId !== sessionId || event.seq !== expectedSeq) {
-          throw invalidEventLog(
-            `Invalid event ordering in Session journal record ${recordNumber}.`,
-            {
-              sessionId,
-              recordNumber,
-              eventIndex,
-              expectedSeq,
-              actualSeq: event.seq,
-              eventSessionId: event.sessionId,
-            },
-          )
-        }
-        storedEvents.push(event)
-        const admission = admissionRecord(event)
-        if (admission !== undefined) {
-          if (admissions.has(admission.requestId)) {
-            throw invalidEventLog(
-              `Duplicate admission request ${admission.requestId} in Session journal.`,
-              { sessionId, recordNumber, requestId: admission.requestId },
-            )
-          }
-          admissions.set(admission.requestId, admission.record)
-        }
-        expectedSeq += 1
-      }
-    }
-
+    const physicalRecords = parsePhysicalJournal(
+      sessionId,
+      content,
+      committedBytes,
+    )
+    const storedEvents = await materializeSessionHistory(
+      sessionId,
+      physicalRecords,
+    )
+    const admissions = collectJournalAdmissions(sessionId, storedEvents)
     const projection = projectSession(storedEvents)
     if (storedEvents.length > 0 && projection === undefined) {
       throw invalidEventLog(`Session journal has no session.created fact.`, {
@@ -503,6 +666,453 @@ export function createJsonlEventStore(
       journalBytes: committedBytes,
       ...(projection === undefined ? {} : { projection }),
     }
+  }
+
+  async function materializeSessionHistory(
+    sessionId: string,
+    physicalRecords: readonly PhysicalEventRecord[],
+  ): Promise<StoredEventEnvelope[]> {
+    const created = physicalRecords[0]?.event
+    if (created === undefined) return []
+    if (
+      created.sessionId !== sessionId ||
+      created.seq !== 1 ||
+      created.type !== EventType.SessionCreated ||
+      !isKernelEvent(created)
+    ) {
+      throw invalidEventLog(
+        "Session journal must begin with session.created at sequence 1.",
+        { sessionId },
+      )
+    }
+
+    const reference = requireForkReference(sessionId, created)
+    let inherited: StoredEventEnvelope[] = []
+    if (reference !== undefined) {
+      if (!(await pathExists(journalPath(reference.parentSessionId)))) {
+        throw invalidEventLog("Forked Session history parent was not found.", {
+          sessionId,
+          parentSessionId: reference.parentSessionId,
+        })
+      }
+      const segments = await resolveHistorySegments(
+        reference.historyBase,
+        new Set([sessionId]),
+      )
+      for (const segment of segments) {
+        inherited.push(...(await readHistorySegment(segment)))
+      }
+      inherited = inherited.map((event) => ({
+        ...structuredClone(event),
+        sessionId,
+      }))
+    }
+
+    const events = [
+      created,
+      ...inherited,
+      ...physicalRecords.slice(1).map((record) => record.event),
+    ]
+    for (const [index, event] of events.entries()) {
+      const expectedSeq = index + 1
+      if (event.sessionId !== sessionId || event.seq !== expectedSeq) {
+        throw invalidEventLog("Session history is not contiguous.", {
+          sessionId,
+          expectedSeq,
+          actualSeq: event.seq,
+          eventSessionId: event.sessionId,
+        })
+      }
+    }
+    return events
+  }
+
+  async function resolveHistorySegments(
+    position: SessionHistoryPosition,
+    lineage: ReadonlySet<string>,
+  ): Promise<HistorySegment[]> {
+    if (lineage.has(position.sessionId)) {
+      throw invalidEventLog("Session history references contain a cycle.", {
+        sessionId: position.sessionId,
+      })
+    }
+    const header = await readSessionHeader(position.sessionId)
+    const reference = requireForkReference(position.sessionId, header.created)
+    if (
+      reference !== undefined &&
+      !(await pathExists(journalPath(reference.parentSessionId)))
+    ) {
+      throw invalidEventLog("Forked Session history parent was not found.", {
+        sessionId: position.sessionId,
+        parentSessionId: reference.parentSessionId,
+      })
+    }
+    const nextLineage = new Set([...lineage, position.sessionId])
+    const segments =
+      reference === undefined
+        ? []
+        : await resolveHistorySegments(reference.historyBase, nextLineage)
+    const startSeq = reference?.historyBase.endSeqExclusive ?? 2
+    const segment = await validateHistorySegment({
+      sessionId: position.sessionId,
+      startByteOffset: header.headerBytes,
+      endByteOffset: position.endByteOffset,
+      startSeq,
+      endSeqExclusive: position.endSeqExclusive,
+    })
+    return segment.startSeq === segment.endSeqExclusive
+      ? segments
+      : [...segments, segment]
+  }
+
+  async function resolveFullHistorySegments(
+    sessionId: string,
+  ): Promise<HistorySegment[]> {
+    const header = await readSessionHeader(sessionId)
+    const reference = requireForkReference(sessionId, header.created)
+    const inherited =
+      reference === undefined
+        ? []
+        : await resolveHistorySegments(
+            reference.historyBase,
+            new Set([sessionId]),
+          )
+    const startSeq = reference?.historyBase.endSeqExclusive ?? 2
+    const local = await inspectHistorySegment({
+      sessionId,
+      startByteOffset: header.headerBytes,
+      endByteOffset: header.journalBytes,
+      startSeq,
+    })
+    return local.startSeq === local.endSeqExclusive
+      ? inherited
+      : [...inherited, local]
+  }
+
+  async function findHistoryPosition(
+    sourceSessionId: string,
+    boundarySeq: number,
+  ): Promise<SessionHistoryPosition> {
+    const segments = await resolveFullHistorySegments(sourceSessionId)
+    const segment = segments.find(
+      (candidate) =>
+        candidate.startSeq <= boundarySeq &&
+        boundarySeq < candidate.endSeqExclusive,
+    )
+    if (segment === undefined) {
+      throw invalidEventLog("Fork history boundary has no physical event.", {
+        sessionId: sourceSessionId,
+        boundarySeq,
+      })
+    }
+    const records = await readHistorySegmentRecords(segment)
+    const boundary = records.find((record) => record.event.seq === boundarySeq)
+    if (boundary === undefined || boundary.eventIndex !== 0) {
+      throw invalidEventLog(
+        "Fork history boundary is not a stable journal line boundary.",
+        { sessionId: segment.sessionId, boundarySeq },
+      )
+    }
+    return {
+      sessionId: segment.sessionId,
+      endSeqExclusive: boundarySeq,
+      endByteOffset: boundary.lineStart,
+    }
+  }
+
+  async function readSessionHeader(sessionId: string): Promise<JournalHeader> {
+    const journal = journalPath(sessionId)
+    const handle = await open(journal, "r").catch((error: unknown) => {
+      if (isNotFound(error)) return undefined
+      throw error
+    })
+    if (handle === undefined) {
+      throw invalidEventLog("Referenced Session journal was not found.", {
+        sessionId,
+      })
+    }
+    try {
+      const chunks: Buffer[] = []
+      let offset = 0
+      for (;;) {
+        const chunk = Buffer.alloc(4_096)
+        const { bytesRead } = await handle.read(chunk, 0, chunk.length, offset)
+        if (bytesRead === 0) {
+          throw invalidEventLog("Session journal has no committed header.", {
+            sessionId,
+          })
+        }
+        const read = chunk.subarray(0, bytesRead)
+        const newline = read.indexOf(0x0a)
+        if (newline === -1) {
+          chunks.push(read)
+          offset += bytesRead
+          continue
+        }
+        chunks.push(read.subarray(0, newline))
+        const line = Buffer.concat(chunks).toString("utf8")
+        const parsed = parseJournalLine(line, 1)
+        if (isCommitRecord(parsed)) {
+          throw invalidEventLog(
+            "Legacy commit journals cannot contribute referenced history.",
+            { sessionId },
+          )
+        }
+        if (
+          parsed.sessionId !== sessionId ||
+          parsed.seq !== 1 ||
+          parsed.type !== EventType.SessionCreated ||
+          !isKernelEvent(parsed)
+        ) {
+          throw invalidEventLog(
+            "Session journal must begin with session.created at sequence 1.",
+            { sessionId },
+          )
+        }
+        return {
+          created: parsed,
+          headerBytes: offset + newline + 1,
+          journalBytes: (await handle.stat()).size,
+        }
+      }
+    } finally {
+      await handle.close()
+    }
+  }
+
+  async function validateHistorySegment(
+    segment: HistorySegment,
+  ): Promise<HistorySegment> {
+    const inspected = await inspectHistorySegment(segment)
+    if (inspected.endSeqExclusive !== segment.endSeqExclusive) {
+      throw invalidEventLog(
+        "Fork history position does not match its sequence.",
+        {
+          sessionId: segment.sessionId,
+          expectedSeq: segment.endSeqExclusive,
+          actualSeq: inspected.endSeqExclusive,
+        },
+      )
+    }
+    return inspected
+  }
+
+  async function inspectHistorySegment(
+    segment: Omit<HistorySegment, "endSeqExclusive"> & {
+      readonly endSeqExclusive?: number
+    },
+  ): Promise<HistorySegment> {
+    const records = await readHistorySegmentRecords(segment)
+    let expectedSeq = segment.startSeq
+    for (const record of records) {
+      if (
+        record.event.sessionId !== segment.sessionId ||
+        record.event.seq !== expectedSeq ||
+        record.event.type === EventType.SessionCreated
+      ) {
+        throw invalidEventLog("Referenced history segment is not contiguous.", {
+          sessionId: segment.sessionId,
+          expectedSeq,
+          actualSeq: record.event.seq,
+        })
+      }
+      expectedSeq += 1
+    }
+    return {
+      ...segment,
+      endSeqExclusive: expectedSeq,
+    }
+  }
+
+  async function readHistorySegment(
+    segment: HistorySegment,
+  ): Promise<StoredEventEnvelope[]> {
+    return (await readHistorySegmentRecords(segment)).map(
+      (record) => record.event,
+    )
+  }
+
+  async function readHistorySegmentRecords(
+    segment: Pick<
+      HistorySegment,
+      "sessionId" | "startByteOffset" | "endByteOffset"
+    >,
+  ): Promise<PhysicalEventRecord[]> {
+    const content = await readFile(journalPath(segment.sessionId))
+    if (
+      segment.startByteOffset < 0 ||
+      segment.endByteOffset < segment.startByteOffset ||
+      segment.endByteOffset > content.byteLength ||
+      (segment.startByteOffset > 0 &&
+        content[segment.startByteOffset - 1] !== 0x0a) ||
+      (segment.endByteOffset > 0 && content[segment.endByteOffset - 1] !== 0x0a)
+    ) {
+      throw invalidEventLog("Fork history byte offset is invalid.", {
+        sessionId: segment.sessionId,
+        startByteOffset: segment.startByteOffset,
+        endByteOffset: segment.endByteOffset,
+      })
+    }
+    return parsePhysicalJournal(
+      segment.sessionId,
+      content,
+      segment.endByteOffset,
+      segment.startByteOffset,
+    )
+  }
+
+  async function findHistoryDependent(
+    parentSessionId: string,
+  ): Promise<string | undefined> {
+    return (await historyDependents()).get(parentSessionId)?.[0]
+  }
+
+  async function historyDependents(): Promise<Map<string, string[]>> {
+    const entries = await readdir(sessionsDir, { withFileTypes: true }).catch(
+      (error: unknown) => {
+        if (isNotFound(error)) return []
+        throw error
+      },
+    )
+    const dependents = new Map<string, string[]>()
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
+      try {
+        assertEventStoreSessionId(entry.name)
+      } catch {
+        continue
+      }
+      const first = await readSessionHeader(entry.name)
+        .then((header) => header.created)
+        .catch((error: unknown) => {
+          if (isNotFound(error)) return undefined
+          throw error
+        })
+      if (
+        first !== undefined &&
+        isKernelEvent(first) &&
+        first.type === EventType.SessionCreated &&
+        first.data.forkReason !== undefined
+      ) {
+        const referenced = new Set(
+          [
+            first.data.parentSessionId,
+            first.data.historyBase?.sessionId,
+          ].filter((sessionId): sessionId is string => sessionId !== undefined),
+        )
+        for (const sessionId of referenced) {
+          const children = dependents.get(sessionId) ?? []
+          children.push(entry.name)
+          dependents.set(sessionId, children)
+        }
+      }
+    }
+    return dependents
+  }
+
+  async function conversationSessions(
+    conversationId: string,
+  ): Promise<Array<{ sessionId: string; parentSessionId?: string }>> {
+    const entries = await readdir(sessionsDir, { withFileTypes: true }).catch(
+      (error: unknown) => {
+        if (isNotFound(error)) return []
+        throw error
+      },
+    )
+    const sessions: Array<{ sessionId: string; parentSessionId?: string }> = []
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
+      try {
+        assertEventStoreSessionId(entry.name)
+      } catch {
+        continue
+      }
+      const header = await readSessionHeader(entry.name)
+      const created = header.created
+      if (
+        !isKernelEvent(created) ||
+        created.type !== EventType.SessionCreated
+      ) {
+        continue
+      }
+      if ((created.data.conversationId ?? entry.name) !== conversationId) {
+        continue
+      }
+      sessions.push({
+        sessionId: entry.name,
+        ...(created.data.parentSessionId === undefined
+          ? {}
+          : { parentSessionId: created.data.parentSessionId }),
+      })
+    }
+    return sessions
+  }
+
+  async function readPhysicalLifecycle(sessionId: string): Promise<{
+    readonly activeTurnId?: string
+    readonly pendingInputIds: readonly string[]
+  }> {
+    const header = await readSessionHeader(sessionId)
+    const records = await readHistorySegmentRecords({
+      sessionId,
+      startByteOffset: header.headerBytes,
+      endByteOffset: header.journalBytes,
+    })
+    const activeTurns = new Set<string>()
+    const pendingInputs = new Set<string>()
+    for (const { event } of records) {
+      if (!isKernelEvent(event)) continue
+      if (event.type === EventType.InputAdmitted) {
+        pendingInputs.add(event.data.inputId)
+        continue
+      }
+      if (event.type === EventType.InputCancelled) {
+        pendingInputs.delete(event.data.inputId)
+        continue
+      }
+      if (event.type === EventType.TurnStarted) {
+        activeTurns.add(event.data.turnId)
+        pendingInputs.delete(event.data.inputId)
+        continue
+      }
+      if (
+        event.type === EventType.TurnCompleted ||
+        event.type === EventType.TurnFailed ||
+        event.type === EventType.TurnCancelled ||
+        event.type === EventType.TurnInterrupted
+      ) {
+        activeTurns.delete(event.data.turnId)
+      }
+    }
+    const activeTurnId = activeTurns.values().next().value
+    return {
+      ...(activeTurnId === undefined ? {} : { activeTurnId }),
+      pendingInputIds: [...pendingInputs],
+    }
+  }
+
+  function runForSessions<T>(
+    sessionIds: readonly string[],
+    task: () => Promise<T>,
+    index = 0,
+  ): Promise<T> {
+    const sessionId = sessionIds[index]
+    return sessionId === undefined
+      ? task()
+      : runForSession(sessionId, () =>
+          runForSessions(sessionIds, task, index + 1),
+        )
+  }
+
+  async function removeSessionDirectory(sessionId: string): Promise<void> {
+    await discardLoadedSession(sessionId)
+    const summaryJob = summaryJobs.get(sessionId)
+    if (summaryJob !== undefined) {
+      summaryJobs.delete(sessionId)
+      await summaryJob.promise
+    }
+    await rm(sessionDirectory(sessionId), { recursive: true, force: true })
+    unconfirmedSessions.delete(sessionId)
   }
 
   async function discardLoadedSession(sessionId: string): Promise<void> {
@@ -616,6 +1226,7 @@ export function createJsonlEventStore(
   }
 
   return {
+    createSession,
     async appendEvent(sessionId, event, appendOptions = {}) {
       const appended = await appendEvents(sessionId, [event], appendOptions)
       const envelope = appended[0]
@@ -631,9 +1242,19 @@ export function createJsonlEventStore(
       return runStoreOperation(() =>
         runForSession(sessionId, async () => {
           const loaded = await loadSession(sessionId, false)
+          if (loaded === undefined) return []
+          const after = input.after ?? 0
+          const start = Math.min(Math.max(after, 0), loaded.events.length)
+          const replayEnd = Math.min(
+            input.through ?? loaded.events.length,
+            loaded.events.length,
+          )
+          const end = Math.min(
+            replayEnd,
+            input.limit === undefined ? replayEnd : start + input.limit,
+          )
           return structuredClone(
-            loaded?.events.filter((event) => event.seq > (input.after ?? 0)) ??
-              [],
+            end <= start ? [] : loaded.events.slice(start, end),
           )
         }),
       )
@@ -689,27 +1310,104 @@ export function createJsonlEventStore(
           )
           if (summary !== undefined) summaries.push(summary)
         }
-        return paginateSessionSummaries(summaries, input)
+        return paginateSessionSummaries(
+          collapseSessionConversations(summaries),
+          input,
+        )
       })
     },
     async deleteSession(sessionId: string) {
       assertEventStoreSessionId(sessionId)
       return runStoreOperation(() =>
         runForSession(sessionId, async () => {
-          await discardLoadedSession(sessionId)
-          // A delayed summary write recreates the directory after rm; settle
-          // the pending job before removing it.
-          const summaryJob = summaryJobs.get(sessionId)
-          if (summaryJob !== undefined) {
-            summaryJobs.delete(sessionId)
-            await summaryJob.promise
+          if (!(await pathExists(journalPath(sessionId)))) return
+          const dependentSessionId = await findHistoryDependent(sessionId)
+          if (dependentSessionId !== undefined) {
+            throw createYakitoriError({
+              code: YakitoriErrorCode.InvalidState,
+              message: `Session ${sessionId} cannot be deleted because Session ${dependentSessionId} references its history.`,
+              details: { sessionId, dependentSessionId },
+            })
           }
-          await rm(sessionDirectory(sessionId), {
-            recursive: true,
-            force: true,
+          await removeSessionDirectory(sessionId)
+          await confirmSessionsDirectoryMutation()
+        }),
+      )
+    },
+    async deleteConversation(conversationId: string) {
+      assertEventStoreSessionId(conversationId)
+      return runStoreOperation(() =>
+        runGraphOperation(async () => {
+          const sessions = await conversationSessions(conversationId)
+          if (sessions.length === 0) return
+          const byId = new Map(
+            sessions.map((session) => [session.sessionId, session]),
+          )
+          const depths = new Map<string, number>()
+          const depth = (
+            sessionId: string,
+            lineage: ReadonlySet<string> = new Set(),
+          ): number => {
+            const cached = depths.get(sessionId)
+            if (cached !== undefined) return cached
+            if (lineage.has(sessionId)) {
+              throw invalidEventLog(
+                "Session conversation lineage contains a cycle.",
+                { sessionId },
+              )
+            }
+            const parent = byId.get(sessionId)?.parentSessionId
+            const value =
+              parent === undefined || !byId.has(parent)
+                ? 0
+                : depth(parent, new Set([...lineage, sessionId])) + 1
+            depths.set(sessionId, value)
+            return value
+          }
+          const rootFirst = [...byId.keys()].sort(
+            (left, right) => depth(left) - depth(right),
+          )
+          const lockOrder = [...byId.keys()].sort()
+          await runForSessions(lockOrder, async () => {
+            const dependents = await historyDependents()
+            for (const sessionId of [...rootFirst].reverse()) {
+              const dependent = dependents
+                .get(sessionId)
+                ?.find((candidate) => !byId.has(candidate))
+              if (dependent !== undefined && !byId.has(dependent)) {
+                throw createYakitoriError({
+                  code: YakitoriErrorCode.InvalidState,
+                  message: `Session ${sessionId} is referenced outside its conversation.`,
+                  details: { sessionId, dependentSessionId: dependent },
+                })
+              }
+            }
+            for (const sessionId of lockOrder) {
+              const lifecycle = await readPhysicalLifecycle(sessionId)
+              if (lifecycle.activeTurnId !== undefined) {
+                throw createYakitoriError({
+                  code: YakitoriErrorCode.InvalidState,
+                  message: `Conversation ${conversationId} contains an active Session ${sessionId}; interrupt it before deleting the conversation.`,
+                  details: {
+                    conversationId,
+                    sessionId,
+                    activeTurnId: lifecycle.activeTurnId,
+                  },
+                })
+              }
+              if (lifecycle.pendingInputIds.length > 0) {
+                throw createYakitoriError({
+                  code: YakitoriErrorCode.InvalidState,
+                  message: `Conversation ${conversationId} contains queued input in Session ${sessionId}; cancel it before deleting the conversation.`,
+                  details: { conversationId, sessionId },
+                })
+              }
+            }
+            for (const sessionId of [...rootFirst].reverse()) {
+              await removeSessionDirectory(sessionId)
+            }
+            await confirmSessionsDirectoryMutation()
           })
-          await syncDirectory(sessionsDir)
-          unconfirmedSessions.delete(sessionId)
         }),
       )
     },
@@ -722,6 +1420,7 @@ export function createJsonlEventStore(
           Promise.all([...summaryJobs.values()].map((job) => job.promise)),
         )
         .then(async () => {
+          if (sessionsDirectoryNeedsSync) await syncDirectory(sessionsDir)
           const loaded = [...loadedSessions.entries()]
           const synchronized = await Promise.allSettled(
             loaded.map(([sessionId, session]) =>
@@ -759,6 +1458,136 @@ function summaryCache(loaded: LoadedSession): SessionSummaryCache | undefined {
 
 function isCommitRecord(line: JournalLine): line is JournalCommitRecord {
   return "record" in line
+}
+
+function parsePhysicalJournal(
+  sessionId: string,
+  content: Buffer,
+  endByteOffset: number,
+  startByteOffset = 0,
+): PhysicalEventRecord[] {
+  const records: PhysicalEventRecord[] = []
+  let lineStart = startByteOffset
+  let recordNumber = 1
+  while (lineStart < endByteOffset) {
+    const newline = content.indexOf(0x0a, lineStart)
+    if (newline === -1 || newline + 1 > endByteOffset) {
+      throw invalidEventLog("Session journal segment ends inside a record.", {
+        sessionId,
+        recordNumber,
+      })
+    }
+    const lineEnd = newline + 1
+    const parsed = parseJournalLine(
+      content.subarray(lineStart, newline).toString("utf8"),
+      recordNumber,
+    )
+    if (isCommitRecord(parsed) && parsed.sessionId !== sessionId) {
+      throw invalidEventLog(
+        `Session journal record ${recordNumber} belongs to another Session.`,
+        {
+          sessionId,
+          recordNumber,
+          recordSessionId: parsed.sessionId,
+        },
+      )
+    }
+    const events = isCommitRecord(parsed)
+      ? parsed.events.map((event, eventIndex) =>
+          parseStoredEventEnvelope(
+            JSON.stringify(event),
+            recordNumber * 1_000_000 + eventIndex + 1,
+          ),
+        )
+      : [parsed]
+    const first = events[0]
+    if (
+      isCommitRecord(parsed) &&
+      first !== undefined &&
+      parsed.firstSeq !== first.seq
+    ) {
+      throw invalidEventLog(
+        `Session journal record ${recordNumber} firstSeq does not match its first event.`,
+        {
+          sessionId,
+          recordNumber,
+          expectedSeq: parsed.firstSeq,
+          actualSeq: first.seq,
+        },
+      )
+    }
+    for (const [eventIndex, event] of events.entries()) {
+      const preceding = events[eventIndex - 1]
+      if (
+        event.sessionId !== sessionId ||
+        (preceding !== undefined && event.seq !== preceding.seq + 1)
+      ) {
+        throw invalidEventLog(
+          `Invalid event ordering in Session journal record ${recordNumber}.`,
+          {
+            sessionId,
+            recordNumber,
+            eventIndex,
+            actualSeq: event.seq,
+            eventSessionId: event.sessionId,
+            ...(preceding === undefined
+              ? {}
+              : { expectedSeq: preceding.seq + 1 }),
+          },
+        )
+      }
+      records.push({ event, lineStart, lineEnd, eventIndex })
+    }
+    lineStart = lineEnd
+    recordNumber += 1
+  }
+  return records
+}
+
+function requireForkReference(
+  sessionId: string,
+  created: StoredEventEnvelope & {
+    readonly type: typeof EventType.SessionCreated
+  },
+): ForkReference | undefined {
+  if (!isKernelEvent(created)) return undefined
+  const { parentSessionId, forkedFromInputId, forkReason } = created.data
+  const { historyBase } = created.data
+  const hasForkMetadata =
+    forkedFromInputId !== undefined ||
+    forkReason !== undefined ||
+    historyBase !== undefined
+  if (!hasForkMetadata) return undefined
+  if (
+    parentSessionId === undefined ||
+    forkedFromInputId === undefined ||
+    forkReason === undefined ||
+    historyBase === undefined
+  ) {
+    throw invalidEventLog("Forked Session history reference is incomplete.", {
+      sessionId,
+    })
+  }
+  return { parentSessionId, atInputId: forkedFromInputId, historyBase }
+}
+
+function collectJournalAdmissions(
+  sessionId: string,
+  events: readonly StoredEventEnvelope[],
+): Map<string, AdmissionRecord> {
+  const admissions = new Map<string, AdmissionRecord>()
+  for (const event of events) {
+    const admission = admissionRecord(event)
+    if (admission === undefined) continue
+    if (admissions.has(admission.requestId)) {
+      throw invalidEventLog(
+        `Duplicate admission request ${admission.requestId} in Session journal.`,
+        { sessionId, requestId: admission.requestId },
+      )
+    }
+    admissions.set(admission.requestId, admission.record)
+  }
+  return admissions
 }
 
 function requireAdmissionOption(

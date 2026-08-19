@@ -149,11 +149,19 @@ export type SessionCreatedEvent = {
     readonly workingDirectory?: string
     readonly mateId?: string
     readonly mateRevisionId?: string
+    readonly conversationId?: string
     readonly parentSessionId?: string
     readonly forkedFromInputId?: string
     readonly forkReason?: ForkReason
+    readonly historyBase?: SessionHistoryPosition
     readonly metadata?: EventMetadata
   }
+}
+
+export type SessionHistoryPosition = {
+  readonly sessionId: string
+  readonly endSeqExclusive: number
+  readonly endByteOffset: number
 }
 
 export type InputAdmittedEvent = {
@@ -376,12 +384,16 @@ function requireKernelEvent(value: unknown): asserts value is KernelEvent {
             "workingDirectory",
             "mateId",
             "mateRevisionId",
+            "conversationId",
             "parentSessionId",
             "forkedFromInputId",
             "forkReason",
+            "historyBase",
             "metadata",
           ]) &&
-          (data.forkReason === undefined || isForkReason(data.forkReason))
+          (data.forkReason === undefined || isForkReason(data.forkReason)) &&
+          (data.historyBase === undefined ||
+            isSessionHistoryPosition(data.historyBase))
         )
       case EventType.InputAdmitted:
         return (
@@ -560,6 +572,7 @@ function optionalFieldsAreValid(
     "workingDirectory",
     "mateId",
     "mateRevisionId",
+    "conversationId",
     "parentSessionId",
     "forkedFromInputId",
     "parentInputId",
@@ -571,6 +584,22 @@ function optionalFieldsAreValid(
       return false
   }
   return true
+}
+
+function isSessionHistoryPosition(
+  value: unknown,
+): value is SessionHistoryPosition {
+  return (
+    isRecord(value) &&
+    onlyKeys(value, ["sessionId", "endSeqExclusive", "endByteOffset"]) &&
+    isString(value.sessionId) &&
+    typeof value.endSeqExclusive === "number" &&
+    Number.isSafeInteger(value.endSeqExclusive) &&
+    value.endSeqExclusive > 1 &&
+    typeof value.endByteOffset === "number" &&
+    Number.isSafeInteger(value.endByteOffset) &&
+    value.endByteOffset > 0
+  )
 }
 
 function isForkReason(value: unknown): value is ForkReason {

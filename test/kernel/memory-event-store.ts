@@ -10,6 +10,7 @@ import {
 } from "../../src/index.ts"
 import {
   appendForkCutTurnClosures,
+  collapseSessionConversations,
   paginateSessionSummaries,
   requireAdmissionFingerprint,
   requireExpectedSequence,
@@ -28,6 +29,35 @@ export function createMemoryEventStore(): EventStore {
   const projections = new Map<string, SessionProjection>()
 
   return {
+    async createSession(sessionId, created) {
+      if (sessions.has(sessionId)) {
+        throw new Error(`Session ${sessionId} already exists.`)
+      }
+      if (
+        created.data.historyBase !== undefined ||
+        created.data.forkedFromInputId !== undefined ||
+        created.data.forkReason !== undefined
+      ) {
+        throw new Error("A root Session cannot carry fork history metadata.")
+      }
+      const event = createEventEnvelope({
+        sessionId,
+        seq: 1,
+        event: {
+          ...structuredClone(created),
+          data: {
+            ...structuredClone(created.data),
+            conversationId: created.data.conversationId ?? sessionId,
+          },
+        },
+      })
+      const projection = applySessionFacts(undefined, [event])
+      if (projection === undefined) throw new Error("Expected projection.")
+      sessions.set(sessionId, [event])
+      projections.set(sessionId, projection)
+      return structuredClone(event)
+    },
+
     async appendEvent(sessionId, event, options) {
       const envelopes = await appendEvents(sessionId, [event], options)
       const envelope = envelopes.at(0)
@@ -68,6 +98,37 @@ export function createMemoryEventStore(): EventStore {
         })),
       ]
       appendForkCutTurnClosures(input.targetSessionId, events)
+      const inheritedProjection = applySessionFacts(undefined, events)
+      if (inheritedProjection === undefined) {
+        throw new Error("Expected forked Session projection.")
+      }
+      for (const pending of inheritedProjection.pendingInputs) {
+        events.push(
+          createEventEnvelope({
+            sessionId: input.targetSessionId,
+            seq: events.length + 1,
+            event: {
+              type: EventType.InputCancelled,
+              data: {
+                inputId: pending.inputId,
+                reason: "conversation_fork",
+              },
+            },
+          }),
+        )
+      }
+      for (const event of input.initialEvents ?? []) {
+        if (event.type === EventType.SessionCreated) {
+          throw new Error("Fork initial events cannot contain session.created.")
+        }
+        events.push(
+          createEventEnvelope({
+            sessionId: input.targetSessionId,
+            seq: events.length + 1,
+            event,
+          }),
+        )
+      }
       const projection = applySessionFacts(undefined, events)
       if (projection === undefined) {
         throw new Error("Expected forked Session projection.")
@@ -85,15 +146,24 @@ export function createMemoryEventStore(): EventStore {
           },
         )
       }
-      return structuredClone({ events, projection })
+      return structuredClone({
+        historyEndSeqExclusive: sourceEvents[cutIndex]?.seq ?? 1,
+        events,
+        localEvents: [created, ...events.slice(cutIndex)],
+        projection,
+      })
     },
 
     async readEvents(sessionId, input = {}) {
-      return structuredClone(
-        (sessions.get(sessionId) ?? []).filter(
-          (event) => event.seq > (input.after ?? 0),
-        ),
+      const events = sessions.get(sessionId) ?? []
+      const after = input.after ?? 0
+      const start = Math.min(Math.max(after, 0), events.length)
+      const replayEnd = Math.min(input.through ?? events.length, events.length)
+      const end = Math.min(
+        replayEnd,
+        input.limit === undefined ? replayEnd : start + input.limit,
       )
+      return structuredClone(end <= start ? [] : events.slice(start, end))
     },
 
     async readProjection(sessionId) {
@@ -120,7 +190,12 @@ export function createMemoryEventStore(): EventStore {
         summarizeSessionProjection,
       )
 
-      return structuredClone(paginateSessionSummaries(summaries, input))
+      return structuredClone(
+        paginateSessionSummaries(
+          collapseSessionConversations(summaries),
+          input,
+        ),
+      )
     },
 
     async deleteSession(sessionId) {
@@ -130,6 +205,31 @@ export function createMemoryEventStore(): EventStore {
         if (key.startsWith(`${sessionId}\u0000`)) admissions.delete(key)
       }
     },
+
+    async deleteConversation(conversationId) {
+      const conversation = Array.from(projections.entries()).filter(
+        ([, projection]) => projection.conversationId === conversationId,
+      )
+      for (const [sessionId, projection] of conversation) {
+        if (projection.activeTurn !== undefined) {
+          throw new Error(
+            `Conversation ${conversationId} contains an active Session ${sessionId}.`,
+          )
+        }
+        if (projection.pendingInputs.length > 0) {
+          throw new Error(
+            `Conversation ${conversationId} contains queued input in Session ${sessionId}.`,
+          )
+        }
+      }
+      for (const [sessionId] of conversation) {
+        sessions.delete(sessionId)
+        projections.delete(sessionId)
+        for (const key of admissions.keys()) {
+          if (key.startsWith(`${sessionId}\u0000`)) admissions.delete(key)
+        }
+      }
+    },
   }
 
   async function appendEvents(
@@ -137,7 +237,13 @@ export function createMemoryEventStore(): EventStore {
     events: readonly KernelEvent[],
     options: EventStoreAppendOptions = {},
   ): Promise<EventEnvelope[]> {
-    const existingEvents = sessions.get(sessionId) ?? []
+    if (events.some((event) => event.type === EventType.SessionCreated)) {
+      throw new Error("session.created can only be written by createSession.")
+    }
+    const existingEvents = sessions.get(sessionId)
+    if (existingEvents === undefined) {
+      throw new Error(`Session ${sessionId} has not been created.`)
+    }
     if (options.admission !== undefined) {
       const event = events[0]
       if (
