@@ -19,7 +19,7 @@ jobs:
         run: corepack enable
 
       - name: Install ripgrep
-        run: sudo apt-get update && sudo apt-get install --yes ripgrep
+        run: command -v rg || (sudo apt-get update && sudo apt-get install --yes ripgrep)
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
