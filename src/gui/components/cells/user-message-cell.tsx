@@ -53,7 +53,7 @@ export function UserMessageCell({
       {mode === "undo" ? (
         <div className="w-full max-w-lg rounded-md border bg-card p-3 shadow-sm">
           <p className="text-xs font-medium">
-            Start a new branch before this message?
+            Undo this message and everything after it?
           </p>
           <p className="mt-1 text-xs text-muted-foreground">
             The conversation will branch. Files and command effects stay as-is.
@@ -78,7 +78,7 @@ export function UserMessageCell({
                 )
               }}
             >
-              <RotateCcw /> Create branch
+              <RotateCcw /> Undo
             </Button>
           </div>
         </div>
@@ -97,7 +97,7 @@ export function UserMessageCell({
         >
           <div className="mb-2 flex items-center justify-between gap-3">
             <div>
-              <p className="text-xs font-medium">Edit in a new branch</p>
+              <p className="text-xs font-medium">Edit message</p>
               <p className="text-[11px] text-muted-foreground">
                 Files are not restored.
               </p>
@@ -113,7 +113,7 @@ export function UserMessageCell({
             </button>
           </div>
           <textarea
-            aria-label="Edit message in a new branch"
+            aria-label="Edit message"
             value={draft}
             rows={3}
             disabled={busy}
@@ -135,7 +135,7 @@ export function UserMessageCell({
               size="sm"
               disabled={busy || edited.length === 0}
             >
-              <PencilLine /> Fork &amp; send
+              <PencilLine /> Save &amp; send
             </Button>
           </div>
         </form>

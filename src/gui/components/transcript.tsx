@@ -13,7 +13,6 @@ import { ScrollArea } from "./ui/scroll-area.tsx"
 export function Transcript() {
   const view = useExecutionView()
   const selectSession = useAppStore((state) => state.selectSession)
-  const sessionId = useAppStore((state) => state.selectedSession?.id)
   const { viewportRef, onScroll, pinToBottom } = usePinnedScroll()
 
   useLayoutEffect(() => {
@@ -61,7 +60,7 @@ export function Transcript() {
               case "tool":
                 return (
                   <ToolCell
-                    key={`tool:${sessionId ?? "loading"}:${entry.toolCallId}`}
+                    key={`tool:${entry.toolCallId}`}
                     entry={entry}
                     workspaceRoot={view.workingDirectory}
                     onOpenSession={selectSession}

@@ -7,7 +7,8 @@ import { Button } from "./ui/button.tsx"
 import { ScrollArea } from "./ui/scroll-area.tsx"
 
 export function ThreadList() {
-  const sessions = useAppStore((state) => state.sessions)
+  const storedSessions = useAppStore((state) => state.sessions)
+  const sessions = storedSessions
   const selectedId = useAppStore((state) => state.selection.sessionId)
   const nextCursor = useAppStore((state) => state.nextCursor)
   const selectSession = useAppStore((state) => state.selectSession)
@@ -31,7 +32,7 @@ export function ThreadList() {
                   className="flex items-center gap-2 rounded-md px-2 py-1.5"
                 >
                   <span className="flex-1 text-xs text-muted-foreground">
-                    Delete? This cannot be undone.
+                    Delete conversation? This cannot be undone.
                   </span>
                   <Button
                     type="button"
@@ -65,7 +66,8 @@ export function ThreadList() {
                     )}
                   >
                     <span className="flex items-center gap-1.5 truncate text-sm">
-                      {session.parentSessionId !== undefined ? (
+                      {session.parentSessionId !== undefined &&
+                      session.forkReason === undefined ? (
                         <GitFork className="size-3 shrink-0 text-muted-foreground" />
                       ) : null}
                       <span className="truncate">
@@ -78,7 +80,7 @@ export function ThreadList() {
                   </button>
                   <button
                     type="button"
-                    aria-label="Delete session"
+                    aria-label="Delete conversation"
                     onClick={() => setPendingDeleteId(session.id)}
                     className="rounded-md p-1.5 text-muted-foreground opacity-0 hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
                   >

@@ -476,6 +476,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
       if (get().inFlightActions.has(key)) return
       const intentRevision = get().sessionSelectionIntentRevision + 1
       const state = get()
+      const sourceEvents = [...state.events]
       const sourceModelSelection = normalizeKimiModelSelection(
         resolveEffectiveModel({
           sessionCurrent: state.modelSelections[sourceSelection.sessionId],
@@ -491,28 +492,6 @@ export const useAppStore = create<AppStore>()((set, get) => {
 
       await runTask(
         async () => {
-          const view = projectExecutionView(get().execution)
-          if (view.activeTurnId !== undefined) {
-            await requestJson(
-              get().apiBase,
-              `/sessions/${encodeURIComponent(sourceSelection.sessionId)}/turns/${encodeURIComponent(view.activeTurnId)}/cancel`,
-              {
-                method: "POST",
-                body: { reason: "conversation_fork" },
-              },
-            )
-          }
-          const cancelledInputs = await Promise.all(
-            view.queuedInputIds.map((inputId) =>
-              cancelSessionInput(
-                get().apiBase,
-                sourceSelection.sessionId,
-                inputId,
-              ),
-            ),
-          )
-          for (const cancelled of cancelledInputs) mergeEvent(cancelled.event)
-
           const response = await requestJson<ApiForkSessionResponse>(
             get().apiBase,
             `/sessions/${encodeURIComponent(sourceSelection.sessionId)}/fork`,
@@ -530,25 +509,58 @@ export const useAppStore = create<AppStore>()((set, get) => {
               },
             },
           )
+          if (
+            get().sessionSelectionIntentRevision !== intentRevision ||
+            !isCurrentSessionSelection(get().selection, sourceSelection)
+          ) {
+            return
+          }
           if (sourceModelSelection !== undefined) {
             get().setModelSelection(response.session.id, sourceModelSelection)
           }
-          await get().loadSessions()
-          if (get().sessionSelectionIntentRevision !== intentRevision) return
 
+          const cutIndex = sourceEvents.findIndex(
+            (event) =>
+              event.type === EventType.InputAdmitted &&
+              event.data.inputId === atInputId,
+          )
+          const created = response.events[0]
+          if (
+            cutIndex < 0 ||
+            created?.type !== EventType.SessionCreated ||
+            sourceEvents[cutIndex]?.seq !== response.historyEndSeqExclusive
+          ) {
+            throw new Error(
+              "Fork response could not be joined to source history.",
+            )
+          }
+          const events = [
+            created,
+            ...sourceEvents.slice(1, cutIndex).map((event) => ({
+              ...event,
+              sessionId: response.session.id,
+            })),
+            ...response.events.slice(1),
+          ]
           const selection = activateSession(response.session.id)
           closeStream()
           set((state) => ({
             selectedSession: response.session,
-            events: [],
-            execution: reduceExecutionView(createExecutionViewState(), {
-              type: "session",
-              session: response.session,
-            }),
+            events,
+            execution: events.reduce(
+              (execution, event) =>
+                reduceExecutionView(execution, {
+                  type: "durable",
+                  event,
+                  session: response.session,
+                }),
+              createExecutionViewState(),
+            ),
             promptDraft: undefined,
             composerFocusRevision: state.composerFocusRevision + 1,
           }))
-          connectEvents(selection, 0)
+          connectEvents(selection, events.at(-1)?.seq ?? response.session.seq)
+          await get().loadSessions()
         },
         () => get().sessionSelectionIntentRevision === intentRevision,
       )

@@ -417,7 +417,7 @@ describe("delete session", () => {
 })
 
 describe("fork session", () => {
-  it("cancels active work, edits in a fork, and selects the new Session", async () => {
+  it("edits through one fork request and selects the new Session", async () => {
     window.localStorage.clear()
     const activeSession: ApiSessionDetail = {
       ...sessionDetail,
@@ -428,27 +428,59 @@ describe("fork session", () => {
     const forkedSession: ApiSessionDetail = {
       ...sessionDetail,
       id: "session_fork",
+      seq: 2,
       parentSessionId: "session_1",
       forkedFromInputId: "input_1",
       forkReason: "edit",
       counts: { ...sessionDetail.counts, inputs: 1 },
     }
+    const forkEvents = [
+      createEventEnvelope({
+        sessionId: "session_fork",
+        seq: 1,
+        event: {
+          type: EventType.SessionCreated,
+          data: {
+            parentSessionId: "session_1",
+            forkedFromInputId: "input_1",
+            forkReason: "edit",
+          },
+        },
+      }),
+      createEventEnvelope({
+        sessionId: "session_fork",
+        seq: 2,
+        event: {
+          type: EventType.InputAdmitted,
+          data: {
+            requestId: "request:replacement",
+            inputId: "input_replacement",
+            role: InputRole.User,
+            content: { kind: "text", text: "replacement" },
+            parentInputId: "input_1",
+            modelSelection: {
+              provider: "openai",
+              model: "gpt-test",
+              effort: "high",
+            },
+          },
+        },
+      }),
+    ]
     const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
       const url = String(input)
       if (url === "http://api.test/sessions/session_1") {
         return jsonResponse({ session: activeSession })
       }
       if (
-        url === "http://api.test/sessions/session_1/turns/turn_1/cancel" &&
-        init?.method === "POST"
-      ) {
-        return jsonResponse({ sessionId: "session_1", turnId: "turn_1" })
-      }
-      if (
         url === "http://api.test/sessions/session_1/fork" &&
         init?.method === "POST"
       ) {
-        return jsonResponse({ session: forkedSession })
+        return jsonResponse({
+          session: forkedSession,
+          historyEndSeqExclusive: 2,
+          events: forkEvents,
+        })
       }
       if (url === "http://api.test/sessions?limit=30") {
         return jsonResponse({ sessions: [forkedSession, activeSession] })
@@ -494,10 +526,9 @@ describe("fork session", () => {
 
     await useAppStore.getState().forkSession("input_1", "edit", "replacement")
 
-    const calls = fetchMock.mock.calls.map(([input]) => String(input))
     expect(
-      calls.indexOf("http://api.test/sessions/session_1/turns/turn_1/cancel"),
-    ).toBeLessThan(calls.indexOf("http://api.test/sessions/session_1/fork"))
+      fetchMock.mock.calls.some(([input]) => String(input).endsWith("/cancel")),
+    ).toBe(false)
     const forkCall = fetchMock.mock.calls.find(([input]) =>
       String(input).endsWith("/fork"),
     )
@@ -519,9 +550,18 @@ describe("fork session", () => {
       effort: "high",
     })
     expect(useAppStore.getState().composerFocusRevision).toBe(1)
+    expect(
+      projectExecutionView(useAppStore.getState().execution).entries,
+    ).toEqual([
+      expect.objectContaining({
+        kind: "user_input",
+        inputId: "input_replacement",
+        text: "replacement",
+      }),
+    ])
     expect(source?.closed).toBe(true)
     expect(FakeEventSource.instances[1]?.url).toBe(
-      "http://api.test/sessions/session_fork/events?after=0",
+      "http://api.test/sessions/session_fork/events?after=2",
     )
   })
 })
