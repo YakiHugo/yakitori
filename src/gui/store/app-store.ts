@@ -3,6 +3,7 @@ import { create } from "zustand"
 import {
   COMPACT_DIRECTIVE,
   EventType,
+  type ImageAttachment,
   type ModelSelection,
   type StoredEventEnvelope,
   type TurnStartedEvent,
@@ -63,6 +64,7 @@ export type AppStoreData = {
   modelSelections: Record<string, ModelSelection>
   nextCursor: string | undefined
   promptDraft: string | undefined
+  promptAttachments: readonly ImageAttachment[]
   projects: string[]
   providers: ApiProviderSummary[]
   userPreference: ApiUserModelPreference | undefined
@@ -88,11 +90,15 @@ export type AppStoreActions = {
     atInputId: string,
     reason: "undo" | "edit",
     content?: string,
+    attachments?: readonly ImageAttachment[],
   ): Promise<void>
   selectProject(path: string): Promise<void>
   addProject(path: string): Promise<void>
   selectSession(sessionId: string): Promise<void>
-  admitInput(text: string): Promise<void>
+  admitInput(
+    text: string,
+    attachments?: readonly ImageAttachment[],
+  ): Promise<void>
   cancelTurn(turnId: string): Promise<void>
   cancelQueuedInput(inputId: string): Promise<void>
   resolvePermission(
@@ -101,6 +107,7 @@ export type AppStoreActions = {
     behavior: "allow" | "deny",
   ): Promise<void>
   setPromptDraft(text: string): void
+  setPromptAttachments(attachments: readonly ImageAttachment[]): void
   setModelSelection(
     sessionId: string,
     selection: ModelSelection | undefined,
@@ -124,6 +131,7 @@ export function createInitialAppState(): AppStoreData {
     modelSelections: initialModelSelections(),
     nextCursor: undefined,
     promptDraft: undefined,
+    promptAttachments: [],
     projects: [],
     providers: [],
     userPreference: undefined,
@@ -462,6 +470,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
               session: response.session,
             }),
             promptDraft: undefined,
+            promptAttachments: [],
           })
           connectEvents(selection, response.event.seq)
         },
@@ -469,7 +478,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
       )
     },
 
-    forkSession: async (atInputId, reason, content) => {
+    forkSession: async (atInputId, reason, content, attachments = []) => {
       const sourceSelection = currentSessionSelection(get().selection)
       if (!sourceSelection) return
       const key = `fork:${sourceSelection.sessionId}:${atInputId}`
@@ -502,7 +511,13 @@ export const useAppStore = create<AppStore>()((set, get) => {
                 reason,
                 ...(content === undefined
                   ? {}
-                  : { content: { kind: "text", text: content } }),
+                  : {
+                      content: {
+                        kind: "text",
+                        text: content,
+                        ...(attachments.length === 0 ? {} : { attachments }),
+                      },
+                    }),
                 ...(reason !== "edit" || sourceModelSelection === undefined
                   ? {}
                   : { modelSelection: sourceModelSelection }),
@@ -557,6 +572,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
               createExecutionViewState(),
             ),
             promptDraft: undefined,
+            promptAttachments: [],
             composerFocusRevision: state.composerFocusRevision + 1,
           }))
           connectEvents(selection, events.at(-1)?.seq ?? response.session.seq)
@@ -623,6 +639,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
         execution: createExecutionViewState(),
         nextCursor: undefined,
         promptDraft: undefined,
+        promptAttachments: [],
       }))
       await get().loadSessions()
     },
@@ -666,6 +683,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
         events: [],
         execution: createExecutionViewState(),
         promptDraft: undefined,
+        promptAttachments: [],
         selectedSession: undefined,
       })
       await runTask(
@@ -678,7 +696,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
       )
     },
 
-    admitInput: async (text) => {
+    admitInput: async (text, attachments = []) => {
       const selection = currentSessionSelection(get().selection)
       if (!selection || !get().modelSelectionReady) return
       const key = `admit:${selection.sessionId}`
@@ -706,8 +724,11 @@ export const useAppStore = create<AppStore>()((set, get) => {
               throw new Error("Compact response did not match the request.")
             }
             if (!isCurrentSessionSelection(get().selection, selection)) return
-            if (get().promptDraft?.trim() === text) {
-              set({ promptDraft: undefined })
+            if (
+              get().promptDraft?.trim() === text &&
+              sameAttachments(get().promptAttachments, attachments)
+            ) {
+              set({ promptDraft: undefined, promptAttachments: [] })
             }
             mergeEvent(response.event)
             await refreshSelectedSession(selection)
@@ -737,6 +758,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
             apiBase: get().apiBase,
             sessionId: selection.sessionId,
             text,
+            ...(attachments.length === 0 ? {} : { attachments }),
           })
           if (!isCurrentSessionSelection(get().selection, selection)) return
           const response = await requestJson<ApiAdmitInputResponse>(
@@ -749,6 +771,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
                 content: {
                   kind: "text",
                   text,
+                  ...(attachments.length === 0 ? {} : { attachments }),
                 },
                 ...(admittedModelSelection === undefined
                   ? {}
@@ -764,8 +787,11 @@ export const useAppStore = create<AppStore>()((set, get) => {
           }
           await acknowledgeAdmission(window.localStorage, pendingAdmission)
           if (!isCurrentSessionSelection(get().selection, selection)) return
-          if (get().promptDraft?.trim() === text) {
-            set({ promptDraft: undefined })
+          if (
+            get().promptDraft?.trim() === text &&
+            sameAttachments(get().promptAttachments, attachments)
+          ) {
+            set({ promptDraft: undefined, promptAttachments: [] })
           }
           mergeEvent(response.event)
           set((state) => {
@@ -887,6 +913,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
       set({ promptDraft: text })
     },
 
+    setPromptAttachments: (attachments) => {
+      set({ promptAttachments: [...attachments] })
+    },
+
     setModelSelection: (sessionId, selection) => {
       userPreferenceRevision += 1
       const preferenceRevision = userPreferenceRevision
@@ -963,6 +993,22 @@ function initialApiBase(): string {
   const queryApi = new URLSearchParams(window.location.search).get("api")
   if (queryApi) return queryApi
   return window.location.origin
+}
+
+function sameAttachments(
+  left: readonly ImageAttachment[],
+  right: readonly ImageAttachment[],
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every(
+      (attachment, index) =>
+        attachment.name === right[index]?.name &&
+        attachment.mediaType === right[index]?.mediaType &&
+        attachment.sizeBytes === right[index]?.sizeBytes &&
+        attachment.data === right[index]?.data,
+    )
+  )
 }
 
 function initialModelSelections(): Record<string, ModelSelection> {

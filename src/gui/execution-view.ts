@@ -1,8 +1,10 @@
 import {
   type EventEnvelope,
+  type ImageAttachment,
   isKernelEvent,
   type StoredEventEnvelope,
   type TokenUsage,
+  type TurnMetrics,
 } from "../kernel/events.ts"
 import type { LiveSessionEvent } from "../runtime/live-events.ts"
 import type { ApiSessionDetail } from "../server/protocol.ts"
@@ -12,6 +14,7 @@ export type ExecutionEntry =
       readonly kind: "user_input"
       readonly inputId: string
       readonly text: string
+      readonly attachments?: readonly ImageAttachment[]
       readonly at: string
     }
   | {
@@ -105,8 +108,22 @@ export type ExecutionView = {
     readonly model: string
   }
   readonly lastTurnUsage?: TokenUsage
+  readonly lastTurnMetrics?: TurnMetrics
+  readonly telemetry: SessionTelemetry
   readonly activeTurnStartedAt?: string
   readonly activeActivity?: ActiveTurnActivity
+}
+
+export type SessionTelemetry = {
+  readonly turns: number
+  readonly steps: number
+  readonly modelDurationMs: number
+  readonly toolDurationMs: number
+  readonly averageTimeToFirstTokenMs?: number
+  readonly inputTokens: number
+  readonly outputTokens: number
+  readonly cacheReadInputTokens: number
+  readonly cacheWriteInputTokens: number
 }
 
 export type ActiveTurnActivity =
@@ -250,6 +267,19 @@ export function projectExecutionView(state: ExecutionViewState): ExecutionView {
     | { readonly provider: string; readonly model: string }
     | undefined
   let lastTurnUsage: TokenUsage | undefined
+  let lastTurnMetrics: TurnMetrics | undefined
+  let telemetry: SessionTelemetry = {
+    turns: 0,
+    steps: 0,
+    modelDurationMs: 0,
+    toolDurationMs: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadInputTokens: 0,
+    cacheWriteInputTokens: 0,
+  }
+  let timeToFirstTokenWeightedMs = 0
+  let timeToFirstTokenSamples = 0
 
   for (const stored of state.durableEvents) {
     const event = knownEvent(stored)
@@ -261,6 +291,7 @@ export function projectExecutionView(state: ExecutionViewState): ExecutionView {
           kind: "user_input",
           inputId: event.data.inputId,
           text: event.data.content.text,
+          attachments: event.data.content.attachments ?? [],
           at: event.createdAt,
         })
       }
@@ -279,9 +310,62 @@ export function projectExecutionView(state: ExecutionViewState): ExecutionView {
       }
       continue
     }
-    if (event.type === "turn.completed") {
+    if (
+      event.type === "turn.completed" ||
+      event.type === "turn.failed" ||
+      event.type === "turn.cancelled" ||
+      event.type === "turn.interrupted"
+    ) {
       terminalTurnIds.add(event.data.turnId)
       if (event.data.usage !== undefined) lastTurnUsage = event.data.usage
+      if (event.data.metrics !== undefined) lastTurnMetrics = event.data.metrics
+      telemetry = addTerminalTelemetry(
+        telemetry,
+        event.data.usage,
+        event.data.metrics,
+      )
+      if (event.data.metrics?.averageTimeToFirstTokenMs !== undefined) {
+        const samples = Math.max(1, event.data.metrics.modelCalls)
+        timeToFirstTokenWeightedMs +=
+          event.data.metrics.averageTimeToFirstTokenMs * samples
+        timeToFirstTokenSamples += samples
+      }
+      if (event.type !== "turn.completed") {
+        markPendingPermissionsStale(permissions, entries, event.data.turnId)
+        if (event.type === "turn.interrupted") {
+          for (const tool of tools.values()) {
+            if (
+              tool.turnId !== event.data.turnId ||
+              tool.state !== "requested"
+            ) {
+              continue
+            }
+            updateTool(tools, entries, tool.toolCallId, {
+              state: "interrupted",
+              resultText:
+                "Interrupted before a result was recorded. Side effects may be unknown.",
+              resultError: true,
+            })
+          }
+        }
+        entries.push({
+          kind: "turn_terminal",
+          turnId: event.data.turnId,
+          state:
+            event.type === "turn.failed"
+              ? "failed"
+              : event.type === "turn.cancelled"
+                ? "cancelled"
+                : "interrupted",
+          message:
+            event.type === "turn.failed"
+              ? event.data.error.message
+              : (event.data.reason ??
+                (event.type === "turn.cancelled"
+                  ? "Turn cancelled."
+                  : "Turn interrupted.")),
+        })
+      }
       continue
     }
     if (event.type === "assistant.message") {
@@ -378,50 +462,6 @@ export function projectExecutionView(state: ExecutionViewState): ExecutionView {
       })
       continue
     }
-    if (event.type === "turn.failed") {
-      terminalTurnIds.add(event.data.turnId)
-      markPendingPermissionsStale(permissions, entries, event.data.turnId)
-      entries.push({
-        kind: "turn_terminal",
-        turnId: event.data.turnId,
-        state: "failed",
-        message: event.data.error.message,
-      })
-      continue
-    }
-    if (event.type === "turn.cancelled") {
-      terminalTurnIds.add(event.data.turnId)
-      markPendingPermissionsStale(permissions, entries, event.data.turnId)
-      entries.push({
-        kind: "turn_terminal",
-        turnId: event.data.turnId,
-        state: "cancelled",
-        message: event.data.reason ?? "Turn cancelled.",
-      })
-      continue
-    }
-    if (event.type === "turn.interrupted") {
-      terminalTurnIds.add(event.data.turnId)
-      markPendingPermissionsStale(permissions, entries, event.data.turnId)
-      for (const tool of tools.values()) {
-        if (tool.turnId !== event.data.turnId || tool.state !== "requested") {
-          continue
-        }
-        updateTool(tools, entries, tool.toolCallId, {
-          state: "interrupted",
-          resultText:
-            "Interrupted before a result was recorded. Side effects may be unknown.",
-          resultError: true,
-        })
-      }
-      entries.push({
-        kind: "turn_terminal",
-        turnId: event.data.turnId,
-        state: "interrupted",
-        message: event.data.reason ?? "Turn interrupted.",
-      })
-      continue
-    }
     if (event.type === "context.compacted") {
       entries.push({
         kind: "context_compacted",
@@ -486,6 +526,17 @@ export function projectExecutionView(state: ExecutionViewState): ExecutionView {
     queuedInputIds,
     ...(lastModel === undefined ? {} : { lastModel }),
     ...(lastTurnUsage === undefined ? {} : { lastTurnUsage }),
+    ...(lastTurnMetrics === undefined ? {} : { lastTurnMetrics }),
+    telemetry: {
+      ...telemetry,
+      ...(timeToFirstTokenSamples === 0
+        ? {}
+        : {
+            averageTimeToFirstTokenMs: Math.round(
+              timeToFirstTokenWeightedMs / timeToFirstTokenSamples,
+            ),
+          }),
+    },
     ...(activeTurnStartedAt === undefined ? {} : { activeTurnStartedAt }),
     ...(activeActivity === undefined ? {} : { activeActivity }),
   }
@@ -519,6 +570,26 @@ function projectActiveActivity(
     return { kind: "responding" }
   }
   return { kind: "reasoning" }
+}
+
+function addTerminalTelemetry(
+  current: SessionTelemetry,
+  usage: TokenUsage | undefined,
+  metrics: TurnMetrics | undefined,
+): SessionTelemetry {
+  return {
+    turns: current.turns + 1,
+    steps:
+      current.steps + (metrics?.modelCalls ?? 0) + (metrics?.toolCalls ?? 0),
+    modelDurationMs: current.modelDurationMs + (metrics?.modelDurationMs ?? 0),
+    toolDurationMs: current.toolDurationMs + (metrics?.toolDurationMs ?? 0),
+    inputTokens: current.inputTokens + (usage?.inputTokens ?? 0),
+    outputTokens: current.outputTokens + (usage?.outputTokens ?? 0),
+    cacheReadInputTokens:
+      current.cacheReadInputTokens + (usage?.cacheReadInputTokens ?? 0),
+    cacheWriteInputTokens:
+      current.cacheWriteInputTokens + (usage?.cacheWriteInputTokens ?? 0),
+  }
 }
 
 function markPendingPermissionsStale(

@@ -600,7 +600,19 @@ describe("execution view", () => {
         type: EventType.TurnCompleted,
         data: {
           turnId: "turn_1",
-          usage: { inputTokens: 120, outputTokens: 45 },
+          usage: {
+            inputTokens: 120,
+            outputTokens: 45,
+            cacheReadInputTokens: 90,
+            cacheWriteInputTokens: 10,
+          },
+          metrics: {
+            modelCalls: 2,
+            toolCalls: 2,
+            modelDurationMs: 4_000,
+            toolDurationMs: 1_000,
+            averageTimeToFirstTokenMs: 250,
+          },
         },
       },
     ]
@@ -616,7 +628,23 @@ describe("execution view", () => {
 
     expect(view.queuedInputIds).toEqual(["input_2"])
     expect(view.lastModel).toEqual({ provider: "faux", model: "faux-1" })
-    expect(view.lastTurnUsage).toEqual({ inputTokens: 120, outputTokens: 45 })
+    expect(view.lastTurnUsage).toEqual({
+      inputTokens: 120,
+      outputTokens: 45,
+      cacheReadInputTokens: 90,
+      cacheWriteInputTokens: 10,
+    })
+    expect(view.telemetry).toEqual({
+      turns: 1,
+      steps: 4,
+      modelDurationMs: 4_000,
+      toolDurationMs: 1_000,
+      averageTimeToFirstTokenMs: 250,
+      inputTokens: 120,
+      outputTokens: 45,
+      cacheReadInputTokens: 90,
+      cacheWriteInputTokens: 10,
+    })
     expect(view.entries).toEqual([
       expect.objectContaining({ kind: "user_input", inputId: "input_1" }),
       expect.objectContaining({ kind: "user_input", inputId: "input_2" }),

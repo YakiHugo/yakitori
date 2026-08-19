@@ -2,6 +2,7 @@ import { PencilLine, RotateCcw, X } from "lucide-react"
 import { useState } from "react"
 import type { ExecutionEntry } from "../../execution-view.ts"
 import { useAppStore } from "../../store/app-store.ts"
+import { imageAttachmentUrl } from "../../composer-attachments.ts"
 import { Badge } from "../ui/badge.tsx"
 import { Button } from "../ui/button.tsx"
 
@@ -17,11 +18,28 @@ export function UserMessageCell({
   const [mode, setMode] = useState<"undo" | "edit" | undefined>()
   const [draft, setDraft] = useState(entry.text)
   const edited = draft.trim()
+  const attachments = entry.attachments ?? []
 
   return (
     <div className="group flex flex-col items-end gap-1.5">
-      <div className="max-w-[85%] rounded-lg bg-primary px-3 py-2 text-sm whitespace-pre-wrap text-primary-foreground">
-        {entry.text}
+      <div className="max-w-[85%] overflow-hidden rounded-xl bg-primary text-sm text-primary-foreground">
+        {attachments.length > 0 ? (
+          <div
+            className={`grid gap-1.5 p-1.5 ${attachments.length > 1 ? "grid-cols-2" : "grid-cols-1"}`}
+          >
+            {attachments.map((attachment) => (
+              <img
+                key={`${attachment.name}:${attachment.sizeBytes}:${attachment.data.slice(0, 24)}`}
+                src={imageAttachmentUrl(attachment)}
+                alt={attachment.name}
+                className="max-h-72 min-h-24 w-full rounded-lg bg-black/10 object-cover"
+              />
+            ))}
+          </div>
+        ) : null}
+        {entry.text.length > 0 ? (
+          <div className="px-3 py-2 whitespace-pre-wrap">{entry.text}</div>
+        ) : null}
       </div>
       <div className="flex min-h-5 items-center gap-1">
         {queued ? <Badge variant="secondary">queued</Badge> : null}
@@ -90,16 +108,18 @@ export function UserMessageCell({
           onSubmit={(event) => {
             event.preventDefault()
             if (edited.length === 0 || busy) return
-            void forkSession(entry.inputId, "edit", edited).then(() =>
-              setMode(undefined),
-            )
+            const resubmission =
+              attachments.length === 0
+                ? forkSession(entry.inputId, "edit", edited)
+                : forkSession(entry.inputId, "edit", edited, attachments)
+            void resubmission.then(() => setMode(undefined))
           }}
         >
           <div className="mb-2 flex items-center justify-between gap-3">
             <div>
               <p className="text-xs font-medium">Edit message</p>
               <p className="text-[11px] text-muted-foreground">
-                Files are not restored.
+                Attached images will be kept.
               </p>
             </div>
             <button
