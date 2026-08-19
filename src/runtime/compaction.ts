@@ -53,6 +53,7 @@ export function buildCompactionRequest(input: {
   readonly previousSummary?: string
   readonly provider: string
   readonly model: string
+  readonly cacheKey?: string
   readonly signal?: AbortSignal
 }): ModelRequest {
   return {
@@ -61,6 +62,7 @@ export function buildCompactionRequest(input: {
       model: input.model,
       promptId: "compaction",
     },
+    ...(input.cacheKey === undefined ? {} : { cacheKey: input.cacheKey }),
     system: [
       {
         id: "compaction.instructions",
@@ -132,6 +134,16 @@ export async function runCompaction(input: {
           usage: {
             inputTokens: terminal.usage.inputTokens ?? 0,
             outputTokens: terminal.usage.outputTokens ?? 0,
+            ...(terminal.usage.cacheReadInputTokens === undefined
+              ? {}
+              : {
+                  cacheReadInputTokens: terminal.usage.cacheReadInputTokens,
+                }),
+            ...(terminal.usage.cacheWriteInputTokens === undefined
+              ? {}
+              : {
+                  cacheWriteInputTokens: terminal.usage.cacheWriteInputTokens,
+                }),
           },
         }),
   }

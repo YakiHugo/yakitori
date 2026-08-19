@@ -88,7 +88,12 @@ describe("runCompaction", () => {
         response: {
           stopReason: ModelStopReason.EndTurn,
           content: [{ type: "text", text: "Goal: x\nProgress: y" }],
-          usage: { inputTokens: 10, outputTokens: 4 },
+          usage: {
+            inputTokens: 10,
+            outputTokens: 4,
+            cacheReadInputTokens: 8,
+            cacheWriteInputTokens: 2,
+          },
         },
       }
     }
@@ -96,7 +101,12 @@ describe("runCompaction", () => {
     const result = await runCompaction({ stream, request: compactionRequest() })
     expect(result).toEqual({
       summary: "Goal: x\nProgress: y",
-      usage: { inputTokens: 10, outputTokens: 4 },
+      usage: {
+        inputTokens: 10,
+        outputTokens: 4,
+        cacheReadInputTokens: 8,
+        cacheWriteInputTokens: 2,
+      },
     })
   })
 

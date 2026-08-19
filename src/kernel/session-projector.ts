@@ -18,6 +18,7 @@ import {
   type StoredEventEnvelope,
   type TextContent,
   type TokenUsage,
+  type TurnMetrics,
   type TurnExecutionContext,
 } from "./events.ts"
 import {
@@ -103,6 +104,7 @@ export type TurnProjection = {
   readonly interruptedReason?: string
   readonly metadata?: EventMetadata
   readonly usage?: TokenUsage
+  readonly metrics?: TurnMetrics
   readonly itemIds: readonly string[]
 }
 
@@ -408,6 +410,7 @@ function applyKnownEvent(
         turn.outputMessageId = event.data.outputMessageId
       }
       if (event.data.usage !== undefined) turn.usage = event.data.usage
+      if (event.data.metrics !== undefined) turn.metrics = event.data.metrics
       return
     }
     case EventType.TurnFailed: {
@@ -416,6 +419,8 @@ function applyKnownEvent(
       turn.state = TurnState.Failed
       turn.error = event.data.error
       turn.updatedAt = event.createdAt
+      if (event.data.usage !== undefined) turn.usage = event.data.usage
+      if (event.data.metrics !== undefined) turn.metrics = event.data.metrics
       return
     }
     case EventType.TurnCancelled: {
@@ -423,6 +428,8 @@ function applyKnownEvent(
       if (!turn) return
       turn.state = TurnState.Cancelled
       turn.updatedAt = event.createdAt
+      if (event.data.usage !== undefined) turn.usage = event.data.usage
+      if (event.data.metrics !== undefined) turn.metrics = event.data.metrics
       if (event.data.reason !== undefined)
         turn.cancelledReason = event.data.reason
       return
@@ -432,6 +439,8 @@ function applyKnownEvent(
       if (!turn) return
       turn.state = TurnState.Interrupted
       turn.updatedAt = event.createdAt
+      if (event.data.usage !== undefined) turn.usage = event.data.usage
+      if (event.data.metrics !== undefined) turn.metrics = event.data.metrics
       if (event.data.reason !== undefined)
         turn.interruptedReason = event.data.reason
       return
@@ -476,13 +485,32 @@ function aggregateTokenUsage(
       turn.usage !== undefined,
   )
   if (recorded.length === 0) return undefined
-  return recorded.reduce(
+  const totals = recorded.reduce(
     (total, turn) => ({
       inputTokens: total.inputTokens + turn.usage.inputTokens,
       outputTokens: total.outputTokens + turn.usage.outputTokens,
+      cacheReadInputTokens:
+        total.cacheReadInputTokens + (turn.usage.cacheReadInputTokens ?? 0),
+      cacheWriteInputTokens:
+        total.cacheWriteInputTokens + (turn.usage.cacheWriteInputTokens ?? 0),
     }),
-    { inputTokens: 0, outputTokens: 0 },
+    {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadInputTokens: 0,
+      cacheWriteInputTokens: 0,
+    },
   )
+  return {
+    inputTokens: totals.inputTokens,
+    outputTokens: totals.outputTokens,
+    ...(totals.cacheReadInputTokens === 0
+      ? {}
+      : { cacheReadInputTokens: totals.cacheReadInputTokens }),
+    ...(totals.cacheWriteInputTokens === 0
+      ? {}
+      : { cacheWriteInputTokens: totals.cacheWriteInputTokens }),
+  }
 }
 
 function compactionProjection(

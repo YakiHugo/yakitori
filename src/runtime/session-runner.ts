@@ -16,6 +16,7 @@ import {
   type SessionProjection,
   type TokenUsage,
   type TurnExecutionContext,
+  type TurnMetrics,
   TurnState,
   YakitoriErrorCode,
 } from "../kernel/index.ts"
@@ -107,6 +108,22 @@ type LaneState = {
   activeTurnId?: string | undefined
 }
 
+type TurnTelemetry = {
+  readonly usages: ModelUsage[]
+  modelCalls: number
+  toolCalls: number
+  modelDurationMs: number
+  toolDurationMs: number
+  timeToFirstTokenTotalMs: number
+  timeToFirstTokenSamples: number
+}
+
+type ConsumedModelResponse = {
+  readonly response: ModelResponse
+  readonly durationMs: number
+  readonly timeToFirstTokenMs: number
+}
+
 export function createSessionRunner(
   options: SessionRunnerOptions,
 ): SessionRunner {
@@ -120,6 +137,7 @@ export function createSessionRunner(
   const projectInstructionLoader =
     options.loadProjectInstructions ?? loadProjectInstructions
   const lanes = new Map<string, LaneState>()
+  const turnTelemetry = new Map<string, TurnTelemetry>()
   // Consecutive compaction failures per session; after the cap the lane
   // stops paying for doomed summary calls until one succeeds again.
   const compactionFailures = new Map<string, number>()
@@ -221,6 +239,7 @@ export function createSessionRunner(
     lane.abort = abort
     lane.activeTurnId = started.turnId
     lanes.set(session.id, lane)
+    turnTelemetry.set(started.turnId, createTurnTelemetry())
 
     if (closed) abort.abort()
 
@@ -250,6 +269,7 @@ export function createSessionRunner(
         current.activeTurnId = undefined
         current.abort = undefined
       }
+      turnTelemetry.delete(started.turnId)
     }
   }
 
@@ -370,6 +390,12 @@ export function createSessionRunner(
     }
   }
 
+  function requireTurnTelemetry(turnId: string): TurnTelemetry {
+    const telemetry = turnTelemetry.get(turnId)
+    if (telemetry !== undefined) return telemetry
+    throw new Error(`Turn telemetry for ${turnId} was not initialized.`)
+  }
+
   async function executeTextTurn(input: {
     readonly sessionId: string
     readonly turnId: string
@@ -420,7 +446,8 @@ export function createSessionRunner(
 
     let modelCallIndex = 0
     let toolCallCount = 0
-    const usages: ModelUsage[] = []
+    const telemetry = requireTurnTelemetry(input.turnId)
+    const usages = telemetry.usages
     while (modelCallIndex < input.executionContext.limits.modelCallsPerTurn) {
       if (input.signal.aborted) {
         await cancelAfterRuntimeAbort(input.sessionId, input.turnId)
@@ -456,6 +483,7 @@ export function createSessionRunner(
             ? {}
             : { speed: input.executionContext.speed }),
         },
+        cacheKey: session.conversationId,
         system: staticContext.system,
         contextual: staticContext.contextual,
         messages: context.messages,
@@ -474,12 +502,22 @@ export function createSessionRunner(
       )
 
       const streamId = `stream_${input.turnId}_${modelCallIndex + 1}`
-      const response = await consumeModelStream({
-        sessionId: input.sessionId,
-        turnId: input.turnId,
-        streamId,
-        request,
-      })
+      const modelStartedAt = Date.now()
+      let consumed: ConsumedModelResponse
+      try {
+        consumed = await consumeModelStream({
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          streamId,
+          request,
+        })
+      } catch (error) {
+        telemetry.modelCalls += 1
+        telemetry.modelDurationMs += Date.now() - modelStartedAt
+        throw error
+      }
+      recordModelCall(telemetry, consumed)
+      const response = consumed.response
       modelCallIndex += 1
       if (response.usage !== undefined) usages.push(response.usage)
 
@@ -551,35 +589,41 @@ export function createSessionRunner(
           return
         }
         toolCallCount += toolCalls.length
-        await persistAssistantAndExecuteTools({
-          sessionId: input.sessionId,
-          turnId: input.turnId,
-          content,
-          toolCalls,
-          streamId,
-          modelCallIndex,
-          executionContext: input.executionContext,
-          contextMetadata: {
-            selectedItemIds: [...context.selectedItemIds],
-            observationEligibleToolResultItemIds: [
-              ...context.observationEligibleToolResultItemIds,
-            ],
-            droppedTurnCount: context.droppedTurnCount,
-            truncatedToolResultCount: context.truncatedToolResultCount,
-            ...(context.prunedToolResultCount > 0
-              ? { prunedToolResultCount: context.prunedToolResultCount }
-              : {}),
-            ...(context.droppedCompactionCheckpoint
-              ? { droppedCompactionCheckpoint: true }
-              : {}),
-            ...(response.providerRequestId === undefined
-              ? {}
-              : { providerRequestId: response.providerRequestId }),
-          },
-          signal: input.signal,
-          visibleFileObservations,
-          subagentSession: subagentAgent(session) !== undefined,
-        })
+        const toolStartedAt = Date.now()
+        try {
+          await persistAssistantAndExecuteTools({
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            content,
+            toolCalls,
+            streamId,
+            modelCallIndex,
+            executionContext: input.executionContext,
+            contextMetadata: {
+              selectedItemIds: [...context.selectedItemIds],
+              observationEligibleToolResultItemIds: [
+                ...context.observationEligibleToolResultItemIds,
+              ],
+              droppedTurnCount: context.droppedTurnCount,
+              truncatedToolResultCount: context.truncatedToolResultCount,
+              ...(context.prunedToolResultCount > 0
+                ? { prunedToolResultCount: context.prunedToolResultCount }
+                : {}),
+              ...(context.droppedCompactionCheckpoint
+                ? { droppedCompactionCheckpoint: true }
+                : {}),
+              ...(response.providerRequestId === undefined
+                ? {}
+                : { providerRequestId: response.providerRequestId }),
+            },
+            signal: input.signal,
+            visibleFileObservations,
+            subagentSession: subagentAgent(session) !== undefined,
+          })
+        } finally {
+          telemetry.toolCalls += toolCalls.length
+          telemetry.toolDurationMs += Date.now() - toolStartedAt
+        }
         continue
       }
 
@@ -613,6 +657,7 @@ export function createSessionRunner(
           sessionId: input.sessionId,
           turnId: input.turnId,
           ...(usage === undefined ? {} : { usage }),
+          metrics: turnMetrics(telemetry),
         })
         publishDurable([completed.event])
         return
@@ -642,6 +687,7 @@ export function createSessionRunner(
             : { providerRequestId: response.providerRequestId }),
         },
         ...(usage === undefined ? {} : { usage }),
+        metrics: turnMetrics(telemetry),
       })
       publishDurable(completed.events)
       return
@@ -688,6 +734,7 @@ export function createSessionRunner(
       let result: Awaited<ReturnType<typeof runCompaction>> | undefined
       let attempts = 0
       while (result === undefined) {
+        const modelStartedAt = Date.now()
         try {
           result = await runCompaction({
             stream: options.stream,
@@ -696,6 +743,7 @@ export function createSessionRunner(
               ...(previousSummary === undefined ? {} : { previousSummary }),
               provider: input.executionContext.provider,
               model: input.executionContext.model,
+              cacheKey: input.session.conversationId,
               signal: input.signal,
             }),
           })
@@ -711,6 +759,12 @@ export function createSessionRunner(
             throw error
           }
           source = reduced
+        } finally {
+          const telemetry = turnTelemetry.get(input.turnId)
+          if (telemetry !== undefined) {
+            telemetry.modelCalls += 1
+            telemetry.modelDurationMs += Date.now() - modelStartedAt
+          }
         }
       }
       // A checkpoint that is not smaller than the history it replaces buys
@@ -771,7 +825,8 @@ export function createSessionRunner(
   }): Promise<void> {
     const session = await requireSession(input.sessionId)
     const source = collectUncoveredTurns(session, input.executionContext.limits)
-    const usages: ModelUsage[] = []
+    const telemetry = requireTurnTelemetry(input.turnId)
+    const usages = telemetry.usages
     let note: string
     if (source.length === 0) {
       note =
@@ -810,6 +865,7 @@ export function createSessionRunner(
         directive: COMPACT_DIRECTIVE,
       },
       ...(usage === undefined ? {} : { usage }),
+      metrics: turnMetrics(telemetry),
     })
     publishDurable(completed.events)
   }
@@ -1350,7 +1406,9 @@ export function createSessionRunner(
     readonly turnId: string
     readonly streamId: string
     readonly request: ModelRequest
-  }): Promise<ModelResponse> {
+  }): Promise<ConsumedModelResponse> {
+    const startedAt = Date.now()
+    let firstEventAt: number | undefined
     const publisher =
       options.transientHub === undefined
         ? undefined
@@ -1370,6 +1428,7 @@ export function createSessionRunner(
     let terminal: ModelResponse | undefined
     try {
       for await (const event of options.stream(input.request)) {
+        firstEventAt ??= Date.now()
         if (event.type === "reasoning_snapshot") {
           if (utf8Bytes(event.text) > limits.assistantResponseBytes) {
             throw createYakitoriError({
@@ -1416,7 +1475,12 @@ export function createSessionRunner(
       publisher?.flush()
       reasoningPublisher?.flush()
       if (isAbortError(error) || input.request.signal?.aborted) {
-        return { stopReason: ModelStopReason.Aborted, content: [] }
+        const completedAt = Date.now()
+        return {
+          response: { stopReason: ModelStopReason.Aborted, content: [] },
+          durationMs: completedAt - startedAt,
+          timeToFirstTokenMs: (firstEventAt ?? completedAt) - startedAt,
+        }
       }
       throw normalizeStreamError(error)
     }
@@ -1430,7 +1494,12 @@ export function createSessionRunner(
         details: { code: "premature_stream_end" },
       })
     }
-    return terminal
+    const completedAt = Date.now()
+    return {
+      response: terminal,
+      durationMs: completedAt - startedAt,
+      timeToFirstTokenMs: (firstEventAt ?? completedAt) - startedAt,
+    }
   }
 
   async function failActiveTurn(
@@ -1442,10 +1511,17 @@ export function createSessionRunner(
     const active = read.session?.activeTurn
     if (!active || active.turnId !== turnId) return
 
+    const telemetry = turnTelemetry.get(turnId)
+    const usage =
+      telemetry === undefined
+        ? undefined
+        : aggregateTokenUsage(telemetry.usages)
     const failed = await options.kernel.failTurn({
       sessionId,
       turnId,
       error: toKernelError(error),
+      ...(usage === undefined ? {} : { usage }),
+      ...(telemetry === undefined ? {} : { metrics: turnMetrics(telemetry) }),
     })
     publishDurable(failed.events)
   }
@@ -1456,10 +1532,17 @@ export function createSessionRunner(
     code: string,
     message: string,
   ): Promise<void> {
+    const telemetry = turnTelemetry.get(turnId)
+    const usage =
+      telemetry === undefined
+        ? undefined
+        : aggregateTokenUsage(telemetry.usages)
     const failed = await options.kernel.failTurn({
       sessionId,
       turnId,
       error: { code, message },
+      ...(usage === undefined ? {} : { usage }),
+      ...(telemetry === undefined ? {} : { metrics: turnMetrics(telemetry) }),
     })
     publishDurable(failed.events)
   }
@@ -1472,10 +1555,17 @@ export function createSessionRunner(
     const read = await options.kernel.readSession({ sessionId })
     const active = read.session?.activeTurn
     if (!active || active.turnId !== turnId) return
+    const telemetry = turnTelemetry.get(turnId)
+    const usage =
+      telemetry === undefined
+        ? undefined
+        : aggregateTokenUsage(telemetry.usages)
     const cancelled = await options.kernel.cancelTurn({
       sessionId,
       turnId,
       reason,
+      ...(usage === undefined ? {} : { usage }),
+      ...(telemetry === undefined ? {} : { metrics: turnMetrics(telemetry) }),
     })
     publishDurable(cancelled.events)
   }
@@ -1606,13 +1696,76 @@ function aggregateTokenUsage(
   usages: readonly ModelUsage[],
 ): TokenUsage | undefined {
   if (usages.length === 0) return undefined
-  return usages.reduce<TokenUsage>(
+  const totals = usages.reduce<{
+    inputTokens: number
+    outputTokens: number
+    cacheReadInputTokens: number
+    cacheWriteInputTokens: number
+  }>(
     (total, usage) => ({
       inputTokens: total.inputTokens + (usage.inputTokens ?? 0),
       outputTokens: total.outputTokens + (usage.outputTokens ?? 0),
+      cacheReadInputTokens:
+        total.cacheReadInputTokens + (usage.cacheReadInputTokens ?? 0),
+      cacheWriteInputTokens:
+        total.cacheWriteInputTokens + (usage.cacheWriteInputTokens ?? 0),
     }),
-    { inputTokens: 0, outputTokens: 0 },
+    {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadInputTokens: 0,
+      cacheWriteInputTokens: 0,
+    },
   )
+  return {
+    inputTokens: totals.inputTokens,
+    outputTokens: totals.outputTokens,
+    ...(totals.cacheReadInputTokens === 0
+      ? {}
+      : { cacheReadInputTokens: totals.cacheReadInputTokens }),
+    ...(totals.cacheWriteInputTokens === 0
+      ? {}
+      : { cacheWriteInputTokens: totals.cacheWriteInputTokens }),
+  }
+}
+
+function createTurnTelemetry(): TurnTelemetry {
+  return {
+    usages: [],
+    modelCalls: 0,
+    toolCalls: 0,
+    modelDurationMs: 0,
+    toolDurationMs: 0,
+    timeToFirstTokenTotalMs: 0,
+    timeToFirstTokenSamples: 0,
+  }
+}
+
+function recordModelCall(
+  telemetry: TurnTelemetry,
+  consumed: ConsumedModelResponse,
+): void {
+  telemetry.modelCalls += 1
+  telemetry.modelDurationMs += consumed.durationMs
+  telemetry.timeToFirstTokenTotalMs += consumed.timeToFirstTokenMs
+  telemetry.timeToFirstTokenSamples += 1
+}
+
+function turnMetrics(telemetry: TurnTelemetry): TurnMetrics {
+  return {
+    modelCalls: telemetry.modelCalls,
+    toolCalls: telemetry.toolCalls,
+    modelDurationMs: telemetry.modelDurationMs,
+    toolDurationMs: telemetry.toolDurationMs,
+    ...(telemetry.timeToFirstTokenSamples === 0
+      ? {}
+      : {
+          averageTimeToFirstTokenMs: Math.round(
+            telemetry.timeToFirstTokenTotalMs /
+              telemetry.timeToFirstTokenSamples,
+          ),
+        }),
+  }
 }
 
 function assistantContent(

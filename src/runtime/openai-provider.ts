@@ -66,6 +66,9 @@ async function* streamOpenAI(
         max_output_tokens: 8_192,
         store: false,
         stream: true,
+        ...(request.cacheKey === undefined
+          ? {}
+          : { prompt_cache_key: request.cacheKey }),
         ...(request.target.effort === undefined &&
         !REASONING_SUMMARY_PROVIDERS.has(request.target.provider)
           ? {}
@@ -148,9 +151,26 @@ export function toOpenAIInput(
   const input: ResponseInput = []
   for (const message of messages) {
     if (message.role === "user") {
+      if ((message.images?.length ?? 0) === 0) {
+        input.push({
+          role: "user",
+          content: message.content.map((block) => block.text).join(""),
+        })
+        continue
+      }
       input.push({
         role: "user",
-        content: message.content.map((block) => block.text).join(""),
+        content: [
+          ...message.content.map((block) => ({
+            type: "input_text" as const,
+            text: block.text,
+          })),
+          ...(message.images ?? []).map((block) => ({
+            type: "input_image" as const,
+            detail: "auto" as const,
+            image_url: `data:${block.mediaType};base64,${block.data}`,
+          })),
+        ],
       })
       continue
     }
@@ -337,6 +357,19 @@ function responseResult(
           usage: {
             inputTokens: response.usage.input_tokens,
             outputTokens: response.usage.output_tokens,
+            ...((response.usage.input_tokens_details?.cached_tokens ?? 0) === 0
+              ? {}
+              : {
+                  cacheReadInputTokens:
+                    response.usage.input_tokens_details.cached_tokens,
+                }),
+            ...((response.usage.input_tokens_details?.cache_write_tokens ??
+              0) === 0
+              ? {}
+              : {
+                  cacheWriteInputTokens:
+                    response.usage.input_tokens_details.cache_write_tokens,
+                }),
           },
         }),
     providerRequestId: response.id,
