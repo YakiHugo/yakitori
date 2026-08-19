@@ -100,6 +100,39 @@ describe("composer", () => {
     expect(button.textContent).toContain("Sending")
     expect(button).toHaveProperty("disabled", true)
   })
+
+  it("attaches and sends an image without requiring text", async () => {
+    const user = userEvent.setup()
+    const admitInput = vi.fn(() => Promise.resolve())
+    useAppStore.setState({
+      admitInput,
+      selection: { revision: 1, sessionId: "session_1" },
+    })
+    const { container } = render(<Composer />)
+    const fileInput =
+      container.querySelector<HTMLInputElement>('input[type="file"]')
+    if (fileInput === null) throw new Error("missing image input")
+
+    await user.upload(
+      fileInput,
+      new File([new Uint8Array([1, 2, 3])], "screenshot.png", {
+        type: "image/png",
+      }),
+    )
+    await waitFor(() => {
+      expect(useAppStore.getState().promptAttachments).toHaveLength(1)
+    })
+    await user.click(screen.getByRole("button", { name: "Send" }))
+
+    expect(admitInput).toHaveBeenCalledWith("", [
+      {
+        name: "screenshot.png",
+        mediaType: "image/png",
+        data: "AQID",
+        sizeBytes: 3,
+      },
+    ])
+  })
 })
 
 describe("model selector", () => {

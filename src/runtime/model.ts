@@ -16,6 +16,12 @@ export type ModelTextBlock = {
   readonly text: string
 }
 
+export type ModelImageBlock = {
+  readonly type: "image"
+  readonly mediaType: "image/gif" | "image/jpeg" | "image/png" | "image/webp"
+  readonly data: string
+}
+
 export type ModelReasoningBlock = {
   readonly type: "reasoning"
   readonly text: string
@@ -37,6 +43,7 @@ export type ModelContentBlock =
 export type ModelUserMessage = {
   readonly role: "user"
   readonly content: readonly ModelTextBlock[]
+  readonly images?: readonly ModelImageBlock[]
 }
 
 export type ModelAssistantMessage = {
@@ -84,6 +91,7 @@ export type ModelContextMessage = {
 
 export type ModelRequest = {
   readonly target: ModelTarget
+  readonly cacheKey?: string
   readonly system: readonly ModelSystemSection[]
   readonly contextual: readonly ModelContextMessage[]
   readonly messages: readonly ModelMessage[]
@@ -100,6 +108,8 @@ export function flattenModelSystem(
 export type ModelUsage = {
   readonly inputTokens?: number
   readonly outputTokens?: number
+  readonly cacheReadInputTokens?: number
+  readonly cacheWriteInputTokens?: number
 }
 
 export type ModelError = {

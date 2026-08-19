@@ -6,10 +6,15 @@ import {
   type ItemProjection,
   ItemStatus,
   type SessionProjection,
+  type TextContent,
   type TurnProjection,
   TurnState,
 } from "../kernel/index.ts"
-import type { ModelMessage, ModelToolResultMessage } from "./model.ts"
+import type {
+  ModelMessage,
+  ModelToolResultMessage,
+  ModelUserMessage,
+} from "./model.ts"
 
 export type ModelContextLimits = {
   readonly modelVisibleMessageBlocks: number
@@ -62,12 +67,7 @@ export function buildModelContext(input: {
   const currentGroup: ContextGroup = activeGroup ?? {
     kind: "current_input",
     inputId: currentInput.inputId,
-    messages: [
-      {
-        role: "user",
-        content: [{ type: "text", text: currentInput.content.text }],
-      },
-    ],
+    messages: [modelUserMessage(currentInput.content)],
     itemIds: [],
   }
   const readResultKeys = buildReadResultKeys(input.session)
@@ -83,8 +83,11 @@ export function buildModelContext(input: {
   let droppedCompactionCheckpoint = false
   let selectedGroups: readonly ContextGroup[] = [
     ...(compactionGroup === undefined ? [] : [compactionGroup]),
-    ...(forkGroup === undefined ? [] : [forkGroup]),
     ...turnGroups,
+    // Keep inherited conversation history as the stable prompt prefix. The
+    // fork notice describes local state, so placing it after inherited Turns
+    // avoids invalidating the provider cache for the entire shared history.
+    ...(forkGroup === undefined ? [] : [forkGroup]),
     currentGroup,
   ]
   let assembled = assembleGroups(selectedGroups, input.limits, readResultKeys)
@@ -174,11 +177,10 @@ export function collectUncoveredTurns(
 ): readonly DroppedTurn[] {
   const coveredTurnIds = new Set(session.compaction?.coveredTurnIds ?? [])
   const readResultKeys = buildReadResultKeys(session)
-  return buildTurnGroups(session, coveredTurnIds)
-    .map((group) => ({
-      turnId: group.turnId,
-      messages: assembleGroups([group], limits, readResultKeys).messages,
-    }))
+  return buildTurnGroups(session, coveredTurnIds).map((group) => ({
+    turnId: group.turnId,
+    messages: assembleGroups([group], limits, readResultKeys).messages,
+  }))
 }
 
 type TurnContextGroup = {
@@ -282,12 +284,7 @@ function buildTurnGroup(
   )
   if (!input || input.role !== InputRole.User) return undefined
 
-  const messages: ModelMessage[] = [
-    {
-      role: "user",
-      content: [{ type: "text", text: input.content.text }],
-    },
-  ]
+  const messages: ModelMessage[] = [modelUserMessage(input.content)]
   const itemIds: string[] = []
   const turnItems = turn.itemIds
     .map((itemId) => session.items.find((item) => item.itemId === itemId))
@@ -417,6 +414,22 @@ function buildTurnGroup(
   }
 }
 
+function modelUserMessage(content: TextContent): ModelUserMessage {
+  const images = (content.attachments ?? []).map((attachment) => ({
+    type: "image" as const,
+    mediaType: attachment.mediaType,
+    data: attachment.data,
+  }))
+  return {
+    role: "user",
+    content:
+      content.text.length === 0
+        ? []
+        : [{ type: "text" as const, text: content.text }],
+    ...(images.length === 0 ? {} : { images }),
+  }
+}
+
 function terminalTurnNotice(turn: TurnProjection): string | undefined {
   if (turn.state === TurnState.Completed) return undefined
   if (turn.state === TurnState.Failed) {
@@ -518,7 +531,7 @@ function assembleGroups(
   }
 
   const blockCount = countBlocks(messages)
-  const byteCount = utf8Bytes(JSON.stringify(messages))
+  const byteCount = modelContextBytes(messages)
   return {
     messages,
     itemIds,
@@ -528,6 +541,29 @@ function assembleGroups(
     byteCount,
     blockCount,
   }
+}
+
+// Raw base64 bytes are transport size, not language-context bytes. Count a
+// bounded descriptor here; providers account for vision tokens separately.
+function modelContextBytes(messages: readonly ModelMessage[]): number {
+  return utf8Bytes(
+    JSON.stringify(messages, (_key, value: unknown) => {
+      if (
+        typeof value === "object" &&
+        value !== null &&
+        "type" in value &&
+        value.type === "image" &&
+        "data" in value &&
+        typeof value.data === "string"
+      ) {
+        return {
+          ...(value as Record<string, unknown>),
+          data: `[base64 image: ${Math.floor((value.data.length * 3) / 4)} bytes]`,
+        }
+      }
+      return value
+    }),
+  )
 }
 
 function buildReadResultKeys(
@@ -600,7 +636,11 @@ function truncateToolResult(
 function countBlocks(messages: readonly ModelMessage[]): number {
   return messages.reduce((count, message) => {
     if (message.role === "tool") return count + 1
-    return count + message.content.length
+    return (
+      count +
+      message.content.length +
+      (message.role === "user" ? (message.images?.length ?? 0) : 0)
+    )
   }, 0)
 }
 

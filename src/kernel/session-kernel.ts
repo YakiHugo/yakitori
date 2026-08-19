@@ -17,6 +17,7 @@ import {
   type StoredEventEnvelope,
   type TextContent,
   type TokenUsage,
+  type TurnMetrics,
   type TurnExecutionContext,
 } from "./events.ts"
 import {
@@ -263,6 +264,7 @@ export type CompleteTurnInput = {
   readonly turnId: string
   readonly outputMessageId?: string
   readonly usage?: TokenUsage
+  readonly metrics?: TurnMetrics
   readonly metadata?: EventMetadata
 }
 export type CompleteTurnResult = {
@@ -275,6 +277,7 @@ export type CompleteTurnWithAssistantOutputInput = {
   readonly content: readonly AssistantContentBlock[]
   readonly providerMetadata?: EventMetadata
   readonly usage?: TokenUsage
+  readonly metrics?: TurnMetrics
   readonly metadata?: EventMetadata
 }
 export type CompleteTurnWithAssistantOutputResult = {
@@ -286,6 +289,8 @@ export type FailTurnInput = {
   readonly sessionId: string
   readonly turnId: string
   readonly error: KernelError
+  readonly usage?: TokenUsage
+  readonly metrics?: TurnMetrics
 }
 export type FailTurnResult = {
   readonly event: EventEnvelope
@@ -295,6 +300,8 @@ export type CancelTurnInput = {
   readonly sessionId: string
   readonly turnId: string
   readonly reason?: string
+  readonly usage?: TokenUsage
+  readonly metrics?: TurnMetrics
 }
 export type CancelTurnResult = {
   readonly event: EventEnvelope
@@ -304,6 +311,8 @@ export type InterruptTurnInput = {
   readonly sessionId: string
   readonly turnId: string
   readonly reason?: string
+  readonly usage?: TokenUsage
+  readonly metrics?: TurnMetrics
 }
 export type InterruptTurnResult = {
   readonly event?: EventEnvelope
@@ -738,6 +747,7 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
           turnId: input.turnId,
           outputMessageId: input.outputMessageId,
           usage: input.usage,
+          metrics: input.metrics,
           metadata: input.metadata,
         }),
       })
@@ -764,6 +774,7 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
               turnId: input.turnId,
               outputMessageId: itemId,
               usage: input.usage,
+              metrics: input.metrics,
               metadata: input.metadata,
             }),
           },
@@ -775,14 +786,24 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
     failTurn(input) {
       return terminal(command, eventStore, input.sessionId, input.turnId, {
         type: EventType.TurnFailed,
-        data: { turnId: input.turnId, error: input.error },
+        data: compact({
+          turnId: input.turnId,
+          error: input.error,
+          usage: input.usage,
+          metrics: input.metrics,
+        }),
       })
     },
 
     cancelTurn(input) {
       return terminal(command, eventStore, input.sessionId, input.turnId, {
         type: EventType.TurnCancelled,
-        data: compact({ turnId: input.turnId, reason: input.reason }),
+        data: compact({
+          turnId: input.turnId,
+          reason: input.reason,
+          usage: input.usage,
+          metrics: input.metrics,
+        }),
       })
     },
 
@@ -796,7 +817,12 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
           invalidState(`Turn ${input.turnId} is already ${turn.state}.`)
         const event = await append(eventStore, session, {
           type: EventType.TurnInterrupted,
-          data: compact({ turnId: input.turnId, reason: input.reason }),
+          data: compact({
+            turnId: input.turnId,
+            reason: input.reason,
+            usage: input.usage,
+            metrics: input.metrics,
+          }),
         })
         return { event, events: [event], created: true }
       })

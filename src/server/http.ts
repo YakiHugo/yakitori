@@ -719,12 +719,14 @@ async function readJson(request: IncomingMessage): Promise<JsonReadResult> {
 async function readRequestBody(
   request: IncomingMessage,
 ): Promise<string | undefined> {
+  // Four 4 MiB decoded images expand under base64; leave room for JSON and text.
+  const maxRequestBodyBytes = 24 * 1024 * 1024
   const chunks: Buffer[] = []
   let size = 0
   for await (const chunk of request) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
     size += buffer.length
-    if (size > 1_000_000) return undefined
+    if (size > maxRequestBodyBytes) return undefined
     chunks.push(buffer)
   }
   return Buffer.concat(chunks).toString("utf8")

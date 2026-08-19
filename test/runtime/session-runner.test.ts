@@ -1700,6 +1700,11 @@ async function expectTerminal(
   })
   if (terminal === "failed") {
     expect(read.session?.failedTurns.length).toBeGreaterThan(0)
+    const failed = read.session?.failedTurns.at(-1)
+    expect(failed?.metrics).toBeDefined()
+    expect(failed?.metrics?.modelCalls).toBe(
+      limits.modelCallsPerTurn === 0 ? 0 : 1,
+    )
   } else {
     expect(read.session?.cancelledTurns.length).toBeGreaterThan(0)
   }

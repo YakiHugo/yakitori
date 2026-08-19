@@ -806,6 +806,18 @@ for (const implementation of ["memory", "jsonl"] as const) {
           sessionId: session.sessionId,
           turnId: failedTurn.turnId,
           error: { code: "provider_error", message: "unavailable" },
+          usage: {
+            inputTokens: 100,
+            outputTokens: 8,
+            cacheReadInputTokens: 75,
+          },
+          metrics: {
+            modelCalls: 1,
+            toolCalls: 0,
+            modelDurationMs: 320,
+            toolDurationMs: 0,
+            averageTimeToFirstTokenMs: 80,
+          },
         })
         const cancelledInput = await admit(
           kernel,
@@ -828,6 +840,18 @@ for (const implementation of ["memory", "jsonl"] as const) {
           data: {
             turnId: failedTurn.turnId,
             error: { code: "provider_error", message: "unavailable" },
+            usage: {
+              inputTokens: 100,
+              outputTokens: 8,
+              cacheReadInputTokens: 75,
+            },
+            metrics: {
+              modelCalls: 1,
+              toolCalls: 0,
+              modelDurationMs: 320,
+              toolDurationMs: 0,
+              averageTimeToFirstTokenMs: 80,
+            },
           },
         })
         expect(cancelled.events).toEqual([cancelled.event])
@@ -841,6 +865,11 @@ for (const implementation of ["memory", "jsonl"] as const) {
             turnId: failedTurn.turnId,
             state: TurnState.Failed,
             error: { code: "provider_error", message: "unavailable" },
+            usage: {
+              inputTokens: 100,
+              outputTokens: 8,
+              cacheReadInputTokens: 75,
+            },
           }),
         ])
         expect(read.session?.cancelledTurns).toEqual([

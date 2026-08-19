@@ -76,6 +76,14 @@ export type EventMetadata = JsonObject
 export type TextContent = {
   readonly kind: "text"
   readonly text: string
+  readonly attachments?: readonly ImageAttachment[]
+}
+
+export type ImageAttachment = {
+  readonly name: string
+  readonly mediaType: "image/gif" | "image/jpeg" | "image/png" | "image/webp"
+  readonly data: string
+  readonly sizeBytes: number
 }
 
 export type JsonContent = {
@@ -102,6 +110,16 @@ export type KernelError = {
 export type TokenUsage = {
   readonly inputTokens: number
   readonly outputTokens: number
+  readonly cacheReadInputTokens?: number
+  readonly cacheWriteInputTokens?: number
+}
+
+export type TurnMetrics = {
+  readonly modelCalls: number
+  readonly toolCalls: number
+  readonly modelDurationMs: number
+  readonly toolDurationMs: number
+  readonly averageTimeToFirstTokenMs?: number
 }
 
 export type PermissionDecisionReason = {
@@ -202,23 +220,39 @@ export type TurnCompletedEvent = {
     readonly turnId: string
     readonly outputMessageId?: string
     readonly usage?: TokenUsage
+    readonly metrics?: TurnMetrics
     readonly metadata?: EventMetadata
   }
 }
 
 export type TurnFailedEvent = {
   readonly type: typeof EventType.TurnFailed
-  readonly data: { readonly turnId: string; readonly error: KernelError }
+  readonly data: {
+    readonly turnId: string
+    readonly error: KernelError
+    readonly usage?: TokenUsage
+    readonly metrics?: TurnMetrics
+  }
 }
 
 export type TurnCancelledEvent = {
   readonly type: typeof EventType.TurnCancelled
-  readonly data: { readonly turnId: string; readonly reason?: string }
+  readonly data: {
+    readonly turnId: string
+    readonly reason?: string
+    readonly usage?: TokenUsage
+    readonly metrics?: TurnMetrics
+  }
 }
 
 export type TurnInterruptedEvent = {
   readonly type: typeof EventType.TurnInterrupted
-  readonly data: { readonly turnId: string; readonly reason?: string }
+  readonly data: {
+    readonly turnId: string
+    readonly reason?: string
+    readonly usage?: TokenUsage
+    readonly metrics?: TurnMetrics
+  }
 }
 
 export type AssistantMessageEvent = {
@@ -431,19 +465,33 @@ function requireKernelEvent(value: unknown): asserts value is KernelEvent {
         )
       case EventType.TurnCompleted:
         return (
-          onlyKeys(data, ["turnId", "outputMessageId", "usage", "metadata"]) &&
+          onlyKeys(data, [
+            "turnId",
+            "outputMessageId",
+            "usage",
+            "metrics",
+            "metadata",
+          ]) &&
           isString(data.turnId) &&
-          (data.usage === undefined || isTokenUsage(data.usage))
+          (data.usage === undefined || isTokenUsage(data.usage)) &&
+          (data.metrics === undefined || isTurnMetrics(data.metrics))
         )
       case EventType.TurnFailed:
         return (
-          onlyKeys(data, ["turnId", "error"]) &&
+          onlyKeys(data, ["turnId", "error", "usage", "metrics"]) &&
           isString(data.turnId) &&
-          isKernelError(data.error)
+          isKernelError(data.error) &&
+          (data.usage === undefined || isTokenUsage(data.usage)) &&
+          (data.metrics === undefined || isTurnMetrics(data.metrics))
         )
       case EventType.TurnCancelled:
       case EventType.TurnInterrupted:
-        return onlyKeys(data, ["turnId", "reason"]) && isString(data.turnId)
+        return (
+          onlyKeys(data, ["turnId", "reason", "usage", "metrics"]) &&
+          isString(data.turnId) &&
+          (data.usage === undefined || isTokenUsage(data.usage)) &&
+          (data.metrics === undefined || isTurnMetrics(data.metrics))
+        )
       case EventType.AssistantMessage:
         return (
           onlyKeys(data, [
@@ -635,9 +683,37 @@ function isPermissionBehavior(value: unknown): value is PermissionBehavior {
 function isTokenUsage(value: unknown): value is TokenUsage {
   return (
     isRecord(value) &&
-    onlyKeys(value, ["inputTokens", "outputTokens"]) &&
+    onlyKeys(value, [
+      "inputTokens",
+      "outputTokens",
+      "cacheReadInputTokens",
+      "cacheWriteInputTokens",
+    ]) &&
     isNonNegativeInteger(value.inputTokens) &&
-    isNonNegativeInteger(value.outputTokens)
+    isNonNegativeInteger(value.outputTokens) &&
+    (value.cacheReadInputTokens === undefined ||
+      isNonNegativeInteger(value.cacheReadInputTokens)) &&
+    (value.cacheWriteInputTokens === undefined ||
+      isNonNegativeInteger(value.cacheWriteInputTokens))
+  )
+}
+
+function isTurnMetrics(value: unknown): value is TurnMetrics {
+  return (
+    isRecord(value) &&
+    onlyKeys(value, [
+      "modelCalls",
+      "toolCalls",
+      "modelDurationMs",
+      "toolDurationMs",
+      "averageTimeToFirstTokenMs",
+    ]) &&
+    isNonNegativeInteger(value.modelCalls) &&
+    isNonNegativeInteger(value.toolCalls) &&
+    isNonNegativeInteger(value.modelDurationMs) &&
+    isNonNegativeInteger(value.toolDurationMs) &&
+    (value.averageTimeToFirstTokenMs === undefined ||
+      isNonNegativeInteger(value.averageTimeToFirstTokenMs))
   )
 }
 
@@ -646,7 +722,32 @@ function isTextContent(value: unknown): value is TextContent {
     isRecord(value) &&
     value.kind === "text" &&
     isString(value.text) &&
-    onlyKeys(value, ["kind", "text"])
+    onlyKeys(value, ["kind", "text", "attachments"]) &&
+    (value.attachments === undefined ||
+      (Array.isArray(value.attachments) &&
+        value.attachments.every(isImageAttachment)))
+  )
+}
+
+function isImageAttachment(value: unknown): value is ImageAttachment {
+  return (
+    isRecord(value) &&
+    onlyKeys(value, ["name", "mediaType", "data", "sizeBytes"]) &&
+    isString(value.name) &&
+    isSupportedImageMediaType(value.mediaType) &&
+    isString(value.data) &&
+    isNonNegativeInteger(value.sizeBytes)
+  )
+}
+
+function isSupportedImageMediaType(
+  value: unknown,
+): value is ImageAttachment["mediaType"] {
+  return (
+    value === "image/gif" ||
+    value === "image/jpeg" ||
+    value === "image/png" ||
+    value === "image/webp"
   )
 }
 
@@ -667,8 +768,7 @@ function isModelSelection(value: unknown): value is ModelSelection {
 
 function isItemContent(value: unknown): value is ItemContent {
   if (!isRecord(value)) return false
-  if (value.kind === "text")
-    return isString(value.text) && onlyKeys(value, ["kind", "text"])
+  if (value.kind === "text") return isTextContent(value)
   if (value.kind === "json")
     return isJsonValue(value.value) && onlyKeys(value, ["kind", "value"])
   return false

@@ -1,9 +1,11 @@
+import type { ImageAttachment } from "../kernel/events.ts"
 import { createRequestId, isRequestId } from "../kernel/ids.ts"
 
 export type AdmissionDraft = {
   readonly apiBase: string
   readonly sessionId: string
   readonly text: string
+  readonly attachments?: readonly ImageAttachment[]
 }
 
 export type PendingAdmission = AdmissionDraft & {
@@ -62,7 +64,12 @@ async function storageKey(draft: AdmissionDraft): Promise<string> {
   const digest = await globalThis.crypto.subtle.digest(
     "SHA-256",
     new TextEncoder().encode(
-      JSON.stringify([draft.apiBase, draft.sessionId, draft.text]),
+      JSON.stringify([
+        draft.apiBase,
+        draft.sessionId,
+        draft.text,
+        draft.attachments ?? [],
+      ]),
     ),
   )
   return `yakitori.admission.v1:${Array.from(new Uint8Array(digest), (byte) =>

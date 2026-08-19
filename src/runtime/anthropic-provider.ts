@@ -68,11 +68,14 @@ async function* streamAnthropic(
 
   let stream: Awaited<ReturnType<typeof client.messages.stream>>
   try {
-    const explicitPromptCaching = request.target.provider === "anthropic"
+    const explicitPromptCaching =
+      request.target.provider === "anthropic" ||
+      request.target.provider === "kimi"
     const tools = toAnthropicTools(request.tools, explicitPromptCaching)
     // Effort is only sent where support is confirmed: official Anthropic and
     // Kimi's Anthropic-compatible coding endpoint (which mirrors Claude Code).
-    // Cache-control stays official-Anthropic-only. Kimi boolean-thinking
+    // Explicit cache breakpoints are supported by both official Anthropic and
+    // Kimi's Anthropic-compatible coding endpoint. Kimi boolean-thinking
     // models take "on"/"off": "off" maps to thinking.disabled, "on" is the
     // endpoint default and sends nothing; real levels use the effort beta.
     const effort = EFFORT_BETA_PROVIDERS.has(request.target.provider)
@@ -100,6 +103,9 @@ async function* streamAnthropic(
           explicitPromptCaching,
         ),
         ...(tools === undefined ? {} : { tools }),
+        ...(request.cacheKey === undefined
+          ? {}
+          : { metadata: { user_id: request.cacheKey } }),
         ...(thinking === undefined ? {} : { thinking }),
         ...(effortLevel === undefined
           ? {}
@@ -182,10 +188,20 @@ export function toAnthropicMessages(
     if (message.role === "user") {
       converted.push({
         role: "user",
-        content: message.content.map((block) => ({
-          type: "text",
-          text: block.text,
-        })),
+        content: [
+          ...message.content.map((block) => ({
+            type: "text" as const,
+            text: block.text,
+          })),
+          ...(message.images ?? []).map((block) => ({
+            type: "image" as const,
+            source: {
+              type: "base64" as const,
+              media_type: block.mediaType,
+              data: block.data,
+            },
+          })),
+        ],
       })
       continue
     }
@@ -302,6 +318,8 @@ export function fromAnthropicMessage(message: {
   readonly usage?: {
     readonly input_tokens?: number
     readonly output_tokens?: number
+    readonly cache_read_input_tokens?: number | null
+    readonly cache_creation_input_tokens?: number | null
   }
   readonly id?: string
 }): ModelResponse {
@@ -358,12 +376,25 @@ export function fromAnthropicMessage(message: {
       ? {}
       : {
           usage: {
-            ...(message.usage.input_tokens === undefined
-              ? {}
-              : { inputTokens: message.usage.input_tokens }),
+            inputTokens:
+              (message.usage.input_tokens ?? 0) +
+              (message.usage.cache_read_input_tokens ?? 0) +
+              (message.usage.cache_creation_input_tokens ?? 0),
             ...(message.usage.output_tokens === undefined
               ? {}
               : { outputTokens: message.usage.output_tokens }),
+            ...(message.usage.cache_read_input_tokens === undefined
+              ? {}
+              : {
+                  cacheReadInputTokens:
+                    message.usage.cache_read_input_tokens ?? 0,
+                }),
+            ...(message.usage.cache_creation_input_tokens === undefined
+              ? {}
+              : {
+                  cacheWriteInputTokens:
+                    message.usage.cache_creation_input_tokens ?? 0,
+                }),
           },
         }),
     ...(message.id === undefined ? {} : { providerRequestId: message.id }),

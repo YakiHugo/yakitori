@@ -69,6 +69,32 @@ describe("OpenAI Responses provider", () => {
     ])
   })
 
+  it("converts attached images into Responses API input blocks", () => {
+    expect(
+      toOpenAIInput([
+        {
+          role: "user",
+          content: [{ type: "text", text: "Inspect this" }],
+          images: [
+            { type: "image", mediaType: "image/webp", data: "aGVsbG8=" },
+          ],
+        },
+      ]),
+    ).toEqual([
+      {
+        role: "user",
+        content: [
+          { type: "input_text", text: "Inspect this" },
+          {
+            type: "input_image",
+            detail: "auto",
+            image_url: "data:image/webp;base64,aGVsbG8=",
+          },
+        ],
+      },
+    ])
+  })
+
   it("restores durable reasoning items for a tool continuation", () => {
     expect(
       toOpenAIInput([
@@ -245,6 +271,7 @@ describe("OpenAI Responses provider", () => {
     const events = []
     for await (const event of stream(
       requestFixture({
+        cacheKey: "conversation_1",
         contextual: [
           {
             id: "project.instructions",
@@ -281,6 +308,7 @@ describe("OpenAI Responses provider", () => {
       stream: true,
       store: false,
       parallel_tool_calls: false,
+      prompt_cache_key: "conversation_1",
     })
   })
 

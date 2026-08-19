@@ -83,7 +83,52 @@ describe("anthropic provider conversion", () => {
     ])
   })
 
+  it("converts attached images into Anthropic base64 content blocks", () => {
+    expect(
+      toAnthropicMessages([
+        {
+          role: "user",
+          content: [{ type: "text", text: "What is this?" }],
+          images: [{ type: "image", mediaType: "image/png", data: "aGVsbG8=" }],
+        },
+      ]),
+    ).toEqual([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "What is this?" },
+          {
+            type: "image",
+            source: {
+              type: "base64",
+              media_type: "image/png",
+              data: "aGVsbG8=",
+            },
+          },
+        ],
+      },
+    ])
+  })
+
   it("maps text, tool use, length, and usage from fixture messages", () => {
+    expect(
+      fromAnthropicMessage({
+        stop_reason: "end_turn",
+        usage: {
+          input_tokens: 10,
+          output_tokens: 4,
+          cache_read_input_tokens: 80,
+          cache_creation_input_tokens: 6,
+        },
+        content: [{ type: "text", text: "cached" }],
+      }).usage,
+    ).toEqual({
+      inputTokens: 96,
+      outputTokens: 4,
+      cacheReadInputTokens: 80,
+      cacheWriteInputTokens: 6,
+    })
+
     expect(
       fromAnthropicMessage({
         id: "msg_1",
@@ -562,17 +607,23 @@ describe("anthropic provider conversion", () => {
       client,
     })
 
-    for await (const _event of stream(effortRequest("kimi", "max"))) void _event
+    for await (const _event of stream({
+      ...effortRequest("kimi", "max"),
+      cacheKey: "conversation_1",
+    }))
+      void _event
 
     expect(body).toMatchObject({
       model: "kimi-for-coding",
+      metadata: { user_id: "conversation_1" },
       output_config: { effort: "max" },
     })
     expect(options).toMatchObject({
       headers: { "anthropic-beta": "effort-2025-11-24" },
     })
-    // Cache-control stays official-Anthropic-only, even with effort.
-    expect(JSON.stringify(body)).not.toContain("cache_control")
+    // Kimi's Anthropic-compatible endpoint supports the same explicit
+    // ephemeral cache breakpoints as the official Anthropic endpoint.
+    expect(JSON.stringify(body)).toContain("cache_control")
   })
 
   it("omits output_config and the beta header for kimi without an effort", async () => {

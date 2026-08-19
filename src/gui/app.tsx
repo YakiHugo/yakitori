@@ -1,7 +1,6 @@
 import { GitFork, Plus } from "lucide-react"
 import { ApprovalBar } from "./components/approval-bar.tsx"
 import { Composer } from "./components/composer.tsx"
-import { DiagnosticsDrawer } from "./components/diagnostics-drawer.tsx"
 import { ProjectSwitcher } from "./components/project-switcher.tsx"
 import { StatusSurface } from "./components/status-surface.tsx"
 import { ThreadList } from "./components/thread-list.tsx"
@@ -48,7 +47,6 @@ export function App() {
             <>
               <SessionHeader />
               <Transcript />
-              <DiagnosticsDrawer />
               <ApprovalBar />
               <StatusSurface />
               <Composer />

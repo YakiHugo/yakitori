@@ -5,6 +5,7 @@ import {
   type EventMetadata,
   ForkReason,
   IdPrefix,
+  type ImageAttachment,
   InputRole,
   isIdWithPrefix,
   isJsonValue,
@@ -92,6 +93,9 @@ export type ServerHandlers = {
 
 const sessionListOrder = "updated_at_desc"
 const maxCancelReasonLength = 512
+const maxImageAttachments = 4
+const maxImageAttachmentBytes = 4 * 1024 * 1024
+const maxImageAttachmentsBytes = 10 * 1024 * 1024
 
 export function createServerHandlers(
   kernel: SessionKernel,
@@ -867,12 +871,87 @@ function requireTextContent(
         },
       )
     }
+    const attachments = requireImageAttachments(value.attachments)
     return {
       kind: "text",
       text: value.text,
+      ...(attachments.length === 0 ? {} : { attachments }),
     }
   }
   throw invalidInput("content must include kind text and a string text value.")
+}
+
+function requireImageAttachments(value: unknown): readonly ImageAttachment[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value) || value.length > maxImageAttachments) {
+    throw invalidInput(
+      `content.attachments must contain at most ${maxImageAttachments} images.`,
+      { field: "content.attachments", maxItems: maxImageAttachments },
+    )
+  }
+
+  const attachments = value.map((item, index) =>
+    requireImageAttachment(item, index),
+  )
+  const totalBytes = attachments.reduce(
+    (total, attachment) => total + attachment.sizeBytes,
+    0,
+  )
+  if (totalBytes > maxImageAttachmentsBytes) {
+    throw invalidInput(
+      `content.attachments must not exceed ${maxImageAttachmentsBytes} decoded bytes in total.`,
+      {
+        field: "content.attachments",
+        maxBytes: maxImageAttachmentsBytes,
+      },
+    )
+  }
+  return attachments
+}
+
+function requireImageAttachment(
+  value: unknown,
+  index: number,
+): ImageAttachment {
+  if (!isRecord(value)) {
+    throw invalidInput(`content.attachments[${index}] must be an image object.`)
+  }
+  const name = requireString(value.name, `content.attachments[${index}].name`)
+  if (Buffer.byteLength(name, "utf8") > 255) {
+    throw invalidInput(`content.attachments[${index}].name is too long.`)
+  }
+  const mediaType = value.mediaType
+  if (
+    mediaType !== "image/gif" &&
+    mediaType !== "image/jpeg" &&
+    mediaType !== "image/png" &&
+    mediaType !== "image/webp"
+  ) {
+    throw invalidInput(
+      `content.attachments[${index}].mediaType is not a supported image type.`,
+    )
+  }
+  if (
+    typeof value.data !== "string" ||
+    value.data.length === 0 ||
+    !/^[A-Za-z0-9+/]+={0,2}$/.test(value.data)
+  ) {
+    throw invalidInput(
+      `content.attachments[${index}].data must be base64 image data.`,
+    )
+  }
+  const decoded = Buffer.from(value.data, "base64")
+  if (decoded.length === 0 || decoded.length > maxImageAttachmentBytes) {
+    throw invalidInput(
+      `content.attachments[${index}] must not exceed ${maxImageAttachmentBytes} decoded bytes.`,
+    )
+  }
+  if (value.sizeBytes !== decoded.length) {
+    throw invalidInput(
+      `content.attachments[${index}].sizeBytes does not match its data.`,
+    )
+  }
+  return { name, mediaType, data: value.data, sizeBytes: decoded.length }
 }
 
 function optionalStringField(
