@@ -16,6 +16,7 @@ import {
   MateLifecycle,
   resolveWorkspaceDirectory,
 } from "../../src/index.ts"
+import { listCatalogModels } from "../../src/runtime/model-catalog.ts"
 
 async function listen(server: HttpServer): Promise<string> {
   await new Promise<void>((resolve) => {
@@ -38,6 +39,16 @@ function testApplicationOptions(input: {
     recoverOnStart: false,
     stream: createFauxProvider([]).stream,
     userConfigPath: join(input.rootDir, "config.toml"),
+    modelDirectory: {
+      listModels: async (provider: string) =>
+        listCatalogModels(provider).map((model) => ({
+          id: model.model,
+          displayName: model.displayName ?? model.model,
+          family: model.promptId,
+          ...(model.efforts === undefined ? {} : { efforts: model.efforts }),
+          ...(model.speeds === undefined ? {} : { speeds: model.speeds }),
+        })),
+    },
   }
 }
 
@@ -529,6 +540,11 @@ describe("application composition", () => {
           forkReason: "edit",
           workingDirectory: application.workspace,
         })
+        expect(forked.body.events.at(-1)).toMatchObject({
+          sessionId: forked.body.session.id,
+          type: EventType.InputAdmitted,
+          data: { content: { kind: "text", text: "replacement" } },
+        })
         expect(provider.callCount).toBe(3)
       } finally {
         await application.close()
@@ -611,6 +627,11 @@ describe("application composition", () => {
             reason: "conversation_fork",
           },
         })
+        expect(forked.body.events.map((event) => event.type)).toEqual([
+          EventType.SessionCreated,
+          EventType.TurnInterrupted,
+          EventType.InputCancelled,
+        ])
       } finally {
         await application.close()
       }

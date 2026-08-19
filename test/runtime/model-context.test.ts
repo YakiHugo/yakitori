@@ -423,11 +423,10 @@ describe("model context", () => {
     const notice = context.messages[1]
     expect(notice?.role).toBe("user")
     if (notice?.role !== "user") throw new Error("missing fork notice")
-    expect(notice.content[0]?.text).toContain(
-      `<session_forked reason="${reason}">`,
+    const action = reason === "edit" ? "edited" : "undone"
+    expect(notice.content[0]?.text).toBe(
+      `<session_forked reason="${reason}">\nThis session continues a conversation that was ${action} at an earlier point. Actions taken after that point in the previous session were NOT rolled back: files, command effects, processes, and the environment may still reflect them.\n</session_forked>`,
     )
-    expect(notice.content[0]?.text).toContain("were NOT rolled back")
-    expect(notice.content[0]?.text).toContain("re-read files")
     expect(context.messages[2]).toEqual({
       role: "user",
       content: [{ type: "text", text: "shared question" }],

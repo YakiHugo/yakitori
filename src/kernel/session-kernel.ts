@@ -95,11 +95,16 @@ export type ForkSessionInput = {
   readonly sessionId: string
   readonly atInputId: string
   readonly reason: ForkReason
+  readonly content?: TextContent
+  readonly modelSelection?: ModelSelection
 }
 export type ForkSessionResult = {
   readonly sessionId: string
+  readonly historyEndSeqExclusive: number
   readonly session: SessionProjection
   readonly events: readonly StoredEventEnvelope[]
+  readonly localEvents: readonly StoredEventEnvelope[]
+  readonly sourceEvents: readonly EventEnvelope[]
 }
 export type ListSessionsInput = {
   readonly limit?: number
@@ -109,6 +114,7 @@ export type ListSessionsInput = {
 }
 export type SessionSummary = {
   readonly sessionId: string
+  readonly conversationId: string
   readonly seq: number
   readonly createdAt: string
   readonly updatedAt: string
@@ -132,9 +138,12 @@ export type DeleteSessionResult = { readonly sessionId: string }
 export type ReadEventsInput = {
   readonly sessionId: string
   readonly after?: number
+  readonly through?: number
+  readonly limit?: number
 }
 export type ReadEventsResult = {
   readonly events: readonly StoredEventEnvelope[]
+  readonly nextAfter?: number
 }
 export type ReplaySessionInput = { readonly sessionId: string }
 export type ReplaySessionResult = {
@@ -310,38 +319,69 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
   return {
     async createSession(input = {}) {
       const sessionId = createSessionId()
-      const event = await eventStore.appendEvent(
-        sessionId,
-        {
-          type: EventType.SessionCreated,
-          data: compact({
-            title: input.title,
-            workingDirectory: input.workingDirectory,
-            mateId: input.mateId,
-            mateRevisionId: input.mateRevisionId,
-            parentSessionId: input.parentSessionId,
-            metadata: input.metadata,
-          }),
-        },
-        { expectedSeq: 0 },
-      )
+      const event = await eventStore.createSession(sessionId, {
+        type: EventType.SessionCreated,
+        data: compact({
+          title: input.title,
+          workingDirectory: input.workingDirectory,
+          mateId: input.mateId,
+          mateRevisionId: input.mateRevisionId,
+          conversationId: sessionId,
+          parentSessionId: input.parentSessionId,
+          metadata: input.metadata,
+        }),
+      })
       return { sessionId, event }
     },
 
     forkSession(input) {
       return command(input.sessionId, async () => {
-        const source = await requireSession(eventStore, input.sessionId)
+        let source = await requireSession(eventStore, input.sessionId)
         requireInput(source, input.atInputId)
-        if (source.activeTurn !== undefined)
+        if (source.activeTurn !== undefined) {
           invalidState(
-            `Session ${source.id} has an active turn; cancel it before forking the session.`,
+            `Session ${source.id} has an active turn; interrupt it before forking the session.`,
+            {
+              sessionId: source.id,
+              activeTurnId: source.activeTurn.turnId,
+              operation: "fork_session",
+            },
           )
-        if (source.pendingInputs.length > 0)
-          invalidState(
-            `Session ${source.id} has queued inputs; cancel its queued inputs before forking the session.`,
-          )
+        }
+        const sourceEvents = await appendMany(
+          eventStore,
+          source,
+          source.pendingInputs.map(
+            (pending): KernelEvent => ({
+              type: EventType.InputCancelled,
+              data: {
+                inputId: pending.inputId,
+                reason: "conversation_fork",
+              },
+            }),
+          ),
+        )
+        if (sourceEvents.length > 0) {
+          source = await requireSession(eventStore, input.sessionId)
+        }
 
         const sessionId = createSessionId()
+        const initialEvents: KernelEvent[] = []
+        if (input.content !== undefined) {
+          initialEvents.push({
+            type: EventType.InputAdmitted,
+            data: {
+              requestId: createRequestId(),
+              inputId: createInputId(),
+              role: InputRole.User,
+              content: input.content,
+              ...(input.modelSelection === undefined
+                ? {}
+                : { modelSelection: input.modelSelection }),
+              parentInputId: input.atInputId,
+            },
+          })
+        }
         const forked = await eventStore.forkSession({
           sourceSessionId: source.id,
           targetSessionId: sessionId,
@@ -354,17 +394,22 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
               workingDirectory: source.workingDirectory,
               mateId: source.mateId,
               mateRevisionId: source.mateRevisionId,
+              conversationId: source.conversationId,
               parentSessionId: source.id,
               forkedFromInputId: input.atInputId,
               forkReason: input.reason,
               metadata: source.metadata,
             }),
           },
+          ...(initialEvents.length === 0 ? {} : { initialEvents }),
         })
         return {
           sessionId,
+          historyEndSeqExclusive: forked.historyEndSeqExclusive,
           session: forked.projection,
           events: forked.events,
+          localEvents: forked.localEvents,
+          sourceEvents,
         }
       })
     },
@@ -389,16 +434,37 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
           invalidState(
             `Session ${session.id} has queued inputs; cancel its queued inputs before deleting the session.`,
           )
-        await eventStore.deleteSession(input.sessionId)
+        await eventStore.deleteConversation(session.conversationId)
         return { sessionId: input.sessionId }
       })
     },
 
     async readEvents(input) {
+      const limit = input.limit
+      if (
+        limit !== undefined &&
+        (!Number.isInteger(limit) || limit <= 0 || limit > 1_000)
+      ) {
+        invalidArgument("Event page limit must be an integer from 1 to 1000.")
+      }
+      if (
+        input.through !== undefined &&
+        (!Number.isInteger(input.through) || input.through < 0)
+      ) {
+        invalidArgument("Event replay boundary must be a non-negative integer.")
+      }
+      const events = await eventStore.readEvents(input.sessionId, {
+        after: input.after ?? 0,
+        ...(input.through === undefined ? {} : { through: input.through }),
+        ...(limit === undefined ? {} : { limit: limit + 1 }),
+      })
+      const page = limit === undefined ? events : events.slice(0, limit)
+      const last = page.at(-1)
       return {
-        events: await eventStore.readEvents(input.sessionId, {
-          after: input.after ?? 0,
-        }),
+        events: page,
+        ...(limit !== undefined && events.length > limit && last !== undefined
+          ? { nextAfter: last.seq }
+          : {}),
       }
     },
 

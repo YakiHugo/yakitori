@@ -160,6 +160,12 @@ describe("HTTP server", () => {
         title: "Fork route",
         counts: { inputs: 0, pendingInputs: 0, turns: 0 },
       })
+      expect(forked.body.events).toEqual([
+        expect.objectContaining({
+          sessionId: forked.body.session.id,
+          type: EventType.SessionCreated,
+        }),
+      ])
 
       const source = await getJson<ApiReadSessionResponse>(
         `${baseUrl}/sessions/${created.body.session.id}`,
@@ -353,6 +359,7 @@ describe("HTTP server", () => {
     const finishReplay = new Promise<void>((resolve) => {
       resolveFinishReplay = resolve
     })
+    const replayRequests: unknown[] = []
     const buffered = createEventEnvelope({
       sessionId: "session_1",
       seq: 2,
@@ -368,7 +375,31 @@ describe("HTTP server", () => {
     })
     const handlers = {
       ...createServerHandlers(createSessionKernel(createMemoryEventStore())),
-      async readSessionEvents() {
+      async readSession() {
+        return {
+          ok: true as const,
+          status: 200,
+          body: {
+            session: {
+              id: "session_1",
+              conversationId: "session_1",
+              seq: 1,
+              createdAt: "2026-01-01T00:00:00.000Z",
+              updatedAt: "2026-01-01T00:00:00.000Z",
+              counts: {
+                inputs: 0,
+                pendingInputs: 0,
+                turns: 0,
+                items: 0,
+                permissions: 0,
+                tools: 0,
+              },
+            },
+          },
+        }
+      },
+      async readSessionEvents(input: unknown) {
+        replayRequests.push(input)
         resolveReplayStarted?.()
         await finishReplay
         return { ok: true as const, status: 200, body: { events: [] } }
@@ -393,6 +424,9 @@ describe("HTTP server", () => {
         expect(text.indexOf(`data: ${JSON.stringify(buffered)}`)).toBeLessThan(
           text.indexOf("event: session.replay-complete"),
         )
+        expect(replayRequests).toEqual([
+          { sessionId: "session_1", after: 0, through: 1, limit: 500 },
+        ])
       },
     )
   })

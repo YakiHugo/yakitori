@@ -582,7 +582,24 @@ async function streamSessionEvents(
     cleanup()
   })
 
-  const replayed = await handlers.readSessionEvents({ sessionId, after })
+  const snapshot = await handlers.readSession({ sessionId })
+  if (responseClosed) {
+    cleanup()
+    return
+  }
+  if (!snapshot.ok) {
+    cleanup()
+    writeResult(response, snapshot)
+    return
+  }
+  const replayThrough = snapshot.body.session.seq
+  let replayAfter = after
+  let replayed = await handlers.readSessionEvents({
+    sessionId,
+    after: replayAfter,
+    through: replayThrough,
+    limit: 500,
+  })
   if (responseClosed) {
     cleanup()
     return
@@ -596,7 +613,27 @@ async function streamSessionEvents(
   writeSseHead(response)
   response.write(": connected\n\n")
   lastSequence = after
-  lastSequence = writeSseEvents(response, replayed.body.events, lastSequence)
+  for (;;) {
+    if (responseClosed) {
+      cleanup()
+      return
+    }
+    lastSequence = writeSseEvents(response, replayed.body.events, lastSequence)
+    if (replayed.body.nextAfter === undefined) break
+    replayAfter = replayed.body.nextAfter
+    replayed = await handlers.readSessionEvents({
+      sessionId,
+      after: replayAfter,
+      through: replayThrough,
+      limit: 500,
+    })
+    if (!replayed.ok) {
+      cleanup()
+      response.destroy()
+      return
+    }
+  }
+  pendingEvents.sort((left, right) => left.seq - right.seq)
   lastSequence = writeSseEvents(response, pendingEvents, lastSequence)
   pendingEvents.length = 0
   response.write("event: session.replay-complete\n")
