@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest"
-import { createEventEnvelope, EventType, InputRole } from "../../src/index.ts"
 import {
   createExecutionViewState,
   projectExecutionView,
   reduceExecutionView,
 } from "../../src/gui/execution-view.ts"
+import { createEventEnvelope, EventType, InputRole } from "../../src/index.ts"
 
 const sessionId = "session_00000000-0000-4000-8000-000000000000"
 
@@ -45,6 +45,100 @@ describe("execution view", () => {
         itemId: "item_1",
         text: "Hello",
         status: "completed",
+      }),
+    ])
+  })
+
+  it("shows a live reasoning summary and replaces it with the durable block", () => {
+    let state = reduceExecutionView(createExecutionViewState(), {
+      type: "transient",
+      event: {
+        type: "reasoning.snapshot",
+        sessionId,
+        turnId: "turn_1",
+        streamId: "stream_1",
+        text: "Inspecting files",
+        createdAt: "2026-07-24T00:00:00.000Z",
+      },
+    })
+
+    expect(projectExecutionView(state).entries).toEqual([
+      {
+        kind: "reasoning",
+        streamId: "stream_1",
+        text: "Inspecting files",
+        status: "streaming",
+        at: "2026-07-24T00:00:00.000Z",
+      },
+    ])
+
+    state = reduceExecutionView(state, {
+      type: "durable",
+      event: createEventEnvelope({
+        sessionId,
+        seq: 1,
+        event: {
+          type: EventType.AssistantMessage,
+          data: {
+            messageId: "item_1",
+            turnId: "turn_1",
+            content: [
+              { type: "reasoning", text: "Inspecting files" },
+              { type: "text", text: "Done." },
+            ],
+            providerMetadata: { streamId: "stream_1" },
+          },
+        },
+      }),
+    })
+
+    expect(projectExecutionView(state).entries).toEqual([
+      expect.objectContaining({
+        kind: "reasoning",
+        text: "Inspecting files",
+        status: "completed",
+      }),
+      expect.objectContaining({
+        kind: "assistant",
+        text: "Done.",
+        status: "completed",
+      }),
+    ])
+  })
+
+  it("projects public reasoning separately from the assistant answer", () => {
+    const state = reduceExecutionView(createExecutionViewState(), {
+      type: "durable",
+      event: createEventEnvelope({
+        sessionId,
+        seq: 1,
+        createdAt: "2026-07-24T00:00:00.000Z",
+        event: {
+          type: EventType.AssistantMessage,
+          data: {
+            messageId: "item_1",
+            turnId: "turn_1",
+            content: [
+              { type: "reasoning", text: "Inspect the event ordering." },
+              { type: "text", text: "The ordering is correct." },
+            ],
+          },
+        },
+      }),
+    })
+
+    expect(projectExecutionView(state).entries).toEqual([
+      {
+        kind: "reasoning",
+        itemId: "item_1:reasoning:0",
+        text: "Inspect the event ordering.",
+        status: "completed",
+        at: "2026-07-24T00:00:00.000Z",
+      },
+      expect.objectContaining({
+        kind: "assistant",
+        itemId: "item_1",
+        text: "The ordering is correct.",
       }),
     ])
   })
@@ -207,6 +301,7 @@ describe("execution view", () => {
       expect.objectContaining({
         kind: "tool",
         toolCallId: "tool_1",
+        output: expect.objectContaining({ path: "src/index.ts" }),
         diff: {
           text: "--- a/src/index.ts\n+++ b/src/index.ts\n@@ -1 +1 @@\n-old\n+new",
           truncated: false,
@@ -216,6 +311,7 @@ describe("execution view", () => {
         kind: "tool",
         toolCallId: "tool_2",
         summary: "Run the test suite",
+        output: expect.objectContaining({ exitCode: 0, stdout: "all green" }),
         commandResult: {
           exitCode: 0,
           signal: null,
@@ -618,4 +714,102 @@ describe("execution view", () => {
     expect(next.queuedInputIds).toEqual([])
     expect(next.activeTurnStartedAt).toBe("2026-07-24T00:00:03.000Z")
   })
+
+  it("derives the active activity from snapshots, tools, and permissions", () => {
+    let state = reduceExecutionView(createExecutionViewState(), {
+      type: "durable",
+      event: createEventEnvelope({
+        sessionId,
+        seq: 1,
+        event: {
+          type: EventType.TurnStarted,
+          data: { turnId: "turn_1", inputId: "input_1" },
+        },
+      }),
+    })
+    state = reduceExecutionView(state, {
+      type: "session",
+      session: activeSession("turn_1", 1),
+    })
+    expect(projectExecutionView(state).activeActivity).toEqual({
+      kind: "reasoning",
+    })
+
+    state = reduceExecutionView(state, {
+      type: "transient",
+      event: {
+        type: "assistant.snapshot",
+        sessionId,
+        turnId: "turn_1",
+        streamId: "stream_1",
+        text: "Writing",
+        createdAt: "2026-07-24T00:00:01.000Z",
+      },
+    })
+    expect(projectExecutionView(state).activeActivity).toEqual({
+      kind: "responding",
+    })
+
+    state = reduceExecutionView(state, {
+      type: "durable",
+      event: createEventEnvelope({
+        sessionId,
+        seq: 2,
+        event: {
+          type: EventType.ToolCall,
+          data: {
+            toolCallId: "tool_1",
+            itemId: "item_1",
+            turnId: "turn_1",
+            name: "run_command",
+            input: { command: "pnpm test" },
+            requiresPermission: true,
+          },
+        },
+      }),
+    })
+    expect(projectExecutionView(state).activeActivity).toEqual({
+      kind: "running_tool",
+      name: "run_command",
+    })
+
+    state = reduceExecutionView(state, {
+      type: "durable",
+      event: createEventEnvelope({
+        sessionId,
+        seq: 3,
+        event: {
+          type: EventType.PermissionRequested,
+          data: {
+            permissionRequestId: "permission_1",
+            turnId: "turn_1",
+            toolCallId: "tool_1",
+            action: "run_command",
+          },
+        },
+      }),
+    })
+    expect(projectExecutionView(state).activeActivity).toEqual({
+      kind: "waiting_permission",
+      action: "run_command",
+    })
+  })
 })
+
+function activeSession(activeTurnId: string, seq: number) {
+  return {
+    id: sessionId,
+    seq,
+    createdAt: "2026-07-24T00:00:00.000Z",
+    updatedAt: "2026-07-24T00:00:00.000Z",
+    activeTurnId,
+    counts: {
+      inputs: 1,
+      pendingInputs: 0,
+      turns: 1,
+      items: 0,
+      permissions: 0,
+      tools: 0,
+    },
+  }
+}

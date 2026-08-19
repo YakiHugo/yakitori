@@ -2,12 +2,12 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { createEventEnvelope, EventType } from "../../src/index.ts"
 import { Composer } from "../../src/gui/components/composer.tsx"
 import {
   createInitialAppState,
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
+import { createEventEnvelope, EventType } from "../../src/index.ts"
 
 beforeEach(() => {
   useAppStore.setState(createInitialAppState())
@@ -86,6 +86,19 @@ describe("composer", () => {
       "disabled",
       true,
     )
+  })
+
+  it("shows an explicit sending state while admission is in flight", () => {
+    useAppStore.setState({
+      selection: { revision: 1, sessionId: "session_1" },
+      promptDraft: "hello",
+      inFlightActions: new Set(["admit:session_1"]),
+    })
+    render(<Composer />)
+
+    const button = screen.getByRole("button", { name: "Sending" })
+    expect(button.textContent).toContain("Sending")
+    expect(button).toHaveProperty("disabled", true)
   })
 })
 

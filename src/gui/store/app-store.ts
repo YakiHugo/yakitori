@@ -669,6 +669,11 @@ export const useAppStore = create<AppStore>()((set, get) => {
     admitInput: async (text) => {
       const selection = currentSessionSelection(get().selection)
       if (!selection || !get().modelSelectionReady) return
+      const key = `admit:${selection.sessionId}`
+      if (get().inFlightActions.has(key)) return
+      set((state) => ({
+        inFlightActions: new Set(state.inFlightActions).add(key),
+      }))
 
       // The compact directive takes a dedicated lane: no admission outbox,
       // no model selection — the server admits it as a runtime-role Input.
@@ -697,6 +702,11 @@ export const useAppStore = create<AppStore>()((set, get) => {
           },
           () => isCurrentSessionSelection(get().selection, selection),
         )
+        set((state) => {
+          const inFlightActions = new Set(state.inFlightActions)
+          inFlightActions.delete(key)
+          return { inFlightActions }
+        })
         return
       }
 
@@ -746,12 +756,22 @@ export const useAppStore = create<AppStore>()((set, get) => {
             set({ promptDraft: undefined })
           }
           mergeEvent(response.event)
+          set((state) => {
+            const inFlightActions = new Set(state.inFlightActions)
+            inFlightActions.delete(key)
+            return { inFlightActions }
+          })
           await refreshSelectedSession(selection)
           if (!isCurrentSessionSelection(get().selection, selection)) return
           await get().loadSessions()
         },
         () => isCurrentSessionSelection(get().selection, selection),
       )
+      set((state) => {
+        const inFlightActions = new Set(state.inFlightActions)
+        inFlightActions.delete(key)
+        return { inFlightActions }
+      })
     },
 
     cancelTurn: async (turnId) => {

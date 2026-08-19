@@ -1,6 +1,6 @@
 import {
-  isKernelEvent,
   type EventEnvelope,
+  isKernelEvent,
   type StoredEventEnvelope,
   type TokenUsage,
 } from "../kernel/events.ts"
@@ -23,6 +23,14 @@ export type ExecutionEntry =
       readonly at: string
     }
   | {
+      readonly kind: "reasoning"
+      readonly itemId?: string
+      readonly streamId?: string
+      readonly text: string
+      readonly status: "streaming" | "completed"
+      readonly at: string
+    }
+  | {
       readonly kind: "tool"
       readonly toolCallId: string
       readonly turnId: string
@@ -30,6 +38,7 @@ export type ExecutionEntry =
       readonly summary: string
       readonly input: unknown
       readonly state: string
+      readonly output?: unknown
       readonly resultText?: string
       readonly resultError?: boolean
       readonly resultErrorMessage?: string
@@ -40,6 +49,7 @@ export type ExecutionEntry =
       readonly kind: "permission"
       readonly permissionRequestId: string
       readonly turnId: string
+      readonly toolCallId: string
       readonly action: string
       readonly subject?: string
       readonly state: string
@@ -96,18 +106,33 @@ export type ExecutionView = {
   }
   readonly lastTurnUsage?: TokenUsage
   readonly activeTurnStartedAt?: string
+  readonly activeActivity?: ActiveTurnActivity
 }
+
+export type ActiveTurnActivity =
+  | { readonly kind: "reasoning" }
+  | { readonly kind: "responding" }
+  | { readonly kind: "waiting_permission"; readonly action: string }
+  | { readonly kind: "running_tool"; readonly name: string }
 
 export type ExecutionViewState = {
   readonly durableEvents: readonly StoredEventEnvelope[]
-  readonly snapshots: Readonly<Record<string, string>>
+  readonly snapshots: Readonly<Record<string, StreamSnapshot>>
+  readonly reasoningSnapshots: Readonly<Record<string, StreamSnapshot>>
   readonly session?: ApiSessionDetail
+}
+
+type StreamSnapshot = {
+  readonly turnId: string
+  readonly text: string
+  readonly createdAt: string
 }
 
 export function createExecutionViewState(): ExecutionViewState {
   return {
     durableEvents: [],
     snapshots: {},
+    reasoningSnapshots: {},
   }
 }
 
@@ -126,12 +151,19 @@ export function reduceExecutionView(
     return { ...state, session: action.session }
   }
   if (action.type === "transient") {
-    if (action.event.type !== "assistant.snapshot") return state
+    const key =
+      action.event.type === "assistant.snapshot"
+        ? "snapshots"
+        : "reasoningSnapshots"
     return {
       ...state,
-      snapshots: {
-        ...state.snapshots,
-        [action.event.streamId]: action.event.text,
+      [key]: {
+        ...state[key],
+        [action.event.streamId]: {
+          turnId: action.event.turnId,
+          text: action.event.text,
+          createdAt: action.event.createdAt,
+        },
       },
     }
   }
@@ -154,6 +186,7 @@ export function reduceExecutionView(
 
   // Drop completed stream bubbles when the durable assistant fact arrives.
   let snapshots = state.snapshots
+  let reasoningSnapshots = state.reasoningSnapshots
   const event = knownEvent(action.event)
   if (
     event?.type === "assistant.message" &&
@@ -161,11 +194,34 @@ export function reduceExecutionView(
   ) {
     const { [event.data.providerMetadata.streamId]: _, ...rest } = snapshots
     snapshots = rest
+    const {
+      [event.data.providerMetadata.streamId]: _reasoning,
+      ...reasoningRest
+    } = reasoningSnapshots
+    reasoningSnapshots = reasoningRest
+  }
+  if (
+    event?.type === "turn.completed" ||
+    event?.type === "turn.failed" ||
+    event?.type === "turn.cancelled" ||
+    event?.type === "turn.interrupted"
+  ) {
+    snapshots = Object.fromEntries(
+      Object.entries(snapshots).filter(
+        ([, snapshot]) => snapshot.turnId !== event.data.turnId,
+      ),
+    )
+    reasoningSnapshots = Object.fromEntries(
+      Object.entries(reasoningSnapshots).filter(
+        ([, snapshot]) => snapshot.turnId !== event.data.turnId,
+      ),
+    )
   }
 
   return {
     durableEvents,
     snapshots,
+    reasoningSnapshots,
     ...(action.session === undefined
       ? state.session === undefined
         ? {}
@@ -189,6 +245,7 @@ export function projectExecutionView(state: ExecutionViewState): ExecutionView {
   const startedInputIds = new Set<string>()
   const cancelledInputIds = new Set<string>()
   const turnStartedAt = new Map<string, string>()
+  const terminalTurnIds = new Set<string>()
   let lastModel:
     | { readonly provider: string; readonly model: string }
     | undefined
@@ -223,6 +280,7 @@ export function projectExecutionView(state: ExecutionViewState): ExecutionView {
       continue
     }
     if (event.type === "turn.completed") {
+      terminalTurnIds.add(event.data.turnId)
       if (event.data.usage !== undefined) lastTurnUsage = event.data.usage
       continue
     }
@@ -232,17 +290,30 @@ export function projectExecutionView(state: ExecutionViewState): ExecutionView {
           ? event.data.providerMetadata.streamId
           : undefined
       if (streamId) streamIdsSeen.add(streamId)
-      entries.push({
-        kind: "assistant",
-        itemId: event.data.messageId,
-        ...(streamId === undefined ? {} : { streamId }),
-        text: event.data.content
-          .filter((block) => block.type === "text")
-          .map((block) => block.text)
-          .join(""),
-        status: "completed",
-        at: event.createdAt,
-      })
+      for (const [index, block] of event.data.content.entries()) {
+        if (block.type !== "reasoning" || block.text.length === 0) continue
+        entries.push({
+          kind: "reasoning",
+          itemId: `${event.data.messageId}:reasoning:${index}`,
+          text: block.text,
+          status: "completed",
+          at: event.createdAt,
+        })
+      }
+      const text = event.data.content
+        .filter((block) => block.type === "text")
+        .map((block) => block.text)
+        .join("")
+      if (text.length > 0) {
+        entries.push({
+          kind: "assistant",
+          itemId: event.data.messageId,
+          ...(streamId === undefined ? {} : { streamId }),
+          text,
+          status: "completed",
+          at: event.createdAt,
+        })
+      }
       continue
     }
     if (event.type === "tool.call") {
@@ -266,6 +337,9 @@ export function projectExecutionView(state: ExecutionViewState): ExecutionView {
       )
       updateTool(tools, entries, event.data.toolCallId, {
         state: event.data.error === undefined ? "completed" : "failed",
+        ...(event.data.output === undefined
+          ? {}
+          : { output: event.data.output }),
         resultText:
           event.data.content.kind === "text"
             ? event.data.content.text
@@ -286,6 +360,7 @@ export function projectExecutionView(state: ExecutionViewState): ExecutionView {
         kind: "permission",
         permissionRequestId: event.data.permissionRequestId,
         turnId: event.data.turnId,
+        toolCallId: event.data.toolCallId,
         action: event.data.action,
         ...(event.data.subject === undefined
           ? {}
@@ -304,6 +379,7 @@ export function projectExecutionView(state: ExecutionViewState): ExecutionView {
       continue
     }
     if (event.type === "turn.failed") {
+      terminalTurnIds.add(event.data.turnId)
       markPendingPermissionsStale(permissions, entries, event.data.turnId)
       entries.push({
         kind: "turn_terminal",
@@ -314,6 +390,7 @@ export function projectExecutionView(state: ExecutionViewState): ExecutionView {
       continue
     }
     if (event.type === "turn.cancelled") {
+      terminalTurnIds.add(event.data.turnId)
       markPendingPermissionsStale(permissions, entries, event.data.turnId)
       entries.push({
         kind: "turn_terminal",
@@ -324,6 +401,7 @@ export function projectExecutionView(state: ExecutionViewState): ExecutionView {
       continue
     }
     if (event.type === "turn.interrupted") {
+      terminalTurnIds.add(event.data.turnId)
       markPendingPermissionsStale(permissions, entries, event.data.turnId)
       for (const tool of tools.values()) {
         if (tool.turnId !== event.data.turnId || tool.state !== "requested") {
@@ -354,14 +432,25 @@ export function projectExecutionView(state: ExecutionViewState): ExecutionView {
     }
   }
 
-  for (const [streamId, text] of Object.entries(state.snapshots)) {
+  for (const [streamId, snapshot] of Object.entries(state.reasoningSnapshots)) {
+    if (streamIdsSeen.has(streamId)) continue
+    entries.push({
+      kind: "reasoning",
+      streamId,
+      text: snapshot.text,
+      status: "streaming",
+      at: snapshot.createdAt,
+    })
+  }
+
+  for (const [streamId, snapshot] of Object.entries(state.snapshots)) {
     if (streamIdsSeen.has(streamId)) continue
     entries.push({
       kind: "assistant",
       streamId,
-      text,
+      text: snapshot.text,
       status: "streaming",
-      at: new Date().toISOString(),
+      at: snapshot.createdAt,
     })
   }
 
@@ -369,9 +458,18 @@ export function projectExecutionView(state: ExecutionViewState): ExecutionView {
     (inputId) =>
       !startedInputIds.has(inputId) && !cancelledInputIds.has(inputId),
   )
-  const activeTurnId = state.session?.activeTurnId
+  const sessionActiveTurnId = state.session?.activeTurnId
+  const activeTurnId =
+    sessionActiveTurnId === undefined ||
+    terminalTurnIds.has(sessionActiveTurnId)
+      ? undefined
+      : sessionActiveTurnId
   const activeTurnStartedAt =
     activeTurnId === undefined ? undefined : turnStartedAt.get(activeTurnId)
+  const activeActivity =
+    activeTurnId === undefined
+      ? undefined
+      : projectActiveActivity(activeTurnId, state.snapshots, tools, permissions)
 
   return {
     entries,
@@ -389,7 +487,38 @@ export function projectExecutionView(state: ExecutionViewState): ExecutionView {
     ...(lastModel === undefined ? {} : { lastModel }),
     ...(lastTurnUsage === undefined ? {} : { lastTurnUsage }),
     ...(activeTurnStartedAt === undefined ? {} : { activeTurnStartedAt }),
+    ...(activeActivity === undefined ? {} : { activeActivity }),
   }
+}
+
+function projectActiveActivity(
+  turnId: string,
+  snapshots: ExecutionViewState["snapshots"],
+  tools: Map<string, Extract<ExecutionEntry, { readonly kind: "tool" }>>,
+  permissions: Map<
+    string,
+    Extract<ExecutionEntry, { readonly kind: "permission" }>
+  >,
+): ActiveTurnActivity {
+  const waitingPermission = [...permissions.values()].find(
+    (permission) =>
+      permission.turnId === turnId && permission.state === "requested",
+  )
+  if (waitingPermission !== undefined) {
+    return { kind: "waiting_permission", action: waitingPermission.action }
+  }
+
+  const runningTool = [...tools.values()]
+    .reverse()
+    .find((tool) => tool.turnId === turnId && tool.state === "requested")
+  if (runningTool !== undefined) {
+    return { kind: "running_tool", name: runningTool.name }
+  }
+
+  if (Object.values(snapshots).some((snapshot) => snapshot.turnId === turnId)) {
+    return { kind: "responding" }
+  }
+  return { kind: "reasoning" }
 }
 
 function markPendingPermissionsStale(

@@ -1,3 +1,4 @@
+import { LoaderCircle } from "lucide-react"
 import { useLayoutEffect, useRef } from "react"
 import { useAppStore, useExecutionView } from "../store/app-store.ts"
 import { ModelSelector } from "./model-selector.tsx"
@@ -8,6 +9,7 @@ export function Composer() {
   const busy = useAppStore((state) => state.busy)
   const focusRevision = useAppStore((state) => state.composerFocusRevision)
   const modelSelectionReady = useAppStore((state) => state.modelSelectionReady)
+  const inFlightActions = useAppStore((state) => state.inFlightActions)
   const hasSession = useAppStore(
     (state) => state.selection.sessionId !== undefined,
   )
@@ -29,7 +31,11 @@ export function Composer() {
   }, [focusRevision])
 
   const text = draft.trim()
-  const canSend = text.length > 0 && hasSession && modelSelectionReady && !busy
+  const sessionId = useAppStore((state) => state.selection.sessionId)
+  const sending =
+    sessionId !== undefined && inFlightActions.has(`admit:${sessionId}`)
+  const canSend =
+    text.length > 0 && hasSession && modelSelectionReady && !busy && !sending
 
   const submit = () => {
     if (!canSend) return
@@ -77,8 +83,19 @@ export function Composer() {
               : `last turn · ↑ ${view.lastTurnUsage.inputTokens} · ↓ ${view.lastTurnUsage.outputTokens} tokens`}
           </span>
         </div>
-        <Button type="submit" size="sm" disabled={!canSend}>
-          Send
+        <Button
+          type="submit"
+          size="sm"
+          disabled={!canSend}
+          aria-label={sending ? "Sending" : "Send"}
+        >
+          {sending ? (
+            <>
+              <LoaderCircle className="animate-spin" /> Sending…
+            </>
+          ) : (
+            "Send"
+          )}
         </Button>
       </div>
     </form>
