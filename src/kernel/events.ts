@@ -87,7 +87,11 @@ export type ItemContent = TextContent | JsonContent
 
 export type AssistantContentBlock =
   | { readonly type: "text"; readonly text: string }
-  | { readonly type: "reasoning"; readonly text: string }
+  | {
+      readonly type: "reasoning"
+      readonly text: string
+      readonly providerMetadata?: EventMetadata
+    }
 
 export type KernelError = {
   readonly message: string
@@ -581,11 +585,13 @@ function onlyKeys(
 }
 
 function isAssistantContentBlock(value: unknown): boolean {
+  if (!isRecord(value) || !isString(value.text)) return false
+  if (value.type === "text") return onlyKeys(value, ["type", "text"])
   return (
-    isRecord(value) &&
-    (value.type === "text" || value.type === "reasoning") &&
-    isString(value.text) &&
-    onlyKeys(value, ["type", "text"])
+    value.type === "reasoning" &&
+    onlyKeys(value, ["type", "text", "providerMetadata"]) &&
+    (value.providerMetadata === undefined ||
+      isJsonObject(value.providerMetadata))
   )
 }
 

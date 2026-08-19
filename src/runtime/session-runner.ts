@@ -1,4 +1,5 @@
 import {
+  type AssistantContentBlock,
   COMPACT_DIRECTIVE,
   createYakitoriError,
   type EventEnvelope,
@@ -524,9 +525,10 @@ export function createSessionRunner(
           )
           return
         }
-        const text = assistantText(response.content)
+        const content = assistantContent(response.content)
         if (
-          utf8Bytes(text) > input.executionContext.limits.assistantResponseBytes
+          assistantContentBytes(content) >
+          input.executionContext.limits.assistantResponseBytes
         ) {
           await failTurnWithCode(
             input.sessionId,
@@ -552,7 +554,7 @@ export function createSessionRunner(
         await persistAssistantAndExecuteTools({
           sessionId: input.sessionId,
           turnId: input.turnId,
-          text,
+          content,
           toolCalls,
           streamId,
           modelCallIndex,
@@ -591,9 +593,10 @@ export function createSessionRunner(
         return
       }
 
-      const text = assistantText(response.content)
+      const content = assistantContent(response.content)
       if (
-        utf8Bytes(text) > input.executionContext.limits.assistantResponseBytes
+        assistantContentBytes(content) >
+        input.executionContext.limits.assistantResponseBytes
       ) {
         await failTurnWithCode(
           input.sessionId,
@@ -604,7 +607,7 @@ export function createSessionRunner(
         return
       }
 
-      if (text.length === 0) {
+      if (content.length === 0) {
         const usage = aggregateTokenUsage(usages)
         const completed = await options.kernel.completeTurn({
           sessionId: input.sessionId,
@@ -619,7 +622,7 @@ export function createSessionRunner(
       const completed = await options.kernel.completeTurnWithAssistantOutput({
         sessionId: input.sessionId,
         turnId: input.turnId,
-        content: { kind: "text", text },
+        content,
         providerMetadata: {
           provider: input.executionContext.provider,
           model: input.executionContext.model,
@@ -800,7 +803,7 @@ export function createSessionRunner(
     const completed = await options.kernel.completeTurnWithAssistantOutput({
       sessionId: input.sessionId,
       turnId: input.turnId,
-      content: { kind: "text", text: note },
+      content: [{ type: "text", text: note }],
       providerMetadata: {
         provider: input.executionContext.provider,
         model: input.executionContext.model,
@@ -814,7 +817,7 @@ export function createSessionRunner(
   async function persistAssistantAndExecuteTools(input: {
     readonly sessionId: string
     readonly turnId: string
-    readonly text: string
+    readonly content: readonly AssistantContentBlock[]
     readonly toolCalls: readonly ModelToolCallBlock[]
     readonly streamId: string
     readonly modelCallIndex: number
@@ -829,9 +832,7 @@ export function createSessionRunner(
     const recorded = await options.kernel.recordAssistantOutput({
       sessionId: input.sessionId,
       turnId: input.turnId,
-      ...(input.text.length === 0
-        ? {}
-        : { content: [{ type: "text", text: input.text }] }),
+      ...(input.content.length === 0 ? {} : { content: input.content }),
       providerMetadata: {
         provider: input.executionContext.provider,
         model: input.executionContext.model,
@@ -1357,10 +1358,34 @@ export function createSessionRunner(
             options.transientHub,
             limits.assistantSnapshotPublicationsPerSecond,
           )
+    const reasoningPublisher =
+      options.transientHub === undefined
+        ? undefined
+        : createCoalescingSnapshotPublisher(
+            options.transientHub,
+            limits.assistantSnapshotPublicationsPerSecond,
+            "reasoning.snapshot",
+          )
 
     let terminal: ModelResponse | undefined
     try {
       for await (const event of options.stream(input.request)) {
+        if (event.type === "reasoning_snapshot") {
+          if (utf8Bytes(event.text) > limits.assistantResponseBytes) {
+            throw createYakitoriError({
+              code: YakitoriErrorCode.InvalidState,
+              message: "Reasoning snapshot exceeded the configured byte limit.",
+              details: { code: "assistant_output_too_large" },
+            })
+          }
+          reasoningPublisher?.publish({
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            streamId: input.streamId,
+            text: event.text,
+          })
+          continue
+        }
         if (event.type === "snapshot") {
           if (utf8Bytes(event.text) > limits.assistantResponseBytes) {
             throw createYakitoriError({
@@ -1389,6 +1414,7 @@ export function createSessionRunner(
       }
     } catch (error) {
       publisher?.flush()
+      reasoningPublisher?.flush()
       if (isAbortError(error) || input.request.signal?.aborted) {
         return { stopReason: ModelStopReason.Aborted, content: [] }
       }
@@ -1396,6 +1422,7 @@ export function createSessionRunner(
     }
 
     publisher?.flush()
+    reasoningPublisher?.flush()
     if (terminal === undefined) {
       throw createYakitoriError({
         code: YakitoriErrorCode.InvalidState,
@@ -1588,11 +1615,35 @@ function aggregateTokenUsage(
   )
 }
 
-function assistantText(content: readonly ModelContentBlock[]): string {
+function assistantContent(
+  content: readonly ModelContentBlock[],
+): readonly AssistantContentBlock[] {
   return content
-    .filter((block) => block.type === "text")
-    .map((block) => block.text)
-    .join("")
+    .filter(
+      (
+        block,
+      ): block is Extract<
+        ModelContentBlock,
+        { readonly type: "text" | "reasoning" }
+      > => block.type === "text" || block.type === "reasoning",
+    )
+    .map((block) =>
+      block.type === "text"
+        ? block
+        : {
+            type: "reasoning" as const,
+            text: block.text,
+            ...(block.providerMetadata === undefined
+              ? {}
+              : { providerMetadata: block.providerMetadata }),
+          },
+    )
+}
+
+function assistantContentBytes(
+  content: readonly AssistantContentBlock[],
+): number {
+  return utf8Bytes(content.map((block) => block.text).join(""))
 }
 
 function toKernelError(error: unknown): KernelError {

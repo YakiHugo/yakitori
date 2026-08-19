@@ -69,6 +69,51 @@ describe("OpenAI Responses provider", () => {
     ])
   })
 
+  it("restores durable reasoning items for a tool continuation", () => {
+    expect(
+      toOpenAIInput([
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "reasoning",
+              text: "Inspect the repository first.",
+              providerMetadata: {
+                openai: {
+                  id: "reasoning_1",
+                  encryptedContent: "encrypted_1",
+                  status: "completed",
+                },
+              },
+            },
+            {
+              type: "tool_call",
+              id: "call_1",
+              name: "read_file",
+              input: { path: "README.md" },
+            },
+          ],
+        },
+      ]),
+    ).toEqual([
+      {
+        type: "reasoning",
+        id: "reasoning_1",
+        summary: [
+          { type: "summary_text", text: "Inspect the repository first." },
+        ],
+        encrypted_content: "encrypted_1",
+        status: "completed",
+      },
+      {
+        type: "function_call",
+        call_id: "call_1",
+        name: "read_file",
+        arguments: '{"path":"README.md"}',
+      },
+    ])
+  })
+
   it("maps text, function calls, usage, and incomplete responses", () => {
     expect(
       fromOpenAIResponse(
@@ -118,6 +163,48 @@ describe("OpenAI Responses provider", () => {
         }),
       ).stopReason,
     ).toBe(ModelStopReason.Length)
+  })
+
+  it("maps public reasoning summaries with continuation metadata", () => {
+    expect(
+      fromOpenAIResponse(
+        responseFixture({
+          output: [
+            {
+              type: "reasoning",
+              id: "reasoning_1",
+              summary: [
+                { type: "summary_text", text: "Inspect the repository." },
+              ],
+              encrypted_content: "encrypted_1",
+              status: "completed",
+            },
+            {
+              type: "message",
+              id: "message_1",
+              role: "assistant",
+              status: "completed",
+              content: [
+                { type: "output_text", text: "Done.", annotations: [] },
+              ],
+            },
+          ],
+        }),
+      ).content,
+    ).toEqual([
+      {
+        type: "reasoning",
+        text: "Inspect the repository.",
+        providerMetadata: {
+          openai: {
+            id: "reasoning_1",
+            encryptedContent: "encrypted_1",
+            status: "completed",
+          },
+        },
+      },
+      { type: "text", text: "Done." },
+    ])
   })
 
   it("streams full snapshots and uses the request's pinned model", async () => {
@@ -195,6 +282,43 @@ describe("OpenAI Responses provider", () => {
       store: false,
       parallel_tool_calls: false,
     })
+  })
+
+  it("streams public reasoning summary snapshots", async () => {
+    const client = {
+      responses: {
+        async create() {
+          return (async function* () {
+            yield {
+              type: "response.reasoning_summary_text.delta",
+              delta: "Inspect",
+            }
+            yield {
+              type: "response.reasoning_summary_text.delta",
+              delta: " files",
+            }
+            yield {
+              type: "response.completed",
+              response: responseFixture({ output: [] }),
+            }
+          })()
+        },
+      },
+    } as unknown as OpenAI
+    const stream = createOpenAIProvider({
+      apiKey: "test",
+      model: "gpt-default",
+      client,
+    })
+
+    const events = []
+    for await (const event of stream(requestFixture())) events.push(event)
+
+    expect(events).toEqual([
+      { type: "reasoning_snapshot", text: "Inspect" },
+      { type: "reasoning_snapshot", text: "Inspect files" },
+      expect.objectContaining({ type: "response" }),
+    ])
   })
 
   it("passes a pinned reasoning effort through to the request params", async () => {
@@ -318,7 +442,7 @@ describe("OpenAI Responses provider", () => {
     }
   })
 
-  it("omits reasoning params when no effort is pinned", async () => {
+  it("requests automatic reasoning summaries without pinning effort", async () => {
     let body: unknown
     const client = {
       responses: {
@@ -343,7 +467,7 @@ describe("OpenAI Responses provider", () => {
       // Drain the stream.
     }
 
-    expect(body).not.toHaveProperty("reasoning")
+    expect(body).toMatchObject({ reasoning: { summary: "auto" } })
   })
 })
 

@@ -518,8 +518,6 @@ function applyAssistantMessage(
       ? {}
       : { providerMetadata: event.data.providerMetadata }),
   }
-  items.set(item.itemId, item)
-  turn.itemIds.push(item.itemId)
   for (const [index, block] of event.data.content.entries()) {
     if (block.type !== "reasoning") continue
     const reasoning: ItemProjection = {
@@ -530,10 +528,15 @@ function applyAssistantMessage(
       status: ItemStatus.Completed,
       appendedAt: event.createdAt,
       updatedAt: event.createdAt,
+      ...(block.providerMetadata === undefined
+        ? {}
+        : { providerMetadata: block.providerMetadata }),
     }
     items.set(reasoning.itemId, reasoning)
     turn.itemIds.push(reasoning.itemId)
   }
+  items.set(item.itemId, item)
+  turn.itemIds.push(item.itemId)
 }
 
 function applyToolCall(

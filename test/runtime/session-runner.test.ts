@@ -598,7 +598,11 @@ describe("session runner", () => {
       const provider = createFauxProvider([
         {
           snapshots: ["partial", "final text"],
-          content: [{ type: "text", text: "final text" }],
+          reasoningSnapshots: ["inspect", "inspect files"],
+          content: [
+            { type: "reasoning", text: "inspect files" },
+            { type: "text", text: "final text" },
+          ],
         },
       ])
       const session = await createAttributedSession(runtime)
@@ -623,18 +627,30 @@ describe("session runner", () => {
       await runner.wake(session.sessionId)
 
       expect(live.length).toBeGreaterThan(0)
-      expect(live.every((event) => event.type === "assistant.snapshot")).toBe(
+      expect(live.some((event) => event.type === "assistant.snapshot")).toBe(
+        true,
+      )
+      expect(live.some((event) => event.type === "reasoning.snapshot")).toBe(
         true,
       )
       expect(
         durable.some((event) => event.type === EventType.AssistantMessage),
       ).toBe(true)
+      expect(
+        durable.find((event) => event.type === EventType.AssistantMessage)?.data
+          .content,
+      ).toEqual([
+        { type: "reasoning", text: "inspect files" },
+        { type: "text", text: "final text" },
+      ])
       const replayed = await runtime.kernel.replaySession({
         sessionId: session.sessionId,
       })
       expect(
         replayed.events.every(
-          (event) => event.type !== ("assistant.snapshot" as typeof event.type),
+          (event) =>
+            event.type !== ("assistant.snapshot" as typeof event.type) &&
+            event.type !== ("reasoning.snapshot" as typeof event.type),
         ),
       ).toBe(true)
     })
@@ -1651,9 +1667,9 @@ describe("subagent task tool", () => {
       })
       const childTurn = child.session?.turns.at(-1)
       expect(childTurn?.state).not.toBe("completed")
-      expect(childTurn?.cancelledReason ?? childTurn?.interruptedReason).toMatch(
-        /abort/,
-      )
+      expect(
+        childTurn?.cancelledReason ?? childTurn?.interruptedReason,
+      ).toMatch(/abort/)
       // The subagent never ran past the abort.
       expect(provider.callCount).toBe(2)
     })

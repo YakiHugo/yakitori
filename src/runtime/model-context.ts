@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto"
 import {
+  type EventMetadata,
   InputRole,
   ItemKind,
   type ItemProjection,
@@ -295,6 +296,11 @@ function buildTurnGroup(
   let pendingAssistant: Array<
     | { readonly type: "text"; readonly text: string }
     | {
+        readonly type: "reasoning"
+        readonly text: string
+        readonly providerMetadata?: EventMetadata
+      }
+    | {
         readonly type: "tool_call"
         readonly id: string
         readonly name: string
@@ -306,7 +312,7 @@ function buildTurnGroup(
     messages.push({
       role: "assistant",
       content: pendingAssistant.map((block) => {
-        if (block.type === "text") return block
+        if (block.type === "text" || block.type === "reasoning") return block
         return {
           type: "tool_call",
           id: block.id,
@@ -320,9 +326,25 @@ function buildTurnGroup(
 
   for (const item of turnItems) {
     if (
-      item.kind === ItemKind.AssistantMessage &&
+      item.kind === ItemKind.Reasoning &&
       item.status === ItemStatus.Completed &&
       item.content.kind === "text"
+    ) {
+      pendingAssistant.push({
+        type: "reasoning",
+        text: item.content.text,
+        ...(item.providerMetadata === undefined
+          ? {}
+          : { providerMetadata: item.providerMetadata }),
+      })
+      itemIds.push(item.itemId)
+      continue
+    }
+    if (
+      item.kind === ItemKind.AssistantMessage &&
+      item.status === ItemStatus.Completed &&
+      item.content.kind === "text" &&
+      item.content.text.length > 0
     ) {
       pendingAssistant.push({ type: "text", text: item.content.text })
       itemIds.push(item.itemId)

@@ -1,13 +1,17 @@
 import Anthropic from "@anthropic-ai/sdk"
 import type {
+  ContentBlockParam,
   MessageParam,
   OutputConfig,
+  RedactedThinkingBlockParam,
   TextBlockParam,
+  ThinkingBlockParam,
   Tool,
   ToolResultBlockParam,
 } from "@anthropic-ai/sdk/resources/messages"
 import {
   isJsonValue,
+  isJsonObject,
   type JsonObject,
   type JsonValue,
 } from "../kernel/index.ts"
@@ -78,6 +82,13 @@ async function* streamAnthropic(
       effort === undefined || effort === "on" || effort === "off"
         ? undefined
         : effort
+    const thinking =
+      effort === "off"
+        ? ({ type: "disabled" } as const)
+        : request.target.provider === "anthropic" &&
+            supportsAdaptiveThinking(request.target.model || defaultModel)
+          ? ({ type: "adaptive", display: "summarized" } as const)
+          : undefined
     stream = client.messages.stream(
       {
         model: request.target.model || defaultModel,
@@ -89,9 +100,7 @@ async function* streamAnthropic(
           explicitPromptCaching,
         ),
         ...(tools === undefined ? {} : { tools }),
-        ...(effort === "off"
-          ? { thinking: { type: "disabled" as const } }
-          : {}),
+        ...(thinking === undefined ? {} : { thinking }),
         ...(effortLevel === undefined
           ? {}
           : {
@@ -118,6 +127,7 @@ async function* streamAnthropic(
   }
 
   let text = ""
+  let reasoning = ""
   try {
     for await (const event of stream) {
       if (request.signal?.aborted) {
@@ -133,6 +143,14 @@ async function* streamAnthropic(
       ) {
         text += event.delta.text
         yield { type: "snapshot", text }
+        continue
+      }
+      if (
+        event.type === "content_block_delta" &&
+        event.delta.type === "thinking_delta"
+      ) {
+        reasoning += event.delta.thinking
+        yield { type: "reasoning_snapshot", text: reasoning }
       }
     }
 
@@ -172,22 +190,14 @@ export function toAnthropicMessages(
       continue
     }
     if (message.role === "assistant") {
+      const content = message.content.flatMap((block) => {
+        const converted = toAnthropicAssistantBlock(block)
+        return converted === undefined ? [] : [converted]
+      })
+      if (content.length === 0) continue
       converted.push({
         role: "assistant",
-        content: message.content.map((block) => {
-          if (block.type === "text") {
-            return { type: "text" as const, text: block.text }
-          }
-          return {
-            type: "tool_use" as const,
-            id: block.id,
-            name: block.name,
-            input:
-              typeof block.input === "object" && block.input !== null
-                ? block.input
-                : {},
-          }
-        }),
+        content,
       })
       continue
     }
@@ -298,6 +308,30 @@ export function fromAnthropicMessage(message: {
   const content: ModelContentBlock[] = []
   for (const block of message.content) {
     if (!isRecord(block)) continue
+    if (
+      block.type === "thinking" &&
+      typeof block.thinking === "string" &&
+      typeof block.signature === "string"
+    ) {
+      content.push({
+        type: "reasoning",
+        text: block.thinking,
+        providerMetadata: {
+          anthropic: { signature: block.signature },
+        },
+      })
+      continue
+    }
+    if (block.type === "redacted_thinking" && typeof block.data === "string") {
+      content.push({
+        type: "reasoning",
+        text: "",
+        providerMetadata: {
+          anthropic: { redactedData: block.data },
+        },
+      })
+      continue
+    }
     if (block.type === "text" && typeof block.text === "string") {
       content.push({ type: "text", text: block.text })
       continue
@@ -334,6 +368,44 @@ export function fromAnthropicMessage(message: {
         }),
     ...(message.id === undefined ? {} : { providerRequestId: message.id }),
   }
+}
+
+function toAnthropicReasoningBlock(
+  block: Extract<ModelContentBlock, { readonly type: "reasoning" }>,
+): ThinkingBlockParam | RedactedThinkingBlockParam | undefined {
+  const metadata = block.providerMetadata?.anthropic
+  if (!isJsonObject(metadata)) return undefined
+  if (typeof metadata.redactedData === "string") {
+    return { type: "redacted_thinking", data: metadata.redactedData }
+  }
+  if (typeof metadata.signature !== "string") return undefined
+  return {
+    type: "thinking",
+    thinking: block.text,
+    signature: metadata.signature,
+  }
+}
+
+function toAnthropicAssistantBlock(
+  block: ModelContentBlock,
+): ContentBlockParam | undefined {
+  if (block.type === "text") return { type: "text", text: block.text }
+  if (block.type === "reasoning") return toAnthropicReasoningBlock(block)
+  return {
+    type: "tool_use",
+    id: block.id,
+    name: block.name,
+    input:
+      typeof block.input === "object" && block.input !== null
+        ? block.input
+        : {},
+  }
+}
+
+function supportsAdaptiveThinking(model: string): boolean {
+  return /^claude-(?:opus|sonnet)-(?:[5-9](?:-|$)|4-(?:[6-9]|\d{2})(?:-|$))/.test(
+    model,
+  )
 }
 
 function mapStopReason(
