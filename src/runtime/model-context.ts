@@ -55,9 +55,7 @@ export function buildModelContext(input: {
   }
 
   const coveredTurnIds = new Set(input.session.compaction?.coveredTurnIds ?? [])
-  const turnGroups = buildTurnGroups(input.session).filter(
-    (group) => !coveredTurnIds.has(group.turnId),
-  )
+  const turnGroups = buildTurnGroups(input.session, coveredTurnIds)
   const compactionGroup = buildCompactionGroup(input.session)
   const forkGroup = buildForkGroup(input.session)
   const activeGroup = buildActiveTurnGroup(input.session, input.currentInputId)
@@ -176,8 +174,7 @@ export function collectUncoveredTurns(
 ): readonly DroppedTurn[] {
   const coveredTurnIds = new Set(session.compaction?.coveredTurnIds ?? [])
   const readResultKeys = buildReadResultKeys(session)
-  return buildTurnGroups(session)
-    .filter((group) => !coveredTurnIds.has(group.turnId))
+  return buildTurnGroups(session, coveredTurnIds)
     .map((group) => ({
       turnId: group.turnId,
       messages: assembleGroups([group], limits, readResultKeys).messages,
@@ -243,7 +240,7 @@ function buildForkGroup(session: SessionProjection): ContextGroup | undefined {
         content: [
           {
             type: "text",
-            text: `<session_forked reason="${session.forkReason}">\nThis session continues a conversation that was ${action} at an earlier point. Actions taken after that point in the previous session were NOT rolled back: files, command effects, processes, and the environment may still reflect them. Do not rely on remembered file contents or tool results from before this notice; inspect current state and re-read files before editing them.\n</session_forked>`,
+            text: `<session_forked reason="${session.forkReason}">\nThis session continues a conversation that was ${action} at an earlier point. Actions taken after that point in the previous session were NOT rolled back: files, command effects, processes, and the environment may still reflect them.\n</session_forked>`,
           },
         ],
       },
@@ -252,9 +249,13 @@ function buildForkGroup(session: SessionProjection): ContextGroup | undefined {
   }
 }
 
-function buildTurnGroups(session: SessionProjection): TurnContextGroup[] {
+function buildTurnGroups(
+  session: SessionProjection,
+  excludedTurnIds: ReadonlySet<string> = new Set(),
+): TurnContextGroup[] {
   const terminalTurns = session.turns.filter(
-    (turn) => turn.state !== TurnState.Started,
+    (turn) =>
+      turn.state !== TurnState.Started && !excludedTurnIds.has(turn.turnId),
   )
   return terminalTurns.flatMap((turn) => {
     const group = buildTurnGroup(session, turn, false)

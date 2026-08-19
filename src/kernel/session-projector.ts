@@ -42,6 +42,7 @@ export type SessionProjection = {
   readonly workingDirectory?: string
   readonly mateId?: string
   readonly mateRevisionId?: string
+  readonly conversationId: string
   readonly parentSessionId?: string
   readonly forkedFromInputId?: string
   readonly forkReason?: ForkReason
@@ -258,6 +259,7 @@ function createMutableSession(
     ...(created.data.mateRevisionId === undefined
       ? {}
       : { mateRevisionId: created.data.mateRevisionId }),
+    conversationId: created.data.conversationId ?? created.sessionId,
     ...(created.data.parentSessionId === undefined
       ? {}
       : { parentSessionId: created.data.parentSessionId }),
@@ -287,6 +289,7 @@ function mutableSession(current: SessionProjection): MutableSession {
     ...(current.mateRevisionId === undefined
       ? {}
       : { mateRevisionId: current.mateRevisionId }),
+    conversationId: current.conversationId,
     ...(current.parentSessionId === undefined
       ? {}
       : { parentSessionId: current.parentSessionId }),
@@ -312,6 +315,7 @@ type MutableSession = {
   workingDirectory?: string
   mateId?: string
   mateRevisionId?: string
+  conversationId: string
   parentSessionId?: string
   forkedFromInputId?: string
   forkReason?: ForkReason

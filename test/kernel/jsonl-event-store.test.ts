@@ -15,6 +15,7 @@ import {
   applySessionFacts,
   createJsonlEventStore,
   type EventEnvelope,
+  type EventStore,
   EventType,
   type KernelEvent,
   TurnState,
@@ -138,21 +139,125 @@ describe("Session journal format", () => {
 })
 
 describe("JSONL persistence", () => {
+  it("removes an unpublished staging journal during recovery", async () => {
+    const fixture = await createStoreFixture("yakitori-staging-recovery-")
+    const staging = join(fixture.sessionsDirectory, ".staging-crashed-fork")
+    await mkdir(staging, { recursive: true })
+    await writeFile(join(staging, "events.jsonl"), "partial")
+
+    await fixture.store.listSessions()
+
+    await expect(stat(staging)).rejects.toMatchObject({ code: "ENOENT" })
+  })
+
+  it("does not expose a fork when staging fsync fails", async () => {
+    const fixture = await createStoreFixture("yakitori-staging-failure-")
+    const sourceId = "session_00000000-0000-4000-8000-000000000020"
+    const targetId = "session_00000000-0000-4000-8000-000000000021"
+    const sourceEvents = await appendRootEvents(fixture.store, sourceId, [
+      { type: EventType.SessionCreated, data: {} },
+      createAdmission("request:atomic-cut", "input_atomic_cut", "cut").event,
+    ])
+    await vi.waitFor(async () => {
+      expect((await stat(fixture.summary(sourceId))).size).toBeGreaterThan(0)
+    })
+    const sync = await spyOnFileHandleSync(fixture.journal(sourceId))
+    sync.mockRejectedValueOnce(new Error("simulated staging fsync failure"))
+
+    await expect(
+      fixture.store.forkSession({
+        sourceSessionId: sourceId,
+        targetSessionId: targetId,
+        atInputId: "input_atomic_cut",
+        expectedSourceSeq: sourceEvents.length,
+        created: forkCreated(sourceId, "input_atomic_cut"),
+      }),
+    ).rejects.toThrow("simulated staging fsync failure")
+
+    expect(await fixture.store.readEvents(targetId)).toEqual([])
+    await expect(stat(fixture.journal(targetId))).rejects.toMatchObject({
+      code: "ENOENT",
+    })
+    expect(await fixture.store.readEvents(sourceId)).toHaveLength(2)
+  })
+
+  it("does not report a failed fork after its journal was renamed", async () => {
+    const fixture = await createStoreFixture("yakitori-published-fork-sync-")
+    const sourceId = "session_00000000-0000-4000-8000-000000000024"
+    const targetId = "session_00000000-0000-4000-8000-000000000025"
+    const sourceEvents = await appendRootEvents(fixture.store, sourceId, [
+      { type: EventType.SessionCreated, data: {} },
+      createAdmission("request:published-cut", "input_published_cut", "cut")
+        .event,
+    ])
+    await vi.waitFor(async () => {
+      expect((await stat(fixture.summary(sourceId))).size).toBeGreaterThan(0)
+    })
+    const sync = await spyOnFileHandleSync(fixture.journal(sourceId))
+    sync
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(
+        new Error("simulated post-rename directory sync failure"),
+      )
+
+    const forked = await fixture.store.forkSession({
+      sourceSessionId: sourceId,
+      targetSessionId: targetId,
+      atInputId: "input_published_cut",
+      expectedSourceSeq: sourceEvents.length,
+      created: forkCreated(sourceId, "input_published_cut"),
+    })
+
+    expect(forked.projection.id).toBe(targetId)
+    expect(await fixture.store.readEvents(targetId)).toEqual(forked.events)
+    expect((await stat(fixture.journal(targetId))).size).toBeGreaterThan(0)
+  })
+
+  it("serializes conversation deletion with concurrent fork publication", async () => {
+    const fixture = await createStoreFixture("yakitori-fork-delete-race-")
+    const sourceId = "session_00000000-0000-4000-8000-000000000022"
+    const targetId = "session_00000000-0000-4000-8000-000000000023"
+    const sourceEvents = await appendRootEvents(fixture.store, sourceId, [
+      { type: EventType.SessionCreated, data: {} },
+      createAdmission("request:race-cut", "input_race_cut", "cut").event,
+    ])
+    const settled = await fixture.store.appendEvent(
+      sourceId,
+      {
+        type: EventType.InputCancelled,
+        data: { inputId: "input_race_cut", reason: "test_settled" },
+      },
+      { expectedSeq: sourceEvents.length },
+    )
+
+    await Promise.allSettled([
+      fixture.store.forkSession({
+        sourceSessionId: sourceId,
+        targetSessionId: targetId,
+        atInputId: "input_race_cut",
+        expectedSourceSeq: settled.seq,
+        created: forkCreated(sourceId, "input_race_cut"),
+      }),
+      fixture.store.deleteConversation(sourceId),
+    ])
+
+    expect(await fixture.store.readEvents(sourceId)).toEqual([])
+    expect(await fixture.store.readEvents(targetId)).toEqual([])
+    expect((await fixture.store.listSessions()).sessions).toEqual([])
+  })
+
   it("stores one flat physical line per fact", async () => {
     const fixture = await createStoreFixture("yakitori-record-")
     const sessionId = "session_00000000-0000-4000-8000-00000000000b"
 
-    await fixture.store.appendEvents(
-      sessionId,
-      [
-        { type: EventType.SessionCreated, data: { title: "Atomic" } },
-        {
-          type: EventType.InputCancelled,
-          data: { inputId: "input_missing" },
-        },
-      ],
-      { expectedSeq: 0 },
-    )
+    await appendRootEvents(fixture.store, sessionId, [
+      { type: EventType.SessionCreated, data: { title: "Atomic" } },
+      {
+        type: EventType.InputCancelled,
+        data: { inputId: "input_missing" },
+      },
+    ])
 
     const journal = await readFile(fixture.journal(sessionId), "utf8")
     expect(journal.endsWith("\n")).toBe(true)
@@ -168,13 +273,166 @@ describe("JSONL persistence", () => {
     }
   })
 
+  it("stores a fork as a history reference and resolves it after reopen", async () => {
+    const fixture = await createStoreFixture("yakitori-reference-fork-")
+    const sourceId = "session_00000000-0000-4000-8000-000000000030"
+    const targetId = "session_00000000-0000-4000-8000-000000000031"
+    const sourceEvents = await appendRootEvents(fixture.store, sourceId, [
+      ...completeTurnFacts("request:shared", "input_shared", "turn_shared"),
+      createAdmission("request:cut", "input_cut", "cut").event,
+      { type: EventType.InputCancelled, data: { inputId: "input_cut" } },
+    ])
+
+    const forked = await fixture.store.forkSession({
+      sourceSessionId: sourceId,
+      targetSessionId: targetId,
+      atInputId: "input_cut",
+      expectedSourceSeq: sourceEvents.length,
+      created: forkCreated(sourceId, "input_cut"),
+    })
+
+    expect(forked.events).toHaveLength(5)
+    const physical = (await readFile(fixture.journal(targetId), "utf8"))
+      .trimEnd()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+    expect(physical).toMatchObject([
+      {
+        sessionId: targetId,
+        seq: 1,
+        type: EventType.SessionCreated,
+        data: {
+          parentSessionId: sourceId,
+          forkedFromInputId: "input_cut",
+          forkReason: "undo",
+        },
+      },
+    ])
+
+    await fixture.store.close()
+    const reopened = fixture.reopen()
+    expect(await reopened.readEvents(targetId)).toEqual(forked.events)
+    await expect(
+      reopened.appendEvent(
+        targetId,
+        { type: EventType.InputCancelled, data: { inputId: "input_later" } },
+        { expectedSeq: 5 },
+      ),
+    ).resolves.toMatchObject({ sessionId: targetId, seq: 6 })
+    expect(
+      (await readFile(fixture.journal(targetId), "utf8"))
+        .trimEnd()
+        .split("\n")
+        .map((line) => JSON.parse(line).seq),
+    ).toEqual([1, 6])
+  })
+
+  it("resolves chained references and protects every referenced parent", async () => {
+    const fixture = await createStoreFixture("yakitori-reference-chain-")
+    const sourceId = "session_00000000-0000-4000-8000-000000000032"
+    const childId = "session_00000000-0000-4000-8000-000000000033"
+    const grandchildId = "session_00000000-0000-4000-8000-000000000034"
+    const sourceEvents = await appendRootEvents(fixture.store, sourceId, [
+      ...completeTurnFacts("request:root", "input_root", "turn_root"),
+      createAdmission("request:child-cut", "input_child_cut", "cut").event,
+    ])
+    const child = await fixture.store.forkSession({
+      sourceSessionId: sourceId,
+      targetSessionId: childId,
+      atInputId: "input_child_cut",
+      expectedSourceSeq: sourceEvents.length,
+      created: forkCreated(sourceId, "input_child_cut"),
+    })
+    await fixture.store.appendEvent(
+      childId,
+      createAdmission("request:grandchild-cut", "input_grandchild_cut", "cut")
+        .event,
+      { expectedSeq: child.events.length },
+    )
+    const grandchild = await fixture.store.forkSession({
+      sourceSessionId: childId,
+      targetSessionId: grandchildId,
+      atInputId: "input_grandchild_cut",
+      expectedSourceSeq: child.events.length + 1,
+      created: forkCreated(childId, "input_grandchild_cut"),
+    })
+    await fixture.store.close()
+
+    const reopened = fixture.reopen()
+    expect(await reopened.readEvents(grandchildId)).toEqual(grandchild.events)
+    await expect(reopened.deleteSession(sourceId)).rejects.toMatchObject({
+      code: YakitoriErrorCode.InvalidState,
+    })
+    await expect(reopened.deleteSession(childId)).rejects.toMatchObject({
+      code: YakitoriErrorCode.InvalidState,
+    })
+    await reopened.deleteSession(grandchildId)
+    await reopened.deleteSession(childId)
+    await reopened.deleteSession(sourceId)
+    expect((await reopened.listSessions()).sessions).toEqual([])
+  })
+
+  it("reopens a 100-fork reference chain without loading ancestor Sessions", async () => {
+    const fixture = await createStoreFixture("yakitori-deep-reference-")
+    const rootId = "session_00000000-0000-4000-8000-000000000200"
+    let currentId = rootId
+    await fixture.store.createSession(currentId, {
+      type: EventType.SessionCreated,
+      data: {},
+    })
+
+    for (let index = 0; index < 100; index += 1) {
+      const inputId = `input_deep_${index}`
+      const turnId = `turn_deep_${index}`
+      const cutInputId = `input_deep_cut_${index}`
+      const appended = await fixture.store.appendEvents(
+        currentId,
+        [
+          createAdmission(`request:deep:${index}`, inputId, "step").event,
+          { type: EventType.TurnStarted, data: { turnId, inputId } },
+          { type: EventType.TurnCompleted, data: { turnId } },
+          createAdmission(`request:deep-cut:${index}`, cutInputId, "cut").event,
+        ],
+        { expectedSeq: index * 3 + 1 },
+      )
+      const targetId = `session_00000000-0000-4000-8000-${String(index + 201).padStart(12, "0")}`
+      await fixture.store.forkSession({
+        sourceSessionId: currentId,
+        targetSessionId: targetId,
+        atInputId: cutInputId,
+        expectedSourceSeq: appended.at(-1)?.seq ?? 0,
+        created: forkCreated(currentId, cutInputId),
+      })
+      await fixture.store.appendEvent(
+        currentId,
+        {
+          type: EventType.InputCancelled,
+          data: { inputId: cutInputId, reason: "test_settled" },
+        },
+        { expectedSeq: appended.at(-1)?.seq ?? 0 },
+      )
+      currentId = targetId
+    }
+
+    await fixture.store.close()
+    const reopened = fixture.reopen()
+    const events = await reopened.readEvents(currentId)
+    expect(events).toHaveLength(301)
+    expect(events.at(-1)).toMatchObject({
+      seq: 301,
+      type: EventType.TurnCompleted,
+    })
+    await reopened.deleteConversation(rootId)
+    expect((await reopened.listSessions()).sessions).toEqual([])
+  }, 20_000)
+
   it("replays every newline-aligned byte cut as exactly that fact prefix", async () => {
     const fixture = await createStoreFixture("yakitori-byte-cut-")
     const sessionId = "session_00000000-0000-4000-8000-00000000001b"
-    const events = await fixture.store.appendEvents(
+    const events = await appendRootEvents(
+      fixture.store,
       sessionId,
       completeTurnFacts("request:byte-cut", "input_byte_cut", "turn_byte_cut"),
-      { expectedSeq: 0 },
     )
     await fixture.store.close()
     const journal = await readFile(fixture.journal(sessionId))
@@ -205,8 +463,9 @@ describe("JSONL persistence", () => {
       "input_crash_prefix",
       "turn_crash_prefix",
     )
-    await fixture.store.appendEvents(sessionId, facts.slice(0, 3), {
-      expectedSeq: 0,
+    await createRoot(fixture.store, sessionId)
+    await fixture.store.appendEvents(sessionId, facts.slice(1, 3), {
+      expectedSeq: 1,
     })
     await fixture.store.appendEvents(sessionId, facts.slice(3), {
       expectedSeq: 3,
@@ -238,11 +497,7 @@ describe("JSONL persistence", () => {
   it("reads legacy and fact lines with one contiguous sequence", async () => {
     const fixture = await createStoreFixture("yakitori-mixed-")
     const sessionId = "session_00000000-0000-4000-8000-00000000001a"
-    await fixture.store.appendEvent(
-      sessionId,
-      { type: EventType.SessionCreated, data: { title: "Mixed" } },
-      { expectedSeq: 0 },
-    )
+    await createRoot(fixture.store, sessionId, { title: "Mixed" })
     await fixture.store.close()
     await appendFile(
       fixture.journal(sessionId),
@@ -314,11 +569,7 @@ describe("JSONL persistence", () => {
   it("truncates only a non-newline tail during initialization", async () => {
     const fixture = await createStoreFixture("yakitori-tail-")
     const sessionId = "session_00000000-0000-4000-8000-00000000000c"
-    await fixture.store.appendEvent(
-      sessionId,
-      { type: EventType.SessionCreated, data: {} },
-      { expectedSeq: 0 },
-    )
+    await createRoot(fixture.store, sessionId)
     await fixture.store.close()
     const committedBytes = (await stat(fixture.journal(sessionId))).size
     await appendFile(fixture.journal(sessionId), '{"record":"commit"')
@@ -331,11 +582,7 @@ describe("JSONL persistence", () => {
   it("rejects a malformed newline-committed fact line", async () => {
     const fixture = await createStoreFixture("yakitori-corrupt-")
     const sessionId = "session_00000000-0000-4000-8000-00000000000d"
-    await fixture.store.appendEvent(
-      sessionId,
-      { type: EventType.SessionCreated, data: {} },
-      { expectedSeq: 0 },
-    )
+    await createRoot(fixture.store, sessionId)
     await fixture.store.close()
     await appendFile(
       fixture.journal(sessionId),
@@ -360,11 +607,7 @@ describe("JSONL persistence", () => {
   it("rejects a malformed newline-committed legacy record", async () => {
     const fixture = await createStoreFixture("yakitori-corrupt-legacy-")
     const sessionId = "session_00000000-0000-4000-8000-00000000001f"
-    await fixture.store.appendEvent(
-      sessionId,
-      { type: EventType.SessionCreated, data: {} },
-      { expectedSeq: 0 },
-    )
+    await createRoot(fixture.store, sessionId)
     await fixture.store.close()
     await appendFile(
       fixture.journal(sessionId),
@@ -388,11 +631,7 @@ describe("JSONL persistence", () => {
   ])("rejects a committed fact with a %s sequence", async (_, seq) => {
     const fixture = await createStoreFixture(`yakitori-seq-${seq}-`)
     const sessionId = "session_00000000-0000-4000-8000-000000000020"
-    await fixture.store.appendEvent(
-      sessionId,
-      { type: EventType.SessionCreated, data: {} },
-      { expectedSeq: 0 },
-    )
+    await createRoot(fixture.store, sessionId)
     await fixture.store.close()
     await appendFile(
       fixture.journal(sessionId),
@@ -413,11 +652,7 @@ describe("JSONL persistence", () => {
     const fixture = await createStoreFixture("yakitori-reopen-")
     const sessionId = "session_00000000-0000-4000-8000-000000000008"
     const admission = createAdmission("request:reopen", "input_reopen", "same")
-    await fixture.store.appendEvent(
-      sessionId,
-      { type: EventType.SessionCreated, data: { title: "Persistent" } },
-      { expectedSeq: 0 },
-    )
+    await createRoot(fixture.store, sessionId, { title: "Persistent" })
     const original = await fixture.store.appendEvent(
       sessionId,
       admission.event,
@@ -443,11 +678,7 @@ describe("JSONL persistence", () => {
   it("rejects an invalid admission reconciliation before writing", async () => {
     const fixture = await createStoreFixture("yakitori-admission-")
     const sessionId = "session_00000000-0000-4000-8000-000000000012"
-    await fixture.store.appendEvent(
-      sessionId,
-      { type: EventType.SessionCreated, data: {} },
-      { expectedSeq: 0 },
-    )
+    await createRoot(fixture.store, sessionId)
 
     await expect(
       fixture.store.appendEvent(
@@ -562,11 +793,7 @@ describe("JSONL persistence", () => {
   it("serializes same-Session compare-and-append attempts", async () => {
     const fixture = await createStoreFixture("yakitori-serial-")
     const sessionId = "session_00000000-0000-4000-8000-000000000009"
-    await fixture.store.appendEvent(
-      sessionId,
-      { type: EventType.SessionCreated, data: {} },
-      { expectedSeq: 0 },
-    )
+    await createRoot(fixture.store, sessionId)
 
     const attempts = await Promise.allSettled([
       fixture.store.appendEvent(
@@ -593,11 +820,7 @@ describe("JSONL persistence", () => {
   it("rejects duplicate admission request IDs in the committed journal", async () => {
     const fixture = await createStoreFixture("yakitori-duplicate-request-")
     const sessionId = "session_00000000-0000-4000-8000-00000000001e"
-    await fixture.store.appendEvent(
-      sessionId,
-      { type: EventType.SessionCreated, data: {} },
-      { expectedSeq: 0 },
-    )
+    await createRoot(fixture.store, sessionId)
     await fixture.store.appendEvent(
       sessionId,
       createAdmission("request:duplicate", "input_first", "first").event,
@@ -622,14 +845,10 @@ describe("JSONL persistence", () => {
   it("rebuilds a corrupt summary without retaining the cold Session", async () => {
     const fixture = await createStoreFixture("yakitori-summary-")
     const sessionId = "session_00000000-0000-4000-8000-00000000000e"
-    await fixture.store.appendEvent(
-      sessionId,
-      {
-        type: EventType.SessionCreated,
-        data: { title: "Listed", metadata: { source: "journal" } },
-      },
-      { expectedSeq: 0 },
-    )
+    await createRoot(fixture.store, sessionId, {
+      title: "Listed",
+      metadata: { source: "journal" },
+    })
     await fixture.store.close()
     await writeFile(fixture.summary(sessionId), "not json")
 
@@ -647,7 +866,7 @@ describe("JSONL persistence", () => {
     expect(
       JSON.parse(await readFile(fixture.summary(sessionId), "utf8")),
     ).toMatchObject({
-      version: 1,
+      version: 2,
       sessionId,
       journalBytes: (await stat(fixture.journal(sessionId))).size,
     })
@@ -669,11 +888,7 @@ describe("JSONL persistence", () => {
   it("drains the latest coalesced summary before close returns", async () => {
     const fixture = await createStoreFixture("yakitori-summary-close-")
     const sessionId = "session_00000000-0000-4000-8000-000000000010"
-    await fixture.store.appendEvent(
-      sessionId,
-      { type: EventType.SessionCreated, data: {} },
-      { expectedSeq: 0 },
-    )
+    await createRoot(fixture.store, sessionId)
     await fixture.store.appendEvent(
       sessionId,
       { type: EventType.InputCancelled, data: { inputId: "input_1" } },
@@ -699,11 +914,7 @@ describe("JSONL persistence", () => {
   it("preserves an unknown fact while rebuilding from disk", async () => {
     const fixture = await createStoreFixture("yakitori-opaque-")
     const sessionId = "session_00000000-0000-4000-8000-00000000000f"
-    await fixture.store.appendEvent(
-      sessionId,
-      { type: EventType.SessionCreated, data: { title: "Repairable" } },
-      { expectedSeq: 0 },
-    )
+    await createRoot(fixture.store, sessionId, { title: "Repairable" })
     await fixture.store.close()
     await appendFile(
       fixture.journal(sessionId),
@@ -752,11 +963,7 @@ describe("JSONL persistence", () => {
   it("drains a list operation admitted before close", async () => {
     const fixture = await createStoreFixture("yakitori-list-close-")
     const sessionId = "session_00000000-0000-4000-8000-000000000015"
-    await fixture.store.appendEvent(
-      sessionId,
-      { type: EventType.SessionCreated, data: {} },
-      { expectedSeq: 0 },
-    )
+    await createRoot(fixture.store, sessionId)
     await fixture.store.close()
     const reopened = fixture.reopen()
 
@@ -782,6 +989,44 @@ function createAdmission(requestId: string, inputId: string, text: string) {
       fingerprint: fingerprintInputAdmission(data),
     },
   }
+}
+
+function createRoot(
+  store: EventStore,
+  sessionId: string,
+  data: Parameters<EventStore["createSession"]>[1]["data"] = {},
+) {
+  return store.createSession(sessionId, {
+    type: EventType.SessionCreated,
+    data,
+  })
+}
+
+async function appendRootEvents(
+  store: EventStore,
+  sessionId: string,
+  events: readonly KernelEvent[],
+) {
+  const [created, ...rest] = events
+  if (created?.type !== EventType.SessionCreated) {
+    throw new Error("Root fixture must begin with session.created.")
+  }
+  const createdEnvelope = await store.createSession(sessionId, created)
+  const appended = await store.appendEvents(sessionId, rest, {
+    expectedSeq: 1,
+  })
+  return [createdEnvelope, ...appended]
+}
+
+function forkCreated(parentSessionId: string, forkedFromInputId: string) {
+  return {
+    type: EventType.SessionCreated,
+    data: {
+      parentSessionId,
+      forkedFromInputId,
+      forkReason: "undo" as const,
+    },
+  } as const
 }
 
 function completeTurnFacts(
@@ -887,6 +1132,7 @@ async function createStoreFixture(prefix: string) {
     summary(sessionId: string) {
       return join(sessionsDir, sessionId, "summary.json")
     },
+    sessionsDirectory: sessionsDir,
     reopen() {
       store = createJsonlEventStore({ sessionsDir })
       return store

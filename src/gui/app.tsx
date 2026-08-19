@@ -97,7 +97,8 @@ function SessionHeader() {
         <h2 className="truncate text-sm font-semibold">
           {session.title ?? "Untitled session"}
         </h2>
-        {session.parentSessionId !== undefined ? (
+        {session.parentSessionId !== undefined &&
+        session.forkReason === undefined ? (
           <button
             type="button"
             onClick={() =>
@@ -108,7 +109,7 @@ function SessionHeader() {
           >
             <GitFork className="size-3" />
             <span className="truncate">
-              {session.forkReason ?? "fork"} from {parent?.title ?? "parent"}
+              fork from {parent?.title ?? "parent"}
             </span>
           </button>
         ) : null}

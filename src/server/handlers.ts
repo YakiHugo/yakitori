@@ -97,6 +97,35 @@ export function createServerHandlers(
   kernel: SessionKernel,
   options: ServerHandlerOptions = {},
 ): ServerHandlers {
+  async function forkAfterSettlingActiveTurn(
+    request: Parameters<SessionKernel["forkSession"]>[0],
+  ) {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const source = await kernel.readSession({ sessionId: request.sessionId })
+      if (source.session?.activeTurn !== undefined && options.interruptTurn) {
+        await options.interruptTurn({
+          sessionId: request.sessionId,
+          turnId: source.session.activeTurn.turnId,
+          reason: "conversation_fork",
+        })
+      }
+      try {
+        return await kernel.forkSession(request)
+      } catch (error) {
+        if (
+          options.interruptTurn === undefined ||
+          !isYakitoriError(error) ||
+          error.code !== YakitoriErrorCode.InvalidState ||
+          error.details?.operation !== "fork_session" ||
+          attempt === 3
+        ) {
+          throw error
+        }
+      }
+    }
+    throw new Error("Fork retry loop exited unexpectedly.")
+  }
+
   return {
     async createSession(input = {}) {
       try {
@@ -194,32 +223,16 @@ export function createServerHandlers(
           request.modelSelection?.provider,
           options.availableProviders,
         )
-        const forked = await kernel.forkSession(request)
-        // Inputs queued before the fork boundary but cancelled after it are
-        // inherited as pending and would rerun discarded work on wake.
-        for (const pending of forked.session.pendingInputs) {
-          const cancelled = await kernel.cancelInput({
-            sessionId: forked.sessionId,
-            inputId: pending.inputId,
-            reason: "conversation_fork",
-          })
-          options.eventHub?.publish([cancelled.event])
-        }
+        const forked = await forkAfterSettlingActiveTurn(request)
+        options.eventHub?.publish(forked.sourceEvents)
         if (request.content !== undefined) {
-          const admitted = await kernel.admitInput({
-            sessionId: forked.sessionId,
-            content: request.content,
-            parentInputId: request.atInputId,
-            ...(request.modelSelection === undefined
-              ? {}
-              : { modelSelection: request.modelSelection }),
-          })
-          options.eventHub?.publish([admitted.event])
           options.wakeSession?.(forked.sessionId)
         }
         const read = await kernel.readSession({ sessionId: forked.sessionId })
         return ok(201, {
           session: mapRequiredSession(forked.sessionId, read.session),
+          historyEndSeqExclusive: forked.historyEndSeqExclusive,
+          events: forked.localEvents,
         })
       } catch (error) {
         return fail(error)
@@ -349,11 +362,18 @@ export function createServerHandlers(
 
         const read = await kernel.readEvents({
           sessionId: request.sessionId,
-          after: request.after,
+          ...(request.after === undefined ? {} : { after: request.after }),
+          ...(request.through === undefined
+            ? {}
+            : { through: request.through }),
+          ...(request.limit === undefined ? {} : { limit: request.limit }),
         })
 
         return ok(200, {
           events: read.events,
+          ...(read.nextAfter === undefined
+            ? {}
+            : { nextAfter: read.nextAfter }),
         })
       } catch (error) {
         return fail(error)
@@ -365,6 +385,7 @@ export function createServerHandlers(
 function mapSessionSummary(summary: SessionSummary): ApiSessionSummary {
   return {
     id: summary.sessionId,
+    conversationId: summary.conversationId,
     seq: summary.seq,
     createdAt: summary.createdAt,
     updatedAt: summary.updatedAt,
@@ -392,6 +413,7 @@ function mapSessionSummary(summary: SessionSummary): ApiSessionSummary {
 function mapSessionDetail(session: SessionProjection): ApiSessionDetail {
   return {
     id: session.id,
+    conversationId: session.conversationId,
     seq: session.seq,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
@@ -747,8 +769,25 @@ function requireReadSessionEventsRequest(input: unknown) {
   )
   return {
     sessionId: requireSessionId(record.sessionId, "sessionId"),
-    after: requireOptionalSequence(record.after),
+    after: requireOptionalSequence(record.after, "after"),
+    through: requireOptionalSequence(record.through, "through"),
+    limit: requireOptionalEventLimit(record.limit),
   }
+}
+
+function requireOptionalEventLimit(value: unknown): number | undefined {
+  if (value === undefined) return undefined
+  const parsed = typeof value === "string" ? Number(value) : value
+  if (
+    Number.isInteger(parsed) &&
+    (parsed as number) > 0 &&
+    (parsed as number) <= 1_000
+  ) {
+    return parsed as number
+  }
+  throw invalidInput("limit must be an integer from 1 to 1000.", {
+    field: "limit",
+  })
 }
 
 function requireRecord(
@@ -795,16 +834,19 @@ function requireOptionalLimit(value: unknown): number {
   })
 }
 
-function requireOptionalSequence(value: unknown): number {
-  if (value === undefined) return 0
+function requireOptionalSequence(
+  value: unknown,
+  field: string,
+): number | undefined {
+  if (value === undefined) return undefined
   if (typeof value === "number" && Number.isInteger(value) && value >= 0) {
     return value
   }
   if (typeof value === "string" && /^[0-9]+$/.test(value)) {
     return Number(value)
   }
-  throw invalidInput("after must be a non-negative integer sequence.", {
-    after: isJsonValue(value) ? value : null,
+  throw invalidInput(`${field} must be a non-negative integer sequence.`, {
+    [field]: isJsonValue(value) ? value : null,
   })
 }
 

@@ -14,6 +14,7 @@ import {
   type SessionKernel,
   ToolState,
   TurnState,
+  YakitoriErrorCode,
 } from "../../src/index.ts"
 import { createMemoryEventStore } from "./memory-event-store.ts"
 
@@ -87,6 +88,32 @@ for (const implementation of ["memory", "jsonl"] as const) {
       })
     })
 
+    it("pages durable events with a sequence cursor", async () => {
+      await withKernel(implementation, async ({ kernel }) => {
+        const session = await kernel.createSession()
+        const input = await admit(kernel, session.sessionId, "page")
+        await kernel.cancelInput({
+          sessionId: session.sessionId,
+          inputId: input.inputId,
+        })
+
+        const first = await kernel.readEvents({
+          sessionId: session.sessionId,
+          limit: 2,
+        })
+        expect(first.events.map((event) => event.seq)).toEqual([1, 2])
+        expect(first.nextAfter).toBe(2)
+        if (first.nextAfter === undefined) throw new Error("Missing cursor.")
+        const second = await kernel.readEvents({
+          sessionId: session.sessionId,
+          after: first.nextAfter,
+          limit: 2,
+        })
+        expect(second.events.map((event) => event.seq)).toEqual([3])
+        expect(second.nextAfter).toBeUndefined()
+      })
+    })
+
     it("rejects deleting unknown or busy sessions", async () => {
       await withKernel(implementation, async ({ kernel }) => {
         await expect(
@@ -135,6 +162,93 @@ for (const implementation of ["memory", "jsonl"] as const) {
         const listed = await kernel.listSessions()
         expect(listed.sessions.map((summary) => summary.sessionId)).toEqual([
           kept.sessionId,
+        ])
+      })
+    })
+
+    it("lists and deletes a fork chain as one conversation", async () => {
+      await withKernel(implementation, async ({ kernel }) => {
+        const source = await kernel.createSession({ title: "Conversation" })
+        const input = await admit(kernel, source.sessionId, "fork-me")
+        const forked = await kernel.forkSession({
+          sessionId: source.sessionId,
+          atInputId: input.inputId,
+          reason: "undo",
+        })
+
+        expect((await kernel.listSessions()).sessions).toMatchObject([
+          {
+            sessionId: forked.sessionId,
+            conversationId: source.sessionId,
+          },
+        ])
+
+        await kernel.deleteSession({ sessionId: forked.sessionId })
+
+        expect(
+          (await kernel.readSession({ sessionId: source.sessionId })).session,
+        ).toBeUndefined()
+        expect(
+          (await kernel.readSession({ sessionId: forked.sessionId })).session,
+        ).toBeUndefined()
+        expect((await kernel.listSessions()).sessions).toEqual([])
+      })
+    })
+
+    it("does not delete an active sibling through an idle continuation", async () => {
+      await withKernel(implementation, async ({ kernel }) => {
+        const source = await kernel.createSession({ title: "Conversation" })
+        const cut = await admit(kernel, source.sessionId, "fork-me")
+        const forked = await kernel.forkSession({
+          sessionId: source.sessionId,
+          atInputId: cut.inputId,
+          reason: "undo",
+        })
+        const activeInput = await admit(
+          kernel,
+          source.sessionId,
+          "still-running",
+        )
+        await kernel.startTurn({
+          sessionId: source.sessionId,
+          inputId: activeInput.inputId,
+        })
+
+        await expect(
+          kernel.deleteSession({ sessionId: forked.sessionId }),
+        ).rejects.toThrow("contains an active Session")
+        expect(
+          (await kernel.readSession({ sessionId: source.sessionId })).session,
+        ).toBeDefined()
+        expect(
+          (await kernel.readSession({ sessionId: forked.sessionId })).session,
+        ).toBeDefined()
+      })
+    })
+
+    it("publishes an edit replacement in the fork's initial commit", async () => {
+      await withKernel(implementation, async ({ kernel }) => {
+        const source = await kernel.createSession()
+        const cut = await admit(kernel, source.sessionId, "replace-me")
+
+        const forked = await kernel.forkSession({
+          sessionId: source.sessionId,
+          atInputId: cut.inputId,
+          reason: "edit",
+          content: { kind: "text", text: "replacement" },
+          modelSelection: { provider: "faux", model: "atomic-edit" },
+        })
+
+        expect(forked.localEvents.at(-1)).toMatchObject({
+          type: EventType.InputAdmitted,
+          data: {
+            parentInputId: cut.inputId,
+            content: { kind: "text", text: "replacement" },
+            modelSelection: { provider: "faux", model: "atomic-edit" },
+          },
+        })
+        expect(forked.session.pendingInputs).toMatchObject([
+          { content: { text: "replacement" } },
         ])
       })
     })
@@ -275,17 +389,18 @@ for (const implementation of ["memory", "jsonl"] as const) {
       })
     })
 
-    it("refuses to fork a busy Session", async () => {
+    it("settles queued work but requires the runtime to interrupt an active Turn", async () => {
       await withKernel(implementation, async ({ kernel }) => {
         const queued = await kernel.createSession()
         const queuedInput = await admit(kernel, queued.sessionId, "queued-fork")
-        await expect(
-          kernel.forkSession({
-            sessionId: queued.sessionId,
-            atInputId: queuedInput.inputId,
-            reason: "undo",
-          }),
-        ).rejects.toThrow("cancel its queued inputs")
+        const queuedFork = await kernel.forkSession({
+          sessionId: queued.sessionId,
+          atInputId: queuedInput.inputId,
+          reason: "undo",
+        })
+        expect(queuedFork.sourceEvents).toMatchObject([
+          { type: EventType.InputCancelled },
+        ])
 
         const active = await kernel.createSession()
         const activeInput = await admit(kernel, active.sessionId, "active-fork")
@@ -299,7 +414,13 @@ for (const implementation of ["memory", "jsonl"] as const) {
             atInputId: activeInput.inputId,
             reason: "undo",
           }),
-        ).rejects.toThrow("has an active turn")
+        ).rejects.toMatchObject({
+          code: YakitoriErrorCode.InvalidState,
+          details: {
+            sessionId: active.sessionId,
+            operation: "fork_session",
+          },
+        })
       })
     })
 

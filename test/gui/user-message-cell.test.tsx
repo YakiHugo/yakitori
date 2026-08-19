@@ -34,7 +34,7 @@ describe("user message fork actions", () => {
     expect(
       screen.getByText(/Files and command effects stay as-is/),
     ).toBeDefined()
-    await user.click(screen.getByRole("button", { name: /Create branch/ }))
+    await user.click(screen.getByRole("button", { name: "Undo" }))
 
     expect(forkSession).toHaveBeenCalledWith("input_1", "undo")
   })
@@ -46,12 +46,10 @@ describe("user message fork actions", () => {
     render(<UserMessageCell entry={entry} queued={false} />)
 
     await user.click(screen.getByRole("button", { name: "Edit & resubmit" }))
-    const editor = screen.getByRole("textbox", {
-      name: "Edit message in a new branch",
-    })
+    const editor = screen.getByRole("textbox", { name: "Edit message" })
     await user.clear(editor)
     await user.type(editor, "Replacement request")
-    await user.click(screen.getByRole("button", { name: /Fork & send/ }))
+    await user.click(screen.getByRole("button", { name: /Save & send/ }))
 
     expect(forkSession).toHaveBeenCalledWith(
       "input_1",

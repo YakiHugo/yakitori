@@ -62,6 +62,8 @@ export type ApiForkSessionRequest = {
 
 export type ApiForkSessionResponse = {
   readonly session: ApiSessionDetail
+  readonly historyEndSeqExclusive: number
+  readonly events: readonly StoredEventEnvelope[]
 }
 
 export type ApiListSessionsRequest = {
@@ -194,14 +196,18 @@ export type ApiResolvePermissionResponse = {
 export type ApiReadSessionEventsRequest = {
   readonly sessionId: string
   readonly after?: number | string
+  readonly through?: number | string
+  readonly limit?: number | string
 }
 
 export type ApiReadSessionEventsResponse = {
   readonly events: readonly StoredEventEnvelope[]
+  readonly nextAfter?: number
 }
 
 export type ApiSessionSummary = {
   readonly id: string
+  readonly conversationId?: string
   readonly seq: number
   readonly createdAt: string
   readonly updatedAt: string

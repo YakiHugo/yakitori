@@ -15,7 +15,7 @@ import {
 import { ForkReason, isJsonObject, type StoredEventEnvelope } from "./events.ts"
 
 export const journalRecordVersion = 1
-export const summaryVersion = 1
+export const summaryVersion = 2
 
 export type JournalOperation = {
   readonly id: string
@@ -114,6 +114,7 @@ export async function readSummaryCache(
     !Number.isSafeInteger(value.journalBytes) ||
     (value.journalBytes as number) < 0 ||
     typeof value.sessionId !== "string" ||
+    typeof value.conversationId !== "string" ||
     !isPositiveInteger(value.seq) ||
     typeof value.createdAt !== "string" ||
     typeof value.updatedAt !== "string" ||
@@ -136,6 +137,7 @@ export function summaryWithoutCacheFields(
 ): EventStoreSessionSummary {
   return {
     sessionId: cached.sessionId,
+    conversationId: cached.conversationId,
     seq: cached.seq,
     createdAt: cached.createdAt,
     updatedAt: cached.updatedAt,
