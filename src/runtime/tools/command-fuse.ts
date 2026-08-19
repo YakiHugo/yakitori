@@ -640,6 +640,12 @@ function hasCatastrophicRmPath(words: readonly string[]): boolean {
       path === "$HOME" ||
       path === "$" + "{HOME}" ||
       /^(?:~|\$HOME|\$\{HOME\})\/(?:\*|\.\*|\{\*,\.\*\})$/.test(path) ||
+      // An unexpanded variable followed by a glob (e.g. `rm -rf $UNSET/*`)
+      // expands to `/*` when the variable is empty. This is the most common
+      // real-world catastrophic rm form; block it like a literal root path.
+      /^\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})\/(?:\*|\.\*|\{\*,\.\*\})$/.test(
+        path,
+      ) ||
       ROOT_CHILDREN.has(path)
     ) {
       return true

@@ -510,7 +510,7 @@ describe("model context", () => {
     )
 
     // The tool Turn drops first; the pinned checkpoint survives next to the
-    // current input. The dropped Turn is reported with truncation applied.
+    // current input. The dropped Turn is reported with pruning applied.
     expect(context.droppedTurnCount).toBe(1)
     expect(context.droppedCompactionCheckpoint).toBe(false)
     expect(context.droppedTurns).toEqual([
@@ -535,8 +535,7 @@ describe("model context", () => {
           {
             role: "tool",
             toolCallId: "tool_long",
-            content:
-              "line 0\nline 1\nline 2\nline 3\nline 4\n...[truncated 45 lines]",
+            content: "[Old tool result content cleared to free context budget.]",
           },
         ],
       },
@@ -742,6 +741,151 @@ describe("model context", () => {
     expect(result.content).toContain("(exit 1, 4.1s)")
     expect(result.content).toContain("cmd > out.log 2>&1")
     expect(context.truncatedToolResultCount).toBe(0)
+  })
+
+  it("prunes old tool results before dropping whole turns", async () => {
+    const { context, oldResultItemId, recentResultItemId } =
+      await withAttributedSession(async ({ kernel, sessionId }) => {
+        let oldResultItemId = ""
+        let recentResultItemId = ""
+        for (const [index, size] of [3_000, 100, 100].entries()) {
+          const turn = await admitAndStartTurn(
+            kernel,
+            sessionId,
+            `question ${index}`,
+          )
+          await kernel.recordAssistantOutput({
+            sessionId,
+            turnId: turn.turnId,
+            toolCalls: [
+              {
+                id: `tool_${index}`,
+                name: "run_command",
+                input: { command: `cmd ${index}` },
+                requiresPermission: false,
+              },
+            ],
+          })
+          const result = await kernel.recordToolResult({
+            sessionId,
+            turnId: turn.turnId,
+            toolCallId: `tool_${index}`,
+            content: { kind: "text", text: "x".repeat(size) },
+          })
+          await kernel.completeTurn({ sessionId, turnId: turn.turnId })
+          if (index === 0) oldResultItemId = result.itemId
+          if (index === 2) recentResultItemId = result.itemId
+        }
+        const current = await kernel.admitInput({
+          sessionId,
+          content: { kind: "text", text: "current" },
+        })
+        const read = await kernel.readSession({ sessionId })
+        if (!read.session) throw new Error("missing session")
+        return {
+          context: buildModelContext({
+            session: read.session,
+            currentInputId: current.inputId,
+            limits: {
+              ...generousLimits(),
+              // Unpruned assembly (~3.6KB) exceeds; pruning the oldest
+              // turn's result brings it back under the budget.
+              modelVisibleContextBytes: 1_500,
+            },
+          }),
+          oldResultItemId,
+          recentResultItemId,
+        }
+      })
+
+    // No turn drops: pruning alone brought the context back under budget.
+    expect(context.droppedTurnCount).toBe(0)
+    expect(context.prunedToolResultCount).toBe(1)
+    const results = context.messages.filter(
+      (message) => message.role === "tool",
+    )
+    expect(results.map((message) => message.content)).toEqual([
+      "[Old tool result content cleared to free context budget.]",
+      "x".repeat(100),
+      "x".repeat(100),
+    ])
+    // A pruned result carries no content, so it no longer counts as an
+    // observation; the protected recent results still do.
+    expect(context.observationEligibleToolResultItemIds).not.toContain(
+      oldResultItemId,
+    )
+    expect(context.observationEligibleToolResultItemIds).toContain(
+      recentResultItemId,
+    )
+  })
+
+  it("prunes tool results inside dropped turns bound for summarization", async () => {
+    const { context } = await withAttributedSession(
+      async ({ kernel, sessionId }) => {
+        for (const [index, size] of [3_000, 3_000, 100].entries()) {
+          const turn = await admitAndStartTurn(
+            kernel,
+            sessionId,
+            `question ${index}`,
+          )
+          await kernel.recordAssistantOutput({
+            sessionId,
+            turnId: turn.turnId,
+            toolCalls: [
+              {
+                id: `tool_${index}`,
+                name: "run_command",
+                input: { command: `cmd ${index}` },
+                requiresPermission: false,
+              },
+            ],
+          })
+          await kernel.recordToolResult({
+            sessionId,
+            turnId: turn.turnId,
+            toolCallId: `tool_${index}`,
+            content: { kind: "text", text: "x".repeat(size) },
+          })
+          await kernel.completeTurn({ sessionId, turnId: turn.turnId })
+        }
+        const current = await kernel.admitInput({
+          sessionId,
+          content: { kind: "text", text: "current" },
+        })
+        const read = await kernel.readSession({ sessionId })
+        if (!read.session) throw new Error("missing session")
+        return {
+          context: buildModelContext({
+            session: read.session,
+            currentInputId: current.inputId,
+            limits: {
+              ...generousLimits(),
+              // Pruning alone cannot fit ~6KB of tool output into 1.5KB, so
+              // the two oldest turns drop — and their summarization source
+              // must carry pruned placeholders, not the raw results.
+              modelVisibleContextBytes: 1_500,
+            },
+          }),
+        }
+      },
+    )
+
+    expect(context.droppedTurnCount).toBe(2)
+    for (const dropped of context.droppedTurns) {
+      const results = dropped.messages.filter(
+        (message) => message.role === "tool",
+      )
+      expect(results).toHaveLength(1)
+      expect(results[0]?.content).toBe(
+        "[Old tool result content cleared to free context budget.]",
+      )
+    }
+    // The surviving turn keeps its real result.
+    expect(
+      context.messages
+        .filter((message) => message.role === "tool")
+        .map((message) => message.content),
+    ).toEqual(["x".repeat(100)])
   })
 })
 

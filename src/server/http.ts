@@ -299,6 +299,22 @@ async function handleRequest(
     return
   }
 
+  if (route.kind === "compactSession") {
+    const body = await readJson(request)
+    if (!body.ok) {
+      writeResult(response, body.result)
+      return
+    }
+    writeResult(
+      response,
+      await handlers.compactSession({
+        ...requireBodyRecord(body.value),
+        sessionId: route.sessionId,
+      }),
+    )
+    return
+  }
+
   if (route.kind === "cancelInput") {
     const body = await readJson(request)
     if (!body.ok) {
@@ -457,6 +473,10 @@ function routeRequest(method: string, url: URL): Route {
 
   if (method === "POST" && segments.length === 3 && segments[2] === "inputs") {
     return { kind: "admitInput", sessionId: segments[1] }
+  }
+
+  if (method === "POST" && segments.length === 3 && segments[2] === "compact") {
+    return { kind: "compactSession", sessionId: segments[1] }
   }
 
   if (method === "GET" && segments.length === 3 && segments[2] === "events") {
@@ -1072,6 +1092,7 @@ function isAllowedCorsOrigin(origin: string): boolean {
 
 type Route =
   | { readonly kind: "admitInput"; readonly sessionId: string }
+  | { readonly kind: "compactSession"; readonly sessionId: string }
   | {
       readonly kind: "cancelInput"
       readonly sessionId: string

@@ -336,7 +336,8 @@ for (const implementation of ["memory", "jsonl"] as const) {
           expect.objectContaining({
             turnId: firstTurn.turnId,
             state: TurnState.Interrupted,
-            interruptedReason: "The Session was forked before this Turn finished.",
+            interruptedReason:
+              "The Session was forked before this Turn finished.",
           }),
         ])
         const targetEvents = await store.readEvents(forked.sessionId)

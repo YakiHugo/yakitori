@@ -30,6 +30,12 @@ export const InputRole = {
   User: "user",
 } as const
 
+// A Runtime-role Input whose text equals this directive triggers a
+// compaction-only Turn: the runner folds all uncovered completed Turns into a
+// checkpoint instead of making a regular model call. Shared by the server
+// (compact endpoint), the runner (dispatch), and the GUI (composer shortcut).
+export const COMPACT_DIRECTIVE = "/compact"
+
 // Items are a consumer-facing projection over coarse durable facts.
 export const ItemKind = {
   AssistantMessage: "assistant_message",

@@ -5,11 +5,14 @@ import { createGlobTool } from "./glob.ts"
 import { createGrepTool } from "./grep.ts"
 import { createReadFileTool } from "./read-file.ts"
 import { createRunCommandTool } from "./run-command.ts"
+import { createTaskTool } from "./task.ts"
 import type {
   RuntimeTool,
   ToolExecutionContext,
   ToolExecutionResult,
 } from "./types.ts"
+import { createWebFetchTool } from "./web-fetch.ts"
+import { createWebSearchTool } from "./web-search.ts"
 import { createWriteFileTool } from "./write-file.ts"
 
 export type ToolRegistry = {
@@ -74,6 +77,9 @@ export function createDefaultTools(
         ? {}
         : { log: input.runCommandLog }),
     }),
+    createWebFetchTool(),
+    createWebSearchTool(),
+    createTaskTool(),
   ]
 }
 

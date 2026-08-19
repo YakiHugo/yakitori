@@ -3,6 +3,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it, vi } from "vitest"
 import {
+  COMPACT_DIRECTIVE,
   createDurableEventHub,
   createFauxProvider,
   createMateKernel,
@@ -15,6 +16,7 @@ import {
   createTransientEventHub,
   createYakitoriError,
   EventType,
+  InputRole,
   ModelStopReason,
   YakitoriErrorCode,
   type EventEnvelope,
@@ -1067,6 +1069,593 @@ describe("session runner", () => {
         sessionId: session.sessionId,
       })
       expect(final.session?.cancelledTurns).toHaveLength(1)
+    })
+  })
+
+  it("retries an over-long summary request with a reduced source", async () => {
+    await withRuntime(async (runtime) => {
+      const provider = createFauxProvider([
+        { content: [{ type: "text", text: "first answer" }] },
+        { content: [{ type: "text", text: "second answer" }] },
+        { content: [{ type: "text", text: "Goal: checkpoint one." }] },
+        { content: [{ type: "text", text: "third answer" }] },
+        {
+          throwDuring: new Error(
+            "prompt is too long: 250000 tokens > 200000 maximum",
+          ),
+        },
+        { content: [{ type: "text", text: "Goal: checkpoint two." }] },
+        { content: [{ type: "text", text: "fourth answer" }] },
+      ])
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+        limits: createRuntimeLimits({ modelVisibleMessageBlocks: 3 }),
+      })
+      const session = await createAttributedSession(runtime)
+      for (const question of [
+        "first question",
+        "second question",
+        "third question",
+        "fourth question",
+      ]) {
+        await runtime.kernel.admitInput({
+          sessionId: session.sessionId,
+          content: { kind: "text", text: question },
+        })
+        await runner.wake(session.sessionId)
+      }
+
+      expect(provider.callCount).toBe(7)
+      // The fourth turn's first summary request carries both uncovered
+      // dropped turns; the retry drops the oldest half and only summarizes
+      // the third turn.
+      const firstAttempt = JSON.stringify(provider.requests[4]?.messages)
+      expect(firstAttempt).toContain("second question")
+      expect(firstAttempt).toContain("third question")
+      const retryAttempt = JSON.stringify(provider.requests[5]?.messages)
+      expect(retryAttempt).not.toContain("second question")
+      expect(retryAttempt).toContain("third question")
+
+      const replayed = await runtime.kernel.replaySession({
+        sessionId: session.sessionId,
+      })
+      const compacted = replayed.events.filter(
+        (event) => event.type === EventType.ContextCompacted,
+      )
+      expect(compacted).toHaveLength(2)
+      const turns = replayed.session?.turns ?? []
+      // Coverage follows the reduced source: the second checkpoint folds in
+      // only the third turn (the first was covered by the earlier
+      // checkpoint); the second turn stays uncovered dropped history.
+      expect(compacted[1]?.data).toMatchObject({
+        coveredTurnIds: [turns[0]?.turnId, turns[2]?.turnId],
+        summary: "Goal: checkpoint two.",
+      })
+      expect(replayed.session?.completedTurns).toHaveLength(4)
+    })
+  })
+
+  it("skips compaction quietly when the checkpoint is not smaller than its source", async () => {
+    await withRuntime(async (runtime) => {
+      const provider = createFauxProvider([
+        { content: [{ type: "text", text: "first answer" }] },
+        { content: [{ type: "text", text: "Goal: ".padEnd(500, "x") }] },
+        { content: [{ type: "text", text: "second answer" }] },
+      ])
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+        limits: createRuntimeLimits({ modelVisibleMessageBlocks: 2 }),
+      })
+      const session = await createAttributedSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "first question" },
+      })
+      await runner.wake(session.sessionId)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "second question" },
+      })
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {})
+      try {
+        await runner.wake(session.sessionId)
+        // Not smaller is a no-op, not a failure: no error log, no breaker.
+        expect(errors).not.toHaveBeenCalled()
+      } finally {
+        errors.mockRestore()
+      }
+
+      const replayed = await runtime.kernel.replaySession({
+        sessionId: session.sessionId,
+      })
+      expect(
+        replayed.events.some(
+          (event) => event.type === EventType.ContextCompacted,
+        ),
+      ).toBe(false)
+      expect(replayed.session?.completedTurns).toHaveLength(2)
+    })
+  })
+
+  it("stops attempting compaction after consecutive failures", async () => {
+    await withRuntime(async (runtime) => {
+      const provider = createFauxProvider([
+        { content: [{ type: "text", text: "first answer" }] },
+        { throwDuring: new Error("summarizer down") },
+        { content: [{ type: "text", text: "second answer" }] },
+        { throwDuring: new Error("summarizer down") },
+        { content: [{ type: "text", text: "third answer" }] },
+        { throwDuring: new Error("summarizer down") },
+        { content: [{ type: "text", text: "fourth answer" }] },
+        { content: [{ type: "text", text: "fifth answer" }] },
+      ])
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+        limits: createRuntimeLimits({ modelVisibleMessageBlocks: 2 }),
+      })
+      const session = await createAttributedSession(runtime)
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {})
+      try {
+        for (const question of [
+          "first question",
+          "second question",
+          "third question",
+          "fourth question",
+          "fifth question",
+        ]) {
+          await runtime.kernel.admitInput({
+            sessionId: session.sessionId,
+            content: { kind: "text", text: question },
+          })
+          await runner.wake(session.sessionId)
+        }
+      } finally {
+        errors.mockRestore()
+      }
+
+      // Turns two through four each pay one failed summary call; the fifth
+      // turn goes straight to its real call because the breaker tripped.
+      expect(provider.callCount).toBe(8)
+      const lastRequest = JSON.stringify(provider.requests[7]?.messages)
+      expect(lastRequest).toContain("fifth question")
+      const read = await runtime.kernel.readSession({
+        sessionId: session.sessionId,
+      })
+      expect(read.session?.completedTurns).toHaveLength(5)
+    })
+  })
+
+  it("runs a manual compact directive turn without a real model call", async () => {
+    await withRuntime(async (runtime) => {
+      const provider = createFauxProvider([
+        { content: [{ type: "text", text: "first answer" }] },
+        { content: [{ type: "text", text: "second answer" }] },
+        { content: [{ type: "text", text: "Goal: manual checkpoint." }] },
+        { content: [{ type: "text", text: "third answer" }] },
+      ])
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+      })
+      const session = await createAttributedSession(runtime)
+      for (const question of ["first question", "second question"]) {
+        await runtime.kernel.admitInput({
+          sessionId: session.sessionId,
+          content: { kind: "text", text: question },
+        })
+        await runner.wake(session.sessionId)
+      }
+
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        role: InputRole.Runtime,
+        content: { kind: "text", text: COMPACT_DIRECTIVE },
+      })
+      await runner.wake(session.sessionId)
+
+      // Two real answers plus the summary call; the directive Turn itself
+      // never prompts the model for a response.
+      expect(provider.callCount).toBe(3)
+      const replayed = await runtime.kernel.replaySession({
+        sessionId: session.sessionId,
+      })
+      const turns = replayed.session?.turns ?? []
+      const compacted = replayed.events.filter(
+        (event) => event.type === EventType.ContextCompacted,
+      )
+      expect(compacted).toHaveLength(1)
+      expect(compacted[0]?.data).toMatchObject({
+        turnId: turns[2]?.turnId,
+        coveredTurnIds: [turns[0]?.turnId, turns[1]?.turnId],
+        summary: "Goal: manual checkpoint.",
+      })
+      expect(replayed.session?.completedTurns).toHaveLength(3)
+
+      // The follow-up turn sees the checkpoint; neither the directive nor
+      // the housekeeping note leaks into model history.
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "third question" },
+      })
+      await runner.wake(session.sessionId)
+      const followUp = JSON.stringify(provider.requests[3]?.messages)
+      expect(followUp).toContain("<context_compacted>")
+      expect(followUp).toContain("Goal: manual checkpoint.")
+      expect(followUp).not.toContain(COMPACT_DIRECTIVE)
+      expect(followUp).not.toContain("Compacted")
+      expect(provider.callCount).toBe(4)
+    })
+  })
+
+  it("completes a compact directive with a note when nothing qualifies", async () => {
+    await withRuntime(async (runtime) => {
+      const provider = createFauxProvider([])
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+      })
+      const session = await createAttributedSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        role: InputRole.Runtime,
+        content: { kind: "text", text: COMPACT_DIRECTIVE },
+      })
+      await runner.wake(session.sessionId)
+
+      expect(provider.callCount).toBe(0)
+      const replayed = await runtime.kernel.replaySession({
+        sessionId: session.sessionId,
+      })
+      expect(
+        replayed.events.some(
+          (event) => event.type === EventType.ContextCompacted,
+        ),
+      ).toBe(false)
+      expect(replayed.session?.completedTurns).toHaveLength(1)
+    })
+  })
+})
+
+describe("subagent task tool", () => {
+  it("runs a task call as a child session and returns its final text", async () => {
+    await withRuntime(async (runtime) => {
+      const provider = createFauxProvider([
+        {
+          content: [
+            {
+              type: "tool_call",
+              id: "call_task",
+              name: "task",
+              input: { description: "survey repo", prompt: "report findings" },
+            },
+          ],
+          stopReason: ModelStopReason.ToolUse,
+        },
+        { content: [{ type: "text", text: "findings text" }] },
+        { content: [{ type: "text", text: "done" }] },
+      ])
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+        durableHub: runtime.durableHub,
+      })
+      const session = await createAttributedSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "delegate please" },
+      })
+      await runner.wake(session.sessionId)
+
+      expect(provider.callCount).toBe(3)
+      // The parent sees task; the child (call 2) runs the subagent turn.
+      expect(provider.requests[0]?.tools.map((tool) => tool.name)).toContain(
+        "task",
+      )
+      expect(provider.requests[1]?.messages.at(-1)).toEqual({
+        role: "user",
+        content: [{ type: "text", text: "report findings" }],
+      })
+
+      const parent = await runtime.kernel.readSession({
+        sessionId: session.sessionId,
+      })
+      expect(parent.session?.completedTurns).toHaveLength(1)
+      const taskCall = parent.session?.tools.find(
+        (tool) => tool.name === "task",
+      )
+      expect(taskCall?.state).toBe("completed")
+      const taskResult = parent.session?.items.find(
+        (item) => item.kind === "tool_result",
+      )
+      expect(taskResult?.content).toEqual({
+        kind: "text",
+        text: "findings text",
+      })
+
+      const childSessionId = (taskCall?.output as { sessionId: string })
+        .sessionId
+      const child = await runtime.kernel.readSession({
+        sessionId: childSessionId,
+      })
+      expect(child.session?.parentSessionId).toBe(session.sessionId)
+      expect(child.session?.title).toBe("survey repo")
+      expect(child.session?.metadata).toEqual({
+        subagent: "general",
+        subagentDescription: "survey repo",
+      })
+      expect(child.session?.completedTurns).toHaveLength(1)
+    })
+  })
+
+  it("narrows an explore subagent to the read-only tools", async () => {
+    await withRuntime(async (runtime) => {
+      const provider = createFauxProvider([
+        {
+          content: [
+            {
+              type: "tool_call",
+              id: "call_task",
+              name: "task",
+              input: {
+                description: "look around",
+                prompt: "find the entrypoint",
+                agent: "explore",
+              },
+            },
+          ],
+          stopReason: ModelStopReason.ToolUse,
+        },
+        { content: [{ type: "text", text: "src/index.ts" }] },
+        { content: [{ type: "text", text: "done" }] },
+      ])
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+      })
+      const session = await createAttributedSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "explore" },
+      })
+      await runner.wake(session.sessionId)
+
+      expect(provider.requests[1]?.tools.map((tool) => tool.name)).toEqual([
+        "read_file",
+        "grep",
+        "glob",
+        "web_fetch",
+        "web_search",
+      ])
+    })
+  })
+
+  it("surfaces a failed subagent turn as a task tool error and lets the parent continue", async () => {
+    await withRuntime(async (runtime) => {
+      const provider = createFauxProvider([
+        {
+          content: [
+            {
+              type: "tool_call",
+              id: "call_task",
+              name: "task",
+              input: { description: "doomed", prompt: "try anyway" },
+            },
+          ],
+          stopReason: ModelStopReason.ToolUse,
+        },
+        {
+          stopReason: ModelStopReason.Error,
+          error: { code: "model_error", message: "provider exploded" },
+        },
+        { content: [{ type: "text", text: "recovered" }] },
+      ])
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+      })
+      const session = await createAttributedSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "delegate" },
+      })
+      await runner.wake(session.sessionId)
+
+      expect(provider.callCount).toBe(3)
+      const parent = await runtime.kernel.readSession({
+        sessionId: session.sessionId,
+      })
+      const taskCall = parent.session?.tools.find(
+        (tool) => tool.name === "task",
+      )
+      expect(taskCall?.state).toBe("failed")
+      expect(taskCall?.error?.code).toBe("subagent_failed")
+      const taskResult = parent.session?.items.find(
+        (item) => item.kind === "tool_result",
+      )
+      expect(taskResult?.status).toBe("failed")
+      expect(taskResult?.content).toEqual({
+        kind: "text",
+        text: expect.stringContaining("provider exploded"),
+      })
+      // The parent decides how to proceed and completes its own turn.
+      expect(parent.session?.completedTurns).toHaveLength(1)
+      expect(parent.session?.items.at(-1)?.content).toEqual({
+        kind: "text",
+        text: "recovered",
+      })
+
+      const childSessionId = (taskCall?.output as { sessionId: string })
+        .sessionId
+      const child = await runtime.kernel.readSession({
+        sessionId: childSessionId,
+      })
+      expect(child.session?.failedTurns).toHaveLength(1)
+    })
+  })
+
+  it("never offers task to a subagent session (depth cap 1)", async () => {
+    await withRuntime(async (runtime) => {
+      const provider = createFauxProvider([
+        { content: [{ type: "text", text: "child done" }] },
+      ])
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+      })
+      const mate = await runtime.mateKernel.createMate({
+        instructions: "Answer briefly.",
+        name: "RunnerMate",
+        role: "Assistant",
+      })
+      const parent = await runtime.kernel.createSession({
+        title: "parent",
+        workingDirectory: runtime.rootDir,
+        mateId: mate.mate.id,
+        mateRevisionId: mate.mate.currentRevision.id,
+      })
+      const child = await runtime.kernel.createSession({
+        parentSessionId: parent.sessionId,
+        workingDirectory: runtime.rootDir,
+        mateId: mate.mate.id,
+        mateRevisionId: mate.mate.currentRevision.id,
+        metadata: { subagent: "general", subagentDescription: "child" },
+      })
+      await runtime.kernel.admitInput({
+        sessionId: child.sessionId,
+        content: { kind: "text", text: "work" },
+      })
+      await runner.wake(child.sessionId)
+
+      const toolNames = provider.requests[0]?.tools.map((tool) => tool.name)
+      expect(toolNames).not.toContain("task")
+      // A general subagent keeps the rest of the tool set.
+      expect(toolNames).toContain("edit_file")
+      expect(toolNames).toContain("run_command")
+      const childRead = await runtime.kernel.readSession({
+        sessionId: child.sessionId,
+      })
+      expect(childRead.session?.completedTurns).toHaveLength(1)
+    })
+  })
+
+  it("runs the subagent on the parent turn's model", async () => {
+    await withRuntime(async (runtime) => {
+      const provider = createFauxProvider([
+        {
+          content: [
+            {
+              type: "tool_call",
+              id: "call_task",
+              name: "task",
+              input: { description: "survey", prompt: "report" },
+            },
+          ],
+          stopReason: ModelStopReason.ToolUse,
+        },
+        { content: [{ type: "text", text: "findings" }] },
+        { content: [{ type: "text", text: "done" }] },
+      ])
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+      })
+      const session = await createAttributedSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "delegate" },
+        modelSelection: { provider: "faux", model: "parent-special" },
+      })
+      await runner.wake(session.sessionId)
+
+      // Parent turn, subagent turn, parent continuation — all one model.
+      expect(provider.requests.map((request) => request.target)).toEqual([
+        expect.objectContaining({ provider: "faux", model: "parent-special" }),
+        expect.objectContaining({ provider: "faux", model: "parent-special" }),
+        expect.objectContaining({ provider: "faux", model: "parent-special" }),
+      ])
+    })
+  })
+
+  it("cancels a running subagent turn when the parent turn is interrupted", async () => {
+    await withRuntime(async (runtime) => {
+      const provider = createFauxProvider([
+        {
+          content: [
+            {
+              type: "tool_call",
+              id: "call_task",
+              name: "task",
+              input: { description: "long task", prompt: "work forever" },
+            },
+          ],
+          stopReason: ModelStopReason.ToolUse,
+        },
+        // The subagent turn hangs until its lane abort fires.
+        { waitForAbort: true },
+      ])
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+      })
+      const session = await createAttributedSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "delegate" },
+      })
+      const wake = runner.wake(session.sessionId)
+      // Wait until the subagent turn is running, then interrupt the parent.
+      for (;;) {
+        const read = await runtime.kernel.readSession({
+          sessionId: session.sessionId,
+        })
+        if (read.session?.activeTurn && provider.callCount === 2) {
+          await runner.interrupt({
+            sessionId: session.sessionId,
+            turnId: read.session.activeTurn.turnId,
+            reason: "user_cancel",
+          })
+          break
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1))
+      }
+      await wake
+
+      const parent = await runtime.kernel.readSession({
+        sessionId: session.sessionId,
+      })
+      expect(parent.session?.cancelledTurns).toHaveLength(1)
+
+      // The task tool may never record a result on the cancelled parent, so
+      // find the child through the session list instead of its output.
+      const sessions = await runtime.kernel.listSessions()
+      const childSummary = sessions.sessions.find(
+        (candidate) => candidate.parentSessionId === session.sessionId,
+      )
+      if (childSummary === undefined) throw new Error("missing child session")
+      const child = await runtime.kernel.readSession({
+        sessionId: childSummary.sessionId,
+      })
+      const childTurn = child.session?.turns.at(-1)
+      expect(childTurn?.state).not.toBe("completed")
+      expect(childTurn?.cancelledReason ?? childTurn?.interruptedReason).toMatch(
+        /abort/,
+      )
+      // The subagent never ran past the abort.
+      expect(provider.callCount).toBe(2)
     })
   })
 })

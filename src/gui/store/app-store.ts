@@ -1,13 +1,16 @@
 import { useMemo } from "react"
 import { create } from "zustand"
 import {
+  COMPACT_DIRECTIVE,
   EventType,
   type ModelSelection,
   type StoredEventEnvelope,
   type TurnStartedEvent,
 } from "../../kernel/events.ts"
+import { createRequestId } from "../../kernel/ids.ts"
 import type {
   ApiAdmitInputResponse,
+  ApiCompactSessionResponse,
   ApiCreateSessionResponse,
   ApiForkSessionResponse,
   ApiListProjectsResponse,
@@ -666,6 +669,36 @@ export const useAppStore = create<AppStore>()((set, get) => {
     admitInput: async (text) => {
       const selection = currentSessionSelection(get().selection)
       if (!selection || !get().modelSelectionReady) return
+
+      // The compact directive takes a dedicated lane: no admission outbox,
+      // no model selection — the server admits it as a runtime-role Input.
+      // A per-invocation requestId keeps a retried POST from admitting a
+      // duplicate compact directive.
+      if (text === COMPACT_DIRECTIVE) {
+        await runTask(
+          async () => {
+            const response = await requestJson<ApiCompactSessionResponse>(
+              get().apiBase,
+              `/sessions/${encodeURIComponent(selection.sessionId)}/compact`,
+              {
+                method: "POST",
+                body: JSON.stringify({ requestId: createRequestId() }),
+              },
+            )
+            if (response.event.sessionId !== selection.sessionId) {
+              throw new Error("Compact response did not match the request.")
+            }
+            if (!isCurrentSessionSelection(get().selection, selection)) return
+            if (get().promptDraft?.trim() === text) {
+              set({ promptDraft: undefined })
+            }
+            mergeEvent(response.event)
+            await refreshSelectedSession(selection)
+          },
+          () => isCurrentSessionSelection(get().selection, selection),
+        )
+        return
+      }
 
       await runTask(
         async () => {

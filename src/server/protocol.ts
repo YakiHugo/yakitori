@@ -144,6 +144,12 @@ export type ApiAdmitInputResponse = {
   readonly event: EventEnvelope
 }
 
+export type ApiCompactSessionResponse = {
+  readonly requestId: string
+  readonly inputId: string
+  readonly event: EventEnvelope
+}
+
 export type ApiCancelInputRequest = {
   readonly sessionId: string
   readonly inputId: string

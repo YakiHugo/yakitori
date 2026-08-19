@@ -17,12 +17,31 @@ Goal — what the user is trying to accomplish.
 Progress — what is done so far, including key decisions and why they were made.
 Files — exact paths read or modified, and why each one matters.
 Errors — failures encountered and how they were resolved, or that they are still open.
-Next steps — the concrete work that remains, in order.
+User messages — every message the user sent, in order, as close to verbatim as possible. Corrections and rejections of earlier approaches matter most.
+Next steps — the concrete work that remains, in order. When the conversation was interrupted mid-task, quote the immediate next action verbatim.
 
 Rules:
 - Use precise file paths, commands, and identifiers; avoid vague references.
 - The checkpoint must be self-contained: it must make sense without the conversation it replaces.
 - No pleasantries, preamble, or meta-commentary; output only the checkpoint.`
+
+// Matches provider messages for an over-long request (Anthropic "prompt is
+// too long", OpenAI "context_length_exceeded" style text, HTTP 413). Used to
+// retry compaction with a smaller source instead of giving up.
+export function isContextOverflowError(error: unknown): boolean {
+  const message = (
+    error instanceof Error ? error.message : String(error)
+  ).toLowerCase()
+  return (
+    message.includes("prompt is too long") ||
+    message.includes("context length") ||
+    message.includes("context_length") ||
+    message.includes("maximum context") ||
+    message.includes("too many tokens") ||
+    message.includes("request too large") ||
+    message.includes("413")
+  )
+}
 
 export type CompactionResult = {
   readonly summary: string

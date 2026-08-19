@@ -1,5 +1,6 @@
 import { realpath, stat } from "node:fs/promises"
 import {
+  COMPACT_DIRECTIVE,
   type EventEnvelope,
   type EventMetadata,
   ForkReason,
@@ -23,6 +24,7 @@ import {
   type ApiAdmitInputResponse,
   type ApiCancelInputResponse,
   type ApiCancelTurnResponse,
+  type ApiCompactSessionResponse,
   type ApiCreateSessionResponse,
   type ApiDeleteSessionResponse,
   ApiErrorCode,
@@ -75,6 +77,9 @@ export type ServerHandlers = {
   ): Promise<ApiHandlerResult<ApiDeleteSessionResponse>>
   forkSession(input: unknown): Promise<ApiHandlerResult<ApiForkSessionResponse>>
   admitInput(input: unknown): Promise<ApiHandlerResult<ApiAdmitInputResponse>>
+  compactSession(
+    input: unknown,
+  ): Promise<ApiHandlerResult<ApiCompactSessionResponse>>
   cancelInput(input: unknown): Promise<ApiHandlerResult<ApiCancelInputResponse>>
   cancelTurn(input: unknown): Promise<ApiHandlerResult<ApiCancelTurnResponse>>
   resolvePermission(
@@ -235,6 +240,35 @@ export function createServerHandlers(
         if (admitted.created) options.eventHub?.publish([admitted.event])
         // Wake even on idempotent replay: original process may have crashed
         // after commit and before scheduling.
+        options.wakeSession?.(request.sessionId)
+        return ok(admitted.created ? 201 : 200, {
+          requestId: admitted.requestId,
+          inputId: admitted.inputId,
+          event: admitted.event,
+        })
+      } catch (error) {
+        return fail(error)
+      }
+    },
+
+    async compactSession(input) {
+      try {
+        const request = requireCompactSessionRequest(input)
+        const read = await kernel.readSession({ sessionId: request.sessionId })
+        if (!read.session) {
+          throw notFound(`Session ${request.sessionId} was not found.`, {
+            sessionId: request.sessionId,
+          })
+        }
+        const admitted = await kernel.admitInput({
+          sessionId: request.sessionId,
+          role: InputRole.Runtime,
+          content: { kind: "text", text: COMPACT_DIRECTIVE },
+          ...(request.requestId === undefined
+            ? {}
+            : { requestId: request.requestId }),
+        })
+        if (admitted.created) options.eventHub?.publish([admitted.event])
         options.wakeSession?.(request.sessionId)
         return ok(admitted.created ? 201 : 200, {
           requestId: admitted.requestId,
@@ -616,6 +650,21 @@ function requireAvailableProvider(
     provider,
     availableProviders,
   })
+}
+
+function requireCompactSessionRequest(input: unknown) {
+  const record = requireRecord(
+    input,
+    "Session compact request must be an object.",
+  )
+  return {
+    sessionId: requireSessionId(record.sessionId, "sessionId"),
+    // Optional so older clients keep working; when present it gives the
+    // admission the same idempotent-replay guarantee as regular inputs.
+    ...(record.requestId === undefined
+      ? {}
+      : { requestId: requireRequestId(record.requestId) }),
+  }
 }
 
 function requireCancelInputRequest(input: unknown) {

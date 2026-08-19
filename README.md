@@ -97,6 +97,7 @@ file.
 | `XAI_API_KEY` | Configures Grok; when unset, each Grok Turn tries the Grok CLI OIDC login |
 | `GROK_CREDENTIALS` | Grok CLI credentials file (default `~/.grok/auth.json`) |
 | `KIMI_API_KEY` | Configures Kimi with an official Kimi Code console key |
+| `EXA_API_KEY` | Optional; raises the Exa free-tier quota used by `web_search` |
 | `HOST` / `PORT` | Server listen address (default `127.0.0.1:4141`) |
 
 Every provider example specifies a model so provider-default changes cannot

@@ -77,10 +77,13 @@ export function createMemoryEventStore(): EventStore {
       projections.set(input.targetSessionId, structuredClone(projection))
       for (const event of events) {
         if (event.type !== EventType.InputAdmitted) continue
-        admissions.set(`${input.targetSessionId}\u0000${event.data.requestId}`, {
-          event: structuredClone(event),
-          fingerprint: fingerprintInputAdmission(event.data),
-        })
+        admissions.set(
+          `${input.targetSessionId}\u0000${event.data.requestId}`,
+          {
+            event: structuredClone(event),
+            fingerprint: fingerprintInputAdmission(event.data),
+          },
+        )
       }
       return structuredClone({ events, projection })
     },
