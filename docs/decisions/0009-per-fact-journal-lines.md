@@ -8,6 +8,10 @@ also supersedes decision 0007's requirement that input admission use a generic
 operation receipt. Decision 0008's per-Session layout, runtime lock,
 per-Session I/O gate, durability ordering, summary cache, and store ownership
 remain in force. Decision 0007's witness semantics remain in force.
+Decision 0024 later qualifies physical sequence contiguity for referenced fork
+journals: their effective history remains gap-free, while their local file may
+contain `session.created` followed by facts whose sequences continue after an
+inherited prefix.
 
 ## Context
 
@@ -99,6 +103,11 @@ Within the complete prefix, all lines are committed. Invalid JSON, an invalid
 envelope or legacy record, a Session mismatch, a duplicate sequence, or a
 sequence gap is corruption and fails with `InvalidEventLog`. No complete line
 is silently skipped.
+
+For a decision-0024 referenced fork, this validation applies separately to
+each referenced physical segment and the target-local suffix, then to the
+materialized effective history. A sequence jump between the target header and
+its first local fact represents the referenced prefix rather than corruption.
 
 ### Legacy read compatibility
 
