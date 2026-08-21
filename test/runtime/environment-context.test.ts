@@ -15,11 +15,13 @@ describe("environment context", () => {
 
       expect(context.split("\n")).toEqual([
         "<environment>",
+        `Workspace root: ${dir}`,
         `Working directory: ${dir}`,
-        "Is directory a git repo: no",
+        "Is workspace a git repo: no",
         `Platform: ${process.platform}`,
         expect.stringMatching(/^OS version: .+/),
         "Today's date: 2026-07-31",
+        expect.stringMatching(/^Timezone: .+/),
         "</environment>",
       ])
     } finally {
@@ -37,7 +39,7 @@ describe("environment context", () => {
         now: new Date(2026, 0, 5),
       })
 
-      expect(context).toContain("Is directory a git repo: yes")
+      expect(context).toContain("Is workspace a git repo: yes")
       expect(context).toContain("Today's date: 2026-01-05")
     } finally {
       await rm(dir, { recursive: true, force: true })

@@ -1,59 +1,115 @@
-import { open, stat } from "node:fs/promises"
-import { join } from "node:path"
+import { createHash } from "node:crypto"
+import { open, realpath, stat } from "node:fs/promises"
+import { dirname, join, relative, sep } from "node:path"
 import type { ModelUserMessage } from "./model.ts"
 
 export const PROJECT_INSTRUCTIONS_MAX_BYTES = 32 * 1024
 
 const instructionFilenames = ["AGENTS.override.md", "AGENTS.md"] as const
 
+export type ProjectInstructionSource = {
+  readonly path: string
+  readonly byteLength: number
+}
+
 export type ProjectInstructions = {
+  readonly directory: string
   readonly files: readonly string[]
+  readonly sources: readonly ProjectInstructionSource[]
+  readonly revision: string
   readonly message: ModelUserMessage
   readonly truncated: boolean
 }
 
 export async function loadProjectInstructions(input: {
+  readonly workspaceRoot?: string
   readonly workingDirectory: string
   readonly maxBytes?: number
 }): Promise<ProjectInstructions | undefined> {
   const maxBytes = input.maxBytes ?? PROJECT_INSTRUCTIONS_MAX_BYTES
   if (maxBytes <= 0) return undefined
 
-  // Discovery is intentionally limited to the working directory: the
-  // workspace root is the tool path-policy root, so this loader must not
-  // read instruction files outside it either.
-  const path = await findInstructionFile(input.workingDirectory)
-  if (path === undefined) return undefined
+  const workspaceRoot = await realpath(
+    input.workspaceRoot ?? input.workingDirectory,
+  )
+  const workingDirectory = await realpath(input.workingDirectory)
+  requireInsideWorkspace(workspaceRoot, workingDirectory)
 
-  const result = await readPrefix(path, maxBytes)
-  if (result.text.trim().length === 0) return undefined
+  const sources: ProjectInstructionSource[] = []
+  const sections: string[] = []
+  let remainingBytes = maxBytes
+  let truncated = false
 
-  const suffix = result.truncated
+  for (const directory of directoriesFromRoot(
+    workspaceRoot,
+    workingDirectory,
+  )) {
+    const path = await findInstructionFile(workspaceRoot, directory)
+    if (path === undefined) continue
+    if (remainingBytes === 0) {
+      truncated = true
+      break
+    }
+
+    const result = await readPrefix(path, remainingBytes)
+    if (result.text.trim().length === 0) continue
+    sources.push({ path, byteLength: result.byteCount })
+    sections.push(
+      `# AGENTS.md instructions for ${directory}\n\n<INSTRUCTIONS>\n${result.text}\n</INSTRUCTIONS>`,
+    )
+    remainingBytes -= result.byteCount
+    truncated = result.truncated
+    if (truncated) break
+  }
+
+  if (sections.length === 0) return undefined
+  const suffix = truncated
     ? "\n\n<Project instructions were truncated at the configured byte limit.>"
     : ""
+  const text = `${sections.join("\n\n")}${suffix}`
   return {
-    files: [path],
+    directory: workingDirectory,
+    files: sources.map((source) => source.path),
+    sources,
+    revision: createHash("sha256").update(text).digest("hex"),
     message: {
       role: "user",
-      content: [
-        {
-          type: "text",
-          text: `# AGENTS.md instructions for ${input.workingDirectory}\n\n<INSTRUCTIONS>\n${result.text}\n</INSTRUCTIONS>${suffix}`,
-        },
-      ],
+      content: [{ type: "text", text }],
     },
-    truncated: result.truncated,
+    truncated,
   }
 }
 
+function directoriesFromRoot(root: string, directory: string): string[] {
+  const directories = [directory]
+  let current = directory
+  while (current !== root) {
+    current = dirname(current)
+    directories.push(current)
+  }
+  return directories.reverse()
+}
+
 async function findInstructionFile(
+  workspaceRoot: string,
   directory: string,
 ): Promise<string | undefined> {
   for (const filename of instructionFilenames) {
-    const path = join(directory, filename)
-    if (await fileExists(path)) return path
+    const candidate = join(directory, filename)
+    if (!(await fileExists(candidate))) continue
+    const path = await realpath(candidate)
+    requireInsideWorkspace(workspaceRoot, path)
+    return path
   }
   return undefined
+}
+
+function requireInsideWorkspace(workspaceRoot: string, path: string): void {
+  const child = relative(workspaceRoot, path)
+  if (child === "" || (!child.startsWith(`..${sep}`) && child !== "..")) {
+    return
+  }
+  throw new Error(`Project instruction path escapes the workspace: ${path}`)
 }
 
 async function fileExists(path: string): Promise<boolean> {

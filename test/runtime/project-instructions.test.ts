@@ -1,11 +1,11 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { loadProjectInstructions } from "../../src/runtime/project-instructions.ts"
 
 describe("project instructions", () => {
-  it("loads only the working directory file and prefers the local override", async () => {
+  it("loads root-to-working-directory instructions and prefers a local override", async () => {
     const root = await mkdtemp(join(tmpdir(), "yakitori-instructions-"))
     try {
       const nested = join(root, "packages", "app")
@@ -16,14 +16,21 @@ describe("project instructions", () => {
       await writeFile(join(nested, "AGENTS.override.md"), "override rules")
 
       const result = await loadProjectInstructions({
+        workspaceRoot: root,
         workingDirectory: nested,
       })
 
-      expect(result?.files).toEqual([join(nested, "AGENTS.override.md")])
+      expect(result?.files).toEqual([
+        await realpath(join(root, "AGENTS.md")),
+        await realpath(join(nested, "AGENTS.override.md")),
+      ])
       const text = result?.message.content[0]?.text ?? ""
+      expect(text).toContain("root rules")
       expect(text).toContain("override rules")
-      expect(text).not.toContain("root rules")
       expect(text).not.toContain("ignored local rules")
+      expect(text.indexOf("root rules")).toBeLessThan(
+        text.indexOf("override rules"),
+      )
     } finally {
       await rm(root, { recursive: true, force: true })
     }
@@ -37,7 +44,10 @@ describe("project instructions", () => {
       await writeFile(join(root, "AGENTS.md"), "parent rules")
 
       expect(
-        await loadProjectInstructions({ workingDirectory: workspace }),
+        await loadProjectInstructions({
+          workspaceRoot: workspace,
+          workingDirectory: workspace,
+        }),
       ).toBeUndefined()
     } finally {
       await rm(root, { recursive: true, force: true })
