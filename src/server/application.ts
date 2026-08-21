@@ -79,6 +79,7 @@ export type YakitoriApplicationOptions = {
   readonly providerStreams?: Readonly<Record<string, StreamFn>>
   readonly modelDirectory?: ModelDirectory
   readonly userConfigPath?: string
+  readonly modelContextWindowTokens?: number
   readonly provider?: string
   readonly model?: string
   readonly fauxScenario?: string
@@ -152,6 +153,7 @@ export async function createYakitoriApplication(
         ? {}
         : { configPath: options.userConfigPath }),
     })
+    const userConfiguration = await userConfig.readConfiguration()
     const userShellEnv = options.userShellEnv ?? createUserShellEnv()
     const toolRegistry = createToolRegistry(
       createDefaultTools({
@@ -209,6 +211,9 @@ export async function createYakitoriApplication(
         ...(userPreference === undefined ? {} : { userPreference }),
       }
     }
+    const modelContextWindowTokens =
+      options.modelContextWindowTokens ??
+      userConfiguration.modelContextWindowTokens
 
     const runner = createSessionRunner({
       kernel: sessionKernel,
@@ -216,6 +221,9 @@ export async function createYakitoriApplication(
       stream: providerRegistry.stream,
       provider: provider.provider,
       model: provider.model,
+      ...(modelContextWindowTokens === undefined
+        ? {}
+        : { modelContextWindowTokens }),
       durableHub: eventHub,
       transientHub,
       permissionGate,

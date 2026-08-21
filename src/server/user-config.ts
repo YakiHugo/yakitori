@@ -7,8 +7,14 @@ import type { ApiUserModelPreference } from "./protocol.ts"
 
 export type UserConfigStore = {
   read(): Promise<ApiUserModelPreference | undefined>
+  readConfiguration(): Promise<UserConfiguration>
   write(preference: ApiUserModelPreference): Promise<ApiUserModelPreference>
 }
+
+export type UserConfiguration = Readonly<{
+  preference?: ApiUserModelPreference
+  modelContextWindowTokens?: number
+}>
 
 export function createUserConfigStore(
   options: { readonly configPath?: string } = {},
@@ -19,7 +25,11 @@ export function createUserConfigStore(
   return {
     async read() {
       const document = await readConfigDocument(configPath)
-      return document?.preference
+      return document?.configuration.preference
+    },
+    async readConfiguration() {
+      const document = await readConfigDocument(configPath)
+      return document?.configuration ?? {}
     },
     write(preference) {
       const write = pendingWrite.then(
@@ -81,7 +91,7 @@ async function writePreference(
 }
 
 type ConfigDocument = {
-  readonly preference?: ApiUserModelPreference
+  readonly configuration: UserConfiguration
   readonly value: TomlTable
 }
 
@@ -98,19 +108,38 @@ async function readConfigDocument(
 
   try {
     const value = parse(content, { integersAsBigInt: "asNeeded" })
-    return { value, ...preferenceFromConfig(value) }
+    return { value, configuration: configurationFromConfig(value) }
   } catch (error) {
     console.warn(`Ignoring malformed user config at ${configPath}.`, error)
     return undefined
   }
 }
 
-function preferenceFromConfig(value: TomlTable): {
-  readonly preference?: ApiUserModelPreference
-} {
+function configurationFromConfig(value: TomlTable): UserConfiguration {
+  const preference = preferenceFromConfig(value)
+  const modelContextWindowTokens = value.model_context_window
+  if (
+    modelContextWindowTokens !== undefined &&
+    (typeof modelContextWindowTokens !== "number" ||
+      !Number.isSafeInteger(modelContextWindowTokens) ||
+      modelContextWindowTokens <= 0)
+  ) {
+    throw new Error("model_context_window must be a positive integer.")
+  }
+  return {
+    ...(preference === undefined ? {} : { preference }),
+    ...(modelContextWindowTokens === undefined
+      ? {}
+      : { modelContextWindowTokens }),
+  }
+}
+
+function preferenceFromConfig(
+  value: TomlTable,
+): ApiUserModelPreference | undefined {
   const provider = value.provider
   const model = value.model
-  if (provider === undefined && model === undefined) return {}
+  if (provider === undefined && model === undefined) return undefined
   if (provider === undefined || model === undefined) {
     throw new Error("provider and model must be configured together.")
   }
@@ -132,12 +161,10 @@ function preferenceFromConfig(value: TomlTable): {
     throw new Error("effort and speed must be non-empty when configured.")
   }
   return {
-    preference: {
-      provider,
-      model,
-      ...(effort === undefined ? {} : { effort }),
-      ...(speed === undefined ? {} : { speed }),
-    },
+    provider,
+    model,
+    ...(effort === undefined ? {} : { effort }),
+    ...(speed === undefined ? {} : { speed }),
   }
 }
 

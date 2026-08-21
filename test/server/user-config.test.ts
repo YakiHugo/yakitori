@@ -15,6 +15,27 @@ describe("user config", () => {
       const store = createUserConfigStore({ configPath })
 
       await expect(store.read()).resolves.toBeUndefined()
+      await expect(store.readConfiguration()).resolves.toEqual({})
+    })
+  })
+
+  it("reads the model context window alongside the model preference", async () => {
+    await withConfigPath(async (configPath) => {
+      await writeFile(
+        configPath,
+        [
+          'provider = "codex"',
+          'model = "gpt-5.6-sol"',
+          "model_context_window = 600000",
+          "",
+        ].join("\n"),
+      )
+      const store = createUserConfigStore({ configPath })
+
+      await expect(store.readConfiguration()).resolves.toEqual({
+        preference: { provider: "codex", model: "gpt-5.6-sol" },
+        modelContextWindowTokens: 600_000,
+      })
     })
   })
 
@@ -25,6 +46,7 @@ describe("user config", () => {
         [
           'provider = "faux"',
           'model = "scripted"',
+          "model_context_window = 600000",
           'ui.theme = "dark"',
           "",
           "[[catalog]]",
@@ -51,6 +73,7 @@ describe("user config", () => {
         model: "gpt-5.6-sol",
         effort: "low",
         speed: "priority",
+        model_context_window: 600_000,
         ui: { theme: "dark" },
         catalog: [{ name: "custom", models: ["first", "second"] }],
       })
@@ -70,6 +93,21 @@ describe("user config", () => {
       )
     })
   })
+
+  it("rejects a non-positive model context window as malformed config", async () => {
+    await withConfigPath(async (configPath) => {
+      await writeFile(configPath, "model_context_window = 0\n")
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+      const store = createUserConfigStore({ configPath })
+
+      await expect(store.readConfiguration()).resolves.toEqual({})
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("Ignoring malformed user config"),
+        expect.any(Error),
+      )
+    })
+  })
+
 })
 
 async function withConfigPath(

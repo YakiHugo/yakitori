@@ -55,7 +55,10 @@
       "promptId": "gpt",
       "displayName": "GPT-5.6 Sol",
       "efforts": ["low", "medium", "high", "xhigh"],
-      "speeds": ["standard", "fast"]
+      "speeds": ["standard", "fast"],
+      "contextWindowTokens": 272000,
+      "maxContextWindowTokens": 872000,
+      "effectiveContextWindowPercent": 95
     },
     {
       "provider": "codex",

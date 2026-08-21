@@ -16,6 +16,12 @@ export type CatalogModel = {
   readonly speeds?: readonly string[]
 }
 
+export type ModelCapacity = Readonly<{
+  contextWindowTokens: number
+  maxContextWindowTokens: number
+  effectiveContextWindowPercent: number
+}>
+
 export function listCatalogModels(provider: string): CatalogModel[] {
   const normalized = provider.toLowerCase()
   return catalog.models
@@ -73,6 +79,42 @@ export function resolveModel(input: {
   }
 }
 
+export function validateModelSelection(input: {
+  readonly provider: string
+  readonly model: string
+  readonly effort?: string
+  readonly speed?: string
+}): void {
+  const provider = input.provider.toLowerCase()
+  const model = input.model.toLowerCase()
+  const entry = catalog.models.find(
+    (candidate) =>
+      candidate.provider.toLowerCase() === provider &&
+      candidate.model.toLowerCase() === model,
+  )
+  if (entry === undefined) return
+  if (
+    input.effort !== undefined &&
+    "efforts" in entry &&
+    entry.efforts !== undefined &&
+    !entry.efforts.includes(input.effort)
+  ) {
+    throw new Error(
+      `Reasoning effort ${input.effort} is not supported by ${input.provider}/${input.model}.`,
+    )
+  }
+  if (
+    input.speed !== undefined &&
+    "speeds" in entry &&
+    entry.speeds !== undefined &&
+    !entry.speeds.includes(input.speed)
+  ) {
+    throw new Error(
+      `Speed ${input.speed} is not supported by ${input.provider}/${input.model}.`,
+    )
+  }
+}
+
 type FallbackRule = {
   readonly promptId: string
   readonly modelContainsAny?: readonly string[]
@@ -107,6 +149,32 @@ export function catalogContextWindowTokens(input: {
   )
   if (entry === undefined || !("contextWindowTokens" in entry)) return undefined
   return entry.contextWindowTokens
+}
+
+export function catalogModelCapacity(input: {
+  readonly provider: string
+  readonly model: string
+}): ModelCapacity | undefined {
+  const provider = input.provider.toLowerCase()
+  const model = input.model.toLowerCase()
+  const entry = catalog.models.find(
+    (candidate) =>
+      candidate.provider.toLowerCase() === provider &&
+      candidate.model.toLowerCase() === model,
+  )
+  if (
+    entry === undefined ||
+    !("contextWindowTokens" in entry) ||
+    !("maxContextWindowTokens" in entry) ||
+    !("effectiveContextWindowPercent" in entry)
+  ) {
+    return undefined
+  }
+  return {
+    contextWindowTokens: entry.contextWindowTokens,
+    maxContextWindowTokens: entry.maxContextWindowTokens,
+    effectiveContextWindowPercent: entry.effectiveContextWindowPercent,
+  }
 }
 
 export function requirePromptId(value: string): PromptId {
