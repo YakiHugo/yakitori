@@ -53,7 +53,9 @@ describe("session runner", () => {
       expect(replayed.events.map((event) => event.type)).toEqual([
         EventType.SessionCreated,
         EventType.InputAdmitted,
+        EventType.SessionConfigured,
         EventType.TurnStarted,
+        EventType.WorldStateUpdated,
         EventType.AssistantMessage,
         EventType.TurnCompleted,
       ])
@@ -465,6 +467,20 @@ describe("session runner", () => {
       expect(provider.requests[1]?.messages).toEqual([
         {
           role: "user",
+          content: [
+            {
+              type: "text",
+              text: expect.stringContaining("<environment>"),
+            },
+          ],
+          context: {
+            type: "world_state",
+            sectionId: "environment",
+            revision: expect.any(String),
+          },
+        },
+        {
+          role: "user",
           content: [{ type: "text", text: "hello" }],
         },
         {
@@ -479,7 +495,57 @@ describe("session runner", () => {
     })
   })
 
-  it("adds an environment block to the system prompt", async () => {
+  it("keeps persisted base instructions and emits one developer model-switch fragment", async () => {
+    await withRuntime(async (runtime) => {
+      const provider = createFauxProvider([
+        { content: [{ type: "text", text: "first reply" }] },
+        { content: [{ type: "text", text: "second reply" }] },
+        { content: [{ type: "text", text: "third reply" }] },
+      ])
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+      })
+      const session = await createAttributedSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "first" },
+      })
+      await runner.wake(session.sessionId)
+      for (const text of ["switch", "continue"]) {
+        await runtime.kernel.admitInput({
+          sessionId: session.sessionId,
+          content: { kind: "text", text },
+          modelSelection: {
+            provider: "anthropic",
+            model: "claude-sonnet-4-6",
+          },
+        })
+        await runner.wake(session.sessionId)
+      }
+
+      expect(provider.requests[1]?.system).toEqual(provider.requests[0]?.system)
+      expect(provider.requests[2]?.system).toEqual(provider.requests[0]?.system)
+      const replayed = await runtime.kernel.replaySession({
+        sessionId: session.sessionId,
+      })
+      const modelFragments = replayed.session?.worldStateUpdates.flatMap(
+        (update) =>
+          update.fragments.filter((fragment) => fragment.id === "model"),
+      )
+      expect(modelFragments).toHaveLength(1)
+      expect(modelFragments?.[0]).toMatchObject({
+        role: "developer",
+        text: expect.stringContaining("<model_switch>"),
+      })
+      expect(JSON.stringify(provider.requests[1]?.messages)).toContain(
+        "<model_switch>",
+      )
+    })
+  })
+
+  it("keeps only base instructions in system and records world state", async () => {
     await withRuntime(async (runtime) => {
       await writeFile(join(runtime.rootDir, "AGENTS.md"), "Use focused tests.")
       const provider = createFauxProvider([
@@ -501,25 +567,18 @@ describe("session runner", () => {
       expect(system?.[0]?.text).toContain(
         "You are Yakitori, a coding agent working with the user in their local workspace.",
       )
-      expect(system?.[1]?.text).toBe(
-        "<agent_instructions>\nAnswer briefly.\n</agent_instructions>",
-      )
-      expect(system?.[2]?.text).toContain("<environment>")
-      expect(system?.[2]?.text).toContain(
-        `Working directory: ${runtime.rootDir}`,
-      )
       expect(system?.map((section) => section.id)).toEqual([
-        "model.instructions",
-        "agent.instructions",
-        "environment",
+        "base.instructions",
       ])
-      expect(
-        provider.requests[0]?.contextual[0]?.message.content[0]?.text,
-      ).toContain("Use focused tests.")
+      const visible = JSON.stringify(provider.requests[0]?.messages)
+      expect(visible).toContain("Use focused tests.")
+      expect(visible).toContain("<environment>")
+      expect(visible).toContain(`Working directory: ${runtime.rootDir}`)
+      expect(visible).not.toContain("Answer briefly.")
     })
   })
 
-  it("omits the instructions separator when Mate instructions are empty", async () => {
+  it("does not include Mate instructions in model context", async () => {
     await withRuntime(async (runtime) => {
       const provider = createFauxProvider([
         { content: [{ type: "text", text: "ok" }] },
@@ -549,12 +608,87 @@ describe("session runner", () => {
       const system = provider.requests[0]?.system
       expect(system?.[0]?.text.startsWith("You are Yakitori")).toBe(true)
       expect(system?.map((section) => section.id)).toEqual([
-        "model.instructions",
-        "environment",
+        "base.instructions",
       ])
-      expect(system?.[1]?.text).toContain(
+      expect(JSON.stringify(provider.requests[0]?.messages)).toContain(
         `Working directory: ${runtime.rootDir}`,
       )
+    })
+  })
+
+  it("captures an AGENTS change as an anchored world-state diff before the next step", async () => {
+    await withRuntime(async (runtime) => {
+      const provider = createFauxProvider([
+        {
+          content: [
+            {
+              type: "tool_call",
+              id: "call_write_agents",
+              name: "write_file",
+              input: {
+                path: "AGENTS.md",
+                content: "Run the focused test before finishing.",
+              },
+            },
+          ],
+          stopReason: ModelStopReason.ToolUse,
+        },
+        { content: [{ type: "text", text: "done" }] },
+      ])
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+        now: () => new Date(2026, 7, 21),
+      })
+      const session = await createAttributedSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "add project instructions" },
+      })
+
+      await runner.wake(session.sessionId)
+
+      const replayed = await runtime.kernel.replaySession({
+        sessionId: session.sessionId,
+      })
+      const updates = replayed.events.flatMap((event) =>
+        event.type === EventType.WorldStateUpdated ? [event] : [],
+      )
+      expect(updates).toHaveLength(2)
+      expect(updates[0]?.data.full).toBe(true)
+      expect(updates[1]?.data).toMatchObject({
+        full: false,
+        afterItemId: replayed.session?.tools[0]?.resultItemId,
+        state: {
+          "project.instructions": {
+            directory: expect.any(String),
+            text: expect.stringContaining(
+              "Run the focused test before finishing.",
+            ),
+          },
+        },
+        fragments: [
+          {
+            id: "project.instructions",
+            text: expect.stringContaining(
+              "Run the focused test before finishing.",
+            ),
+          },
+        ],
+      })
+      expect(JSON.stringify(provider.requests[1]?.messages)).toContain(
+        "Run the focused test before finishing.",
+      )
+      const diffIndex = provider.requests[1]?.messages.findIndex(
+        (message) =>
+          message.role === "user" &&
+          message.context?.sectionId === "project.instructions",
+      )
+      const toolResultIndex = provider.requests[1]?.messages.findIndex(
+        (message) => message.role === "tool",
+      )
+      expect(diffIndex).toBeGreaterThan(toolResultIndex ?? -1)
     })
   })
 
@@ -806,7 +940,7 @@ describe("session runner", () => {
         kernel: runtime.kernel,
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
-        limits: createRuntimeLimits({ modelVisibleMessageBlocks: 3 }),
+        limits: createRuntimeLimits({ modelVisibleMessageBlocks: 4 }),
       })
       const session = await createAttributedSession(runtime)
       for (const question of [
@@ -939,7 +1073,7 @@ describe("session runner", () => {
         stream: provider.stream,
         limits: createRuntimeLimits({
           modelCallsPerTurn: 2,
-          modelVisibleMessageBlocks: 3,
+          modelVisibleMessageBlocks: 4,
         }),
       })
       const session = await createAttributedSession(runtime)
@@ -992,7 +1126,7 @@ describe("session runner", () => {
         kernel: runtime.kernel,
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
-        limits: createRuntimeLimits({ modelVisibleMessageBlocks: 2 }),
+        limits: createRuntimeLimits({ modelVisibleMessageBlocks: 3 }),
       })
       const session = await createAttributedSession(runtime)
       await runtime.kernel.admitInput({
@@ -1042,7 +1176,7 @@ describe("session runner", () => {
         kernel: runtime.kernel,
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
-        limits: createRuntimeLimits({ modelVisibleMessageBlocks: 2 }),
+        limits: createRuntimeLimits({ modelVisibleMessageBlocks: 3 }),
       })
       const session = await createAttributedSession(runtime)
       await runtime.kernel.admitInput({
@@ -1107,7 +1241,7 @@ describe("session runner", () => {
         kernel: runtime.kernel,
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
-        limits: createRuntimeLimits({ modelVisibleMessageBlocks: 3 }),
+        limits: createRuntimeLimits({ modelVisibleMessageBlocks: 4 }),
       })
       const session = await createAttributedSession(runtime)
       for (const question of [
@@ -1125,14 +1259,14 @@ describe("session runner", () => {
 
       expect(provider.callCount).toBe(7)
       // The fourth turn's first summary request carries both uncovered
-      // dropped turns; the retry drops the oldest half and only summarizes
-      // the third turn.
+      // dropped turns; the retry keeps the oldest half so checkpoint coverage
+      // remains a continuous historical prefix.
       const firstAttempt = JSON.stringify(provider.requests[4]?.messages)
       expect(firstAttempt).toContain("second question")
       expect(firstAttempt).toContain("third question")
       const retryAttempt = JSON.stringify(provider.requests[5]?.messages)
-      expect(retryAttempt).not.toContain("second question")
-      expect(retryAttempt).toContain("third question")
+      expect(retryAttempt).toContain("second question")
+      expect(retryAttempt).not.toContain("third question")
 
       const replayed = await runtime.kernel.replaySession({
         sessionId: session.sessionId,
@@ -1142,11 +1276,10 @@ describe("session runner", () => {
       )
       expect(compacted).toHaveLength(2)
       const turns = replayed.session?.turns ?? []
-      // Coverage follows the reduced source: the second checkpoint folds in
-      // only the third turn (the first was covered by the earlier
-      // checkpoint); the second turn stays uncovered dropped history.
+      // Coverage follows the reduced source: the second checkpoint extends
+      // the earlier checkpoint with the next oldest uncovered turn.
       expect(compacted[1]?.data).toMatchObject({
-        coveredTurnIds: [turns[0]?.turnId, turns[2]?.turnId],
+        coveredTurnIds: [turns[0]?.turnId, turns[1]?.turnId],
         summary: "Goal: checkpoint two.",
       })
       expect(replayed.session?.completedTurns).toHaveLength(4)
@@ -1164,7 +1297,7 @@ describe("session runner", () => {
         kernel: runtime.kernel,
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
-        limits: createRuntimeLimits({ modelVisibleMessageBlocks: 2 }),
+        limits: createRuntimeLimits({ modelVisibleMessageBlocks: 3 }),
       })
       const session = await createAttributedSession(runtime)
       await runtime.kernel.admitInput({
@@ -1213,7 +1346,7 @@ describe("session runner", () => {
         kernel: runtime.kernel,
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
-        limits: createRuntimeLimits({ modelVisibleMessageBlocks: 2 }),
+        limits: createRuntimeLimits({ modelVisibleMessageBlocks: 3 }),
       })
       const session = await createAttributedSession(runtime)
       const errors = vi.spyOn(console, "error").mockImplementation(() => {})

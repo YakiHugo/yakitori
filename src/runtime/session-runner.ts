@@ -26,13 +26,8 @@ import {
   isContextOverflowError,
   runCompaction,
 } from "./compaction.ts"
-import { buildEnvironmentContext } from "./environment-context.ts"
 import { isAbortError } from "./errors.ts"
-import {
-  createRuntimeLimits,
-  deriveModelVisibleContextBytes,
-  RuntimeLimits,
-} from "./limits.ts"
+import { createRuntimeLimits, type RuntimeLimits } from "./limits.ts"
 import {
   createCoalescingSnapshotPublisher,
   type TransientEventHub,
@@ -47,20 +42,20 @@ import {
   type StreamFn,
 } from "./model.ts"
 import {
-  catalogContextWindowTokens,
-  requirePromptId,
-  resolveModel,
-} from "./model-catalog.ts"
-import {
   buildModelContext,
   collectUncoveredTurns,
+  measureModelMessagesBytes,
   type DroppedTurn,
   type ModelContextBuildResult,
 } from "./model-context.ts"
 import { createPermissionGate, type PermissionGate } from "./permission-gate.ts"
 import { loadProjectInstructions } from "./project-instructions.ts"
-import { buildStaticContext } from "./static-context.ts"
-import { resolveWorkspaceRoot } from "./tools/path-policy.ts"
+import {
+  createTurnContext,
+  SessionConfiguration,
+  type TurnContext,
+} from "./session-configuration.ts"
+import { captureStepContext, type StepToolPlan } from "./step-context.ts"
 import { createToolRegistry, type ToolRegistry } from "./tools/registry.ts"
 import type {
   RuntimeTool,
@@ -72,6 +67,7 @@ import {
   createVisibleFileObservations,
   grantFromToolOutput,
 } from "./tools/visible-file-observations.ts"
+import { diffWorldState } from "./world-state.ts"
 
 export type SessionRunnerOptions = {
   readonly kernel: SessionKernel
@@ -87,7 +83,9 @@ export type SessionRunnerOptions = {
   readonly model?: string
   readonly limits?: RuntimeLimits
   readonly approvalPolicy?: "auto_file_tools" | "never"
+  readonly modelContextWindowTokens?: number
   readonly loadProjectInstructions?: typeof loadProjectInstructions
+  readonly now?: () => Date
   readonly onRuntimeError?: (error: unknown) => void
 }
 
@@ -224,7 +222,8 @@ export function createSessionRunner(
     queuedInput: InputProjection,
   ): Promise<void> {
     if (closed) return
-    const executionContext = await buildExecutionContext(session, queuedInput)
+    const turn = await buildTurnContext(session, queuedInput)
+    const executionContext = turn.execution
     if (closed) return
     const started = await startTurnUnlessInputConsumed(
       session.id,
@@ -257,7 +256,7 @@ export function createSessionRunner(
           sessionId: session.id,
           turnId: started.turnId,
           inputId: queuedInput.inputId,
-          executionContext,
+          turn,
           signal: abort.signal,
         })
       }
@@ -298,10 +297,10 @@ export function createSessionRunner(
     }
   }
 
-  async function buildExecutionContext(
+  async function buildTurnContext(
     session: SessionProjection,
     queuedInput: InputProjection,
-  ): Promise<TurnExecutionContext> {
+  ): Promise<TurnContext> {
     if (session.mateId === undefined || session.mateRevisionId === undefined) {
       throw createYakitoriError({
         code: YakitoriErrorCode.InvalidState,
@@ -340,10 +339,14 @@ export function createSessionRunner(
     }
 
     const previousTarget = session.turns.at(-1)?.executionContext
+    const defaultTarget = session.configuration?.defaultTarget ?? {
+      provider,
+      model,
+    }
     const selectedTarget: ModelSelection =
       queuedInput.modelSelection ??
       (previousTarget === undefined
-        ? { provider, model }
+        ? defaultTarget
         : {
             provider: previousTarget.provider,
             model: previousTarget.model,
@@ -354,40 +357,38 @@ export function createSessionRunner(
               ? {}
               : { speed: previousTarget.speed }),
           })
-    const resolvedModel = resolveModel(selectedTarget)
-    // Scale the visible-context budget with the model's context window when
-    // the catalog knows it; an explicit limits override always wins.
-    const contextWindowTokens = catalogContextWindowTokens(resolvedModel)
-    const modelVisibleContextBytes =
-      contextWindowTokens === undefined ||
-      limits.modelVisibleContextBytes !== RuntimeLimits.modelVisibleContextBytes
-        ? limits.modelVisibleContextBytes
-        : deriveModelVisibleContextBytes(contextWindowTokens)
-    return {
+    const initialEnabledTools = resolveEnabledTools(session, enabledTools)
+    let sessionConfiguration =
+      session.configuration === undefined
+        ? SessionConfiguration.create({
+            selection: selectedTarget,
+            workspaceRoot: session.workingDirectory,
+            enabledTools: initialEnabledTools,
+            approvalPolicy,
+            limits,
+            ...(options.modelContextWindowTokens === undefined
+              ? {}
+              : {
+                  modelContextWindowTokens: options.modelContextWindowTokens,
+                }),
+          })
+        : SessionConfiguration.restore(session.configuration)
+    if (session.configuration === undefined) {
+      const configured = await options.kernel.configureSession({
+        sessionId: session.id,
+        configuration: sessionConfiguration.snapshot,
+      })
+      if (configured.event !== undefined) publishDurable([configured.event])
+      sessionConfiguration = SessionConfiguration.restore(
+        configured.configuration,
+      )
+    }
+    const configuration = sessionConfiguration.resolveTurn(selectedTarget)
+    return createTurnContext({
+      configuration,
       mateId: session.mateId,
       mateRevisionId: session.mateRevisionId,
-      provider: resolvedModel.provider,
-      model: resolvedModel.model,
-      promptId: resolvedModel.promptId,
-      ...(selectedTarget.effort === undefined
-        ? {}
-        : { effort: selectedTarget.effort }),
-      ...(selectedTarget.speed === undefined
-        ? {}
-        : { speed: selectedTarget.speed }),
-      workingDirectory: session.workingDirectory,
-      enabledTools: resolveEnabledTools(session, enabledTools),
-      approvalPolicy,
-      limits: {
-        modelCallsPerTurn: limits.modelCallsPerTurn,
-        toolCallsPerTurn: limits.toolCallsPerTurn,
-        modelVisibleMessageBlocks: limits.modelVisibleMessageBlocks,
-        modelVisibleContextBytes,
-        modelVisibleToolResultBytes: limits.modelVisibleToolResultBytes,
-        modelVisibleToolResultLines: limits.modelVisibleToolResultLines,
-        assistantResponseBytes: limits.assistantResponseBytes,
-      },
-    }
+    })
   }
 
   function requireTurnTelemetry(turnId: string): TurnTelemetry {
@@ -400,94 +401,73 @@ export function createSessionRunner(
     readonly sessionId: string
     readonly turnId: string
     readonly inputId: string
-    readonly executionContext: TurnExecutionContext
+    readonly turn: TurnContext
     readonly signal: AbortSignal
   }): Promise<void> {
-    const mate = await options.mateKernel.readMate({
-      mateId: input.executionContext.mateId,
-    })
-    const revision = mate.mate?.revisions.find(
-      (candidate) => candidate.id === input.executionContext.mateRevisionId,
-    )
-    if (!revision) {
-      throw createYakitoriError({
-        code: YakitoriErrorCode.NotFound,
-        message: `Mate revision ${input.executionContext.mateRevisionId} was not found.`,
-      })
-    }
-
-    const projectInstructions = await projectInstructionLoader({
-      workingDirectory: input.executionContext.workingDirectory,
-    })
-    const resolvedModel = {
-      model: input.executionContext.model,
-      provider: input.executionContext.provider,
-      promptId:
-        input.executionContext.promptId === undefined
-          ? resolveModel({
-              model: input.executionContext.model,
-              provider: input.executionContext.provider,
-            }).promptId
-          : requirePromptId(input.executionContext.promptId),
-    }
-    const staticContext = buildStaticContext({
-      environment: buildEnvironmentContext({
-        workingDirectory: input.executionContext.workingDirectory,
-      }),
-      mateInstructions: revision.instructions,
-      mateRevisionId: revision.id,
-      model: resolvedModel,
-      ...(projectInstructions === undefined ? {} : { projectInstructions }),
-    })
-    const enabledToolNames = new Set(input.executionContext.enabledTools)
-    const tools = toolRegistry
-      .definitions()
-      .filter((definition) => enabledToolNames.has(definition.name))
-
+    const executionContext = input.turn.execution
     let modelCallIndex = 0
     let toolCallCount = 0
     const telemetry = requireTurnTelemetry(input.turnId)
     const usages = telemetry.usages
-    while (modelCallIndex < input.executionContext.limits.modelCallsPerTurn) {
+    while (modelCallIndex < executionContext.limits.modelCallsPerTurn) {
       if (input.signal.aborted) {
         await cancelAfterRuntimeAbort(input.sessionId, input.turnId)
         return
       }
 
-      const session = await requireSession(input.sessionId)
+      let session = await requireSession(input.sessionId)
+      const step = await captureStepContext({
+        turn: input.turn,
+        session,
+        toolRegistry,
+        projectInstructionLoader,
+        ...(options.now === undefined ? {} : { now: options.now() }),
+      })
+      const compactionThroughSeq = session.compaction?.throughSeq
+      const compactionInvalidatedBaseline =
+        compactionThroughSeq !== undefined &&
+        !session.worldStateUpdates.some(
+          (update) => update.full && update.seq > compactionThroughSeq,
+        )
+      const worldState = diffWorldState(
+        compactionInvalidatedBaseline ? undefined : session.worldState?.state,
+        step.worldState,
+      )
+      if (worldState !== undefined) {
+        const afterItemId = session.activeTurn?.itemIds.at(-1)
+        const updated = await options.kernel.recordWorldStateUpdate({
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          ...(afterItemId === undefined ? {} : { afterItemId }),
+          ...worldState,
+        })
+        publishDurable([updated.event])
+        session = await requireSession(input.sessionId)
+      }
       let context = buildModelContext({
         session,
         currentInputId: input.inputId,
-        limits: input.executionContext.limits,
+        limits: executionContext.limits,
       })
-      if (context.droppedTurns.length > 0) {
+      if (context.compactableTurns.length > 0) {
         context =
           (await attemptCompaction({
             session,
             turnId: input.turnId,
             inputId: input.inputId,
-            executionContext: input.executionContext,
-            droppedTurns: context.droppedTurns,
+            executionContext,
+            candidateTurns: context.compactableTurns,
             usages,
             signal: input.signal,
           })) ?? context
       }
 
       const request: ModelRequest = {
-        target: {
-          ...staticContext.target,
-          ...(input.executionContext.effort === undefined
-            ? {}
-            : { effort: input.executionContext.effort }),
-          ...(input.executionContext.speed === undefined
-            ? {}
-            : { speed: input.executionContext.speed }),
-        },
+        target: step.turn.configuration.target,
         cacheKey: session.conversationId,
-        system: staticContext.system,
-        contextual: staticContext.contextual,
+        system: [step.turn.configuration.baseInstructions],
         messages: context.messages,
-        tools,
+        tools: step.tools.definitions,
         signal: input.signal,
       }
       const observationEligibleToolResultItemIds = new Set(
@@ -566,7 +546,7 @@ export function createSessionRunner(
         const content = assistantContent(response.content)
         if (
           assistantContentBytes(content) >
-          input.executionContext.limits.assistantResponseBytes
+          executionContext.limits.assistantResponseBytes
         ) {
           await failTurnWithCode(
             input.sessionId,
@@ -578,13 +558,13 @@ export function createSessionRunner(
         }
         if (
           toolCallCount + toolCalls.length >
-          input.executionContext.limits.toolCallsPerTurn
+          executionContext.limits.toolCallsPerTurn
         ) {
           await failTurnWithCode(
             input.sessionId,
             input.turnId,
             "tool_budget_exhausted",
-            `Turn exceeded tool call budget of ${input.executionContext.limits.toolCallsPerTurn}.`,
+            `Turn exceeded tool call budget of ${executionContext.limits.toolCallsPerTurn}.`,
           )
           return
         }
@@ -598,7 +578,9 @@ export function createSessionRunner(
             toolCalls,
             streamId,
             modelCallIndex,
-            executionContext: input.executionContext,
+            executionContext,
+            toolPlan: step.tools,
+            workspaceRoot: step.workspaceRoot,
             contextMetadata: {
               selectedItemIds: [...context.selectedItemIds],
               observationEligibleToolResultItemIds: [
@@ -640,7 +622,7 @@ export function createSessionRunner(
       const content = assistantContent(response.content)
       if (
         assistantContentBytes(content) >
-        input.executionContext.limits.assistantResponseBytes
+        executionContext.limits.assistantResponseBytes
       ) {
         await failTurnWithCode(
           input.sessionId,
@@ -669,8 +651,8 @@ export function createSessionRunner(
         turnId: input.turnId,
         content,
         providerMetadata: {
-          provider: input.executionContext.provider,
-          model: input.executionContext.model,
+          provider: executionContext.provider,
+          model: executionContext.model,
           callIndex: modelCallIndex,
           streamId,
           selectedItemIds: [...context.selectedItemIds],
@@ -697,13 +679,13 @@ export function createSessionRunner(
       input.sessionId,
       input.turnId,
       "model_budget_exhausted",
-      `Turn exceeded model call budget of ${input.executionContext.limits.modelCallsPerTurn}.`,
+      `Turn exceeded model call budget of ${executionContext.limits.modelCallsPerTurn}.`,
     )
   }
 
-  // Housekeeping: fold the longest fitting prefix of dropped history into a
+  // Housekeeping: fold the longest fitting continuous history prefix into a
   // durable checkpoint, then rebuild context. An over-long summary request is
-  // retried with the oldest half of the source removed (up to
+  // retried with a shorter oldest prefix (up to
   // MAX_COMPACTION_ATTEMPTS); any other failure falls back to the originally
   // built context, and repeated failures trip a per-session circuit breaker.
   async function attemptCompaction(input: {
@@ -711,7 +693,7 @@ export function createSessionRunner(
     readonly turnId: string
     readonly inputId: string
     readonly executionContext: TurnExecutionContext
-    readonly droppedTurns: readonly DroppedTurn[]
+    readonly candidateTurns: readonly DroppedTurn[]
     readonly usages: ModelUsage[]
     readonly signal: AbortSignal
   }): Promise<ModelContextBuildResult | null | undefined> {
@@ -725,7 +707,7 @@ export function createSessionRunner(
     try {
       const previousSummary = input.session.compaction?.summary
       let source = selectCompactionSource(
-        input.droppedTurns,
+        input.candidateTurns,
         previousSummary,
         input.executionContext.limits.modelVisibleContextBytes,
       )
@@ -750,7 +732,7 @@ export function createSessionRunner(
         } catch (error) {
           if (input.signal.aborted || isAbortError(error)) throw error
           attempts += 1
-          const reduced = dropOldestSourceHalf(source)
+          const reduced = reduceCompactionSourcePrefix(source)
           if (
             !isContextOverflowError(error) ||
             attempts >= MAX_COMPACTION_ATTEMPTS ||
@@ -770,11 +752,16 @@ export function createSessionRunner(
       // A checkpoint that is not smaller than the history it replaces buys
       // nothing. This is not a failure: keep history, skip the error log and
       // the circuit breaker, and let callers tell the two outcomes apart.
-      const sourceBytes = utf8Bytes(
-        JSON.stringify(source.flatMap((group) => group.messages)),
+      const sourceBytes = measureModelMessagesBytes(
+        source.flatMap((group) => group.messages),
       )
       if (utf8Bytes(result.summary) >= sourceBytes) {
         return null
+      }
+      if (utf8Bytes(result.summary) > limits.compactionSummaryBytes) {
+        throw new Error(
+          `Compaction checkpoint exceeds the configured ${limits.compactionSummaryBytes}-byte limit.`,
+        )
       }
       const recorded = await options.kernel.recordCompaction({
         sessionId,
@@ -784,7 +771,7 @@ export function createSessionRunner(
           ...(input.session.compaction?.coveredTurnIds ?? []),
           ...source.map((group) => group.turnId),
         ],
-        summary: truncateSummary(result.summary, limits.compactionSummaryBytes),
+        summary: result.summary,
         ...(result.usage === undefined ? {} : { usage: result.usage }),
       })
       publishDurable([recorded.event])
@@ -839,7 +826,7 @@ export function createSessionRunner(
         turnId: input.turnId,
         inputId: input.inputId,
         executionContext: input.executionContext,
-        droppedTurns: source,
+        candidateTurns: source,
         usages,
         signal: input.signal,
       })
@@ -878,6 +865,8 @@ export function createSessionRunner(
     readonly streamId: string
     readonly modelCallIndex: number
     readonly executionContext: TurnExecutionContext
+    readonly toolPlan: StepToolPlan
+    readonly workspaceRoot: string
     readonly contextMetadata: EventMetadata
     readonly signal: AbortSignal
     readonly visibleFileObservations: ReturnType<
@@ -897,7 +886,7 @@ export function createSessionRunner(
         ...input.contextMetadata,
       },
       toolCalls: input.toolCalls.map((call) => {
-        const tool = toolRegistry.get(call.name)
+        const tool = input.toolPlan.get(call.name)
         return {
           id: call.id,
           name: call.name,
@@ -911,12 +900,9 @@ export function createSessionRunner(
     })
     publishDurable(recorded.events)
 
-    const workspaceRoot = await resolveWorkspaceRoot(
-      input.executionContext.workingDirectory,
-    )
     const observations = input.visibleFileObservations
     const firstBarrier = input.toolCalls.findIndex((call) => {
-      const tool = toolRegistry.get(call.name)
+      const tool = input.toolPlan.get(call.name)
       return toolEffect(tool) !== "observe"
     })
     const prefix =
@@ -935,7 +921,8 @@ export function createSessionRunner(
               turnId: input.turnId,
               call,
               executionContext: input.executionContext,
-              workspaceRoot,
+              toolPlan: input.toolPlan,
+              workspaceRoot: input.workspaceRoot,
               signal: input.signal,
               observations,
               record: false,
@@ -981,7 +968,8 @@ export function createSessionRunner(
           turnId: input.turnId,
           call,
           executionContext: input.executionContext,
-          workspaceRoot,
+          toolPlan: input.toolPlan,
+          workspaceRoot: input.workspaceRoot,
           signal: input.signal,
           observations,
           record: true,
@@ -1006,6 +994,7 @@ export function createSessionRunner(
     readonly turnId: string
     readonly call: ModelToolCallBlock
     readonly executionContext: TurnExecutionContext
+    readonly toolPlan: StepToolPlan
     readonly workspaceRoot: string
     readonly signal: AbortSignal
     readonly observations: ReturnType<typeof createVisibleFileObservations>
@@ -1036,7 +1025,7 @@ export function createSessionRunner(
     }
     // The registry owns dispatch; the lookup here is only for permission
     // metadata (autoAllow), mirroring codex's ToolRouter split.
-    const tool = toolRegistry.get(input.call.name)
+    const tool = input.toolPlan.get(input.call.name)
     let permissionRequestId: string | undefined
     if (
       tool !== undefined &&
@@ -1097,7 +1086,7 @@ export function createSessionRunner(
       toolCallId: input.call.id,
     })
 
-    const result = await toolRegistry.execute(
+    const result = await input.toolPlan.execute(
       input.call.name,
       input.call.input,
       {
@@ -1861,14 +1850,14 @@ function isEventMetadata(value: unknown): value is EventMetadata {
 }
 
 function selectCompactionSource(
-  droppedTurns: readonly DroppedTurn[],
+  candidateTurns: readonly DroppedTurn[],
   previousSummary: string | undefined,
   budgetBytes: number,
 ): readonly DroppedTurn[] {
   const selected: DroppedTurn[] = []
   let bytes = utf8Bytes(previousSummary ?? "")
-  for (const group of droppedTurns) {
-    const groupBytes = utf8Bytes(JSON.stringify(group.messages))
+  for (const group of candidateTurns) {
+    const groupBytes = measureModelMessagesBytes(group.messages)
     if (bytes + groupBytes > budgetBytes) break
     selected.push(group)
     bytes += groupBytes
@@ -1876,26 +1865,16 @@ function selectCompactionSource(
   return selected
 }
 
-function truncateSummary(summary: string, budgetBytes: number): string {
-  if (utf8Bytes(summary) <= budgetBytes) return summary
-  const marker = "\n...[summary truncated]"
-  let text = summary
-  while (utf8Bytes(`${text}${marker}`) > budgetBytes && text.length > 0) {
-    text = text.slice(0, Math.max(0, text.length - 1_024))
-  }
-  return `${text}${marker}`
-}
-
 const MAX_COMPACTION_ATTEMPTS = 3
 const MAX_CONSECUTIVE_COMPACTION_FAILURES = 3
 
-// Keeps the most recent half of the source; the oldest turns are what an
-// over-long summary request can most afford to lose.
-function dropOldestSourceHalf(
+// Every checkpoint covers a continuous historical prefix. If the summary
+// request overflows, keep the oldest half and postpone newer Turns.
+function reduceCompactionSourcePrefix(
   source: readonly DroppedTurn[],
 ): readonly DroppedTurn[] {
   const keep = Math.ceil(source.length / 2)
-  return source.slice(source.length - keep)
+  return source.slice(0, keep)
 }
 
 function utf8Bytes(value: string): number {
