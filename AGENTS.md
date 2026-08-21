@@ -32,10 +32,6 @@ Local references:
 - Treat code and tests as the authoritative description of implementation.
   Do not maintain prose that duplicates behavior already expressed clearly by
   public types, tests, or code.
-- `docs/decisions/` contains architecture decisions and their rationale. Only
-  decisions that constrain the current work matter by default. Read historical
-  ADRs only when the user explicitly asks for a decision, its history, or a
-  comparison that requires them.
 - `docs/` root holds only living documents and the one active stage plan. When
   a stage completes, move its plan to `docs/archive/` with an archive banner
   and update inbound links. Archived documents are historical records: never
@@ -177,7 +173,8 @@ opinions, not validated practice.
 By default, adopt the reference's implementation as-is, including the design
 direction its developers or community have publicly planned. Only design an
 independent approach when there is an explicit reason it fits our scenario
-better, and record that reason where the decision lives (ADR or module notes).
+better, and record that reason where the decision lives (module notes or code
+comments).
 
 When using reference projects for a design decision, record the comparison in
 module notes or code comments only when it affects an implementation boundary.
