@@ -46,16 +46,20 @@ import {
   collectUncoveredTurns,
   measureModelMessagesBytes,
   type DroppedTurn,
-  type ModelContextBuildResult,
 } from "./model-context.ts"
 import { createPermissionGate, type PermissionGate } from "./permission-gate.ts"
 import { loadProjectInstructions } from "./project-instructions.ts"
 import {
   createTurnContext,
+  type ResolvedTurnConfiguration,
   SessionConfiguration,
   type TurnContext,
 } from "./session-configuration.ts"
-import { captureStepContext, type StepToolPlan } from "./step-context.ts"
+import {
+  captureStepContext,
+  type StepContext,
+  type StepToolPlan,
+} from "./step-context.ts"
 import { createToolRegistry, type ToolRegistry } from "./tools/registry.ts"
 import type {
   RuntimeTool,
@@ -248,6 +252,7 @@ export function createSessionRunner(
           sessionId: session.id,
           turnId: started.turnId,
           inputId: queuedInput.inputId,
+          configuration: turn.configuration,
           executionContext,
           signal: abort.signal,
         })
@@ -416,50 +421,53 @@ export function createSessionRunner(
       }
 
       let session = await requireSession(input.sessionId)
-      const step = await captureStepContext({
+      let step = await captureStepContext({
         turn: input.turn,
         session,
         toolRegistry,
         projectInstructionLoader,
         ...(options.now === undefined ? {} : { now: options.now() }),
       })
-      const compactionThroughSeq = session.compaction?.throughSeq
-      const compactionInvalidatedBaseline =
-        compactionThroughSeq !== undefined &&
-        !session.worldStateUpdates.some(
-          (update) => update.full && update.seq > compactionThroughSeq,
-        )
-      const worldState = diffWorldState(
-        compactionInvalidatedBaseline ? undefined : session.worldState?.state,
-        step.worldState,
-      )
-      if (worldState !== undefined) {
-        const afterItemId = session.activeTurn?.itemIds.at(-1)
-        const updated = await options.kernel.recordWorldStateUpdate({
-          sessionId: input.sessionId,
-          turnId: input.turnId,
-          ...(afterItemId === undefined ? {} : { afterItemId }),
-          ...worldState,
-        })
-        publishDurable([updated.event])
-        session = await requireSession(input.sessionId)
-      }
+      session = await recordStepWorldState({
+        session,
+        turnId: input.turnId,
+        step,
+      })
       let context = buildModelContext({
         session,
         currentInputId: input.inputId,
         limits: executionContext.limits,
       })
       if (context.compactableTurns.length > 0) {
-        context =
-          (await attemptCompaction({
+        const outcome = await attemptCompaction({
+          session,
+          turnId: input.turnId,
+          configuration: input.turn.configuration,
+          candidateTurns: context.compactableTurns,
+          usages,
+          signal: input.signal,
+        })
+        if (outcome === "compacted") {
+          session = await requireSession(input.sessionId)
+          step = await captureStepContext({
+            turn: input.turn,
+            session,
+            toolRegistry,
+            projectInstructionLoader,
+            ...(options.now === undefined ? {} : { now: options.now() }),
+          })
+          session = await recordStepWorldState({
             session,
             turnId: input.turnId,
-            inputId: input.inputId,
-            executionContext,
-            candidateTurns: context.compactableTurns,
-            usages,
-            signal: input.signal,
-          })) ?? context
+            step,
+            forceFull: true,
+          })
+          context = buildModelContext({
+            session,
+            currentInputId: input.inputId,
+            limits: executionContext.limits,
+          })
+        }
       }
 
       const request: ModelRequest = {
@@ -683,6 +691,37 @@ export function createSessionRunner(
     )
   }
 
+  async function recordStepWorldState(input: {
+    readonly session: SessionProjection
+    readonly turnId: string
+    readonly step: StepContext
+    readonly forceFull?: boolean
+  }): Promise<SessionProjection> {
+    const compactionThroughSeq = input.session.compaction?.throughSeq
+    const compactionInvalidatedBaseline =
+      compactionThroughSeq !== undefined &&
+      !input.session.worldStateUpdates.some(
+        (update) => update.full && update.seq > compactionThroughSeq,
+      )
+    const worldState = diffWorldState(
+      input.forceFull || compactionInvalidatedBaseline
+        ? undefined
+        : input.session.worldState?.state,
+      input.step.worldState,
+    )
+    if (worldState === undefined) return input.session
+
+    const afterItemId = input.session.activeTurn?.itemIds.at(-1)
+    const updated = await options.kernel.recordWorldStateUpdate({
+      sessionId: input.session.id,
+      turnId: input.turnId,
+      ...(afterItemId === undefined ? {} : { afterItemId }),
+      ...worldState,
+    })
+    publishDurable([updated.event])
+    return requireSession(input.session.id)
+  }
+
   // Housekeeping: fold the longest fitting continuous history prefix into a
   // durable checkpoint, then rebuild context. An over-long summary request is
   // retried with a shorter oldest prefix (up to
@@ -691,27 +730,26 @@ export function createSessionRunner(
   async function attemptCompaction(input: {
     readonly session: SessionProjection
     readonly turnId: string
-    readonly inputId: string
-    readonly executionContext: TurnExecutionContext
+    readonly configuration: ResolvedTurnConfiguration
     readonly candidateTurns: readonly DroppedTurn[]
     readonly usages: ModelUsage[]
     readonly signal: AbortSignal
-  }): Promise<ModelContextBuildResult | null | undefined> {
+  }): Promise<"compacted" | "not_smaller" | "failed"> {
     const sessionId = input.session.id
     if (
       (compactionFailures.get(sessionId) ?? 0) >=
       MAX_CONSECUTIVE_COMPACTION_FAILURES
     ) {
-      return undefined
+      return "failed"
     }
     try {
       const previousSummary = input.session.compaction?.summary
       let source = selectCompactionSource(
         input.candidateTurns,
         previousSummary,
-        input.executionContext.limits.modelVisibleContextBytes,
+        input.configuration.limits.modelVisibleContextBytes,
       )
-      if (source.length === 0) return undefined
+      if (source.length === 0) return "failed"
       const throughSeq = input.session.seq
       let result: Awaited<ReturnType<typeof runCompaction>> | undefined
       let attempts = 0
@@ -723,8 +761,8 @@ export function createSessionRunner(
             request: buildCompactionRequest({
               source,
               ...(previousSummary === undefined ? {} : { previousSummary }),
-              provider: input.executionContext.provider,
-              model: input.executionContext.model,
+              target: input.configuration.target,
+              baseInstructions: input.configuration.baseInstructions,
               cacheKey: input.session.conversationId,
               signal: input.signal,
             }),
@@ -756,11 +794,14 @@ export function createSessionRunner(
         source.flatMap((group) => group.messages),
       )
       if (utf8Bytes(result.summary) >= sourceBytes) {
-        return null
+        return "not_smaller"
       }
-      if (utf8Bytes(result.summary) > limits.compactionSummaryBytes) {
+      if (
+        utf8Bytes(result.summary) >
+        input.configuration.limits.compactionSummaryBytes
+      ) {
         throw new Error(
-          `Compaction checkpoint exceeds the configured ${limits.compactionSummaryBytes}-byte limit.`,
+          `Compaction checkpoint exceeds the configured ${input.configuration.limits.compactionSummaryBytes}-byte limit.`,
         )
       }
       const recorded = await options.kernel.recordCompaction({
@@ -777,12 +818,7 @@ export function createSessionRunner(
       publishDurable([recorded.event])
       if (result.usage !== undefined) input.usages.push(result.usage)
       compactionFailures.delete(sessionId)
-      const rebuilt = await requireSession(sessionId)
-      return buildModelContext({
-        session: rebuilt,
-        currentInputId: input.inputId,
-        limits: input.executionContext.limits,
-      })
+      return "compacted"
     } catch (error) {
       // A user interrupt mid-summary surfaces here as an AbortError; that is
       // the normal abort path, not a compaction failure worth logging.
@@ -796,7 +832,7 @@ export function createSessionRunner(
           error,
         )
       }
-      return undefined
+      return "failed"
     }
   }
 
@@ -807,6 +843,7 @@ export function createSessionRunner(
     readonly sessionId: string
     readonly turnId: string
     readonly inputId: string
+    readonly configuration: ResolvedTurnConfiguration
     readonly executionContext: TurnExecutionContext
     readonly signal: AbortSignal
   }): Promise<void> {
@@ -824,8 +861,7 @@ export function createSessionRunner(
       const compacted = await attemptCompaction({
         session,
         turnId: input.turnId,
-        inputId: input.inputId,
-        executionContext: input.executionContext,
+        configuration: input.configuration,
         candidateTurns: source,
         usages,
         signal: input.signal,
@@ -835,9 +871,9 @@ export function createSessionRunner(
         return
       }
       note =
-        compacted === undefined
+        compacted === "failed"
           ? "Context compaction failed; the history was kept intact."
-          : compacted === null
+          : compacted === "not_smaller"
             ? "The history is already compact enough; summarizing it would not reduce the context."
             : `Compacted ${source.length} turn(s) into a context checkpoint.`
     }

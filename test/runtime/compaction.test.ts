@@ -15,11 +15,26 @@ describe("compaction request", () => {
   it("flattens source groups and appends the checkpoint instruction", () => {
     const request = buildCompactionRequest({
       source: [sourceTurn()],
-      provider: "faux",
-      model: "scripted",
+      target: {
+        provider: "faux",
+        model: "scripted",
+        promptId: "gpt",
+        effort: "high",
+        speed: "fast",
+      },
+      baseInstructions: {
+        id: "base.instructions",
+        revision: "base-1",
+        text: "coding agent instructions",
+      },
     })
 
     expect(request.system).toEqual([
+      {
+        id: "base.instructions",
+        revision: "base-1",
+        text: "coding agent instructions",
+      },
       {
         id: "compaction.instructions",
         revision: "1",
@@ -30,7 +45,9 @@ describe("compaction request", () => {
     expect(request.target).toEqual({
       provider: "faux",
       model: "scripted",
-      promptId: "compaction",
+      promptId: "gpt",
+      effort: "high",
+      speed: "fast",
     })
     expect(request.messages).toEqual([
       ...sourceTurn().messages,
@@ -65,8 +82,12 @@ describe("compaction request", () => {
     const request = buildCompactionRequest({
       source: [sourceTurn()],
       previousSummary: "Goal: old checkpoint.",
-      provider: "faux",
-      model: "scripted",
+      target: { provider: "faux", model: "scripted", promptId: "gpt" },
+      baseInstructions: {
+        id: "base.instructions",
+        revision: "base-1",
+        text: "coding agent instructions",
+      },
     })
 
     const instruction = request.messages.at(-1)

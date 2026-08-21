@@ -5,6 +5,8 @@ import {
   ModelStopReason,
   type ModelRequest,
   type ModelResponse,
+  type ModelSystemSection,
+  type ModelTarget,
   type ModelTextBlock,
   type StreamFn,
 } from "./model.ts"
@@ -51,19 +53,16 @@ export type CompactionResult = {
 export function buildCompactionRequest(input: {
   readonly source: readonly DroppedTurn[]
   readonly previousSummary?: string
-  readonly provider: string
-  readonly model: string
+  readonly target: ModelTarget
+  readonly baseInstructions: ModelSystemSection
   readonly cacheKey?: string
   readonly signal?: AbortSignal
 }): ModelRequest {
   return {
-    target: {
-      provider: input.provider,
-      model: input.model,
-      promptId: "compaction",
-    },
+    target: input.target,
     ...(input.cacheKey === undefined ? {} : { cacheKey: input.cacheKey }),
     system: [
+      input.baseInstructions,
       {
         id: "compaction.instructions",
         revision: "1",

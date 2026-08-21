@@ -18,6 +18,7 @@ import {
   EventType,
   InputRole,
   ModelStopReason,
+  SessionConfiguration,
   YakitoriErrorCode,
   type EventEnvelope,
   type LiveSessionEvent,
@@ -940,9 +941,25 @@ describe("session runner", () => {
         kernel: runtime.kernel,
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
-        limits: createRuntimeLimits({ modelVisibleMessageBlocks: 4 }),
+        limits: createRuntimeLimits({
+          modelVisibleMessageBlocks: 4,
+          compactionSummaryBytes: 1,
+        }),
       })
       const session = await createAttributedSession(runtime)
+      await runtime.kernel.configureSession({
+        sessionId: session.sessionId,
+        configuration: SessionConfiguration.create({
+          selection: { provider: "faux", model: "scripted" },
+          workspaceRoot: runtime.rootDir,
+          enabledTools: ["read_file"],
+          approvalPolicy: "never",
+          limits: createRuntimeLimits({
+            modelVisibleMessageBlocks: 4,
+            compactionSummaryBytes: 16 * 1024,
+          }),
+        }).snapshot,
+      })
       for (const question of [
         "first question",
         "second question",
@@ -997,7 +1014,7 @@ describe("session runner", () => {
       // tools, and folds the previous checkpoint into its instruction.
       const firstSummary = provider.requests[2]
       expect(firstSummary?.tools).toEqual([])
-      expect(firstSummary?.system[0]?.text).toContain("checkpoint")
+      expect(firstSummary?.system.at(-1)?.text).toContain("checkpoint")
       const firstSummaryText = JSON.stringify(firstSummary?.messages)
       expect(firstSummaryText).toContain("first question")
       expect(firstSummaryText).toContain("first answer")
@@ -1018,12 +1035,27 @@ describe("session runner", () => {
       expect(realFirst.content[0]?.text).toContain("<context_compacted>")
       expect(realFirst.content[0]?.text).toContain("Goal: checkpoint two.")
       const realText = JSON.stringify(realRequest?.messages)
+      expect(realText).toContain("<environment>")
       expect(realText).not.toContain("first question")
       expect(realText).not.toContain("second question")
       expect(realRequest?.messages.at(-1)).toEqual({
         role: "user",
         content: [{ type: "text", text: "third question" }],
       })
+      for (const checkpoint of compacted) {
+        if (checkpoint.type !== EventType.ContextCompacted) {
+          throw new Error("expected compaction fact")
+        }
+        expect(
+          replayed.events.find(
+            (event) =>
+              event.type === EventType.WorldStateUpdated &&
+              event.data.turnId === checkpoint.data.turnId &&
+              event.data.full &&
+              event.seq > checkpoint.seq,
+          ),
+        ).toBeDefined()
+      }
 
       // Compaction usage is folded into turn.completed usage.
       expect(secondTurn?.usage).toEqual({
