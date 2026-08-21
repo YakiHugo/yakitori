@@ -14,10 +14,9 @@ Open questions the redesign should answer explicitly:
 
 - Whether the Mate projector stays a strict validator (a "judge": first event
   must be `mate.created`, gap-free sequence, monotonic revisions, no revising
-  inactive Mates) while the Session kernel is a witness (decision 0007). The
-  divergence is currently undocumented.
-- Whether the Mate store keeps the `events.sqlite` fallback introduced by
-  decision 0008 ("Existing SQLite Data").
+  inactive Mates) while the Session kernel is a witness. The divergence is
+  currently undocumented.
+- Whether the Mate store keeps the `events.sqlite` fallback.
 
 ## Dead code deletion candidates
 
@@ -40,7 +39,7 @@ Open questions the redesign should answer explicitly:
   remember it in `userData/workspace.json` (implemented 2026-08-05);
   cancelling the picker falls back to `~/Yakitori`. Changing the workspace
   later still means editing or deleting that config; an in-app project-open
-  flow remains deferred (decision 0010, Deferred Work).
+  flow remains deferred.
 - Static GUI serving is GET-only (no HEAD); add HEAD if a real client needs
   it.
 - `pnpm package:desktop` produces an unsigned `dir` build only; signed
@@ -161,7 +160,7 @@ kernel fact protocol ahead of a concrete consumer.
   its cap; introduce a content-addressed artifact reference only when real
   large-diff/output consumers justify extending the durable fact protocol.
 - Before diff/artifact work expands the durable shape, re-compare the concrete
-  consumers and record an ADR or explicit persistence-direction amendment.
+  consumers and record the decision beside the persistence module.
   Claude Code separates model tool-result text from structured native results
   such as patches; OpenCode keeps output, metadata, attachments, and timing in
   its tool/message projection; Codex also emits UI-oriented diff/command events
