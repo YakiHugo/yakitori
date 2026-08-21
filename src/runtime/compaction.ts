@@ -70,7 +70,6 @@ export function buildCompactionRequest(input: {
         text: COMPACTION_SYSTEM_PROMPT,
       },
     ],
-    contextual: [],
     messages: [
       ...input.source.flatMap((group) => group.messages),
       {
@@ -111,6 +110,11 @@ export async function runCompaction(input: {
   }
   if (terminal.stopReason === ModelStopReason.Error) {
     throw new Error(terminal.error?.message ?? "Model returned an error.")
+  }
+  if (terminal.stopReason === ModelStopReason.Length) {
+    throw new Error(
+      "Compaction was truncated at the model output limit; checkpoint was not recorded.",
+    )
   }
   if (
     terminal.stopReason === ModelStopReason.Aborted ||

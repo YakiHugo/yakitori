@@ -127,6 +127,22 @@ describe("runCompaction", () => {
     ).rejects.toThrow("slow down")
   })
 
+  it("rejects a checkpoint truncated at the model output limit", async () => {
+    const stream: StreamFn = async function* () {
+      yield {
+        type: "response",
+        response: {
+          stopReason: ModelStopReason.Length,
+          content: [{ type: "text", text: "Goal: incomplete" }],
+        },
+      }
+    }
+
+    await expect(
+      runCompaction({ stream, request: compactionRequest() }),
+    ).rejects.toThrow("truncated at the model output limit")
+  })
+
   it("throws an AbortError when the stream aborts", async () => {
     const signal = AbortSignal.abort()
     const stream: StreamFn = async function* () {
@@ -224,7 +240,6 @@ function compactionRequest(signal?: AbortSignal): ModelRequest {
   return {
     target: { provider: "faux", model: "scripted", promptId: "compaction" },
     system: [{ id: "compaction", revision: "1", text: "sys" }],
-    contextual: [],
     messages: [],
     tools: [],
     ...(signal === undefined ? {} : { signal }),

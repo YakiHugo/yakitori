@@ -15,6 +15,10 @@ describe("anthropic provider conversion", () => {
   it("builds Anthropic messages from internal history with tools and results", () => {
     const messages = toAnthropicMessages([
       {
+        role: "developer",
+        content: [{ type: "text", text: "state update" }],
+      },
+      {
         role: "user",
         content: [{ type: "text", text: "read it" }],
       },
@@ -40,7 +44,10 @@ describe("anthropic provider conversion", () => {
     expect(messages).toEqual([
       {
         role: "user",
-        content: [{ type: "text", text: "read it" }],
+        content: [
+          { type: "text", text: "state update" },
+          { type: "text", text: "read it" },
+        ],
       },
       {
         role: "assistant",
@@ -284,7 +291,6 @@ describe("anthropic provider conversion", () => {
         promptId: "anthropic",
       },
       system: [],
-      contextual: [],
       messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
       tools: [],
     }
@@ -336,17 +342,13 @@ describe("anthropic provider conversion", () => {
         { id: "base", revision: "base-1", text: "base" },
         { id: "environment", revision: "environment-1", text: "environment" },
       ],
-      contextual: [
+      messages: [
         {
-          id: "project.instructions",
-          revision: "project-1",
-          message: {
-            role: "user",
-            content: [{ type: "text", text: "project rules" }],
-          },
+          role: "user",
+          content: [{ type: "text", text: "project rules" }],
         },
+        { role: "user", content: [{ type: "text", text: "hello" }] },
       ],
-      messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
       tools: [
         {
           name: "read_file",
@@ -385,11 +387,6 @@ describe("anthropic provider conversion", () => {
               type: "text",
               text: "project rules",
             },
-          ],
-        },
-        {
-          role: "user",
-          content: [
             {
               type: "text",
               text: "hello",
@@ -433,7 +430,6 @@ describe("anthropic provider conversion", () => {
         promptId: "anthropic",
       },
       system: [{ id: "base", revision: "base-1", text: "base" }],
-      contextual: [],
       messages: [
         { role: "user", content: [{ type: "text", text: "read" }] },
         {
@@ -499,7 +495,6 @@ describe("anthropic provider conversion", () => {
         { id: "base", revision: "base-1", text: "base" },
         { id: "environment", revision: "environment-1", text: "environment" },
       ],
-      contextual: [],
       messages: [],
       tools: [],
     }
@@ -787,7 +782,6 @@ function effortRequest(
       ...(effort === undefined ? {} : { effort }),
     },
     system: [{ id: "base", revision: "base-1", text: "Be helpful." }],
-    contextual: [],
     messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
     tools: [],
   }
@@ -938,7 +932,6 @@ async function collectWithClient(
       promptId: "anthropic",
     },
     system: [{ id: "base", revision: "base-1", text: "Be helpful." }],
-    contextual: [],
     messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
     tools: [],
   }

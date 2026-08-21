@@ -19,6 +19,8 @@ import type {
 export type ModelContextLimits = {
   readonly modelVisibleMessageBlocks: number
   readonly modelVisibleContextBytes: number
+  readonly compactionTriggerContextBytes?: number
+  readonly compactionRetainContextBytes?: number
   readonly modelVisibleToolResultBytes: number
   readonly modelVisibleToolResultLines: number
 }
@@ -34,6 +36,7 @@ export type ModelContextBuildResult = {
   readonly observationEligibleToolResultItemIds: readonly string[]
   readonly droppedTurnCount: number
   readonly droppedTurns: readonly DroppedTurn[]
+  readonly compactableTurns: readonly DroppedTurn[]
   readonly droppedCompactionCheckpoint: boolean
   readonly truncatedToolResultCount: number
   readonly prunedToolResultCount: number
@@ -105,6 +108,15 @@ export function buildModelContext(input: {
     )
   }
 
+  let compactableTurns = selectCompactableTurns({
+    turnGroups,
+    tailGroups: [...(forkGroup === undefined ? [] : [forkGroup]), currentGroup],
+    assembledBytes: assembled.byteCount,
+    limits: input.limits,
+    readResultKeys,
+    pruneToolResults,
+  })
+
   // The checkpoint is pinned until last resort and the final group — the
   // current input or active Turn — is never dropped: the oldest remaining
   // completed Turn group drops first, and the compaction group drops only
@@ -123,16 +135,9 @@ export function buildModelContext(input: {
       // tool-result truncation as selected groups. A lone dropped group is
       // its own most-recent group, so the default recent-turn protection
       // would shield all of its tool results from pruning; disable it here.
-      droppedTurns.push({
-        turnId: dropped.turnId,
-        messages: assembleGroups(
-          [dropped],
-          input.limits,
-          readResultKeys,
-          pruneToolResults,
-          0,
-        ).messages,
-      })
+      droppedTurns.push(
+        toDroppedTurn(dropped, input.limits, readResultKeys, pruneToolResults),
+      )
     }
     if (dropped.kind === "compaction") {
       droppedCompactionCheckpoint = true
@@ -152,6 +157,13 @@ export function buildModelContext(input: {
     )
   }
 
+  // Block pressure can force more of the oldest prefix out than the proactive
+  // byte threshold selected. Both lists are head-anchored, so the longer one
+  // is the complete safe source for the runner's next compaction attempt.
+  if (droppedTurns.length > compactableTurns.length) {
+    compactableTurns = droppedTurns
+  }
+
   return {
     messages: assembled.messages,
     selectedItemIds: assembled.itemIds,
@@ -163,10 +175,103 @@ export function buildModelContext(input: {
     ),
     droppedTurnCount: droppedTurns.length,
     droppedTurns,
+    compactableTurns,
     droppedCompactionCheckpoint,
     truncatedToolResultCount: assembled.truncatedToolResultCount,
     prunedToolResultCount: assembled.prunedToolResultCount,
   }
+}
+
+function selectCompactableTurns(input: {
+  readonly turnGroups: readonly TurnContextGroup[]
+  readonly tailGroups: readonly ContextGroup[]
+  readonly assembledBytes: number
+  readonly limits: ModelContextLimits
+  readonly readResultKeys: ReadonlyMap<string, string>
+  readonly pruneToolResults: boolean
+}): readonly DroppedTurn[] {
+  const triggerBytes = input.limits.compactionTriggerContextBytes
+  const retainBytes = input.limits.compactionRetainContextBytes
+  if (
+    triggerBytes === undefined ||
+    retainBytes === undefined ||
+    input.assembledBytes < triggerBytes ||
+    input.turnGroups.length === 0
+  ) {
+    return []
+  }
+
+  let retainedBytes = assembleGroups(
+    input.tailGroups,
+    input.limits,
+    input.readResultKeys,
+    input.pruneToolResults,
+  ).byteCount
+  let keepFromIndex = input.turnGroups.length
+  for (let index = input.turnGroups.length - 1; index >= 0; index -= 1) {
+    if (retainedBytes >= retainBytes) break
+    const group = input.turnGroups[index]
+    if (group === undefined) break
+    retainedBytes += assembleGroups(
+      [group],
+      input.limits,
+      input.readResultKeys,
+      input.pruneToolResults,
+    ).byteCount
+    keepFromIndex = index
+  }
+
+  return input.turnGroups
+    .slice(0, keepFromIndex)
+    .map((group) =>
+      toDroppedTurn(
+        group,
+        input.limits,
+        input.readResultKeys,
+        input.pruneToolResults,
+      ),
+    )
+}
+
+function toDroppedTurn(
+  group: TurnContextGroup,
+  limits: ModelContextLimits,
+  readResultKeys: ReadonlyMap<string, string>,
+  pruneToolResults: boolean,
+): DroppedTurn {
+  return {
+    turnId: group.turnId,
+    // A lone group is its own most-recent group, so disable the usual recent
+    // protection when pressure pruning must also shape the summary source.
+    messages: prepareCompactionMessages(
+      assembleGroups([group], limits, readResultKeys, pruneToolResults, 0)
+        .messages,
+    ),
+  }
+}
+
+function prepareCompactionMessages(
+  messages: readonly ModelMessage[],
+): readonly ModelMessage[] {
+  return messages.flatMap((message) => {
+    if (
+      (message.role === "user" || message.role === "developer") &&
+      message.context?.type === "world_state"
+    ) {
+      return []
+    }
+    if (message.role !== "user" || message.images === undefined) return message
+    return {
+      role: "user" as const,
+      content: [
+        ...message.content,
+        ...message.images.map((image) => ({
+          type: "text" as const,
+          text: `[Attached ${image.mediaType} image omitted from compaction input; ${Math.floor((image.data.length * 3) / 4)} encoded bytes.]`,
+        })),
+      ],
+    }
+  })
 }
 
 // Manual compaction source: every completed, still-uncovered Turn group,
@@ -177,10 +282,9 @@ export function collectUncoveredTurns(
 ): readonly DroppedTurn[] {
   const coveredTurnIds = new Set(session.compaction?.coveredTurnIds ?? [])
   const readResultKeys = buildReadResultKeys(session)
-  return buildTurnGroups(session, coveredTurnIds).map((group) => ({
-    turnId: group.turnId,
-    messages: assembleGroups([group], limits, readResultKeys).messages,
-  }))
+  return buildTurnGroups(session, coveredTurnIds).map((group) =>
+    toDroppedTurn(group, limits, readResultKeys, false),
+  )
 }
 
 type TurnContextGroup = {
@@ -284,7 +388,15 @@ function buildTurnGroup(
   )
   if (!input || input.role !== InputRole.User) return undefined
 
-  const messages: ModelMessage[] = [modelUserMessage(input.content)]
+  const worldStateUpdates = session.worldStateUpdates.filter(
+    (update) => update.turnId === turn.turnId,
+  )
+  const messages: ModelMessage[] = [
+    ...worldStateMessages(
+      worldStateUpdates.filter((update) => update.afterItemId === undefined),
+    ),
+    modelUserMessage(input.content),
+  ]
   const itemIds: string[] = []
   const turnItems = turn.itemIds
     .map((itemId) => session.items.find((item) => item.itemId === itemId))
@@ -321,6 +433,14 @@ function buildTurnGroup(
     })
     pendingAssistant = []
   }
+  const appendWorldStateAfter = (itemId: string) => {
+    const updates = worldStateUpdates.filter(
+      (update) => update.afterItemId === itemId,
+    )
+    if (updates.length === 0) return
+    flushAssistant()
+    messages.push(...worldStateMessages(updates))
+  }
 
   for (const item of turnItems) {
     if (
@@ -336,6 +456,7 @@ function buildTurnGroup(
           : { providerMetadata: item.providerMetadata }),
       })
       itemIds.push(item.itemId)
+      appendWorldStateAfter(item.itemId)
       continue
     }
     if (
@@ -346,6 +467,7 @@ function buildTurnGroup(
     ) {
       pendingAssistant.push({ type: "text", text: item.content.text })
       itemIds.push(item.itemId)
+      appendWorldStateAfter(item.itemId)
       continue
     }
     if (
@@ -355,7 +477,10 @@ function buildTurnGroup(
       const tool = session.tools.find(
         (candidate) => candidate.requestItemId === item.itemId,
       )
-      if (!tool) continue
+      if (!tool) {
+        appendWorldStateAfter(item.itemId)
+        continue
+      }
       pendingAssistant.push({
         type: "tool_call",
         id: tool.toolCallId,
@@ -373,6 +498,7 @@ function buildTurnGroup(
           isError: true,
         })
       }
+      appendWorldStateAfter(item.itemId)
       continue
     }
     if (item.kind === ItemKind.ToolResult) {
@@ -394,6 +520,7 @@ function buildTurnGroup(
           : {}),
       })
       itemIds.push(item.itemId)
+      appendWorldStateAfter(item.itemId)
     }
   }
 
@@ -412,6 +539,22 @@ function buildTurnGroup(
     messages,
     itemIds,
   }
+}
+
+function worldStateMessages(
+  updates: SessionProjection["worldStateUpdates"],
+): ModelMessage[] {
+  return updates.flatMap((update) =>
+    update.fragments.map((fragment) => ({
+      role: fragment.role,
+      content: [{ type: "text" as const, text: fragment.text }],
+      context: {
+        type: "world_state" as const,
+        sectionId: fragment.id,
+        revision: fragment.revision,
+      },
+    })),
+  )
 }
 
 function modelUserMessage(content: TextContent): ModelUserMessage {
@@ -531,7 +674,7 @@ function assembleGroups(
   }
 
   const blockCount = countBlocks(messages)
-  const byteCount = modelContextBytes(messages)
+  const byteCount = measureModelMessagesBytes(messages)
   return {
     messages,
     itemIds,
@@ -545,7 +688,9 @@ function assembleGroups(
 
 // Raw base64 bytes are transport size, not language-context bytes. Count a
 // bounded descriptor here; providers account for vision tokens separately.
-function modelContextBytes(messages: readonly ModelMessage[]): number {
+export function measureModelMessagesBytes(
+  messages: readonly ModelMessage[],
+): number {
   return utf8Bytes(
     JSON.stringify(messages, (_key, value: unknown) => {
       if (

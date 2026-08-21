@@ -146,7 +146,6 @@ function cloneRequest(request: ModelRequest): ModelRequest {
   return {
     target: structuredClone(request.target),
     system: structuredClone(request.system),
-    contextual: structuredClone(request.contextual),
     messages: structuredClone(request.messages),
     tools: structuredClone(request.tools),
     ...(request.signal === undefined ? {} : { signal: request.signal }),

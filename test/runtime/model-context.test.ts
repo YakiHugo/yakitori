@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 import {
   boundCommandContent,
   buildModelContext,
+  collectUncoveredTurns,
   createMateKernel,
   createSessionKernel,
   ItemKind,
@@ -169,6 +170,106 @@ describe("model context", () => {
           message.content[0].text === "old question",
       ),
     ).toBe(false)
+  })
+
+  it("selects a historical prefix for proactive compaction without dropping it", async () => {
+    const context = await withAttributedSession(
+      async ({ kernel, sessionId }) => {
+        const oldest = await completeTextTurn(
+          kernel,
+          sessionId,
+          "old question",
+          "old answer",
+        )
+        const middle = await completeTextTurn(
+          kernel,
+          sessionId,
+          "middle question",
+          "middle answer",
+        )
+        await completeTextTurn(
+          kernel,
+          sessionId,
+          "recent question",
+          "recent answer",
+        )
+        const current = await kernel.admitInput({
+          sessionId,
+          content: { kind: "text", text: "current" },
+        })
+        const read = await kernel.readSession({ sessionId })
+        if (!read.session) throw new Error("missing session")
+        return {
+          oldest,
+          middle,
+          context: buildModelContext({
+            session: read.session,
+            currentInputId: current.inputId,
+            limits: {
+              ...generousLimits(),
+              compactionTriggerContextBytes: 1,
+              compactionRetainContextBytes: 150,
+            },
+          }),
+        }
+      },
+    )
+
+    expect(context.context.droppedTurnCount).toBe(0)
+    expect(context.context.compactableTurns.map((turn) => turn.turnId)).toEqual(
+      [context.oldest, context.middle],
+    )
+    expect(JSON.stringify(context.context.messages)).toContain("old question")
+    expect(JSON.stringify(context.context.messages)).toContain(
+      "recent question",
+    )
+  })
+
+  it("replaces images with semantic markers in compaction sources", async () => {
+    const source = await withAttributedSession(
+      async ({ kernel, sessionId }) => {
+        const admitted = await kernel.admitInput({
+          sessionId,
+          content: {
+            kind: "text",
+            text: "inspect this image",
+            attachments: [
+              {
+                name: "screen.png",
+                mediaType: "image/png",
+                data: "a".repeat(4_096),
+                sizeBytes: 3_072,
+              },
+            ],
+          },
+        })
+        const started = await kernel.startTurn({
+          sessionId,
+          inputId: admitted.inputId,
+        })
+        await kernel.completeTurnWithAssistantOutput({
+          sessionId,
+          turnId: started.turnId,
+          content: [{ type: "text", text: "noted" }],
+          providerMetadata: {
+            streamId: "stream_image",
+            kind: ItemKind.AssistantMessage,
+            status: ItemStatus.Completed,
+          },
+        })
+        const read = await kernel.readSession({ sessionId })
+        if (!read.session) throw new Error("missing session")
+        return collectUncoveredTurns(read.session, generousLimits())
+      },
+    )
+
+    const first = source[0]?.messages[0]
+    expect(first?.role).toBe("user")
+    if (first?.role !== "user") throw new Error("missing user message")
+    expect(first.images).toBeUndefined()
+    expect(first.content.at(-1)?.text).toContain(
+      "image/png image omitted from compaction input; 3072 encoded bytes",
+    )
   })
 
   it("synthesizes a view-only error for a completed Turn with an open tool", async () => {

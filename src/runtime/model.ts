@@ -44,6 +44,21 @@ export type ModelUserMessage = {
   readonly role: "user"
   readonly content: readonly ModelTextBlock[]
   readonly images?: readonly ModelImageBlock[]
+  readonly context?: {
+    readonly type: "world_state"
+    readonly sectionId: string
+    readonly revision: string
+  }
+}
+
+export type ModelDeveloperMessage = {
+  readonly role: "developer"
+  readonly content: readonly ModelTextBlock[]
+  readonly context?: {
+    readonly type: "world_state"
+    readonly sectionId: string
+    readonly revision: string
+  }
 }
 
 export type ModelAssistantMessage = {
@@ -60,6 +75,7 @@ export type ModelToolResultMessage = {
 
 export type ModelMessage =
   | ModelUserMessage
+  | ModelDeveloperMessage
   | ModelAssistantMessage
   | ModelToolResultMessage
 
@@ -83,17 +99,10 @@ export type ModelSystemSection = {
   readonly text: string
 }
 
-export type ModelContextMessage = {
-  readonly id: string
-  readonly revision: string
-  readonly message: ModelUserMessage
-}
-
 export type ModelRequest = {
   readonly target: ModelTarget
   readonly cacheKey?: string
   readonly system: readonly ModelSystemSection[]
-  readonly contextual: readonly ModelContextMessage[]
   readonly messages: readonly ModelMessage[]
   readonly tools: readonly ModelToolDefinition[]
   readonly signal?: AbortSignal

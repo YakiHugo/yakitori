@@ -35,7 +35,6 @@ function request(provider: string, model: string): ModelRequest {
   return {
     target: { provider, model, promptId: "default" },
     system: [],
-    contextual: [],
     messages: [],
     tools: [],
   }
