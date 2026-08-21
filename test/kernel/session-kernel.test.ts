@@ -281,6 +281,45 @@ for (const implementation of ["memory", "jsonl"] as const) {
       })
     })
 
+    it("persists the inherited execution contract after the history cut", async () => {
+      await withKernel(implementation, async ({ kernel, store }) => {
+        const source = await kernel.createSession()
+        const cut = await admit(kernel, source.sessionId, "first")
+        const configuration = SessionConfiguration.create({
+          selection: { provider: "codex", model: "gpt-5.6-sol" },
+          workspaceRoot: "/workspace/fork-contract",
+          enabledTools: ["read_file", "apply_patch"],
+          approvalPolicy: "never",
+        }).snapshot
+        await kernel.configureSession({
+          sessionId: source.sessionId,
+          configuration,
+        })
+
+        const forked = await kernel.forkSession({
+          sessionId: source.sessionId,
+          atInputId: cut.inputId,
+          reason: "edit",
+        })
+
+        expect(forked.localEvents).toEqual([
+          expect.objectContaining({
+            seq: 1,
+            type: EventType.SessionCreated,
+          }),
+          expect.objectContaining({
+            seq: 2,
+            type: EventType.SessionConfigured,
+            data: { configuration },
+          }),
+        ])
+        expect(forked.session.configuration).toEqual(configuration)
+        expect(
+          (await store.readProjection(forked.sessionId))?.configuration,
+        ).toEqual(configuration)
+      })
+    })
+
     it("forks an exact event prefix into a new Session", async () => {
       await withKernel(implementation, async ({ kernel, store }) => {
         const source = await kernel.createSession({

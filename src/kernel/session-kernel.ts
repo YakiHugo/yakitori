@@ -424,6 +424,16 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
 
         const sessionId = createSessionId()
         const initialEvents: KernelEvent[] = []
+        // A fork owns the execution contract it inherits. The source may have
+        // been configured after the selected Input was admitted, so that event
+        // can sit beyond the history cut even though it governs the source
+        // Session today.
+        if (source.configuration !== undefined) {
+          initialEvents.push({
+            type: EventType.SessionConfigured,
+            data: { configuration: source.configuration },
+          })
+        }
         if (input.content !== undefined) {
           initialEvents.push({
             type: EventType.InputAdmitted,
