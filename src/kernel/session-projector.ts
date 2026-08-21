@@ -11,15 +11,18 @@ import {
   type ItemStatus as ItemStatusType,
   isKernelEvent,
   type JsonValue,
+  type JsonObject,
   type KernelError,
   type ModelSelection,
   type PermissionBehavior,
   type PermissionDecisionReason,
+  type SessionConfigurationSnapshot,
   type StoredEventEnvelope,
   type TextContent,
   type TokenUsage,
   type TurnMetrics,
   type TurnExecutionContext,
+  type WorldStateFragment,
 } from "./events.ts"
 import {
   InputState,
@@ -48,8 +51,11 @@ export type SessionProjection = {
   readonly forkedFromInputId?: string
   readonly forkReason?: ForkReason
   readonly metadata?: EventMetadata
+  readonly configuration?: SessionConfigurationSnapshot
   readonly usage?: TokenUsage
   readonly compaction?: CompactionProjection
+  readonly worldState?: WorldStateProjection
+  readonly worldStateUpdates: readonly WorldStateUpdateProjection[]
   readonly inputs: readonly InputProjection[]
   readonly pendingInputs: readonly InputProjection[]
   readonly activeTurn?: TurnProjection
@@ -72,6 +78,22 @@ export type CompactionProjection = {
   readonly coveredTurnIds: readonly string[]
   readonly summary: string
   readonly usage?: TokenUsage
+  readonly createdAt: string
+}
+
+export type WorldStateProjection = {
+  readonly state: JsonObject
+  readonly updatedSeq: number
+  readonly updatedAt: string
+}
+
+export type WorldStateUpdateProjection = {
+  readonly turnId: string
+  readonly afterItemId?: string
+  readonly full: boolean
+  readonly state: JsonObject
+  readonly fragments: readonly WorldStateFragment[]
+  readonly seq: number
   readonly createdAt: string
 }
 
@@ -186,6 +208,8 @@ export function applySessionFacts(
     ]) ?? [],
   )
   let session = current === undefined ? undefined : mutableSession(current)
+  let worldState = current?.worldState
+  const worldStateUpdates = [...(current?.worldStateUpdates ?? [])]
 
   for (const stored of events) {
     if (!session && stored.type === EventType.SessionCreated) {
@@ -201,8 +225,38 @@ export function applySessionFacts(
     if (stored.createdAt > session.updatedAt)
       session.updatedAt = stored.createdAt
     if (!isKernelEvent(stored)) continue
+    if (stored.type === EventType.SessionConfigured) {
+      session.configuration = stored.data.configuration
+      continue
+    }
     if (stored.type === EventType.ContextCompacted) {
       session.compaction = compactionProjection(stored)
+      continue
+    }
+    if (stored.type === EventType.WorldStateUpdated) {
+      const event = stored as Extract<
+        EventEnvelope,
+        { type: typeof EventType.WorldStateUpdated }
+      >
+      const state = event.data.full
+        ? event.data.state
+        : applyMergePatch(worldState?.state ?? {}, event.data.state)
+      worldState = {
+        state,
+        updatedSeq: event.seq,
+        updatedAt: event.createdAt,
+      }
+      worldStateUpdates.push({
+        turnId: event.data.turnId,
+        ...(event.data.afterItemId === undefined
+          ? {}
+          : { afterItemId: event.data.afterItemId }),
+        full: event.data.full,
+        state: event.data.state,
+        fragments: [...event.data.fragments],
+        seq: event.seq,
+        createdAt: event.createdAt,
+      })
       continue
     }
     applyKnownEvent(inputs, turns, items, tools, permissions, stored)
@@ -219,6 +273,8 @@ export function applySessionFacts(
   return {
     ...session,
     ...(usage === undefined ? {} : { usage }),
+    ...(worldState === undefined ? {} : { worldState }),
+    worldStateUpdates,
     inputs: projectedInputs,
     pendingInputs: projectedInputs.filter(
       (input) => input.state === InputState.Admitted,
@@ -302,6 +358,9 @@ function mutableSession(current: SessionProjection): MutableSession {
       ? {}
       : { forkReason: current.forkReason }),
     ...(current.metadata === undefined ? {} : { metadata: current.metadata }),
+    ...(current.configuration === undefined
+      ? {}
+      : { configuration: current.configuration }),
     ...(current.compaction === undefined
       ? {}
       : { compaction: current.compaction }),
@@ -322,6 +381,7 @@ type MutableSession = {
   forkedFromInputId?: string
   forkReason?: ForkReason
   metadata?: EventMetadata
+  configuration?: SessionConfigurationSnapshot
   compaction?: CompactionProjection
 }
 
@@ -345,6 +405,7 @@ function applyKnownEvent(
 ): void {
   switch (event.type) {
     case EventType.SessionCreated:
+    case EventType.SessionConfigured:
       return
     case EventType.InputAdmitted:
       inputs.set(event.data.inputId, {
@@ -474,7 +535,30 @@ function applyKnownEvent(
       })
       return
     }
+    case EventType.WorldStateUpdated:
+    case EventType.ContextCompacted:
+      return
   }
+}
+
+function applyMergePatch(target: JsonObject, patch: JsonObject): JsonObject {
+  const merged: Record<string, JsonValue> = { ...target }
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === null) {
+      delete merged[key]
+      continue
+    }
+    const current = merged[key]
+    merged[key] =
+      isJsonRecord(current) && isJsonRecord(value)
+        ? applyMergePatch(current, value)
+        : value
+  }
+  return merged
+}
+
+function isJsonRecord(value: JsonValue | undefined): value is JsonObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
 function aggregateTokenUsage(

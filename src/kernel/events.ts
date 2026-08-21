@@ -2,6 +2,7 @@ import { createEventId } from "./ids.ts"
 
 export const EventType = {
   SessionCreated: "session.created",
+  SessionConfigured: "session.configured",
   InputAdmitted: "input.admitted",
   InputCancelled: "input.cancelled",
   TurnStarted: "turn.started",
@@ -14,6 +15,7 @@ export const EventType = {
   ToolResult: "tool.result",
   PermissionRequested: "permission.requested",
   PermissionResolved: "permission.resolved",
+  WorldStateUpdated: "world_state.updated",
   ContextCompacted: "context.compacted",
 } as const
 
@@ -133,6 +135,10 @@ export type TurnExecutionLimits = {
   readonly toolCallsPerTurn: number
   readonly modelVisibleMessageBlocks: number
   readonly modelVisibleContextBytes: number
+  /** Missing on Turns recorded before proactive compaction thresholds existed. */
+  readonly compactionTriggerContextBytes?: number
+  /** Missing on Turns recorded before verbatim-tail retention was explicit. */
+  readonly compactionRetainContextBytes?: number
   readonly modelVisibleToolResultBytes: number
   readonly modelVisibleToolResultLines: number
   readonly assistantResponseBytes: number
@@ -145,6 +151,30 @@ export type ModelSelection = {
   readonly speed?: string
 }
 
+export type BaseInstructionsSnapshot = {
+  readonly text: string
+  readonly revision: string
+  readonly provenance:
+    | {
+        readonly type: "model"
+        readonly provider: string
+        readonly model: string
+        readonly promptId: string
+      }
+    | { readonly type: "custom" }
+}
+
+export type SessionConfigurationSnapshot = {
+  readonly schemaVersion: 1
+  readonly workspaceRoot: string
+  readonly defaultTarget: ModelSelection
+  readonly baseInstructions: BaseInstructionsSnapshot
+  readonly enabledTools: readonly string[]
+  readonly approvalPolicy: "auto_file_tools" | "never"
+  readonly runtimeLimits: { readonly [key: string]: number }
+  readonly modelContextWindowTokens?: number
+}
+
 export type TurnExecutionContext = {
   readonly mateId: string
   readonly mateRevisionId: string
@@ -154,6 +184,16 @@ export type TurnExecutionContext = {
   readonly speed?: string
   /** Missing only on events written before prompt attribution was introduced. */
   readonly promptId?: string
+  /** Legacy combined revision written before base/model attribution split. */
+  readonly promptRevision?: string
+  /** Exact persisted Session base-instruction revision. */
+  readonly baseInstructionsRevision?: string
+  /** Selected model template revision for model-switch attribution. */
+  readonly modelInstructionsRevision?: string
+  /** Selected window after applying the session configuration override. */
+  readonly modelContextWindowTokens?: number
+  /** Window available to the harness after the model's safety margin. */
+  readonly effectiveModelContextWindowTokens?: number
   readonly workingDirectory: string
   readonly enabledTools: readonly string[]
   readonly approvalPolicy: string
@@ -173,6 +213,13 @@ export type SessionCreatedEvent = {
     readonly forkReason?: ForkReason
     readonly historyBase?: SessionHistoryPosition
     readonly metadata?: EventMetadata
+  }
+}
+
+export type SessionConfiguredEvent = {
+  readonly type: typeof EventType.SessionConfigured
+  readonly data: {
+    readonly configuration: SessionConfigurationSnapshot
   }
 }
 
@@ -314,6 +361,26 @@ export type PermissionResolvedEvent = {
   }
 }
 
+export type WorldStateFragment = {
+  readonly id: string
+  readonly revision: string
+  readonly role: "user" | "developer"
+  readonly text: string
+}
+
+export type WorldStateUpdatedEvent = {
+  readonly type: typeof EventType.WorldStateUpdated
+  readonly data: {
+    readonly turnId: string
+    readonly afterItemId?: string
+    readonly full: boolean
+    /** Complete state when full, otherwise an RFC 7386 merge patch. */
+    readonly state: JsonObject
+    /** Exact model-visible text is durable even if renderers later change. */
+    readonly fragments: readonly WorldStateFragment[]
+  }
+}
+
 export type ContextCompactedEvent = {
   readonly type: typeof EventType.ContextCompacted
   readonly data: {
@@ -328,6 +395,7 @@ export type ContextCompactedEvent = {
 
 export type KernelEvent =
   | SessionCreatedEvent
+  | SessionConfiguredEvent
   | InputAdmittedEvent
   | InputCancelledEvent
   | TurnStartedEvent
@@ -340,6 +408,7 @@ export type KernelEvent =
   | ToolResultEvent
   | PermissionRequestedEvent
   | PermissionResolvedEvent
+  | WorldStateUpdatedEvent
   | ContextCompactedEvent
 
 export type EventEnvelopeBase = {
@@ -428,6 +497,11 @@ function requireKernelEvent(value: unknown): asserts value is KernelEvent {
           (data.forkReason === undefined || isForkReason(data.forkReason)) &&
           (data.historyBase === undefined ||
             isSessionHistoryPosition(data.historyBase))
+        )
+      case EventType.SessionConfigured:
+        return (
+          onlyKeys(data, ["configuration"]) &&
+          isSessionConfigurationSnapshot(data.configuration)
         )
       case EventType.InputAdmitted:
         return (
@@ -569,6 +643,22 @@ function requireKernelEvent(value: unknown): asserts value is KernelEvent {
           isString(data.turnId) &&
           isPermissionBehavior(data.behavior)
         )
+      case EventType.WorldStateUpdated:
+        return (
+          onlyKeys(data, [
+            "turnId",
+            "afterItemId",
+            "full",
+            "state",
+            "fragments",
+          ]) &&
+          isString(data.turnId) &&
+          (data.afterItemId === undefined || isString(data.afterItemId)) &&
+          typeof data.full === "boolean" &&
+          isJsonObject(data.state) &&
+          Array.isArray(data.fragments) &&
+          data.fragments.every(isWorldStateFragment)
+        )
       case EventType.ContextCompacted:
         return (
           onlyKeys(data, [
@@ -592,6 +682,84 @@ function requireKernelEvent(value: unknown): asserts value is KernelEvent {
   if (!valid || !optionalFieldsAreValid(value.type, data)) {
     throw new TypeError(`Invalid event data for ${value.type}.`)
   }
+}
+
+function isWorldStateFragment(value: unknown): value is WorldStateFragment {
+  return (
+    isRecord(value) &&
+    onlyKeys(value, ["id", "revision", "role", "text"]) &&
+    isString(value.id) &&
+    isString(value.revision) &&
+    (value.role === "user" || value.role === "developer") &&
+    isString(value.text)
+  )
+}
+
+function isSessionConfigurationSnapshot(
+  value: unknown,
+): value is SessionConfigurationSnapshot {
+  if (!isRecord(value)) return false
+  if (
+    !onlyKeys(value, [
+      "schemaVersion",
+      "workspaceRoot",
+      "defaultTarget",
+      "baseInstructions",
+      "enabledTools",
+      "approvalPolicy",
+      "runtimeLimits",
+      "modelContextWindowTokens",
+    ]) ||
+    value.schemaVersion !== 1 ||
+    !isString(value.workspaceRoot) ||
+    !isModelSelection(value.defaultTarget) ||
+    !isBaseInstructionsSnapshot(value.baseInstructions) ||
+    !Array.isArray(value.enabledTools) ||
+    !value.enabledTools.every(isString) ||
+    (value.approvalPolicy !== "auto_file_tools" &&
+      value.approvalPolicy !== "never") ||
+    !isNumericConfiguration(value.runtimeLimits) ||
+    (value.modelContextWindowTokens !== undefined &&
+      !isPositiveInteger(value.modelContextWindowTokens))
+  ) {
+    return false
+  }
+  return true
+}
+
+function isBaseInstructionsSnapshot(
+  value: unknown,
+): value is BaseInstructionsSnapshot {
+  if (
+    !isRecord(value) ||
+    !onlyKeys(value, ["text", "revision", "provenance"]) ||
+    !isString(value.text) ||
+    !isString(value.revision) ||
+    !isRecord(value.provenance)
+  ) {
+    return false
+  }
+  if (value.provenance.type === "custom") {
+    return onlyKeys(value.provenance, ["type"])
+  }
+  return (
+    value.provenance.type === "model" &&
+    onlyKeys(value.provenance, ["type", "provider", "model", "promptId"]) &&
+    isString(value.provenance.provider) &&
+    isString(value.provenance.model) &&
+    isString(value.provenance.promptId)
+  )
+}
+
+function isNumericConfiguration(
+  value: unknown,
+): value is { readonly [key: string]: number } {
+  return (
+    isRecord(value) &&
+    Object.values(value).every(
+      (item) => typeof item === "number" && Number.isFinite(item),
+    )
+  )
 }
 
 function optionalFieldsAreValid(
@@ -805,10 +973,31 @@ function isTurnExecutionContext(value: unknown): value is TurnExecutionContext {
     (value.effort === undefined || isString(value.effort)) &&
     (value.speed === undefined || isString(value.speed)) &&
     (value.promptId === undefined || isString(value.promptId)) &&
+    (value.promptRevision === undefined || isString(value.promptRevision)) &&
+    (value.baseInstructionsRevision === undefined ||
+      isString(value.baseInstructionsRevision)) &&
+    (value.modelInstructionsRevision === undefined ||
+      isString(value.modelInstructionsRevision)) &&
+    (value.modelContextWindowTokens === undefined ||
+      isPositiveInteger(value.modelContextWindowTokens)) &&
+    (value.effectiveModelContextWindowTokens === undefined ||
+      isPositiveInteger(value.effectiveModelContextWindowTokens)) &&
+    (typeof value.modelContextWindowTokens !== "number" ||
+      typeof value.effectiveModelContextWindowTokens !== "number" ||
+      value.effectiveModelContextWindowTokens <=
+        value.modelContextWindowTokens) &&
     isString(value.workingDirectory) &&
     isString(value.approvalPolicy) &&
     Array.isArray(value.enabledTools) &&
     value.enabledTools.every(isString) &&
+    (limits.compactionTriggerContextBytes === undefined ||
+      isNonNegativeInteger(limits.compactionTriggerContextBytes)) &&
+    (limits.compactionRetainContextBytes === undefined ||
+      isNonNegativeInteger(limits.compactionRetainContextBytes)) &&
+    (typeof limits.compactionTriggerContextBytes !== "number" ||
+      typeof limits.compactionRetainContextBytes !== "number" ||
+      limits.compactionRetainContextBytes <
+        limits.compactionTriggerContextBytes) &&
     [
       "modelCallsPerTurn",
       "toolCallsPerTurn",

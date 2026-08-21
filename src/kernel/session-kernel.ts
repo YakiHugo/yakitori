@@ -8,17 +8,20 @@ import {
   type ForkReason,
   InputRole,
   type ItemContent,
+  type JsonObject,
   type JsonValue,
   type KernelError,
   type KernelEvent,
   type ModelSelection,
   PermissionBehavior,
   type PermissionDecisionReason,
+  type SessionConfigurationSnapshot,
   type StoredEventEnvelope,
   type TextContent,
   type TokenUsage,
   type TurnMetrics,
   type TurnExecutionContext,
+  type WorldStateFragment,
 } from "./events.ts"
 import {
   createCompactionId,
@@ -44,6 +47,9 @@ import {
 
 export type SessionKernel = {
   createSession(input?: CreateSessionInput): Promise<CreateSessionResult>
+  configureSession(
+    input: ConfigureSessionInput,
+  ): Promise<ConfigureSessionResult>
   forkSession(input: ForkSessionInput): Promise<ForkSessionResult>
   listSessions(input?: ListSessionsInput): Promise<ListSessionsResult>
   readSession(input: ReadSessionInput): Promise<ReadSessionResult>
@@ -71,6 +77,9 @@ export type SessionKernel = {
   recordCompaction(
     input: RecordCompactionInput,
   ): Promise<RecordCompactionResult>
+  recordWorldStateUpdate(
+    input: RecordWorldStateUpdateInput,
+  ): Promise<RecordWorldStateUpdateResult>
   completeTurn(input: CompleteTurnInput): Promise<CompleteTurnResult>
   completeTurnWithAssistantOutput(
     input: CompleteTurnWithAssistantOutputInput,
@@ -91,6 +100,15 @@ export type CreateSessionInput = {
 export type CreateSessionResult = {
   readonly sessionId: string
   readonly event: EventEnvelope
+}
+export type ConfigureSessionInput = {
+  readonly sessionId: string
+  readonly configuration: SessionConfigurationSnapshot
+}
+export type ConfigureSessionResult = {
+  readonly event?: EventEnvelope
+  readonly configuration: SessionConfigurationSnapshot
+  readonly created: boolean
 }
 export type ForkSessionInput = {
   readonly sessionId: string
@@ -259,6 +277,17 @@ export type RecordCompactionResult = {
   readonly compactionId: string
   readonly event: EventEnvelope
 }
+export type RecordWorldStateUpdateInput = {
+  readonly sessionId: string
+  readonly turnId: string
+  readonly afterItemId?: string
+  readonly full: boolean
+  readonly state: JsonObject
+  readonly fragments: readonly WorldStateFragment[]
+}
+export type RecordWorldStateUpdateResult = {
+  readonly event: EventEnvelope
+}
 export type CompleteTurnInput = {
   readonly sessionId: string
   readonly turnId: string
@@ -341,6 +370,25 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
         }),
       })
       return { sessionId, event }
+    },
+
+    configureSession(input) {
+      return command(input.sessionId, async () => {
+        const session = await requireSession(eventStore, input.sessionId)
+        if (session.configuration !== undefined) {
+          return {
+            configuration: session.configuration,
+            created: false,
+          }
+        }
+        if (session.activeTurn !== undefined)
+          invalidState(`Session ${session.id} has an active Turn.`)
+        const event = await append(eventStore, session, {
+          type: EventType.SessionConfigured,
+          data: { configuration: input.configuration },
+        })
+        return { event, configuration: input.configuration, created: true }
+      })
     },
 
     forkSession(input) {
@@ -737,6 +785,32 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
           }),
         })
         return { compactionId, event }
+      })
+    },
+
+    recordWorldStateUpdate(input) {
+      return command(input.sessionId, async () => {
+        const session = await requireSession(eventStore, input.sessionId)
+        const turn = requireActiveTurn(session, input.turnId)
+        if (
+          input.afterItemId !== undefined &&
+          !turn.itemIds.includes(input.afterItemId)
+        ) {
+          invalidArgument(
+            `World-state anchor ${input.afterItemId} does not belong to active Turn ${input.turnId}.`,
+          )
+        }
+        const event = await append(eventStore, session, {
+          type: EventType.WorldStateUpdated,
+          data: compact({
+            turnId: input.turnId,
+            afterItemId: input.afterItemId,
+            full: input.full,
+            state: input.state,
+            fragments: [...input.fragments],
+          }),
+        })
+        return { event }
       })
     },
 

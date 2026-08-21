@@ -11,6 +11,7 @@ import {
   InputState,
   PermissionBehavior,
   PermissionState,
+  SessionConfiguration,
   type SessionKernel,
   ToolState,
   TurnState,
@@ -25,6 +26,33 @@ afterEach(async () => {
 
 for (const implementation of ["memory", "jsonl"] as const) {
   describe(`session witness kernel (${implementation})`, () => {
+    it("persists session configuration once and returns the winning snapshot", async () => {
+      await withKernel(implementation, async ({ kernel }) => {
+        const session = await kernel.createSession()
+        const first = SessionConfiguration.create({
+          selection: { provider: "codex", model: "gpt-5.6-sol" },
+          workspaceRoot: "/workspace/first",
+          enabledTools: ["read_file"],
+          approvalPolicy: "never",
+        }).snapshot
+        const competing = { ...first, workspaceRoot: "/workspace/second" }
+
+        const created = await kernel.configureSession({
+          sessionId: session.sessionId,
+          configuration: first,
+        })
+        const retry = await kernel.configureSession({
+          sessionId: session.sessionId,
+          configuration: competing,
+        })
+        const read = await kernel.readSession({ sessionId: session.sessionId })
+
+        expect(created).toMatchObject({ created: true, configuration: first })
+        expect(retry).toEqual({ created: false, configuration: first })
+        expect(read.session?.configuration).toEqual(first)
+      })
+    })
+
     it("admits idempotently and folds promotion into turn.started", async () => {
       await withKernel(implementation, async ({ kernel }) => {
         const session = await kernel.createSession({ title: "Witness" })
