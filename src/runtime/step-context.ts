@@ -1,4 +1,5 @@
 import { observeEnvironment } from "./environment-context.ts"
+import type { AgentRuntimeContext } from "./agent-control.ts"
 import type { SessionProjection } from "../kernel/index.ts"
 import type { ModelToolDefinition } from "./model.ts"
 import { loadProjectInstructions } from "./project-instructions.ts"
@@ -35,6 +36,7 @@ export async function captureStepContext(input: {
   readonly toolRegistry: ToolRegistry
   readonly projectInstructionLoader?: typeof loadProjectInstructions
   readonly now?: Date
+  readonly multiAgent?: AgentRuntimeContext
 }): Promise<StepContext> {
   const workspaceRoot = await resolveWorkspaceRoot(
     input.turn.configuration.workspaceRoot,
@@ -60,6 +62,9 @@ export async function captureStepContext(input: {
       configuration: input.turn.configuration,
       session: input.session,
       environment,
+      ...(input.multiAgent === undefined
+        ? {}
+        : { multiAgent: input.multiAgent }),
       ...(projectInstructions === undefined ? {} : { projectInstructions }),
     }),
     tools,

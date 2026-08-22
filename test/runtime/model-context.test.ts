@@ -3,6 +3,7 @@ import {
   boundCommandContent,
   buildModelContext,
   collectUncoveredTurns,
+  createForkedModelContext,
   createMateKernel,
   createSessionKernel,
   ItemKind,
@@ -12,6 +13,44 @@ import { createMemoryEventStore } from "../kernel/memory-event-store.ts"
 import { createMemoryMateStore } from "../mates/memory-mate-store.ts"
 
 describe("model context", () => {
+  it("cleans agent-scoped messages and baseline state from inherited context", () => {
+    const forked = createForkedModelContext({
+      sourceSessionId: "session_parent",
+      messages: [
+        {
+          role: "developer",
+          content: [{ type: "text", text: "You are agent /root/child." }],
+          context: {
+            type: "world_state",
+            sectionId: "multi_agent",
+            revision: "agent_revision",
+          },
+        },
+        {
+          role: "user",
+          content: [{ type: "text", text: "historical task" }],
+        },
+      ],
+      worldState: {
+        environment: { workspaceRoot: "/workspace" },
+        multi_agent: { path: "/root/child" },
+      },
+    })
+
+    expect(forked).toEqual({
+      sourceSessionId: "session_parent",
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "text", text: "historical task" }],
+        },
+      ],
+      worldState: {
+        environment: { workspaceRoot: "/workspace" },
+      },
+    })
+  })
+
   it("includes prior completed history and the current input", async () => {
     const context = await withAttributedSession(
       async ({ kernel, sessionId }) => {
@@ -451,6 +490,41 @@ describe("model context", () => {
           limits: {
             ...generousLimits(),
             modelVisibleContextBytes: 100,
+          },
+        }),
+      ).toThrow("exceeds the configured hard cap")
+    })
+  })
+
+  it("counts inherited fork history without silently dropping its baseline", async () => {
+    await withAttributedSession(async ({ kernel, sessionId }) => {
+      const current = await kernel.admitInput({
+        sessionId,
+        content: { kind: "text", text: "child task" },
+      })
+      const read = await kernel.readSession({ sessionId })
+      if (!read.session) throw new Error("missing session")
+      const session = read.session
+
+      expect(() =>
+        buildModelContext({
+          session,
+          currentInputId: current.inputId,
+          forkedContext: {
+            sourceSessionId: "session_parent",
+            messages: [
+              {
+                role: "user",
+                content: [{ type: "text", text: "x".repeat(1_000) }],
+              },
+            ],
+            worldState: {
+              environment: { workspaceRoot: "/workspace" },
+            },
+          },
+          limits: {
+            ...generousLimits(),
+            modelVisibleContextBytes: 200,
           },
         }),
       ).toThrow("exceeds the configured hard cap")

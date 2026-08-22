@@ -5,6 +5,7 @@ import {
   ItemKind,
   type ItemProjection,
   ItemStatus,
+  type JsonObject,
   type SessionProjection,
   type TextContent,
   type TurnProjection,
@@ -15,6 +16,7 @@ import type {
   ModelToolResultMessage,
   ModelUserMessage,
 } from "./model.ts"
+import { WorldStateSectionId } from "./world-state.ts"
 
 export type ModelContextLimits = {
   readonly modelVisibleMessageBlocks: number
@@ -29,6 +31,12 @@ export type DroppedTurn = {
   readonly turnId: string
   readonly messages: readonly ModelMessage[]
 }
+
+export type ForkedModelContext = Readonly<{
+  sourceSessionId: string
+  messages: readonly ModelMessage[]
+  worldState?: JsonObject
+}>
 
 export type ModelContextBuildResult = {
   readonly messages: readonly ModelMessage[]
@@ -54,6 +62,7 @@ export function buildModelContext(input: {
   readonly session: SessionProjection
   readonly currentInputId: string
   readonly limits: ModelContextLimits
+  readonly forkedContext?: ForkedModelContext
 }): ModelContextBuildResult {
   const currentInput = input.session.inputs.find(
     (candidate) => candidate.inputId === input.currentInputId,
@@ -65,6 +74,7 @@ export function buildModelContext(input: {
   const coveredTurnIds = new Set(input.session.compaction?.coveredTurnIds ?? [])
   const turnGroups = buildTurnGroups(input.session, coveredTurnIds)
   const compactionGroup = buildCompactionGroup(input.session)
+  const inheritedGroup = buildInheritedGroup(input.forkedContext)
   const forkGroup = buildForkGroup(input.session)
   const activeGroup = buildActiveTurnGroup(input.session, input.currentInputId)
   const currentGroup: ContextGroup = activeGroup ?? {
@@ -85,6 +95,7 @@ export function buildModelContext(input: {
   const droppedTurns: DroppedTurn[] = []
   let droppedCompactionCheckpoint = false
   let selectedGroups: readonly ContextGroup[] = [
+    ...(inheritedGroup === undefined ? [] : [inheritedGroup]),
     ...(compactionGroup === undefined ? [] : [compactionGroup]),
     ...turnGroups,
     // Keep inherited conversation history as the stable prompt prefix. The
@@ -117,17 +128,20 @@ export function buildModelContext(input: {
     pruneToolResults,
   })
 
-  // The checkpoint is pinned until last resort and the final group — the
-  // current input or active Turn — is never dropped: the oldest remaining
-  // completed Turn group drops first, and the compaction group drops only
-  // when no droppable Turn groups remain. Message order stays
-  // checkpoint-first either way.
+  // Forked messages and their inherited world-state baseline are one unit: if
+  // the history disappeared while its baseline stayed active, the model would
+  // miss environment and project context that the child intentionally did not
+  // re-emit. Keep that prefix pinned and drop only child-local history here.
   while (selectedGroups.length > 1 && exceedsCaps(assembled, input.limits)) {
     const lastIndex = selectedGroups.length - 1
     const turnIndex = selectedGroups.findIndex(
       (group, index) => index < lastIndex && group.kind === "turn",
     )
-    const dropIndex = turnIndex === -1 ? 0 : turnIndex
+    const fallbackIndex = selectedGroups.findIndex(
+      (group, index) => index < lastIndex && group.kind !== "inherited",
+    )
+    const dropIndex = turnIndex === -1 ? fallbackIndex : turnIndex
+    if (dropIndex === -1) break
     const dropped = selectedGroups[dropIndex]
     if (dropped === undefined) break
     if (dropped.kind === "turn") {
@@ -151,9 +165,9 @@ export function buildModelContext(input: {
     )
   }
 
-  if (selectedGroups.length === 1 && exceedsCaps(assembled, input.limits)) {
+  if (exceedsCaps(assembled, input.limits)) {
     throw new Error(
-      `Current Turn context exceeds the configured hard cap (${assembled.byteCount} bytes, ${assembled.blockCount} blocks).`,
+      `Model context exceeds the configured hard cap (${assembled.byteCount} bytes, ${assembled.blockCount} blocks).`,
     )
   }
 
@@ -180,6 +194,36 @@ export function buildModelContext(input: {
     truncatedToolResultCount: assembled.truncatedToolResultCount,
     prunedToolResultCount: assembled.prunedToolResultCount,
   }
+}
+
+export function createForkedModelContext(input: {
+  readonly sourceSessionId: string
+  readonly messages: readonly ModelMessage[]
+  readonly worldState?: JsonObject
+}): ForkedModelContext | undefined {
+  const messages = input.messages.filter(
+    (message) =>
+      !(
+        (message.role === "user" || message.role === "developer") &&
+        message.context?.type === "world_state" &&
+        message.context.sectionId === WorldStateSectionId.MultiAgent
+      ),
+  )
+  const worldState =
+    input.worldState === undefined
+      ? undefined
+      : Object.fromEntries(
+          Object.entries(input.worldState).filter(
+            ([sectionId]) => sectionId !== WorldStateSectionId.MultiAgent,
+          ),
+        )
+  return messages.length === 0 && worldState === undefined
+    ? undefined
+    : {
+        sourceSessionId: input.sourceSessionId,
+        messages,
+        ...(worldState === undefined ? {} : { worldState }),
+      }
 }
 
 function selectCompactableTurns(input: {
@@ -297,6 +341,11 @@ type TurnContextGroup = {
 type ContextGroup =
   | TurnContextGroup
   | {
+      readonly kind: "inherited"
+      readonly messages: readonly ModelMessage[]
+      readonly itemIds: readonly string[]
+    }
+  | {
       readonly kind: "compaction"
       readonly messages: readonly ModelMessage[]
       readonly itemIds: readonly string[]
@@ -312,6 +361,17 @@ type ContextGroup =
       readonly messages: readonly ModelMessage[]
       readonly itemIds: readonly string[]
     }
+
+function buildInheritedGroup(
+  context: ForkedModelContext | undefined,
+): ContextGroup | undefined {
+  if (context === undefined || context.messages.length === 0) return undefined
+  return {
+    kind: "inherited",
+    messages: context.messages,
+    itemIds: [],
+  }
+}
 
 function buildCompactionGroup(
   session: SessionProjection,

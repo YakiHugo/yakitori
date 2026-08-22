@@ -8,6 +8,7 @@ import {
   InputRole,
   isJsonValue,
   ItemKind,
+  type JsonObject,
   type KernelError,
   type ModelSelection,
   PermissionBehavior,
@@ -22,6 +23,12 @@ import {
 } from "../kernel/index.ts"
 import type { MateKernel } from "../mates/index.ts"
 import {
+  createAgentControl,
+  type AgentModelTarget,
+  type AgentRunOutcome,
+  type ForkTurns,
+} from "./agent-control.ts"
+import {
   buildCompactionRequest,
   isContextOverflowError,
   runCompaction,
@@ -34,6 +41,7 @@ import {
 } from "./live-events.ts"
 import {
   type ModelContentBlock,
+  type ModelMessage,
   type ModelRequest,
   type ModelResponse,
   ModelStopReason,
@@ -44,6 +52,7 @@ import {
 import {
   buildModelContext,
   collectUncoveredTurns,
+  createForkedModelContext,
   measureModelMessagesBytes,
   type DroppedTurn,
 } from "./model-context.ts"
@@ -63,7 +72,6 @@ import {
 import { createToolRegistry, type ToolRegistry } from "./tools/registry.ts"
 import type {
   RuntimeTool,
-  SpawnSubagent,
   ToolEffect,
   ToolExecutionResult,
 } from "./tools/types.ts"
@@ -71,7 +79,7 @@ import {
   createVisibleFileObservations,
   grantFromToolOutput,
 } from "./tools/visible-file-observations.ts"
-import { diffWorldState } from "./world-state.ts"
+import { diffWorldState, snapshotWorldState } from "./world-state.ts"
 
 export type SessionRunnerOptions = {
   readonly kernel: SessionKernel
@@ -88,6 +96,8 @@ export type SessionRunnerOptions = {
   readonly limits?: RuntimeLimits
   readonly approvalPolicy?: "auto_file_tools" | "never"
   readonly modelContextWindowTokens?: number
+  readonly maxAgentDepth?: number
+  readonly maxConcurrentAgents?: number
   readonly loadProjectInstructions?: typeof loadProjectInstructions
   readonly now?: () => Date
   readonly onRuntimeError?: (error: unknown) => void
@@ -143,12 +153,30 @@ export function createSessionRunner(
   // Consecutive compaction failures per session; after the cap the lane
   // stops paying for doomed summary calls until one succeeds again.
   const compactionFailures = new Map<string, number>()
+  const activeModelContexts = new Map<string, readonly ModelMessage[]>()
+  const activeWorldStates = new Map<string, JsonObject>()
   let closed = false
 
   const publishDurable = (events: readonly EventEnvelope[]) => {
     if (events.length === 0) return
     options.durableHub?.publish(events)
   }
+
+  const agentControl = createAgentControl({
+    ...(options.maxAgentDepth === undefined
+      ? {}
+      : { maxDepth: options.maxAgentDepth }),
+    ...(options.maxConcurrentAgents === undefined
+      ? {}
+      : { maxConcurrentAgents: options.maxConcurrentAgents }),
+    adapter: {
+      createChild: createAgentSession,
+      runChild: runAgentChild,
+      submitFollowup: submitAgentFollowup,
+      interruptChild: interruptAgentTurn,
+      captureForkContext,
+    },
+  })
 
   async function wake(sessionId: string): Promise<void> {
     if (closed) {
@@ -362,13 +390,12 @@ export function createSessionRunner(
               ? {}
               : { speed: previousTarget.speed }),
           })
-    const initialEnabledTools = resolveEnabledTools(session, enabledTools)
     let sessionConfiguration =
       session.configuration === undefined
         ? SessionConfiguration.create({
             selection: selectedTarget,
             workspaceRoot: session.workingDirectory,
-            enabledTools: initialEnabledTools,
+            enabledTools,
             approvalPolicy,
             limits,
             ...(options.modelContextWindowTokens === undefined
@@ -421,10 +448,13 @@ export function createSessionRunner(
       }
 
       let session = await requireSession(input.sessionId)
+      const agentRuntime = agentControl.runtimeContext(input.sessionId)
+      const forkedContext = agentControl.forkedContext(input.sessionId)
       let step = await captureStepContext({
         turn: input.turn,
         session,
         toolRegistry,
+        multiAgent: agentRuntime,
         projectInstructionLoader,
         ...(options.now === undefined ? {} : { now: options.now() }),
       })
@@ -437,6 +467,7 @@ export function createSessionRunner(
         session,
         currentInputId: input.inputId,
         limits: executionContext.limits,
+        ...(forkedContext === undefined ? {} : { forkedContext }),
       })
       if (context.compactableTurns.length > 0) {
         const outcome = await attemptCompaction({
@@ -453,6 +484,7 @@ export function createSessionRunner(
             turn: input.turn,
             session,
             toolRegistry,
+            multiAgent: agentRuntime,
             projectInstructionLoader,
             ...(options.now === undefined ? {} : { now: options.now() }),
           })
@@ -466,15 +498,30 @@ export function createSessionRunner(
             session,
             currentInputId: input.inputId,
             limits: executionContext.limits,
+            ...(forkedContext === undefined ? {} : { forkedContext }),
           })
         }
       }
 
+      const requestMessages = [
+        ...context.messages,
+        ...agentControl.takeMessages(input.sessionId),
+      ]
+      const rootSession =
+        agentRuntime.rootSessionId === session.id
+          ? session
+          : await requireSession(agentRuntime.rootSessionId)
+      activeModelContexts.set(input.sessionId, requestMessages)
+      if (session.worldState === undefined) {
+        activeWorldStates.delete(input.sessionId)
+      } else {
+        activeWorldStates.set(input.sessionId, session.worldState.state)
+      }
       const request: ModelRequest = {
         target: step.turn.configuration.target,
-        cacheKey: session.conversationId,
+        cacheKey: rootSession.conversationId,
         system: [step.turn.configuration.baseInstructions],
-        messages: context.messages,
+        messages: requestMessages,
         tools: step.tools.definitions,
         signal: input.signal,
       }
@@ -608,7 +655,6 @@ export function createSessionRunner(
             },
             signal: input.signal,
             visibleFileObservations,
-            subagentSession: subagentAgent(session) !== undefined,
           })
         } finally {
           telemetry.toolCalls += toolCalls.length
@@ -703,12 +749,28 @@ export function createSessionRunner(
       !input.session.worldStateUpdates.some(
         (update) => update.full && update.seq > compactionThroughSeq,
       )
-    const worldState = diffWorldState(
+    const inheritedWorldState =
+      input.session.worldState === undefined
+        ? agentControl.forkedContext(input.session.id)?.worldState
+        : undefined
+    const establishInheritedBaseline =
+      !input.forceFull &&
+      !compactionInvalidatedBaseline &&
+      inheritedWorldState !== undefined
+    const diff = diffWorldState(
       input.forceFull || compactionInvalidatedBaseline
         ? undefined
-        : input.session.worldState?.state,
+        : (input.session.worldState?.state ?? inheritedWorldState),
       input.step.worldState,
     )
+    if (diff === undefined && !establishInheritedBaseline) return input.session
+    const worldState = establishInheritedBaseline
+      ? {
+          full: true,
+          state: snapshotWorldState(input.step.worldState),
+          fragments: diff?.fragments ?? [],
+        }
+      : diff
     if (worldState === undefined) return input.session
 
     const afterItemId = input.session.activeTurn?.itemIds.at(-1)
@@ -908,7 +970,6 @@ export function createSessionRunner(
     readonly visibleFileObservations: ReturnType<
       typeof createVisibleFileObservations
     >
-    readonly subagentSession: boolean
   }): Promise<void> {
     const recorded = await options.kernel.recordAssistantOutput({
       sessionId: input.sessionId,
@@ -962,7 +1023,6 @@ export function createSessionRunner(
               signal: input.signal,
               observations,
               record: false,
-              subagentSession: input.subagentSession,
             }),
           }
         } catch (error) {
@@ -1009,7 +1069,6 @@ export function createSessionRunner(
           signal: input.signal,
           observations,
           record: true,
-          subagentSession: input.subagentSession,
         })
         if (result === "aborted") {
           await cancelAfterRuntimeAbort(input.sessionId, input.turnId)
@@ -1035,11 +1094,9 @@ export function createSessionRunner(
     readonly signal: AbortSignal
     readonly observations: ReturnType<typeof createVisibleFileObservations>
     readonly record: boolean
-    readonly subagentSession: boolean
   }): Promise<ToolExecutionResult | "aborted"> {
-    // Defense in depth: the model only sees enabledTools definitions, but a
-    // session's narrowed tool set must hold even if a call slips through
-    // (e.g. a subagent session attempting task).
+    // Defense in depth: the model only sees enabledTools definitions, but the
+    // persisted Session contract must still hold if a disabled call arrives.
     if (!input.executionContext.enabledTools.includes(input.call.name)) {
       const disabled: ToolExecutionResult = {
         ok: false,
@@ -1129,17 +1186,10 @@ export function createSessionRunner(
         workspaceRoot: input.workspaceRoot,
         signal: input.signal,
         visibleFileObservations: input.observations,
-        // Subagent sessions never get spawnSubagent; this caps delegation
-        // depth at 1 alongside task being absent from their enabledTools.
-        ...(input.subagentSession
-          ? {}
-          : {
-              spawnSubagent: createSpawnSubagent(
-                input.sessionId,
-                input.executionContext,
-                input.signal,
-              ),
-            }),
+        agentControl: agentControl.bind(
+          input.sessionId,
+          turnTarget(input.executionContext),
+        ),
       },
     )
     if (!input.record) return result
@@ -1193,80 +1243,104 @@ export function createSessionRunner(
     return input.result.code === "aborted" ? "aborted" : "ok"
   }
 
-  // Spawns a subagent as a child session on this same runner: the child gets
-  // its own lane, so awaiting its wake() cannot deadlock the parent's lane.
-  function createSpawnSubagent(
-    parentSessionId: string,
-    executionContext: TurnExecutionContext,
-    parentSignal: AbortSignal,
-  ): SpawnSubagent {
-    return async ({ agent, description, prompt }) => {
-      // An already-aborted signal never fires listeners, so check it
-      // explicitly at every stage boundary.
-      if (parentSignal.aborted) {
-        return {
-          ok: false as const,
-          sessionId: "",
-          error: "Parent turn was aborted before the subagent started.",
-        }
-      }
-      const created = await options.kernel.createSession({
-        parentSessionId,
-        workingDirectory: executionContext.workingDirectory,
-        mateId: executionContext.mateId,
-        mateRevisionId: executionContext.mateRevisionId,
-        title: description,
-        metadata: { subagent: agent, subagentDescription: description },
-      })
-      publishDurable([created.event])
-      const childSessionId = created.sessionId
-      const onParentAbort = () => {
-        void interruptSubagentTurn(childSessionId).catch((error: unknown) => {
-          options.onRuntimeError?.(error)
-        })
-      }
-      parentSignal.addEventListener("abort", onParentAbort, { once: true })
-      try {
-        const admitted = await options.kernel.admitInput({
-          sessionId: childSessionId,
-          role: InputRole.User,
-          content: { kind: "text", text: prompt },
-          // A subagent extends the turn that spawned it: inherit that turn's
-          // model instead of falling back to the session default.
-          modelSelection: {
-            provider: executionContext.provider,
-            model: executionContext.model,
-            ...(executionContext.effort === undefined
-              ? {}
-              : { effort: executionContext.effort }),
-            ...(executionContext.speed === undefined
-              ? {}
-              : { speed: executionContext.speed }),
-          },
-        })
-        publishDurable([admitted.event])
-        // The abort listener cannot cancel a turn that does not exist yet;
-        // if the parent died during admission, tear the child down instead
-        // of waking it.
-        if (parentSignal.aborted) {
-          await interruptSubagentTurn(childSessionId)
-          return {
-            ok: false as const,
-            sessionId: childSessionId,
-            error: "Parent turn was aborted.",
-          }
-        }
-        await wake(childSessionId)
-      } finally {
-        parentSignal.removeEventListener("abort", onParentAbort)
-      }
-      return readSubagentOutcome(childSessionId)
+  async function createAgentSession(input: {
+    readonly parentSessionId: string
+    readonly rootSessionId: string
+    readonly taskName: string
+    readonly path: string
+    readonly agentType: "general" | "explore"
+    readonly depth: number
+    readonly message: string
+    readonly target: AgentModelTarget
+  }): Promise<string> {
+    const parent = await requireSession(input.parentSessionId)
+    if (parent.configuration === undefined) {
+      throw new Error(
+        `Parent Session ${input.parentSessionId} has no persisted configuration.`,
+      )
     }
+    const created = await options.kernel.createSession({
+      parentSessionId: input.parentSessionId,
+      ...(parent.workingDirectory === undefined
+        ? {}
+        : { workingDirectory: parent.workingDirectory }),
+      ...(parent.mateId === undefined ? {} : { mateId: parent.mateId }),
+      ...(parent.mateRevisionId === undefined
+        ? {}
+        : { mateRevisionId: parent.mateRevisionId }),
+      title: input.taskName,
+      metadata: {
+        agent: {
+          version: 1,
+          kind: "subagent",
+          rootSessionId: input.rootSessionId,
+          parentSessionId: input.parentSessionId,
+          taskName: input.taskName,
+          path: input.path,
+          agentType: input.agentType,
+          depth: input.depth,
+        },
+      },
+    })
+    publishDurable([created.event])
+    const configured = await options.kernel.configureSession({
+      sessionId: created.sessionId,
+      configuration: parent.configuration,
+    })
+    if (configured.event !== undefined) publishDurable([configured.event])
+    const admitted = await options.kernel.admitInput({
+      sessionId: created.sessionId,
+      role: InputRole.User,
+      content: { kind: "text", text: input.message },
+      modelSelection: selectionFromTarget(input.target),
+    })
+    publishDurable([admitted.event])
+    return created.sessionId
   }
 
-  // Keyed off durable state rather than lane state: on parent abort the
-  // child turn may already be terminal, and losing that race is a no-op.
-  async function interruptSubagentTurn(sessionId: string): Promise<void> {
+  async function runAgentChild(sessionId: string): Promise<AgentRunOutcome> {
+    await wake(sessionId)
+    return readAgentOutcome(sessionId)
+  }
+
+  async function submitAgentFollowup(input: {
+    readonly sessionId: string
+    readonly message: string
+    readonly target: AgentModelTarget
+  }): Promise<void> {
+    const admitted = await options.kernel.admitInput({
+      sessionId: input.sessionId,
+      role: InputRole.User,
+      content: { kind: "text", text: input.message },
+      modelSelection: selectionFromTarget(input.target),
+    })
+    publishDurable([admitted.event])
+  }
+
+  function captureForkContext(input: {
+    readonly parentSessionId: string
+    readonly forkTurns: ForkTurns
+  }) {
+    if (input.forkTurns === "none") return undefined
+    const context = activeModelContexts.get(input.parentSessionId) ?? []
+    const messages =
+      input.forkTurns === "all"
+        ? context
+        : lastModelTurns(context, input.forkTurns)
+    const worldState =
+      input.forkTurns === "all"
+        ? activeWorldStates.get(input.parentSessionId)
+        : undefined
+    return createForkedModelContext({
+      sourceSessionId: input.parentSessionId,
+      messages,
+      ...(worldState === undefined ? {} : { worldState }),
+    })
+  }
+
+  // Keyed off durable state rather than lane state: an interrupt can race a
+  // terminal child, in which case there is nothing left to cancel.
+  async function interruptAgentTurn(sessionId: string): Promise<void> {
     lanes.get(sessionId)?.abort?.abort()
     const read = await options.kernel.readSession({ sessionId })
     const session = read.session
@@ -1291,10 +1365,10 @@ export function createSessionRunner(
       ?.activeTurn
     if (!active) return
     lanes.get(sessionId)?.abort?.abort()
-    await cancelActiveTurn(sessionId, active.turnId, "parent_aborted")
+    await cancelActiveTurn(sessionId, active.turnId, "agent_interrupted")
   }
 
-  async function readSubagentOutcome(sessionId: string) {
+  async function readAgentOutcome(sessionId: string): Promise<AgentRunOutcome> {
     const session = await requireSession(sessionId)
     const assistantItem = [...session.items]
       .reverse()
@@ -1305,17 +1379,24 @@ export function createSessionRunner(
         : undefined
     const lastTurn = session.turns.at(-1)
     if (lastTurn?.state === TurnState.Completed) {
-      return { ok: true as const, sessionId, text: text ?? "" }
+      return { type: "completed", text: text ?? "" }
     }
     const detail =
       lastTurn?.error?.message ??
       lastTurn?.cancelledReason ??
       lastTurn?.interruptedReason
+    if (
+      lastTurn?.state === TurnState.Cancelled ||
+      lastTurn?.state === TurnState.Interrupted
+    ) {
+      return {
+        type: "interrupted",
+        ...(detail === undefined ? {} : { reason: detail }),
+      }
+    }
     return {
-      ok: false as const,
-      sessionId,
-      error: `Subagent turn ${lastTurn?.state ?? "missing"}${detail === undefined ? "." : `: ${detail}`}`,
-      ...(text === undefined ? {} : { partialText: text }),
+      type: "errored",
+      error: `Agent turn ${lastTurn?.state ?? "missing"}${detail === undefined ? "." : `: ${detail}`}`,
     }
   }
 
@@ -1662,6 +1743,7 @@ export function createSessionRunner(
     async close() {
       closed = true
       for (const lane of lanes.values()) lane.abort?.abort()
+      await agentControl.close()
       await Promise.all(
         Array.from(lanes.values(), (lane) => lane.worker).filter(
           (worker): worker is Promise<void> => worker !== undefined,
@@ -1675,38 +1757,36 @@ function toolEffect(tool: RuntimeTool | undefined): ToolEffect {
   return tool?.effect ?? "opaque"
 }
 
-// A session is a subagent session when SessionCreated metadata carries a
-// `subagent` marker (forks use forkReason instead, so there is no overlap).
-// Any value other than the two known kinds is treated as "general".
-function subagentAgent(
-  session: SessionProjection,
-): "general" | "explore" | undefined {
-  const marker = session.metadata?.subagent
-  if (marker === undefined) return undefined
-  return marker === "explore" ? "explore" : "general"
-}
-
-// Subagent sessions run with a narrowed tool set: explore is read-only,
-// general keeps everything except task itself (depth is capped at 1).
-function resolveEnabledTools(
-  session: SessionProjection,
-  enabledTools: readonly string[],
-): readonly string[] {
-  const agent = subagentAgent(session)
-  if (agent === undefined) return [...enabledTools]
-  if (agent === "explore") {
-    return enabledTools.filter((name) => EXPLORE_SUBAGENT_TOOLS.has(name))
+function turnTarget(execution: TurnExecutionContext): AgentModelTarget {
+  return {
+    provider: execution.provider,
+    model: execution.model,
+    ...(execution.effort === undefined ? {} : { effort: execution.effort }),
+    ...(execution.speed === undefined ? {} : { speed: execution.speed }),
   }
-  return enabledTools.filter((name) => name !== "task")
 }
 
-const EXPLORE_SUBAGENT_TOOLS: ReadonlySet<string> = new Set([
-  "read_file",
-  "grep",
-  "glob",
-  "web_fetch",
-  "web_search",
-])
+function selectionFromTarget(target: AgentModelTarget): ModelSelection {
+  return {
+    provider: target.provider,
+    model: target.model,
+    ...(target.effort === undefined ? {} : { effort: target.effort }),
+    ...(target.speed === undefined ? {} : { speed: target.speed }),
+  }
+}
+
+function lastModelTurns(
+  messages: readonly ModelMessage[],
+  count: number,
+): readonly ModelMessage[] {
+  const turnStarts = messages.flatMap((message, index) =>
+    message.role === "user" && message.context?.type !== "world_state"
+      ? [index]
+      : [],
+  )
+  const start = turnStarts.at(-count)
+  return start === undefined ? [...messages] : messages.slice(start)
+}
 
 function isInvalidState(error: unknown): boolean {
   return (

@@ -9,6 +9,7 @@ import {
   type EnvironmentSnapshot,
   renderEnvironmentContext,
 } from "./environment-context.ts"
+import type { AgentRuntimeContext } from "./agent-control.ts"
 import type { ProjectInstructions } from "./project-instructions.ts"
 import type { ResolvedTurnConfiguration } from "./session-configuration.ts"
 
@@ -16,6 +17,7 @@ export const WorldStateSectionId = {
   Model: "model",
   ProjectInstructions: "project.instructions",
   Environment: "environment",
+  MultiAgent: "multi_agent",
 } as const
 
 export type PreviousSectionState<T> =
@@ -44,14 +46,59 @@ export function buildWorldState(input: {
   readonly session: SessionProjection
   readonly environment: EnvironmentSnapshot
   readonly projectInstructions?: ProjectInstructions
+  readonly multiAgent?: AgentRuntimeContext
 }): WorldState {
   return {
     sections: [
       modelSection(input.configuration, previousModel(input.session)),
+      ...(input.multiAgent === undefined
+        ? []
+        : [multiAgentSection(input.multiAgent)]),
       projectInstructionsSection(input.projectInstructions),
       environmentSection(input.environment),
     ],
   }
+}
+
+function multiAgentSection(
+  context: AgentRuntimeContext,
+): ErasedWorldStateSection {
+  const snapshot: JsonObject = {
+    path: context.path,
+    taskName: context.taskName,
+    agentType: context.agentType,
+    depth: context.depth,
+    maxDepth: context.maxDepth,
+    maxConcurrentAgents: context.maxConcurrentAgents,
+    ...(context.parentPath === undefined
+      ? {}
+      : { parentPath: context.parentPath }),
+  }
+  return section({
+    id: WorldStateSectionId.MultiAgent,
+    snapshot,
+    decode: jsonObjectSnapshot,
+    render(previous) {
+      if (previous.type === "known" && equalJson(previous.snapshot, snapshot)) {
+        return []
+      }
+      const role =
+        context.agentType === "explore"
+          ? "This is an exploration role. Inspect and report; do not modify files or run mutating commands."
+          : "Complete the assigned task and report concrete results."
+      const delegation =
+        context.depth >= context.maxDepth
+          ? `Delegation depth ${String(context.maxDepth)} has been reached. Do not retry spawn_agent; complete the work yourself.`
+          : `You may spawn descendants up to depth ${String(context.maxDepth)} when a bounded task can run independently.`
+      return [
+        fragment(
+          WorldStateSectionId.MultiAgent,
+          "developer",
+          `<multi_agent_context>\nYou are agent ${context.path}${context.parentPath === undefined ? "." : `, reporting to ${context.parentPath}.`} ${role}\n${delegation}\nThe shared tree allows ${String(context.maxConcurrentAgents)} concurrently running agents including the root. All agents receive the same tool definitions; follow the role guidance above when choosing actions.\n</multi_agent_context>`,
+        ),
+      ]
+    },
+  })
 }
 
 export function diffWorldState(
@@ -59,9 +106,7 @@ export function diffWorldState(
   current: WorldState,
 ): WorldStateDiff | undefined {
   requireUniqueSectionIds(current.sections)
-  const currentState = Object.fromEntries(
-    current.sections.map((section) => [section.id, section.snapshot]),
-  )
+  const currentState = snapshotWorldState(current)
   if (previous === undefined) {
     return {
       full: true,
@@ -78,6 +123,13 @@ export function diffWorldState(
     section.renderDiff(previousSection(previous[section.id])),
   )
   return { full: false, state: patch, fragments }
+}
+
+export function snapshotWorldState(current: WorldState): JsonObject {
+  requireUniqueSectionIds(current.sections)
+  return Object.fromEntries(
+    current.sections.map((section) => [section.id, section.snapshot]),
+  )
 }
 
 function modelSection(
@@ -255,6 +307,10 @@ function previousSection(
 
 function stringSnapshot(value: JsonValue): string | undefined {
   return typeof value === "string" ? value : undefined
+}
+
+function jsonObjectSnapshot(value: JsonValue): JsonObject | undefined {
+  return isJsonRecord(value) ? value : undefined
 }
 
 function projectInstructionsSnapshot(

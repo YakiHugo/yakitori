@@ -1,4 +1,5 @@
 export * from "./anthropic-provider.ts"
+export * from "./agent-control.ts"
 export * from "./codex-credentials.ts"
 export * from "./codex-provider.ts"
 export * from "./compaction.ts"
