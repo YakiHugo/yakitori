@@ -16,6 +16,7 @@ export const EventType = {
   PermissionRequested: "permission.requested",
   PermissionResolved: "permission.resolved",
   WorldStateUpdated: "world_state.updated",
+  ContextWindowSeeded: "context_window.seeded",
   ContextCompacted: "context.compacted",
 } as const
 
@@ -474,6 +475,16 @@ export type ContextCompactedEvent = {
   }
 }
 
+export type ContextWindowSeededEvent = {
+  readonly type: typeof EventType.ContextWindowSeeded
+  readonly data: {
+    readonly windowId: string
+    readonly sourceSessionId: string
+    readonly history: readonly ModelMessage[]
+    readonly worldStateBaseline?: JsonObject
+  }
+}
+
 export type KernelEvent =
   | SessionCreatedEvent
   | SessionConfiguredEvent
@@ -490,6 +501,7 @@ export type KernelEvent =
   | PermissionRequestedEvent
   | PermissionResolvedEvent
   | WorldStateUpdatedEvent
+  | ContextWindowSeededEvent
   | ContextCompactedEvent
 
 export type EventEnvelopeBase = {
@@ -760,6 +772,21 @@ function requireKernelEvent(value: unknown): asserts value is KernelEvent {
           (data.usage === undefined || isTokenUsage(data.usage)) &&
           (data.replacement === undefined ||
             isContextWindowReplacement(data.replacement))
+        )
+      case EventType.ContextWindowSeeded:
+        return (
+          onlyKeys(data, [
+            "windowId",
+            "sourceSessionId",
+            "history",
+            "worldStateBaseline",
+          ]) &&
+          isString(data.windowId) &&
+          isString(data.sourceSessionId) &&
+          Array.isArray(data.history) &&
+          data.history.every(isModelMessage) &&
+          (data.worldStateBaseline === undefined ||
+            isJsonObject(data.worldStateBaseline))
         )
     }
   })()

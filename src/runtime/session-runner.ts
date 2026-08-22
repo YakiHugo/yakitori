@@ -80,11 +80,7 @@ import {
   createVisibleFileObservations,
   grantFromToolOutput,
 } from "./tools/visible-file-observations.ts"
-import {
-  diffWorldState,
-  snapshotWorldState,
-  type WorldState,
-} from "./world-state.ts"
+import { diffWorldState, type WorldState } from "./world-state.ts"
 
 export type SessionRunnerOptions = {
   readonly kernel: SessionKernel
@@ -454,7 +450,6 @@ export function createSessionRunner(
 
       let session = await requireSession(input.sessionId)
       const agentRuntime = agentControl.runtimeContext(input.sessionId)
-      const forkedContext = agentControl.forkedContext(input.sessionId)
       const step = await captureStepContext({
         turn: input.turn,
         session,
@@ -472,7 +467,6 @@ export function createSessionRunner(
         session,
         currentInputId: input.inputId,
         limits: executionContext.limits,
-        ...(forkedContext === undefined ? {} : { forkedContext }),
       })
       if (context.compactableTurns.length > 0) {
         const outcome = await attemptCompaction({
@@ -490,9 +484,23 @@ export function createSessionRunner(
             session,
             currentInputId: input.inputId,
             limits: executionContext.limits,
-            ...(forkedContext === undefined ? {} : { forkedContext }),
           })
         }
+      }
+      if (
+        context.droppedTurns.length > 0 ||
+        context.droppedCompactionCheckpoint
+      ) {
+        throw createYakitoriError({
+          code: YakitoriErrorCode.InvalidState,
+          message:
+            "Context compaction could not preserve all model-visible history.",
+          details: {
+            code: "context_compaction_required",
+            droppedTurnCount: context.droppedTurns.length,
+            droppedCompactionCheckpoint: context.droppedCompactionCheckpoint,
+          },
+        })
       }
 
       const requestMessages = [
@@ -742,36 +750,20 @@ export function createSessionRunner(
       !input.session.worldStateUpdates.some(
         (update) => update.full && update.seq > compactionThroughSeq,
       )
-    const inheritedWorldState =
-      input.session.worldState === undefined
-        ? agentControl.forkedContext(input.session.id)?.worldState
-        : undefined
-    const establishInheritedBaseline =
-      !input.forceFull &&
-      !compactionInvalidatedBaseline &&
-      inheritedWorldState !== undefined
     const diff = diffWorldState(
       input.forceFull || compactionInvalidatedBaseline
         ? undefined
-        : (input.session.worldState?.state ?? inheritedWorldState),
+        : input.session.worldState?.state,
       input.step.worldState,
     )
-    if (diff === undefined && !establishInheritedBaseline) return input.session
-    const worldState = establishInheritedBaseline
-      ? {
-          full: true,
-          state: snapshotWorldState(input.step.worldState),
-          fragments: diff?.fragments ?? [],
-        }
-      : diff
-    if (worldState === undefined) return input.session
+    if (diff === undefined) return input.session
 
     const afterItemId = input.session.activeTurn?.itemIds.at(-1)
     const updated = await options.kernel.recordWorldStateUpdate({
       sessionId: input.session.id,
       turnId: input.turnId,
       ...(afterItemId === undefined ? {} : { afterItemId }),
-      ...worldState,
+      ...diff,
     })
     publishDurable([updated.event])
     return requireSession(input.session.id)
@@ -780,8 +772,9 @@ export function createSessionRunner(
   // Housekeeping: fold the longest fitting continuous history prefix into a
   // durable checkpoint, then rebuild context. An over-long summary request is
   // retried with a shorter oldest prefix (up to
-  // MAX_COMPACTION_ATTEMPTS); any other failure falls back to the originally
-  // built context, and repeated failures trip a per-session circuit breaker.
+  // MAX_COMPACTION_ATTEMPTS); any other failure leaves the checkpoint
+  // unchanged, and repeated failures trip a per-session circuit breaker. The
+  // caller may continue only when the unabridged context still fits.
   async function attemptCompaction(input: {
     readonly session: SessionProjection
     readonly turnId: string
@@ -887,10 +880,7 @@ export function createSessionRunner(
           sessionId,
           (compactionFailures.get(sessionId) ?? 0) + 1,
         )
-        console.error(
-          "Context compaction failed; continuing with dropped history.",
-          error,
-        )
+        console.error("Context compaction failed.", error)
       }
       return "failed"
     }
@@ -1264,6 +1254,7 @@ export function createSessionRunner(
     readonly depth: number
     readonly message: string
     readonly target: AgentModelTarget
+    readonly forkedContext?: ReturnType<typeof createForkedModelContext>
   }): Promise<string> {
     const parent = await requireSession(input.parentSessionId)
     if (parent.configuration === undefined) {
@@ -1300,6 +1291,17 @@ export function createSessionRunner(
       configuration: parent.configuration,
     })
     if (configured.event !== undefined) publishDurable([configured.event])
+    if (input.forkedContext !== undefined) {
+      const seeded = await options.kernel.seedContextWindow({
+        sessionId: created.sessionId,
+        sourceSessionId: input.forkedContext.sourceSessionId,
+        history: input.forkedContext.messages,
+        ...(input.forkedContext.worldState === undefined
+          ? {}
+          : { worldStateBaseline: input.forkedContext.worldState }),
+      })
+      publishDurable([seeded.event])
+    }
     const admitted = await options.kernel.admitInput({
       sessionId: created.sessionId,
       role: InputRole.User,

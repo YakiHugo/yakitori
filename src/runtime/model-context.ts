@@ -75,7 +75,19 @@ export function buildModelContext(input: {
   const coveredTurnIds = new Set(input.session.compaction?.coveredTurnIds ?? [])
   const turnGroups = buildTurnGroups(input.session, coveredTurnIds)
   const compactionGroup = buildCompactionGroup(input.session)
-  const inheritedGroup = buildInheritedGroup(input.forkedContext)
+  const inheritedGroup = buildInheritedGroup(
+    input.session.inheritedContext === undefined
+      ? input.forkedContext
+      : {
+          sourceSessionId: input.session.inheritedContext.sourceSessionId,
+          messages: input.session.inheritedContext.history,
+          ...(input.session.inheritedContext.worldStateBaseline === undefined
+            ? {}
+            : {
+                worldState: input.session.inheritedContext.worldStateBaseline,
+              }),
+        },
+  )
   const forkGroup = buildForkGroup(input.session)
   const activeGroup = buildActiveTurnGroup(input.session, input.currentInputId)
   const currentGroup: ContextGroup = activeGroup ?? {

@@ -13,6 +13,7 @@ import {
   type KernelError,
   type KernelEvent,
   type ContextWindowReplacement,
+  type ModelMessage,
   type ModelSelection,
   PermissionBehavior,
   type PermissionDecisionReason,
@@ -52,6 +53,9 @@ export type SessionKernel = {
   configureSession(
     input: ConfigureSessionInput,
   ): Promise<ConfigureSessionResult>
+  seedContextWindow(
+    input: SeedContextWindowInput,
+  ): Promise<SeedContextWindowResult>
   forkSession(input: ForkSessionInput): Promise<ForkSessionResult>
   listSessions(input?: ListSessionsInput): Promise<ListSessionsResult>
   readSession(input: ReadSessionInput): Promise<ReadSessionResult>
@@ -111,6 +115,16 @@ export type ConfigureSessionResult = {
   readonly event?: EventEnvelope
   readonly configuration: SessionConfigurationSnapshot
   readonly created: boolean
+}
+export type SeedContextWindowInput = {
+  readonly sessionId: string
+  readonly sourceSessionId: string
+  readonly history: readonly ModelMessage[]
+  readonly worldStateBaseline?: JsonObject
+}
+export type SeedContextWindowResult = {
+  readonly windowId: string
+  readonly event: EventEnvelope
 }
 export type ForkSessionInput = {
   readonly sessionId: string
@@ -394,6 +408,33 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
           data: { configuration: input.configuration },
         })
         return { event, configuration: input.configuration, created: true }
+      })
+    },
+
+    seedContextWindow(input) {
+      return command(input.sessionId, async () => {
+        const session = await requireSession(eventStore, input.sessionId)
+        if (
+          session.inputs.length > 0 ||
+          session.turns.length > 0 ||
+          session.inheritedContext !== undefined ||
+          session.compaction !== undefined
+        ) {
+          invalidState(
+            `Session ${session.id} already has model-visible history.`,
+          )
+        }
+        const windowId = createContextWindowId()
+        const event = await append(eventStore, session, {
+          type: EventType.ContextWindowSeeded,
+          data: compact({
+            windowId,
+            sourceSessionId: input.sourceSessionId,
+            history: input.history,
+            worldStateBaseline: input.worldStateBaseline,
+          }),
+        })
+        return { windowId, event }
       })
     },
 

@@ -961,7 +961,10 @@ describe("session runner", () => {
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
         limits: createRuntimeLimits({
-          modelVisibleMessageBlocks: 5,
+          modelVisibleMessageBlocks: 100,
+          modelVisibleContextBytes: 100_000,
+          compactionTriggerRatio: 0.000_01,
+          compactionRetainRatio: 0,
           compactionSummaryBytes: 1,
         }),
       })
@@ -974,7 +977,10 @@ describe("session runner", () => {
           enabledTools: ["read_file"],
           approvalPolicy: "never",
           limits: createRuntimeLimits({
-            modelVisibleMessageBlocks: 5,
+            modelVisibleMessageBlocks: 100,
+            modelVisibleContextBytes: 100_000,
+            compactionTriggerRatio: 0.000_01,
+            compactionRetainRatio: 0,
             compactionSummaryBytes: 16 * 1024,
           }),
         }).snapshot,
@@ -1156,7 +1162,10 @@ describe("session runner", () => {
         stream: provider.stream,
         limits: createRuntimeLimits({
           modelCallsPerTurn: 2,
-          modelVisibleMessageBlocks: 5,
+          modelVisibleMessageBlocks: 100,
+          modelVisibleContextBytes: 100_000,
+          compactionTriggerRatio: 0.000_01,
+          compactionRetainRatio: 0,
         }),
       })
       const session = await createAttributedSession(runtime)
@@ -1180,9 +1189,7 @@ describe("session runner", () => {
       expect(read.session?.failedTurns).toEqual([])
       expect(provider.callCount).toBe(5)
 
-      // The second Turn's final call ran without the checkpoint, which did
-      // not fit next to the active Turn; that last-resort drop is recorded
-      // in the assistant message metadata.
+      // The checkpoint remains visible across both real calls in the Turn.
       const replayed = await runtime.kernel.replaySession({
         sessionId: session.sessionId,
       })
@@ -1193,12 +1200,12 @@ describe("session runner", () => {
       )
       expect(assistantMetadata).toEqual([
         expect.not.objectContaining({ droppedCompactionCheckpoint: true }),
-        expect.objectContaining({ droppedCompactionCheckpoint: true }),
+        expect.not.objectContaining({ droppedCompactionCheckpoint: true }),
       ])
     })
   })
 
-  it("falls back to dropped history when summarization fails", async () => {
+  it("fails the Turn instead of sending silently dropped history", async () => {
     await withRuntime(async (runtime) => {
       const provider = createFauxProvider([
         { content: [{ type: "text", text: "first answer" }] },
@@ -1237,14 +1244,13 @@ describe("session runner", () => {
           (event) => event.type === EventType.ContextCompacted,
         ),
       ).toBe(false)
-      expect(replayed.session?.completedTurns).toHaveLength(2)
-      // The turn proceeds with the uncovered history silently dropped.
-      expect(provider.requests[2]?.messages).toEqual([
-        {
-          role: "user",
-          content: [{ type: "text", text: "second question" }],
-        },
-      ])
+      expect(replayed.session?.completedTurns).toHaveLength(1)
+      expect(replayed.session?.failedTurns).toHaveLength(1)
+      expect(replayed.session?.failedTurns[0]?.error).toMatchObject({
+        code: YakitoriErrorCode.InvalidState,
+        details: { code: "context_compaction_required" },
+      })
+      expect(provider.requests).toHaveLength(2)
     })
   })
 
@@ -1308,48 +1314,54 @@ describe("session runner", () => {
   it("retries an over-long summary request with a reduced source", async () => {
     await withRuntime(async (runtime) => {
       const provider = createFauxProvider([
-        { content: [{ type: "text", text: "first answer" }] },
-        { content: [{ type: "text", text: "second answer" }] },
-        { content: [{ type: "text", text: "Goal: checkpoint one." }] },
-        { content: [{ type: "text", text: "third answer" }] },
+        {
+          content: [{ type: "text", text: "first answer".padEnd(1_000, "a") }],
+        },
+        {
+          content: [{ type: "text", text: "second answer".padEnd(1_000, "b") }],
+        },
         {
           throwDuring: new Error(
             "prompt is too long: 250000 tokens > 200000 maximum",
           ),
         },
-        { content: [{ type: "text", text: "Goal: checkpoint two." }] },
-        { content: [{ type: "text", text: "fourth answer" }] },
+        { content: [{ type: "text", text: "Goal: checkpoint." }] },
+        { content: [{ type: "text", text: "third answer" }] },
       ])
       const runner = createSessionRunner({
         kernel: runtime.kernel,
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
-        limits: createRuntimeLimits({ modelVisibleMessageBlocks: 5 }),
+        limits: createRuntimeLimits({
+          modelVisibleMessageBlocks: 100,
+          modelVisibleContextBytes: 10_000,
+          compactionTriggerRatio: 0.5,
+          compactionRetainRatio: 0,
+        }),
       })
       const session = await createAttributedSession(runtime)
       for (const question of [
         "first question",
         "second question",
         "third question",
-        "fourth question",
       ]) {
         await runtime.kernel.admitInput({
           sessionId: session.sessionId,
-          content: { kind: "text", text: question },
+          content: { kind: "text", text: question.padEnd(1_000, "q") },
         })
         await runner.wake(session.sessionId)
       }
 
-      expect(provider.callCount).toBe(7)
-      // The fourth turn's first summary request carries both uncovered
+      expect(provider.callCount).toBe(5)
+      // The third turn's first summary request carries both uncovered
       // dropped turns; the retry keeps the oldest half so checkpoint coverage
       // remains a continuous historical prefix.
-      const firstAttempt = JSON.stringify(provider.requests[4]?.messages)
+      const firstAttempt = JSON.stringify(provider.requests[2]?.messages)
+      expect(firstAttempt).toContain("first question")
       expect(firstAttempt).toContain("second question")
-      expect(firstAttempt).toContain("third question")
-      const retryAttempt = JSON.stringify(provider.requests[5]?.messages)
-      expect(retryAttempt).toContain("second question")
-      expect(retryAttempt).not.toContain("third question")
+      const retryAttempt = JSON.stringify(provider.requests[3]?.messages)
+      expect(retryAttempt).toContain("first question")
+      expect(retryAttempt).not.toContain("second question")
 
       const replayed = await runtime.kernel.replaySession({
         sessionId: session.sessionId,
@@ -1357,15 +1369,14 @@ describe("session runner", () => {
       const compacted = replayed.events.filter(
         (event) => event.type === EventType.ContextCompacted,
       )
-      expect(compacted).toHaveLength(2)
+      expect(compacted).toHaveLength(1)
       const turns = replayed.session?.turns ?? []
-      // Coverage follows the reduced source: the second checkpoint extends
-      // the earlier checkpoint with the next oldest uncovered turn.
-      expect(compacted[1]?.data).toMatchObject({
-        coveredTurnIds: [turns[0]?.turnId, turns[1]?.turnId],
-        summary: "Goal: checkpoint two.",
+      // Coverage follows the reduced source and leaves the next Turn verbatim.
+      expect(compacted[0]?.data).toMatchObject({
+        coveredTurnIds: [turns[0]?.turnId],
+        summary: "Goal: checkpoint.",
       })
-      expect(replayed.session?.completedTurns).toHaveLength(4)
+      expect(replayed.session?.completedTurns).toHaveLength(3)
     })
   })
 
@@ -1380,7 +1391,12 @@ describe("session runner", () => {
         kernel: runtime.kernel,
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
-        limits: createRuntimeLimits({ modelVisibleMessageBlocks: 3 }),
+        limits: createRuntimeLimits({
+          modelVisibleMessageBlocks: 100,
+          modelVisibleContextBytes: 100_000,
+          compactionTriggerRatio: 0.000_01,
+          compactionRetainRatio: 0,
+        }),
       })
       const session = await createAttributedSession(runtime)
       await runtime.kernel.admitInput({
@@ -1429,7 +1445,12 @@ describe("session runner", () => {
         kernel: runtime.kernel,
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
-        limits: createRuntimeLimits({ modelVisibleMessageBlocks: 3 }),
+        limits: createRuntimeLimits({
+          modelVisibleMessageBlocks: 100,
+          modelVisibleContextBytes: 100_000,
+          compactionTriggerRatio: 0.000_01,
+          compactionRetainRatio: 0,
+        }),
       })
       const session = await createAttributedSession(runtime)
       const errors = vi.spyOn(console, "error").mockImplementation(() => {})
@@ -1645,10 +1666,16 @@ describe("multi-agent runtime", () => {
           depth: 1,
         },
       })
-      expect(child.session?.worldStateUpdates[0]).toMatchObject({
-        full: true,
-        state: {
+      expect(child.session?.inheritedContext).toMatchObject({
+        sourceSessionId: root.sessionId,
+        history: expect.any(Array),
+        worldStateBaseline: {
           environment: expect.any(Object),
+        },
+      })
+      expect(child.session?.worldStateUpdates[0]).toMatchObject({
+        full: false,
+        state: {
           multi_agent: { path: "/root/survey" },
         },
         fragments: [{ id: "multi_agent" }],
@@ -1800,9 +1827,8 @@ describe("multi-agent runtime", () => {
         ),
       ).toHaveLength(1)
       expect(grandchildSession.session?.worldStateUpdates[0]).toMatchObject({
-        full: true,
+        full: false,
         state: {
-          environment: expect.any(Object),
           multi_agent: { path: "/root/child/grandchild" },
         },
         fragments: [{ id: "multi_agent" }],

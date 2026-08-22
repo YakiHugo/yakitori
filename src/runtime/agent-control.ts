@@ -43,6 +43,7 @@ export type AgentControlAdapter = Readonly<{
     readonly depth: number
     readonly message: string
     readonly target: AgentModelTarget
+    readonly forkedContext?: ForkedModelContext
   }): Promise<string>
   runChild(sessionId: string): Promise<AgentRunOutcome>
   submitFollowup(input: {
@@ -100,7 +101,6 @@ export type AgentUpdate = Readonly<{
 export type AgentControl = Readonly<{
   bind(sessionId: string, target: AgentModelTarget): BoundAgentControl
   runtimeContext(sessionId: string): AgentRuntimeContext
-  forkedContext(sessionId: string): ForkedModelContext | undefined
   takeMessages(sessionId: string): readonly ModelMessage[]
   close(): Promise<void>
 }>
@@ -114,7 +114,6 @@ type AgentRecord = {
   readonly agentType: AgentType
   readonly depth: number
   status: AgentStatus
-  forkedContext?: ForkedModelContext
 }
 
 const ROOT_TASK_NAME = "root"
@@ -214,6 +213,7 @@ export function createAgentControl(input: {
             depth: actor.depth + 1,
             message: request.message,
             target: childTarget,
+            ...(forkedContext === undefined ? {} : { forkedContext }),
           })
           const child: AgentRecord = {
             agentId: childId,
@@ -224,7 +224,6 @@ export function createAgentControl(input: {
             agentType: request.agentType,
             depth: actor.depth + 1,
             status: "pending_init",
-            ...(forkedContext === undefined ? {} : { forkedContext }),
           }
           agents.set(childId, child)
           paths.set(key, childId)
@@ -404,9 +403,6 @@ export function createAgentControl(input: {
         maxDepth,
         maxConcurrentAgents,
       }
-    },
-    forkedContext(sessionId) {
-      return requireAgent(sessionId).forkedContext
     },
     takeMessages(sessionId) {
       const pending = messages.get(sessionId) ?? []

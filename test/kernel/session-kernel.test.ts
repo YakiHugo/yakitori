@@ -26,6 +26,48 @@ afterEach(async () => {
 
 for (const implementation of ["memory", "jsonl"] as const) {
   describe(`session witness kernel (${implementation})`, () => {
+    it("seeds inherited model context before conversation history", async () => {
+      await withKernel(implementation, async ({ kernel }) => {
+        const session = await kernel.createSession()
+        const seeded = await kernel.seedContextWindow({
+          sessionId: session.sessionId,
+          sourceSessionId: "session_parent",
+          history: [
+            {
+              role: "user",
+              content: [{ type: "text", text: "inherited task" }],
+            },
+          ],
+          worldStateBaseline: { environment: { cwd: "/workspace" } },
+        })
+        const replayed = await kernel.replaySession({
+          sessionId: session.sessionId,
+        })
+
+        expect(seeded.windowId.startsWith("context_window_")).toBe(true)
+        expect(replayed.session?.inheritedContext).toMatchObject({
+          windowId: seeded.windowId,
+          sourceSessionId: "session_parent",
+          history: [
+            {
+              role: "user",
+              content: [{ type: "text", text: "inherited task" }],
+            },
+          ],
+        })
+        expect(replayed.session?.worldState?.state).toEqual({
+          environment: { cwd: "/workspace" },
+        })
+        await expect(
+          kernel.seedContextWindow({
+            sessionId: session.sessionId,
+            sourceSessionId: "session_other",
+            history: [],
+          }),
+        ).rejects.toThrow("already has model-visible history")
+      })
+    })
+
     it("persists session configuration once and returns the winning snapshot", async () => {
       await withKernel(implementation, async ({ kernel }) => {
         const session = await kernel.createSession()

@@ -29,7 +29,7 @@ describe("agent control", () => {
     expect(root.list()).toMatchObject([
       { agentId: "agent_1", path: "/root/survey", status: "running" },
     ])
-    expect(harness.control.forkedContext("agent_1")).toEqual({
+    expect(harness.children[0]?.forkedContext).toEqual({
       sourceSessionId: "root_session",
       messages: [
         { role: "user", content: [{ type: "text", text: "parent prefix" }] },
@@ -170,11 +170,13 @@ function createHarness(
     readonly target: typeof TARGET
   }> = []
   const interrupted: string[] = []
+  const children: Array<Parameters<AgentControlAdapter["createChild"]>[0]> = []
   const prefix: readonly ModelMessage[] = [
     { role: "user", content: [{ type: "text", text: "parent prefix" }] },
   ]
   const adapter: AgentControlAdapter = {
-    async createChild() {
+    async createChild(request) {
+      children.push(request)
       const id = `agent_${String(nextId)}`
       nextId += 1
       runs.set(id, deferred())
@@ -211,6 +213,7 @@ function createHarness(
     runs,
     followups,
     interrupted,
+    children,
   }
 }
 

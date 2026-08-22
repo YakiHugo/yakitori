@@ -14,6 +14,7 @@ import {
   type JsonValue,
   type JsonObject,
   type KernelError,
+  type ModelMessage,
   type ModelSelection,
   type PermissionBehavior,
   type PermissionDecisionReason,
@@ -55,6 +56,7 @@ export type SessionProjection = {
   readonly configuration?: SessionConfigurationSnapshot
   readonly usage?: TokenUsage
   readonly compaction?: CompactionProjection
+  readonly inheritedContext?: InheritedContextProjection
   readonly worldState?: WorldStateProjection
   readonly worldStateUpdates: readonly WorldStateUpdateProjection[]
   readonly inputs: readonly InputProjection[]
@@ -80,6 +82,14 @@ export type CompactionProjection = {
   readonly summary: string
   readonly usage?: TokenUsage
   readonly replacement?: ContextWindowReplacement
+  readonly createdAt: string
+}
+
+export type InheritedContextProjection = {
+  readonly windowId: string
+  readonly sourceSessionId: string
+  readonly history: readonly ModelMessage[]
+  readonly worldStateBaseline?: JsonObject
   readonly createdAt: string
 }
 
@@ -242,6 +252,25 @@ export function applySessionFacts(
       }
       continue
     }
+    if (stored.type === EventType.ContextWindowSeeded) {
+      session.inheritedContext = {
+        windowId: stored.data.windowId,
+        sourceSessionId: stored.data.sourceSessionId,
+        history: stored.data.history,
+        ...(stored.data.worldStateBaseline === undefined
+          ? {}
+          : { worldStateBaseline: stored.data.worldStateBaseline }),
+        createdAt: stored.createdAt,
+      }
+      if (stored.data.worldStateBaseline !== undefined) {
+        worldState = {
+          state: stored.data.worldStateBaseline,
+          updatedSeq: stored.seq,
+          updatedAt: stored.createdAt,
+        }
+      }
+      continue
+    }
     if (stored.type === EventType.WorldStateUpdated) {
       const event = stored as Extract<
         EventEnvelope,
@@ -373,6 +402,9 @@ function mutableSession(current: SessionProjection): MutableSession {
     ...(current.compaction === undefined
       ? {}
       : { compaction: current.compaction }),
+    ...(current.inheritedContext === undefined
+      ? {}
+      : { inheritedContext: current.inheritedContext }),
   }
 }
 
@@ -392,6 +424,7 @@ type MutableSession = {
   metadata?: EventMetadata
   configuration?: SessionConfigurationSnapshot
   compaction?: CompactionProjection
+  inheritedContext?: InheritedContextProjection
 }
 
 type Mutable<T> = { -readonly [K in keyof T]: T[K] }
@@ -545,6 +578,7 @@ function applyKnownEvent(
       return
     }
     case EventType.WorldStateUpdated:
+    case EventType.ContextWindowSeeded:
     case EventType.ContextCompacted:
       return
   }

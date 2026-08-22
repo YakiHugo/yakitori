@@ -25,6 +25,7 @@ describe("kernel facts", () => {
       "permission.requested",
       "permission.resolved",
       "world_state.updated",
+      "context_window.seeded",
       "context.compacted",
     ])
   })
@@ -306,6 +307,37 @@ describe("kernel facts", () => {
             ],
             worldStateBaseline: { environment: { cwd: "/workspace" } },
           },
+        },
+      }),
+    ).toBe(true)
+  })
+
+  it("recognizes a durable inherited context window", () => {
+    expect(
+      isKernelEvent({
+        type: EventType.ContextWindowSeeded,
+        data: {
+          windowId: "context_window_1",
+          sourceSessionId: "session_parent",
+          history: [
+            {
+              role: "assistant",
+              content: [
+                {
+                  type: "tool_call",
+                  id: "call_1",
+                  name: "read_file",
+                  input: { path: "README.md" },
+                },
+              ],
+            },
+            {
+              role: "tool",
+              toolCallId: "call_1",
+              content: "hello",
+            },
+          ],
+          worldStateBaseline: { environment: { cwd: "/workspace" } },
         },
       }),
     ).toBe(true)
