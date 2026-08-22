@@ -284,6 +284,28 @@ describe("kernel facts", () => {
           coveredTurnIds: ["turn_0"],
           summary: "Goal: ship it.",
           usage: { inputTokens: 10, outputTokens: 5 },
+          replacement: {
+            windowId: "context_window_2",
+            firstWindowId: "context_window_1",
+            previousWindowId: "context_window_1",
+            windowNumber: 2,
+            history: [
+              {
+                role: "developer",
+                content: [{ type: "text", text: "current state" }],
+                context: {
+                  type: "world_state",
+                  sectionId: "environment",
+                  revision: "revision_1",
+                },
+              },
+              {
+                role: "user",
+                content: [{ type: "text", text: "Goal: ship it." }],
+              },
+            ],
+            worldStateBaseline: { environment: { cwd: "/workspace" } },
+          },
         },
       }),
     ).toBe(true)

@@ -52,6 +52,7 @@ import {
 import {
   buildModelContext,
   collectUncoveredTurns,
+  createCompactionReplacementHistory,
   createForkedModelContext,
   measureModelMessagesBytes,
   type DroppedTurn,
@@ -79,7 +80,11 @@ import {
   createVisibleFileObservations,
   grantFromToolOutput,
 } from "./tools/visible-file-observations.ts"
-import { diffWorldState, snapshotWorldState } from "./world-state.ts"
+import {
+  diffWorldState,
+  snapshotWorldState,
+  type WorldState,
+} from "./world-state.ts"
 
 export type SessionRunnerOptions = {
   readonly kernel: SessionKernel
@@ -280,7 +285,7 @@ export function createSessionRunner(
           sessionId: session.id,
           turnId: started.turnId,
           inputId: queuedInput.inputId,
-          configuration: turn.configuration,
+          turn,
           executionContext,
           signal: abort.signal,
         })
@@ -450,7 +455,7 @@ export function createSessionRunner(
       let session = await requireSession(input.sessionId)
       const agentRuntime = agentControl.runtimeContext(input.sessionId)
       const forkedContext = agentControl.forkedContext(input.sessionId)
-      let step = await captureStepContext({
+      const step = await captureStepContext({
         turn: input.turn,
         session,
         toolRegistry,
@@ -475,25 +480,12 @@ export function createSessionRunner(
           turnId: input.turnId,
           configuration: input.turn.configuration,
           candidateTurns: context.compactableTurns,
+          worldState: step.worldState,
           usages,
           signal: input.signal,
         })
         if (outcome === "compacted") {
           session = await requireSession(input.sessionId)
-          step = await captureStepContext({
-            turn: input.turn,
-            session,
-            toolRegistry,
-            multiAgent: agentRuntime,
-            projectInstructionLoader,
-            ...(options.now === undefined ? {} : { now: options.now() }),
-          })
-          session = await recordStepWorldState({
-            session,
-            turnId: input.turnId,
-            step,
-            forceFull: true,
-          })
           context = buildModelContext({
             session,
             currentInputId: input.inputId,
@@ -746,6 +738,7 @@ export function createSessionRunner(
     const compactionThroughSeq = input.session.compaction?.throughSeq
     const compactionInvalidatedBaseline =
       compactionThroughSeq !== undefined &&
+      input.session.compaction?.replacement === undefined &&
       !input.session.worldStateUpdates.some(
         (update) => update.full && update.seq > compactionThroughSeq,
       )
@@ -794,6 +787,7 @@ export function createSessionRunner(
     readonly turnId: string
     readonly configuration: ResolvedTurnConfiguration
     readonly candidateTurns: readonly DroppedTurn[]
+    readonly worldState: WorldState
     readonly usages: ModelUsage[]
     readonly signal: AbortSignal
   }): Promise<"compacted" | "not_smaller" | "failed"> {
@@ -875,6 +869,10 @@ export function createSessionRunner(
           ...source.map((group) => group.turnId),
         ],
         summary: result.summary,
+        replacement: createCompactionReplacement(
+          input.worldState,
+          result.summary,
+        ),
         ...(result.usage === undefined ? {} : { usage: result.usage }),
       })
       publishDurable([recorded.event])
@@ -905,11 +903,24 @@ export function createSessionRunner(
     readonly sessionId: string
     readonly turnId: string
     readonly inputId: string
-    readonly configuration: ResolvedTurnConfiguration
+    readonly turn: TurnContext
     readonly executionContext: TurnExecutionContext
     readonly signal: AbortSignal
   }): Promise<void> {
-    const session = await requireSession(input.sessionId)
+    let session = await requireSession(input.sessionId)
+    const step = await captureStepContext({
+      turn: input.turn,
+      session,
+      toolRegistry,
+      multiAgent: agentControl.runtimeContext(input.sessionId),
+      projectInstructionLoader,
+      ...(options.now === undefined ? {} : { now: options.now() }),
+    })
+    session = await recordStepWorldState({
+      session,
+      turnId: input.turnId,
+      step,
+    })
     const source = collectUncoveredTurns(session, input.executionContext.limits)
     const telemetry = requireTurnTelemetry(input.turnId)
     const usages = telemetry.usages
@@ -923,8 +934,9 @@ export function createSessionRunner(
       const compacted = await attemptCompaction({
         session,
         turnId: input.turnId,
-        configuration: input.configuration,
+        configuration: input.turn.configuration,
         candidateTurns: source,
+        worldState: step.worldState,
         usages,
         signal: input.signal,
       })
@@ -1750,6 +1762,28 @@ export function createSessionRunner(
         ),
       )
     },
+  }
+}
+
+function createCompactionReplacement(
+  worldState: WorldState,
+  summary: string,
+): {
+  readonly history: readonly ModelMessage[]
+  readonly worldStateBaseline: JsonObject
+} {
+  const fullWorldState = diffWorldState(undefined, worldState)
+  if (fullWorldState === undefined) {
+    throw new Error(
+      "Full world-state rendering unexpectedly produced no state.",
+    )
+  }
+  return {
+    history: createCompactionReplacementHistory({
+      summary,
+      worldStateFragments: fullWorldState.fragments,
+    }),
+    worldStateBaseline: fullWorldState.state,
   }
 }
 

@@ -5,6 +5,7 @@ import {
   type ForkReason,
   type InputRole,
   type ItemContent,
+  type ContextWindowReplacement,
   ItemKind,
   type ItemKind as ItemKindType,
   ItemStatus,
@@ -78,6 +79,7 @@ export type CompactionProjection = {
   readonly coveredTurnIds: readonly string[]
   readonly summary: string
   readonly usage?: TokenUsage
+  readonly replacement?: ContextWindowReplacement
   readonly createdAt: string
 }
 
@@ -231,6 +233,13 @@ export function applySessionFacts(
     }
     if (stored.type === EventType.ContextCompacted) {
       session.compaction = compactionProjection(stored)
+      if (stored.data.replacement !== undefined) {
+        worldState = {
+          state: stored.data.replacement.worldStateBaseline,
+          updatedSeq: stored.seq,
+          updatedAt: stored.createdAt,
+        }
+      }
       continue
     }
     if (stored.type === EventType.WorldStateUpdated) {
@@ -607,6 +616,9 @@ function compactionProjection(
     coveredTurnIds: [...event.data.coveredTurnIds],
     summary: event.data.summary,
     ...(event.data.usage === undefined ? {} : { usage: event.data.usage }),
+    ...(event.data.replacement === undefined
+      ? {}
+      : { replacement: event.data.replacement }),
     createdAt: event.createdAt,
   }
 }

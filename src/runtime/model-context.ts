@@ -10,6 +10,7 @@ import {
   type TextContent,
   type TurnProjection,
   TurnState,
+  type WorldStateFragment,
 } from "../kernel/index.ts"
 import type {
   ModelMessage,
@@ -380,17 +381,9 @@ function buildCompactionGroup(
   if (compaction === undefined) return undefined
   return {
     kind: "compaction",
-    messages: [
-      {
-        role: "user",
-        content: [
-          {
-            type: "text",
-            text: `<context_compacted>\nEarlier turns in this session were summarized into this checkpoint. The complete history is preserved on disk.\n${compaction.summary}\n</context_compacted>`,
-          },
-        ],
-      },
-    ],
+    messages:
+      compaction.replacement?.history ??
+      createCompactionReplacementHistory({ summary: compaction.summary }),
     itemIds: [],
   }
 }
@@ -449,7 +442,10 @@ function buildTurnGroup(
   if (!input || input.role !== InputRole.User) return undefined
 
   const worldStateUpdates = session.worldStateUpdates.filter(
-    (update) => update.turnId === turn.turnId,
+    (update) =>
+      update.turnId === turn.turnId &&
+      (session.compaction?.replacement === undefined ||
+        update.seq > session.compaction.throughSeq),
   )
   const messages: ModelMessage[] = [
     ...worldStateMessages(
@@ -615,6 +611,32 @@ function worldStateMessages(
       },
     })),
   )
+}
+
+export function createCompactionReplacementHistory(input: {
+  readonly summary: string
+  readonly worldStateFragments?: readonly WorldStateFragment[]
+}): readonly ModelMessage[] {
+  return [
+    ...(input.worldStateFragments ?? []).map((fragment) => ({
+      role: fragment.role,
+      content: [{ type: "text" as const, text: fragment.text }],
+      context: {
+        type: "world_state" as const,
+        sectionId: fragment.id,
+        revision: fragment.revision,
+      },
+    })),
+    {
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: `<context_compacted>\nEarlier turns in this session were summarized into this checkpoint. The complete history is preserved on disk.\n${input.summary}\n</context_compacted>`,
+        },
+      ],
+    },
+  ]
 }
 
 function modelUserMessage(content: TextContent): ModelUserMessage {

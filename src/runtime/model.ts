@@ -1,4 +1,29 @@
-import type { JsonObject, JsonValue } from "../kernel/index.ts"
+import type {
+  JsonObject,
+  ModelAssistantMessage,
+  ModelContentBlock,
+  ModelDeveloperMessage,
+  ModelImageBlock,
+  ModelMessage,
+  ModelReasoningBlock,
+  ModelTextBlock,
+  ModelToolCallBlock,
+  ModelToolResultMessage,
+  ModelUserMessage,
+} from "../kernel/index.ts"
+
+export type {
+  ModelAssistantMessage,
+  ModelContentBlock,
+  ModelDeveloperMessage,
+  ModelImageBlock,
+  ModelMessage,
+  ModelReasoningBlock,
+  ModelTextBlock,
+  ModelToolCallBlock,
+  ModelToolResultMessage,
+  ModelUserMessage,
+}
 
 export const ModelStopReason = {
   Aborted: "aborted",
@@ -10,74 +35,6 @@ export const ModelStopReason = {
 
 export type ModelStopReason =
   (typeof ModelStopReason)[keyof typeof ModelStopReason]
-
-export type ModelTextBlock = {
-  readonly type: "text"
-  readonly text: string
-}
-
-export type ModelImageBlock = {
-  readonly type: "image"
-  readonly mediaType: "image/gif" | "image/jpeg" | "image/png" | "image/webp"
-  readonly data: string
-}
-
-export type ModelReasoningBlock = {
-  readonly type: "reasoning"
-  readonly text: string
-  readonly providerMetadata?: JsonObject
-}
-
-export type ModelToolCallBlock = {
-  readonly type: "tool_call"
-  readonly id: string
-  readonly name: string
-  readonly input: JsonValue
-}
-
-export type ModelContentBlock =
-  | ModelTextBlock
-  | ModelReasoningBlock
-  | ModelToolCallBlock
-
-export type ModelUserMessage = {
-  readonly role: "user"
-  readonly content: readonly ModelTextBlock[]
-  readonly images?: readonly ModelImageBlock[]
-  readonly context?: {
-    readonly type: "world_state"
-    readonly sectionId: string
-    readonly revision: string
-  }
-}
-
-export type ModelDeveloperMessage = {
-  readonly role: "developer"
-  readonly content: readonly ModelTextBlock[]
-  readonly context?: {
-    readonly type: "world_state"
-    readonly sectionId: string
-    readonly revision: string
-  }
-}
-
-export type ModelAssistantMessage = {
-  readonly role: "assistant"
-  readonly content: readonly ModelContentBlock[]
-}
-
-export type ModelToolResultMessage = {
-  readonly role: "tool"
-  readonly toolCallId: string
-  readonly content: string
-  readonly isError?: boolean
-}
-
-export type ModelMessage =
-  | ModelUserMessage
-  | ModelDeveloperMessage
-  | ModelAssistantMessage
-  | ModelToolResultMessage
 
 export type ModelToolDefinition = {
   readonly name: string

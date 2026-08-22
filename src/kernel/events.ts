@@ -95,6 +95,85 @@ export type JsonContent = {
 
 export type ItemContent = TextContent | JsonContent
 
+// Provider-neutral, model-visible history IR. The kernel owns this contract so
+// durable checkpoints and forks do not depend on runtime request assembly.
+export type ModelTextBlock = {
+  readonly type: "text"
+  readonly text: string
+}
+
+export type ModelImageBlock = {
+  readonly type: "image"
+  readonly mediaType: ImageAttachment["mediaType"]
+  readonly data: string
+}
+
+export type ModelReasoningBlock = {
+  readonly type: "reasoning"
+  readonly text: string
+  readonly providerMetadata?: JsonObject
+}
+
+export type ModelToolCallBlock = {
+  readonly type: "tool_call"
+  readonly id: string
+  readonly name: string
+  readonly input: JsonValue
+}
+
+export type ModelContentBlock =
+  | ModelTextBlock
+  | ModelReasoningBlock
+  | ModelToolCallBlock
+
+export type ModelHistoryContext = {
+  readonly type: "world_state"
+  readonly sectionId: string
+  readonly revision: string
+}
+
+export type ModelUserMessage = {
+  readonly role: "user"
+  readonly content: readonly ModelTextBlock[]
+  readonly images?: readonly ModelImageBlock[]
+  readonly context?: ModelHistoryContext
+}
+
+export type ModelDeveloperMessage = {
+  readonly role: "developer"
+  readonly content: readonly ModelTextBlock[]
+  readonly context?: ModelHistoryContext
+}
+
+export type ModelAssistantMessage = {
+  readonly role: "assistant"
+  readonly content: readonly ModelContentBlock[]
+}
+
+export type ModelToolResultMessage = {
+  readonly role: "tool"
+  readonly toolCallId: string
+  readonly content: string
+  readonly isError?: boolean
+}
+
+export type ModelMessage =
+  | ModelUserMessage
+  | ModelDeveloperMessage
+  | ModelAssistantMessage
+  | ModelToolResultMessage
+
+export type ContextWindowReplacement = {
+  readonly windowId: string
+  readonly firstWindowId: string
+  readonly previousWindowId?: string
+  readonly windowNumber: number
+  /** Exact provider-neutral prefix that replaces history through throughSeq. */
+  readonly history: readonly ModelMessage[]
+  /** State against which later world-state changes must be diffed. */
+  readonly worldStateBaseline: JsonObject
+}
+
 export type AssistantContentBlock =
   | { readonly type: "text"; readonly text: string }
   | {
@@ -390,6 +469,8 @@ export type ContextCompactedEvent = {
     readonly coveredTurnIds: readonly string[]
     readonly summary: string
     readonly usage?: TokenUsage
+    /** Missing on checkpoints written before exact window replacement existed. */
+    readonly replacement?: ContextWindowReplacement
   }
 }
 
@@ -668,6 +749,7 @@ function requireKernelEvent(value: unknown): asserts value is KernelEvent {
             "coveredTurnIds",
             "summary",
             "usage",
+            "replacement",
           ]) &&
           isString(data.compactionId) &&
           isString(data.turnId) &&
@@ -675,7 +757,9 @@ function requireKernelEvent(value: unknown): asserts value is KernelEvent {
           Array.isArray(data.coveredTurnIds) &&
           data.coveredTurnIds.every(isString) &&
           isString(data.summary) &&
-          (data.usage === undefined || isTokenUsage(data.usage))
+          (data.usage === undefined || isTokenUsage(data.usage)) &&
+          (data.replacement === undefined ||
+            isContextWindowReplacement(data.replacement))
         )
     }
   })()
@@ -692,6 +776,108 @@ function isWorldStateFragment(value: unknown): value is WorldStateFragment {
     isString(value.revision) &&
     (value.role === "user" || value.role === "developer") &&
     isString(value.text)
+  )
+}
+
+function isContextWindowReplacement(
+  value: unknown,
+): value is ContextWindowReplacement {
+  return (
+    isRecord(value) &&
+    onlyKeys(value, [
+      "windowId",
+      "firstWindowId",
+      "previousWindowId",
+      "windowNumber",
+      "history",
+      "worldStateBaseline",
+    ]) &&
+    isString(value.windowId) &&
+    isString(value.firstWindowId) &&
+    (value.previousWindowId === undefined ||
+      isString(value.previousWindowId)) &&
+    isPositiveInteger(value.windowNumber) &&
+    Array.isArray(value.history) &&
+    value.history.every(isModelMessage) &&
+    isJsonObject(value.worldStateBaseline)
+  )
+}
+
+function isModelMessage(value: unknown): value is ModelMessage {
+  if (!isRecord(value) || !isString(value.role)) return false
+  if (value.role === "tool") {
+    return (
+      onlyKeys(value, ["role", "toolCallId", "content", "isError"]) &&
+      isString(value.toolCallId) &&
+      isString(value.content) &&
+      (value.isError === undefined || typeof value.isError === "boolean")
+    )
+  }
+  if (value.role === "assistant") {
+    return (
+      onlyKeys(value, ["role", "content"]) &&
+      Array.isArray(value.content) &&
+      value.content.every(isModelContentBlock)
+    )
+  }
+  if (value.role !== "user" && value.role !== "developer") return false
+  return (
+    onlyKeys(value, ["role", "content", "images", "context"]) &&
+    Array.isArray(value.content) &&
+    value.content.every(
+      (block) =>
+        isRecord(block) &&
+        onlyKeys(block, ["type", "text"]) &&
+        block.type === "text" &&
+        isString(block.text),
+    ) &&
+    (value.images === undefined ||
+      (value.role === "user" &&
+        Array.isArray(value.images) &&
+        value.images.every(isModelImageBlock))) &&
+    (value.context === undefined || isModelHistoryContext(value.context))
+  )
+}
+
+function isModelContentBlock(value: unknown): boolean {
+  if (!isRecord(value) || !isString(value.type)) return false
+  if (value.type === "text") {
+    return onlyKeys(value, ["type", "text"]) && isString(value.text)
+  }
+  if (value.type === "reasoning") {
+    return (
+      onlyKeys(value, ["type", "text", "providerMetadata"]) &&
+      isString(value.text) &&
+      (value.providerMetadata === undefined ||
+        isJsonObject(value.providerMetadata))
+    )
+  }
+  return (
+    value.type === "tool_call" &&
+    onlyKeys(value, ["type", "id", "name", "input"]) &&
+    isString(value.id) &&
+    isString(value.name) &&
+    isJsonValue(value.input)
+  )
+}
+
+function isModelImageBlock(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    onlyKeys(value, ["type", "mediaType", "data"]) &&
+    value.type === "image" &&
+    isSupportedImageMediaType(value.mediaType) &&
+    isString(value.data)
+  )
+}
+
+function isModelHistoryContext(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    onlyKeys(value, ["type", "sectionId", "revision"]) &&
+    value.type === "world_state" &&
+    isString(value.sectionId) &&
+    isString(value.revision)
   )
 }
 

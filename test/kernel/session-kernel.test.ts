@@ -345,6 +345,7 @@ for (const implementation of ["memory", "jsonl"] as const) {
           throughSeq,
           coveredTurnIds: [],
           summary: "Shared compacted history.",
+          replacement: checkpointReplacement("Shared compacted history."),
         })
         await kernel.completeTurnWithAssistantOutput({
           sessionId: source.sessionId,
@@ -637,6 +638,7 @@ for (const implementation of ["memory", "jsonl"] as const) {
           throughSeq,
           coveredTurnIds: ["turn_earlier"],
           summary: "Goal: ship the feature.",
+          replacement: checkpointReplacement("Goal: ship the feature."),
           usage: { inputTokens: 12, outputTokens: 4 },
         })
 
@@ -660,7 +662,15 @@ for (const implementation of ["memory", "jsonl"] as const) {
           throughSeq,
           coveredTurnIds: ["turn_earlier"],
           summary: "Goal: ship the feature.",
+          replacement: {
+            windowNumber: 1,
+            history: checkpointReplacement("Goal: ship the feature.").history,
+            worldStateBaseline: {},
+          },
         })
+        const window = replay.session?.compaction?.replacement
+        expect(window?.windowId.startsWith("context_window_")).toBe(true)
+        expect(window?.firstWindowId).toBe(window?.windowId)
       })
     })
 
@@ -684,6 +694,7 @@ for (const implementation of ["memory", "jsonl"] as const) {
             throughSeq: 3,
             coveredTurnIds: [turn.turnId],
             summary: "too late",
+            replacement: checkpointReplacement("too late"),
           }),
         ).rejects.toThrow("is not active")
       })
@@ -1052,6 +1063,18 @@ function admit(kernel: SessionKernel, sessionId: string, text: string) {
     requestId: `request:${text}`,
     content: { kind: "text", text },
   })
+}
+
+function checkpointReplacement(summary: string) {
+  return {
+    history: [
+      {
+        role: "user" as const,
+        content: [{ type: "text" as const, text: summary }],
+      },
+    ],
+    worldStateBaseline: {},
+  }
 }
 
 async function withKernel(

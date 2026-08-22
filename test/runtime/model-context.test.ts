@@ -551,6 +551,7 @@ describe("model context", () => {
           throughSeq,
           coveredTurnIds: [],
           summary: "Shared checkpoint.",
+          replacement: checkpointReplacement("Shared checkpoint."),
         })
         await kernel.completeTurnWithAssistantOutput({
           sessionId,
@@ -638,6 +639,7 @@ describe("model context", () => {
           throughSeq: 1,
           coveredTurnIds: [firstTurnId, secondTurnId],
           summary: "Goal: answer questions.",
+          replacement: checkpointReplacement("Goal: answer questions."),
         })
         const read = await kernel.readSession({ sessionId })
         if (!read.session) throw new Error("missing session")
@@ -684,6 +686,7 @@ describe("model context", () => {
           throughSeq: 1,
           coveredTurnIds: [firstTurnId],
           summary: "Goal: answer questions.",
+          replacement: checkpointReplacement("Goal: answer questions."),
         })
         const read = await kernel.readSession({ sessionId })
         if (!read.session) throw new Error("missing session")
@@ -755,6 +758,7 @@ describe("model context", () => {
           throughSeq: 1,
           coveredTurnIds: [coveredTurnId],
           summary: "checkpoint",
+          replacement: checkpointReplacement("checkpoint"),
         })
         const read = await kernel.readSession({ sessionId })
         if (!read.session) throw new Error("missing session")
@@ -1159,6 +1163,23 @@ function generousLimits() {
     modelVisibleContextBytes: 256_000,
     modelVisibleToolResultBytes: 50_000,
     modelVisibleToolResultLines: 2_000,
+  }
+}
+
+function checkpointReplacement(summary: string) {
+  return {
+    history: [
+      {
+        role: "user" as const,
+        content: [
+          {
+            type: "text" as const,
+            text: `<context_compacted>\nEarlier turns in this session were summarized into this checkpoint. The complete history is preserved on disk.\n${summary}\n</context_compacted>`,
+          },
+        ],
+      },
+    ],
+    worldStateBaseline: {},
   }
 }
 

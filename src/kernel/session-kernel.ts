@@ -12,6 +12,7 @@ import {
   type JsonValue,
   type KernelError,
   type KernelEvent,
+  type ContextWindowReplacement,
   type ModelSelection,
   PermissionBehavior,
   type PermissionDecisionReason,
@@ -25,6 +26,7 @@ import {
 } from "./events.ts"
 import {
   createCompactionId,
+  createContextWindowId,
   createInputId,
   createItemId,
   createPermissionRequestId,
@@ -272,6 +274,10 @@ export type RecordCompactionInput = {
   readonly coveredTurnIds: readonly string[]
   readonly summary: string
   readonly usage?: TokenUsage
+  readonly replacement: Omit<
+    ContextWindowReplacement,
+    "windowId" | "firstWindowId" | "previousWindowId" | "windowNumber"
+  >
 }
 export type RecordCompactionResult = {
   readonly compactionId: string
@@ -783,6 +789,18 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
         const session = await requireSession(eventStore, input.sessionId)
         requireActiveTurn(session, input.turnId)
         const compactionId = createCompactionId()
+        const previousReplacement = session.compaction?.replacement
+        const windowId = createContextWindowId()
+        const replacement: ContextWindowReplacement = {
+          windowId,
+          firstWindowId: previousReplacement?.firstWindowId ?? windowId,
+          ...(previousReplacement === undefined
+            ? {}
+            : { previousWindowId: previousReplacement.windowId }),
+          windowNumber: (previousReplacement?.windowNumber ?? 0) + 1,
+          history: input.replacement.history,
+          worldStateBaseline: input.replacement.worldStateBaseline,
+        }
         const event = await append(eventStore, session, {
           type: EventType.ContextCompacted,
           data: compact({
@@ -792,6 +810,7 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
             coveredTurnIds: [...input.coveredTurnIds],
             summary: input.summary,
             usage: input.usage,
+            replacement,
           }),
         })
         return { compactionId, event }

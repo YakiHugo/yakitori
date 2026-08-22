@@ -21,6 +21,7 @@ import {
   SessionConfiguration,
   YakitoriErrorCode,
   type EventEnvelope,
+  type ContextWindowReplacement,
   type LiveSessionEvent,
   type ModelContentBlock,
   type ModelRequest,
@@ -1027,6 +1028,17 @@ describe("session runner", () => {
         secondTurn?.turnId,
       ])
       expect(second.data.summary).toBe("Goal: checkpoint two.")
+      const firstReplacement = first.data.replacement as
+        | ContextWindowReplacement
+        | undefined
+      const secondReplacement = second.data.replacement as
+        | ContextWindowReplacement
+        | undefined
+      expect(secondReplacement?.previousWindowId).toBe(
+        firstReplacement?.windowId,
+      )
+      expect(secondReplacement?.firstWindowId).toBe(firstReplacement?.windowId)
+      expect(secondReplacement?.windowNumber).toBe(2)
 
       // The summarization request flattens the dropped turns, carries no
       // tools, and folds the previous checkpoint into its instruction.
@@ -1045,13 +1057,20 @@ describe("session runner", () => {
         "Previous checkpoint:\nGoal: checkpoint one.",
       )
 
-      // The real request after compaction starts with the checkpoint and
-      // excludes covered turns.
+      // The real request after compaction uses the exact durable replacement
+      // prefix and excludes covered turns.
       const realRequest = provider.requests[6]
-      const realFirst = realRequest?.messages[0]
-      if (realFirst?.role !== "user") throw new Error("missing checkpoint")
-      expect(realFirst.content[0]?.text).toContain("<context_compacted>")
-      expect(realFirst.content[0]?.text).toContain("Goal: checkpoint two.")
+      const checkpointMessage = realRequest?.messages.find(
+        (message) =>
+          message.role === "user" &&
+          message.content[0]?.text.includes("<context_compacted>"),
+      )
+      if (checkpointMessage?.role !== "user") {
+        throw new Error("missing checkpoint")
+      }
+      expect(checkpointMessage.content[0]?.text).toContain(
+        "Goal: checkpoint two.",
+      )
       const realText = JSON.stringify(realRequest?.messages)
       expect(realText).toContain("<environment>")
       expect(realText).not.toContain("first question")
@@ -1064,6 +1083,20 @@ describe("session runner", () => {
         if (checkpoint.type !== EventType.ContextCompacted) {
           throw new Error("expected compaction fact")
         }
+        const replacement = checkpoint.data.replacement as
+          | ContextWindowReplacement
+          | undefined
+        expect(replacement?.history).toContainEqual(
+          expect.objectContaining({
+            role: "user",
+            content: [
+              expect.objectContaining({
+                text: expect.stringContaining("<context_compacted>"),
+              }),
+            ],
+          }),
+        )
+        expect(replacement?.worldStateBaseline).toBeDefined()
         expect(
           replayed.events.find(
             (event) =>
@@ -1072,7 +1105,7 @@ describe("session runner", () => {
               event.data.full &&
               event.seq > checkpoint.seq,
           ),
-        ).toBeDefined()
+        ).toBeUndefined()
       }
 
       // Compaction usage is folded into turn.completed usage.
@@ -1625,7 +1658,9 @@ describe("multi-agent runtime", () => {
         JSON.stringify(request.messages).includes("delegate and wait"),
       )
       const childRequest = requests.find((request) =>
-        JSON.stringify(request.messages).includes("You are agent /root/survey,"),
+        JSON.stringify(request.messages).includes(
+          "You are agent /root/survey,",
+        ),
       )
       expect(rootRequest).toBeDefined()
       expect(childRequest).toBeDefined()
@@ -1831,7 +1866,9 @@ describe("multi-agent runtime", () => {
         JSON.stringify(request.messages).includes("ask an explorer"),
       )?.tools
       const childRequest = requests.find((request) =>
-        JSON.stringify(request.messages).includes("You are agent /root/explorer,"),
+        JSON.stringify(request.messages).includes(
+          "You are agent /root/explorer,",
+        ),
       )
       const childTools = childRequest?.tools
       expect(childTools).toEqual(rootTools)
