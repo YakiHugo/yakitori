@@ -1,6 +1,6 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { parse } from "smol-toml"
 import { createUserConfigStore } from "../../src/index.ts"
@@ -36,6 +36,44 @@ describe("user config", () => {
         preference: { provider: "codex", model: "gpt-5.6-sol" },
         modelContextWindowTokens: 600_000,
       })
+    })
+  })
+
+  it("loads custom model instructions relative to the effective cwd", async () => {
+    await withConfigPath(async (configPath) => {
+      const cwd = dirname(configPath)
+      await writeFile(
+        join(cwd, "model-instructions.md"),
+        "\nUse the custom harness instructions.\n",
+      )
+      await writeFile(
+        configPath,
+        [
+          'model_instructions_file = "model-instructions.md"',
+          'instructions = "legacy fallback"',
+          "",
+        ].join("\n"),
+      )
+      const store = createUserConfigStore({ configPath, cwd })
+
+      await expect(store.readConfiguration()).resolves.toEqual({
+        baseInstructions: "Use the custom harness instructions.",
+      })
+    })
+  })
+
+  it("does not silently replace an unreadable custom instruction file", async () => {
+    await withConfigPath(async (configPath) => {
+      const cwd = dirname(configPath)
+      await writeFile(
+        configPath,
+        'model_instructions_file = "missing-instructions.md"\n',
+      )
+      const store = createUserConfigStore({ configPath, cwd })
+
+      await expect(store.readConfiguration()).rejects.toThrow(
+        "Failed to read model instructions file",
+      )
     })
   })
 
@@ -107,7 +145,6 @@ describe("user config", () => {
       )
     })
   })
-
 })
 
 async function withConfigPath(

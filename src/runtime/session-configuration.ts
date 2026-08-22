@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import type {
   ModelSelection,
   SessionConfigurationSnapshot,
@@ -24,8 +25,9 @@ export type ApprovalPolicy = "auto_file_tools" | "never"
 
 type ResolvedSessionConfigurationSnapshot = Omit<
   SessionConfigurationSnapshot,
-  "runtimeLimits"
+  "promptCacheKey" | "runtimeLimits"
 > & {
+  readonly promptCacheKey: string
   readonly runtimeLimits: RuntimeLimitsType
 }
 
@@ -39,6 +41,7 @@ export type ResolvedModelCapacity = Readonly<{
 
 export type ResolvedTurnConfiguration = Readonly<{
   target: ModelTarget
+  promptCacheKey: string
   baseInstructions: ModelSystemSection
   modelInstructions: ModelSystemSection
   workspaceRoot: string
@@ -65,27 +68,28 @@ export class SessionConfiguration {
     readonly workspaceRoot: string
     readonly enabledTools: readonly string[]
     readonly approvalPolicy: ApprovalPolicy
+    readonly promptCacheKey: string
+    readonly baseInstructions?: string
     readonly limits?: RuntimeLimitsType
     readonly modelContextWindowTokens?: number
   }): SessionConfiguration {
     validateModelSelection(input.selection)
     const model = resolveModel(input.selection)
     const prompt = getPrompt(model.promptId)
+    const baseInstructions = resolveBaseInstructions(input.baseInstructions, {
+      prompt,
+      model,
+    })
+    if (input.promptCacheKey.trim().length === 0) {
+      throw new Error("promptCacheKey must be non-empty.")
+    }
     validateContextWindowOverride(model, input.modelContextWindowTokens)
     return new SessionConfiguration({
       schemaVersion: 1,
       workspaceRoot: input.workspaceRoot,
+      promptCacheKey: input.promptCacheKey,
       defaultTarget: { ...input.selection },
-      baseInstructions: {
-        text: prompt.text,
-        revision: prompt.revision,
-        provenance: {
-          type: "model",
-          provider: model.provider,
-          model: model.model,
-          promptId: model.promptId,
-        },
-      },
+      baseInstructions,
       enabledTools: [...input.enabledTools],
       approvalPolicy: input.approvalPolicy,
       runtimeLimits: { ...(input.limits ?? createRuntimeLimits()) },
@@ -95,12 +99,20 @@ export class SessionConfiguration {
     })
   }
 
-  static restore(snapshot: SessionConfigurationSnapshot): SessionConfiguration {
+  static restore(
+    snapshot: SessionConfigurationSnapshot,
+    fallbackPromptCacheKey: string,
+  ): SessionConfiguration {
     const runtimeLimits = requireRuntimeLimits(snapshot.runtimeLimits)
     const model = resolveModel(snapshot.defaultTarget)
+    const promptCacheKey = snapshot.promptCacheKey ?? fallbackPromptCacheKey
+    if (promptCacheKey.trim().length === 0) {
+      throw new Error("promptCacheKey must be non-empty.")
+    }
     validateContextWindowOverride(model, snapshot.modelContextWindowTokens)
     return new SessionConfiguration({
       ...snapshot,
+      promptCacheKey,
       defaultTarget: { ...snapshot.defaultTarget },
       baseInstructions: {
         ...snapshot.baseInstructions,
@@ -128,6 +140,7 @@ export class SessionConfiguration {
         ...(selection.effort === undefined ? {} : { effort: selection.effort }),
         ...(selection.speed === undefined ? {} : { speed: selection.speed }),
       },
+      promptCacheKey: this.snapshot.promptCacheKey,
       baseInstructions: {
         id: "base.instructions",
         revision: this.snapshot.baseInstructions.revision,
@@ -144,6 +157,40 @@ export class SessionConfiguration {
       limits: requireRuntimeLimits(this.snapshot.runtimeLimits),
       ...(modelCapacity === undefined ? {} : { modelCapacity }),
     }
+  }
+}
+
+function resolveBaseInstructions(
+  custom: string | undefined,
+  input: {
+    readonly prompt: { readonly text: string; readonly revision: string }
+    readonly model: {
+      readonly provider: string
+      readonly model: string
+      readonly promptId: string
+    }
+  },
+): SessionConfigurationSnapshot["baseInstructions"] {
+  if (custom === undefined) {
+    return {
+      text: input.prompt.text,
+      revision: input.prompt.revision,
+      provenance: {
+        type: "model",
+        provider: input.model.provider,
+        model: input.model.model,
+        promptId: input.model.promptId,
+      },
+    }
+  }
+  const text = custom.trim()
+  if (text.length === 0) {
+    throw new Error("baseInstructions must be non-empty.")
+  }
+  return {
+    text,
+    revision: createHash("sha256").update(text).digest("hex"),
+    provenance: { type: "custom" },
   }
 }
 

@@ -248,6 +248,8 @@ export type BaseInstructionsSnapshot = {
 export type SessionConfigurationSnapshot = {
   readonly schemaVersion: 1
   readonly workspaceRoot: string
+  /** Missing on Sessions created before prompt-cache identity was persisted. */
+  readonly promptCacheKey?: string
   readonly defaultTarget: ModelSelection
   readonly baseInstructions: BaseInstructionsSnapshot
   readonly enabledTools: readonly string[]
@@ -920,6 +922,7 @@ function isSessionConfigurationSnapshot(
     !onlyKeys(value, [
       "schemaVersion",
       "workspaceRoot",
+      "promptCacheKey",
       "defaultTarget",
       "baseInstructions",
       "enabledTools",
@@ -929,6 +932,9 @@ function isSessionConfigurationSnapshot(
     ]) ||
     value.schemaVersion !== 1 ||
     !isString(value.workspaceRoot) ||
+    (value.promptCacheKey !== undefined &&
+      (!isString(value.promptCacheKey) ||
+        value.promptCacheKey.trim().length === 0)) ||
     !isModelSelection(value.defaultTarget) ||
     !isBaseInstructionsSnapshot(value.baseInstructions) ||
     !Array.isArray(value.enabledTools) ||

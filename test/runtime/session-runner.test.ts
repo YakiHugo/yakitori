@@ -526,6 +526,7 @@ describe("session runner", () => {
         kernel: runtime.kernel,
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
+        baseInstructions: "Use the persisted custom base instructions.",
       })
       const session = await createAttributedSession(runtime)
       await runtime.kernel.admitInput({
@@ -545,10 +546,19 @@ describe("session runner", () => {
         await runner.wake(session.sessionId)
       }
 
+      expect(provider.requests[0]?.system).toEqual([
+        expect.objectContaining({
+          text: "Use the persisted custom base instructions.",
+        }),
+      ])
       expect(provider.requests[1]?.system).toEqual(provider.requests[0]?.system)
       expect(provider.requests[2]?.system).toEqual(provider.requests[0]?.system)
       const replayed = await runtime.kernel.replaySession({
         sessionId: session.sessionId,
+      })
+      expect(replayed.session?.configuration?.baseInstructions).toMatchObject({
+        text: "Use the persisted custom base instructions.",
+        provenance: { type: "custom" },
       })
       const modelFragments = replayed.session?.worldStateUpdates.flatMap(
         (update) =>
@@ -972,6 +982,7 @@ describe("session runner", () => {
       await runtime.kernel.configureSession({
         sessionId: session.sessionId,
         configuration: SessionConfiguration.create({
+          promptCacheKey: "session-cache",
           selection: { provider: "faux", model: "scripted" },
           workspaceRoot: runtime.rootDir,
           enabledTools: ["read_file"],
@@ -1034,6 +1045,9 @@ describe("session runner", () => {
         secondTurn?.turnId,
       ])
       expect(second.data.summary).toBe("Goal: checkpoint two.")
+      expect(provider.requests.map((request) => request.cacheKey)).toEqual(
+        provider.requests.map(() => "session-cache"),
+      )
       const firstReplacement = first.data.replacement as
         | ContextWindowReplacement
         | undefined

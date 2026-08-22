@@ -6,9 +6,15 @@ import {
 } from "../../src/index.ts"
 
 function resolveSessionConfiguration(
-  input: Parameters<typeof SessionConfiguration.create>[0],
+  input: Omit<
+    Parameters<typeof SessionConfiguration.create>[0],
+    "promptCacheKey"
+  >,
 ) {
-  const session = SessionConfiguration.create(input)
+  const session = SessionConfiguration.create({
+    ...input,
+    promptCacheKey: "session-cache",
+  })
   return session.resolveTurn(input.selection)
 }
 
@@ -92,19 +98,23 @@ describe("session configuration", () => {
 
   it("restores the exact persisted base instructions instead of re-resolving them", () => {
     const created = SessionConfiguration.create({
+      promptCacheKey: "session-cache",
       selection: { provider: "codex", model: "gpt-5.6-sol" },
       workspaceRoot: "/workspace",
       enabledTools: ["read_file"],
       approvalPolicy: "never",
     })
-    const restored = SessionConfiguration.restore({
-      ...created.snapshot,
-      baseInstructions: {
-        ...created.snapshot.baseInstructions,
-        text: "persisted session instructions",
-        revision: "persisted-revision",
+    const restored = SessionConfiguration.restore(
+      {
+        ...created.snapshot,
+        baseInstructions: {
+          ...created.snapshot.baseInstructions,
+          text: "persisted session instructions",
+          revision: "persisted-revision",
+        },
       },
-    }).resolveTurn(created.snapshot.defaultTarget)
+      "fallback-cache",
+    ).resolveTurn(created.snapshot.defaultTarget)
 
     expect(restored.baseInstructions).toEqual({
       id: "base.instructions",
@@ -116,8 +126,60 @@ describe("session configuration", () => {
     )
   })
 
+  it("persists custom base instructions across model changes", () => {
+    const session = SessionConfiguration.create({
+      promptCacheKey: "tree-cache",
+      selection: { provider: "codex", model: "gpt-5.6-sol" },
+      workspaceRoot: "/workspace",
+      enabledTools: [],
+      approvalPolicy: "never",
+      baseInstructions: "  Follow the custom harness contract.  ",
+    })
+    const switched = session.resolveTurn({
+      provider: "anthropic",
+      model: "claude-sonnet-4-6",
+    })
+
+    expect(session.snapshot.baseInstructions).toEqual({
+      text: "Follow the custom harness contract.",
+      revision: expect.stringMatching(/^[a-f0-9]{64}$/),
+      provenance: { type: "custom" },
+    })
+    expect(switched).toMatchObject({
+      promptCacheKey: "tree-cache",
+      baseInstructions: { text: "Follow the custom harness contract." },
+    })
+    expect(switched.modelInstructions.text).not.toBe(
+      switched.baseInstructions.text,
+    )
+  })
+
+  it("resolves cache identity once and restores old snapshots with a fallback", () => {
+    const created = SessionConfiguration.create({
+      promptCacheKey: "persisted-cache",
+      selection: { provider: "codex", model: "gpt-5.6-sol" },
+      workspaceRoot: "/workspace",
+      enabledTools: [],
+      approvalPolicy: "never",
+    })
+    const { promptCacheKey: _removed, ...legacy } = created.snapshot
+
+    expect(
+      SessionConfiguration.restore(
+        created.snapshot,
+        "fallback-cache",
+      ).resolveTurn(created.snapshot.defaultTarget).promptCacheKey,
+    ).toBe("persisted-cache")
+    expect(
+      SessionConfiguration.restore(legacy, "fallback-cache").resolveTurn(
+        legacy.defaultTarget,
+      ).promptCacheKey,
+    ).toBe("fallback-cache")
+  })
+
   it("fills runtime limits added to schema v1 when restoring an older snapshot", () => {
     const created = SessionConfiguration.create({
+      promptCacheKey: "session-cache",
       selection: { provider: "codex", model: "gpt-5.6-sol" },
       workspaceRoot: "/workspace",
       enabledTools: ["read_file"],
@@ -125,10 +187,13 @@ describe("session configuration", () => {
     })
     const { compactionRetainRatio: _removedLimit, ...legacyRuntimeLimits } =
       created.snapshot.runtimeLimits
-    const restored = SessionConfiguration.restore({
-      ...created.snapshot,
-      runtimeLimits: legacyRuntimeLimits,
-    })
+    const restored = SessionConfiguration.restore(
+      {
+        ...created.snapshot,
+        runtimeLimits: legacyRuntimeLimits,
+      },
+      "fallback-cache",
+    )
 
     expect(restored.snapshot.runtimeLimits.compactionRetainRatio).toBe(
       createRuntimeLimits().compactionRetainRatio,
@@ -138,6 +203,7 @@ describe("session configuration", () => {
   it("rejects an explicitly unsupported effort or speed", () => {
     expect(() =>
       SessionConfiguration.create({
+        promptCacheKey: "session-cache",
         selection: {
           provider: "codex",
           model: "gpt-5.6-sol",
@@ -150,6 +216,7 @@ describe("session configuration", () => {
     ).toThrow("Reasoning effort max is not supported")
     expect(() =>
       SessionConfiguration.create({
+        promptCacheKey: "session-cache",
         selection: {
           provider: "codex",
           model: "gpt-5.6-sol",

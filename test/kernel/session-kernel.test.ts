@@ -72,6 +72,7 @@ for (const implementation of ["memory", "jsonl"] as const) {
       await withKernel(implementation, async ({ kernel }) => {
         const session = await kernel.createSession()
         const first = SessionConfiguration.create({
+          promptCacheKey: "session-cache",
           selection: { provider: "codex", model: "gpt-5.6-sol" },
           workspaceRoot: "/workspace/first",
           enabledTools: ["read_file"],
@@ -328,6 +329,7 @@ for (const implementation of ["memory", "jsonl"] as const) {
         const source = await kernel.createSession()
         const cut = await admit(kernel, source.sessionId, "first")
         const configuration = SessionConfiguration.create({
+          promptCacheKey: "session-cache",
           selection: { provider: "codex", model: "gpt-5.6-sol" },
           workspaceRoot: "/workspace/fork-contract",
           enabledTools: ["read_file", "apply_patch"],

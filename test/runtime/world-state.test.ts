@@ -75,14 +75,11 @@ describe("world state", () => {
       ],
     })
   })
-
 })
 
-function worldState(
-  project?: ProjectInstructions,
-  currentDate = "2026-08-21",
-) {
+function worldState(project?: ProjectInstructions, currentDate = "2026-08-21") {
   const sessionConfiguration = SessionConfiguration.create({
+    promptCacheKey: "session-cache",
     selection: { provider: "codex", model: "gpt-5.6-sol" },
     workspaceRoot: "/workspace",
     enabledTools: [],

@@ -96,6 +96,7 @@ export type SessionRunnerOptions = {
   readonly model?: string
   readonly limits?: RuntimeLimits
   readonly approvalPolicy?: "auto_file_tools" | "never"
+  readonly baseInstructions?: string
   readonly modelContextWindowTokens?: number
   readonly maxAgentDepth?: number
   readonly maxConcurrentAgents?: number
@@ -404,6 +405,10 @@ export function createSessionRunner(
             workspaceRoot: session.workingDirectory,
             enabledTools,
             approvalPolicy,
+            promptCacheKey: session.conversationId,
+            ...(options.baseInstructions === undefined
+              ? {}
+              : { baseInstructions: options.baseInstructions }),
             limits,
             ...(options.modelContextWindowTokens === undefined
               ? {}
@@ -411,7 +416,10 @@ export function createSessionRunner(
                   modelContextWindowTokens: options.modelContextWindowTokens,
                 }),
           })
-        : SessionConfiguration.restore(session.configuration)
+        : SessionConfiguration.restore(
+            session.configuration,
+            session.conversationId,
+          )
     if (session.configuration === undefined) {
       const configured = await options.kernel.configureSession({
         sessionId: session.id,
@@ -420,6 +428,7 @@ export function createSessionRunner(
       if (configured.event !== undefined) publishDurable([configured.event])
       sessionConfiguration = SessionConfiguration.restore(
         configured.configuration,
+        session.conversationId,
       )
     }
     const configuration = sessionConfiguration.resolveTurn(selectedTarget)
@@ -513,10 +522,6 @@ export function createSessionRunner(
         ...context.messages,
         ...agentControl.takeMessages(input.sessionId),
       ]
-      const rootSession =
-        agentRuntime.rootSessionId === session.id
-          ? session
-          : await requireSession(agentRuntime.rootSessionId)
       activeModelContexts.set(input.sessionId, {
         messages: context.messages,
         forkTurnStartIndexes: context.forkTurnStartIndexes,
@@ -528,7 +533,7 @@ export function createSessionRunner(
       }
       const request: ModelRequest = {
         target: step.turn.configuration.target,
-        cacheKey: rootSession.conversationId,
+        cacheKey: step.turn.configuration.promptCacheKey,
         system: [step.turn.configuration.baseInstructions],
         messages: requestMessages,
         tools: step.tools.definitions,
@@ -818,7 +823,7 @@ export function createSessionRunner(
               source,
               target: input.configuration.target,
               baseInstructions: input.configuration.baseInstructions,
-              cacheKey: input.session.conversationId,
+              cacheKey: input.configuration.promptCacheKey,
               signal: input.signal,
             }),
           })
@@ -1280,6 +1285,14 @@ export function createSessionRunner(
         `Parent Session ${input.parentSessionId} has no persisted configuration.`,
       )
     }
+    const root =
+      input.rootSessionId === parent.id
+        ? parent
+        : await requireSession(input.rootSessionId)
+    const inheritedConfiguration = SessionConfiguration.restore(
+      parent.configuration,
+      root.conversationId,
+    ).snapshot
     const created = await options.kernel.createSession({
       parentSessionId: input.parentSessionId,
       ...(parent.workingDirectory === undefined
@@ -1306,7 +1319,7 @@ export function createSessionRunner(
     publishDurable([created.event])
     const configured = await options.kernel.configureSession({
       sessionId: created.sessionId,
-      configuration: parent.configuration,
+      configuration: inheritedConfiguration,
     })
     if (configured.event !== undefined) publishDurable([configured.event])
     if (input.forkedContext !== undefined) {
