@@ -384,6 +384,7 @@ for (const implementation of ["memory", "jsonl"] as const) {
         const compaction = await kernel.recordCompaction({
           sessionId: source.sessionId,
           turnId: firstTurn.turnId,
+          expectedCompactionId: null,
           throughSeq,
           coveredTurnIds: [],
           summary: "Shared compacted history.",
@@ -677,8 +678,9 @@ for (const implementation of ["memory", "jsonl"] as const) {
         if (throughSeq === undefined) throw new Error("missing session")
         const recorded = await kernel.recordCompaction({
           ...active,
+          expectedCompactionId: null,
           throughSeq,
-          coveredTurnIds: ["turn_earlier"],
+          coveredTurnIds: [],
           summary: "Goal: ship the feature.",
           replacement: checkpointReplacement("Goal: ship the feature."),
           usage: { inputTokens: 12, outputTokens: 4 },
@@ -691,7 +693,7 @@ for (const implementation of ["memory", "jsonl"] as const) {
             compactionId: recorded.compactionId,
             turnId: active.turnId,
             throughSeq,
-            coveredTurnIds: ["turn_earlier"],
+            coveredTurnIds: [],
             summary: "Goal: ship the feature.",
             usage: { inputTokens: 12, outputTokens: 4 },
           },
@@ -702,7 +704,7 @@ for (const implementation of ["memory", "jsonl"] as const) {
         expect(replay.session?.compaction).toMatchObject({
           compactionId: recorded.compactionId,
           throughSeq,
-          coveredTurnIds: ["turn_earlier"],
+          coveredTurnIds: [],
           summary: "Goal: ship the feature.",
           replacement: {
             windowNumber: 1,
@@ -713,6 +715,46 @@ for (const implementation of ["memory", "jsonl"] as const) {
         const window = replay.session?.compaction?.replacement
         expect(window?.windowId.startsWith("context_window_")).toBe(true)
         expect(window?.firstWindowId).toBe(window?.windowId)
+      })
+    })
+
+    it("rejects stale compaction snapshots and invalid coverage", async () => {
+      await withKernel(implementation, async ({ kernel }) => {
+        const active = await activeTurn(kernel)
+        const read = await kernel.readSession({ sessionId: active.sessionId })
+        const seq = read.session?.seq
+        if (seq === undefined) throw new Error("missing session")
+
+        await expect(
+          kernel.recordCompaction({
+            ...active,
+            expectedCompactionId: "compaction_stale",
+            throughSeq: seq,
+            coveredTurnIds: [],
+            summary: "stale",
+            replacement: checkpointReplacement("stale"),
+          }),
+        ).rejects.toThrow("checkpoint changed")
+        await expect(
+          kernel.recordCompaction({
+            ...active,
+            expectedCompactionId: null,
+            throughSeq: seq - 1,
+            coveredTurnIds: [],
+            summary: "stale history",
+            replacement: checkpointReplacement("stale history"),
+          }),
+        ).rejects.toThrow("history changed")
+        await expect(
+          kernel.recordCompaction({
+            ...active,
+            expectedCompactionId: null,
+            throughSeq: seq,
+            coveredTurnIds: ["turn_missing"],
+            summary: "bad coverage",
+            replacement: checkpointReplacement("bad coverage"),
+          }),
+        ).rejects.toThrow("continuous prefix")
       })
     })
 
@@ -733,6 +775,7 @@ for (const implementation of ["memory", "jsonl"] as const) {
           kernel.recordCompaction({
             sessionId: session.sessionId,
             turnId: turn.turnId,
+            expectedCompactionId: null,
             throughSeq: 3,
             coveredTurnIds: [turn.turnId],
             summary: "too late",

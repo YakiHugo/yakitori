@@ -78,10 +78,22 @@ describe("compaction request", () => {
     }
   })
 
-  it("folds a previous checkpoint into the instruction", () => {
+  it("folds a previous checkpoint from the replacement history", () => {
+    const checkpoint = {
+      messages: [
+        {
+          role: "user" as const,
+          content: [
+            {
+              type: "text" as const,
+              text: "<context_compacted>Goal: old checkpoint.</context_compacted>",
+            },
+          ],
+        },
+      ],
+    }
     const request = buildCompactionRequest({
-      source: [sourceTurn()],
-      previousSummary: "Goal: old checkpoint.",
+      source: [checkpoint, sourceTurn()],
       target: { provider: "faux", model: "scripted", promptId: "gpt" },
       baseInstructions: {
         id: "base.instructions",
@@ -92,9 +104,7 @@ describe("compaction request", () => {
 
     const instruction = request.messages.at(-1)
     if (instruction?.role !== "user") throw new Error("missing instruction")
-    expect(instruction.content[0]?.text).toContain(
-      "Previous checkpoint:\nGoal: old checkpoint.",
-    )
+    expect(request.messages).toContainEqual(checkpoint.messages[0])
     expect(instruction.content[0]?.text).toContain("supersede")
   })
 })

@@ -51,6 +51,79 @@ describe("model context", () => {
     })
   })
 
+  it("keeps only fork-safe conversation items", () => {
+    const environment = {
+      role: "developer" as const,
+      content: [{ type: "text" as const, text: "workspace state" }],
+      context: {
+        type: "world_state" as const,
+        sectionId: "environment",
+        revision: "environment-1",
+      },
+    }
+    const forked = createForkedModelContext({
+      sourceSessionId: "session_parent",
+      messages: [
+        environment,
+        {
+          role: "user",
+          content: [{ type: "text", text: "inspect the project" }],
+        },
+        {
+          role: "assistant",
+          content: [
+            { type: "reasoning", text: "private reasoning" },
+            { type: "text", text: "I will inspect it." },
+            {
+              type: "tool_call",
+              id: "tool_1",
+              name: "read_file",
+              input: { path: "README.md" },
+            },
+          ],
+        },
+        { role: "tool", toolCallId: "tool_1", content: "file contents" },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "The project uses TypeScript." }],
+        },
+        {
+          role: "developer",
+          content: [{ type: "text", text: "old child identity" }],
+          context: {
+            type: "world_state",
+            sectionId: "multi_agent",
+            revision: "agent-1",
+          },
+        },
+        {
+          role: "user",
+          content: [{ type: "text", text: "continue" }],
+        },
+      ],
+    })
+
+    expect(forked?.messages).toEqual([
+      environment,
+      {
+        role: "user",
+        content: [{ type: "text", text: "inspect the project" }],
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "The project uses TypeScript." }],
+      },
+      { role: "user", content: [{ type: "text", text: "continue" }] },
+    ])
+    expect(
+      createForkedModelContext({
+        sourceSessionId: "session_parent",
+        messages: [environment],
+        preserveWorldState: false,
+      }),
+    ).toBeUndefined()
+  })
+
   it("includes prior completed history and the current input", async () => {
     const context = await withAttributedSession(
       async ({ kernel, sessionId }) => {
@@ -89,6 +162,7 @@ describe("model context", () => {
       },
     ])
     expect(context.droppedTurnCount).toBe(0)
+    expect(context.forkTurnStartIndexes).toEqual([0, 2])
   })
 
   it("preserves durable reasoning continuation data through a tool loop", async () => {
@@ -255,9 +329,9 @@ describe("model context", () => {
     )
 
     expect(context.context.droppedTurnCount).toBe(0)
-    expect(context.context.compactableTurns.map((turn) => turn.turnId)).toEqual(
-      [context.oldest, context.middle],
-    )
+    expect(
+      context.context.compactableHistory.flatMap((group) => group.turnIds),
+    ).toEqual([context.oldest, context.middle])
     expect(JSON.stringify(context.context.messages)).toContain("old question")
     expect(JSON.stringify(context.context.messages)).toContain(
       "recent question",
@@ -506,28 +580,77 @@ describe("model context", () => {
       if (!read.session) throw new Error("missing session")
       const session = read.session
 
-      expect(() =>
-        buildModelContext({
-          session,
-          currentInputId: current.inputId,
-          forkedContext: {
-            sourceSessionId: "session_parent",
-            messages: [
-              {
-                role: "user",
-                content: [{ type: "text", text: "x".repeat(1_000) }],
-              },
-            ],
-            worldState: {
-              environment: { workspaceRoot: "/workspace" },
+      const context = buildModelContext({
+        session,
+        currentInputId: current.inputId,
+        forkedContext: {
+          sourceSessionId: "session_parent",
+          messages: [
+            {
+              role: "user",
+              content: [{ type: "text", text: "x".repeat(1_000) }],
             },
+          ],
+          worldState: {
+            environment: { workspaceRoot: "/workspace" },
           },
-          limits: {
-            ...generousLimits(),
-            modelVisibleContextBytes: 200,
+        },
+        limits: {
+          ...generousLimits(),
+          modelVisibleContextBytes: 200,
+        },
+      })
+      expect(context.messages).toEqual([
+        { role: "user", content: [{ type: "text", text: "child task" }] },
+      ])
+      expect(context.compactableHistory).toEqual([
+        expect.objectContaining({ kind: "inherited", turnIds: [] }),
+      ])
+    })
+  })
+
+  it("replaces inherited history with the child's first checkpoint", async () => {
+    await withAttributedSession(async ({ kernel, sessionId }) => {
+      const seeded = await kernel.seedContextWindow({
+        sessionId,
+        sourceSessionId: "session_parent",
+        history: [
+          {
+            role: "user",
+            content: [{ type: "text", text: "parent history" }],
           },
-        }),
-      ).toThrow("exceeds the configured hard cap")
+        ],
+        worldStateBaseline: { environment: { workspaceRoot: "/workspace" } },
+      })
+      const current = await admitAndStartTurn(kernel, sessionId, "child task")
+      await kernel.recordCompaction({
+        sessionId,
+        turnId: current.turnId,
+        expectedCompactionId: null,
+        throughSeq: await currentSessionSeq(kernel, sessionId),
+        coveredTurnIds: [],
+        summary: "Goal: child checkpoint.",
+        replacement: {
+          ...checkpointReplacement("Goal: child checkpoint."),
+          replacesInheritedContext: true,
+        },
+      })
+      const read = await kernel.readSession({ sessionId })
+      if (read.session === undefined) throw new Error("missing session")
+      expect(read.session.compaction?.replacement).toMatchObject({
+        previousWindowId: seeded.windowId,
+        firstWindowId: seeded.windowId,
+        windowNumber: 2,
+        replacesInheritedContext: true,
+      })
+
+      const context = buildModelContext({
+        session: read.session,
+        currentInputId: current.inputId,
+        limits: generousLimits(),
+      })
+      expect(JSON.stringify(context.messages)).not.toContain("parent history")
+      expect(JSON.stringify(context.messages)).toContain("child checkpoint")
     })
   })
 
@@ -548,6 +671,7 @@ describe("model context", () => {
         await kernel.recordCompaction({
           sessionId,
           turnId: shared.turnId,
+          expectedCompactionId: null,
           throughSeq,
           coveredTurnIds: [],
           summary: "Shared checkpoint.",
@@ -636,7 +760,8 @@ describe("model context", () => {
         await kernel.recordCompaction({
           sessionId,
           turnId: current.turnId,
-          throughSeq: 1,
+          expectedCompactionId: null,
+          throughSeq: await currentSessionSeq(kernel, sessionId),
           coveredTurnIds: [firstTurnId, secondTurnId],
           summary: "Goal: answer questions.",
           replacement: checkpointReplacement("Goal: answer questions."),
@@ -683,7 +808,8 @@ describe("model context", () => {
         await kernel.recordCompaction({
           sessionId,
           turnId: current.turnId,
-          throughSeq: 1,
+          expectedCompactionId: null,
+          throughSeq: await currentSessionSeq(kernel, sessionId),
           coveredTurnIds: [firstTurnId],
           summary: "Goal: answer questions.",
           replacement: checkpointReplacement("Goal: answer questions."),
@@ -755,7 +881,8 @@ describe("model context", () => {
         await kernel.recordCompaction({
           sessionId,
           turnId: current.turnId,
-          throughSeq: 1,
+          expectedCompactionId: null,
+          throughSeq: await currentSessionSeq(kernel, sessionId),
           coveredTurnIds: [coveredTurnId],
           summary: "checkpoint",
           replacement: checkpointReplacement("checkpoint"),
@@ -776,8 +903,8 @@ describe("model context", () => {
       },
     )
 
-    // The tool Turn drops first; the pinned checkpoint survives next to the
-    // current input. The dropped Turn is reported with pruning applied.
+    // The tool Turn leaves the live request first. Its replacement source
+    // still includes the preceding checkpoint as one continuous prefix.
     expect(context.droppedTurnCount).toBe(1)
     expect(context.droppedCompactionCheckpoint).toBe(false)
     expect(context.droppedTurns).toEqual([
@@ -1164,6 +1291,15 @@ function generousLimits() {
     modelVisibleToolResultBytes: 50_000,
     modelVisibleToolResultLines: 2_000,
   }
+}
+
+async function currentSessionSeq(
+  kernel: ReturnType<typeof createSessionKernel>,
+  sessionId: string,
+): Promise<number> {
+  const read = await kernel.readSession({ sessionId })
+  if (read.session === undefined) throw new Error("missing session")
+  return read.session.seq
 }
 
 function checkpointReplacement(summary: string) {

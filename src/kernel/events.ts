@@ -169,6 +169,7 @@ export type ContextWindowReplacement = {
   readonly firstWindowId: string
   readonly previousWindowId?: string
   readonly windowNumber: number
+  readonly replacesInheritedContext?: boolean
   /** Exact provider-neutral prefix that replaces history through throughSeq. */
   readonly history: readonly ModelMessage[]
   /** State against which later world-state changes must be diffed. */
@@ -816,6 +817,7 @@ function isContextWindowReplacement(
       "firstWindowId",
       "previousWindowId",
       "windowNumber",
+      "replacesInheritedContext",
       "history",
       "worldStateBaseline",
     ]) &&
@@ -824,6 +826,8 @@ function isContextWindowReplacement(
     (value.previousWindowId === undefined ||
       isString(value.previousWindowId)) &&
     isPositiveInteger(value.windowNumber) &&
+    (value.replacesInheritedContext === undefined ||
+      typeof value.replacesInheritedContext === "boolean") &&
     Array.isArray(value.history) &&
     value.history.every(isModelMessage) &&
     isJsonObject(value.worldStateBaseline)

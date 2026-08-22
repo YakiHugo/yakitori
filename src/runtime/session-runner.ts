@@ -55,7 +55,7 @@ import {
   createCompactionReplacementHistory,
   createForkedModelContext,
   measureModelMessagesBytes,
-  type DroppedTurn,
+  type CompactionSourceGroup,
 } from "./model-context.ts"
 import { createPermissionGate, type PermissionGate } from "./permission-gate.ts"
 import { loadProjectInstructions } from "./project-instructions.ts"
@@ -154,7 +154,13 @@ export function createSessionRunner(
   // Consecutive compaction failures per session; after the cap the lane
   // stops paying for doomed summary calls until one succeeds again.
   const compactionFailures = new Map<string, number>()
-  const activeModelContexts = new Map<string, readonly ModelMessage[]>()
+  const activeModelContexts = new Map<
+    string,
+    {
+      readonly messages: readonly ModelMessage[]
+      readonly forkTurnStartIndexes: readonly number[]
+    }
+  >()
   const activeWorldStates = new Map<string, JsonObject>()
   let closed = false
 
@@ -468,12 +474,12 @@ export function createSessionRunner(
         currentInputId: input.inputId,
         limits: executionContext.limits,
       })
-      if (context.compactableTurns.length > 0) {
+      if (context.compactableHistory.length > 0) {
         const outcome = await attemptCompaction({
           session,
           turnId: input.turnId,
           configuration: input.turn.configuration,
-          candidateTurns: context.compactableTurns,
+          candidateHistory: context.compactableHistory,
           worldState: step.worldState,
           usages,
           signal: input.signal,
@@ -511,7 +517,10 @@ export function createSessionRunner(
         agentRuntime.rootSessionId === session.id
           ? session
           : await requireSession(agentRuntime.rootSessionId)
-      activeModelContexts.set(input.sessionId, requestMessages)
+      activeModelContexts.set(input.sessionId, {
+        messages: context.messages,
+        forkTurnStartIndexes: context.forkTurnStartIndexes,
+      })
       if (session.worldState === undefined) {
         activeWorldStates.delete(input.sessionId)
       } else {
@@ -779,7 +788,7 @@ export function createSessionRunner(
     readonly session: SessionProjection
     readonly turnId: string
     readonly configuration: ResolvedTurnConfiguration
-    readonly candidateTurns: readonly DroppedTurn[]
+    readonly candidateHistory: readonly CompactionSourceGroup[]
     readonly worldState: WorldState
     readonly usages: ModelUsage[]
     readonly signal: AbortSignal
@@ -792,10 +801,8 @@ export function createSessionRunner(
       return "failed"
     }
     try {
-      const previousSummary = input.session.compaction?.summary
       let source = selectCompactionSource(
-        input.candidateTurns,
-        previousSummary,
+        input.candidateHistory,
         input.configuration.limits.modelVisibleContextBytes,
       )
       if (source.length === 0) return "failed"
@@ -809,7 +816,6 @@ export function createSessionRunner(
             stream: options.stream,
             request: buildCompactionRequest({
               source,
-              ...(previousSummary === undefined ? {} : { previousSummary }),
               target: input.configuration.target,
               baseInstructions: input.configuration.baseInstructions,
               cacheKey: input.session.conversationId,
@@ -839,10 +845,24 @@ export function createSessionRunner(
       // A checkpoint that is not smaller than the history it replaces buys
       // nothing. This is not a failure: keep history, skip the error log and
       // the circuit breaker, and let callers tell the two outcomes apart.
+      const replacement = createCompactionReplacement(
+        input.worldState,
+        result.summary,
+        source.some((group) => group.kind === "inherited"),
+      )
       const sourceBytes = measureModelMessagesBytes(
         source.flatMap((group) => group.messages),
       )
-      if (utf8Bytes(result.summary) >= sourceBytes) {
+      const replacementBytes = measureModelMessagesBytes(
+        replacement.history.filter(
+          (message) =>
+            !(
+              (message.role === "user" || message.role === "developer") &&
+              message.context?.type === "world_state"
+            ),
+        ),
+      )
+      if (replacementBytes >= sourceBytes) {
         return "not_smaller"
       }
       if (
@@ -856,16 +876,14 @@ export function createSessionRunner(
       const recorded = await options.kernel.recordCompaction({
         sessionId,
         turnId: input.turnId,
+        expectedCompactionId: input.session.compaction?.compactionId ?? null,
         throughSeq,
         coveredTurnIds: [
           ...(input.session.compaction?.coveredTurnIds ?? []),
-          ...source.map((group) => group.turnId),
+          ...source.flatMap((group) => group.turnIds),
         ],
         summary: result.summary,
-        replacement: createCompactionReplacement(
-          input.worldState,
-          result.summary,
-        ),
+        replacement,
         ...(result.usage === undefined ? {} : { usage: result.usage }),
       })
       publishDurable([recorded.event])
@@ -925,7 +943,7 @@ export function createSessionRunner(
         session,
         turnId: input.turnId,
         configuration: input.turn.configuration,
-        candidateTurns: source,
+        candidateHistory: source,
         worldState: step.worldState,
         usages,
         signal: input.signal,
@@ -1336,10 +1354,11 @@ export function createSessionRunner(
     readonly forkTurns: ForkTurns
   }) {
     if (input.forkTurns === "none") return undefined
-    const context = activeModelContexts.get(input.parentSessionId) ?? []
+    const context = activeModelContexts.get(input.parentSessionId)
+    if (context === undefined) return undefined
     const messages =
       input.forkTurns === "all"
-        ? context
+        ? context.messages
         : lastModelTurns(context, input.forkTurns)
     const worldState =
       input.forkTurns === "all"
@@ -1348,6 +1367,7 @@ export function createSessionRunner(
     return createForkedModelContext({
       sourceSessionId: input.parentSessionId,
       messages,
+      preserveWorldState: input.forkTurns === "all",
       ...(worldState === undefined ? {} : { worldState }),
     })
   }
@@ -1770,9 +1790,11 @@ export function createSessionRunner(
 function createCompactionReplacement(
   worldState: WorldState,
   summary: string,
+  replacesInheritedContext: boolean,
 ): {
   readonly history: readonly ModelMessage[]
   readonly worldStateBaseline: JsonObject
+  readonly replacesInheritedContext?: boolean
 } {
   const fullWorldState = diffWorldState(undefined, worldState)
   if (fullWorldState === undefined) {
@@ -1786,6 +1808,7 @@ function createCompactionReplacement(
       worldStateFragments: fullWorldState.fragments,
     }),
     worldStateBaseline: fullWorldState.state,
+    ...(replacesInheritedContext ? { replacesInheritedContext: true } : {}),
   }
 }
 
@@ -1812,16 +1835,15 @@ function selectionFromTarget(target: AgentModelTarget): ModelSelection {
 }
 
 function lastModelTurns(
-  messages: readonly ModelMessage[],
+  context: {
+    readonly messages: readonly ModelMessage[]
+    readonly forkTurnStartIndexes: readonly number[]
+  },
   count: number,
 ): readonly ModelMessage[] {
-  const turnStarts = messages.flatMap((message, index) =>
-    message.role === "user" && message.context?.type !== "world_state"
-      ? [index]
-      : [],
-  )
-  const start = turnStarts.at(-count)
-  return start === undefined ? [...messages] : messages.slice(start)
+  const start =
+    context.forkTurnStartIndexes.at(-count) ?? context.forkTurnStartIndexes[0]
+  return start === undefined ? [] : context.messages.slice(start)
 }
 
 function isInvalidState(error: unknown): boolean {
@@ -2002,15 +2024,18 @@ function isEventMetadata(value: unknown): value is EventMetadata {
 }
 
 function selectCompactionSource(
-  candidateTurns: readonly DroppedTurn[],
-  previousSummary: string | undefined,
+  candidateHistory: readonly CompactionSourceGroup[],
   budgetBytes: number,
-): readonly DroppedTurn[] {
-  const selected: DroppedTurn[] = []
-  let bytes = utf8Bytes(previousSummary ?? "")
-  for (const group of candidateTurns) {
+): readonly CompactionSourceGroup[] {
+  const selected: CompactionSourceGroup[] = []
+  const checkpointIndex = candidateHistory.findIndex(
+    (group) => group.kind === "compaction",
+  )
+  const requiredLength = checkpointIndex < 0 ? 0 : checkpointIndex + 1
+  let bytes = 0
+  for (const [index, group] of candidateHistory.entries()) {
     const groupBytes = measureModelMessagesBytes(group.messages)
-    if (bytes + groupBytes > budgetBytes) break
+    if (index >= requiredLength && bytes + groupBytes > budgetBytes) break
     selected.push(group)
     bytes += groupBytes
   }
@@ -2023,9 +2048,13 @@ const MAX_CONSECUTIVE_COMPACTION_FAILURES = 3
 // Every checkpoint covers a continuous historical prefix. If the summary
 // request overflows, keep the oldest half and postpone newer Turns.
 function reduceCompactionSourcePrefix(
-  source: readonly DroppedTurn[],
-): readonly DroppedTurn[] {
-  const keep = Math.ceil(source.length / 2)
+  source: readonly CompactionSourceGroup[],
+): readonly CompactionSourceGroup[] {
+  const checkpointIndex = source.findIndex(
+    (group) => group.kind === "compaction",
+  )
+  const requiredLength = checkpointIndex < 0 ? 0 : checkpointIndex + 1
+  const keep = Math.max(requiredLength, Math.ceil(source.length / 2))
   return source.slice(0, keep)
 }
 

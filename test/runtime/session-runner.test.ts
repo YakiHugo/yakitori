@@ -1046,8 +1046,9 @@ describe("session runner", () => {
       expect(secondReplacement?.firstWindowId).toBe(firstReplacement?.windowId)
       expect(secondReplacement?.windowNumber).toBe(2)
 
-      // The summarization request flattens the dropped turns, carries no
-      // tools, and folds the previous checkpoint into its instruction.
+      // The summarization request flattens the replacement prefix, carries no
+      // tools, and includes the previous checkpoint as ordinary source
+      // history so the model sees exactly what the replacement supersedes.
       const firstSummary = provider.requests[2]
       expect(firstSummary?.tools).toEqual([])
       expect(firstSummary?.system.at(-1)?.text).toContain("checkpoint")
@@ -1059,9 +1060,10 @@ describe("session runner", () => {
       if (secondInstruction?.role !== "user") {
         throw new Error("missing summarization instruction")
       }
-      expect(secondInstruction.content[0]?.text).toContain(
-        "Previous checkpoint:\nGoal: checkpoint one.",
+      expect(JSON.stringify(secondSummary?.messages)).toContain(
+        "Goal: checkpoint one.",
       )
+      expect(secondInstruction.content[0]?.text).toContain("supersede")
 
       // The real request after compaction uses the exact durable replacement
       // prefix and excludes covered turns.

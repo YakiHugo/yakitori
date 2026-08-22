@@ -284,6 +284,7 @@ export type RecordToolResultResult = {
 export type RecordCompactionInput = {
   readonly sessionId: string
   readonly turnId: string
+  readonly expectedCompactionId: string | null
   readonly throughSeq: number
   readonly coveredTurnIds: readonly string[]
   readonly summary: string
@@ -829,16 +830,56 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
       return command(input.sessionId, async () => {
         const session = await requireSession(eventStore, input.sessionId)
         requireActiveTurn(session, input.turnId)
+        const currentCompactionId = session.compaction?.compactionId ?? null
+        if (currentCompactionId !== input.expectedCompactionId) {
+          invalidState(
+            `Compaction checkpoint changed while Turn ${input.turnId} was summarizing.`,
+          )
+        }
+        if (input.throughSeq !== session.seq) {
+          invalidState(
+            `Session history changed while Turn ${input.turnId} was summarizing (expected seq ${String(input.throughSeq)}, current seq ${String(session.seq)}).`,
+          )
+        }
+        const previousCompaction = session.compaction
+        if (
+          previousCompaction !== undefined &&
+          (input.throughSeq < previousCompaction.throughSeq ||
+            input.coveredTurnIds.length <
+              previousCompaction.coveredTurnIds.length ||
+            previousCompaction.coveredTurnIds.some(
+              (turnId, index) => input.coveredTurnIds[index] !== turnId,
+            ))
+        ) {
+          invalidArgument(
+            "A compaction checkpoint cannot regress its previous history coverage.",
+          )
+        }
+        requireContinuousCompactionCoverage(session, input.coveredTurnIds)
         const compactionId = createCompactionId()
         const previousReplacement = session.compaction?.replacement
+        const inheritedWindow = input.replacement.replacesInheritedContext
+          ? session.inheritedContext
+          : undefined
         const windowId = createContextWindowId()
+        const previousWindowId =
+          previousReplacement?.windowId ?? inheritedWindow?.windowId
         const replacement: ContextWindowReplacement = {
           windowId,
-          firstWindowId: previousReplacement?.firstWindowId ?? windowId,
-          ...(previousReplacement === undefined
+          firstWindowId:
+            previousReplacement?.firstWindowId ??
+            inheritedWindow?.windowId ??
+            windowId,
+          ...(previousWindowId === undefined ? {} : { previousWindowId }),
+          windowNumber:
+            (previousReplacement?.windowNumber ??
+              (inheritedWindow === undefined ? 0 : 1)) + 1,
+          ...(input.replacement.replacesInheritedContext === undefined
             ? {}
-            : { previousWindowId: previousReplacement.windowId }),
-          windowNumber: (previousReplacement?.windowNumber ?? 0) + 1,
+            : {
+                replacesInheritedContext:
+                  input.replacement.replacesInheritedContext,
+              }),
           history: input.replacement.history,
           worldStateBaseline: input.replacement.worldStateBaseline,
         }
@@ -1054,6 +1095,33 @@ function requireActiveTurn(
     turnId,
     state: turn.state,
   })
+}
+
+function requireContinuousCompactionCoverage(
+  session: SessionProjection,
+  coveredTurnIds: readonly string[],
+): void {
+  const userInputIds = new Set(
+    session.inputs
+      .filter((input) => input.role === InputRole.User)
+      .map((input) => input.inputId),
+  )
+  const eligibleTurnIds = session.turns
+    .filter(
+      (turn) =>
+        turn.state !== TurnState.Started && userInputIds.has(turn.inputId),
+    )
+    .map((turn) => turn.turnId)
+  const expected = eligibleTurnIds.slice(0, coveredTurnIds.length)
+  if (
+    expected.length !== coveredTurnIds.length ||
+    expected.some((turnId, index) => turnId !== coveredTurnIds[index])
+  ) {
+    invalidArgument(
+      "Compaction coverage must be a continuous prefix of terminal user Turns.",
+      { coveredTurnIds, expectedTurnIds: expected },
+    )
+  }
 }
 
 function requireTool(
