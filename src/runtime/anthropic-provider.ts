@@ -98,7 +98,6 @@ async function* streamAnthropic(
         max_tokens: 8_192,
         system: toAnthropicSystem(request.system, explicitPromptCaching),
         messages: toAnthropicRequestMessages(
-          request.contextual.map((entry) => entry.message),
           request.messages,
           explicitPromptCaching,
         ),
@@ -185,24 +184,29 @@ export function toAnthropicMessages(
 ): MessageParam[] {
   const converted: MessageParam[] = []
   for (const message of messages) {
+    if (message.role === "developer") {
+      const content = message.content.map((block) => ({
+        type: "text" as const,
+        text: block.text,
+      }))
+      appendAnthropicUserContent(converted, content)
+      continue
+    }
     if (message.role === "user") {
-      converted.push({
-        role: "user",
-        content: [
-          ...message.content.map((block) => ({
-            type: "text" as const,
-            text: block.text,
-          })),
-          ...(message.images ?? []).map((block) => ({
-            type: "image" as const,
-            source: {
-              type: "base64" as const,
-              media_type: block.mediaType,
-              data: block.data,
-            },
-          })),
-        ],
-      })
+      appendAnthropicUserContent(converted, [
+        ...message.content.map((block) => ({
+          type: "text" as const,
+          text: block.text,
+        })),
+        ...(message.images ?? []).map((block) => ({
+          type: "image" as const,
+          source: {
+            type: "base64" as const,
+            media_type: block.mediaType,
+            data: block.data,
+          },
+        })),
+      ])
       continue
     }
     if (message.role === "assistant") {
@@ -224,20 +228,24 @@ export function toAnthropicMessages(
       content: message.content,
       ...(message.isError ? { is_error: true } : {}),
     }
-    const last = converted.at(-1)
-    if (last?.role === "user" && Array.isArray(last.content)) {
-      converted[converted.length - 1] = {
-        role: "user",
-        content: [...last.content, toolResult],
-      }
-    } else {
-      converted.push({
-        role: "user",
-        content: [toolResult],
-      })
-    }
+    appendAnthropicUserContent(converted, [toolResult])
   }
   return converted
+}
+
+function appendAnthropicUserContent(
+  messages: MessageParam[],
+  content: ContentBlockParam[],
+): void {
+  const last = messages.at(-1)
+  if (last?.role === "user" && Array.isArray(last.content)) {
+    messages[messages.length - 1] = {
+      role: "user",
+      content: [...last.content, ...content],
+    }
+    return
+  }
+  messages.push({ role: "user", content })
 }
 
 export function toAnthropicTools(
@@ -272,16 +280,12 @@ export function toAnthropicSystem(
 }
 
 function toAnthropicRequestMessages(
-  contextualMessages: readonly ModelMessage[],
   messages: readonly ModelMessage[],
   cacheBreakpoint: boolean,
 ): MessageParam[] {
-  const contextual = toAnthropicMessages(contextualMessages)
   const dynamic = toAnthropicMessages(messages)
-  if (cacheBreakpoint && !markLastModelContentBlockCacheable(dynamic)) {
-    markLastModelContentBlockCacheable(contextual)
-  }
-  return [...contextual, ...dynamic]
+  if (cacheBreakpoint) markLastModelContentBlockCacheable(dynamic)
+  return dynamic
 }
 
 function markLastModelContentBlockCacheable(messages: MessageParam[]): boolean {

@@ -1,10 +1,12 @@
 import type { TokenUsage } from "../kernel/index.ts"
 import { isAbortError } from "./errors.ts"
-import type { DroppedTurn } from "./model-context.ts"
 import {
   ModelStopReason,
   type ModelRequest,
+  type ModelMessage,
   type ModelResponse,
+  type ModelSystemSection,
+  type ModelTarget,
   type ModelTextBlock,
   type StreamFn,
 } from "./model.ts"
@@ -49,35 +51,28 @@ export type CompactionResult = {
 }
 
 export function buildCompactionRequest(input: {
-  readonly source: readonly DroppedTurn[]
-  readonly previousSummary?: string
-  readonly provider: string
-  readonly model: string
+  readonly source: readonly { readonly messages: readonly ModelMessage[] }[]
+  readonly target: ModelTarget
+  readonly baseInstructions: ModelSystemSection
   readonly cacheKey?: string
   readonly signal?: AbortSignal
 }): ModelRequest {
   return {
-    target: {
-      provider: input.provider,
-      model: input.model,
-      promptId: "compaction",
-    },
+    target: input.target,
     ...(input.cacheKey === undefined ? {} : { cacheKey: input.cacheKey }),
     system: [
+      input.baseInstructions,
       {
         id: "compaction.instructions",
         revision: "1",
         text: COMPACTION_SYSTEM_PROMPT,
       },
     ],
-    contextual: [],
     messages: [
       ...input.source.flatMap((group) => group.messages),
       {
         role: "user",
-        content: [
-          { type: "text", text: compactionInstruction(input.previousSummary) },
-        ],
+        content: [{ type: "text", text: compactionInstruction() }],
       },
     ],
     tools: [],
@@ -111,6 +106,11 @@ export async function runCompaction(input: {
   }
   if (terminal.stopReason === ModelStopReason.Error) {
     throw new Error(terminal.error?.message ?? "Model returned an error.")
+  }
+  if (terminal.stopReason === ModelStopReason.Length) {
+    throw new Error(
+      "Compaction was truncated at the model output limit; checkpoint was not recorded.",
+    )
   }
   if (
     terminal.stopReason === ModelStopReason.Aborted ||
@@ -149,12 +149,8 @@ export async function runCompaction(input: {
   }
 }
 
-function compactionInstruction(previousSummary: string | undefined): string {
-  const fold =
-    previousSummary === undefined
-      ? ""
-      : `\n\nPrevious checkpoint:\n${previousSummary}\n\nFold the previous checkpoint into the new one. The new checkpoint must be self-contained and supersede it.`
-  return `Write the checkpoint for the conversation above now.${fold}`
+function compactionInstruction(): string {
+  return "Write the checkpoint for the conversation above now. If the conversation contains an earlier checkpoint, fold it into the new one; the new checkpoint must be self-contained and supersede it."
 }
 
 function createAbortError(): Error {

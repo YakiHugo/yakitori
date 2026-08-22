@@ -11,6 +11,7 @@ import {
   InputState,
   PermissionBehavior,
   PermissionState,
+  SessionConfiguration,
   type SessionKernel,
   ToolState,
   TurnState,
@@ -25,6 +26,76 @@ afterEach(async () => {
 
 for (const implementation of ["memory", "jsonl"] as const) {
   describe(`session witness kernel (${implementation})`, () => {
+    it("seeds inherited model context before conversation history", async () => {
+      await withKernel(implementation, async ({ kernel }) => {
+        const session = await kernel.createSession()
+        const seeded = await kernel.seedContextWindow({
+          sessionId: session.sessionId,
+          sourceSessionId: "session_parent",
+          history: [
+            {
+              role: "user",
+              content: [{ type: "text", text: "inherited task" }],
+            },
+          ],
+          worldStateBaseline: { environment: { cwd: "/workspace" } },
+        })
+        const replayed = await kernel.replaySession({
+          sessionId: session.sessionId,
+        })
+
+        expect(seeded.windowId.startsWith("context_window_")).toBe(true)
+        expect(replayed.session?.inheritedContext).toMatchObject({
+          windowId: seeded.windowId,
+          sourceSessionId: "session_parent",
+          history: [
+            {
+              role: "user",
+              content: [{ type: "text", text: "inherited task" }],
+            },
+          ],
+        })
+        expect(replayed.session?.worldState?.state).toEqual({
+          environment: { cwd: "/workspace" },
+        })
+        await expect(
+          kernel.seedContextWindow({
+            sessionId: session.sessionId,
+            sourceSessionId: "session_other",
+            history: [],
+          }),
+        ).rejects.toThrow("already has model-visible history")
+      })
+    })
+
+    it("persists session configuration once and returns the winning snapshot", async () => {
+      await withKernel(implementation, async ({ kernel }) => {
+        const session = await kernel.createSession()
+        const first = SessionConfiguration.create({
+          promptCacheKey: "session-cache",
+          selection: { provider: "codex", model: "gpt-5.6-sol" },
+          workspaceRoot: "/workspace/first",
+          enabledTools: ["read_file"],
+          approvalPolicy: "never",
+        }).snapshot
+        const competing = { ...first, workspaceRoot: "/workspace/second" }
+
+        const created = await kernel.configureSession({
+          sessionId: session.sessionId,
+          configuration: first,
+        })
+        const retry = await kernel.configureSession({
+          sessionId: session.sessionId,
+          configuration: competing,
+        })
+        const read = await kernel.readSession({ sessionId: session.sessionId })
+
+        expect(created).toMatchObject({ created: true, configuration: first })
+        expect(retry).toEqual({ created: false, configuration: first })
+        expect(read.session?.configuration).toEqual(first)
+      })
+    })
+
     it("admits idempotently and folds promotion into turn.started", async () => {
       await withKernel(implementation, async ({ kernel }) => {
         const session = await kernel.createSession({ title: "Witness" })
@@ -253,6 +324,46 @@ for (const implementation of ["memory", "jsonl"] as const) {
       })
     })
 
+    it("persists the inherited execution contract after the history cut", async () => {
+      await withKernel(implementation, async ({ kernel, store }) => {
+        const source = await kernel.createSession()
+        const cut = await admit(kernel, source.sessionId, "first")
+        const configuration = SessionConfiguration.create({
+          promptCacheKey: "session-cache",
+          selection: { provider: "codex", model: "gpt-5.6-sol" },
+          workspaceRoot: "/workspace/fork-contract",
+          enabledTools: ["read_file", "apply_patch"],
+          approvalPolicy: "never",
+        }).snapshot
+        await kernel.configureSession({
+          sessionId: source.sessionId,
+          configuration,
+        })
+
+        const forked = await kernel.forkSession({
+          sessionId: source.sessionId,
+          atInputId: cut.inputId,
+          reason: "edit",
+        })
+
+        expect(forked.localEvents).toEqual([
+          expect.objectContaining({
+            seq: 1,
+            type: EventType.SessionCreated,
+          }),
+          expect.objectContaining({
+            seq: 2,
+            type: EventType.SessionConfigured,
+            data: { configuration },
+          }),
+        ])
+        expect(forked.session.configuration).toEqual(configuration)
+        expect(
+          (await store.readProjection(forked.sessionId))?.configuration,
+        ).toEqual(configuration)
+      })
+    })
+
     it("forks an exact event prefix into a new Session", async () => {
       await withKernel(implementation, async ({ kernel, store }) => {
         const source = await kernel.createSession({
@@ -275,9 +386,11 @@ for (const implementation of ["memory", "jsonl"] as const) {
         const compaction = await kernel.recordCompaction({
           sessionId: source.sessionId,
           turnId: firstTurn.turnId,
+          expectedCompactionId: null,
           throughSeq,
           coveredTurnIds: [],
           summary: "Shared compacted history.",
+          replacement: checkpointReplacement("Shared compacted history."),
         })
         await kernel.completeTurnWithAssistantOutput({
           sessionId: source.sessionId,
@@ -567,9 +680,11 @@ for (const implementation of ["memory", "jsonl"] as const) {
         if (throughSeq === undefined) throw new Error("missing session")
         const recorded = await kernel.recordCompaction({
           ...active,
+          expectedCompactionId: null,
           throughSeq,
-          coveredTurnIds: ["turn_earlier"],
+          coveredTurnIds: [],
           summary: "Goal: ship the feature.",
+          replacement: checkpointReplacement("Goal: ship the feature."),
           usage: { inputTokens: 12, outputTokens: 4 },
         })
 
@@ -580,7 +695,7 @@ for (const implementation of ["memory", "jsonl"] as const) {
             compactionId: recorded.compactionId,
             turnId: active.turnId,
             throughSeq,
-            coveredTurnIds: ["turn_earlier"],
+            coveredTurnIds: [],
             summary: "Goal: ship the feature.",
             usage: { inputTokens: 12, outputTokens: 4 },
           },
@@ -591,9 +706,57 @@ for (const implementation of ["memory", "jsonl"] as const) {
         expect(replay.session?.compaction).toMatchObject({
           compactionId: recorded.compactionId,
           throughSeq,
-          coveredTurnIds: ["turn_earlier"],
+          coveredTurnIds: [],
           summary: "Goal: ship the feature.",
+          replacement: {
+            windowNumber: 1,
+            history: checkpointReplacement("Goal: ship the feature.").history,
+            worldStateBaseline: {},
+          },
         })
+        const window = replay.session?.compaction?.replacement
+        expect(window?.windowId.startsWith("context_window_")).toBe(true)
+        expect(window?.firstWindowId).toBe(window?.windowId)
+      })
+    })
+
+    it("rejects stale compaction snapshots and invalid coverage", async () => {
+      await withKernel(implementation, async ({ kernel }) => {
+        const active = await activeTurn(kernel)
+        const read = await kernel.readSession({ sessionId: active.sessionId })
+        const seq = read.session?.seq
+        if (seq === undefined) throw new Error("missing session")
+
+        await expect(
+          kernel.recordCompaction({
+            ...active,
+            expectedCompactionId: "compaction_stale",
+            throughSeq: seq,
+            coveredTurnIds: [],
+            summary: "stale",
+            replacement: checkpointReplacement("stale"),
+          }),
+        ).rejects.toThrow("checkpoint changed")
+        await expect(
+          kernel.recordCompaction({
+            ...active,
+            expectedCompactionId: null,
+            throughSeq: seq - 1,
+            coveredTurnIds: [],
+            summary: "stale history",
+            replacement: checkpointReplacement("stale history"),
+          }),
+        ).rejects.toThrow("history changed")
+        await expect(
+          kernel.recordCompaction({
+            ...active,
+            expectedCompactionId: null,
+            throughSeq: seq,
+            coveredTurnIds: ["turn_missing"],
+            summary: "bad coverage",
+            replacement: checkpointReplacement("bad coverage"),
+          }),
+        ).rejects.toThrow("continuous prefix")
       })
     })
 
@@ -614,9 +777,11 @@ for (const implementation of ["memory", "jsonl"] as const) {
           kernel.recordCompaction({
             sessionId: session.sessionId,
             turnId: turn.turnId,
+            expectedCompactionId: null,
             throughSeq: 3,
             coveredTurnIds: [turn.turnId],
             summary: "too late",
+            replacement: checkpointReplacement("too late"),
           }),
         ).rejects.toThrow("is not active")
       })
@@ -985,6 +1150,18 @@ function admit(kernel: SessionKernel, sessionId: string, text: string) {
     requestId: `request:${text}`,
     content: { kind: "text", text },
   })
+}
+
+function checkpointReplacement(summary: string) {
+  return {
+    history: [
+      {
+        role: "user" as const,
+        content: [{ type: "text" as const, text: summary }],
+      },
+    ],
+    worldStateBaseline: {},
+  }
 }
 
 async function withKernel(

@@ -18,9 +18,15 @@ import {
   EventType,
   InputRole,
   ModelStopReason,
+  SessionConfiguration,
   YakitoriErrorCode,
   type EventEnvelope,
+  type ContextWindowReplacement,
   type LiveSessionEvent,
+  type ModelContentBlock,
+  type ModelRequest,
+  type ModelStopReason as ModelStopReasonType,
+  type StreamFn,
 } from "../../src/index.ts"
 
 describe("session runner", () => {
@@ -53,7 +59,9 @@ describe("session runner", () => {
       expect(replayed.events.map((event) => event.type)).toEqual([
         EventType.SessionCreated,
         EventType.InputAdmitted,
+        EventType.SessionConfigured,
         EventType.TurnStarted,
+        EventType.WorldStateUpdated,
         EventType.AssistantMessage,
         EventType.TurnCompleted,
       ])
@@ -464,6 +472,34 @@ describe("session runner", () => {
 
       expect(provider.requests[1]?.messages).toEqual([
         {
+          role: "developer",
+          content: [
+            {
+              type: "text",
+              text: expect.stringContaining("<multi_agent_context>"),
+            },
+          ],
+          context: {
+            type: "world_state",
+            sectionId: "multi_agent",
+            revision: expect.any(String),
+          },
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: expect.stringContaining("<environment>"),
+            },
+          ],
+          context: {
+            type: "world_state",
+            sectionId: "environment",
+            revision: expect.any(String),
+          },
+        },
+        {
           role: "user",
           content: [{ type: "text", text: "hello" }],
         },
@@ -479,7 +515,67 @@ describe("session runner", () => {
     })
   })
 
-  it("adds an environment block to the system prompt", async () => {
+  it("keeps persisted base instructions and emits one developer model-switch fragment", async () => {
+    await withRuntime(async (runtime) => {
+      const provider = createFauxProvider([
+        { content: [{ type: "text", text: "first reply" }] },
+        { content: [{ type: "text", text: "second reply" }] },
+        { content: [{ type: "text", text: "third reply" }] },
+      ])
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+        baseInstructions: "Use the persisted custom base instructions.",
+      })
+      const session = await createAttributedSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "first" },
+      })
+      await runner.wake(session.sessionId)
+      for (const text of ["switch", "continue"]) {
+        await runtime.kernel.admitInput({
+          sessionId: session.sessionId,
+          content: { kind: "text", text },
+          modelSelection: {
+            provider: "anthropic",
+            model: "claude-sonnet-4-6",
+          },
+        })
+        await runner.wake(session.sessionId)
+      }
+
+      expect(provider.requests[0]?.system).toEqual([
+        expect.objectContaining({
+          text: "Use the persisted custom base instructions.",
+        }),
+      ])
+      expect(provider.requests[1]?.system).toEqual(provider.requests[0]?.system)
+      expect(provider.requests[2]?.system).toEqual(provider.requests[0]?.system)
+      const replayed = await runtime.kernel.replaySession({
+        sessionId: session.sessionId,
+      })
+      expect(replayed.session?.configuration?.baseInstructions).toMatchObject({
+        text: "Use the persisted custom base instructions.",
+        provenance: { type: "custom" },
+      })
+      const modelFragments = replayed.session?.worldStateUpdates.flatMap(
+        (update) =>
+          update.fragments.filter((fragment) => fragment.id === "model"),
+      )
+      expect(modelFragments).toHaveLength(1)
+      expect(modelFragments?.[0]).toMatchObject({
+        role: "developer",
+        text: expect.stringContaining("<model_switch>"),
+      })
+      expect(JSON.stringify(provider.requests[1]?.messages)).toContain(
+        "<model_switch>",
+      )
+    })
+  })
+
+  it("keeps only base instructions in system and records world state", async () => {
     await withRuntime(async (runtime) => {
       await writeFile(join(runtime.rootDir, "AGENTS.md"), "Use focused tests.")
       const provider = createFauxProvider([
@@ -501,25 +597,18 @@ describe("session runner", () => {
       expect(system?.[0]?.text).toContain(
         "You are Yakitori, a coding agent working with the user in their local workspace.",
       )
-      expect(system?.[1]?.text).toBe(
-        "<agent_instructions>\nAnswer briefly.\n</agent_instructions>",
-      )
-      expect(system?.[2]?.text).toContain("<environment>")
-      expect(system?.[2]?.text).toContain(
-        `Working directory: ${runtime.rootDir}`,
-      )
       expect(system?.map((section) => section.id)).toEqual([
-        "model.instructions",
-        "agent.instructions",
-        "environment",
+        "base.instructions",
       ])
-      expect(
-        provider.requests[0]?.contextual[0]?.message.content[0]?.text,
-      ).toContain("Use focused tests.")
+      const visible = JSON.stringify(provider.requests[0]?.messages)
+      expect(visible).toContain("Use focused tests.")
+      expect(visible).toContain("<environment>")
+      expect(visible).toContain(`Working directory: ${runtime.rootDir}`)
+      expect(visible).not.toContain("Answer briefly.")
     })
   })
 
-  it("omits the instructions separator when Mate instructions are empty", async () => {
+  it("does not include Mate instructions in model context", async () => {
     await withRuntime(async (runtime) => {
       const provider = createFauxProvider([
         { content: [{ type: "text", text: "ok" }] },
@@ -549,12 +638,87 @@ describe("session runner", () => {
       const system = provider.requests[0]?.system
       expect(system?.[0]?.text.startsWith("You are Yakitori")).toBe(true)
       expect(system?.map((section) => section.id)).toEqual([
-        "model.instructions",
-        "environment",
+        "base.instructions",
       ])
-      expect(system?.[1]?.text).toContain(
+      expect(JSON.stringify(provider.requests[0]?.messages)).toContain(
         `Working directory: ${runtime.rootDir}`,
       )
+    })
+  })
+
+  it("captures an AGENTS change as an anchored world-state diff before the next step", async () => {
+    await withRuntime(async (runtime) => {
+      const provider = createFauxProvider([
+        {
+          content: [
+            {
+              type: "tool_call",
+              id: "call_write_agents",
+              name: "write_file",
+              input: {
+                path: "AGENTS.md",
+                content: "Run the focused test before finishing.",
+              },
+            },
+          ],
+          stopReason: ModelStopReason.ToolUse,
+        },
+        { content: [{ type: "text", text: "done" }] },
+      ])
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+        now: () => new Date(2026, 7, 21),
+      })
+      const session = await createAttributedSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "add project instructions" },
+      })
+
+      await runner.wake(session.sessionId)
+
+      const replayed = await runtime.kernel.replaySession({
+        sessionId: session.sessionId,
+      })
+      const updates = replayed.events.flatMap((event) =>
+        event.type === EventType.WorldStateUpdated ? [event] : [],
+      )
+      expect(updates).toHaveLength(2)
+      expect(updates[0]?.data.full).toBe(true)
+      expect(updates[1]?.data).toMatchObject({
+        full: false,
+        afterItemId: replayed.session?.tools[0]?.resultItemId,
+        state: {
+          "project.instructions": {
+            directory: expect.any(String),
+            text: expect.stringContaining(
+              "Run the focused test before finishing.",
+            ),
+          },
+        },
+        fragments: [
+          {
+            id: "project.instructions",
+            text: expect.stringContaining(
+              "Run the focused test before finishing.",
+            ),
+          },
+        ],
+      })
+      expect(JSON.stringify(provider.requests[1]?.messages)).toContain(
+        "Run the focused test before finishing.",
+      )
+      const diffIndex = provider.requests[1]?.messages.findIndex(
+        (message) =>
+          message.role === "user" &&
+          message.context?.sectionId === "project.instructions",
+      )
+      const toolResultIndex = provider.requests[1]?.messages.findIndex(
+        (message) => message.role === "tool",
+      )
+      expect(diffIndex).toBeGreaterThan(toolResultIndex ?? -1)
     })
   })
 
@@ -806,9 +970,32 @@ describe("session runner", () => {
         kernel: runtime.kernel,
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
-        limits: createRuntimeLimits({ modelVisibleMessageBlocks: 3 }),
+        limits: createRuntimeLimits({
+          modelVisibleMessageBlocks: 100,
+          modelVisibleContextBytes: 100_000,
+          compactionTriggerRatio: 0.000_01,
+          compactionRetainRatio: 0,
+          compactionSummaryBytes: 1,
+        }),
       })
       const session = await createAttributedSession(runtime)
+      await runtime.kernel.configureSession({
+        sessionId: session.sessionId,
+        configuration: SessionConfiguration.create({
+          promptCacheKey: "session-cache",
+          selection: { provider: "faux", model: "scripted" },
+          workspaceRoot: runtime.rootDir,
+          enabledTools: ["read_file"],
+          approvalPolicy: "never",
+          limits: createRuntimeLimits({
+            modelVisibleMessageBlocks: 100,
+            modelVisibleContextBytes: 100_000,
+            compactionTriggerRatio: 0.000_01,
+            compactionRetainRatio: 0,
+            compactionSummaryBytes: 16 * 1024,
+          }),
+        }).snapshot,
+      })
       for (const question of [
         "first question",
         "second question",
@@ -858,12 +1045,27 @@ describe("session runner", () => {
         secondTurn?.turnId,
       ])
       expect(second.data.summary).toBe("Goal: checkpoint two.")
+      expect(provider.requests.map((request) => request.cacheKey)).toEqual(
+        provider.requests.map(() => "session-cache"),
+      )
+      const firstReplacement = first.data.replacement as
+        | ContextWindowReplacement
+        | undefined
+      const secondReplacement = second.data.replacement as
+        | ContextWindowReplacement
+        | undefined
+      expect(secondReplacement?.previousWindowId).toBe(
+        firstReplacement?.windowId,
+      )
+      expect(secondReplacement?.firstWindowId).toBe(firstReplacement?.windowId)
+      expect(secondReplacement?.windowNumber).toBe(2)
 
-      // The summarization request flattens the dropped turns, carries no
-      // tools, and folds the previous checkpoint into its instruction.
+      // The summarization request flattens the replacement prefix, carries no
+      // tools, and includes the previous checkpoint as ordinary source
+      // history so the model sees exactly what the replacement supersedes.
       const firstSummary = provider.requests[2]
       expect(firstSummary?.tools).toEqual([])
-      expect(firstSummary?.system[0]?.text).toContain("checkpoint")
+      expect(firstSummary?.system.at(-1)?.text).toContain("checkpoint")
       const firstSummaryText = JSON.stringify(firstSummary?.messages)
       expect(firstSummaryText).toContain("first question")
       expect(firstSummaryText).toContain("first answer")
@@ -872,24 +1074,61 @@ describe("session runner", () => {
       if (secondInstruction?.role !== "user") {
         throw new Error("missing summarization instruction")
       }
-      expect(secondInstruction.content[0]?.text).toContain(
-        "Previous checkpoint:\nGoal: checkpoint one.",
+      expect(JSON.stringify(secondSummary?.messages)).toContain(
+        "Goal: checkpoint one.",
       )
+      expect(secondInstruction.content[0]?.text).toContain("supersede")
 
-      // The real request after compaction starts with the checkpoint and
-      // excludes covered turns.
+      // The real request after compaction uses the exact durable replacement
+      // prefix and excludes covered turns.
       const realRequest = provider.requests[6]
-      const realFirst = realRequest?.messages[0]
-      if (realFirst?.role !== "user") throw new Error("missing checkpoint")
-      expect(realFirst.content[0]?.text).toContain("<context_compacted>")
-      expect(realFirst.content[0]?.text).toContain("Goal: checkpoint two.")
+      const checkpointMessage = realRequest?.messages.find(
+        (message) =>
+          message.role === "user" &&
+          message.content[0]?.text.includes("<context_compacted>"),
+      )
+      if (checkpointMessage?.role !== "user") {
+        throw new Error("missing checkpoint")
+      }
+      expect(checkpointMessage.content[0]?.text).toContain(
+        "Goal: checkpoint two.",
+      )
       const realText = JSON.stringify(realRequest?.messages)
+      expect(realText).toContain("<environment>")
       expect(realText).not.toContain("first question")
       expect(realText).not.toContain("second question")
       expect(realRequest?.messages.at(-1)).toEqual({
         role: "user",
         content: [{ type: "text", text: "third question" }],
       })
+      for (const checkpoint of compacted) {
+        if (checkpoint.type !== EventType.ContextCompacted) {
+          throw new Error("expected compaction fact")
+        }
+        const replacement = checkpoint.data.replacement as
+          | ContextWindowReplacement
+          | undefined
+        expect(replacement?.history).toContainEqual(
+          expect.objectContaining({
+            role: "user",
+            content: [
+              expect.objectContaining({
+                text: expect.stringContaining("<context_compacted>"),
+              }),
+            ],
+          }),
+        )
+        expect(replacement?.worldStateBaseline).toBeDefined()
+        expect(
+          replayed.events.find(
+            (event) =>
+              event.type === EventType.WorldStateUpdated &&
+              event.data.turnId === checkpoint.data.turnId &&
+              event.data.full &&
+              event.seq > checkpoint.seq,
+          ),
+        ).toBeUndefined()
+      }
 
       // Compaction usage is folded into turn.completed usage.
       expect(secondTurn?.usage).toEqual({
@@ -939,7 +1178,10 @@ describe("session runner", () => {
         stream: provider.stream,
         limits: createRuntimeLimits({
           modelCallsPerTurn: 2,
-          modelVisibleMessageBlocks: 3,
+          modelVisibleMessageBlocks: 100,
+          modelVisibleContextBytes: 100_000,
+          compactionTriggerRatio: 0.000_01,
+          compactionRetainRatio: 0,
         }),
       })
       const session = await createAttributedSession(runtime)
@@ -963,9 +1205,7 @@ describe("session runner", () => {
       expect(read.session?.failedTurns).toEqual([])
       expect(provider.callCount).toBe(5)
 
-      // The second Turn's final call ran without the checkpoint, which did
-      // not fit next to the active Turn; that last-resort drop is recorded
-      // in the assistant message metadata.
+      // The checkpoint remains visible across both real calls in the Turn.
       const replayed = await runtime.kernel.replaySession({
         sessionId: session.sessionId,
       })
@@ -976,12 +1216,12 @@ describe("session runner", () => {
       )
       expect(assistantMetadata).toEqual([
         expect.not.objectContaining({ droppedCompactionCheckpoint: true }),
-        expect.objectContaining({ droppedCompactionCheckpoint: true }),
+        expect.not.objectContaining({ droppedCompactionCheckpoint: true }),
       ])
     })
   })
 
-  it("falls back to dropped history when summarization fails", async () => {
+  it("fails the Turn instead of sending silently dropped history", async () => {
     await withRuntime(async (runtime) => {
       const provider = createFauxProvider([
         { content: [{ type: "text", text: "first answer" }] },
@@ -992,7 +1232,7 @@ describe("session runner", () => {
         kernel: runtime.kernel,
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
-        limits: createRuntimeLimits({ modelVisibleMessageBlocks: 2 }),
+        limits: createRuntimeLimits({ modelVisibleMessageBlocks: 3 }),
       })
       const session = await createAttributedSession(runtime)
       await runtime.kernel.admitInput({
@@ -1020,14 +1260,13 @@ describe("session runner", () => {
           (event) => event.type === EventType.ContextCompacted,
         ),
       ).toBe(false)
-      expect(replayed.session?.completedTurns).toHaveLength(2)
-      // The turn proceeds with the uncovered history silently dropped.
-      expect(provider.requests[2]?.messages).toEqual([
-        {
-          role: "user",
-          content: [{ type: "text", text: "second question" }],
-        },
-      ])
+      expect(replayed.session?.completedTurns).toHaveLength(1)
+      expect(replayed.session?.failedTurns).toHaveLength(1)
+      expect(replayed.session?.failedTurns[0]?.error).toMatchObject({
+        code: YakitoriErrorCode.InvalidState,
+        details: { code: "context_compaction_required" },
+      })
+      expect(provider.requests).toHaveLength(2)
     })
   })
 
@@ -1042,7 +1281,7 @@ describe("session runner", () => {
         kernel: runtime.kernel,
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
-        limits: createRuntimeLimits({ modelVisibleMessageBlocks: 2 }),
+        limits: createRuntimeLimits({ modelVisibleMessageBlocks: 3 }),
       })
       const session = await createAttributedSession(runtime)
       await runtime.kernel.admitInput({
@@ -1091,48 +1330,54 @@ describe("session runner", () => {
   it("retries an over-long summary request with a reduced source", async () => {
     await withRuntime(async (runtime) => {
       const provider = createFauxProvider([
-        { content: [{ type: "text", text: "first answer" }] },
-        { content: [{ type: "text", text: "second answer" }] },
-        { content: [{ type: "text", text: "Goal: checkpoint one." }] },
-        { content: [{ type: "text", text: "third answer" }] },
+        {
+          content: [{ type: "text", text: "first answer".padEnd(1_000, "a") }],
+        },
+        {
+          content: [{ type: "text", text: "second answer".padEnd(1_000, "b") }],
+        },
         {
           throwDuring: new Error(
             "prompt is too long: 250000 tokens > 200000 maximum",
           ),
         },
-        { content: [{ type: "text", text: "Goal: checkpoint two." }] },
-        { content: [{ type: "text", text: "fourth answer" }] },
+        { content: [{ type: "text", text: "Goal: checkpoint." }] },
+        { content: [{ type: "text", text: "third answer" }] },
       ])
       const runner = createSessionRunner({
         kernel: runtime.kernel,
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
-        limits: createRuntimeLimits({ modelVisibleMessageBlocks: 3 }),
+        limits: createRuntimeLimits({
+          modelVisibleMessageBlocks: 100,
+          modelVisibleContextBytes: 10_000,
+          compactionTriggerRatio: 0.5,
+          compactionRetainRatio: 0,
+        }),
       })
       const session = await createAttributedSession(runtime)
       for (const question of [
         "first question",
         "second question",
         "third question",
-        "fourth question",
       ]) {
         await runtime.kernel.admitInput({
           sessionId: session.sessionId,
-          content: { kind: "text", text: question },
+          content: { kind: "text", text: question.padEnd(1_000, "q") },
         })
         await runner.wake(session.sessionId)
       }
 
-      expect(provider.callCount).toBe(7)
-      // The fourth turn's first summary request carries both uncovered
-      // dropped turns; the retry drops the oldest half and only summarizes
-      // the third turn.
-      const firstAttempt = JSON.stringify(provider.requests[4]?.messages)
+      expect(provider.callCount).toBe(5)
+      // The third turn's first summary request carries both uncovered
+      // dropped turns; the retry keeps the oldest half so checkpoint coverage
+      // remains a continuous historical prefix.
+      const firstAttempt = JSON.stringify(provider.requests[2]?.messages)
+      expect(firstAttempt).toContain("first question")
       expect(firstAttempt).toContain("second question")
-      expect(firstAttempt).toContain("third question")
-      const retryAttempt = JSON.stringify(provider.requests[5]?.messages)
+      const retryAttempt = JSON.stringify(provider.requests[3]?.messages)
+      expect(retryAttempt).toContain("first question")
       expect(retryAttempt).not.toContain("second question")
-      expect(retryAttempt).toContain("third question")
 
       const replayed = await runtime.kernel.replaySession({
         sessionId: session.sessionId,
@@ -1140,16 +1385,14 @@ describe("session runner", () => {
       const compacted = replayed.events.filter(
         (event) => event.type === EventType.ContextCompacted,
       )
-      expect(compacted).toHaveLength(2)
+      expect(compacted).toHaveLength(1)
       const turns = replayed.session?.turns ?? []
-      // Coverage follows the reduced source: the second checkpoint folds in
-      // only the third turn (the first was covered by the earlier
-      // checkpoint); the second turn stays uncovered dropped history.
-      expect(compacted[1]?.data).toMatchObject({
-        coveredTurnIds: [turns[0]?.turnId, turns[2]?.turnId],
-        summary: "Goal: checkpoint two.",
+      // Coverage follows the reduced source and leaves the next Turn verbatim.
+      expect(compacted[0]?.data).toMatchObject({
+        coveredTurnIds: [turns[0]?.turnId],
+        summary: "Goal: checkpoint.",
       })
-      expect(replayed.session?.completedTurns).toHaveLength(4)
+      expect(replayed.session?.completedTurns).toHaveLength(3)
     })
   })
 
@@ -1164,7 +1407,12 @@ describe("session runner", () => {
         kernel: runtime.kernel,
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
-        limits: createRuntimeLimits({ modelVisibleMessageBlocks: 2 }),
+        limits: createRuntimeLimits({
+          modelVisibleMessageBlocks: 100,
+          modelVisibleContextBytes: 100_000,
+          compactionTriggerRatio: 0.000_01,
+          compactionRetainRatio: 0,
+        }),
       })
       const session = await createAttributedSession(runtime)
       await runtime.kernel.admitInput({
@@ -1213,7 +1461,12 @@ describe("session runner", () => {
         kernel: runtime.kernel,
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
-        limits: createRuntimeLimits({ modelVisibleMessageBlocks: 2 }),
+        limits: createRuntimeLimits({
+          modelVisibleMessageBlocks: 100,
+          modelVisibleContextBytes: 100_000,
+          compactionTriggerRatio: 0.000_01,
+          compactionRetainRatio: 0,
+        }),
       })
       const session = await createAttributedSession(runtime)
       const errors = vi.spyOn(console, "error").mockImplementation(() => {})
@@ -1340,341 +1593,349 @@ describe("session runner", () => {
   })
 })
 
-describe("subagent task tool", () => {
-  it("runs a task call as a child session and returns its final text", async () => {
+describe("multi-agent runtime", () => {
+  it("composes synchronous delegation from spawn_agent and wait_agent", async () => {
     await withRuntime(async (runtime) => {
-      const provider = createFauxProvider([
-        {
-          content: [
-            {
-              type: "tool_call",
-              id: "call_task",
-              name: "task",
-              input: { description: "survey repo", prompt: "report findings" },
-            },
-          ],
-          stopReason: ModelStopReason.ToolUse,
-        },
-        { content: [{ type: "text", text: "findings text" }] },
-        { content: [{ type: "text", text: "done" }] },
-      ])
-      const runner = createSessionRunner({
-        kernel: runtime.kernel,
-        mateKernel: runtime.mateKernel,
-        stream: provider.stream,
-        durableHub: runtime.durableHub,
-      })
-      const session = await createAttributedSession(runtime)
-      await runtime.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: { kind: "text", text: "delegate please" },
-      })
-      await runner.wake(session.sessionId)
-
-      expect(provider.callCount).toBe(3)
-      // The parent sees task; the child (call 2) runs the subagent turn.
-      expect(provider.requests[0]?.tools.map((tool) => tool.name)).toContain(
-        "task",
-      )
-      expect(provider.requests[1]?.messages.at(-1)).toEqual({
-        role: "user",
-        content: [{ type: "text", text: "report findings" }],
-      })
-
-      const parent = await runtime.kernel.readSession({
-        sessionId: session.sessionId,
-      })
-      expect(parent.session?.completedTurns).toHaveLength(1)
-      const taskCall = parent.session?.tools.find(
-        (tool) => tool.name === "task",
-      )
-      expect(taskCall?.state).toBe("completed")
-      const taskResult = parent.session?.items.find(
-        (item) => item.kind === "tool_result",
-      )
-      expect(taskResult?.content).toEqual({
-        kind: "text",
-        text: "findings text",
-      })
-
-      const childSessionId = (taskCall?.output as { sessionId: string })
-        .sessionId
-      const child = await runtime.kernel.readSession({
-        sessionId: childSessionId,
-      })
-      expect(child.session?.parentSessionId).toBe(session.sessionId)
-      expect(child.session?.title).toBe("survey repo")
-      expect(child.session?.metadata).toEqual({
-        subagent: "general",
-        subagentDescription: "survey repo",
-      })
-      expect(child.session?.completedTurns).toHaveLength(1)
-    })
-  })
-
-  it("narrows an explore subagent to the read-only tools", async () => {
-    await withRuntime(async (runtime) => {
-      const provider = createFauxProvider([
-        {
-          content: [
-            {
-              type: "tool_call",
-              id: "call_task",
-              name: "task",
-              input: {
-                description: "look around",
-                prompt: "find the entrypoint",
-                agent: "explore",
-              },
-            },
-          ],
-          stopReason: ModelStopReason.ToolUse,
-        },
-        { content: [{ type: "text", text: "src/index.ts" }] },
-        { content: [{ type: "text", text: "done" }] },
-      ])
-      const runner = createSessionRunner({
-        kernel: runtime.kernel,
-        mateKernel: runtime.mateKernel,
-        stream: provider.stream,
-      })
-      const session = await createAttributedSession(runtime)
-      await runtime.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: { kind: "text", text: "explore" },
-      })
-      await runner.wake(session.sessionId)
-
-      expect(provider.requests[1]?.tools.map((tool) => tool.name)).toEqual([
-        "read_file",
-        "grep",
-        "glob",
-        "web_fetch",
-        "web_search",
-      ])
-    })
-  })
-
-  it("surfaces a failed subagent turn as a task tool error and lets the parent continue", async () => {
-    await withRuntime(async (runtime) => {
-      const provider = createFauxProvider([
-        {
-          content: [
-            {
-              type: "tool_call",
-              id: "call_task",
-              name: "task",
-              input: { description: "doomed", prompt: "try anyway" },
-            },
-          ],
-          stopReason: ModelStopReason.ToolUse,
-        },
-        {
-          stopReason: ModelStopReason.Error,
-          error: { code: "model_error", message: "provider exploded" },
-        },
-        { content: [{ type: "text", text: "recovered" }] },
-      ])
-      const runner = createSessionRunner({
-        kernel: runtime.kernel,
-        mateKernel: runtime.mateKernel,
-        stream: provider.stream,
-      })
-      const session = await createAttributedSession(runtime)
-      await runtime.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: { kind: "text", text: "delegate" },
-      })
-      await runner.wake(session.sessionId)
-
-      expect(provider.callCount).toBe(3)
-      const parent = await runtime.kernel.readSession({
-        sessionId: session.sessionId,
-      })
-      const taskCall = parent.session?.tools.find(
-        (tool) => tool.name === "task",
-      )
-      expect(taskCall?.state).toBe("failed")
-      expect(taskCall?.error?.code).toBe("subagent_failed")
-      const taskResult = parent.session?.items.find(
-        (item) => item.kind === "tool_result",
-      )
-      expect(taskResult?.status).toBe("failed")
-      expect(taskResult?.content).toEqual({
-        kind: "text",
-        text: expect.stringContaining("provider exploded"),
-      })
-      // The parent decides how to proceed and completes its own turn.
-      expect(parent.session?.completedTurns).toHaveLength(1)
-      expect(parent.session?.items.at(-1)?.content).toEqual({
-        kind: "text",
-        text: "recovered",
-      })
-
-      const childSessionId = (taskCall?.output as { sessionId: string })
-        .sessionId
-      const child = await runtime.kernel.readSession({
-        sessionId: childSessionId,
-      })
-      expect(child.session?.failedTurns).toHaveLength(1)
-    })
-  })
-
-  it("never offers task to a subagent session (depth cap 1)", async () => {
-    await withRuntime(async (runtime) => {
-      const provider = createFauxProvider([
-        { content: [{ type: "text", text: "child done" }] },
-      ])
-      const runner = createSessionRunner({
-        kernel: runtime.kernel,
-        mateKernel: runtime.mateKernel,
-        stream: provider.stream,
-      })
-      const mate = await runtime.mateKernel.createMate({
-        instructions: "Answer briefly.",
-        name: "RunnerMate",
-        role: "Assistant",
-      })
-      const parent = await runtime.kernel.createSession({
-        title: "parent",
-        workingDirectory: runtime.rootDir,
-        mateId: mate.mate.id,
-        mateRevisionId: mate.mate.currentRevision.id,
-      })
-      const child = await runtime.kernel.createSession({
-        parentSessionId: parent.sessionId,
-        workingDirectory: runtime.rootDir,
-        mateId: mate.mate.id,
-        mateRevisionId: mate.mate.currentRevision.id,
-        metadata: { subagent: "general", subagentDescription: "child" },
-      })
-      await runtime.kernel.admitInput({
-        sessionId: child.sessionId,
-        content: { kind: "text", text: "work" },
-      })
-      await runner.wake(child.sessionId)
-
-      const toolNames = provider.requests[0]?.tools.map((tool) => tool.name)
-      expect(toolNames).not.toContain("task")
-      // A general subagent keeps the rest of the tool set.
-      expect(toolNames).toContain("edit_file")
-      expect(toolNames).toContain("run_command")
-      const childRead = await runtime.kernel.readSession({
-        sessionId: child.sessionId,
-      })
-      expect(childRead.session?.completedTurns).toHaveLength(1)
-    })
-  })
-
-  it("runs the subagent on the parent turn's model", async () => {
-    await withRuntime(async (runtime) => {
-      const provider = createFauxProvider([
-        {
-          content: [
-            {
-              type: "tool_call",
-              id: "call_task",
-              name: "task",
-              input: { description: "survey", prompt: "report" },
-            },
-          ],
-          stopReason: ModelStopReason.ToolUse,
-        },
-        { content: [{ type: "text", text: "findings" }] },
-        { content: [{ type: "text", text: "done" }] },
-      ])
-      const runner = createSessionRunner({
-        kernel: runtime.kernel,
-        mateKernel: runtime.mateKernel,
-        stream: provider.stream,
-      })
-      const session = await createAttributedSession(runtime)
-      await runtime.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: { kind: "text", text: "delegate" },
-        modelSelection: { provider: "faux", model: "parent-special" },
-      })
-      await runner.wake(session.sessionId)
-
-      // Parent turn, subagent turn, parent continuation — all one model.
-      expect(provider.requests.map((request) => request.target)).toEqual([
-        expect.objectContaining({ provider: "faux", model: "parent-special" }),
-        expect.objectContaining({ provider: "faux", model: "parent-special" }),
-        expect.objectContaining({ provider: "faux", model: "parent-special" }),
-      ])
-    })
-  })
-
-  it("cancels a running subagent turn when the parent turn is interrupted", async () => {
-    await withRuntime(async (runtime) => {
-      const provider = createFauxProvider([
-        {
-          content: [
-            {
-              type: "tool_call",
-              id: "call_task",
-              name: "task",
-              input: { description: "long task", prompt: "work forever" },
-            },
-          ],
-          stopReason: ModelStopReason.ToolUse,
-        },
-        // The subagent turn hangs until its lane abort fires.
-        { waitForAbort: true },
-      ])
-      const runner = createSessionRunner({
-        kernel: runtime.kernel,
-        mateKernel: runtime.mateKernel,
-        stream: provider.stream,
-      })
-      const session = await createAttributedSession(runtime)
-      await runtime.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: { kind: "text", text: "delegate" },
-      })
-      const wake = runner.wake(session.sessionId)
-      // Wait until the subagent turn is running, then interrupt the parent.
-      for (;;) {
-        const read = await runtime.kernel.readSession({
-          sessionId: session.sessionId,
-        })
-        if (read.session?.activeTurn && provider.callCount === 2) {
-          await runner.interrupt({
-            sessionId: session.sessionId,
-            turnId: read.session.activeTurn.turnId,
-            reason: "user_cancel",
-          })
-          break
+      const requests: ModelRequest[] = []
+      const stream: StreamFn = async function* (request) {
+        requests.push(request)
+        const serialized = JSON.stringify(request.messages)
+        const toolResults = request.messages.filter(
+          (message) => message.role === "tool",
+        )
+        const waitCompleted = toolResults.some((message) =>
+          message.content.includes('"timedOut":false'),
+        )
+        if (serialized.includes("You are agent /root/survey,")) {
+          await new Promise((resolve) => setTimeout(resolve, 20))
+          yield response([{ type: "text", text: "child findings" }])
+          return
         }
-        await new Promise((resolve) => setTimeout(resolve, 1))
+        if (toolResults.length === 0) {
+          yield response(
+            [
+              {
+                type: "tool_call",
+                id: "spawn_survey",
+                name: "spawn_agent",
+                input: {
+                  task_name: "survey",
+                  message: "inspect the repository",
+                  fork_turns: "all",
+                },
+              },
+            ],
+            ModelStopReason.ToolUse,
+          )
+          return
+        }
+        if (!waitCompleted) {
+          yield response(
+            [
+              {
+                type: "tool_call",
+                id: "wait_survey",
+                name: "wait_agent",
+                input: { timeout_ms: 5_000 },
+              },
+            ],
+            ModelStopReason.ToolUse,
+          )
+          return
+        }
+        yield response([{ type: "text", text: "parent complete" }])
       }
-      await wake
-
-      const parent = await runtime.kernel.readSession({
-        sessionId: session.sessionId,
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream,
       })
-      expect(parent.session?.cancelledTurns).toHaveLength(1)
+      const root = await createAttributedSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: root.sessionId,
+        content: { kind: "text", text: "delegate and wait" },
+      })
 
-      // The task tool may never record a result on the cancelled parent, so
-      // find the child through the session list instead of its output.
+      await runner.wake(root.sessionId)
+
       const sessions = await runtime.kernel.listSessions()
       const childSummary = sessions.sessions.find(
-        (candidate) => candidate.parentSessionId === session.sessionId,
+        (session) => session.parentSessionId === root.sessionId,
       )
-      if (childSummary === undefined) throw new Error("missing child session")
+      if (childSummary === undefined) throw new Error("missing child agent")
+      const parent = await runtime.kernel.readSession({
+        sessionId: root.sessionId,
+      })
       const child = await runtime.kernel.readSession({
         sessionId: childSummary.sessionId,
       })
-      const childTurn = child.session?.turns.at(-1)
-      expect(childTurn?.state).not.toBe("completed")
+      expect(parent.session?.completedTurns).toHaveLength(1)
+      expect(child.session?.completedTurns).toHaveLength(1)
       expect(
-        childTurn?.cancelledReason ?? childTurn?.interruptedReason,
-      ).toMatch(/abort/)
-      // The subagent never ran past the abort.
-      expect(provider.callCount).toBe(2)
+        parent.session?.tools.find((tool) => tool.name === "wait_agent")
+          ?.output,
+      ).toMatchObject({ timedOut: false })
+      expect(child.session?.metadata).toMatchObject({
+        agent: {
+          kind: "subagent",
+          path: "/root/survey",
+          depth: 1,
+        },
+      })
+      expect(child.session?.inheritedContext).toMatchObject({
+        sourceSessionId: root.sessionId,
+        history: expect.any(Array),
+        worldStateBaseline: {
+          environment: expect.any(Object),
+        },
+      })
+      expect(child.session?.worldStateUpdates[0]).toMatchObject({
+        full: false,
+        state: {
+          multi_agent: { path: "/root/survey" },
+        },
+        fragments: [{ id: "multi_agent" }],
+      })
+
+      const rootRequest = requests.find((request) =>
+        JSON.stringify(request.messages).includes("delegate and wait"),
+      )
+      const childRequest = requests.find((request) =>
+        JSON.stringify(request.messages).includes(
+          "You are agent /root/survey,",
+        ),
+      )
+      expect(rootRequest).toBeDefined()
+      expect(childRequest).toBeDefined()
+      expect(childRequest?.cacheKey).toBe(root.sessionId)
+      expect(childRequest?.tools).toEqual(rootRequest?.tools)
+      expect(JSON.stringify(rootRequest?.messages)).toContain(
+        "You are agent /root.",
+      )
+      expect(JSON.stringify(childRequest?.messages)).not.toContain(
+        "You are agent /root.",
+      )
+      expect(JSON.stringify(childRequest?.messages)).toContain(
+        "You are agent /root/survey,",
+      )
+      expect(JSON.stringify(childRequest?.messages)).toContain(
+        "delegate and wait",
+      )
+      expect(JSON.stringify(childRequest?.messages)).toContain(
+        "inspect the repository",
+      )
+      expect(
+        childRequest?.messages.filter(
+          (message) =>
+            (message.role === "user" || message.role === "developer") &&
+            message.context?.sectionId === "multi_agent",
+        ),
+      ).toHaveLength(1)
+    })
+  })
+
+  it("replaces inherited agent context across nested full-history forks", async () => {
+    await withRuntime(async (runtime) => {
+      const requests: ModelRequest[] = []
+      const stream: StreamFn = async function* (request) {
+        requests.push(request)
+        const serialized = JSON.stringify(request.messages)
+        const hasToolResult = request.messages.some(
+          (message) => message.role === "tool",
+        )
+        if (serialized.includes("You are agent /root/child/grandchild,")) {
+          yield response([{ type: "text", text: "grandchild done" }])
+          return
+        }
+        if (serialized.includes("You are agent /root/child,")) {
+          if (!hasToolResult) {
+            yield response(
+              [
+                {
+                  type: "tool_call",
+                  id: "spawn_grandchild",
+                  name: "spawn_agent",
+                  input: {
+                    task_name: "grandchild",
+                    message: "grandchild task",
+                    fork_turns: "all",
+                  },
+                },
+              ],
+              ModelStopReason.ToolUse,
+            )
+            return
+          }
+          yield response([{ type: "text", text: "child done" }])
+          return
+        }
+        if (!hasToolResult) {
+          yield response(
+            [
+              {
+                type: "tool_call",
+                id: "spawn_child",
+                name: "spawn_agent",
+                input: {
+                  task_name: "child",
+                  message: "child task",
+                  fork_turns: "all",
+                },
+              },
+            ],
+            ModelStopReason.ToolUse,
+          )
+          return
+        }
+        yield response([{ type: "text", text: "root done" }])
+      }
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream,
+      })
+      const root = await createAttributedSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: root.sessionId,
+        content: { kind: "text", text: "root task" },
+      })
+
+      await runner.wake(root.sessionId)
+      const child = (await runtime.kernel.listSessions()).sessions.find(
+        (session) => session.parentSessionId === root.sessionId,
+      )
+      if (child === undefined) throw new Error("missing child agent")
+      await runner.wake(child.sessionId)
+      const grandchild = (await runtime.kernel.listSessions()).sessions.find(
+        (session) => session.parentSessionId === child.sessionId,
+      )
+      if (grandchild === undefined) throw new Error("missing grandchild agent")
+      await runner.wake(grandchild.sessionId)
+      const grandchildSession = await runtime.kernel.readSession({
+        sessionId: grandchild.sessionId,
+      })
+
+      const grandchildRequest = requests.find((request) =>
+        JSON.stringify(request.messages).includes(
+          "You are agent /root/child/grandchild,",
+        ),
+      )
+      expect(grandchildRequest).toBeDefined()
+      const serialized = JSON.stringify(grandchildRequest?.messages)
+      expect(serialized).not.toContain("You are agent /root.")
+      expect(serialized).not.toContain("You are agent /root/child,")
+      expect(serialized).toContain("You are agent /root/child/grandchild,")
+      expect(serialized).toContain("root task")
+      expect(serialized).toContain("child task")
+      expect(serialized).toContain("grandchild task")
+      expect(
+        grandchildRequest?.messages.filter(
+          (message) =>
+            (message.role === "user" || message.role === "developer") &&
+            message.context?.sectionId === "multi_agent",
+        ),
+      ).toHaveLength(1)
+      expect(
+        grandchildRequest?.messages.filter(
+          (message) =>
+            (message.role === "user" || message.role === "developer") &&
+            message.context?.sectionId === "environment",
+        ),
+      ).toHaveLength(1)
+      expect(grandchildSession.session?.worldStateUpdates[0]).toMatchObject({
+        full: false,
+        state: {
+          multi_agent: { path: "/root/child/grandchild" },
+        },
+        fragments: [{ id: "multi_agent" }],
+      })
+    })
+  })
+
+  it("keeps tool schemas stable and guides explore through its role context", async () => {
+    await withRuntime(async (runtime) => {
+      const requests: ModelRequest[] = []
+      const stream: StreamFn = async function* (request) {
+        requests.push(request)
+        const serialized = JSON.stringify(request.messages)
+        const isChild = serialized.includes("You are agent /root/explorer,")
+        const toolResults = request.messages.filter(
+          (message) => message.role === "tool",
+        )
+        if (isChild) {
+          yield response([{ type: "text", text: "reported without editing" }])
+          return
+        }
+        if (toolResults.length === 0) {
+          yield response(
+            [
+              {
+                type: "tool_call",
+                id: "spawn_explorer",
+                name: "spawn_agent",
+                input: {
+                  task_name: "explorer",
+                  message: "inspect only",
+                  agent_type: "explore",
+                },
+              },
+            ],
+            ModelStopReason.ToolUse,
+          )
+          return
+        }
+        yield response([{ type: "text", text: "parent done" }])
+      }
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream,
+      })
+      const root = await createAttributedSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: root.sessionId,
+        content: { kind: "text", text: "ask an explorer" },
+      })
+
+      await runner.wake(root.sessionId)
+      const sessions = await runtime.kernel.listSessions()
+      const childSummary = sessions.sessions.find(
+        (session) => session.parentSessionId === root.sessionId,
+      )
+      if (childSummary === undefined) throw new Error("missing explore agent")
+      await runner.wake(childSummary.sessionId)
+      const rootTools = requests.find((request) =>
+        JSON.stringify(request.messages).includes("ask an explorer"),
+      )?.tools
+      const childRequest = requests.find((request) =>
+        JSON.stringify(request.messages).includes(
+          "You are agent /root/explorer,",
+        ),
+      )
+      const childTools = childRequest?.tools
+      expect(childTools).toEqual(rootTools)
+      expect(childTools?.map((tool) => tool.name)).toContain("edit_file")
+      expect(childTools?.map((tool) => tool.name)).toContain("spawn_agent")
+      expect(JSON.stringify(childRequest?.messages)).toContain(
+        "This is an exploration role. Inspect and report; do not modify files or run mutating commands.",
+      )
+      expect(JSON.stringify(childRequest?.messages)).not.toContain(
+        "ask an explorer",
+      )
+      expect(JSON.stringify(childRequest?.messages)).toContain("inspect only")
     })
   })
 })
+
+function response(
+  content: readonly ModelContentBlock[],
+  stopReason: ModelStopReasonType = ModelStopReason.EndTurn,
+) {
+  return {
+    type: "response" as const,
+    response: { content, stopReason },
+  }
+}
 
 async function expectTerminal(
   runtime: RuntimeContext,

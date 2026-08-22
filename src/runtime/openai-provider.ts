@@ -57,10 +57,7 @@ async function* streamOpenAI(
       {
         model: request.target.model || defaultModel,
         instructions: flattenModelSystem(request.system),
-        input: toOpenAIInput([
-          ...request.contextual.map((entry) => entry.message),
-          ...request.messages,
-        ]),
+        input: toOpenAIInput(request.messages),
         tools: toOpenAITools(request.tools),
         parallel_tool_calls: false,
         max_output_tokens: 8_192,
@@ -150,6 +147,13 @@ export function toOpenAIInput(
 ): ResponseInput {
   const input: ResponseInput = []
   for (const message of messages) {
+    if (message.role === "developer") {
+      input.push({
+        role: "developer",
+        content: message.content.map((block) => block.text).join(""),
+      })
+      continue
+    }
     if (message.role === "user") {
       if ((message.images?.length ?? 0) === 0) {
         input.push({

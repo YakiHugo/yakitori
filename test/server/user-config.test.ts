@@ -1,6 +1,6 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { parse } from "smol-toml"
 import { createUserConfigStore } from "../../src/index.ts"
@@ -15,6 +15,65 @@ describe("user config", () => {
       const store = createUserConfigStore({ configPath })
 
       await expect(store.read()).resolves.toBeUndefined()
+      await expect(store.readConfiguration()).resolves.toEqual({})
+    })
+  })
+
+  it("reads the model context window alongside the model preference", async () => {
+    await withConfigPath(async (configPath) => {
+      await writeFile(
+        configPath,
+        [
+          'provider = "codex"',
+          'model = "gpt-5.6-sol"',
+          "model_context_window = 600000",
+          "",
+        ].join("\n"),
+      )
+      const store = createUserConfigStore({ configPath })
+
+      await expect(store.readConfiguration()).resolves.toEqual({
+        preference: { provider: "codex", model: "gpt-5.6-sol" },
+        modelContextWindowTokens: 600_000,
+      })
+    })
+  })
+
+  it("loads custom model instructions relative to the effective cwd", async () => {
+    await withConfigPath(async (configPath) => {
+      const cwd = dirname(configPath)
+      await writeFile(
+        join(cwd, "model-instructions.md"),
+        "\nUse the custom harness instructions.\n",
+      )
+      await writeFile(
+        configPath,
+        [
+          'model_instructions_file = "model-instructions.md"',
+          'instructions = "legacy fallback"',
+          "",
+        ].join("\n"),
+      )
+      const store = createUserConfigStore({ configPath, cwd })
+
+      await expect(store.readConfiguration()).resolves.toEqual({
+        baseInstructions: "Use the custom harness instructions.",
+      })
+    })
+  })
+
+  it("does not silently replace an unreadable custom instruction file", async () => {
+    await withConfigPath(async (configPath) => {
+      const cwd = dirname(configPath)
+      await writeFile(
+        configPath,
+        'model_instructions_file = "missing-instructions.md"\n',
+      )
+      const store = createUserConfigStore({ configPath, cwd })
+
+      await expect(store.readConfiguration()).rejects.toThrow(
+        "Failed to read model instructions file",
+      )
     })
   })
 
@@ -25,6 +84,7 @@ describe("user config", () => {
         [
           'provider = "faux"',
           'model = "scripted"',
+          "model_context_window = 600000",
           'ui.theme = "dark"',
           "",
           "[[catalog]]",
@@ -51,6 +111,7 @@ describe("user config", () => {
         model: "gpt-5.6-sol",
         effort: "low",
         speed: "priority",
+        model_context_window: 600_000,
         ui: { theme: "dark" },
         catalog: [{ name: "custom", models: ["first", "second"] }],
       })
@@ -64,6 +125,20 @@ describe("user config", () => {
       const store = createUserConfigStore({ configPath })
 
       await expect(store.read()).resolves.toBeUndefined()
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("Ignoring malformed user config"),
+        expect.any(Error),
+      )
+    })
+  })
+
+  it("rejects a non-positive model context window as malformed config", async () => {
+    await withConfigPath(async (configPath) => {
+      await writeFile(configPath, "model_context_window = 0\n")
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+      const store = createUserConfigStore({ configPath })
+
+      await expect(store.readConfiguration()).resolves.toEqual({})
       expect(warn).toHaveBeenCalledWith(
         expect.stringContaining("Ignoring malformed user config"),
         expect.any(Error),

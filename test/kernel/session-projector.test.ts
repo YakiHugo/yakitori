@@ -179,6 +179,81 @@ describe("session fact projection", () => {
       projectSession(events),
     )
   })
+
+  it("folds world-state merge patches while preserving exact updates", () => {
+    const sessionId = "session_00000000-0000-4000-8000-000000000000"
+    const events = [
+      createEventEnvelope({
+        sessionId,
+        seq: 1,
+        event: { type: EventType.SessionCreated, data: {} },
+      }),
+      createEventEnvelope({
+        sessionId,
+        seq: 2,
+        event: {
+          type: EventType.WorldStateUpdated,
+          data: {
+            turnId: "turn_1",
+            full: true,
+            state: {
+              environment: { revision: "environment_1" },
+              "project.instructions": { revision: "project_1" },
+            },
+            fragments: [
+              {
+                id: "environment",
+                revision: "environment_1",
+                role: "user" as const,
+                text: "environment one",
+              },
+            ],
+          },
+        },
+      }),
+      createEventEnvelope({
+        sessionId,
+        seq: 3,
+        event: {
+          type: EventType.WorldStateUpdated,
+          data: {
+            turnId: "turn_2",
+            afterItemId: "item_2",
+            full: false,
+            state: {
+              environment: { revision: "environment_2" },
+              "project.instructions": null,
+            },
+            fragments: [
+              {
+                id: "environment",
+                revision: "environment_2",
+                role: "user" as const,
+                text: "environment two",
+              },
+            ],
+          },
+        },
+      }),
+    ]
+
+    const projection = projectSession(events)
+    expect(projection?.worldState).toMatchObject({
+      state: { environment: { revision: "environment_2" } },
+      updatedSeq: 3,
+    })
+    expect(projection?.worldState?.state).not.toHaveProperty(
+      "project.instructions",
+    )
+    expect(projection?.worldStateUpdates).toHaveLength(2)
+    expect(projection?.worldStateUpdates[1]).toMatchObject({
+      afterItemId: "item_2",
+      fragments: [{ text: "environment two" }],
+    })
+    expect(
+      applySessionFacts(projectSession(events.slice(0, 2)), events.slice(2)),
+    ).toEqual(projection)
+  })
 })
 
 function baseWithCompactions() {

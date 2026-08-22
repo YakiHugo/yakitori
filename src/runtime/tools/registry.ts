@@ -3,9 +3,9 @@ import type { UserShellEnv } from "../user-shell-env.ts"
 import { createEditFileTool } from "./edit-file.ts"
 import { createGlobTool } from "./glob.ts"
 import { createGrepTool } from "./grep.ts"
+import { createMultiAgentTools } from "./multi-agent.ts"
 import { createReadFileTool } from "./read-file.ts"
 import { createRunCommandTool } from "./run-command.ts"
-import { createTaskTool } from "./task.ts"
 import type {
   RuntimeTool,
   ToolExecutionContext,
@@ -79,7 +79,7 @@ export function createDefaultTools(
     }),
     createWebFetchTool(),
     createWebSearchTool(),
-    createTaskTool(),
+    ...createMultiAgentTools(),
   ]
 }
 

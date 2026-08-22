@@ -8,20 +8,26 @@ import {
   type ForkReason,
   InputRole,
   type ItemContent,
+  type JsonObject,
   type JsonValue,
   type KernelError,
   type KernelEvent,
+  type ContextWindowReplacement,
+  type ModelMessage,
   type ModelSelection,
   PermissionBehavior,
   type PermissionDecisionReason,
+  type SessionConfigurationSnapshot,
   type StoredEventEnvelope,
   type TextContent,
   type TokenUsage,
   type TurnMetrics,
   type TurnExecutionContext,
+  type WorldStateFragment,
 } from "./events.ts"
 import {
   createCompactionId,
+  createContextWindowId,
   createInputId,
   createItemId,
   createPermissionRequestId,
@@ -44,6 +50,12 @@ import {
 
 export type SessionKernel = {
   createSession(input?: CreateSessionInput): Promise<CreateSessionResult>
+  configureSession(
+    input: ConfigureSessionInput,
+  ): Promise<ConfigureSessionResult>
+  seedContextWindow(
+    input: SeedContextWindowInput,
+  ): Promise<SeedContextWindowResult>
   forkSession(input: ForkSessionInput): Promise<ForkSessionResult>
   listSessions(input?: ListSessionsInput): Promise<ListSessionsResult>
   readSession(input: ReadSessionInput): Promise<ReadSessionResult>
@@ -71,6 +83,9 @@ export type SessionKernel = {
   recordCompaction(
     input: RecordCompactionInput,
   ): Promise<RecordCompactionResult>
+  recordWorldStateUpdate(
+    input: RecordWorldStateUpdateInput,
+  ): Promise<RecordWorldStateUpdateResult>
   completeTurn(input: CompleteTurnInput): Promise<CompleteTurnResult>
   completeTurnWithAssistantOutput(
     input: CompleteTurnWithAssistantOutputInput,
@@ -90,6 +105,25 @@ export type CreateSessionInput = {
 }
 export type CreateSessionResult = {
   readonly sessionId: string
+  readonly event: EventEnvelope
+}
+export type ConfigureSessionInput = {
+  readonly sessionId: string
+  readonly configuration: SessionConfigurationSnapshot
+}
+export type ConfigureSessionResult = {
+  readonly event?: EventEnvelope
+  readonly configuration: SessionConfigurationSnapshot
+  readonly created: boolean
+}
+export type SeedContextWindowInput = {
+  readonly sessionId: string
+  readonly sourceSessionId: string
+  readonly history: readonly ModelMessage[]
+  readonly worldStateBaseline?: JsonObject
+}
+export type SeedContextWindowResult = {
+  readonly windowId: string
   readonly event: EventEnvelope
 }
 export type ForkSessionInput = {
@@ -250,13 +284,29 @@ export type RecordToolResultResult = {
 export type RecordCompactionInput = {
   readonly sessionId: string
   readonly turnId: string
+  readonly expectedCompactionId: string | null
   readonly throughSeq: number
   readonly coveredTurnIds: readonly string[]
   readonly summary: string
   readonly usage?: TokenUsage
+  readonly replacement: Omit<
+    ContextWindowReplacement,
+    "windowId" | "firstWindowId" | "previousWindowId" | "windowNumber"
+  >
 }
 export type RecordCompactionResult = {
   readonly compactionId: string
+  readonly event: EventEnvelope
+}
+export type RecordWorldStateUpdateInput = {
+  readonly sessionId: string
+  readonly turnId: string
+  readonly afterItemId?: string
+  readonly full: boolean
+  readonly state: JsonObject
+  readonly fragments: readonly WorldStateFragment[]
+}
+export type RecordWorldStateUpdateResult = {
   readonly event: EventEnvelope
 }
 export type CompleteTurnInput = {
@@ -343,6 +393,52 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
       return { sessionId, event }
     },
 
+    configureSession(input) {
+      return command(input.sessionId, async () => {
+        const session = await requireSession(eventStore, input.sessionId)
+        if (session.configuration !== undefined) {
+          return {
+            configuration: session.configuration,
+            created: false,
+          }
+        }
+        if (session.activeTurn !== undefined)
+          invalidState(`Session ${session.id} has an active Turn.`)
+        const event = await append(eventStore, session, {
+          type: EventType.SessionConfigured,
+          data: { configuration: input.configuration },
+        })
+        return { event, configuration: input.configuration, created: true }
+      })
+    },
+
+    seedContextWindow(input) {
+      return command(input.sessionId, async () => {
+        const session = await requireSession(eventStore, input.sessionId)
+        if (
+          session.inputs.length > 0 ||
+          session.turns.length > 0 ||
+          session.inheritedContext !== undefined ||
+          session.compaction !== undefined
+        ) {
+          invalidState(
+            `Session ${session.id} already has model-visible history.`,
+          )
+        }
+        const windowId = createContextWindowId()
+        const event = await append(eventStore, session, {
+          type: EventType.ContextWindowSeeded,
+          data: compact({
+            windowId,
+            sourceSessionId: input.sourceSessionId,
+            history: input.history,
+            worldStateBaseline: input.worldStateBaseline,
+          }),
+        })
+        return { windowId, event }
+      })
+    },
+
     forkSession(input) {
       return command(input.sessionId, async () => {
         let source = await requireSession(eventStore, input.sessionId)
@@ -376,6 +472,16 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
 
         const sessionId = createSessionId()
         const initialEvents: KernelEvent[] = []
+        // A fork owns the execution contract it inherits. The source may have
+        // been configured after the selected Input was admitted, so that event
+        // can sit beyond the history cut even though it governs the source
+        // Session today.
+        if (source.configuration !== undefined) {
+          initialEvents.push({
+            type: EventType.SessionConfigured,
+            data: { configuration: source.configuration },
+          })
+        }
         if (input.content !== undefined) {
           initialEvents.push({
             type: EventType.InputAdmitted,
@@ -724,7 +830,59 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
       return command(input.sessionId, async () => {
         const session = await requireSession(eventStore, input.sessionId)
         requireActiveTurn(session, input.turnId)
+        const currentCompactionId = session.compaction?.compactionId ?? null
+        if (currentCompactionId !== input.expectedCompactionId) {
+          invalidState(
+            `Compaction checkpoint changed while Turn ${input.turnId} was summarizing.`,
+          )
+        }
+        if (input.throughSeq !== session.seq) {
+          invalidState(
+            `Session history changed while Turn ${input.turnId} was summarizing (expected seq ${String(input.throughSeq)}, current seq ${String(session.seq)}).`,
+          )
+        }
+        const previousCompaction = session.compaction
+        if (
+          previousCompaction !== undefined &&
+          (input.throughSeq < previousCompaction.throughSeq ||
+            input.coveredTurnIds.length <
+              previousCompaction.coveredTurnIds.length ||
+            previousCompaction.coveredTurnIds.some(
+              (turnId, index) => input.coveredTurnIds[index] !== turnId,
+            ))
+        ) {
+          invalidArgument(
+            "A compaction checkpoint cannot regress its previous history coverage.",
+          )
+        }
+        requireContinuousCompactionCoverage(session, input.coveredTurnIds)
         const compactionId = createCompactionId()
+        const previousReplacement = session.compaction?.replacement
+        const inheritedWindow = input.replacement.replacesInheritedContext
+          ? session.inheritedContext
+          : undefined
+        const windowId = createContextWindowId()
+        const previousWindowId =
+          previousReplacement?.windowId ?? inheritedWindow?.windowId
+        const replacement: ContextWindowReplacement = {
+          windowId,
+          firstWindowId:
+            previousReplacement?.firstWindowId ??
+            inheritedWindow?.windowId ??
+            windowId,
+          ...(previousWindowId === undefined ? {} : { previousWindowId }),
+          windowNumber:
+            (previousReplacement?.windowNumber ??
+              (inheritedWindow === undefined ? 0 : 1)) + 1,
+          ...(input.replacement.replacesInheritedContext === undefined
+            ? {}
+            : {
+                replacesInheritedContext:
+                  input.replacement.replacesInheritedContext,
+              }),
+          history: input.replacement.history,
+          worldStateBaseline: input.replacement.worldStateBaseline,
+        }
         const event = await append(eventStore, session, {
           type: EventType.ContextCompacted,
           data: compact({
@@ -734,9 +892,36 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
             coveredTurnIds: [...input.coveredTurnIds],
             summary: input.summary,
             usage: input.usage,
+            replacement,
           }),
         })
         return { compactionId, event }
+      })
+    },
+
+    recordWorldStateUpdate(input) {
+      return command(input.sessionId, async () => {
+        const session = await requireSession(eventStore, input.sessionId)
+        const turn = requireActiveTurn(session, input.turnId)
+        if (
+          input.afterItemId !== undefined &&
+          !turn.itemIds.includes(input.afterItemId)
+        ) {
+          invalidArgument(
+            `World-state anchor ${input.afterItemId} does not belong to active Turn ${input.turnId}.`,
+          )
+        }
+        const event = await append(eventStore, session, {
+          type: EventType.WorldStateUpdated,
+          data: compact({
+            turnId: input.turnId,
+            afterItemId: input.afterItemId,
+            full: input.full,
+            state: input.state,
+            fragments: [...input.fragments],
+          }),
+        })
+        return { event }
       })
     },
 
@@ -910,6 +1095,33 @@ function requireActiveTurn(
     turnId,
     state: turn.state,
   })
+}
+
+function requireContinuousCompactionCoverage(
+  session: SessionProjection,
+  coveredTurnIds: readonly string[],
+): void {
+  const userInputIds = new Set(
+    session.inputs
+      .filter((input) => input.role === InputRole.User)
+      .map((input) => input.inputId),
+  )
+  const eligibleTurnIds = session.turns
+    .filter(
+      (turn) =>
+        turn.state !== TurnState.Started && userInputIds.has(turn.inputId),
+    )
+    .map((turn) => turn.turnId)
+  const expected = eligibleTurnIds.slice(0, coveredTurnIds.length)
+  if (
+    expected.length !== coveredTurnIds.length ||
+    expected.some((turnId, index) => turnId !== coveredTurnIds[index])
+  ) {
+    invalidArgument(
+      "Compaction coverage must be a continuous prefix of terminal user Turns.",
+      { coveredTurnIds, expectedTurnIds: expected },
+    )
+  }
 }
 
 function requireTool(

@@ -83,9 +83,6 @@ describe("tool loop", () => {
       expect(provider.callCount).toBe(2)
       expect(provider.requests[0]?.target).toEqual(provider.requests[1]?.target)
       expect(provider.requests[0]?.system).toEqual(provider.requests[1]?.system)
-      expect(provider.requests[0]?.contextual).toEqual(
-        provider.requests[1]?.contextual,
-      )
       expect(provider.requests[0]?.tools).toEqual(provider.requests[1]?.tools)
       expect(
         provider.requests[1]?.messages.some(

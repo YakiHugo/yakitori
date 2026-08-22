@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest"
 import {
   boundCommandContent,
   buildModelContext,
+  collectUncoveredTurns,
+  createForkedModelContext,
   createMateKernel,
   createSessionKernel,
   ItemKind,
@@ -11,6 +13,117 @@ import { createMemoryEventStore } from "../kernel/memory-event-store.ts"
 import { createMemoryMateStore } from "../mates/memory-mate-store.ts"
 
 describe("model context", () => {
+  it("cleans agent-scoped messages and baseline state from inherited context", () => {
+    const forked = createForkedModelContext({
+      sourceSessionId: "session_parent",
+      messages: [
+        {
+          role: "developer",
+          content: [{ type: "text", text: "You are agent /root/child." }],
+          context: {
+            type: "world_state",
+            sectionId: "multi_agent",
+            revision: "agent_revision",
+          },
+        },
+        {
+          role: "user",
+          content: [{ type: "text", text: "historical task" }],
+        },
+      ],
+      worldState: {
+        environment: { workspaceRoot: "/workspace" },
+        multi_agent: { path: "/root/child" },
+      },
+    })
+
+    expect(forked).toEqual({
+      sourceSessionId: "session_parent",
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "text", text: "historical task" }],
+        },
+      ],
+      worldState: {
+        environment: { workspaceRoot: "/workspace" },
+      },
+    })
+  })
+
+  it("keeps only fork-safe conversation items", () => {
+    const environment = {
+      role: "developer" as const,
+      content: [{ type: "text" as const, text: "workspace state" }],
+      context: {
+        type: "world_state" as const,
+        sectionId: "environment",
+        revision: "environment-1",
+      },
+    }
+    const forked = createForkedModelContext({
+      sourceSessionId: "session_parent",
+      messages: [
+        environment,
+        {
+          role: "user",
+          content: [{ type: "text", text: "inspect the project" }],
+        },
+        {
+          role: "assistant",
+          content: [
+            { type: "reasoning", text: "private reasoning" },
+            { type: "text", text: "I will inspect it." },
+            {
+              type: "tool_call",
+              id: "tool_1",
+              name: "read_file",
+              input: { path: "README.md" },
+            },
+          ],
+        },
+        { role: "tool", toolCallId: "tool_1", content: "file contents" },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "The project uses TypeScript." }],
+        },
+        {
+          role: "developer",
+          content: [{ type: "text", text: "old child identity" }],
+          context: {
+            type: "world_state",
+            sectionId: "multi_agent",
+            revision: "agent-1",
+          },
+        },
+        {
+          role: "user",
+          content: [{ type: "text", text: "continue" }],
+        },
+      ],
+    })
+
+    expect(forked?.messages).toEqual([
+      environment,
+      {
+        role: "user",
+        content: [{ type: "text", text: "inspect the project" }],
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "The project uses TypeScript." }],
+      },
+      { role: "user", content: [{ type: "text", text: "continue" }] },
+    ])
+    expect(
+      createForkedModelContext({
+        sourceSessionId: "session_parent",
+        messages: [environment],
+        preserveWorldState: false,
+      }),
+    ).toBeUndefined()
+  })
+
   it("includes prior completed history and the current input", async () => {
     const context = await withAttributedSession(
       async ({ kernel, sessionId }) => {
@@ -49,6 +162,7 @@ describe("model context", () => {
       },
     ])
     expect(context.droppedTurnCount).toBe(0)
+    expect(context.forkTurnStartIndexes).toEqual([0, 2])
   })
 
   it("preserves durable reasoning continuation data through a tool loop", async () => {
@@ -169,6 +283,106 @@ describe("model context", () => {
           message.content[0].text === "old question",
       ),
     ).toBe(false)
+  })
+
+  it("selects a historical prefix for proactive compaction without dropping it", async () => {
+    const context = await withAttributedSession(
+      async ({ kernel, sessionId }) => {
+        const oldest = await completeTextTurn(
+          kernel,
+          sessionId,
+          "old question",
+          "old answer",
+        )
+        const middle = await completeTextTurn(
+          kernel,
+          sessionId,
+          "middle question",
+          "middle answer",
+        )
+        await completeTextTurn(
+          kernel,
+          sessionId,
+          "recent question",
+          "recent answer",
+        )
+        const current = await kernel.admitInput({
+          sessionId,
+          content: { kind: "text", text: "current" },
+        })
+        const read = await kernel.readSession({ sessionId })
+        if (!read.session) throw new Error("missing session")
+        return {
+          oldest,
+          middle,
+          context: buildModelContext({
+            session: read.session,
+            currentInputId: current.inputId,
+            limits: {
+              ...generousLimits(),
+              compactionTriggerContextBytes: 1,
+              compactionRetainContextBytes: 150,
+            },
+          }),
+        }
+      },
+    )
+
+    expect(context.context.droppedTurnCount).toBe(0)
+    expect(
+      context.context.compactableHistory.flatMap((group) => group.turnIds),
+    ).toEqual([context.oldest, context.middle])
+    expect(JSON.stringify(context.context.messages)).toContain("old question")
+    expect(JSON.stringify(context.context.messages)).toContain(
+      "recent question",
+    )
+  })
+
+  it("replaces images with semantic markers in compaction sources", async () => {
+    const source = await withAttributedSession(
+      async ({ kernel, sessionId }) => {
+        const admitted = await kernel.admitInput({
+          sessionId,
+          content: {
+            kind: "text",
+            text: "inspect this image",
+            attachments: [
+              {
+                name: "screen.png",
+                mediaType: "image/png",
+                data: "a".repeat(4_096),
+                sizeBytes: 3_072,
+              },
+            ],
+          },
+        })
+        const started = await kernel.startTurn({
+          sessionId,
+          inputId: admitted.inputId,
+        })
+        await kernel.completeTurnWithAssistantOutput({
+          sessionId,
+          turnId: started.turnId,
+          content: [{ type: "text", text: "noted" }],
+          providerMetadata: {
+            streamId: "stream_image",
+            kind: ItemKind.AssistantMessage,
+            status: ItemStatus.Completed,
+          },
+        })
+        const read = await kernel.readSession({ sessionId })
+        if (!read.session) throw new Error("missing session")
+        return collectUncoveredTurns(read.session, generousLimits())
+      },
+    )
+
+    const first = source[0]?.messages[0]
+    expect(first?.role).toBe("user")
+    if (first?.role !== "user") throw new Error("missing user message")
+    expect(first.images).toBeUndefined()
+    expect(first.content.at(-1)?.text).toContain(
+      "image/png image omitted from compaction input; 3072 encoded bytes",
+    )
   })
 
   it("synthesizes a view-only error for a completed Turn with an open tool", async () => {
@@ -356,6 +570,90 @@ describe("model context", () => {
     })
   })
 
+  it("counts inherited fork history without silently dropping its baseline", async () => {
+    await withAttributedSession(async ({ kernel, sessionId }) => {
+      const current = await kernel.admitInput({
+        sessionId,
+        content: { kind: "text", text: "child task" },
+      })
+      const read = await kernel.readSession({ sessionId })
+      if (!read.session) throw new Error("missing session")
+      const session = read.session
+
+      const context = buildModelContext({
+        session,
+        currentInputId: current.inputId,
+        forkedContext: {
+          sourceSessionId: "session_parent",
+          messages: [
+            {
+              role: "user",
+              content: [{ type: "text", text: "x".repeat(1_000) }],
+            },
+          ],
+          worldState: {
+            environment: { workspaceRoot: "/workspace" },
+          },
+        },
+        limits: {
+          ...generousLimits(),
+          modelVisibleContextBytes: 200,
+        },
+      })
+      expect(context.messages).toEqual([
+        { role: "user", content: [{ type: "text", text: "child task" }] },
+      ])
+      expect(context.compactableHistory).toEqual([
+        expect.objectContaining({ kind: "inherited", turnIds: [] }),
+      ])
+    })
+  })
+
+  it("replaces inherited history with the child's first checkpoint", async () => {
+    await withAttributedSession(async ({ kernel, sessionId }) => {
+      const seeded = await kernel.seedContextWindow({
+        sessionId,
+        sourceSessionId: "session_parent",
+        history: [
+          {
+            role: "user",
+            content: [{ type: "text", text: "parent history" }],
+          },
+        ],
+        worldStateBaseline: { environment: { workspaceRoot: "/workspace" } },
+      })
+      const current = await admitAndStartTurn(kernel, sessionId, "child task")
+      await kernel.recordCompaction({
+        sessionId,
+        turnId: current.turnId,
+        expectedCompactionId: null,
+        throughSeq: await currentSessionSeq(kernel, sessionId),
+        coveredTurnIds: [],
+        summary: "Goal: child checkpoint.",
+        replacement: {
+          ...checkpointReplacement("Goal: child checkpoint."),
+          replacesInheritedContext: true,
+        },
+      })
+      const read = await kernel.readSession({ sessionId })
+      if (read.session === undefined) throw new Error("missing session")
+      expect(read.session.compaction?.replacement).toMatchObject({
+        previousWindowId: seeded.windowId,
+        firstWindowId: seeded.windowId,
+        windowNumber: 2,
+        replacesInheritedContext: true,
+      })
+
+      const context = buildModelContext({
+        session: read.session,
+        currentInputId: current.inputId,
+        limits: generousLimits(),
+      })
+      expect(JSON.stringify(context.messages)).not.toContain("parent history")
+      expect(JSON.stringify(context.messages)).toContain("child checkpoint")
+    })
+  })
+
   it.each([
     "undo",
     "edit",
@@ -373,9 +671,11 @@ describe("model context", () => {
         await kernel.recordCompaction({
           sessionId,
           turnId: shared.turnId,
+          expectedCompactionId: null,
           throughSeq,
           coveredTurnIds: [],
           summary: "Shared checkpoint.",
+          replacement: checkpointReplacement("Shared checkpoint."),
         })
         await kernel.completeTurnWithAssistantOutput({
           sessionId,
@@ -460,9 +760,11 @@ describe("model context", () => {
         await kernel.recordCompaction({
           sessionId,
           turnId: current.turnId,
-          throughSeq: 1,
+          expectedCompactionId: null,
+          throughSeq: await currentSessionSeq(kernel, sessionId),
           coveredTurnIds: [firstTurnId, secondTurnId],
           summary: "Goal: answer questions.",
+          replacement: checkpointReplacement("Goal: answer questions."),
         })
         const read = await kernel.readSession({ sessionId })
         if (!read.session) throw new Error("missing session")
@@ -506,9 +808,11 @@ describe("model context", () => {
         await kernel.recordCompaction({
           sessionId,
           turnId: current.turnId,
-          throughSeq: 1,
+          expectedCompactionId: null,
+          throughSeq: await currentSessionSeq(kernel, sessionId),
           coveredTurnIds: [firstTurnId],
           summary: "Goal: answer questions.",
+          replacement: checkpointReplacement("Goal: answer questions."),
         })
         const read = await kernel.readSession({ sessionId })
         if (!read.session) throw new Error("missing session")
@@ -577,9 +881,11 @@ describe("model context", () => {
         await kernel.recordCompaction({
           sessionId,
           turnId: current.turnId,
-          throughSeq: 1,
+          expectedCompactionId: null,
+          throughSeq: await currentSessionSeq(kernel, sessionId),
           coveredTurnIds: [coveredTurnId],
           summary: "checkpoint",
+          replacement: checkpointReplacement("checkpoint"),
         })
         const read = await kernel.readSession({ sessionId })
         if (!read.session) throw new Error("missing session")
@@ -597,8 +903,8 @@ describe("model context", () => {
       },
     )
 
-    // The tool Turn drops first; the pinned checkpoint survives next to the
-    // current input. The dropped Turn is reported with pruning applied.
+    // The tool Turn leaves the live request first. Its replacement source
+    // still includes the preceding checkpoint as one continuous prefix.
     expect(context.droppedTurnCount).toBe(1)
     expect(context.droppedCompactionCheckpoint).toBe(false)
     expect(context.droppedTurns).toEqual([
@@ -984,6 +1290,32 @@ function generousLimits() {
     modelVisibleContextBytes: 256_000,
     modelVisibleToolResultBytes: 50_000,
     modelVisibleToolResultLines: 2_000,
+  }
+}
+
+async function currentSessionSeq(
+  kernel: ReturnType<typeof createSessionKernel>,
+  sessionId: string,
+): Promise<number> {
+  const read = await kernel.readSession({ sessionId })
+  if (read.session === undefined) throw new Error("missing session")
+  return read.session.seq
+}
+
+function checkpointReplacement(summary: string) {
+  return {
+    history: [
+      {
+        role: "user" as const,
+        content: [
+          {
+            type: "text" as const,
+            text: `<context_compacted>\nEarlier turns in this session were summarized into this checkpoint. The complete history is preserved on disk.\n${summary}\n</context_compacted>`,
+          },
+        ],
+      },
+    ],
+    worldStateBaseline: {},
   }
 }
 

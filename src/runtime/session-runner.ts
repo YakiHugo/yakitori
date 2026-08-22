@@ -8,6 +8,7 @@ import {
   InputRole,
   isJsonValue,
   ItemKind,
+  type JsonObject,
   type KernelError,
   type ModelSelection,
   PermissionBehavior,
@@ -22,23 +23,25 @@ import {
 } from "../kernel/index.ts"
 import type { MateKernel } from "../mates/index.ts"
 import {
+  createAgentControl,
+  type AgentModelTarget,
+  type AgentRunOutcome,
+  type ForkTurns,
+} from "./agent-control.ts"
+import {
   buildCompactionRequest,
   isContextOverflowError,
   runCompaction,
 } from "./compaction.ts"
-import { buildEnvironmentContext } from "./environment-context.ts"
 import { isAbortError } from "./errors.ts"
-import {
-  createRuntimeLimits,
-  deriveModelVisibleContextBytes,
-  RuntimeLimits,
-} from "./limits.ts"
+import { createRuntimeLimits, type RuntimeLimits } from "./limits.ts"
 import {
   createCoalescingSnapshotPublisher,
   type TransientEventHub,
 } from "./live-events.ts"
 import {
   type ModelContentBlock,
+  type ModelMessage,
   type ModelRequest,
   type ModelResponse,
   ModelStopReason,
@@ -47,24 +50,29 @@ import {
   type StreamFn,
 } from "./model.ts"
 import {
-  catalogContextWindowTokens,
-  requirePromptId,
-  resolveModel,
-} from "./model-catalog.ts"
-import {
   buildModelContext,
   collectUncoveredTurns,
-  type DroppedTurn,
-  type ModelContextBuildResult,
+  createCompactionReplacementHistory,
+  createForkedModelContext,
+  measureModelMessagesBytes,
+  type CompactionSourceGroup,
 } from "./model-context.ts"
 import { createPermissionGate, type PermissionGate } from "./permission-gate.ts"
 import { loadProjectInstructions } from "./project-instructions.ts"
-import { buildStaticContext } from "./static-context.ts"
-import { resolveWorkspaceRoot } from "./tools/path-policy.ts"
+import {
+  createTurnContext,
+  type ResolvedTurnConfiguration,
+  SessionConfiguration,
+  type TurnContext,
+} from "./session-configuration.ts"
+import {
+  captureStepContext,
+  type StepContext,
+  type StepToolPlan,
+} from "./step-context.ts"
 import { createToolRegistry, type ToolRegistry } from "./tools/registry.ts"
 import type {
   RuntimeTool,
-  SpawnSubagent,
   ToolEffect,
   ToolExecutionResult,
 } from "./tools/types.ts"
@@ -72,6 +80,7 @@ import {
   createVisibleFileObservations,
   grantFromToolOutput,
 } from "./tools/visible-file-observations.ts"
+import { diffWorldState, type WorldState } from "./world-state.ts"
 
 export type SessionRunnerOptions = {
   readonly kernel: SessionKernel
@@ -87,7 +96,12 @@ export type SessionRunnerOptions = {
   readonly model?: string
   readonly limits?: RuntimeLimits
   readonly approvalPolicy?: "auto_file_tools" | "never"
+  readonly baseInstructions?: string
+  readonly modelContextWindowTokens?: number
+  readonly maxAgentDepth?: number
+  readonly maxConcurrentAgents?: number
   readonly loadProjectInstructions?: typeof loadProjectInstructions
+  readonly now?: () => Date
   readonly onRuntimeError?: (error: unknown) => void
 }
 
@@ -141,12 +155,36 @@ export function createSessionRunner(
   // Consecutive compaction failures per session; after the cap the lane
   // stops paying for doomed summary calls until one succeeds again.
   const compactionFailures = new Map<string, number>()
+  const activeModelContexts = new Map<
+    string,
+    {
+      readonly messages: readonly ModelMessage[]
+      readonly forkTurnStartIndexes: readonly number[]
+    }
+  >()
+  const activeWorldStates = new Map<string, JsonObject>()
   let closed = false
 
   const publishDurable = (events: readonly EventEnvelope[]) => {
     if (events.length === 0) return
     options.durableHub?.publish(events)
   }
+
+  const agentControl = createAgentControl({
+    ...(options.maxAgentDepth === undefined
+      ? {}
+      : { maxDepth: options.maxAgentDepth }),
+    ...(options.maxConcurrentAgents === undefined
+      ? {}
+      : { maxConcurrentAgents: options.maxConcurrentAgents }),
+    adapter: {
+      createChild: createAgentSession,
+      runChild: runAgentChild,
+      submitFollowup: submitAgentFollowup,
+      interruptChild: interruptAgentTurn,
+      captureForkContext,
+    },
+  })
 
   async function wake(sessionId: string): Promise<void> {
     if (closed) {
@@ -224,7 +262,8 @@ export function createSessionRunner(
     queuedInput: InputProjection,
   ): Promise<void> {
     if (closed) return
-    const executionContext = await buildExecutionContext(session, queuedInput)
+    const turn = await buildTurnContext(session, queuedInput)
+    const executionContext = turn.execution
     if (closed) return
     const started = await startTurnUnlessInputConsumed(
       session.id,
@@ -249,6 +288,7 @@ export function createSessionRunner(
           sessionId: session.id,
           turnId: started.turnId,
           inputId: queuedInput.inputId,
+          turn,
           executionContext,
           signal: abort.signal,
         })
@@ -257,7 +297,7 @@ export function createSessionRunner(
           sessionId: session.id,
           turnId: started.turnId,
           inputId: queuedInput.inputId,
-          executionContext,
+          turn,
           signal: abort.signal,
         })
       }
@@ -298,10 +338,10 @@ export function createSessionRunner(
     }
   }
 
-  async function buildExecutionContext(
+  async function buildTurnContext(
     session: SessionProjection,
     queuedInput: InputProjection,
-  ): Promise<TurnExecutionContext> {
+  ): Promise<TurnContext> {
     if (session.mateId === undefined || session.mateRevisionId === undefined) {
       throw createYakitoriError({
         code: YakitoriErrorCode.InvalidState,
@@ -340,10 +380,14 @@ export function createSessionRunner(
     }
 
     const previousTarget = session.turns.at(-1)?.executionContext
+    const defaultTarget = session.configuration?.defaultTarget ?? {
+      provider,
+      model,
+    }
     const selectedTarget: ModelSelection =
       queuedInput.modelSelection ??
       (previousTarget === undefined
-        ? { provider, model }
+        ? defaultTarget
         : {
             provider: previousTarget.provider,
             model: previousTarget.model,
@@ -354,40 +398,45 @@ export function createSessionRunner(
               ? {}
               : { speed: previousTarget.speed }),
           })
-    const resolvedModel = resolveModel(selectedTarget)
-    // Scale the visible-context budget with the model's context window when
-    // the catalog knows it; an explicit limits override always wins.
-    const contextWindowTokens = catalogContextWindowTokens(resolvedModel)
-    const modelVisibleContextBytes =
-      contextWindowTokens === undefined ||
-      limits.modelVisibleContextBytes !== RuntimeLimits.modelVisibleContextBytes
-        ? limits.modelVisibleContextBytes
-        : deriveModelVisibleContextBytes(contextWindowTokens)
-    return {
+    let sessionConfiguration =
+      session.configuration === undefined
+        ? SessionConfiguration.create({
+            selection: selectedTarget,
+            workspaceRoot: session.workingDirectory,
+            enabledTools,
+            approvalPolicy,
+            promptCacheKey: session.conversationId,
+            ...(options.baseInstructions === undefined
+              ? {}
+              : { baseInstructions: options.baseInstructions }),
+            limits,
+            ...(options.modelContextWindowTokens === undefined
+              ? {}
+              : {
+                  modelContextWindowTokens: options.modelContextWindowTokens,
+                }),
+          })
+        : SessionConfiguration.restore(
+            session.configuration,
+            session.conversationId,
+          )
+    if (session.configuration === undefined) {
+      const configured = await options.kernel.configureSession({
+        sessionId: session.id,
+        configuration: sessionConfiguration.snapshot,
+      })
+      if (configured.event !== undefined) publishDurable([configured.event])
+      sessionConfiguration = SessionConfiguration.restore(
+        configured.configuration,
+        session.conversationId,
+      )
+    }
+    const configuration = sessionConfiguration.resolveTurn(selectedTarget)
+    return createTurnContext({
+      configuration,
       mateId: session.mateId,
       mateRevisionId: session.mateRevisionId,
-      provider: resolvedModel.provider,
-      model: resolvedModel.model,
-      promptId: resolvedModel.promptId,
-      ...(selectedTarget.effort === undefined
-        ? {}
-        : { effort: selectedTarget.effort }),
-      ...(selectedTarget.speed === undefined
-        ? {}
-        : { speed: selectedTarget.speed }),
-      workingDirectory: session.workingDirectory,
-      enabledTools: resolveEnabledTools(session, enabledTools),
-      approvalPolicy,
-      limits: {
-        modelCallsPerTurn: limits.modelCallsPerTurn,
-        toolCallsPerTurn: limits.toolCallsPerTurn,
-        modelVisibleMessageBlocks: limits.modelVisibleMessageBlocks,
-        modelVisibleContextBytes,
-        modelVisibleToolResultBytes: limits.modelVisibleToolResultBytes,
-        modelVisibleToolResultLines: limits.modelVisibleToolResultLines,
-        assistantResponseBytes: limits.assistantResponseBytes,
-      },
-    }
+    })
   }
 
   function requireTurnTelemetry(turnId: string): TurnTelemetry {
@@ -400,94 +449,94 @@ export function createSessionRunner(
     readonly sessionId: string
     readonly turnId: string
     readonly inputId: string
-    readonly executionContext: TurnExecutionContext
+    readonly turn: TurnContext
     readonly signal: AbortSignal
   }): Promise<void> {
-    const mate = await options.mateKernel.readMate({
-      mateId: input.executionContext.mateId,
-    })
-    const revision = mate.mate?.revisions.find(
-      (candidate) => candidate.id === input.executionContext.mateRevisionId,
-    )
-    if (!revision) {
-      throw createYakitoriError({
-        code: YakitoriErrorCode.NotFound,
-        message: `Mate revision ${input.executionContext.mateRevisionId} was not found.`,
-      })
-    }
-
-    const projectInstructions = await projectInstructionLoader({
-      workingDirectory: input.executionContext.workingDirectory,
-    })
-    const resolvedModel = {
-      model: input.executionContext.model,
-      provider: input.executionContext.provider,
-      promptId:
-        input.executionContext.promptId === undefined
-          ? resolveModel({
-              model: input.executionContext.model,
-              provider: input.executionContext.provider,
-            }).promptId
-          : requirePromptId(input.executionContext.promptId),
-    }
-    const staticContext = buildStaticContext({
-      environment: buildEnvironmentContext({
-        workingDirectory: input.executionContext.workingDirectory,
-      }),
-      mateInstructions: revision.instructions,
-      mateRevisionId: revision.id,
-      model: resolvedModel,
-      ...(projectInstructions === undefined ? {} : { projectInstructions }),
-    })
-    const enabledToolNames = new Set(input.executionContext.enabledTools)
-    const tools = toolRegistry
-      .definitions()
-      .filter((definition) => enabledToolNames.has(definition.name))
-
+    const executionContext = input.turn.execution
     let modelCallIndex = 0
     let toolCallCount = 0
     const telemetry = requireTurnTelemetry(input.turnId)
     const usages = telemetry.usages
-    while (modelCallIndex < input.executionContext.limits.modelCallsPerTurn) {
+    while (modelCallIndex < executionContext.limits.modelCallsPerTurn) {
       if (input.signal.aborted) {
         await cancelAfterRuntimeAbort(input.sessionId, input.turnId)
         return
       }
 
-      const session = await requireSession(input.sessionId)
+      let session = await requireSession(input.sessionId)
+      const agentRuntime = agentControl.runtimeContext(input.sessionId)
+      const step = await captureStepContext({
+        turn: input.turn,
+        session,
+        toolRegistry,
+        multiAgent: agentRuntime,
+        projectInstructionLoader,
+        ...(options.now === undefined ? {} : { now: options.now() }),
+      })
+      session = await recordStepWorldState({
+        session,
+        turnId: input.turnId,
+        step,
+      })
       let context = buildModelContext({
         session,
         currentInputId: input.inputId,
-        limits: input.executionContext.limits,
+        limits: executionContext.limits,
       })
-      if (context.droppedTurns.length > 0) {
-        context =
-          (await attemptCompaction({
+      if (context.compactableHistory.length > 0) {
+        const outcome = await attemptCompaction({
+          session,
+          turnId: input.turnId,
+          configuration: input.turn.configuration,
+          candidateHistory: context.compactableHistory,
+          worldState: step.worldState,
+          usages,
+          signal: input.signal,
+        })
+        if (outcome === "compacted") {
+          session = await requireSession(input.sessionId)
+          context = buildModelContext({
             session,
-            turnId: input.turnId,
-            inputId: input.inputId,
-            executionContext: input.executionContext,
-            droppedTurns: context.droppedTurns,
-            usages,
-            signal: input.signal,
-          })) ?? context
+            currentInputId: input.inputId,
+            limits: executionContext.limits,
+          })
+        }
+      }
+      if (
+        context.droppedTurns.length > 0 ||
+        context.droppedCompactionCheckpoint
+      ) {
+        throw createYakitoriError({
+          code: YakitoriErrorCode.InvalidState,
+          message:
+            "Context compaction could not preserve all model-visible history.",
+          details: {
+            code: "context_compaction_required",
+            droppedTurnCount: context.droppedTurns.length,
+            droppedCompactionCheckpoint: context.droppedCompactionCheckpoint,
+          },
+        })
       }
 
-      const request: ModelRequest = {
-        target: {
-          ...staticContext.target,
-          ...(input.executionContext.effort === undefined
-            ? {}
-            : { effort: input.executionContext.effort }),
-          ...(input.executionContext.speed === undefined
-            ? {}
-            : { speed: input.executionContext.speed }),
-        },
-        cacheKey: session.conversationId,
-        system: staticContext.system,
-        contextual: staticContext.contextual,
+      const requestMessages = [
+        ...context.messages,
+        ...agentControl.takeMessages(input.sessionId),
+      ]
+      activeModelContexts.set(input.sessionId, {
         messages: context.messages,
-        tools,
+        forkTurnStartIndexes: context.forkTurnStartIndexes,
+      })
+      if (session.worldState === undefined) {
+        activeWorldStates.delete(input.sessionId)
+      } else {
+        activeWorldStates.set(input.sessionId, session.worldState.state)
+      }
+      const request: ModelRequest = {
+        target: step.turn.configuration.target,
+        cacheKey: step.turn.configuration.promptCacheKey,
+        system: [step.turn.configuration.baseInstructions],
+        messages: requestMessages,
+        tools: step.tools.definitions,
         signal: input.signal,
       }
       const observationEligibleToolResultItemIds = new Set(
@@ -566,7 +615,7 @@ export function createSessionRunner(
         const content = assistantContent(response.content)
         if (
           assistantContentBytes(content) >
-          input.executionContext.limits.assistantResponseBytes
+          executionContext.limits.assistantResponseBytes
         ) {
           await failTurnWithCode(
             input.sessionId,
@@ -578,13 +627,13 @@ export function createSessionRunner(
         }
         if (
           toolCallCount + toolCalls.length >
-          input.executionContext.limits.toolCallsPerTurn
+          executionContext.limits.toolCallsPerTurn
         ) {
           await failTurnWithCode(
             input.sessionId,
             input.turnId,
             "tool_budget_exhausted",
-            `Turn exceeded tool call budget of ${input.executionContext.limits.toolCallsPerTurn}.`,
+            `Turn exceeded tool call budget of ${executionContext.limits.toolCallsPerTurn}.`,
           )
           return
         }
@@ -598,7 +647,9 @@ export function createSessionRunner(
             toolCalls,
             streamId,
             modelCallIndex,
-            executionContext: input.executionContext,
+            executionContext,
+            toolPlan: step.tools,
+            workspaceRoot: step.workspaceRoot,
             contextMetadata: {
               selectedItemIds: [...context.selectedItemIds],
               observationEligibleToolResultItemIds: [
@@ -618,7 +669,6 @@ export function createSessionRunner(
             },
             signal: input.signal,
             visibleFileObservations,
-            subagentSession: subagentAgent(session) !== undefined,
           })
         } finally {
           telemetry.toolCalls += toolCalls.length
@@ -640,7 +690,7 @@ export function createSessionRunner(
       const content = assistantContent(response.content)
       if (
         assistantContentBytes(content) >
-        input.executionContext.limits.assistantResponseBytes
+        executionContext.limits.assistantResponseBytes
       ) {
         await failTurnWithCode(
           input.sessionId,
@@ -669,8 +719,8 @@ export function createSessionRunner(
         turnId: input.turnId,
         content,
         providerMetadata: {
-          provider: input.executionContext.provider,
-          model: input.executionContext.model,
+          provider: executionContext.provider,
+          model: executionContext.model,
           callIndex: modelCallIndex,
           streamId,
           selectedItemIds: [...context.selectedItemIds],
@@ -697,39 +747,70 @@ export function createSessionRunner(
       input.sessionId,
       input.turnId,
       "model_budget_exhausted",
-      `Turn exceeded model call budget of ${input.executionContext.limits.modelCallsPerTurn}.`,
+      `Turn exceeded model call budget of ${executionContext.limits.modelCallsPerTurn}.`,
     )
   }
 
-  // Housekeeping: fold the longest fitting prefix of dropped history into a
+  async function recordStepWorldState(input: {
+    readonly session: SessionProjection
+    readonly turnId: string
+    readonly step: StepContext
+    readonly forceFull?: boolean
+  }): Promise<SessionProjection> {
+    const compactionThroughSeq = input.session.compaction?.throughSeq
+    const compactionInvalidatedBaseline =
+      compactionThroughSeq !== undefined &&
+      input.session.compaction?.replacement === undefined &&
+      !input.session.worldStateUpdates.some(
+        (update) => update.full && update.seq > compactionThroughSeq,
+      )
+    const diff = diffWorldState(
+      input.forceFull || compactionInvalidatedBaseline
+        ? undefined
+        : input.session.worldState?.state,
+      input.step.worldState,
+    )
+    if (diff === undefined) return input.session
+
+    const afterItemId = input.session.activeTurn?.itemIds.at(-1)
+    const updated = await options.kernel.recordWorldStateUpdate({
+      sessionId: input.session.id,
+      turnId: input.turnId,
+      ...(afterItemId === undefined ? {} : { afterItemId }),
+      ...diff,
+    })
+    publishDurable([updated.event])
+    return requireSession(input.session.id)
+  }
+
+  // Housekeeping: fold the longest fitting continuous history prefix into a
   // durable checkpoint, then rebuild context. An over-long summary request is
-  // retried with the oldest half of the source removed (up to
-  // MAX_COMPACTION_ATTEMPTS); any other failure falls back to the originally
-  // built context, and repeated failures trip a per-session circuit breaker.
+  // retried with a shorter oldest prefix (up to
+  // MAX_COMPACTION_ATTEMPTS); any other failure leaves the checkpoint
+  // unchanged, and repeated failures trip a per-session circuit breaker. The
+  // caller may continue only when the unabridged context still fits.
   async function attemptCompaction(input: {
     readonly session: SessionProjection
     readonly turnId: string
-    readonly inputId: string
-    readonly executionContext: TurnExecutionContext
-    readonly droppedTurns: readonly DroppedTurn[]
+    readonly configuration: ResolvedTurnConfiguration
+    readonly candidateHistory: readonly CompactionSourceGroup[]
+    readonly worldState: WorldState
     readonly usages: ModelUsage[]
     readonly signal: AbortSignal
-  }): Promise<ModelContextBuildResult | null | undefined> {
+  }): Promise<"compacted" | "not_smaller" | "failed"> {
     const sessionId = input.session.id
     if (
       (compactionFailures.get(sessionId) ?? 0) >=
       MAX_CONSECUTIVE_COMPACTION_FAILURES
     ) {
-      return undefined
+      return "failed"
     }
     try {
-      const previousSummary = input.session.compaction?.summary
       let source = selectCompactionSource(
-        input.droppedTurns,
-        previousSummary,
-        input.executionContext.limits.modelVisibleContextBytes,
+        input.candidateHistory,
+        input.configuration.limits.modelVisibleContextBytes,
       )
-      if (source.length === 0) return undefined
+      if (source.length === 0) return "failed"
       const throughSeq = input.session.seq
       let result: Awaited<ReturnType<typeof runCompaction>> | undefined
       let attempts = 0
@@ -740,17 +821,16 @@ export function createSessionRunner(
             stream: options.stream,
             request: buildCompactionRequest({
               source,
-              ...(previousSummary === undefined ? {} : { previousSummary }),
-              provider: input.executionContext.provider,
-              model: input.executionContext.model,
-              cacheKey: input.session.conversationId,
+              target: input.configuration.target,
+              baseInstructions: input.configuration.baseInstructions,
+              cacheKey: input.configuration.promptCacheKey,
               signal: input.signal,
             }),
           })
         } catch (error) {
           if (input.signal.aborted || isAbortError(error)) throw error
           attempts += 1
-          const reduced = dropOldestSourceHalf(source)
+          const reduced = reduceCompactionSourcePrefix(source)
           if (
             !isContextOverflowError(error) ||
             attempts >= MAX_COMPACTION_ATTEMPTS ||
@@ -770,32 +850,51 @@ export function createSessionRunner(
       // A checkpoint that is not smaller than the history it replaces buys
       // nothing. This is not a failure: keep history, skip the error log and
       // the circuit breaker, and let callers tell the two outcomes apart.
-      const sourceBytes = utf8Bytes(
-        JSON.stringify(source.flatMap((group) => group.messages)),
+      const replacement = createCompactionReplacement(
+        input.worldState,
+        result.summary,
+        source.some((group) => group.kind === "inherited"),
       )
-      if (utf8Bytes(result.summary) >= sourceBytes) {
-        return null
+      const sourceBytes = measureModelMessagesBytes(
+        source.flatMap((group) => group.messages),
+      )
+      const replacementBytes = measureModelMessagesBytes(
+        replacement.history.filter(
+          (message) =>
+            !(
+              (message.role === "user" || message.role === "developer") &&
+              message.context?.type === "world_state"
+            ),
+        ),
+      )
+      if (replacementBytes >= sourceBytes) {
+        return "not_smaller"
+      }
+      if (
+        utf8Bytes(result.summary) >
+        input.configuration.limits.compactionSummaryBytes
+      ) {
+        throw new Error(
+          `Compaction checkpoint exceeds the configured ${input.configuration.limits.compactionSummaryBytes}-byte limit.`,
+        )
       }
       const recorded = await options.kernel.recordCompaction({
         sessionId,
         turnId: input.turnId,
+        expectedCompactionId: input.session.compaction?.compactionId ?? null,
         throughSeq,
         coveredTurnIds: [
           ...(input.session.compaction?.coveredTurnIds ?? []),
-          ...source.map((group) => group.turnId),
+          ...source.flatMap((group) => group.turnIds),
         ],
-        summary: truncateSummary(result.summary, limits.compactionSummaryBytes),
+        summary: result.summary,
+        replacement,
         ...(result.usage === undefined ? {} : { usage: result.usage }),
       })
       publishDurable([recorded.event])
       if (result.usage !== undefined) input.usages.push(result.usage)
       compactionFailures.delete(sessionId)
-      const rebuilt = await requireSession(sessionId)
-      return buildModelContext({
-        session: rebuilt,
-        currentInputId: input.inputId,
-        limits: input.executionContext.limits,
-      })
+      return "compacted"
     } catch (error) {
       // A user interrupt mid-summary surfaces here as an AbortError; that is
       // the normal abort path, not a compaction failure worth logging.
@@ -804,12 +903,9 @@ export function createSessionRunner(
           sessionId,
           (compactionFailures.get(sessionId) ?? 0) + 1,
         )
-        console.error(
-          "Context compaction failed; continuing with dropped history.",
-          error,
-        )
+        console.error("Context compaction failed.", error)
       }
-      return undefined
+      return "failed"
     }
   }
 
@@ -820,10 +916,24 @@ export function createSessionRunner(
     readonly sessionId: string
     readonly turnId: string
     readonly inputId: string
+    readonly turn: TurnContext
     readonly executionContext: TurnExecutionContext
     readonly signal: AbortSignal
   }): Promise<void> {
-    const session = await requireSession(input.sessionId)
+    let session = await requireSession(input.sessionId)
+    const step = await captureStepContext({
+      turn: input.turn,
+      session,
+      toolRegistry,
+      multiAgent: agentControl.runtimeContext(input.sessionId),
+      projectInstructionLoader,
+      ...(options.now === undefined ? {} : { now: options.now() }),
+    })
+    session = await recordStepWorldState({
+      session,
+      turnId: input.turnId,
+      step,
+    })
     const source = collectUncoveredTurns(session, input.executionContext.limits)
     const telemetry = requireTurnTelemetry(input.turnId)
     const usages = telemetry.usages
@@ -837,9 +947,9 @@ export function createSessionRunner(
       const compacted = await attemptCompaction({
         session,
         turnId: input.turnId,
-        inputId: input.inputId,
-        executionContext: input.executionContext,
-        droppedTurns: source,
+        configuration: input.turn.configuration,
+        candidateHistory: source,
+        worldState: step.worldState,
         usages,
         signal: input.signal,
       })
@@ -848,9 +958,9 @@ export function createSessionRunner(
         return
       }
       note =
-        compacted === undefined
+        compacted === "failed"
           ? "Context compaction failed; the history was kept intact."
-          : compacted === null
+          : compacted === "not_smaller"
             ? "The history is already compact enough; summarizing it would not reduce the context."
             : `Compacted ${source.length} turn(s) into a context checkpoint.`
     }
@@ -878,12 +988,13 @@ export function createSessionRunner(
     readonly streamId: string
     readonly modelCallIndex: number
     readonly executionContext: TurnExecutionContext
+    readonly toolPlan: StepToolPlan
+    readonly workspaceRoot: string
     readonly contextMetadata: EventMetadata
     readonly signal: AbortSignal
     readonly visibleFileObservations: ReturnType<
       typeof createVisibleFileObservations
     >
-    readonly subagentSession: boolean
   }): Promise<void> {
     const recorded = await options.kernel.recordAssistantOutput({
       sessionId: input.sessionId,
@@ -897,7 +1008,7 @@ export function createSessionRunner(
         ...input.contextMetadata,
       },
       toolCalls: input.toolCalls.map((call) => {
-        const tool = toolRegistry.get(call.name)
+        const tool = input.toolPlan.get(call.name)
         return {
           id: call.id,
           name: call.name,
@@ -911,12 +1022,9 @@ export function createSessionRunner(
     })
     publishDurable(recorded.events)
 
-    const workspaceRoot = await resolveWorkspaceRoot(
-      input.executionContext.workingDirectory,
-    )
     const observations = input.visibleFileObservations
     const firstBarrier = input.toolCalls.findIndex((call) => {
-      const tool = toolRegistry.get(call.name)
+      const tool = input.toolPlan.get(call.name)
       return toolEffect(tool) !== "observe"
     })
     const prefix =
@@ -935,11 +1043,11 @@ export function createSessionRunner(
               turnId: input.turnId,
               call,
               executionContext: input.executionContext,
-              workspaceRoot,
+              toolPlan: input.toolPlan,
+              workspaceRoot: input.workspaceRoot,
               signal: input.signal,
               observations,
               record: false,
-              subagentSession: input.subagentSession,
             }),
           }
         } catch (error) {
@@ -981,11 +1089,11 @@ export function createSessionRunner(
           turnId: input.turnId,
           call,
           executionContext: input.executionContext,
-          workspaceRoot,
+          toolPlan: input.toolPlan,
+          workspaceRoot: input.workspaceRoot,
           signal: input.signal,
           observations,
           record: true,
-          subagentSession: input.subagentSession,
         })
         if (result === "aborted") {
           await cancelAfterRuntimeAbort(input.sessionId, input.turnId)
@@ -1006,15 +1114,14 @@ export function createSessionRunner(
     readonly turnId: string
     readonly call: ModelToolCallBlock
     readonly executionContext: TurnExecutionContext
+    readonly toolPlan: StepToolPlan
     readonly workspaceRoot: string
     readonly signal: AbortSignal
     readonly observations: ReturnType<typeof createVisibleFileObservations>
     readonly record: boolean
-    readonly subagentSession: boolean
   }): Promise<ToolExecutionResult | "aborted"> {
-    // Defense in depth: the model only sees enabledTools definitions, but a
-    // session's narrowed tool set must hold even if a call slips through
-    // (e.g. a subagent session attempting task).
+    // Defense in depth: the model only sees enabledTools definitions, but the
+    // persisted Session contract must still hold if a disabled call arrives.
     if (!input.executionContext.enabledTools.includes(input.call.name)) {
       const disabled: ToolExecutionResult = {
         ok: false,
@@ -1036,7 +1143,7 @@ export function createSessionRunner(
     }
     // The registry owns dispatch; the lookup here is only for permission
     // metadata (autoAllow), mirroring codex's ToolRouter split.
-    const tool = toolRegistry.get(input.call.name)
+    const tool = input.toolPlan.get(input.call.name)
     let permissionRequestId: string | undefined
     if (
       tool !== undefined &&
@@ -1097,24 +1204,17 @@ export function createSessionRunner(
       toolCallId: input.call.id,
     })
 
-    const result = await toolRegistry.execute(
+    const result = await input.toolPlan.execute(
       input.call.name,
       input.call.input,
       {
         workspaceRoot: input.workspaceRoot,
         signal: input.signal,
         visibleFileObservations: input.observations,
-        // Subagent sessions never get spawnSubagent; this caps delegation
-        // depth at 1 alongside task being absent from their enabledTools.
-        ...(input.subagentSession
-          ? {}
-          : {
-              spawnSubagent: createSpawnSubagent(
-                input.sessionId,
-                input.executionContext,
-                input.signal,
-              ),
-            }),
+        agentControl: agentControl.bind(
+          input.sessionId,
+          turnTarget(input.executionContext),
+        ),
       },
     )
     if (!input.record) return result
@@ -1168,80 +1268,126 @@ export function createSessionRunner(
     return input.result.code === "aborted" ? "aborted" : "ok"
   }
 
-  // Spawns a subagent as a child session on this same runner: the child gets
-  // its own lane, so awaiting its wake() cannot deadlock the parent's lane.
-  function createSpawnSubagent(
-    parentSessionId: string,
-    executionContext: TurnExecutionContext,
-    parentSignal: AbortSignal,
-  ): SpawnSubagent {
-    return async ({ agent, description, prompt }) => {
-      // An already-aborted signal never fires listeners, so check it
-      // explicitly at every stage boundary.
-      if (parentSignal.aborted) {
-        return {
-          ok: false as const,
-          sessionId: "",
-          error: "Parent turn was aborted before the subagent started.",
-        }
-      }
-      const created = await options.kernel.createSession({
-        parentSessionId,
-        workingDirectory: executionContext.workingDirectory,
-        mateId: executionContext.mateId,
-        mateRevisionId: executionContext.mateRevisionId,
-        title: description,
-        metadata: { subagent: agent, subagentDescription: description },
-      })
-      publishDurable([created.event])
-      const childSessionId = created.sessionId
-      const onParentAbort = () => {
-        void interruptSubagentTurn(childSessionId).catch((error: unknown) => {
-          options.onRuntimeError?.(error)
-        })
-      }
-      parentSignal.addEventListener("abort", onParentAbort, { once: true })
-      try {
-        const admitted = await options.kernel.admitInput({
-          sessionId: childSessionId,
-          role: InputRole.User,
-          content: { kind: "text", text: prompt },
-          // A subagent extends the turn that spawned it: inherit that turn's
-          // model instead of falling back to the session default.
-          modelSelection: {
-            provider: executionContext.provider,
-            model: executionContext.model,
-            ...(executionContext.effort === undefined
-              ? {}
-              : { effort: executionContext.effort }),
-            ...(executionContext.speed === undefined
-              ? {}
-              : { speed: executionContext.speed }),
-          },
-        })
-        publishDurable([admitted.event])
-        // The abort listener cannot cancel a turn that does not exist yet;
-        // if the parent died during admission, tear the child down instead
-        // of waking it.
-        if (parentSignal.aborted) {
-          await interruptSubagentTurn(childSessionId)
-          return {
-            ok: false as const,
-            sessionId: childSessionId,
-            error: "Parent turn was aborted.",
-          }
-        }
-        await wake(childSessionId)
-      } finally {
-        parentSignal.removeEventListener("abort", onParentAbort)
-      }
-      return readSubagentOutcome(childSessionId)
+  async function createAgentSession(input: {
+    readonly parentSessionId: string
+    readonly rootSessionId: string
+    readonly taskName: string
+    readonly path: string
+    readonly agentType: "general" | "explore"
+    readonly depth: number
+    readonly message: string
+    readonly target: AgentModelTarget
+    readonly forkedContext?: ReturnType<typeof createForkedModelContext>
+  }): Promise<string> {
+    const parent = await requireSession(input.parentSessionId)
+    if (parent.configuration === undefined) {
+      throw new Error(
+        `Parent Session ${input.parentSessionId} has no persisted configuration.`,
+      )
     }
+    const root =
+      input.rootSessionId === parent.id
+        ? parent
+        : await requireSession(input.rootSessionId)
+    const inheritedConfiguration = SessionConfiguration.restore(
+      parent.configuration,
+      root.conversationId,
+    ).snapshot
+    const created = await options.kernel.createSession({
+      parentSessionId: input.parentSessionId,
+      ...(parent.workingDirectory === undefined
+        ? {}
+        : { workingDirectory: parent.workingDirectory }),
+      ...(parent.mateId === undefined ? {} : { mateId: parent.mateId }),
+      ...(parent.mateRevisionId === undefined
+        ? {}
+        : { mateRevisionId: parent.mateRevisionId }),
+      title: input.taskName,
+      metadata: {
+        agent: {
+          version: 1,
+          kind: "subagent",
+          rootSessionId: input.rootSessionId,
+          parentSessionId: input.parentSessionId,
+          taskName: input.taskName,
+          path: input.path,
+          agentType: input.agentType,
+          depth: input.depth,
+        },
+      },
+    })
+    publishDurable([created.event])
+    const configured = await options.kernel.configureSession({
+      sessionId: created.sessionId,
+      configuration: inheritedConfiguration,
+    })
+    if (configured.event !== undefined) publishDurable([configured.event])
+    if (input.forkedContext !== undefined) {
+      const seeded = await options.kernel.seedContextWindow({
+        sessionId: created.sessionId,
+        sourceSessionId: input.forkedContext.sourceSessionId,
+        history: input.forkedContext.messages,
+        ...(input.forkedContext.worldState === undefined
+          ? {}
+          : { worldStateBaseline: input.forkedContext.worldState }),
+      })
+      publishDurable([seeded.event])
+    }
+    const admitted = await options.kernel.admitInput({
+      sessionId: created.sessionId,
+      role: InputRole.User,
+      content: { kind: "text", text: input.message },
+      modelSelection: selectionFromTarget(input.target),
+    })
+    publishDurable([admitted.event])
+    return created.sessionId
   }
 
-  // Keyed off durable state rather than lane state: on parent abort the
-  // child turn may already be terminal, and losing that race is a no-op.
-  async function interruptSubagentTurn(sessionId: string): Promise<void> {
+  async function runAgentChild(sessionId: string): Promise<AgentRunOutcome> {
+    await wake(sessionId)
+    return readAgentOutcome(sessionId)
+  }
+
+  async function submitAgentFollowup(input: {
+    readonly sessionId: string
+    readonly message: string
+    readonly target: AgentModelTarget
+  }): Promise<void> {
+    const admitted = await options.kernel.admitInput({
+      sessionId: input.sessionId,
+      role: InputRole.User,
+      content: { kind: "text", text: input.message },
+      modelSelection: selectionFromTarget(input.target),
+    })
+    publishDurable([admitted.event])
+  }
+
+  function captureForkContext(input: {
+    readonly parentSessionId: string
+    readonly forkTurns: ForkTurns
+  }) {
+    if (input.forkTurns === "none") return undefined
+    const context = activeModelContexts.get(input.parentSessionId)
+    if (context === undefined) return undefined
+    const messages =
+      input.forkTurns === "all"
+        ? context.messages
+        : lastModelTurns(context, input.forkTurns)
+    const worldState =
+      input.forkTurns === "all"
+        ? activeWorldStates.get(input.parentSessionId)
+        : undefined
+    return createForkedModelContext({
+      sourceSessionId: input.parentSessionId,
+      messages,
+      preserveWorldState: input.forkTurns === "all",
+      ...(worldState === undefined ? {} : { worldState }),
+    })
+  }
+
+  // Keyed off durable state rather than lane state: an interrupt can race a
+  // terminal child, in which case there is nothing left to cancel.
+  async function interruptAgentTurn(sessionId: string): Promise<void> {
     lanes.get(sessionId)?.abort?.abort()
     const read = await options.kernel.readSession({ sessionId })
     const session = read.session
@@ -1266,10 +1412,10 @@ export function createSessionRunner(
       ?.activeTurn
     if (!active) return
     lanes.get(sessionId)?.abort?.abort()
-    await cancelActiveTurn(sessionId, active.turnId, "parent_aborted")
+    await cancelActiveTurn(sessionId, active.turnId, "agent_interrupted")
   }
 
-  async function readSubagentOutcome(sessionId: string) {
+  async function readAgentOutcome(sessionId: string): Promise<AgentRunOutcome> {
     const session = await requireSession(sessionId)
     const assistantItem = [...session.items]
       .reverse()
@@ -1280,17 +1426,24 @@ export function createSessionRunner(
         : undefined
     const lastTurn = session.turns.at(-1)
     if (lastTurn?.state === TurnState.Completed) {
-      return { ok: true as const, sessionId, text: text ?? "" }
+      return { type: "completed", text: text ?? "" }
     }
     const detail =
       lastTurn?.error?.message ??
       lastTurn?.cancelledReason ??
       lastTurn?.interruptedReason
+    if (
+      lastTurn?.state === TurnState.Cancelled ||
+      lastTurn?.state === TurnState.Interrupted
+    ) {
+      return {
+        type: "interrupted",
+        ...(detail === undefined ? {} : { reason: detail }),
+      }
+    }
     return {
-      ok: false as const,
-      sessionId,
-      error: `Subagent turn ${lastTurn?.state ?? "missing"}${detail === undefined ? "." : `: ${detail}`}`,
-      ...(text === undefined ? {} : { partialText: text }),
+      type: "errored",
+      error: `Agent turn ${lastTurn?.state ?? "missing"}${detail === undefined ? "." : `: ${detail}`}`,
     }
   }
 
@@ -1637,6 +1790,7 @@ export function createSessionRunner(
     async close() {
       closed = true
       for (const lane of lanes.values()) lane.abort?.abort()
+      await agentControl.close()
       await Promise.all(
         Array.from(lanes.values(), (lane) => lane.worker).filter(
           (worker): worker is Promise<void> => worker !== undefined,
@@ -1646,42 +1800,64 @@ export function createSessionRunner(
   }
 }
 
+function createCompactionReplacement(
+  worldState: WorldState,
+  summary: string,
+  replacesInheritedContext: boolean,
+): {
+  readonly history: readonly ModelMessage[]
+  readonly worldStateBaseline: JsonObject
+  readonly replacesInheritedContext?: boolean
+} {
+  const fullWorldState = diffWorldState(undefined, worldState)
+  if (fullWorldState === undefined) {
+    throw new Error(
+      "Full world-state rendering unexpectedly produced no state.",
+    )
+  }
+  return {
+    history: createCompactionReplacementHistory({
+      summary,
+      worldStateFragments: fullWorldState.fragments,
+    }),
+    worldStateBaseline: fullWorldState.state,
+    ...(replacesInheritedContext ? { replacesInheritedContext: true } : {}),
+  }
+}
+
 function toolEffect(tool: RuntimeTool | undefined): ToolEffect {
   return tool?.effect ?? "opaque"
 }
 
-// A session is a subagent session when SessionCreated metadata carries a
-// `subagent` marker (forks use forkReason instead, so there is no overlap).
-// Any value other than the two known kinds is treated as "general".
-function subagentAgent(
-  session: SessionProjection,
-): "general" | "explore" | undefined {
-  const marker = session.metadata?.subagent
-  if (marker === undefined) return undefined
-  return marker === "explore" ? "explore" : "general"
-}
-
-// Subagent sessions run with a narrowed tool set: explore is read-only,
-// general keeps everything except task itself (depth is capped at 1).
-function resolveEnabledTools(
-  session: SessionProjection,
-  enabledTools: readonly string[],
-): readonly string[] {
-  const agent = subagentAgent(session)
-  if (agent === undefined) return [...enabledTools]
-  if (agent === "explore") {
-    return enabledTools.filter((name) => EXPLORE_SUBAGENT_TOOLS.has(name))
+function turnTarget(execution: TurnExecutionContext): AgentModelTarget {
+  return {
+    provider: execution.provider,
+    model: execution.model,
+    ...(execution.effort === undefined ? {} : { effort: execution.effort }),
+    ...(execution.speed === undefined ? {} : { speed: execution.speed }),
   }
-  return enabledTools.filter((name) => name !== "task")
 }
 
-const EXPLORE_SUBAGENT_TOOLS: ReadonlySet<string> = new Set([
-  "read_file",
-  "grep",
-  "glob",
-  "web_fetch",
-  "web_search",
-])
+function selectionFromTarget(target: AgentModelTarget): ModelSelection {
+  return {
+    provider: target.provider,
+    model: target.model,
+    ...(target.effort === undefined ? {} : { effort: target.effort }),
+    ...(target.speed === undefined ? {} : { speed: target.speed }),
+  }
+}
+
+function lastModelTurns(
+  context: {
+    readonly messages: readonly ModelMessage[]
+    readonly forkTurnStartIndexes: readonly number[]
+  },
+  count: number,
+): readonly ModelMessage[] {
+  const start =
+    context.forkTurnStartIndexes.at(-count) ?? context.forkTurnStartIndexes[0]
+  return start === undefined ? [] : context.messages.slice(start)
+}
 
 function isInvalidState(error: unknown): boolean {
   return (
@@ -1861,41 +2037,38 @@ function isEventMetadata(value: unknown): value is EventMetadata {
 }
 
 function selectCompactionSource(
-  droppedTurns: readonly DroppedTurn[],
-  previousSummary: string | undefined,
+  candidateHistory: readonly CompactionSourceGroup[],
   budgetBytes: number,
-): readonly DroppedTurn[] {
-  const selected: DroppedTurn[] = []
-  let bytes = utf8Bytes(previousSummary ?? "")
-  for (const group of droppedTurns) {
-    const groupBytes = utf8Bytes(JSON.stringify(group.messages))
-    if (bytes + groupBytes > budgetBytes) break
+): readonly CompactionSourceGroup[] {
+  const selected: CompactionSourceGroup[] = []
+  const checkpointIndex = candidateHistory.findIndex(
+    (group) => group.kind === "compaction",
+  )
+  const requiredLength = checkpointIndex < 0 ? 0 : checkpointIndex + 1
+  let bytes = 0
+  for (const [index, group] of candidateHistory.entries()) {
+    const groupBytes = measureModelMessagesBytes(group.messages)
+    if (index >= requiredLength && bytes + groupBytes > budgetBytes) break
     selected.push(group)
     bytes += groupBytes
   }
   return selected
 }
 
-function truncateSummary(summary: string, budgetBytes: number): string {
-  if (utf8Bytes(summary) <= budgetBytes) return summary
-  const marker = "\n...[summary truncated]"
-  let text = summary
-  while (utf8Bytes(`${text}${marker}`) > budgetBytes && text.length > 0) {
-    text = text.slice(0, Math.max(0, text.length - 1_024))
-  }
-  return `${text}${marker}`
-}
-
 const MAX_COMPACTION_ATTEMPTS = 3
 const MAX_CONSECUTIVE_COMPACTION_FAILURES = 3
 
-// Keeps the most recent half of the source; the oldest turns are what an
-// over-long summary request can most afford to lose.
-function dropOldestSourceHalf(
-  source: readonly DroppedTurn[],
-): readonly DroppedTurn[] {
-  const keep = Math.ceil(source.length / 2)
-  return source.slice(source.length - keep)
+// Every checkpoint covers a continuous historical prefix. If the summary
+// request overflows, keep the oldest half and postpone newer Turns.
+function reduceCompactionSourcePrefix(
+  source: readonly CompactionSourceGroup[],
+): readonly CompactionSourceGroup[] {
+  const checkpointIndex = source.findIndex(
+    (group) => group.kind === "compaction",
+  )
+  const requiredLength = checkpointIndex < 0 ? 0 : checkpointIndex + 1
+  const keep = Math.max(requiredLength, Math.ceil(source.length / 2))
+  return source.slice(0, keep)
 }
 
 function utf8Bytes(value: string): number {

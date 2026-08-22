@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import {
   createEventEnvelope,
+  createRuntimeLimits,
   EventType,
   InputRole,
   isKernelEvent,
@@ -10,6 +11,7 @@ describe("kernel facts", () => {
   it("contains exactly the coarse witness vocabulary", () => {
     expect(Object.values(EventType)).toEqual([
       "session.created",
+      "session.configured",
       "input.admitted",
       "input.cancelled",
       "turn.started",
@@ -22,6 +24,8 @@ describe("kernel facts", () => {
       "tool.result",
       "permission.requested",
       "permission.resolved",
+      "world_state.updated",
+      "context_window.seeded",
       "context.compacted",
     ])
   })
@@ -40,6 +44,66 @@ describe("kernel facts", () => {
       type: EventType.SessionCreated,
       data: { title: "Witness" },
     })
+  })
+
+  it("recognizes a persisted session configuration snapshot", () => {
+    expect(
+      isKernelEvent({
+        type: EventType.SessionConfigured,
+        data: {
+          configuration: {
+            schemaVersion: 1,
+            workspaceRoot: "/workspace",
+            defaultTarget: { provider: "codex", model: "gpt-5.6-sol" },
+            baseInstructions: {
+              text: "instructions",
+              revision: "revision_1",
+              provenance: {
+                type: "model",
+                provider: "codex",
+                model: "gpt-5.6-sol",
+                promptId: "gpt",
+              },
+            },
+            enabledTools: ["read_file"],
+            approvalPolicy: "never",
+            runtimeLimits: createRuntimeLimits(),
+          },
+        },
+      }),
+    ).toBe(true)
+  })
+
+  it("accepts schema v1 snapshots written before a runtime limit existed", () => {
+    const runtimeLimits = createRuntimeLimits()
+    const { compactionRetainRatio: _removed, ...legacyRuntimeLimits } =
+      runtimeLimits
+
+    expect(
+      isKernelEvent({
+        type: EventType.SessionConfigured,
+        data: {
+          configuration: {
+            schemaVersion: 1,
+            workspaceRoot: "/workspace",
+            defaultTarget: { provider: "codex", model: "gpt-5.6-sol" },
+            baseInstructions: {
+              text: "instructions",
+              revision: "revision_1",
+              provenance: {
+                type: "model",
+                provider: "codex",
+                model: "gpt-5.6-sol",
+                promptId: "gpt",
+              },
+            },
+            enabledTools: ["read_file"],
+            approvalPolicy: "never",
+            runtimeLimits: legacyRuntimeLimits,
+          },
+        },
+      }),
+    ).toBe(true)
   })
 
   it("strictly rejects malformed known facts at write time", () => {
@@ -105,7 +169,7 @@ describe("kernel facts", () => {
     ).toBe(false)
   })
 
-  it("accepts turn.started execution contexts with or without promptId, effort, and speed", () => {
+  it("accepts backward-compatible Turn execution configuration fields", () => {
     const started = (executionContext: Record<string, unknown>) =>
       isKernelEvent({
         type: EventType.TurnStarted,
@@ -138,9 +202,58 @@ describe("kernel facts", () => {
     // must still validate.
     expect(started({})).toBe(true)
     expect(started({ promptId: "gpt" })).toBe(true)
+    expect(
+      started({
+        promptId: "gpt",
+        baseInstructionsRevision: "base@1",
+        modelInstructionsRevision: "gpt@1",
+        modelContextWindowTokens: 272_000,
+        effectiveModelContextWindowTokens: 258_400,
+      }),
+    ).toBe(true)
     expect(started({ promptId: 1 })).toBe(false)
+    expect(started({ promptRevision: 1 })).toBe(false)
+    expect(started({ baseInstructionsRevision: 1 })).toBe(false)
+    expect(started({ modelInstructionsRevision: 1 })).toBe(false)
+    expect(started({ modelContextWindowTokens: 0 })).toBe(false)
+    expect(
+      started({
+        modelContextWindowTokens: 100,
+        effectiveModelContextWindowTokens: 101,
+      }),
+    ).toBe(false)
     expect(started({ effort: "low" })).toBe(true)
     expect(started({ effort: "low", speed: "fast" })).toBe(true)
+    expect(
+      started({
+        limits: {
+          modelCallsPerTurn: 1,
+          toolCallsPerTurn: 1,
+          modelVisibleMessageBlocks: 1,
+          modelVisibleContextBytes: 100,
+          compactionTriggerContextBytes: 80,
+          compactionRetainContextBytes: 16,
+          modelVisibleToolResultBytes: 1,
+          modelVisibleToolResultLines: 1,
+          assistantResponseBytes: 1,
+        },
+      }),
+    ).toBe(true)
+    expect(
+      started({
+        limits: {
+          modelCallsPerTurn: 1,
+          toolCallsPerTurn: 1,
+          modelVisibleMessageBlocks: 1,
+          modelVisibleContextBytes: 100,
+          compactionTriggerContextBytes: 80,
+          compactionRetainContextBytes: 80,
+          modelVisibleToolResultBytes: 1,
+          modelVisibleToolResultLines: 1,
+          assistantResponseBytes: 1,
+        },
+      }),
+    ).toBe(false)
     expect(started({ effort: 1 })).toBe(false)
     expect(started({ speed: 2 })).toBe(false)
   })
@@ -172,9 +285,99 @@ describe("kernel facts", () => {
           coveredTurnIds: ["turn_0"],
           summary: "Goal: ship it.",
           usage: { inputTokens: 10, outputTokens: 5 },
+          replacement: {
+            windowId: "context_window_2",
+            firstWindowId: "context_window_1",
+            previousWindowId: "context_window_1",
+            windowNumber: 2,
+            history: [
+              {
+                role: "developer",
+                content: [{ type: "text", text: "current state" }],
+                context: {
+                  type: "world_state",
+                  sectionId: "environment",
+                  revision: "revision_1",
+                },
+              },
+              {
+                role: "user",
+                content: [{ type: "text", text: "Goal: ship it." }],
+              },
+            ],
+            worldStateBaseline: { environment: { cwd: "/workspace" } },
+          },
         },
       }),
     ).toBe(true)
+  })
+
+  it("recognizes a durable inherited context window", () => {
+    expect(
+      isKernelEvent({
+        type: EventType.ContextWindowSeeded,
+        data: {
+          windowId: "context_window_1",
+          sourceSessionId: "session_parent",
+          history: [
+            {
+              role: "assistant",
+              content: [
+                {
+                  type: "tool_call",
+                  id: "call_1",
+                  name: "read_file",
+                  input: { path: "README.md" },
+                },
+              ],
+            },
+            {
+              role: "tool",
+              toolCallId: "call_1",
+              content: "hello",
+            },
+          ],
+          worldStateBaseline: { environment: { cwd: "/workspace" } },
+        },
+      }),
+    ).toBe(true)
+  })
+
+  it("recognizes a strict world_state.updated fact", () => {
+    const event = {
+      type: EventType.WorldStateUpdated,
+      data: {
+        turnId: "turn_1",
+        afterItemId: "item_1",
+        full: false,
+        state: { "project.instructions": null },
+        fragments: [
+          {
+            id: "project.instructions",
+            revision: "revision_removed",
+            role: "user",
+            text: "instructions removed",
+          },
+        ],
+      },
+    }
+
+    expect(isKernelEvent(event)).toBe(true)
+    expect(
+      isKernelEvent({
+        ...event,
+        data: { ...event.data, fragments: [] },
+      }),
+    ).toBe(true)
+    expect(
+      isKernelEvent({
+        ...event,
+        data: {
+          ...event.data,
+          fragments: [{ ...event.data.fragments[0], role: "system" }],
+        },
+      }),
+    ).toBe(false)
   })
 
   it.each([

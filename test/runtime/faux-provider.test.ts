@@ -197,7 +197,6 @@ function baseRequest(overrides: Partial<ModelRequest> = {}): ModelRequest {
   return {
     target: target("scripted"),
     system: [{ id: "base", revision: "base-1", text: "system" }],
-    contextual: [],
     messages: [
       {
         role: "user",

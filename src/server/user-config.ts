@@ -1,30 +1,42 @@
 import { randomUUID } from "node:crypto"
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
-import { dirname, join } from "node:path"
+import { dirname, isAbsolute, join, resolve } from "node:path"
 import { parse, stringify, type TomlTable } from "smol-toml"
 import type { ApiUserModelPreference } from "./protocol.ts"
 
 export type UserConfigStore = {
   read(): Promise<ApiUserModelPreference | undefined>
+  readConfiguration(): Promise<UserConfiguration>
   write(preference: ApiUserModelPreference): Promise<ApiUserModelPreference>
 }
 
+export type UserConfiguration = Readonly<{
+  preference?: ApiUserModelPreference
+  baseInstructions?: string
+  modelContextWindowTokens?: number
+}>
+
 export function createUserConfigStore(
-  options: { readonly configPath?: string } = {},
+  options: { readonly configPath?: string; readonly cwd?: string } = {},
 ): UserConfigStore {
   const configPath = options.configPath ?? defaultUserConfigPath()
+  const cwd = options.cwd ?? process.cwd()
   let pendingWrite = Promise.resolve()
 
   return {
     async read() {
-      const document = await readConfigDocument(configPath)
-      return document?.preference
+      const document = await readConfigDocument(configPath, cwd)
+      return document?.configuration.preference
+    },
+    async readConfiguration() {
+      const document = await readConfigDocument(configPath, cwd)
+      return document?.configuration ?? {}
     },
     write(preference) {
       const write = pendingWrite.then(
-        () => writePreference(configPath, preference),
-        () => writePreference(configPath, preference),
+        () => writePreference(configPath, cwd, preference),
+        () => writePreference(configPath, cwd, preference),
       )
       pendingWrite = write.then(
         () => undefined,
@@ -44,9 +56,10 @@ function defaultUserConfigPath(): string {
 
 async function writePreference(
   configPath: string,
+  cwd: string,
   preference: ApiUserModelPreference,
 ): Promise<ApiUserModelPreference> {
-  const document = await readConfigDocument(configPath)
+  const document = await readConfigDocument(configPath, cwd)
   const content = stringify({
     ...(document?.value ?? {}),
     provider: preference.provider,
@@ -81,12 +94,13 @@ async function writePreference(
 }
 
 type ConfigDocument = {
-  readonly preference?: ApiUserModelPreference
+  readonly configuration: UserConfiguration
   readonly value: TomlTable
 }
 
 async function readConfigDocument(
   configPath: string,
+  cwd: string,
 ): Promise<ConfigDocument | undefined> {
   let content: string
   try {
@@ -98,19 +112,94 @@ async function readConfigDocument(
 
   try {
     const value = parse(content, { integersAsBigInt: "asNeeded" })
-    return { value, ...preferenceFromConfig(value) }
+    return {
+      value,
+      configuration: await configurationFromConfig(value, cwd),
+    }
   } catch (error) {
+    if (error instanceof ModelInstructionsConfigError) throw error
     console.warn(`Ignoring malformed user config at ${configPath}.`, error)
     return undefined
   }
 }
 
-function preferenceFromConfig(value: TomlTable): {
-  readonly preference?: ApiUserModelPreference
-} {
+async function configurationFromConfig(
+  value: TomlTable,
+  cwd: string,
+): Promise<UserConfiguration> {
+  const preference = preferenceFromConfig(value)
+  const baseInstructions = await baseInstructionsFromConfig(value, cwd)
+  const modelContextWindowTokens = value.model_context_window
+  if (
+    modelContextWindowTokens !== undefined &&
+    (typeof modelContextWindowTokens !== "number" ||
+      !Number.isSafeInteger(modelContextWindowTokens) ||
+      modelContextWindowTokens <= 0)
+  ) {
+    throw new Error("model_context_window must be a positive integer.")
+  }
+  return {
+    ...(preference === undefined ? {} : { preference }),
+    ...(baseInstructions === undefined ? {} : { baseInstructions }),
+    ...(modelContextWindowTokens === undefined
+      ? {}
+      : { modelContextWindowTokens }),
+  }
+}
+
+async function baseInstructionsFromConfig(
+  value: TomlTable,
+  cwd: string,
+): Promise<string | undefined> {
+  const configuredPath = value.model_instructions_file
+  if (
+    configuredPath !== undefined &&
+    (typeof configuredPath !== "string" || configuredPath.trim() === "")
+  ) {
+    throw new Error("model_instructions_file must be a non-empty string.")
+  }
+  if (typeof configuredPath === "string") {
+    const path = isAbsolute(configuredPath)
+      ? configuredPath
+      : resolve(cwd, configuredPath)
+    let content: string
+    try {
+      content = await readFile(path, "utf8")
+    } catch (cause) {
+      throw new ModelInstructionsConfigError(
+        `Failed to read model instructions file ${path}.`,
+        { cause },
+      )
+    }
+    const text = content.trim()
+    if (text.length === 0) {
+      throw new ModelInstructionsConfigError(
+        `Model instructions file is empty: ${path}.`,
+      )
+    }
+    return text
+  }
+  const instructions = value.instructions
+  if (instructions === undefined) return undefined
+  if (typeof instructions !== "string" || instructions.trim() === "") {
+    throw new Error("instructions must be a non-empty string.")
+  }
+  return instructions.trim()
+}
+
+class ModelInstructionsConfigError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options)
+    this.name = "ModelInstructionsConfigError"
+  }
+}
+
+function preferenceFromConfig(
+  value: TomlTable,
+): ApiUserModelPreference | undefined {
   const provider = value.provider
   const model = value.model
-  if (provider === undefined && model === undefined) return {}
+  if (provider === undefined && model === undefined) return undefined
   if (provider === undefined || model === undefined) {
     throw new Error("provider and model must be configured together.")
   }
@@ -132,12 +221,10 @@ function preferenceFromConfig(value: TomlTable): {
     throw new Error("effort and speed must be non-empty when configured.")
   }
   return {
-    preference: {
-      provider,
-      model,
-      ...(effort === undefined ? {} : { effort }),
-      ...(speed === undefined ? {} : { speed }),
-    },
+    provider,
+    model,
+    ...(effort === undefined ? {} : { effort }),
+    ...(speed === undefined ? {} : { speed }),
   }
 }
 

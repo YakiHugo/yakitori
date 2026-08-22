@@ -15,11 +15,26 @@ describe("compaction request", () => {
   it("flattens source groups and appends the checkpoint instruction", () => {
     const request = buildCompactionRequest({
       source: [sourceTurn()],
-      provider: "faux",
-      model: "scripted",
+      target: {
+        provider: "faux",
+        model: "scripted",
+        promptId: "gpt",
+        effort: "high",
+        speed: "fast",
+      },
+      baseInstructions: {
+        id: "base.instructions",
+        revision: "base-1",
+        text: "coding agent instructions",
+      },
     })
 
     expect(request.system).toEqual([
+      {
+        id: "base.instructions",
+        revision: "base-1",
+        text: "coding agent instructions",
+      },
       {
         id: "compaction.instructions",
         revision: "1",
@@ -30,7 +45,9 @@ describe("compaction request", () => {
     expect(request.target).toEqual({
       provider: "faux",
       model: "scripted",
-      promptId: "compaction",
+      promptId: "gpt",
+      effort: "high",
+      speed: "fast",
     })
     expect(request.messages).toEqual([
       ...sourceTurn().messages,
@@ -61,19 +78,33 @@ describe("compaction request", () => {
     }
   })
 
-  it("folds a previous checkpoint into the instruction", () => {
+  it("folds a previous checkpoint from the replacement history", () => {
+    const checkpoint = {
+      messages: [
+        {
+          role: "user" as const,
+          content: [
+            {
+              type: "text" as const,
+              text: "<context_compacted>Goal: old checkpoint.</context_compacted>",
+            },
+          ],
+        },
+      ],
+    }
     const request = buildCompactionRequest({
-      source: [sourceTurn()],
-      previousSummary: "Goal: old checkpoint.",
-      provider: "faux",
-      model: "scripted",
+      source: [checkpoint, sourceTurn()],
+      target: { provider: "faux", model: "scripted", promptId: "gpt" },
+      baseInstructions: {
+        id: "base.instructions",
+        revision: "base-1",
+        text: "coding agent instructions",
+      },
     })
 
     const instruction = request.messages.at(-1)
     if (instruction?.role !== "user") throw new Error("missing instruction")
-    expect(instruction.content[0]?.text).toContain(
-      "Previous checkpoint:\nGoal: old checkpoint.",
-    )
+    expect(request.messages).toContainEqual(checkpoint.messages[0])
     expect(instruction.content[0]?.text).toContain("supersede")
   })
 })
@@ -125,6 +156,22 @@ describe("runCompaction", () => {
     await expect(
       runCompaction({ stream, request: compactionRequest() }),
     ).rejects.toThrow("slow down")
+  })
+
+  it("rejects a checkpoint truncated at the model output limit", async () => {
+    const stream: StreamFn = async function* () {
+      yield {
+        type: "response",
+        response: {
+          stopReason: ModelStopReason.Length,
+          content: [{ type: "text", text: "Goal: incomplete" }],
+        },
+      }
+    }
+
+    await expect(
+      runCompaction({ stream, request: compactionRequest() }),
+    ).rejects.toThrow("truncated at the model output limit")
   })
 
   it("throws an AbortError when the stream aborts", async () => {
@@ -224,7 +271,6 @@ function compactionRequest(signal?: AbortSignal): ModelRequest {
   return {
     target: { provider: "faux", model: "scripted", promptId: "compaction" },
     system: [{ id: "compaction", revision: "1", text: "sys" }],
-    contextual: [],
     messages: [],
     tools: [],
     ...(signal === undefined ? {} : { signal }),

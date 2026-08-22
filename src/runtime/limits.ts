@@ -3,6 +3,8 @@ export const RuntimeLimits = {
   toolCallsPerTurn: 32,
   modelVisibleMessageBlocks: 200,
   modelVisibleContextBytes: 256 * 1024,
+  compactionTriggerRatio: 0.8,
+  compactionRetainRatio: 0.16,
   modelVisibleToolResultBytes: 50 * 1024,
   modelVisibleToolResultLines: 2_000,
   compactionSummaryBytes: 16 * 1024,
@@ -25,20 +27,49 @@ export type RuntimeLimits = {
 export function createRuntimeLimits(
   overrides: Partial<RuntimeLimits> = {},
 ): RuntimeLimits {
-  return {
+  const limits = {
     ...RuntimeLimits,
     ...overrides,
   }
+  if (limits.compactionTriggerRatio <= 0 || limits.compactionTriggerRatio > 1) {
+    throw new Error(
+      "compactionTriggerRatio must be greater than 0 and at most 1.",
+    )
+  }
+  if (
+    limits.compactionRetainRatio < 0 ||
+    limits.compactionRetainRatio >= limits.compactionTriggerRatio
+  ) {
+    throw new Error(
+      "compactionRetainRatio must be non-negative and less than compactionTriggerRatio.",
+    )
+  }
+  return limits
 }
 
-// Derives the visible-context byte budget from a model's context window:
-// roughly 4 bytes per token with a 0.75 trigger ratio, clamped so unusual
-// windows cannot push the budget to useless extremes.
+export function deriveCompactionContextBytes(input: {
+  readonly modelVisibleContextBytes: number
+  readonly triggerRatio: number
+  readonly retainRatio: number
+}): {
+  readonly triggerBytes: number
+  readonly retainBytes: number
+} {
+  return {
+    triggerBytes: Math.floor(
+      input.modelVisibleContextBytes * input.triggerRatio,
+    ),
+    retainBytes: Math.floor(input.modelVisibleContextBytes * input.retainRatio),
+  }
+}
+
+// Byte measurement is the harness's tokenizer-free capacity proxy. Keep the
+// full estimated window here; proactive compaction ratios reserve headroom.
 export function deriveModelVisibleContextBytes(
   contextWindowTokens: number,
 ): number {
-  return Math.min(
-    1024 * 1024,
-    Math.max(128 * 1024, Math.floor(contextWindowTokens * 3)),
-  )
+  if (!Number.isInteger(contextWindowTokens) || contextWindowTokens <= 0) {
+    throw new Error("contextWindowTokens must be a positive integer.")
+  }
+  return contextWindowTokens * 4
 }

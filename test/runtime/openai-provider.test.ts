@@ -15,6 +15,10 @@ describe("OpenAI Responses provider", () => {
   it("converts internal history and function tools", () => {
     expect(
       toOpenAIInput([
+        {
+          role: "developer",
+          content: [{ type: "text", text: "state update" }],
+        },
         { role: "user", content: [{ type: "text", text: "read" }] },
         {
           role: "assistant",
@@ -36,6 +40,7 @@ describe("OpenAI Responses provider", () => {
         },
       ]),
     ).toEqual([
+      { role: "developer", content: "state update" },
       { role: "user", content: "read" },
       { role: "assistant", content: "checking" },
       {
@@ -272,15 +277,12 @@ describe("OpenAI Responses provider", () => {
     for await (const event of stream(
       requestFixture({
         cacheKey: "conversation_1",
-        contextual: [
+        messages: [
           {
-            id: "project.instructions",
-            revision: "project-1",
-            message: {
-              role: "user",
-              content: [{ type: "text", text: "project rules" }],
-            },
+            role: "user",
+            content: [{ type: "text", text: "project rules" }],
           },
+          { role: "user", content: [{ type: "text", text: "hello" }] },
         ],
       }),
     )) {
@@ -689,7 +691,6 @@ function requestFixture(overrides: Partial<ModelRequest> = {}): ModelRequest {
       promptId: "gpt",
     },
     system: [{ id: "base", revision: "base-1", text: "Be helpful." }],
-    contextual: [],
     messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
     tools: [],
     ...overrides,
