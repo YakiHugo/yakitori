@@ -1,5 +1,8 @@
 import { spawn, type ChildProcess } from "node:child_process"
+import { createWriteStream } from "node:fs"
 import { basename } from "node:path"
+import { Transform } from "node:stream"
+import type { SessionFileReference } from "../../kernel/index.ts"
 import { RuntimeLimits } from "../limits.ts"
 import { createUserShellEnv, type UserShellEnv } from "../user-shell-env.ts"
 import { matchCatastrophicCommand } from "./command-fuse.ts"
@@ -18,7 +21,9 @@ export type RunCommandLauncher = (input: {
   readonly signal?: AbortSignal
   readonly timeoutMs: number
   readonly maxOutputBytes: number
+  readonly maxPersistedOutputBytes: number
   readonly killGraceMs: number
+  readonly outputFiles?: { readonly stdout: string; readonly stderr: string }
 }) => Promise<CommandLaunchResult>
 
 export type CommandLaunchResult = {
@@ -31,6 +36,13 @@ export type CommandLaunchResult = {
   readonly aborted?: boolean
   readonly durationMs?: number
   readonly spawnError?: string
+  readonly stdoutBytes?: number
+  readonly stderrBytes?: number
+  readonly persisted?: { readonly stdout: boolean; readonly stderr: boolean }
+  readonly persistenceTruncated?: {
+    readonly stdout: boolean
+    readonly stderr: boolean
+  }
   readonly binary?: {
     readonly stdout: boolean
     readonly stderr: boolean
@@ -50,6 +62,15 @@ export type RunCommandOutput = {
   readonly cwd: string
   readonly shell: string
   readonly warnings?: readonly string[]
+  readonly totalBytes: { readonly stdout: number; readonly stderr: number }
+  readonly files?: {
+    readonly stdout?: SessionFileReference
+    readonly stderr?: SessionFileReference
+  }
+  readonly filesTruncated?: {
+    readonly stdout: boolean
+    readonly stderr: boolean
+  }
   readonly blocked?: { readonly rule: string }
   readonly binary?: {
     readonly stdout: boolean
@@ -63,6 +84,7 @@ export function createRunCommandTool(
   input: {
     readonly maxCommandBytes?: number
     readonly maxOutputBytes?: number
+    readonly maxPersistedOutputBytes?: number
     readonly defaultTimeoutSeconds?: number
     readonly maxTimeoutSeconds?: number
     readonly killGraceMs?: number
@@ -75,6 +97,8 @@ export function createRunCommandTool(
     input.maxCommandBytes ?? RuntimeLimits.commandTextBytes
   const maxOutputBytes =
     input.maxOutputBytes ?? RuntimeLimits.commandOutputBytes
+  const maxPersistedOutputBytes =
+    input.maxPersistedOutputBytes ?? RuntimeLimits.commandPersistedOutputBytes
   const defaultTimeoutSeconds =
     input.defaultTimeoutSeconds ?? RuntimeLimits.runCommandDefaultTimeoutSeconds
   const maxTimeoutSeconds =
@@ -87,8 +111,7 @@ export function createRunCommandTool(
 
   return {
     name: "run_command",
-    description:
-      "Run one non-interactive shell command, optionally from an in-workspace cwd. Use it for git, package managers, builds, and tests; prefer glob, grep, read_file, edit_file, and write_file for file work. It runs immediately with the host user's full files, process, and network authority and is not sandboxed. A small, bypassable fuse blocks only obvious catastrophic commands. Use timeoutSeconds for long work; there are no timeout/workdir aliases and no interactive stdin. Redirect large output to a workspace file and use read_file.",
+    description: `Run one non-interactive shell command, optionally from an in-workspace cwd. Use it for git, package managers, builds, and tests; prefer glob, grep, read_file, edit_file, and write_file for file work. It runs immediately with the host user's full files, process, and network authority and is not sandboxed. A small, bypassable fuse blocks only obvious catastrophic commands. Use timeoutSeconds for long work; there are no timeout/workdir aliases and no interactive stdin. Up to ${maxPersistedOutputBytes} bytes from each stdout/stderr stream are retained as Session files when Session storage is available; use read_session_file on a returned path after preview truncation.`,
     autoAllow: true,
     effect: "opaque",
     inputSchema: {
@@ -146,6 +169,7 @@ export function createRunCommandTool(
         durationMs: 0,
         cwd: cwd.absolutePath,
         shell: commandEnvironment.shell,
+        totalBytes: { stdout: 0, stderr: 0 },
         ...(commandEnvironment.warnings.length === 0
           ? {}
           : { warnings: [...commandEnvironment.warnings] }),
@@ -168,6 +192,30 @@ export function createRunCommandTool(
         `run_command start token=${firstCommandToken(parsed.command)} bytes=${Buffer.byteLength(parsed.command, "utf8")}`,
       )
       const startedAt = Date.now()
+      let commandFiles:
+        | Awaited<
+            ReturnType<
+              NonNullable<typeof context.sessionFiles>["prepareCommandFiles"]
+            >
+          >
+        | undefined
+      const persistenceWarnings: string[] = []
+      if (
+        context.sessionFiles !== undefined &&
+        context.sessionId !== undefined &&
+        context.toolCallId !== undefined
+      ) {
+        try {
+          commandFiles = await context.sessionFiles.prepareCommandFiles(
+            context.sessionId,
+            context.toolCallId,
+          )
+        } catch (error) {
+          persistenceWarnings.push(
+            `Complete command output could not be persisted: ${error instanceof Error ? error.message : String(error)}`,
+          )
+        }
+      }
       const result = await launch({
         command: parsed.command,
         cwd: cwd.absolutePath,
@@ -176,8 +224,45 @@ export function createRunCommandTool(
         ...(context.signal === undefined ? {} : { signal: context.signal }),
         timeoutMs: parsed.timeoutSeconds * 1_000,
         maxOutputBytes,
+        maxPersistedOutputBytes,
         killGraceMs,
+        ...(commandFiles === undefined
+          ? {}
+          : {
+              outputFiles: {
+                stdout: commandFiles.stdout.path,
+                stderr: commandFiles.stderr.path,
+              },
+            }),
       })
+      const files =
+        commandFiles === undefined || result.persisted === undefined
+          ? undefined
+          : {
+              ...(result.persisted.stdout
+                ? { stdout: commandFiles.stdout.reference }
+                : {}),
+              ...(result.persisted.stderr
+                ? { stderr: commandFiles.stderr.reference }
+                : {}),
+            }
+      if (commandFiles !== undefined && result.persisted?.stdout === false) {
+        persistenceWarnings.push("Complete stdout could not be persisted.")
+      }
+      if (commandFiles !== undefined && result.persisted?.stderr === false) {
+        persistenceWarnings.push("Complete stderr could not be persisted.")
+      }
+      if (result.persistenceTruncated?.stdout === true) {
+        persistenceWarnings.push(
+          `Session stdout reached its ${maxPersistedOutputBytes}-byte limit and is incomplete.`,
+        )
+      }
+      if (result.persistenceTruncated?.stderr === true) {
+        persistenceWarnings.push(
+          `Session stderr reached its ${maxPersistedOutputBytes}-byte limit and is incomplete.`,
+        )
+      }
+      const warnings = [...commandEnvironment.warnings, ...persistenceWarnings]
       const output: RunCommandOutput = {
         exitCode: result.exitCode,
         signal: result.signal,
@@ -188,9 +273,17 @@ export function createRunCommandTool(
         durationMs: result.durationMs ?? Date.now() - startedAt,
         cwd: cwd.absolutePath,
         shell: commandEnvironment.shell,
-        ...(commandEnvironment.warnings.length === 0
+        totalBytes: {
+          stdout: result.stdoutBytes ?? Buffer.byteLength(result.stdout),
+          stderr: result.stderrBytes ?? Buffer.byteLength(result.stderr),
+        },
+        ...(warnings.length === 0 ? {} : { warnings }),
+        ...(files === undefined || Object.keys(files).length === 0
           ? {}
-          : { warnings: [...commandEnvironment.warnings] }),
+          : { files }),
+        ...(result.persistenceTruncated === undefined
+          ? {}
+          : { filesTruncated: result.persistenceTruncated }),
         ...(result.binary === undefined ? {} : { binary: result.binary }),
       }
 
@@ -302,6 +395,25 @@ function renderCommandContent(
   if (status !== undefined) sections.push(status)
   if (output.warnings !== undefined) {
     sections.push(`[warning]\n${output.warnings.join("\n")}`)
+  }
+  if (output.files !== undefined) {
+    const paths = [
+      ...(output.files.stdout === undefined
+        ? []
+        : [
+            `Full stdout: session://${output.files.stdout.sessionId}/${output.files.stdout.path}`,
+          ]),
+      ...(output.files.stderr === undefined
+        ? []
+        : [
+            `Full stderr: session://${output.files.stderr.sessionId}/${output.files.stderr.path}`,
+          ]),
+    ]
+    if (paths.length > 0) {
+      sections.push(
+        `Session output retained; use read_session_file with a path below:\n${paths.join("\n")}`,
+      )
+    }
   }
   sections.push(
     `(${[
@@ -421,7 +533,9 @@ async function launchCommand(input: {
   readonly signal?: AbortSignal
   readonly timeoutMs: number
   readonly maxOutputBytes: number
+  readonly maxPersistedOutputBytes: number
   readonly killGraceMs: number
+  readonly outputFiles?: { readonly stdout: string; readonly stderr: string }
 }): Promise<CommandLaunchResult> {
   const startedAt = Date.now()
   if (input.signal?.aborted)
@@ -492,6 +606,11 @@ async function launchCommand(input: {
   }
   capture(child.stdout, stdout)
   capture(child.stderr, stderr)
+  const persisted = awaitCommandPersistence(
+    child,
+    input.outputFiles,
+    input.maxPersistedOutputBytes,
+  )
 
   type ExitObservation = {
     readonly exitCode: number | null
@@ -539,6 +658,7 @@ async function launchCommand(input: {
 
   try {
     const exit = await exitPromise
+    const persistence = await persisted
     const aborted = abortFired || input.signal?.aborted === true
     return {
       exitCode: exit.exitCode,
@@ -549,6 +669,20 @@ async function launchCommand(input: {
       timedOut: timeoutFired && !aborted,
       aborted,
       durationMs: Date.now() - startedAt,
+      stdoutBytes: stdout.bytes,
+      stderrBytes: stderr.bytes,
+      ...(persistence === undefined
+        ? {}
+        : {
+            persisted: {
+              stdout: persistence.stdout.ok,
+              stderr: persistence.stderr.ok,
+            },
+            persistenceTruncated: {
+              stdout: persistence.stdout.truncated,
+              stderr: persistence.stderr.truncated,
+            },
+          }),
       ...(exit.spawnError === undefined ? {} : { spawnError: exit.spawnError }),
       ...(stdout.binary || stderr.binary
         ? {
@@ -566,6 +700,64 @@ async function launchCommand(input: {
     if (hardCompletion !== undefined) clearTimeout(hardCompletion)
     input.signal?.removeEventListener("abort", onAbort)
   }
+}
+
+async function awaitCommandPersistence(
+  child: ChildProcess,
+  files: { readonly stdout: string; readonly stderr: string } | undefined,
+  maxBytes: number,
+): Promise<
+  | {
+      readonly stdout: PersistedStreamResult
+      readonly stderr: PersistedStreamResult
+    }
+  | undefined
+> {
+  if (files === undefined) return undefined
+  const [stdout, stderr] = await Promise.all([
+    persistStream(child.stdout, files.stdout, maxBytes),
+    persistStream(child.stderr, files.stderr, maxBytes),
+  ])
+  return { stdout, stderr }
+}
+
+function persistStream(
+  stream: NodeJS.ReadableStream | null,
+  path: string,
+  maxBytes: number,
+): Promise<PersistedStreamResult> {
+  if (stream === null) return Promise.resolve({ ok: true, truncated: false })
+  let writtenBytes = 0
+  let truncated = false
+  const limiter = new Transform({
+    transform(chunk: Buffer | string, _encoding, callback) {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+      const remaining = Math.max(0, maxBytes - writtenBytes)
+      const retained = bytes.subarray(0, remaining)
+      if (retained.byteLength > 0) this.push(retained)
+      writtenBytes += retained.byteLength
+      if (retained.byteLength < bytes.byteLength) truncated = true
+      callback()
+    },
+  })
+  const file = createWriteStream(path, { flags: "a", mode: 0o600, flush: true })
+  stream.pipe(limiter).pipe(file)
+  return new Promise((resolve) => {
+    file.once("finish", () => resolve({ ok: true, truncated }))
+    file.once("error", () => {
+      stream.unpipe(limiter)
+      limiter.destroy()
+      resolve({ ok: false, truncated })
+    })
+    stream.once("close", () => {
+      if (!limiter.destroyed && !limiter.writableEnded) limiter.end()
+    })
+  })
+}
+
+type PersistedStreamResult = {
+  readonly ok: boolean
+  readonly truncated: boolean
 }
 
 type CaptureState = {
@@ -635,7 +827,7 @@ function truncationMarker(
   totalBytes: number,
   omittedLines: number,
 ): string {
-  return `...[truncated: showing first ${headBytes} + last ${tailBytes} of ${totalBytes} bytes; ${omittedLines} lines omitted. Full captured output is not available in model context; bytes beyond the capture cap are not retained. Redirect to a workspace file (\`cmd > out.log 2>&1\`) and use read_file, or rerun with a narrower command.]...`
+  return `...[truncated: showing first ${headBytes} + last ${tailBytes} of ${totalBytes} captured bytes; ${omittedLines} lines omitted. Use read_session_file on the returned stdout/stderr path for complete output when available, or rerun with a narrower command.]...`
 }
 
 function takeHead(text: string, maxBytes: number, maxLines: number): string {

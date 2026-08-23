@@ -201,6 +201,32 @@ describe("server handlers", () => {
     })
   })
 
+  it("rejects image admission when Session file storage is unavailable", async () => {
+    await withServer(async (server) => {
+      const created = await server.createSession()
+      expectOk(created)
+
+      const admitted = await server.admitInput({
+        sessionId: created.body.session.id,
+        requestId: "request_image",
+        content: {
+          kind: "text",
+          text: "inspect",
+          attachments: [
+            {
+              name: "screen.png",
+              mediaType: "image/png",
+              data: "eA==",
+              sizeBytes: 1,
+            },
+          ],
+        },
+      })
+
+      expectError(admitted, 400, ApiErrorCode.InvalidInput)
+    })
+  })
+
   it("admits the compact directive as a runtime-role input", async () => {
     await withServer(async (server) => {
       expectError(

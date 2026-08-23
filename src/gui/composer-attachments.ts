@@ -1,13 +1,17 @@
-import type { ImageAttachment } from "../kernel/events.ts"
+import type {
+  ImageAttachment,
+  InlineImageAttachment,
+} from "../kernel/events.ts"
+import { apiUrl } from "./lib/api-client.ts"
 
 export const MAX_COMPOSER_IMAGES = 4
 export const MAX_COMPOSER_IMAGE_BYTES = 4 * 1024 * 1024
 export const MAX_COMPOSER_IMAGES_BYTES = 10 * 1024 * 1024
 
 export async function appendImageFiles(
-  current: readonly ImageAttachment[],
+  current: readonly InlineImageAttachment[],
   files: readonly File[],
-): Promise<readonly ImageAttachment[]> {
+): Promise<readonly InlineImageAttachment[]> {
   const candidates = files.filter((file) => file.type.startsWith("image/"))
   if (candidates.length !== files.length) {
     throw new Error("Only PNG, JPEG, GIF, and WebP images can be attached.")
@@ -28,11 +32,23 @@ export async function appendImageFiles(
   return attachments
 }
 
-export function imageAttachmentUrl(attachment: ImageAttachment): string {
-  return `data:${attachment.mediaType};base64,${attachment.data}`
+export function imageAttachmentUrl(
+  attachment: ImageAttachment | InlineImageAttachment,
+  apiBase = window.location.origin,
+): string {
+  if ("data" in attachment) {
+    return `data:${attachment.mediaType};base64,${attachment.data}`
+  }
+  return apiUrl(
+    apiBase,
+    `/sessions/${encodeURIComponent(attachment.file.sessionId)}/files/${attachment.file.path
+      .split("/")
+      .map(encodeURIComponent)
+      .join("/")}`,
+  )
 }
 
-async function readImageFile(file: File): Promise<ImageAttachment> {
+async function readImageFile(file: File): Promise<InlineImageAttachment> {
   if (!isSupportedImageMediaType(file.type)) {
     throw new Error(`${file.name} is not a supported image type.`)
   }
@@ -66,7 +82,7 @@ function readFileAsDataUrl(file: File): Promise<string> {
 
 function isSupportedImageMediaType(
   value: string,
-): value is ImageAttachment["mediaType"] {
+): value is InlineImageAttachment["mediaType"] {
   return (
     value === "image/gif" ||
     value === "image/jpeg" ||

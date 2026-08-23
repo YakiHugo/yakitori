@@ -1,4 +1,11 @@
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises"
 import type { Server as HttpServer } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -14,6 +21,8 @@ import {
   EventType,
   InputState,
   MateLifecycle,
+  type ModelRequest,
+  ModelStopReason,
   resolveWorkspaceDirectory,
 } from "../../src/index.ts"
 import { listCatalogModels } from "../../src/runtime/model-catalog.ts"
@@ -53,6 +62,130 @@ function testApplicationOptions(input: {
 }
 
 describe("application composition", () => {
+  it("stores admitted images beside the Session and hydrates model requests", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      let captured: ModelRequest | undefined
+      const application = await createYakitoriApplication({
+        ...testApplicationOptions({ rootDir, workspace }),
+        stream: async function* (request) {
+          captured = request
+          yield {
+            type: "response",
+            response: {
+              stopReason: ModelStopReason.EndTurn,
+              content: [{ type: "text", text: "seen" }],
+            },
+          }
+        },
+      })
+      const server = application.createHttpServer()
+      try {
+        const baseUrl = await listen(server)
+        const created = await application.handlers.createSession({})
+        expectOk(created)
+        const sessionId = created.body.session.id
+        const admitted = await application.handlers.admitInput({
+          sessionId,
+          requestId: "request_image",
+          content: {
+            kind: "text",
+            text: "inspect",
+            attachments: [
+              {
+                name: "screen.png",
+                mediaType: "image/png",
+                data: Buffer.from("image-bytes").toString("base64"),
+                sizeBytes: 11,
+              },
+            ],
+          },
+        })
+        expectOk(admitted)
+        await application.runner.wake(sessionId)
+
+        expect(admitted.body.event).toMatchObject({
+          data: {
+            content: {
+              attachments: [
+                {
+                  file: {
+                    sessionId,
+                    path: "attachments/request_image/1.png",
+                  },
+                },
+              ],
+            },
+          },
+        })
+        expect(JSON.stringify(admitted.body.event)).not.toContain(
+          Buffer.from("image-bytes").toString("base64"),
+        )
+        expect(
+          await readFile(
+            join(
+              application.sessionStoreRoot,
+              sessionId,
+              "files",
+              "attachments",
+              "request_image",
+              "1.png",
+            ),
+            "utf8",
+          ),
+        ).toBe("image-bytes")
+        expect(captured?.messages).toContainEqual({
+          role: "user",
+          content: [{ type: "text", text: "inspect" }],
+          images: [
+            {
+              type: "image",
+              mediaType: "image/png",
+              data: Buffer.from("image-bytes").toString("base64"),
+            },
+          ],
+        })
+
+        const image = await fetch(
+          `${baseUrl}/sessions/${sessionId}/files/attachments/request_image/1.png`,
+        )
+        expect(image.status).toBe(200)
+        expect(image.headers.get("content-type")).toBe("image/png")
+        expect(Buffer.from(await image.arrayBuffer()).toString()).toBe(
+          "image-bytes",
+        )
+        const logRoute = await fetch(
+          `${baseUrl}/sessions/${sessionId}/files/tools/call_1/stdout.log`,
+        )
+        expect(logRoute.status).toBe(404)
+
+        const rejectedFork = await application.handlers.forkSession({
+          sessionId,
+          atInputId: admitted.body.inputId,
+          reason: "edit",
+          content: {
+            kind: "text",
+            text: "changed",
+            attachments: [
+              {
+                name: "screen.png",
+                mediaType: "image/png",
+                data: Buffer.from("image-bytes").toString("base64"),
+                sizeBytes: 11,
+              },
+            ],
+          },
+        })
+        expect(rejectedFork).toMatchObject({
+          status: 400,
+          body: { error: { code: ApiErrorCode.InvalidInput } },
+        })
+      } finally {
+        await closeServer(server)
+        await application.close()
+      }
+    })
+  })
+
   it("binds the runtime lock to the canonical Session store", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const secondRoot = await mkdtemp(join(tmpdir(), "yakitori-app-second-"))

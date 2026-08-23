@@ -3,7 +3,7 @@ import { create } from "zustand"
 import {
   COMPACT_DIRECTIVE,
   EventType,
-  type ImageAttachment,
+  type InlineImageAttachment,
   type ModelSelection,
   type StoredEventEnvelope,
   type TurnStartedEvent,
@@ -64,7 +64,7 @@ export type AppStoreData = {
   modelSelections: Record<string, ModelSelection>
   nextCursor: string | undefined
   promptDraft: string | undefined
-  promptAttachments: readonly ImageAttachment[]
+  promptAttachments: readonly InlineImageAttachment[]
   projects: string[]
   providers: ApiProviderSummary[]
   userPreference: ApiUserModelPreference | undefined
@@ -90,14 +90,13 @@ export type AppStoreActions = {
     atInputId: string,
     reason: "undo" | "edit",
     content?: string,
-    attachments?: readonly ImageAttachment[],
   ): Promise<void>
   selectProject(path: string): Promise<void>
   addProject(path: string): Promise<void>
   selectSession(sessionId: string): Promise<void>
   admitInput(
     text: string,
-    attachments?: readonly ImageAttachment[],
+    attachments?: readonly InlineImageAttachment[],
   ): Promise<void>
   cancelTurn(turnId: string): Promise<void>
   cancelQueuedInput(inputId: string): Promise<void>
@@ -107,7 +106,7 @@ export type AppStoreActions = {
     behavior: "allow" | "deny",
   ): Promise<void>
   setPromptDraft(text: string): void
-  setPromptAttachments(attachments: readonly ImageAttachment[]): void
+  setPromptAttachments(attachments: readonly InlineImageAttachment[]): void
   setModelSelection(
     sessionId: string,
     selection: ModelSelection | undefined,
@@ -478,7 +477,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
       )
     },
 
-    forkSession: async (atInputId, reason, content, attachments = []) => {
+    forkSession: async (atInputId, reason, content) => {
       const sourceSelection = currentSessionSelection(get().selection)
       if (!sourceSelection) return
       const key = `fork:${sourceSelection.sessionId}:${atInputId}`
@@ -515,7 +514,6 @@ export const useAppStore = create<AppStore>()((set, get) => {
                       content: {
                         kind: "text",
                         text: content,
-                        ...(attachments.length === 0 ? {} : { attachments }),
                       },
                     }),
                 ...(reason !== "edit" || sourceModelSelection === undefined
@@ -996,8 +994,8 @@ function initialApiBase(): string {
 }
 
 function sameAttachments(
-  left: readonly ImageAttachment[],
-  right: readonly ImageAttachment[],
+  left: readonly InlineImageAttachment[],
+  right: readonly InlineImageAttachment[],
 ): boolean {
   return (
     left.length === right.length &&

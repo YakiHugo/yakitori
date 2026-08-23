@@ -5,6 +5,7 @@ import { createGlobTool } from "./glob.ts"
 import { createGrepTool } from "./grep.ts"
 import { createMultiAgentTools } from "./multi-agent.ts"
 import { createReadFileTool } from "./read-file.ts"
+import { createReadSessionFileTool } from "./read-session-file.ts"
 import { createRunCommandTool } from "./run-command.ts"
 import type {
   RuntimeTool,
@@ -65,6 +66,7 @@ export function createDefaultTools(
 ): readonly RuntimeTool[] {
   return [
     createReadFileTool(),
+    createReadSessionFileTool(),
     createGrepTool(),
     createGlobTool(),
     createEditFileTool(),

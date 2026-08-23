@@ -115,3 +115,8 @@ export type ModelStreamEvent =
 export type StreamFn = (
   request: ModelRequest,
 ) => AsyncIterable<ModelStreamEvent>
+
+export function requireModelImageData(image: ModelImageBlock): string {
+  if ("data" in image && image.data !== undefined) return image.data
+  throw new Error("Model request contains an unresolved Session image.")
+}

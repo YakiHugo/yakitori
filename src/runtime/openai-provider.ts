@@ -10,6 +10,7 @@ import { isAbortError } from "./errors.ts"
 import {
   flattenModelSystem,
   ModelStopReason,
+  requireModelImageData,
   type ModelContentBlock,
   type ModelMessage,
   type ModelRequest,
@@ -172,7 +173,7 @@ export function toOpenAIInput(
           ...(message.images ?? []).map((block) => ({
             type: "input_image" as const,
             detail: "auto" as const,
-            image_url: `data:${block.mediaType};base64,${block.data}`,
+            image_url: `data:${block.mediaType};base64,${requireModelImageData(block)}`,
           })),
         ],
       })

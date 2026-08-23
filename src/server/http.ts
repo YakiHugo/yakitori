@@ -11,6 +11,7 @@ import {
   type EventStore,
   isYakitoriError,
   type SessionKernel,
+  type SessionFiles,
   type StoredEventEnvelope,
 } from "../kernel/index.ts"
 import type {
@@ -40,7 +41,10 @@ type YakitoriHttpServerCommonOptions = {
   readonly providers?: () => Promise<ApiListProvidersResponse>
   readonly userConfig?: UserConfigStore
   readonly availableProviders?: readonly string[]
+  readonly sessionFiles?: SessionFiles
 }
+
+const maxServedSessionImageBytes = 4 * 1024 * 1024
 
 export type YakitoriHttpServerOptions = YakitoriHttpServerCommonOptions &
   (
@@ -71,6 +75,7 @@ export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
   const providers = options.providers
   const userConfig = options.userConfig
   const availableProviders = options.availableProviders
+  const sessionFiles = options.sessionFiles
 
   const staticAssets =
     options.staticAssets === undefined
@@ -88,6 +93,7 @@ export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
       providers,
       userConfig,
       availableProviders,
+      sessionFiles,
       staticAssets,
     ).catch((error) => {
       writeUnhandledError(response, error)
@@ -118,6 +124,7 @@ async function handleRequest(
   providers: (() => Promise<ApiListProvidersResponse>) | undefined,
   userConfig: UserConfigStore | undefined,
   availableProviders: readonly string[] | undefined,
+  sessionFiles: SessionFiles | undefined,
   staticAssets: StaticAssetContext | undefined,
 ): Promise<void> {
   const origin = requestOrigin(request)
@@ -256,6 +263,44 @@ async function handleRequest(
       response,
       await handlers.readSession({ sessionId: route.sessionId }),
     )
+    return
+  }
+
+  if (route.kind === "readSessionFile") {
+    if (sessionFiles === undefined) {
+      writeResult(
+        response,
+        errorResult(404, ApiErrorCode.NotFound, "Route not found."),
+      )
+      return
+    }
+    try {
+      const file = await sessionFiles.readRange(
+        { sessionId: route.sessionId, path: route.path },
+        0,
+        maxServedSessionImageBytes + 1,
+      )
+      if (file.totalBytes > maxServedSessionImageBytes) {
+        writeResult(
+          response,
+          errorResult(413, ApiErrorCode.InvalidInput, "Image is too large."),
+        )
+        return
+      }
+      const bytes = file.bytes
+      response.writeHead(200, {
+        "Cache-Control": "private, no-store",
+        "Content-Length": bytes.byteLength,
+        "Content-Type": sessionFileContentType(route.path),
+        "X-Content-Type-Options": "nosniff",
+      })
+      response.end(bytes)
+    } catch {
+      writeResult(
+        response,
+        errorResult(404, ApiErrorCode.NotFound, "Session file was not found."),
+      )
+    }
     return
   }
 
@@ -461,6 +506,19 @@ function routeRequest(method: string, url: URL): Route {
 
   if (method === "GET" && segments.length === 2) {
     return { kind: "readSession", sessionId: segments[1] }
+  }
+
+  if (
+    method === "GET" &&
+    segments.length > 4 &&
+    segments[2] === "files" &&
+    segments[3] === "attachments"
+  ) {
+    return {
+      kind: "readSessionFile",
+      sessionId: segments[1],
+      path: segments.slice(3).join("/"),
+    }
   }
 
   if (method === "DELETE" && segments.length === 2) {
@@ -1148,6 +1206,11 @@ type Route =
   | { readonly kind: "listSessions" }
   | { readonly kind: "notFound"; readonly segments: readonly string[] }
   | { readonly kind: "readSession"; readonly sessionId: string }
+  | {
+      readonly kind: "readSessionFile"
+      readonly sessionId: string
+      readonly path: string
+    }
   | { readonly kind: "listProjects" }
   | { readonly kind: "addProject" }
   | { readonly kind: "listProviders" }
@@ -1159,6 +1222,16 @@ type Route =
       readonly permissionRequestId: string
     }
   | { readonly kind: "streamSessionEvents"; readonly sessionId: string }
+
+function sessionFileContentType(path: string): string {
+  const extension = extname(path).toLowerCase()
+  if (extension === ".gif") return "image/gif"
+  if (extension === ".jpg" || extension === ".jpeg") return "image/jpeg"
+  if (extension === ".png") return "image/png"
+  if (extension === ".webp") return "image/webp"
+  if (extension === ".json") return "application/json; charset=utf-8"
+  return "text/plain; charset=utf-8"
+}
 
 type JsonReadResult =
   | {

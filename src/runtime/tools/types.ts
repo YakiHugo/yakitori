@@ -1,4 +1,5 @@
 import type { JsonObject, JsonValue } from "../../kernel/index.ts"
+import type { SessionFiles } from "../../kernel/session-files.ts"
 import type { BoundAgentControl } from "../agent-control.ts"
 import type { VisibleFileObservations } from "./visible-file-observations.ts"
 
@@ -6,6 +7,9 @@ export type ToolEffect = "observe" | "mutate" | "opaque"
 
 export type ToolExecutionContext = {
   readonly workspaceRoot: string
+  readonly sessionId?: string
+  readonly toolCallId?: string
+  readonly sessionFiles?: SessionFiles
   readonly signal?: AbortSignal
   readonly visibleFileObservations?: VisibleFileObservations
   readonly agentControl?: BoundAgentControl

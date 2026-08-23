@@ -14,6 +14,7 @@ export function UserMessageCell({
   readonly queued: boolean
 }) {
   const busy = useAppStore((state) => state.busy)
+  const apiBase = useAppStore((state) => state.apiBase)
   const forkSession = useAppStore((state) => state.forkSession)
   const [mode, setMode] = useState<"undo" | "edit" | undefined>()
   const [draft, setDraft] = useState(entry.text)
@@ -29,8 +30,8 @@ export function UserMessageCell({
           >
             {attachments.map((attachment) => (
               <img
-                key={`${attachment.name}:${attachment.sizeBytes}:${attachment.data.slice(0, 24)}`}
-                src={imageAttachmentUrl(attachment)}
+                key={`${attachment.name}:${attachment.sizeBytes}:${attachment.file.sessionId}:${attachment.file.path}`}
+                src={imageAttachmentUrl(attachment, apiBase)}
                 alt={attachment.name}
                 className="max-h-72 min-h-24 w-full rounded-lg bg-black/10 object-cover"
               />
@@ -108,11 +109,9 @@ export function UserMessageCell({
           onSubmit={(event) => {
             event.preventDefault()
             if (edited.length === 0 || busy) return
-            const resubmission =
-              attachments.length === 0
-                ? forkSession(entry.inputId, "edit", edited)
-                : forkSession(entry.inputId, "edit", edited, attachments)
-            void resubmission.then(() => setMode(undefined))
+            void forkSession(entry.inputId, "edit", edited).then(() =>
+              setMode(undefined),
+            )
           }}
         >
           <div className="mb-2 flex items-center justify-between gap-3">
