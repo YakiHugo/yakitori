@@ -1,24 +1,13 @@
-import { createHash } from "node:crypto"
 import { open, realpath, stat } from "node:fs/promises"
 import { dirname, join, relative, sep } from "node:path"
-import type { ModelUserMessage } from "./model.ts"
 
 export const PROJECT_INSTRUCTIONS_MAX_BYTES = 32 * 1024
 
 const instructionFilenames = ["AGENTS.override.md", "AGENTS.md"] as const
 
-export type ProjectInstructionSource = {
-  readonly path: string
-  readonly byteLength: number
-}
-
 export type ProjectInstructions = {
   readonly directory: string
-  readonly files: readonly string[]
-  readonly sources: readonly ProjectInstructionSource[]
-  readonly revision: string
-  readonly message: ModelUserMessage
-  readonly truncated: boolean
+  readonly text: string
 }
 
 export async function loadProjectInstructions(input: {
@@ -35,7 +24,6 @@ export async function loadProjectInstructions(input: {
   const workingDirectory = await realpath(input.workingDirectory)
   requireInsideWorkspace(workspaceRoot, workingDirectory)
 
-  const sources: ProjectInstructionSource[] = []
   const sections: string[] = []
   let remainingBytes = maxBytes
   let truncated = false
@@ -53,7 +41,6 @@ export async function loadProjectInstructions(input: {
 
     const result = await readPrefix(path, remainingBytes)
     if (result.text.trim().length === 0) continue
-    sources.push({ path, byteLength: result.byteCount })
     sections.push(
       `# AGENTS.md instructions for ${directory}\n\n<INSTRUCTIONS>\n${result.text}\n</INSTRUCTIONS>`,
     )
@@ -69,14 +56,7 @@ export async function loadProjectInstructions(input: {
   const text = `${sections.join("\n\n")}${suffix}`
   return {
     directory: workingDirectory,
-    files: sources.map((source) => source.path),
-    sources,
-    revision: createHash("sha256").update(text).digest("hex"),
-    message: {
-      role: "user",
-      content: [{ type: "text", text }],
-    },
-    truncated,
+    text,
   }
 }
 

@@ -763,7 +763,7 @@ describe("model selection", () => {
                   {
                     id: "scripted",
                     displayName: "scripted",
-                    family: "default",
+                    instructionProfileId: "default",
                   },
                 ],
               },
@@ -773,7 +773,7 @@ describe("model selection", () => {
                   {
                     id: "claude-sonnet-4-6",
                     displayName: "Claude Sonnet 4.6",
-                    family: "anthropic",
+                    instructionProfileId: "anthropic",
                   },
                 ],
               },
@@ -798,7 +798,11 @@ describe("model selection", () => {
         name: "faux",
         defaultModel: "scripted",
         models: [
-          { id: "scripted", displayName: "scripted", family: "default" },
+          {
+            id: "scripted",
+            displayName: "scripted",
+            instructionProfileId: "default",
+          },
         ],
       },
       {
@@ -807,7 +811,7 @@ describe("model selection", () => {
           {
             id: "claude-sonnet-4-6",
             displayName: "Claude Sonnet 4.6",
-            family: "anthropic",
+            instructionProfileId: "anthropic",
           },
         ],
       },

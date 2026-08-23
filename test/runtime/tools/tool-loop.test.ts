@@ -89,7 +89,7 @@ describe("tool loop", () => {
       ).toBe(true)
       expect(
         replayed.session?.completedTurns[0]?.executionContext,
-      ).toMatchObject({ promptId: "default" })
+      ).toMatchObject({ instructionProfileId: "default" })
     })
   })
 

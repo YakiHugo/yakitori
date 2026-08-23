@@ -40,7 +40,7 @@ describe("session configuration", () => {
       effectiveContextWindowTokens: 258_400,
     })
     expect(turn.execution).toMatchObject({
-      promptId: "gpt",
+      instructionProfileId: "codex",
       baseInstructionsRevision: configuration.baseInstructions.revision,
       modelInstructionsRevision: configuration.modelInstructions.revision,
       modelContextWindowTokens: 272_000,
@@ -176,7 +176,7 @@ describe("session configuration", () => {
         promptCacheKey: "session-cache",
         selection: {
           provider: "codex",
-          model: "gpt-5.6-sol",
+          model: "gpt-5.5",
           effort: "max",
         },
         workspaceRoot: "/workspace",

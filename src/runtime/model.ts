@@ -45,7 +45,7 @@ export type ModelToolDefinition = {
 export type ModelTarget = {
   readonly provider: string
   readonly model: string
-  readonly promptId: string
+  readonly instructionProfileId: string
   readonly effort?: string
   readonly speed?: string
 }

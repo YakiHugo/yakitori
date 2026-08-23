@@ -7,6 +7,8 @@ import {
 import {
   catalogContextWindowTokens,
   catalogModelCapacity,
+  resolveModel,
+  validateModelSelection,
 } from "../../src/runtime/model-catalog.ts"
 
 describe("model catalog context windows", () => {
@@ -48,6 +50,56 @@ describe("model catalog context windows", () => {
     expect(
       catalogContextWindowTokens({ provider: "openai", model: "gpt-5" }),
     ).toBeUndefined()
+  })
+
+  it("uses the local coding-agent capacities for Grok and Kimi", () => {
+    expect(
+      catalogContextWindowTokens({ provider: "grok", model: "grok-4.6" }),
+    ).toBe(500_000)
+    expect(catalogContextWindowTokens({ provider: "kimi", model: "k3" })).toBe(
+      1_048_576,
+    )
+    expect(
+      catalogContextWindowTokens({
+        provider: "kimi",
+        model: "kimi-for-coding",
+      }),
+    ).toBe(262_144)
+  })
+
+  it("validates the explicit Grok effort sets without inference", () => {
+    expect(() =>
+      validateModelSelection({
+        provider: "grok",
+        model: "grok-4.6",
+        effort: "xhigh",
+      }),
+    ).not.toThrow()
+    expect(() =>
+      validateModelSelection({
+        provider: "grok",
+        model: "grok-4.5",
+        effort: "xhigh",
+      }),
+    ).toThrow("Reasoning effort xhigh is not supported by grok/grok-4.5.")
+  })
+
+  it("binds known profiles explicitly without guessing unknown models", () => {
+    expect(resolveModel({ provider: "codex", model: "gpt-5.6-sol" })).toEqual({
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      instructionProfileId: "codex",
+    })
+    expect(resolveModel({ provider: "grok", model: "grok-4.6" })).toEqual({
+      provider: "grok",
+      model: "grok-4.6",
+      instructionProfileId: "grok",
+    })
+    expect(resolveModel({ provider: "codex", model: "gpt-future" })).toEqual({
+      provider: "codex",
+      model: "gpt-future",
+      instructionProfileId: "default",
+    })
   })
 })
 

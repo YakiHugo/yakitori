@@ -151,14 +151,14 @@ describe("model selector", () => {
             {
               id: "gpt-5.1-codex",
               displayName: "GPT 5.1 Codex",
-              family: "gpt",
+              instructionProfileId: "codex",
               efforts: ["low", "medium", "high"],
               speeds: ["standard", "fast"],
             },
             {
               id: "gpt-5",
               displayName: "GPT-5",
-              family: "gpt",
+              instructionProfileId: "codex",
               efforts: ["low", "medium", "high"],
               speeds: ["standard", "fast"],
             },
@@ -170,7 +170,7 @@ describe("model selector", () => {
             {
               id: "gpt-5.6-sol",
               displayName: "GPT-5.6 Sol",
-              family: "gpt",
+              instructionProfileId: "codex",
               efforts: ["low", "medium", "high", "xhigh"],
               speeds: ["standard", "fast"],
             },
@@ -182,12 +182,12 @@ describe("model selector", () => {
             {
               id: "kimi-for-coding",
               displayName: "K2.7 Coding",
-              family: "kimi",
+              instructionProfileId: "kimi",
             },
             {
               id: "k3",
               displayName: "K3",
-              family: "kimi",
+              instructionProfileId: "kimi",
               efforts: ["low", "high", "max"],
             },
           ],
@@ -198,7 +198,7 @@ describe("model selector", () => {
             {
               id: "claude-sonnet-4-6",
               displayName: "Claude Sonnet 4.6",
-              family: "anthropic",
+              instructionProfileId: "anthropic",
               efforts: ["low", "medium", "high"],
             },
           ],
@@ -209,7 +209,7 @@ describe("model selector", () => {
             {
               id: "grok-4.20-non-reasoning",
               displayName: "Grok 4.20 Non-Reasoning",
-              family: "default",
+              instructionProfileId: "default",
             },
           ],
         },

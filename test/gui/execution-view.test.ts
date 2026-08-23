@@ -561,7 +561,7 @@ describe("execution view", () => {
             mateRevisionId: "revision_1",
             provider: "faux",
             model: "faux-1",
-            promptId: "default",
+            instructionProfileId: "default",
             baseInstructionsRevision: "base_test",
             modelInstructionsRevision: "model_test",
             workingDirectory: "/workspace",

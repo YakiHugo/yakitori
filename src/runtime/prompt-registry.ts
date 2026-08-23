@@ -1,47 +1,36 @@
 import { createHash } from "node:crypto"
 import { readFileSync } from "node:fs"
-import type { PromptId } from "./model-catalog.ts"
+import type { InstructionProfileId } from "./model-catalog.ts"
 
-export type PromptDefinition = {
-  readonly id: PromptId
+export type InstructionProfile = {
+  readonly id: InstructionProfileId
   readonly revision: string
   readonly text: string
 }
 
-const promptUrls: Record<PromptId, URL> = {
+const instructionProfileUrls: Record<InstructionProfileId, URL> = {
   anthropic: new URL("./prompts/anthropic.md", import.meta.url),
+  codex: new URL("./prompts/codex.md", import.meta.url),
   default: new URL("./prompts/default.md", import.meta.url),
-  gpt: new URL("./prompts/gpt.md", import.meta.url),
+  grok: new URL("./prompts/grok.md", import.meta.url),
   kimi: new URL("./prompts/kimi.md", import.meta.url),
 }
 
-const prompts = new Map<PromptId, PromptDefinition>()
+const instructionProfiles = new Map<InstructionProfileId, InstructionProfile>()
 
-export function getPrompt(id: PromptId): PromptDefinition {
-  const existing = prompts.get(id)
+export function getInstructionProfile(
+  id: InstructionProfileId,
+): InstructionProfile {
+  const existing = instructionProfiles.get(id)
   if (existing) return existing
-  const url = promptUrls[id]
-  if (!url) throw new Error(`Prompt ${id} is not registered.`)
-  const text = readPrompt(url).trim()
-  const prompt = {
+  const url = instructionProfileUrls[id]
+  if (!url) throw new Error(`Instruction profile ${id} is not registered.`)
+  const text = readFileSync(url, "utf8").trim()
+  const profile = {
     id,
     revision: createHash("sha256").update(text).digest("hex"),
     text,
   }
-  prompts.set(id, prompt)
-  return prompt
-}
-
-function readPrompt(url: URL): string {
-  if (url.protocol === "file:") return readFileSync(url, "utf8")
-  if (url.protocol !== "data:") {
-    throw new Error(`Unsupported prompt URL protocol: ${url.protocol}`)
-  }
-  const separator = url.href.indexOf(",")
-  if (separator < 0) throw new Error("Invalid prompt data URL.")
-  const metadata = url.href.slice(0, separator)
-  const data = url.href.slice(separator + 1)
-  return metadata.endsWith(";base64")
-    ? Buffer.from(data, "base64").toString("utf8")
-    : decodeURIComponent(data)
+  instructionProfiles.set(id, profile)
+  return profile
 }

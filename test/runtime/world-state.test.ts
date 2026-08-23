@@ -9,7 +9,7 @@ import {
 
 describe("world state", () => {
   it("emits one full baseline, no duplicate, then section patches", () => {
-    const initial = worldState(projectInstructions("revision_a", "rules a"))
+    const initial = worldState(projectInstructions("rules a"))
     const full = diffWorldState(undefined, initial)
 
     expect(full).toMatchObject({
@@ -28,7 +28,7 @@ describe("world state", () => {
 
     const replacement = diffWorldState(
       full?.state,
-      worldState(projectInstructions("revision_b", "rules b")),
+      worldState(projectInstructions("rules b")),
     )
     expect(replacement).toMatchObject({
       full: false,
@@ -75,14 +75,42 @@ describe("world state", () => {
       ],
     })
   })
+
+  it("only names collaboration tools when the Step exposes them", () => {
+    const context = {
+      rootSessionId: "session_1",
+      path: "/root",
+      taskName: "root",
+      agentType: "general" as const,
+      depth: 0,
+      maxDepth: 2,
+      maxConcurrentAgents: 4,
+    }
+    const withoutTool = diffWorldState(
+      undefined,
+      worldState(undefined, "2026-08-21", [], context),
+    )
+    const withTool = diffWorldState(
+      undefined,
+      worldState(undefined, "2026-08-21", ["spawn_agent"], context),
+    )
+
+    expect(withoutTool?.fragments[0]?.text).not.toContain("spawn_agent")
+    expect(withTool?.fragments[0]?.text).toContain("spawn")
+  })
 })
 
-function worldState(project?: ProjectInstructions, currentDate = "2026-08-21") {
+function worldState(
+  project?: ProjectInstructions,
+  currentDate = "2026-08-21",
+  enabledTools: readonly string[] = [],
+  multiAgent?: Parameters<typeof buildWorldState>[0]["multiAgent"],
+) {
   const sessionConfiguration = SessionConfiguration.create({
     promptCacheKey: "session-cache",
     selection: { provider: "codex", model: "gpt-5.6-sol" },
     workspaceRoot: "/workspace",
-    enabledTools: [],
+    enabledTools,
     approvalPolicy: "never",
   })
   return buildWorldState({
@@ -99,6 +127,7 @@ function worldState(project?: ProjectInstructions, currentDate = "2026-08-21") {
       currentDate,
       timezone: "Asia/Shanghai",
     },
+    ...(multiAgent === undefined ? {} : { multiAgent }),
     ...(project === undefined ? {} : { projectInstructions: project }),
   })
 }
@@ -124,19 +153,9 @@ function emptySession(): SessionProjection {
   }
 }
 
-function projectInstructions(
-  revision: string,
-  text: string,
-): ProjectInstructions {
+function projectInstructions(text: string): ProjectInstructions {
   return {
     directory: "/workspace",
-    files: ["/workspace/AGENTS.md"],
-    sources: [{ path: "/workspace/AGENTS.md", byteLength: text.length }],
-    revision,
-    message: {
-      role: "user",
-      content: [{ type: "text", text }],
-    },
-    truncated: false,
+    text,
   }
 }

@@ -337,7 +337,7 @@ async function providerSummary(
     (entry) => ({
       id: entry.id,
       displayName: entry.displayName,
-      family: entry.family as string,
+      instructionProfileId: entry.instructionProfileId as string,
       ...(entry.efforts === undefined ? {} : { efforts: entry.efforts }),
       ...(entry.speeds === undefined ? {} : { speeds: entry.speeds }),
     }),
@@ -354,8 +354,10 @@ async function providerSummary(
           {
             id: configuredModel,
             displayName: configuredModel,
-            family: resolveModel({ provider: name, model: configuredModel })
-              .promptId,
+            instructionProfileId: resolveModel({
+              provider: name,
+              model: configuredModel,
+            }).instructionProfileId,
           },
           ...models,
         ]

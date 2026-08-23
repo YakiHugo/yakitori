@@ -4,6 +4,12 @@ Status: living register of recorded code work. Each item lands as its own
 small reviewable change or is absorbed into a redesign stage. Recorded from
 the 2026-07-30 documentation/code audit; nothing here is started.
 
+The current cross-module architecture-convergence work is grouped and tracked
+in [Architecture Convergence Register](architecture-convergence-register.md).
+Keep this file for earlier focused follow-ups and landed/deferred decisions;
+record new convergence work in the module register instead of adding another
+flat candidate list here.
+
 ## Mate redesign (recorded direction)
 
 All Mate-related code (`src/mates/`, plus the Mate-facing parts of the runner
