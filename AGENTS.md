@@ -15,17 +15,20 @@ Reference material lives under `.references/` and is intentionally gitignored.
 Do not make source code, tests, build scripts, or runtime behavior depend on
 files in `.references/`.
 
-Local references:
+Reference priority:
 
-- `.references/public/opencode-v2`
-- `.references/public/codex`
-- `.references/public/claude-code-sourcemap`
-- `.references/public/grok-build`
-- `.references/public/dsh` (DeepSeek's open-source harness, first-party)
-- Public Claude Code documentation and observable product behavior
-- Public Raft documentation (product-design reference for the later
-  persistent-colleague collaboration direction — Rooms and mentions, not the
-  consensus protocol)
+- Primary references: `.references/public/codex` and
+  `.references/public/grok-build`. Use these by default as the foundation for
+  coding-agent behavior, architecture, and implementation decisions.
+- Secondary references: `.references/public/opencode-v2`,
+  `.references/public/claude-code-sourcemap`, and public Claude Code
+  documentation and observable product behavior. Use these to fill gaps or
+  compare alternatives after checking the primary references.
+- Other references, including `.references/public/dsh` and public Raft
+  documentation, are opt-in. Before consulting one, explicitly propose it and
+  explain why the primary and secondary references are insufficient. Raft is
+  relevant only to the later persistent-colleague direction (Rooms and
+  mentions), not its consensus protocol.
 
 ## Documentation
 
@@ -159,12 +162,16 @@ in the final response for the task.
 
 ## Reference Comparison
 
-Design and implementation references may only come from:
+Start design and implementation comparisons with Codex and Grok Build. Treat
+their implementations and product direction as the baseline.
 
-- First-party agent products from model vendors (e.g. Claude Code, Codex,
-  Gemini CLI, Kimi Code).
-- Agent products with a large user base (e.g. opencode, Manus; Raft for the
-  later product-design direction).
+Use opencode and Claude Code only as secondary references: consult them when
+the primary references leave a gap or when a comparison would materially
+clarify a decision.
+
+Do not consult DSH, Gemini CLI, Kimi Code, Manus, Raft, or any other reference
+by default. Propose the additional reference explicitly and state why it is
+needed before using it.
 
 Do not take design cues from small personal projects, niche frameworks, or
 unaffiliated "industry analysis" sites — their design docs describe their own
