@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto"
 import { link, open, readFile, rename, rm } from "node:fs/promises"
 import { dirname, join } from "node:path"
-import { RuntimeLimits } from "../limits.ts"
+import { ToolLimitDefaults } from "../limits.ts"
 import { resolveWritePath, type ResolvedWorkspacePath } from "./path-policy.ts"
 import type { ToolExecutionResult } from "./types.ts"
 import { createBoundedUnifiedDiff } from "./unified-diff.ts"
@@ -97,7 +97,7 @@ export async function compareAndWriteTextFile(
                 ? null
                 : checked.currentContent.toString("utf8"),
             after: input.content,
-            maxBytes: RuntimeLimits.toolDiffBytes,
+            maxBytes: ToolLimitDefaults.toolDiffBytes,
           }),
         }
         return {

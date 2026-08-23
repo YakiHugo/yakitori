@@ -7,13 +7,15 @@ import {
 import {
   createEventEnvelope,
   EventType,
+  HistoryRecordType,
   InputRole,
+  toolExecutionType,
 } from "../../src/kernel/events.ts"
 
 const sessionId = "session_00000000-0000-4000-8000-000000000000"
 
 describe("execution view", () => {
-  it("replaces a transient snapshot with an assistant.message fact", () => {
+  it("replaces a transient snapshot with an agent item completion", () => {
     let state = createExecutionViewState()
     state = reduceExecutionView(state, {
       type: "transient",
@@ -28,11 +30,11 @@ describe("execution view", () => {
     })
     state = reduceExecutionView(state, {
       type: "durable",
-      event: createEventEnvelope({
+      event: createExecutionEnvelope({
         sessionId,
         seq: 1,
         event: {
-          type: EventType.AssistantMessage,
+          type: HistoryRecordType.AgentMessage,
           data: {
             messageId: "item_1",
             turnId: "turn_1",
@@ -78,11 +80,11 @@ describe("execution view", () => {
 
     state = reduceExecutionView(state, {
       type: "durable",
-      event: createEventEnvelope({
+      event: createExecutionEnvelope({
         sessionId,
         seq: 1,
         event: {
-          type: EventType.AssistantMessage,
+          type: HistoryRecordType.AgentMessage,
           data: {
             messageId: "item_1",
             turnId: "turn_1",
@@ -113,12 +115,12 @@ describe("execution view", () => {
   it("projects public reasoning separately from the assistant answer", () => {
     const state = reduceExecutionView(createExecutionViewState(), {
       type: "durable",
-      event: createEventEnvelope({
+      event: createExecutionEnvelope({
         sessionId,
         seq: 1,
         createdAt: "2026-07-24T00:00:00.000Z",
         event: {
-          type: EventType.AssistantMessage,
+          type: HistoryRecordType.AgentMessage,
           data: {
             messageId: "item_1",
             turnId: "turn_1",
@@ -159,7 +161,7 @@ describe("execution view", () => {
         },
       },
       {
-        type: EventType.ToolCall,
+        type: HistoryRecordType.ModelToolCall,
         data: {
           toolCallId: "tool_1",
           itemId: "item_call",
@@ -187,7 +189,7 @@ describe("execution view", () => {
         },
       },
       {
-        type: EventType.ToolResult,
+        type: HistoryRecordType.ModelToolResult,
         data: {
           toolResultId: "item_result",
           toolCallId: "tool_1",
@@ -200,7 +202,7 @@ describe("execution view", () => {
       (current, event, index) =>
         reduceExecutionView(current, {
           type: "durable",
-          event: createEventEnvelope({ sessionId, seq: index + 1, event }),
+          event: createExecutionEnvelope({ sessionId, seq: index + 1, event }),
         }),
       createExecutionViewState(),
     )
@@ -225,7 +227,7 @@ describe("execution view", () => {
   it("extracts structured diff and command results from tool output", () => {
     const facts = [
       {
-        type: EventType.ToolCall,
+        type: HistoryRecordType.ModelToolCall,
         data: {
           toolCallId: "tool_1",
           itemId: "item_call_1",
@@ -236,7 +238,7 @@ describe("execution view", () => {
         },
       },
       {
-        type: EventType.ToolResult,
+        type: HistoryRecordType.ModelToolResult,
         data: {
           toolResultId: "item_result_1",
           toolCallId: "tool_1",
@@ -254,7 +256,7 @@ describe("execution view", () => {
         },
       },
       {
-        type: EventType.ToolCall,
+        type: HistoryRecordType.ModelToolCall,
         data: {
           toolCallId: "tool_2",
           itemId: "item_call_2",
@@ -265,7 +267,7 @@ describe("execution view", () => {
         },
       },
       {
-        type: EventType.ToolResult,
+        type: HistoryRecordType.ModelToolResult,
         data: {
           toolResultId: "item_result_2",
           toolCallId: "tool_2",
@@ -296,7 +298,7 @@ describe("execution view", () => {
       (current, event, index) =>
         reduceExecutionView(current, {
           type: "durable",
-          event: createEventEnvelope({ sessionId, seq: index + 1, event }),
+          event: createExecutionEnvelope({ sessionId, seq: index + 1, event }),
         }),
       createExecutionViewState(),
     )
@@ -341,7 +343,7 @@ describe("execution view", () => {
   it("projects a timed-out command result with partial output and no exit code", () => {
     const facts = [
       {
-        type: EventType.ToolCall,
+        type: HistoryRecordType.ModelToolCall,
         data: {
           toolCallId: "tool_1",
           itemId: "item_call_1",
@@ -352,7 +354,7 @@ describe("execution view", () => {
         },
       },
       {
-        type: EventType.ToolResult,
+        type: HistoryRecordType.ModelToolResult,
         data: {
           toolResultId: "item_result_1",
           toolCallId: "tool_1",
@@ -375,7 +377,7 @@ describe("execution view", () => {
       (current, event, index) =>
         reduceExecutionView(current, {
           type: "durable",
-          event: createEventEnvelope({ sessionId, seq: index + 1, event }),
+          event: createExecutionEnvelope({ sessionId, seq: index + 1, event }),
         }),
       createExecutionViewState(),
     )
@@ -402,7 +404,7 @@ describe("execution view", () => {
   it("renders interruption separately from failure", () => {
     const facts = [
       {
-        type: EventType.ToolCall,
+        type: HistoryRecordType.ModelToolCall,
         data: {
           toolCallId: "tool_1",
           itemId: "item_call",
@@ -430,7 +432,7 @@ describe("execution view", () => {
       (current, event, index) =>
         reduceExecutionView(current, {
           type: "durable",
-          event: createEventEnvelope({ sessionId, seq: index + 1, event }),
+          event: createExecutionEnvelope({ sessionId, seq: index + 1, event }),
         }),
       createExecutionViewState(),
     )
@@ -496,7 +498,7 @@ describe("execution view", () => {
         },
       },
       {
-        type: EventType.AssistantMessage,
+        type: HistoryRecordType.AgentMessage,
         data: {
           messageId: "item_1",
           turnId: "turn_2",
@@ -508,7 +510,7 @@ describe("execution view", () => {
       (current, event, index) =>
         reduceExecutionView(current, {
           type: "durable",
-          event: createEventEnvelope({
+          event: createExecutionEnvelope({
             sessionId,
             seq: index + 1,
             createdAt: `2026-07-24T00:00:0${index}.000Z`,
@@ -551,23 +553,27 @@ describe("execution view", () => {
         },
       },
       {
-        type: EventType.TurnStarted,
+        type: HistoryRecordType.TurnContext,
         data: {
           turnId: "turn_1",
-          inputId: "input_1",
-          executionContext: {
+          context: {
             mateId: "mate_1",
             mateRevisionId: "revision_1",
             provider: "faux",
             model: "faux-1",
+            promptId: "default",
+            baseInstructionsRevision: "base_test",
+            modelInstructionsRevision: "model_test",
             workingDirectory: "/workspace",
             enabledTools: ["run_command"],
             approvalPolicy: "host",
-            limits: {
+            executionPolicy: {
               modelCallsPerTurn: 4,
               toolCallsPerTurn: 8,
               modelVisibleMessageBlocks: 16,
               modelVisibleContextBytes: 1024,
+              compactionTriggerContextBytes: 800,
+              compactionRetainContextBytes: 160,
               modelVisibleToolResultBytes: 512,
               modelVisibleToolResultLines: 32,
               assistantResponseBytes: 2048,
@@ -576,7 +582,11 @@ describe("execution view", () => {
         },
       },
       {
-        type: EventType.ToolCall,
+        type: EventType.TurnStarted,
+        data: { turnId: "turn_1", inputId: "input_1" },
+      },
+      {
+        type: HistoryRecordType.ModelToolCall,
         data: {
           toolCallId: "tool_1",
           itemId: "item_call_1",
@@ -590,7 +600,7 @@ describe("execution view", () => {
         },
       },
       {
-        type: EventType.ToolCall,
+        type: HistoryRecordType.ModelToolCall,
         data: {
           toolCallId: "tool_2",
           itemId: "item_call_2",
@@ -624,11 +634,26 @@ describe("execution view", () => {
       (current, event, index) =>
         reduceExecutionView(current, {
           type: "durable",
-          event: createEventEnvelope({ sessionId, seq: index + 1, event }),
+          event: createExecutionEnvelope({ sessionId, seq: index + 1, event }),
         }),
       createExecutionViewState(),
     )
-    const view = projectExecutionView(state)
+    const view = projectExecutionView(state, {
+      id: sessionId,
+      conversationId: "conversation_1",
+      seq: facts.length,
+      createdAt: "2026-07-24T00:00:00.000Z",
+      updatedAt: "2026-07-24T00:00:00.000Z",
+      currentModel: { provider: "faux", model: "faux-1" },
+      counts: {
+        inputs: 2,
+        pendingInputs: 1,
+        turns: 1,
+        items: 0,
+        permissions: 0,
+        tools: 2,
+      },
+    })
 
     expect(view.queuedInputIds).toEqual(["input_2"])
     expect(view.lastModel).toEqual({ provider: "faux", model: "faux-1" })
@@ -696,7 +721,7 @@ describe("execution view", () => {
       (current, event, index) =>
         reduceExecutionView(current, {
           type: "durable",
-          event: createEventEnvelope({
+          event: createExecutionEnvelope({
             sessionId,
             seq: index + 1,
             event,
@@ -729,7 +754,7 @@ describe("execution view", () => {
 
     state = reduceExecutionView(state, {
       type: "durable",
-      event: createEventEnvelope({
+      event: createExecutionEnvelope({
         sessionId,
         seq: 4,
         createdAt: "2026-07-24T00:00:03.000Z",
@@ -748,7 +773,7 @@ describe("execution view", () => {
   it("derives the active activity from snapshots, tools, and permissions", () => {
     let state = reduceExecutionView(createExecutionViewState(), {
       type: "durable",
-      event: createEventEnvelope({
+      event: createExecutionEnvelope({
         sessionId,
         seq: 1,
         event: {
@@ -779,11 +804,11 @@ describe("execution view", () => {
 
     state = reduceExecutionView(state, {
       type: "durable",
-      event: createEventEnvelope({
+      event: createExecutionEnvelope({
         sessionId,
         seq: 2,
         event: {
-          type: EventType.ToolCall,
+          type: HistoryRecordType.ModelToolCall,
           data: {
             toolCallId: "tool_1",
             itemId: "item_1",
@@ -802,7 +827,7 @@ describe("execution view", () => {
 
     state = reduceExecutionView(state, {
       type: "durable",
-      event: createEventEnvelope({
+      event: createExecutionEnvelope({
         sessionId,
         seq: 3,
         event: {
@@ -822,6 +847,78 @@ describe("execution view", () => {
     })
   })
 })
+
+function createExecutionEnvelope(
+  input: Parameters<typeof createEventEnvelope>[0],
+) {
+  const { event } = input
+  if (event.type === HistoryRecordType.AgentMessage) {
+    return createEventEnvelope({
+      ...input,
+      event: {
+        type: EventType.ItemCompleted,
+        data: {
+          turnId: event.data.turnId,
+          item: {
+            type: "agent_message",
+            itemId: event.data.messageId,
+            content: event.data.content,
+            ...(typeof event.data.providerMetadata?.streamId === "string"
+              ? { streamId: event.data.providerMetadata.streamId }
+              : {}),
+          },
+        },
+      },
+    })
+  }
+  if (event.type === HistoryRecordType.ModelToolCall) {
+    return createEventEnvelope({
+      ...input,
+      event: {
+        type: EventType.ItemStarted,
+        data: {
+          turnId: event.data.turnId,
+          item: {
+            type: toolExecutionType(event.data.name),
+            itemId: event.data.itemId,
+            toolCallId: event.data.toolCallId,
+            name: event.data.name,
+            input: event.data.input,
+            requiresPermission: event.data.requiresPermission,
+          },
+        },
+      },
+    })
+  }
+  if (event.type === HistoryRecordType.ModelToolResult) {
+    return createEventEnvelope({
+      ...input,
+      event: {
+        type: EventType.ItemCompleted,
+        data: {
+          turnId: event.data.turnId,
+          item: {
+            type: "tool_execution",
+            itemId: `call:${event.data.toolCallId}`,
+            toolCallId: event.data.toolCallId,
+            name: "tool",
+            input: {},
+            requiresPermission: false,
+            resultItemId: event.data.toolResultId,
+            content: event.data.content,
+            ...(event.data.output === undefined
+              ? {}
+              : { output: event.data.output }),
+            ...(event.data.error === undefined
+              ? {}
+              : { error: event.data.error }),
+          },
+        },
+      },
+    })
+  }
+  return createEventEnvelope(input)
+}
 
 function activeSession(activeTurnId: string, seq: number) {
   return {

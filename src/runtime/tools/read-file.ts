@@ -1,6 +1,6 @@
 import { readdir } from "node:fs/promises"
 import { isAbortError } from "../errors.ts"
-import { RuntimeLimits } from "../limits.ts"
+import { ToolLimitDefaults } from "../limits.ts"
 import { resolveReadPath } from "./path-policy.ts"
 import {
   type CapturedLine,
@@ -22,14 +22,11 @@ type ReadInput = {
 }
 
 export function createReadFileTool(
-  maxBytes = RuntimeLimits.modelVisibleToolResultBytes,
-  maxLines = RuntimeLimits.modelVisibleToolResultLines,
+  maxBytes = ToolLimitDefaults.toolPreviewBytes,
+  maxLines = ToolLimitDefaults.toolPreviewLines,
   maxLineCharacters = DEFAULT_LINE_CHARACTERS,
 ): RuntimeTool {
-  const lineLimit = Math.min(
-    maxLines,
-    RuntimeLimits.modelVisibleToolResultLines,
-  )
+  const lineLimit = Math.min(maxLines, ToolLimitDefaults.toolPreviewLines)
   return {
     name: "read_file",
     description:

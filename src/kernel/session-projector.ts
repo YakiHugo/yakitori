@@ -3,6 +3,7 @@ import {
   type EventEnvelope,
   type EventMetadata,
   EventType,
+  HistoryRecordType,
   type ForkReason,
   type InputRole,
   type ItemContent,
@@ -10,7 +11,7 @@ import {
   type ItemKind as ItemKindType,
   ItemStatus,
   type ItemStatus as ItemStatusType,
-  isKernelEvent,
+  isKernelFact,
   type JsonObject,
   type JsonValue,
   type KernelError,
@@ -267,6 +268,13 @@ export function applySessionFacts(
       { ...permission },
     ]) ?? [],
   )
+  const turnContexts = new Map(
+    current?.turns.flatMap((turn) =>
+      turn.executionContext === undefined
+        ? []
+        : [[turn.turnId, turn.executionContext] as const],
+    ) ?? [],
+  )
   let session = current === undefined ? undefined : mutableSession(current)
   let worldState = current?.worldState
   const worldStateUpdates = [...(current?.worldStateUpdates ?? [])]
@@ -284,8 +292,14 @@ export function applySessionFacts(
     session.seq = Math.max(session.seq, stored.seq)
     if (stored.createdAt > session.updatedAt)
       session.updatedAt = stored.createdAt
-    if (!isKernelEvent(stored)) continue
-    if (stored.type === EventType.SessionConfigured) {
+    if (!isKernelFact(stored)) continue
+    if (stored.type === HistoryRecordType.TurnContext) {
+      turnContexts.set(stored.data.turnId, stored.data.context)
+      const turn = turns.get(stored.data.turnId)
+      if (turn !== undefined) turn.executionContext = stored.data.context
+      continue
+    }
+    if (stored.type === HistoryRecordType.SessionMetadata) {
       session.configuration = stored.data.configuration
       continue
     }
@@ -300,7 +314,7 @@ export function applySessionFacts(
       }
       continue
     }
-    if (stored.type === EventType.ContextWindowSeeded) {
+    if (stored.type === HistoryRecordType.InitialContext) {
       session.inheritedContext = {
         windowId: stored.data.windowId,
         sourceSessionId: stored.data.sourceSessionId,
@@ -319,10 +333,10 @@ export function applySessionFacts(
       }
       continue
     }
-    if (stored.type === EventType.WorldStateUpdated) {
+    if (stored.type === HistoryRecordType.WorldState) {
       const event = stored as Extract<
         EventEnvelope,
-        { type: typeof EventType.WorldStateUpdated }
+        { type: typeof HistoryRecordType.WorldState }
       >
       const state = event.data.full
         ? event.data.state
@@ -345,7 +359,15 @@ export function applySessionFacts(
       })
       continue
     }
-    applyKnownEvent(inputs, turns, items, tools, permissions, stored)
+    applyKnownEvent(
+      inputs,
+      turns,
+      items,
+      tools,
+      permissions,
+      turnContexts,
+      stored,
+    )
   }
 
   if (!session) return undefined
@@ -491,11 +513,13 @@ function applyKnownEvent(
   items: Map<string, ItemProjection>,
   tools: Map<string, MutableTool>,
   permissions: Map<string, PermissionProjection>,
+  turnContexts: ReadonlyMap<string, TurnExecutionContext>,
   event: EventEnvelope,
 ): void {
   switch (event.type) {
     case EventType.SessionCreated:
-    case EventType.SessionConfigured:
+    case HistoryRecordType.SessionMetadata:
+    case HistoryRecordType.TurnContext:
       return
     case EventType.InputAdmitted:
       inputs.set(event.data.inputId, {
@@ -527,6 +551,7 @@ function applyKnownEvent(
       return
     }
     case EventType.TurnStarted: {
+      const executionContext = turnContexts.get(event.data.turnId)
       const input = inputs.get(event.data.inputId)
       if (input) {
         input.state = InputState.Promoted
@@ -543,9 +568,7 @@ function applyKnownEvent(
         ...(event.data.parentTurnId === undefined
           ? {}
           : { parentTurnId: event.data.parentTurnId }),
-        ...(event.data.executionContext === undefined
-          ? {}
-          : { executionContext: event.data.executionContext }),
+        ...(executionContext === undefined ? {} : { executionContext }),
         ...(event.data.metadata === undefined
           ? {}
           : { metadata: event.data.metadata }),
@@ -596,14 +619,17 @@ function applyKnownEvent(
         turn.interruptedReason = event.data.reason
       return
     }
-    case EventType.AssistantMessage:
+    case HistoryRecordType.AgentMessage:
       applyAssistantMessage(turns, items, event)
       return
-    case EventType.ToolCall:
+    case HistoryRecordType.ModelToolCall:
       applyToolCall(turns, items, tools, event)
       return
-    case EventType.ToolResult:
+    case HistoryRecordType.ModelToolResult:
       applyToolResult(turns, items, tools, event)
+      return
+    case EventType.ItemStarted:
+    case EventType.ItemCompleted:
       return
     case EventType.PermissionRequested:
       applyPermissionRequested(tools, permissions, event)
@@ -625,8 +651,8 @@ function applyKnownEvent(
       })
       return
     }
-    case EventType.WorldStateUpdated:
-    case EventType.ContextWindowSeeded:
+    case HistoryRecordType.WorldState:
+    case HistoryRecordType.InitialContext:
     case EventType.ContextCompacted:
       return
   }
@@ -708,7 +734,10 @@ function compactionProjection(
 function applyAssistantMessage(
   turns: Map<string, MutableTurn>,
   items: Map<string, ItemProjection>,
-  event: Extract<EventEnvelope, { type: typeof EventType.AssistantMessage }>,
+  event: Extract<
+    EventEnvelope,
+    { type: typeof HistoryRecordType.AgentMessage }
+  >,
 ): void {
   const turn = turns.get(event.data.turnId)
   if (!turn) return
@@ -753,7 +782,10 @@ function applyToolCall(
   turns: Map<string, MutableTurn>,
   items: Map<string, ItemProjection>,
   tools: Map<string, MutableTool>,
-  event: Extract<EventEnvelope, { type: typeof EventType.ToolCall }>,
+  event: Extract<
+    EventEnvelope,
+    { type: typeof HistoryRecordType.ModelToolCall }
+  >,
 ): void {
   const turn = turns.get(event.data.turnId)
   if (!turn) return
@@ -797,7 +829,10 @@ function applyToolResult(
   turns: Map<string, MutableTurn>,
   items: Map<string, ItemProjection>,
   tools: Map<string, MutableTool>,
-  event: Extract<EventEnvelope, { type: typeof EventType.ToolResult }>,
+  event: Extract<
+    EventEnvelope,
+    { type: typeof HistoryRecordType.ModelToolResult }
+  >,
 ): void {
   const tool = tools.get(event.data.toolCallId)
   if (!tool) return

@@ -6,11 +6,11 @@ import type {
   TurnExecutionLimits,
 } from "../kernel/index.ts"
 import {
-  createRuntimeLimits,
+  createSessionExecutionPolicy,
   deriveCompactionContextBytes,
   deriveModelVisibleContextBytes,
-  RuntimeLimits,
-  type RuntimeLimits as RuntimeLimitsType,
+  SessionExecutionPolicyDefaults,
+  type SessionExecutionPolicy,
 } from "./limits.ts"
 import {
   catalogContextWindowTokens,
@@ -25,10 +25,10 @@ export type ApprovalPolicy = "auto_file_tools" | "never"
 
 type ResolvedSessionConfigurationSnapshot = Omit<
   SessionConfigurationSnapshot,
-  "promptCacheKey" | "runtimeLimits"
+  "promptCacheKey" | "executionPolicyDefaults"
 > & {
   readonly promptCacheKey: string
-  readonly runtimeLimits: RuntimeLimitsType
+  readonly executionPolicyDefaults: SessionExecutionPolicy
 }
 
 export type ResolvedModelCapacity = Readonly<{
@@ -47,7 +47,7 @@ export type ResolvedTurnConfiguration = Readonly<{
   workspaceRoot: string
   enabledTools: readonly string[]
   approvalPolicy: ApprovalPolicy
-  limits: RuntimeLimitsType
+  executionPolicy: SessionExecutionPolicy
   modelCapacity?: ResolvedModelCapacity
 }>
 
@@ -70,7 +70,7 @@ export class SessionConfiguration {
     readonly approvalPolicy: ApprovalPolicy
     readonly promptCacheKey: string
     readonly baseInstructions?: string
-    readonly limits?: RuntimeLimitsType
+    readonly executionPolicy?: SessionExecutionPolicy
     readonly modelContextWindowTokens?: number
   }): SessionConfiguration {
     validateModelSelection(input.selection)
@@ -85,41 +85,40 @@ export class SessionConfiguration {
     }
     validateContextWindowOverride(model, input.modelContextWindowTokens)
     return new SessionConfiguration({
-      schemaVersion: 1,
+      schemaVersion: 2,
       workspaceRoot: input.workspaceRoot,
       promptCacheKey: input.promptCacheKey,
       defaultTarget: { ...input.selection },
       baseInstructions,
       enabledTools: [...input.enabledTools],
       approvalPolicy: input.approvalPolicy,
-      runtimeLimits: { ...(input.limits ?? createRuntimeLimits()) },
+      executionPolicyDefaults: {
+        ...(input.executionPolicy ?? createSessionExecutionPolicy()),
+      },
       ...(input.modelContextWindowTokens === undefined
         ? {}
         : { modelContextWindowTokens: input.modelContextWindowTokens }),
     })
   }
 
-  static restore(
-    snapshot: SessionConfigurationSnapshot,
-    fallbackPromptCacheKey: string,
-  ): SessionConfiguration {
-    const runtimeLimits = requireRuntimeLimits(snapshot.runtimeLimits)
+  static restore(snapshot: SessionConfigurationSnapshot): SessionConfiguration {
+    const executionPolicyDefaults = requireSessionExecutionPolicy(
+      snapshot.executionPolicyDefaults,
+    )
     const model = resolveModel(snapshot.defaultTarget)
-    const promptCacheKey = snapshot.promptCacheKey ?? fallbackPromptCacheKey
-    if (promptCacheKey.trim().length === 0) {
+    if (snapshot.promptCacheKey.trim().length === 0) {
       throw new Error("promptCacheKey must be non-empty.")
     }
     validateContextWindowOverride(model, snapshot.modelContextWindowTokens)
     return new SessionConfiguration({
       ...snapshot,
-      promptCacheKey,
       defaultTarget: { ...snapshot.defaultTarget },
       baseInstructions: {
         ...snapshot.baseInstructions,
         provenance: { ...snapshot.baseInstructions.provenance },
       },
       enabledTools: [...snapshot.enabledTools],
-      runtimeLimits,
+      executionPolicyDefaults,
     })
   }
 
@@ -154,7 +153,9 @@ export class SessionConfiguration {
       workspaceRoot: this.snapshot.workspaceRoot,
       enabledTools: [...this.snapshot.enabledTools],
       approvalPolicy: this.snapshot.approvalPolicy,
-      limits: requireRuntimeLimits(this.snapshot.runtimeLimits),
+      executionPolicy: requireSessionExecutionPolicy(
+        this.snapshot.executionPolicyDefaults,
+      ),
       ...(modelCapacity === undefined ? {} : { modelCapacity }),
     }
   }
@@ -199,7 +200,7 @@ export function createTurnContext(input: {
   readonly mateId: string
   readonly mateRevisionId: string
 }): TurnContext {
-  const limits = turnExecutionLimits(input.configuration)
+  const executionPolicy = turnExecutionLimits(input.configuration)
   const capacity = input.configuration.modelCapacity
   return {
     configuration: input.configuration,
@@ -227,7 +228,7 @@ export function createTurnContext(input: {
       workingDirectory: input.configuration.workspaceRoot,
       enabledTools: [...input.configuration.enabledTools],
       approvalPolicy: input.configuration.approvalPolicy,
-      limits,
+      executionPolicy,
     },
   }
 }
@@ -277,41 +278,48 @@ function validateContextWindowOverride(
   }
 }
 
-function requireRuntimeLimits(
-  value: SessionConfigurationSnapshot["runtimeLimits"],
-): RuntimeLimitsType {
-  const keys = new Set(Object.keys(RuntimeLimits))
-  if (Object.keys(value).some((key) => !keys.has(key))) {
-    throw new Error("Session configuration contains invalid runtime limits.")
+function requireSessionExecutionPolicy(
+  value: SessionConfigurationSnapshot["executionPolicyDefaults"],
+): SessionExecutionPolicy {
+  const expectedKeys = Object.keys(SessionExecutionPolicyDefaults)
+  const actualKeys = Object.keys(value)
+  if (
+    actualKeys.length !== expectedKeys.length ||
+    expectedKeys.some((key) => !Object.hasOwn(value, key))
+  ) {
+    throw new Error(
+      "Session configuration contains an invalid execution policy.",
+    )
   }
-  return createRuntimeLimits(value as Partial<RuntimeLimitsType>)
+  return createSessionExecutionPolicy(value)
 }
 
 function turnExecutionLimits(
   configuration: ResolvedTurnConfiguration,
 ): TurnExecutionLimits {
-  const limits = configuration.limits
+  const executionPolicy = configuration.executionPolicy
   const modelVisibleContextBytes =
     configuration.modelCapacity === undefined ||
-    limits.modelVisibleContextBytes !== RuntimeLimits.modelVisibleContextBytes
-      ? limits.modelVisibleContextBytes
+    executionPolicy.modelVisibleContextBytes !==
+      SessionExecutionPolicyDefaults.modelVisibleContextBytes
+      ? executionPolicy.modelVisibleContextBytes
       : deriveModelVisibleContextBytes(
           configuration.modelCapacity.effectiveContextWindowTokens,
         )
   const compaction = deriveCompactionContextBytes({
     modelVisibleContextBytes,
-    triggerRatio: limits.compactionTriggerRatio,
-    retainRatio: limits.compactionRetainRatio,
+    triggerRatio: executionPolicy.compactionTriggerRatio,
+    retainRatio: executionPolicy.compactionRetainRatio,
   })
   return {
-    modelCallsPerTurn: limits.modelCallsPerTurn,
-    toolCallsPerTurn: limits.toolCallsPerTurn,
-    modelVisibleMessageBlocks: limits.modelVisibleMessageBlocks,
+    modelCallsPerTurn: executionPolicy.modelCallsPerTurn,
+    toolCallsPerTurn: executionPolicy.toolCallsPerTurn,
+    modelVisibleMessageBlocks: executionPolicy.modelVisibleMessageBlocks,
     modelVisibleContextBytes,
     compactionTriggerContextBytes: compaction.triggerBytes,
     compactionRetainContextBytes: compaction.retainBytes,
-    modelVisibleToolResultBytes: limits.modelVisibleToolResultBytes,
-    modelVisibleToolResultLines: limits.modelVisibleToolResultLines,
-    assistantResponseBytes: limits.assistantResponseBytes,
+    modelVisibleToolResultBytes: executionPolicy.modelVisibleToolResultBytes,
+    modelVisibleToolResultLines: executionPolicy.modelVisibleToolResultLines,
+    assistantResponseBytes: executionPolicy.assistantResponseBytes,
   }
 }

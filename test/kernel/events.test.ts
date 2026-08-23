@@ -2,16 +2,17 @@ import { describe, expect, it } from "vitest"
 import {
   createEventEnvelope,
   EventType,
+  HistoryRecordType,
   InputRole,
+  isHistoryRecord,
   isKernelEvent,
 } from "../../src/kernel/events.ts"
-import { createRuntimeLimits } from "../../src/runtime/limits.ts"
+import { createSessionExecutionPolicy } from "../../src/runtime/limits.ts"
 
 describe("kernel facts", () => {
   it("contains exactly the coarse witness vocabulary", () => {
     expect(Object.values(EventType)).toEqual([
       "session.created",
-      "session.configured",
       "input.admitted",
       "input.cancelled",
       "turn.started",
@@ -19,14 +20,20 @@ describe("kernel facts", () => {
       "turn.failed",
       "turn.cancelled",
       "turn.interrupted",
-      "assistant.message",
-      "tool.call",
-      "tool.result",
+      "item.started",
+      "item.completed",
       "permission.requested",
       "permission.resolved",
-      "world_state.updated",
-      "context_window.seeded",
       "context.compacted",
+    ])
+    expect(Object.values(HistoryRecordType)).toEqual([
+      "session.metadata",
+      "turn.context",
+      "history.initialized",
+      "world_state",
+      "conversation.agent_message",
+      "conversation.tool_call",
+      "conversation.tool_result",
     ])
   })
 
@@ -40,7 +47,7 @@ describe("kernel facts", () => {
     expect(envelope).toMatchObject({
       sessionId: "session_00000000-0000-4000-8000-000000000000",
       seq: 1,
-      version: 1,
+      version: 2,
       type: EventType.SessionCreated,
       data: { title: "Witness" },
     })
@@ -48,12 +55,13 @@ describe("kernel facts", () => {
 
   it("recognizes a persisted session configuration snapshot", () => {
     expect(
-      isKernelEvent({
-        type: EventType.SessionConfigured,
+      isHistoryRecord({
+        type: HistoryRecordType.SessionMetadata,
         data: {
           configuration: {
-            schemaVersion: 1,
+            schemaVersion: 2,
             workspaceRoot: "/workspace",
+            promptCacheKey: "session-cache",
             defaultTarget: { provider: "codex", model: "gpt-5.6-sol" },
             baseInstructions: {
               text: "instructions",
@@ -67,43 +75,40 @@ describe("kernel facts", () => {
             },
             enabledTools: ["read_file"],
             approvalPolicy: "never",
-            runtimeLimits: createRuntimeLimits(),
+            executionPolicyDefaults: createSessionExecutionPolicy(),
           },
         },
       }),
     ).toBe(true)
   })
 
-  it("accepts schema v1 snapshots written before a runtime limit existed", () => {
-    const runtimeLimits = createRuntimeLimits()
-    const { compactionRetainRatio: _removed, ...legacyRuntimeLimits } =
-      runtimeLimits
+  it("rejects incomplete execution-policy snapshots instead of restoring defaults", () => {
+    const {
+      toolCallsPerTurn: _toolCallsPerTurn,
+      ...incompleteExecutionPolicy
+    } = createSessionExecutionPolicy()
 
     expect(
-      isKernelEvent({
-        type: EventType.SessionConfigured,
+      isHistoryRecord({
+        type: HistoryRecordType.SessionMetadata,
         data: {
           configuration: {
-            schemaVersion: 1,
+            schemaVersion: 2,
             workspaceRoot: "/workspace",
+            promptCacheKey: "session-cache",
             defaultTarget: { provider: "codex", model: "gpt-5.6-sol" },
             baseInstructions: {
               text: "instructions",
               revision: "revision_1",
-              provenance: {
-                type: "model",
-                provider: "codex",
-                model: "gpt-5.6-sol",
-                promptId: "gpt",
-              },
+              provenance: { type: "custom" },
             },
-            enabledTools: ["read_file"],
+            enabledTools: [],
             approvalPolicy: "never",
-            runtimeLimits: legacyRuntimeLimits,
+            executionPolicyDefaults: incompleteExecutionPolicy,
           },
         },
       }),
-    ).toBe(true)
+    ).toBe(false)
   })
 
   it("strictly rejects malformed known facts at write time", () => {
@@ -211,99 +216,44 @@ describe("kernel facts", () => {
     ).toBe(false)
   })
 
-  it("accepts backward-compatible Turn execution configuration fields", () => {
-    const started = (executionContext: Record<string, unknown>) =>
-      isKernelEvent({
-        type: EventType.TurnStarted,
-        data: {
-          turnId: "turn_1",
-          inputId: "input_1",
-          executionContext: {
-            mateId: "mate_1",
-            mateRevisionId: "revision_1",
-            provider: "openai",
-            model: "gpt-5.1-codex",
-            workingDirectory: "/p/a",
-            enabledTools: [],
-            approvalPolicy: "on-request",
-            limits: {
-              modelCallsPerTurn: 1,
-              toolCallsPerTurn: 1,
-              modelVisibleMessageBlocks: 1,
-              modelVisibleContextBytes: 1,
-              modelVisibleToolResultBytes: 1,
-              modelVisibleToolResultLines: 1,
-              assistantResponseBytes: 1,
-            },
-            ...executionContext,
+  it("recognizes a strict turn.context history record", () => {
+    const record = {
+      type: HistoryRecordType.TurnContext,
+      data: {
+        turnId: "turn_1",
+        context: {
+          mateId: "mate_1",
+          mateRevisionId: "revision_1",
+          provider: "openai",
+          model: "gpt-5.1-codex",
+          promptId: "gpt",
+          baseInstructionsRevision: "base@1",
+          modelInstructionsRevision: "gpt@1",
+          workingDirectory: "/p/a",
+          enabledTools: [],
+          approvalPolicy: "on-request",
+          executionPolicy: {
+            modelCallsPerTurn: 1,
+            toolCallsPerTurn: 1,
+            modelVisibleMessageBlocks: 1,
+            modelVisibleContextBytes: 100,
+            compactionTriggerContextBytes: 80,
+            compactionRetainContextBytes: 16,
+            modelVisibleToolResultBytes: 1,
+            modelVisibleToolResultLines: 1,
+            assistantResponseBytes: 1,
           },
         },
-      })
-
-    // Facts written before prompt attribution and effort/speed existed
-    // must still validate.
-    expect(started({})).toBe(true)
-    expect(started({ promptId: "gpt" })).toBe(true)
-    expect(
-      started({
-        promptId: "gpt",
-        baseInstructionsRevision: "base@1",
-        modelInstructionsRevision: "gpt@1",
-        modelContextWindowTokens: 272_000,
-        effectiveModelContextWindowTokens: 258_400,
-      }),
-    ).toBe(true)
-    expect(started({ promptId: 1 })).toBe(false)
-    expect(started({ promptRevision: 1 })).toBe(false)
-    expect(started({ baseInstructionsRevision: 1 })).toBe(false)
-    expect(started({ modelInstructionsRevision: 1 })).toBe(false)
-    expect(started({ modelContextWindowTokens: 0 })).toBe(false)
-    expect(
-      started({
-        modelContextWindowTokens: 100,
-        effectiveModelContextWindowTokens: 101,
-      }),
-    ).toBe(false)
-    expect(started({ effort: "low" })).toBe(true)
-    expect(started({ effort: "low", speed: "fast" })).toBe(true)
-    expect(
-      started({
-        limits: {
-          modelCallsPerTurn: 1,
-          toolCallsPerTurn: 1,
-          modelVisibleMessageBlocks: 1,
-          modelVisibleContextBytes: 100,
-          compactionTriggerContextBytes: 80,
-          compactionRetainContextBytes: 16,
-          modelVisibleToolResultBytes: 1,
-          modelVisibleToolResultLines: 1,
-          assistantResponseBytes: 1,
-        },
-      }),
-    ).toBe(true)
-    expect(
-      started({
-        limits: {
-          modelCallsPerTurn: 1,
-          toolCallsPerTurn: 1,
-          modelVisibleMessageBlocks: 1,
-          modelVisibleContextBytes: 100,
-          compactionTriggerContextBytes: 80,
-          compactionRetainContextBytes: 80,
-          modelVisibleToolResultBytes: 1,
-          modelVisibleToolResultLines: 1,
-          assistantResponseBytes: 1,
-        },
-      }),
-    ).toBe(false)
-    expect(started({ effort: 1 })).toBe(false)
-    expect(started({ speed: 2 })).toBe(false)
+      },
+    }
+    expect(isHistoryRecord(record)).toBe(true)
+    expect(isKernelEvent(record)).toBe(false)
   })
 
   it("recognizes valid tool facts", () => {
     expect(
-      isKernelEvent({
-        type: EventType.ToolCall,
+      isHistoryRecord({
+        type: HistoryRecordType.ModelToolCall,
         data: {
           toolCallId: "tool_1",
           itemId: "item_1",
@@ -356,8 +306,8 @@ describe("kernel facts", () => {
 
   it("recognizes a durable inherited context window", () => {
     expect(
-      isKernelEvent({
-        type: EventType.ContextWindowSeeded,
+      isHistoryRecord({
+        type: HistoryRecordType.InitialContext,
         data: {
           windowId: "context_window_1",
           sourceSessionId: "session_parent",
@@ -387,8 +337,8 @@ describe("kernel facts", () => {
 
   it("rejects inline images in a durable inherited context window", () => {
     expect(
-      isKernelEvent({
-        type: EventType.ContextWindowSeeded,
+      isHistoryRecord({
+        type: HistoryRecordType.InitialContext,
         data: {
           windowId: "context_window_1",
           sourceSessionId: "session_parent",
@@ -410,9 +360,9 @@ describe("kernel facts", () => {
     ).toBe(false)
   })
 
-  it("recognizes a strict world_state.updated fact", () => {
+  it("recognizes a strict world_state history record", () => {
     const event = {
-      type: EventType.WorldStateUpdated,
+      type: HistoryRecordType.WorldState,
       data: {
         turnId: "turn_1",
         afterItemId: "item_1",
@@ -429,15 +379,15 @@ describe("kernel facts", () => {
       },
     }
 
-    expect(isKernelEvent(event)).toBe(true)
+    expect(isHistoryRecord(event)).toBe(true)
     expect(
-      isKernelEvent({
+      isHistoryRecord({
         ...event,
         data: { ...event.data, fragments: [] },
       }),
     ).toBe(true)
     expect(
-      isKernelEvent({
+      isHistoryRecord({
         ...event,
         data: {
           ...event.data,

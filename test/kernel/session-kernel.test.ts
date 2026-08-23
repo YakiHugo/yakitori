@@ -4,7 +4,11 @@ import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { YakitoriErrorCode } from "../../src/kernel/errors.ts"
 import type { EventStore } from "../../src/kernel/event-store.ts"
-import { EventType, PermissionBehavior } from "../../src/kernel/events.ts"
+import {
+  EventType,
+  HistoryRecordType,
+  PermissionBehavior,
+} from "../../src/kernel/events.ts"
 import { createSessionId } from "../../src/kernel/ids.ts"
 import { createJsonlEventStore } from "../../src/kernel/jsonl-event-store.ts"
 import {
@@ -19,6 +23,7 @@ import {
 } from "../../src/kernel/session-states.ts"
 import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
 import { createMemoryEventStore } from "./memory-event-store.ts"
+import { testTurnExecutionContext } from "./turn-context.ts"
 
 const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => {
@@ -120,6 +125,7 @@ for (const implementation of ["memory", "jsonl"] as const) {
         const turn = await kernel.startTurn({
           sessionId: session.sessionId,
           inputId: first.inputId,
+          executionContext: testTurnExecutionContext(),
         })
         const replay = await kernel.replaySession({
           sessionId: session.sessionId,
@@ -127,11 +133,13 @@ for (const implementation of ["memory", "jsonl"] as const) {
 
         expect(retry).toMatchObject({ inputId: first.inputId, created: false })
         expect(turn.events.map((event) => event.type)).toEqual([
+          HistoryRecordType.TurnContext,
           EventType.TurnStarted,
         ])
         expect(replay.events.map((event) => event.type)).toEqual([
           EventType.SessionCreated,
           EventType.InputAdmitted,
+          HistoryRecordType.TurnContext,
           EventType.TurnStarted,
         ])
         expect(replay.session?.inputs[0]).toMatchObject({
@@ -149,12 +157,14 @@ for (const implementation of ["memory", "jsonl"] as const) {
         await kernel.startTurn({
           sessionId: session.sessionId,
           inputId: first.inputId,
+          executionContext: testTurnExecutionContext(),
         })
 
         await expect(
           kernel.startTurn({
             sessionId: session.sessionId,
             inputId: second.inputId,
+            executionContext: testTurnExecutionContext(),
           }),
         ).rejects.toThrow("already has active Turn")
       })
@@ -203,6 +213,7 @@ for (const implementation of ["memory", "jsonl"] as const) {
         await kernel.startTurn({
           sessionId: busy.sessionId,
           inputId: input.inputId,
+          executionContext: testTurnExecutionContext(),
         })
         await expect(
           kernel.deleteSession({ sessionId: busy.sessionId }),
@@ -284,6 +295,7 @@ for (const implementation of ["memory", "jsonl"] as const) {
         await kernel.startTurn({
           sessionId: source.sessionId,
           inputId: activeInput.inputId,
+          executionContext: testTurnExecutionContext(),
         })
 
         await expect(
@@ -401,7 +413,7 @@ for (const implementation of ["memory", "jsonl"] as const) {
           }),
           expect.objectContaining({
             seq: 2,
-            type: EventType.SessionConfigured,
+            type: HistoryRecordType.SessionMetadata,
             data: { configuration },
           }),
         ])
@@ -425,6 +437,7 @@ for (const implementation of ["memory", "jsonl"] as const) {
         const firstTurn = await kernel.startTurn({
           sessionId: source.sessionId,
           inputId: firstInput.inputId,
+          executionContext: testTurnExecutionContext(),
         })
         const beforeCompaction = await kernel.readSession({
           sessionId: source.sessionId,
@@ -449,6 +462,7 @@ for (const implementation of ["memory", "jsonl"] as const) {
         const cutTurn = await kernel.startTurn({
           sessionId: source.sessionId,
           inputId: cutInput.inputId,
+          executionContext: testTurnExecutionContext(),
         })
         await kernel.completeTurn({
           sessionId: source.sessionId,
@@ -568,6 +582,7 @@ for (const implementation of ["memory", "jsonl"] as const) {
         await kernel.startTurn({
           sessionId: active.sessionId,
           inputId: activeInput.inputId,
+          executionContext: testTurnExecutionContext(),
         })
         await expect(
           kernel.forkSession({
@@ -592,6 +607,7 @@ for (const implementation of ["memory", "jsonl"] as const) {
         const firstTurn = await kernel.startTurn({
           sessionId: source.sessionId,
           inputId: firstInput.inputId,
+          executionContext: testTurnExecutionContext(),
         })
         // Admitted while the first Turn is still running, so its admission
         // sits between turn.started and turn.completed in the journal.
@@ -636,6 +652,7 @@ for (const implementation of ["memory", "jsonl"] as const) {
         const followUpTurn = await kernel.startTurn({
           sessionId: forked.sessionId,
           inputId: followUp.inputId,
+          executionContext: testTurnExecutionContext(),
         })
         expect(followUpTurn.turnId).toBeTruthy()
       })
@@ -703,8 +720,10 @@ for (const implementation of ["memory", "jsonl"] as const) {
         const read = await kernel.readSession({ sessionId: active.sessionId })
 
         expect(output.events.map((event) => event.type)).toEqual([
-          EventType.AssistantMessage,
-          EventType.ToolCall,
+          HistoryRecordType.AgentMessage,
+          EventType.ItemCompleted,
+          HistoryRecordType.ModelToolCall,
+          EventType.ItemStarted,
         ])
         expect(read.session?.tools[0]).toMatchObject({
           toolCallId: "tool_read",
@@ -815,6 +834,7 @@ for (const implementation of ["memory", "jsonl"] as const) {
         const turn = await kernel.startTurn({
           sessionId: session.sessionId,
           inputId: input.inputId,
+          executionContext: testTurnExecutionContext(),
         })
         await kernel.completeTurn({
           sessionId: session.sessionId,
@@ -1014,6 +1034,7 @@ for (const implementation of ["memory", "jsonl"] as const) {
         const failedTurn = await kernel.startTurn({
           sessionId: session.sessionId,
           inputId: failedInput.inputId,
+          executionContext: testTurnExecutionContext(),
         })
         const failed = await kernel.failTurn({
           sessionId: session.sessionId,
@@ -1040,6 +1061,7 @@ for (const implementation of ["memory", "jsonl"] as const) {
         const cancelledTurn = await kernel.startTurn({
           sessionId: session.sessionId,
           inputId: cancelledInput.inputId,
+          executionContext: testTurnExecutionContext(),
         })
         const cancelled = await kernel.cancelTurn({
           sessionId: session.sessionId,
@@ -1140,6 +1162,7 @@ for (const implementation of ["memory", "jsonl"] as const) {
         const interrupted = await kernel.startTurn({
           sessionId: completed.sessionId,
           inputId: interruptedInput.inputId,
+          executionContext: testTurnExecutionContext(),
         })
         await kernel.recordAssistantOutput({
           sessionId: completed.sessionId,
@@ -1188,6 +1211,7 @@ async function activeTurn(kernel: SessionKernel) {
   const turn = await kernel.startTurn({
     sessionId: session.sessionId,
     inputId: input.inputId,
+    executionContext: testTurnExecutionContext(),
   })
   return { sessionId: session.sessionId, turnId: turn.turnId }
 }

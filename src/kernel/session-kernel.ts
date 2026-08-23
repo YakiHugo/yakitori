@@ -6,6 +6,7 @@ import {
   type EventEnvelope,
   type EventMetadata,
   EventType,
+  HistoryRecordType,
   type ForkReason,
   InputRole,
   type ItemContent,
@@ -13,6 +14,7 @@ import {
   type JsonValue,
   type KernelError,
   type KernelEvent,
+  type KernelFact,
   type ModelMessage,
   type ModelSelection,
   PermissionBehavior,
@@ -21,6 +23,7 @@ import {
   type StoredEventEnvelope,
   type TextContent,
   type TokenUsage,
+  toolExecutionType,
   type TurnExecutionContext,
   type TurnMetrics,
   type WorldStateFragment,
@@ -196,7 +199,7 @@ export type StartTurnInput = {
   readonly sessionId: string
   readonly inputId: string
   readonly parentTurnId?: string
-  readonly executionContext?: TurnExecutionContext
+  readonly executionContext: TurnExecutionContext
   readonly metadata?: EventMetadata
 }
 export type StartTurnResult = {
@@ -391,7 +394,7 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
         if (session.activeTurn !== undefined)
           invalidState(`Session ${session.id} has an active Turn.`)
         const event = await append(eventStore, session, {
-          type: EventType.SessionConfigured,
+          type: HistoryRecordType.SessionMetadata,
           data: { configuration: input.configuration },
         })
         return { event, configuration: input.configuration, created: true }
@@ -413,7 +416,7 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
         }
         const windowId = createContextWindowId()
         const event = await append(eventStore, session, {
-          type: EventType.ContextWindowSeeded,
+          type: HistoryRecordType.InitialContext,
           data: compact({
             windowId,
             sourceSessionId: input.sourceSessionId,
@@ -457,14 +460,14 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
         }
 
         const sessionId = createSessionId()
-        const initialEvents: KernelEvent[] = []
+        const initialEvents: KernelFact[] = []
         // A fork owns the execution contract it inherits. The source may have
         // been configured after the selected Input was admitted, so that event
         // can sit beyond the history cut even though it governs the source
         // Session today.
         if (source.configuration !== undefined) {
           initialEvents.push({
-            type: EventType.SessionConfigured,
+            type: HistoryRecordType.SessionMetadata,
             data: { configuration: source.configuration },
           })
         }
@@ -659,17 +662,22 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
         if (input.parentTurnId !== undefined)
           requireTurn(session, input.parentTurnId)
         const turnId = createTurnId()
-        const event = await append(eventStore, session, {
-          type: EventType.TurnStarted,
-          data: compact({
-            turnId,
-            inputId: input.inputId,
-            parentTurnId: input.parentTurnId,
-            executionContext: input.executionContext,
-            metadata: input.metadata,
-          }),
-        })
-        return { turnId, events: [event] }
+        const events = await appendMany(eventStore, session, [
+          {
+            type: HistoryRecordType.TurnContext,
+            data: { turnId, context: input.executionContext },
+          },
+          {
+            type: EventType.TurnStarted,
+            data: compact({
+              turnId,
+              inputId: input.inputId,
+              parentTurnId: input.parentTurnId,
+              metadata: input.metadata,
+            }),
+          },
+        ])
+        return { turnId, events }
       })
     },
 
@@ -688,12 +696,12 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
             invalidState(`Tool call ${row.call.id} already exists.`)
           }
         }
-        const events: KernelEvent[] = [
+        const events: KernelFact[] = [
           ...(messageId === undefined
             ? []
             : [
                 {
-                  type: EventType.AssistantMessage,
+                  type: HistoryRecordType.AgentMessage,
                   data: compact({
                     messageId,
                     turnId: input.turnId,
@@ -701,19 +709,49 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
                     providerMetadata: input.providerMetadata,
                   }),
                 },
+                {
+                  type: EventType.ItemCompleted,
+                  data: {
+                    turnId: input.turnId,
+                    item: {
+                      type: "agent_message" as const,
+                      itemId: messageId,
+                      content,
+                      ...(typeof input.providerMetadata?.streamId === "string"
+                        ? { streamId: input.providerMetadata.streamId }
+                        : {}),
+                    },
+                  },
+                },
               ]),
-          ...callRows.map((row) => ({
-            type: EventType.ToolCall,
-            data: compact({
-              toolCallId: row.call.id,
-              itemId: row.itemId,
-              turnId: input.turnId,
-              name: row.call.name,
-              input: row.call.input,
-              requiresPermission: row.call.requiresPermission,
-              providerMetadata: row.call.providerMetadata,
-            }),
-          })),
+          ...callRows.flatMap((row): KernelFact[] => [
+            {
+              type: HistoryRecordType.ModelToolCall,
+              data: compact({
+                toolCallId: row.call.id,
+                itemId: row.itemId,
+                turnId: input.turnId,
+                name: row.call.name,
+                input: row.call.input,
+                requiresPermission: row.call.requiresPermission,
+                providerMetadata: row.call.providerMetadata,
+              }),
+            },
+            {
+              type: EventType.ItemStarted,
+              data: {
+                turnId: input.turnId,
+                item: {
+                  type: toolExecutionType(row.call.name),
+                  itemId: row.itemId,
+                  toolCallId: row.call.id,
+                  name: row.call.name,
+                  input: row.call.input,
+                  requiresPermission: row.call.requiresPermission,
+                },
+              },
+            },
+          ]),
         ]
         if (events.length === 0)
           invalidArgument("Assistant output has no facts to record.")
@@ -724,7 +762,7 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
             toolCallId: row.call.id,
             itemId: row.itemId,
             event: requireEnvelope(
-              envelopes[(messageId === undefined ? 0 : 1) + index],
+              envelopes[(messageId === undefined ? 0 : 2) + index * 2 + 1],
             ),
           })),
           events: envelopes,
@@ -805,18 +843,38 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
         if (tool.state !== ToolState.Requested)
           invalidState(`Tool call ${input.toolCallId} already has a result.`)
         const itemId = createItemId()
-        const event = await append(eventStore, session, {
-          type: EventType.ToolResult,
-          data: compact({
-            toolResultId: itemId,
-            toolCallId: input.toolCallId,
-            turnId: input.turnId,
-            content: input.content,
-            output: input.output,
-            error: input.error,
-          }),
-        })
-        return { itemId, event, events: [event] }
+        const events = await appendMany(eventStore, session, [
+          {
+            type: HistoryRecordType.ModelToolResult,
+            data: compact({
+              toolResultId: itemId,
+              toolCallId: input.toolCallId,
+              turnId: input.turnId,
+              content: input.content,
+              output: input.output,
+              error: input.error,
+            }),
+          },
+          {
+            type: EventType.ItemCompleted,
+            data: {
+              turnId: input.turnId,
+              item: {
+                type: toolExecutionType(tool.name),
+                itemId: tool.requestItemId,
+                toolCallId: tool.toolCallId,
+                name: tool.name,
+                input: tool.input,
+                requiresPermission: tool.requiresPermission,
+                resultItemId: itemId,
+                content: input.content,
+                ...(input.output === undefined ? {} : { output: input.output }),
+                ...(input.error === undefined ? {} : { error: input.error }),
+              },
+            },
+          },
+        ])
+        return { itemId, event: requireLast(events), events }
       })
     },
 
@@ -906,7 +964,7 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
           )
         }
         const event = await append(eventStore, session, {
-          type: EventType.WorldStateUpdated,
+          type: HistoryRecordType.WorldState,
           data: compact({
             turnId: input.turnId,
             afterItemId: input.afterItemId,
@@ -939,13 +997,27 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
         const itemId = createItemId()
         const events = await appendMany(eventStore, session, [
           {
-            type: EventType.AssistantMessage,
+            type: HistoryRecordType.AgentMessage,
             data: compact({
               messageId: itemId,
               turnId: input.turnId,
               content: input.content,
               providerMetadata: input.providerMetadata,
             }),
+          },
+          {
+            type: EventType.ItemCompleted,
+            data: {
+              turnId: input.turnId,
+              item: {
+                type: "agent_message",
+                itemId,
+                content: input.content,
+                ...(typeof input.providerMetadata?.streamId === "string"
+                  ? { streamId: input.providerMetadata.streamId }
+                  : {}),
+              },
+            },
           },
           {
             type: EventType.TurnCompleted,
@@ -1029,7 +1101,7 @@ function terminal<
 function append(
   eventStore: EventStore,
   session: SessionProjection,
-  event: KernelEvent,
+  event: KernelFact,
 ) {
   return eventStore.appendEvent(session.id, event, { expectedSeq: session.seq })
 }
@@ -1037,10 +1109,11 @@ function append(
 function appendMany(
   eventStore: EventStore,
   session: SessionProjection,
-  events: readonly KernelEvent[],
+  events: readonly KernelFact[],
 ) {
   return eventStore.appendEvents(session.id, events, {
     expectedSeq: session.seq,
+    atomic: true,
   })
 }
 

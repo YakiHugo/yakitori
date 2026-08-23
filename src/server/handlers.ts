@@ -22,7 +22,7 @@ import {
   type TextContent,
   YakitoriErrorCode,
 } from "../kernel/index.ts"
-import { RuntimeLimits } from "../runtime/limits.ts"
+import { SessionExecutionPolicyDefaults } from "../runtime/limits.ts"
 import {
   type ApiAdmitInputResponse,
   type ApiCancelInputResponse,
@@ -230,7 +230,8 @@ export function createServerHandlers(
       try {
         const request = requireForkSessionRequest(
           input,
-          options.maxInputBytes ?? RuntimeLimits.modelVisibleContextBytes,
+          options.maxInputBytes ??
+            SessionExecutionPolicyDefaults.modelVisibleContextBytes,
         )
         requireAvailableProvider(
           request.modelSelection?.provider,
@@ -256,7 +257,8 @@ export function createServerHandlers(
       try {
         const request = requireAdmitInputRequest(
           input,
-          options.maxInputBytes ?? RuntimeLimits.modelVisibleContextBytes,
+          options.maxInputBytes ??
+            SessionExecutionPolicyDefaults.modelVisibleContextBytes,
         )
         requireAvailableProvider(
           request.modelSelection?.provider,
@@ -443,11 +445,19 @@ function mapSessionSummary(summary: SessionSummary): ApiSessionSummary {
 }
 
 function mapSessionDetail(session: SessionProjection): ApiSessionDetail {
+  const currentModel = currentSessionModel(session)
   return {
     ...mapSessionSummary(summarizeSessionProjection(session)),
     ...(session.activeTurn === undefined
       ? {}
       : { activeTurnId: session.activeTurn.turnId }),
+    ...(currentModel === undefined
+      ? {}
+      : {
+          currentModel: {
+            ...currentModel,
+          },
+        }),
     counts: {
       inputs: session.inputs.length,
       pendingInputs: session.pendingInputs.length,
@@ -457,6 +467,27 @@ function mapSessionDetail(session: SessionProjection): ApiSessionDetail {
       tools: session.tools.length,
     },
   }
+}
+
+function currentSessionModel(
+  session: SessionProjection,
+): ModelSelection | undefined {
+  const execution = session.turns.at(-1)?.executionContext
+  let current: ModelSelection | undefined =
+    execution === undefined
+      ? session.configuration?.defaultTarget
+      : {
+          provider: execution.provider,
+          model: execution.model,
+          ...(execution.effort === undefined
+            ? {}
+            : { effort: execution.effort }),
+          ...(execution.speed === undefined ? {} : { speed: execution.speed }),
+        }
+  for (const pending of session.pendingInputs) {
+    current = pending.modelSelection ?? current
+  }
+  return current
 }
 
 function mapRequiredSession(

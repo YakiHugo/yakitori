@@ -9,6 +9,7 @@ import {
 } from "../../src/runtime/model-context.ts"
 import { boundCommandContent } from "../../src/runtime/tools/run-command.ts"
 import { createMemoryEventStore } from "../kernel/memory-event-store.ts"
+import { testTurnExecutionContext } from "../kernel/turn-context.ts"
 import { createMemoryMateStore } from "../mates/memory-mate-store.ts"
 
 describe("model context", () => {
@@ -174,6 +175,7 @@ describe("model context", () => {
         const turn = await kernel.startTurn({
           sessionId,
           inputId: input.inputId,
+          executionContext: testTurnExecutionContext(),
         })
         await kernel.recordAssistantOutput({
           sessionId,
@@ -361,6 +363,7 @@ describe("model context", () => {
         const started = await kernel.startTurn({
           sessionId,
           inputId: admitted.inputId,
+          executionContext: testTurnExecutionContext(),
         })
         await kernel.completeTurnWithAssistantOutput({
           sessionId,
@@ -397,6 +400,7 @@ describe("model context", () => {
         const turn = await kernel.startTurn({
           sessionId,
           inputId: first.inputId,
+          executionContext: testTurnExecutionContext(),
         })
         await kernel.recordAssistantOutput({
           sessionId,
@@ -510,6 +514,7 @@ describe("model context", () => {
         const turn = await kernel.startTurn({
           sessionId,
           inputId: admitted.inputId,
+          executionContext: testTurnExecutionContext(),
         })
         await kernel.recordAssistantOutput({
           sessionId,
@@ -691,6 +696,7 @@ describe("model context", () => {
         const cutTurn = await kernel.startTurn({
           sessionId,
           inputId: cut.inputId,
+          executionContext: testTurnExecutionContext(),
         })
         await kernel.completeTurn({ sessionId, turnId: cutTurn.turnId })
         const forked = await kernel.forkSession({
@@ -856,6 +862,7 @@ describe("model context", () => {
         const toolTurn = await kernel.startTurn({
           sessionId,
           inputId: admitted.inputId,
+          executionContext: testTurnExecutionContext(),
         })
         await kernel.recordAssistantOutput({
           sessionId,
@@ -1381,24 +1388,9 @@ async function completeTextTurn(
   const started = await kernel.startTurn({
     sessionId,
     inputId: admitted.inputId,
-    executionContext: {
-      mateId: "mate_test",
-      mateRevisionId: "mate_revision_test",
-      provider: "faux",
-      model: "scripted",
-      workingDirectory: "/tmp",
-      enabledTools: [],
+    executionContext: testTurnExecutionContext({
       approvalPolicy: "auto_file_tools",
-      limits: {
-        modelCallsPerTurn: 16,
-        toolCallsPerTurn: 32,
-        modelVisibleMessageBlocks: 200,
-        modelVisibleContextBytes: 256_000,
-        modelVisibleToolResultBytes: 50_000,
-        modelVisibleToolResultLines: 2_000,
-        assistantResponseBytes: 256_000,
-      },
-    },
+    }),
   })
   await kernel.completeTurnWithAssistantOutput({
     sessionId,
@@ -1425,6 +1417,7 @@ async function admitAndStartTurn(
   const started = await kernel.startTurn({
     sessionId,
     inputId: admitted.inputId,
+    executionContext: testTurnExecutionContext(),
   })
   return { inputId: admitted.inputId, turnId: started.turnId }
 }

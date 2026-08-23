@@ -11,7 +11,7 @@ import {
   createEventEnvelope,
   type EventEnvelope,
   EventType,
-  type KernelEvent,
+  type KernelFact,
 } from "../../src/kernel/events.ts"
 import { fingerprintInputAdmission } from "../../src/kernel/operation.ts"
 import {
@@ -236,7 +236,7 @@ export function createMemoryEventStore(): EventStore {
 
   async function appendEvents(
     sessionId: string,
-    events: readonly KernelEvent[],
+    events: readonly KernelFact[],
     options: EventStoreAppendOptions = {},
   ): Promise<EventEnvelope[]> {
     if (events.some((event) => event.type === EventType.SessionCreated)) {

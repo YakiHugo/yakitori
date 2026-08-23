@@ -12,69 +12,48 @@ import { parseStoredEventEnvelope } from "./event-store.ts"
 import { ForkReason, isJsonObject, type StoredEventEnvelope } from "./events.ts"
 import type { SessionSummary } from "./session-projector.ts"
 
-export const journalRecordVersion = 1
 export const summaryVersion = 2
-
-export type JournalOperation = {
-  readonly id: string
-  readonly fingerprint: string
-}
-
-export type JournalCommitRecord = {
-  readonly record: "commit"
-  readonly version: typeof journalRecordVersion
-  readonly sessionId: string
-  readonly firstSeq: number
-  readonly operation?: JournalOperation
-  readonly events: readonly StoredEventEnvelope[]
-}
-
-export type JournalLine = JournalCommitRecord | StoredEventEnvelope
 
 export type SessionSummaryCache = SessionSummary & {
   readonly version: typeof summaryVersion
   readonly journalBytes: number
 }
 
-export function parseCommitRecord(
-  serialized: string,
-  recordNumber: number,
-): JournalCommitRecord {
-  let value: unknown
-  try {
-    value = JSON.parse(serialized)
-  } catch (cause) {
-    throw invalidEventLog(
-      `Invalid Session journal JSON at record ${recordNumber}.`,
-      { recordNumber },
-      cause,
-    )
-  }
-  if (
-    !isRecord(value) ||
-    value.record !== "commit" ||
-    value.version !== journalRecordVersion ||
-    typeof value.sessionId !== "string" ||
-    !isPositiveInteger(value.firstSeq) ||
-    !Array.isArray(value.events) ||
-    value.events.length === 0 ||
-    !isOptionalJournalOperation(value.operation)
-  ) {
-    throw invalidEventLog(`Invalid Session journal record ${recordNumber}.`, {
-      recordNumber,
-    })
-  }
-  return value as JournalCommitRecord
-}
-
 export function serializeFactLine(envelope: StoredEventEnvelope): string {
   return `${JSON.stringify(envelope)}\n`
+}
+
+export function serializeFactBatchLine(
+  envelopes: readonly StoredEventEnvelope[],
+): string {
+  if (envelopes.length < 2) {
+    throw new TypeError("A Session fact batch must contain at least two facts.")
+  }
+  return `${JSON.stringify({
+    record: "fact.batch",
+    formatVersion: 1,
+    facts: envelopes,
+  })}\n`
 }
 
 export function parseJournalLine(
   serialized: string,
   recordNumber: number,
-): JournalLine {
+): StoredEventEnvelope {
+  const facts = parseJournalRecord(serialized, recordNumber)
+  if (facts.length !== 1) {
+    throw invalidEventLog(
+      `Session journal record ${recordNumber} contains a fact batch.`,
+      { recordNumber },
+    )
+  }
+  return facts[0] as StoredEventEnvelope
+}
+
+export function parseJournalRecord(
+  serialized: string,
+  recordNumber: number,
+): readonly StoredEventEnvelope[] {
   let value: unknown
   try {
     value = JSON.parse(serialized)
@@ -85,15 +64,17 @@ export function parseJournalLine(
       cause,
     )
   }
-  if (isRecord(value) && Object.hasOwn(value, "record")) {
-    return parseCommitRecord(serialized, recordNumber)
+  if (isFactEnvelopeRecord(value)) {
+    return [parseStoredEventEnvelope(serialized, recordNumber)]
   }
-  if (!isFactEnvelopeRecord(value)) {
+  if (!isFactBatchRecord(value)) {
     throw invalidEventLog(`Invalid Session fact at record ${recordNumber}.`, {
       recordNumber,
     })
   }
-  return parseStoredEventEnvelope(serialized, recordNumber)
+  return value.facts.map((fact) =>
+    parseStoredEventEnvelope(JSON.stringify(fact), recordNumber),
+  )
 }
 
 export async function readSummaryCache(
@@ -237,20 +218,6 @@ export function invalidEventLog(
   })
 }
 
-export function isJournalOperation(value: unknown): value is JournalOperation {
-  return (
-    isRecord(value) &&
-    typeof value.id === "string" &&
-    value.id.length > 0 &&
-    typeof value.fingerprint === "string" &&
-    value.fingerprint.length > 0
-  )
-}
-
-function isOptionalJournalOperation(value: unknown): boolean {
-  return value === undefined || isJournalOperation(value)
-}
-
 function optionalString(value: unknown): boolean {
   return value === undefined || typeof value === "string"
 }
@@ -279,6 +246,20 @@ function isFactEnvelopeRecord(
   return (
     keys.length === factEnvelopeKeys.size &&
     keys.every((key) => factEnvelopeKeys.has(key))
+  )
+}
+
+function isFactBatchRecord(
+  value: unknown,
+): value is { readonly facts: readonly unknown[] } {
+  if (!isRecord(value)) return false
+  return (
+    Object.keys(value).length === 3 &&
+    value.record === "fact.batch" &&
+    value.formatVersion === 1 &&
+    Array.isArray(value.facts) &&
+    value.facts.length >= 2 &&
+    value.facts.every(isFactEnvelopeRecord)
   )
 }
 

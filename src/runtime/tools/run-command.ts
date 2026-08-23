@@ -3,7 +3,7 @@ import { createWriteStream } from "node:fs"
 import { basename } from "node:path"
 import { Transform } from "node:stream"
 import type { SessionFileReference } from "../../kernel/index.ts"
-import { RuntimeLimits } from "../limits.ts"
+import { ToolLimitDefaults } from "../limits.ts"
 import { createUserShellEnv, type UserShellEnv } from "../user-shell-env.ts"
 import { matchCatastrophicCommand } from "./command-fuse.ts"
 import { resolveCommandCwd } from "./path-policy.ts"
@@ -94,16 +94,18 @@ export function createRunCommandTool(
   } = {},
 ): RuntimeTool {
   const maxCommandBytes =
-    input.maxCommandBytes ?? RuntimeLimits.commandTextBytes
+    input.maxCommandBytes ?? ToolLimitDefaults.commandTextBytes
   const maxOutputBytes =
-    input.maxOutputBytes ?? RuntimeLimits.commandOutputBytes
+    input.maxOutputBytes ?? ToolLimitDefaults.commandOutputBytes
   const maxPersistedOutputBytes =
-    input.maxPersistedOutputBytes ?? RuntimeLimits.commandPersistedOutputBytes
+    input.maxPersistedOutputBytes ??
+    ToolLimitDefaults.commandPersistedOutputBytes
   const defaultTimeoutSeconds =
-    input.defaultTimeoutSeconds ?? RuntimeLimits.runCommandDefaultTimeoutSeconds
+    input.defaultTimeoutSeconds ??
+    ToolLimitDefaults.runCommandDefaultTimeoutSeconds
   const maxTimeoutSeconds =
-    input.maxTimeoutSeconds ?? RuntimeLimits.runCommandMaxTimeoutSeconds
-  const killGraceMs = input.killGraceMs ?? RuntimeLimits.commandKillGraceMs
+    input.maxTimeoutSeconds ?? ToolLimitDefaults.runCommandMaxTimeoutSeconds
+  const killGraceMs = input.killGraceMs ?? ToolLimitDefaults.commandKillGraceMs
   const launch = input.launch ?? launchCommand
   const userShellEnv =
     input.userShellEnv ?? createUserShellEnv({ log: () => {} })
@@ -343,8 +345,8 @@ export function boundCommandContent(
     readonly maxLines?: number
   } = {},
 ): string {
-  const maxBytes = limits.maxBytes ?? RuntimeLimits.modelVisibleToolResultBytes
-  const maxLines = limits.maxLines ?? RuntimeLimits.modelVisibleToolResultLines
+  const maxBytes = limits.maxBytes ?? ToolLimitDefaults.toolPreviewBytes
+  const maxLines = limits.maxLines ?? ToolLimitDefaults.toolPreviewLines
   const totalBytes = Buffer.byteLength(text, "utf8")
   const totalLines = countLines(text)
   if (totalBytes <= maxBytes && totalLines <= maxLines) return text

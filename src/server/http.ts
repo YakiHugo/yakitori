@@ -9,6 +9,7 @@ import {
   createSessionKernel,
   type EventEnvelope,
   type EventStore,
+  isKernelEvent,
   isYakitoriError,
   type SessionKernel,
   type SessionFiles,
@@ -720,13 +721,22 @@ function writeSseEvents(
   events: readonly StoredEventEnvelope[],
   lastSequence: number,
 ): number {
-  return events.reduce((sequence, event) => {
+  let lastRuntimeSequence = lastSequence
+  const sequence = events.reduce((sequence, event) => {
     if (event.seq <= sequence) return sequence
+    if (!isKernelEvent(event)) return event.seq
     response.write(`id: ${event.seq}\n`)
     response.write("event: session.event\n")
     response.write(`data: ${JSON.stringify(event)}\n\n`)
+    lastRuntimeSequence = event.seq
     return event.seq
   }, lastSequence)
+  if (sequence > lastRuntimeSequence) {
+    response.write(`id: ${sequence}\n`)
+    response.write("event: session.cursor\n")
+    response.write("data: {}\n\n")
+  }
+  return sequence
 }
 
 function writeTransientSseEvent(

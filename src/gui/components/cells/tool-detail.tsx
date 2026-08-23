@@ -123,7 +123,7 @@ export function ToolDetailView({
           ))}
         </div>
       )
-    case "task":
+    case "collaboration":
       return (
         <div className="space-y-2">
           {detail.text === undefined ? null : <TextOutput text={detail.text} />}

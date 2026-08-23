@@ -10,6 +10,7 @@ import type { Server as HttpServer } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { testTurnExecutionContext } from "../kernel/turn-context.ts"
 import { EventType } from "../../src/kernel/events.ts"
 import { InputState } from "../../src/kernel/session-states.ts"
 import { MateLifecycle } from "../../src/mates/events.ts"
@@ -746,6 +747,7 @@ describe("application composition", () => {
         const turn = await kernel.startTurn({
           sessionId: created.body.session.id,
           inputId: first.body.inputId,
+          executionContext: testTurnExecutionContext(),
         })
         // Admitted mid-Turn, so their admissions sit inside the Turn span.
         const earlier = await application.handlers.admitInput({

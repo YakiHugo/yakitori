@@ -1,10 +1,10 @@
-import { RuntimeLimits } from "../limits.ts"
+import { ToolLimitDefaults } from "../limits.ts"
 import { resolveWritePath } from "./path-policy.ts"
 import { compareAndWriteTextFile } from "./text-file-write.ts"
 import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
 
 export function createWriteFileTool(
-  maxBytes = RuntimeLimits.fileWriteBytes,
+  maxBytes = ToolLimitDefaults.fileWriteBytes,
 ): RuntimeTool {
   return {
     name: "write_file",

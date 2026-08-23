@@ -6,7 +6,6 @@ import {
   type InlineImageAttachment,
   type ModelSelection,
   type StoredEventEnvelope,
-  type TurnStartedEvent,
 } from "../../kernel/events.ts"
 import { createRequestId } from "../../kernel/ids.ts"
 import type {
@@ -195,20 +194,11 @@ export const useAppStore = create<AppStore>()((set, get) => {
     ) {
       return
     }
-    const restored = restoringModelSelections.has(event.sessionId)
-      ? modelSelectionFromTurn(event)
-      : undefined
-    const modelSelections =
-      restored === undefined
-        ? state.modelSelections
-        : { ...state.modelSelections, [event.sessionId]: restored }
-    if (restored !== undefined) persistModelSelections(modelSelections)
     set({
       execution: reduceExecutionView(state.execution, {
         type: "durable",
         event,
       }),
-      modelSelections,
     })
   }
 
@@ -238,7 +228,24 @@ export const useAppStore = create<AppStore>()((set, get) => {
     ) {
       return false
     }
-    set({ selectedSession: response.session })
+    if (
+      restoringModelSelections.has(selection.sessionId) &&
+      response.session.currentModel !== undefined
+    ) {
+      restoringModelSelections.delete(selection.sessionId)
+      const modelSelections = {
+        ...get().modelSelections,
+        [selection.sessionId]: response.session.currentModel,
+      }
+      persistModelSelections(modelSelections)
+      set({
+        selectedSession: response.session,
+        modelSelections,
+        modelSelectionReady: true,
+      })
+    } else {
+      set({ selectedSession: response.session })
+    }
     return true
   }
 
@@ -1014,20 +1021,6 @@ function initialModelSelections(): Record<string, ModelSelection> {
     return parsed as Record<string, ModelSelection>
   } catch {
     return {}
-  }
-}
-
-function modelSelectionFromTurn(
-  event: StoredEventEnvelope,
-): ModelSelection | undefined {
-  if (event.type !== EventType.TurnStarted) return undefined
-  const context = (event.data as TurnStartedEvent["data"]).executionContext
-  if (context === undefined) return undefined
-  return {
-    provider: context.provider,
-    model: context.model,
-    ...(context.effort === undefined ? {} : { effort: context.effort }),
-    ...(context.speed === undefined ? {} : { speed: context.speed }),
   }
 }
 
