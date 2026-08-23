@@ -216,19 +216,23 @@ describe("session runner", () => {
         read.session?.turns.map((turn) => ({
           provider: turn.executionContext?.provider,
           model: turn.executionContext?.model,
-          promptId: turn.executionContext?.promptId,
+          instructionProfileId: turn.executionContext?.instructionProfileId,
         })),
       ).toEqual([
-        { provider: "faux", model: "scripted", promptId: "default" },
         {
-          provider: "anthropic",
-          model: "claude-opus-4-6",
-          promptId: "anthropic",
+          provider: "faux",
+          model: "scripted",
+          instructionProfileId: "default",
         },
         {
           provider: "anthropic",
           model: "claude-opus-4-6",
-          promptId: "anthropic",
+          instructionProfileId: "anthropic",
+        },
+        {
+          provider: "anthropic",
+          model: "claude-opus-4-6",
+          instructionProfileId: "anthropic",
         },
       ])
     })

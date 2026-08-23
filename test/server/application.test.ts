@@ -55,7 +55,7 @@ function testApplicationOptions(input: {
         listCatalogModels(provider).map((model) => ({
           id: model.model,
           displayName: model.displayName ?? model.model,
-          family: model.promptId,
+          instructionProfileId: model.instructionProfileId,
           ...(model.efforts === undefined ? {} : { efforts: model.efforts }),
           ...(model.speeds === undefined ? {} : { speeds: model.speeds }),
         })),
@@ -551,7 +551,7 @@ describe("application composition", () => {
         expect(selected.requests[0]?.target).toEqual({
           provider: "openai",
           model: "gpt-5.6-sol",
-          promptId: "gpt",
+          instructionProfileId: "default",
         })
       } finally {
         await application.close()
@@ -830,10 +830,14 @@ describe("application composition", () => {
                 {
                   id: "gpt-5.1-codex",
                   displayName: "GPT-5.1 Codex",
-                  family: "gpt",
+                  instructionProfileId: "codex",
                   efforts: ["low", "medium", "high"],
                 },
-                { id: "gpt-5", displayName: "GPT-5", family: "gpt" },
+                {
+                  id: "gpt-5",
+                  displayName: "GPT-5",
+                  instructionProfileId: "codex",
+                },
               ]
             }
             if (provider === "grok") {
@@ -841,7 +845,7 @@ describe("application composition", () => {
                 {
                   id: "grok-code-fast-1",
                   displayName: "Grok Code Fast 1",
-                  family: "default",
+                  instructionProfileId: "grok",
                   efforts: ["low", "medium", "high"],
                 },
               ]
@@ -866,14 +870,22 @@ describe("application composition", () => {
           name: "openai",
           defaultModel: "gpt-custom-9",
           models: [
-            { id: "gpt-custom-9", displayName: "gpt-custom-9", family: "gpt" },
+            {
+              id: "gpt-custom-9",
+              displayName: "gpt-custom-9",
+              instructionProfileId: "default",
+            },
             {
               id: "gpt-5.1-codex",
               displayName: "GPT-5.1 Codex",
-              family: "gpt",
+              instructionProfileId: "codex",
               efforts: ["low", "medium", "high"],
             },
-            { id: "gpt-5", displayName: "GPT-5", family: "gpt" },
+            {
+              id: "gpt-5",
+              displayName: "GPT-5",
+              instructionProfileId: "codex",
+            },
           ],
         })
         expect(
@@ -884,7 +896,7 @@ describe("application composition", () => {
             {
               id: "grok-code-fast-1",
               displayName: "Grok Code Fast 1",
-              family: "default",
+              instructionProfileId: "grok",
               efforts: ["low", "medium", "high"],
             },
           ],
@@ -963,7 +975,11 @@ describe("application composition", () => {
           async listModels(provider) {
             if (provider === "faux") {
               return [
-                { id: "scripted", displayName: "Scripted", family: "default" },
+                {
+                  id: "scripted",
+                  displayName: "Scripted",
+                  instructionProfileId: "default",
+                },
               ]
             }
             return []
@@ -982,7 +998,11 @@ describe("application composition", () => {
           name: "faux",
           defaultModel: "scripted",
           models: [
-            { id: "scripted", displayName: "Scripted", family: "default" },
+            {
+              id: "scripted",
+              displayName: "Scripted",
+              instructionProfileId: "default",
+            },
           ],
         })
       } finally {
@@ -1159,11 +1179,14 @@ describe("codex login registration", () => {
         "gpt-5.6-terra",
         "gpt-5.6-luna",
         "gpt-5.5",
+        "gpt-5.4",
+        "gpt-5.4-mini",
+        "gpt-5.3-codex-spark",
       ])
       expect(codex?.models[0]).toMatchObject({
-        displayName: "GPT-5.6 Sol",
-        family: "gpt",
-        efforts: ["low", "medium", "high", "xhigh"],
+        displayName: "GPT-5.6-Sol",
+        instructionProfileId: "codex",
+        efforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
       })
     })
   })

@@ -8,7 +8,7 @@ export function testTurnExecutionContext(
     mateRevisionId: "mate_revision_test",
     provider: "faux",
     model: "scripted",
-    promptId: "default",
+    instructionProfileId: "default",
     baseInstructionsRevision: "base_test",
     modelInstructionsRevision: "model_test",
     workingDirectory: "/tmp",

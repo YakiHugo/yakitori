@@ -59,7 +59,7 @@ describe("kernel facts", () => {
         type: HistoryRecordType.SessionMetadata,
         data: {
           configuration: {
-            schemaVersion: 2,
+            schemaVersion: 3,
             workspaceRoot: "/workspace",
             promptCacheKey: "session-cache",
             defaultTarget: { provider: "codex", model: "gpt-5.6-sol" },
@@ -70,7 +70,7 @@ describe("kernel facts", () => {
                 type: "model",
                 provider: "codex",
                 model: "gpt-5.6-sol",
-                promptId: "gpt",
+                instructionProfileId: "codex",
               },
             },
             enabledTools: ["read_file"],
@@ -93,7 +93,7 @@ describe("kernel facts", () => {
         type: HistoryRecordType.SessionMetadata,
         data: {
           configuration: {
-            schemaVersion: 2,
+            schemaVersion: 3,
             workspaceRoot: "/workspace",
             promptCacheKey: "session-cache",
             defaultTarget: { provider: "codex", model: "gpt-5.6-sol" },
@@ -226,7 +226,7 @@ describe("kernel facts", () => {
           mateRevisionId: "revision_1",
           provider: "openai",
           model: "gpt-5.1-codex",
-          promptId: "gpt",
+          instructionProfileId: "codex",
           baseInstructionsRevision: "base@1",
           modelInstructionsRevision: "gpt@1",
           workingDirectory: "/p/a",

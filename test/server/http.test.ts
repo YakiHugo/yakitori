@@ -969,7 +969,11 @@ describe("HTTP static assets", () => {
           name: "faux",
           defaultModel: "scripted",
           models: [
-            { id: "scripted", displayName: "scripted", family: "default" },
+            {
+              id: "scripted",
+              displayName: "scripted",
+              instructionProfileId: "default",
+            },
           ],
         },
         {
@@ -978,7 +982,7 @@ describe("HTTP static assets", () => {
             {
               id: "gpt-5.1-codex",
               displayName: "GPT-5.1 Codex",
-              family: "gpt",
+              instructionProfileId: "codex",
               efforts: ["low", "medium", "high"],
             },
           ],

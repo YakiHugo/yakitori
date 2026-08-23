@@ -20,7 +20,7 @@ describe("compaction request", () => {
       target: {
         provider: "faux",
         model: "scripted",
-        promptId: "gpt",
+        instructionProfileId: "codex",
         effort: "high",
         speed: "fast",
       },
@@ -47,7 +47,7 @@ describe("compaction request", () => {
     expect(request.target).toEqual({
       provider: "faux",
       model: "scripted",
-      promptId: "gpt",
+      instructionProfileId: "codex",
       effort: "high",
       speed: "fast",
     })
@@ -96,7 +96,11 @@ describe("compaction request", () => {
     }
     const request = buildCompactionRequest({
       source: [checkpoint, sourceTurn()],
-      target: { provider: "faux", model: "scripted", promptId: "gpt" },
+      target: {
+        provider: "faux",
+        model: "scripted",
+        instructionProfileId: "codex",
+      },
       baseInstructions: {
         id: "base.instructions",
         revision: "base-1",
@@ -271,7 +275,11 @@ function sourceTurn(): DroppedTurn {
 
 function compactionRequest(signal?: AbortSignal): ModelRequest {
   return {
-    target: { provider: "faux", model: "scripted", promptId: "compaction" },
+    target: {
+      provider: "faux",
+      model: "scripted",
+      instructionProfileId: "compaction",
+    },
     system: [{ id: "compaction", revision: "1", text: "sys" }],
     messages: [],
     tools: [],

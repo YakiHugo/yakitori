@@ -175,7 +175,11 @@ function retryableError(status: number): ModelStreamEvent {
 
 function requestFixture(signal?: AbortSignal): ModelRequest {
   return {
-    target: { provider: "test", model: "test-model", promptId: "default" },
+    target: {
+      provider: "test",
+      model: "test-model",
+      instructionProfileId: "default",
+    },
     system: [{ id: "base", revision: "base-1", text: "Be helpful." }],
     messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
     tools: [],

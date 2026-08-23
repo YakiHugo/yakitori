@@ -10,6 +10,7 @@ import {
   mergeShellEnvironment,
   parseNullEnvironment,
   parsePrintenvEnvironment,
+  resolveCommandShell,
 } from "../../src/runtime/user-shell-env.ts"
 
 const workspaces: string[] = []
@@ -23,6 +24,51 @@ afterEach(async () => {
 })
 
 describe("user shell environment", () => {
+  it("prefers the account shell and ignores the parent SHELL variable", async () => {
+    const candidates: string[] = []
+    const result = await resolveCommandShell({
+      accountShell: () => "/opt/homebrew/bin/bash",
+      path: "/parent/bin:/usr/local/bin",
+      resolveCandidate: async (candidate) => {
+        candidates.push(candidate)
+        return candidate === "/opt/homebrew/bin/bash" ? candidate : undefined
+      },
+    })
+
+    expect(result).toEqual({ shell: "/opt/homebrew/bin/bash", warnings: [] })
+    expect(candidates).toEqual(["/opt/homebrew/bin/bash"])
+  })
+
+  it("uses PATH zsh before bash and then fixed macOS fallbacks", async () => {
+    const candidates: string[] = []
+    const result = await resolveCommandShell({
+      accountShell: () => "/opt/homebrew/bin/fish",
+      path: "/custom/bin:/usr/local/bin",
+      resolveCandidate: async (candidate) => {
+        candidates.push(candidate)
+        return candidate === "/usr/local/bin/zsh" ? candidate : undefined
+      },
+    })
+
+    expect(result).toEqual({ shell: "/usr/local/bin/zsh", warnings: [] })
+    expect(candidates).toEqual(["/custom/bin/zsh", "/usr/local/bin/zsh"])
+  })
+
+  it("falls back to a verified fixed shell", async () => {
+    const candidates: string[] = []
+    const result = await resolveCommandShell({
+      accountShell: () => null,
+      path: "",
+      resolveCandidate: async (candidate) => {
+        candidates.push(candidate)
+        return candidate === "/bin/bash" ? candidate : undefined
+      },
+    })
+
+    expect(result).toEqual({ shell: "/bin/bash", warnings: [] })
+    expect(candidates).toEqual(["/bin/zsh", "/bin/bash"])
+  })
+
   it("filters exact, suffix, app, and Electron secrets", () => {
     expect(
       filterCommandEnvironment({

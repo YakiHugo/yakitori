@@ -33,7 +33,7 @@ describe("provider registry", () => {
 
 function request(provider: string, model: string): ModelRequest {
   return {
-    target: { provider, model, promptId: "default" },
+    target: { provider, model, instructionProfileId: "default" },
     system: [],
     messages: [],
     tools: [],
