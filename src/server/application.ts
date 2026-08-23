@@ -10,31 +10,31 @@ import {
 import {
   createMateKernel,
   createSqliteMateStore,
-  MateLifecycle,
   type MateKernel,
+  MateLifecycle,
   type MateProjection,
   type SqliteMateStore,
 } from "../mates/index.ts"
 import {
   acquireRuntimeLock,
+  type CodexLogin,
   createAnthropicProvider,
   createCodexProvider,
+  createDefaultTools,
   createOpenAIProvider,
   createPermissionGate,
-  createDefaultTools,
   createProviderRegistry,
   createSessionRunner,
   createToolRegistry,
-  createUserShellEnv,
   createTransientEventHub,
+  createUserShellEnv,
   GROK_API_BASE_URL,
   ModelStopReason,
+  type RuntimeLock,
   readCodexLogin,
   recoverSessions,
   resolveGrokAccessToken,
   resolveModel,
-  type CodexLogin,
-  type RuntimeLock,
   type SessionRunner,
   type StreamFn,
   type UserShellEnv,
@@ -43,17 +43,17 @@ import { withRetries } from "../runtime/retrying-stream.ts"
 import { createDurableEventHub } from "./event-hub.ts"
 import {
   createServerHandlers,
-  type SessionCreateDefaults,
   type ServerHandlers,
+  type SessionCreateDefaults,
 } from "./handlers.ts"
 import { createYakitoriHttpServer } from "./http.ts"
 import { createModelDirectory, type ModelDirectory } from "./model-directory.ts"
+import { createProjectRegistry } from "./project-registry.ts"
 import type {
   ApiListProvidersResponse,
   ApiProviderModel,
   ApiProviderSummary,
 } from "./protocol.ts"
-import { createProjectRegistry } from "./project-registry.ts"
 import { createUserConfigStore } from "./user-config.ts"
 
 const defaultMateProfile = {
@@ -173,24 +173,14 @@ export async function createYakitoriApplication(
     }
     const providerName =
       options.provider ?? process.env.YAKITORI_PROVIDER ?? "faux"
-    const provider =
-      options.stream === undefined
-        ? await createDefaultProvider(
-            providerName,
-            options.model ?? process.env.YAKITORI_MODEL ?? undefined,
-            options.fauxScenario ?? process.env.YAKITORI_FAUX_SCENARIO,
-          )
-        : {
-            stream: options.stream,
-            provider: providerName,
-            model:
-              options.model ??
-              process.env.YAKITORI_MODEL ??
-              (providerName === "faux" ? "scripted" : "injected"),
-          }
-    const providerRegistry = createProviderRegistry(
-      await createConfiguredProviderStreams(provider, options.providerStreams),
-    )
+    const provider = await configureProviders({
+      provider: providerName,
+      model: options.model ?? process.env.YAKITORI_MODEL ?? undefined,
+      fauxScenario: options.fauxScenario ?? process.env.YAKITORI_FAUX_SCENARIO,
+      primaryStream: options.stream,
+      injected: options.providerStreams,
+    })
+    const providerRegistry = createProviderRegistry(provider.streams)
     // Auto-registered providers pick the model per request, so only the
     // primary provider carries its configured default model. The payload is
     // assembled per request: the model directory resolves lazily.
@@ -373,46 +363,119 @@ async function providerSummary(
   return { name, defaultModel: configuredModel, models: ordered }
 }
 
-async function createConfiguredProviderStreams(
-  primary: {
-    readonly provider: string
-    readonly stream: StreamFn
-  },
-  injected: Readonly<Record<string, StreamFn>> | undefined,
-): Promise<Readonly<Record<string, StreamFn>>> {
-  const providers: Record<string, StreamFn> = { ...injected }
-  const anthropicApiKey = process.env.ANTHROPIC_API_KEY
-  if (anthropicApiKey && providers.anthropic === undefined) {
-    providers.anthropic = withRetries(
-      createAnthropicProvider({
-        apiKey: anthropicApiKey,
-        model: "selected-at-request-time",
-      }),
-    )
-  }
-  const openaiApiKey = process.env.OPENAI_API_KEY
-  if (openaiApiKey && providers.openai === undefined) {
-    providers.openai = withRetries(
-      createOpenAIProvider({
-        apiKey: openaiApiKey,
-        model: "selected-at-request-time",
-      }),
-    )
-  }
-  const kimiApiKey = process.env.KIMI_API_KEY
-  if (kimiApiKey && providers.kimi === undefined) {
-    providers.kimi = withRetries(
-      createAnthropicProvider({
-        apiKey: kimiApiKey,
-        model: "selected-at-request-time",
-        baseURL: KIMI_CODE_API_BASE_URL,
-      }),
-    )
+async function configureProviders(input: {
+  readonly provider: string
+  readonly model: string | undefined
+  readonly fauxScenario: string | undefined
+  readonly primaryStream: StreamFn | undefined
+  readonly injected: Readonly<Record<string, StreamFn>> | undefined
+}): Promise<{
+  readonly provider: string
+  readonly model: string
+  readonly streams: Readonly<Record<string, StreamFn>>
+}> {
+  const providers: Record<string, StreamFn> = { ...input.injected }
+  for (const provider of apiKeyProviderNames) {
+    const apiKey = process.env[apiKeyEnvironment[provider]]
+    if (apiKey && providers[provider] === undefined) {
+      providers[provider] = createApiKeyStream(
+        provider,
+        apiKey,
+        "selected-at-request-time",
+      )
+    }
   }
   providers.grok ??= createGrokStream()
   await registerCodexLogin(providers)
-  providers[primary.provider] = primary.stream
-  return providers
+
+  const model =
+    input.model ??
+    (input.provider === "faux"
+      ? "scripted"
+      : input.primaryStream === undefined
+        ? undefined
+        : "injected")
+  if (input.primaryStream !== undefined) {
+    providers[input.provider] = input.primaryStream
+    return {
+      provider: input.provider,
+      model: model ?? "injected",
+      streams: providers,
+    }
+  }
+  if (input.provider === "faux") {
+    providers.faux = createFauxScenarioStream(input.fauxScenario ?? "text")
+    return {
+      provider: input.provider,
+      model: model ?? "scripted",
+      streams: providers,
+    }
+  }
+  if (isApiKeyProvider(input.provider)) {
+    const credential = apiKeyEnvironment[input.provider]
+    const apiKey = process.env[credential]
+    if (!apiKey) {
+      throw new Error(
+        `${credential} is required when YAKITORI_PROVIDER=${input.provider}.`,
+      )
+    }
+    if (!model) {
+      throw new Error(
+        `YAKITORI_MODEL is required when YAKITORI_PROVIDER=${input.provider}.`,
+      )
+    }
+    providers[input.provider] = createApiKeyStream(
+      input.provider,
+      apiKey,
+      model,
+    )
+    return { provider: input.provider, model, streams: providers }
+  }
+  if (input.provider !== "grok") {
+    throw new Error(
+      `Provider "${input.provider}" is not configured. Use YAKITORI_PROVIDER=faux|openai|anthropic|grok|kimi or inject a stream.`,
+    )
+  }
+  if (!model) {
+    throw new Error(
+      `YAKITORI_MODEL is required when YAKITORI_PROVIDER=${input.provider}.`,
+    )
+  }
+  providers.grok = createGrokStream()
+  return { provider: input.provider, model, streams: providers }
+}
+
+const apiKeyEnvironment = {
+  anthropic: "ANTHROPIC_API_KEY",
+  openai: "OPENAI_API_KEY",
+  kimi: "KIMI_API_KEY",
+} as const
+
+const apiKeyProviderNames = Object.keys(
+  apiKeyEnvironment,
+) as (keyof typeof apiKeyEnvironment)[]
+
+function isApiKeyProvider(
+  provider: string,
+): provider is keyof typeof apiKeyEnvironment {
+  return Object.hasOwn(apiKeyEnvironment, provider)
+}
+
+function createApiKeyStream(
+  provider: keyof typeof apiKeyEnvironment,
+  apiKey: string,
+  model: string,
+): StreamFn {
+  if (provider === "openai") {
+    return withRetries(createOpenAIProvider({ apiKey, model }))
+  }
+  return withRetries(
+    createAnthropicProvider({
+      apiKey,
+      model,
+      ...(provider === "kimi" ? { baseURL: KIMI_CODE_API_BASE_URL } : {}),
+    }),
+  )
 }
 
 // Registers the codex provider from the local codex CLI login, or the plain
@@ -575,90 +638,6 @@ async function listAllActiveMateIds(mateKernel: MateKernel): Promise<string[]> {
     if (page.nextCursor === undefined) return activeMateIds
     cursor = page.nextCursor
   }
-}
-
-async function createDefaultProvider(
-  provider: string,
-  model: string | undefined,
-  fauxScenario: string | undefined,
-): Promise<{
-  readonly stream: StreamFn
-  readonly provider: string
-  readonly model: string
-}> {
-  if (provider === "faux") {
-    const scenario = fauxScenario ?? "text"
-    return {
-      stream: createFauxScenarioStream(scenario),
-      provider,
-      model: model ?? "scripted",
-    }
-  }
-  if (provider === "anthropic") {
-    const apiKey = process.env.ANTHROPIC_API_KEY
-    if (!apiKey) {
-      throw new Error(
-        "ANTHROPIC_API_KEY is required when YAKITORI_PROVIDER=anthropic.",
-      )
-    }
-    if (!model) {
-      throw new Error(
-        "YAKITORI_MODEL is required when YAKITORI_PROVIDER=anthropic.",
-      )
-    }
-    return {
-      stream: withRetries(createAnthropicProvider({ apiKey, model })),
-      provider,
-      model,
-    }
-  }
-  if (provider === "openai") {
-    const apiKey = process.env.OPENAI_API_KEY
-    if (!apiKey) {
-      throw new Error(
-        "OPENAI_API_KEY is required when YAKITORI_PROVIDER=openai.",
-      )
-    }
-    if (!model) {
-      throw new Error(
-        "YAKITORI_MODEL is required when YAKITORI_PROVIDER=openai.",
-      )
-    }
-    return {
-      stream: withRetries(createOpenAIProvider({ apiKey, model })),
-      provider,
-      model,
-    }
-  }
-  if (provider === "grok") {
-    if (!model) {
-      throw new Error("YAKITORI_MODEL is required when YAKITORI_PROVIDER=grok.")
-    }
-    return { stream: createGrokStream(), provider, model }
-  }
-  if (provider === "kimi") {
-    const apiKey = process.env.KIMI_API_KEY
-    if (!apiKey) {
-      throw new Error("KIMI_API_KEY is required when YAKITORI_PROVIDER=kimi.")
-    }
-    if (!model) {
-      throw new Error("YAKITORI_MODEL is required when YAKITORI_PROVIDER=kimi.")
-    }
-    return {
-      stream: withRetries(
-        createAnthropicProvider({
-          apiKey,
-          model,
-          baseURL: KIMI_CODE_API_BASE_URL,
-        }),
-      ),
-      provider,
-      model,
-    }
-  }
-  throw new Error(
-    `Provider "${provider}" is not configured. Use YAKITORI_PROVIDER=faux|openai|anthropic|grok|kimi or inject a stream.`,
-  )
 }
 
 function createGrokStream(): StreamFn {

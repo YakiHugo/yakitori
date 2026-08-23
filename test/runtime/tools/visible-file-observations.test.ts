@@ -1,9 +1,7 @@
 import { describe, expect, it } from "vitest"
-import {
-  createVisibleFileObservations,
-  type ToolProjection,
-  ToolState,
-} from "../../../src/index.ts"
+import type { ToolProjection } from "../../../src/kernel/session-projector.ts"
+import { ToolState } from "../../../src/kernel/session-states.ts"
+import { createVisibleFileObservations } from "../../../src/runtime/tools/visible-file-observations.ts"
 
 describe("visible file observations", () => {
   it("projects only the successful tool results supplied for one model request", () => {

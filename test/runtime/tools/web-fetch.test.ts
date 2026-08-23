@@ -1,11 +1,11 @@
 import { createServer, type Server, type ServerResponse } from "node:http"
 import type { AddressInfo } from "node:net"
 import { afterEach, describe, expect, it } from "vitest"
+import { createDefaultTools } from "../../../src/runtime/tools/registry.ts"
 import {
-  createDefaultTools,
   createWebFetchTool,
   htmlToText,
-} from "../../../src/index.ts"
+} from "../../../src/runtime/tools/web-fetch.ts"
 
 const servers: Server[] = []
 

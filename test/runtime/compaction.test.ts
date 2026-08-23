@@ -2,14 +2,16 @@ import { describe, expect, it } from "vitest"
 import {
   buildCompactionRequest,
   COMPACTION_SYSTEM_PROMPT,
-  type DroppedTurn,
   isContextOverflowError,
-  type ModelRequest,
-  type ModelStreamEvent,
-  ModelStopReason,
   runCompaction,
+} from "../../src/runtime/compaction.ts"
+import {
+  type ModelRequest,
+  ModelStopReason,
+  type ModelStreamEvent,
   type StreamFn,
-} from "../../src/index.ts"
+} from "../../src/runtime/model.ts"
+import type { DroppedTurn } from "../../src/runtime/model-context.ts"
 
 describe("compaction request", () => {
   it("flattens source groups and appends the checkpoint instruction", () => {

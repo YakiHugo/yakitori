@@ -3,13 +3,15 @@ import { describe, expect, it } from "vitest"
 import {
   createAnthropicProvider,
   fromAnthropicMessage,
-  ModelStopReason,
   toAnthropicMessages,
   toAnthropicSystem,
   toAnthropicTools,
+} from "../../src/runtime/anthropic-provider.ts"
+import {
   type ModelRequest,
+  ModelStopReason,
   type ModelStreamEvent,
-} from "../../src/index.ts"
+} from "../../src/runtime/model.ts"
 
 describe("anthropic provider conversion", () => {
   it("builds Anthropic messages from internal history with tools and results", () => {

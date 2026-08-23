@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
-import { resolveGrokAccessToken } from "../../src/index.ts"
+import { resolveGrokAccessToken } from "../../src/runtime/grok-credentials.ts"
 
 describe("Grok OIDC credentials (read-only)", () => {
   let dir: string

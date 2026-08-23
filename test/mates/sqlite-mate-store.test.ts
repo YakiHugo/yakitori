@@ -3,17 +3,15 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Worker } from "node:worker_threads"
 import { describe, expect, it } from "vitest"
+import { YakitoriErrorCode } from "../../src/kernel/errors.ts"
+import { type MateEvent, MateEventType } from "../../src/mates/events.ts"
+import { createMateId, createMateRevisionId } from "../../src/mates/ids.ts"
+import { createMateKernel } from "../../src/mates/mate-kernel.ts"
+import { summarizeMate } from "../../src/mates/mate-projector.ts"
 import {
-  createMateId,
-  createMateKernel,
-  createMateRevisionId,
   createSqliteMateStore,
-  MateEventType,
-  summarizeMate,
-  type MateEvent,
   type SqliteMateStore,
-  YakitoriErrorCode,
-} from "../../src/index.ts"
+} from "../../src/mates/sqlite-mate-store.ts"
 import { defineMateStoreContract } from "./mate-store.contract.ts"
 import { createMemoryMateStore } from "./memory-mate-store.ts"
 

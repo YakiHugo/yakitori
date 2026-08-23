@@ -8,11 +8,9 @@ import {
   stat,
 } from "node:fs/promises"
 import { createYakitoriError, YakitoriErrorCode } from "./errors.ts"
-import {
-  type EventStoreSessionSummary,
-  parseStoredEventEnvelope,
-} from "./event-store.ts"
+import { parseStoredEventEnvelope } from "./event-store.ts"
 import { ForkReason, isJsonObject, type StoredEventEnvelope } from "./events.ts"
+import type { SessionSummary } from "./session-projector.ts"
 
 export const journalRecordVersion = 1
 export const summaryVersion = 2
@@ -33,7 +31,7 @@ export type JournalCommitRecord = {
 
 export type JournalLine = JournalCommitRecord | StoredEventEnvelope
 
-export type SessionSummaryCache = EventStoreSessionSummary & {
+export type SessionSummaryCache = SessionSummary & {
   readonly version: typeof summaryVersion
   readonly journalBytes: number
 }
@@ -134,7 +132,7 @@ export async function readSummaryCache(
 
 export function summaryWithoutCacheFields(
   cached: SessionSummaryCache,
-): EventStoreSessionSummary {
+): SessionSummary {
   return {
     sessionId: cached.sessionId,
     conversationId: cached.conversationId,

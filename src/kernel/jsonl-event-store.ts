@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto"
 import {
   type FileHandle,
   mkdir,
@@ -8,7 +9,6 @@ import {
   rm,
   stat,
 } from "node:fs/promises"
-import { randomUUID } from "node:crypto"
 import { dirname, join } from "node:path"
 import { createYakitoriError, YakitoriErrorCode } from "./errors.ts"
 import {
@@ -23,12 +23,10 @@ import {
   type EventStoreListSessionsResult,
   type EventStoreReadEventsInput,
   type EventStoreRebuildProjectionResult,
-  type EventStoreSessionSummary,
   paginateSessionSummaries,
   parseStoredEventEnvelope,
   requireAdmissionFingerprint,
   requireExpectedSequence,
-  summarizeSessionProjection,
 } from "./event-store.ts"
 import {
   createEventEnvelope,
@@ -62,6 +60,8 @@ import {
   applySessionFacts,
   projectSession,
   type SessionProjection,
+  type SessionSummary,
+  summarizeSessionProjection,
 } from "./session-projector.ts"
 
 export type JsonlEventStoreOptions = {
@@ -1132,7 +1132,7 @@ export function createJsonlEventStore(
 
   async function readSummary(
     sessionId: string,
-  ): Promise<EventStoreSessionSummary | undefined> {
+  ): Promise<SessionSummary | undefined> {
     const loaded = loadedSessions.get(sessionId)
     if (loaded !== undefined) {
       await synchronizeIfNeeded(sessionId, loaded)
@@ -1297,7 +1297,7 @@ export function createJsonlEventStore(
           if (isNotFound(error)) return []
           throw error
         })
-        const summaries: EventStoreSessionSummary[] = []
+        const summaries: SessionSummary[] = []
         for (const entry of entries) {
           if (!entry.isDirectory()) continue
           try {

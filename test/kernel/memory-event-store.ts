@@ -1,22 +1,24 @@
 import {
-  applySessionFacts,
-  createEventEnvelope,
-  type EventEnvelope,
-  type EventStore,
-  type EventStoreAppendOptions,
-  EventType,
-  type KernelEvent,
-  type SessionProjection,
-} from "../../src/index.ts"
-import {
   appendForkCutTurnClosures,
   collapseSessionConversations,
+  type EventStore,
+  type EventStoreAppendOptions,
   paginateSessionSummaries,
   requireAdmissionFingerprint,
   requireExpectedSequence,
-  summarizeSessionProjection,
 } from "../../src/kernel/event-store.ts"
+import {
+  createEventEnvelope,
+  type EventEnvelope,
+  EventType,
+  type KernelEvent,
+} from "../../src/kernel/events.ts"
 import { fingerprintInputAdmission } from "../../src/kernel/operation.ts"
+import {
+  applySessionFacts,
+  type SessionProjection,
+  summarizeSessionProjection,
+} from "../../src/kernel/session-projector.ts"
 
 type MemoryAdmissionRecord = {
   readonly event: EventEnvelope

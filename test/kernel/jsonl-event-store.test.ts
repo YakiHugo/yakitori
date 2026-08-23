@@ -11,23 +11,25 @@ import {
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
+import { YakitoriErrorCode } from "../../src/kernel/errors.ts"
 import {
-  applySessionFacts,
-  createJsonlEventStore,
-  type EventEnvelope,
   type EventStore,
+  parseStoredEventEnvelope,
+} from "../../src/kernel/event-store.ts"
+import {
+  type EventEnvelope,
   EventType,
   type KernelEvent,
-  TurnState,
-  YakitoriErrorCode,
-} from "../../src/index.ts"
-import { parseStoredEventEnvelope } from "../../src/kernel/event-store.ts"
+} from "../../src/kernel/events.ts"
+import { createJsonlEventStore } from "../../src/kernel/jsonl-event-store.ts"
 import {
   type JournalCommitRecord,
   parseJournalLine,
   serializeFactLine,
 } from "../../src/kernel/jsonl-event-store-format.ts"
 import { fingerprintInputAdmission } from "../../src/kernel/operation.ts"
+import { applySessionFacts } from "../../src/kernel/session-projector.ts"
+import { TurnState } from "../../src/kernel/session-states.ts"
 import { defineEventStoreContract } from "./event-store.contract.ts"
 import { createMemoryEventStore } from "./memory-event-store.ts"
 

@@ -136,7 +136,6 @@ export type ExecutionViewState = {
   readonly durableEvents: readonly StoredEventEnvelope[]
   readonly snapshots: Readonly<Record<string, StreamSnapshot>>
   readonly reasoningSnapshots: Readonly<Record<string, StreamSnapshot>>
-  readonly session?: ApiSessionDetail
 }
 
 type StreamSnapshot = {
@@ -159,14 +158,9 @@ export function reduceExecutionView(
     | {
         readonly type: "durable"
         readonly event: StoredEventEnvelope
-        readonly session?: ApiSessionDetail
       }
-    | { readonly type: "transient"; readonly event: LiveSessionEvent }
-    | { readonly type: "session"; readonly session: ApiSessionDetail },
+    | { readonly type: "transient"; readonly event: LiveSessionEvent },
 ): ExecutionViewState {
-  if (action.type === "session") {
-    return { ...state, session: action.session }
-  }
   if (action.type === "transient") {
     const key =
       action.event.type === "assistant.snapshot"
@@ -191,11 +185,7 @@ export function reduceExecutionView(
       (event.sessionId === action.event.sessionId &&
         event.seq === action.event.seq),
   )
-  if (existing) {
-    return action.session === undefined
-      ? state
-      : { ...state, session: action.session }
-  }
+  if (existing) return state
 
   const durableEvents = [...state.durableEvents, action.event].sort(
     (left, right) => left.seq - right.seq,
@@ -239,15 +229,13 @@ export function reduceExecutionView(
     durableEvents,
     snapshots,
     reasoningSnapshots,
-    ...(action.session === undefined
-      ? state.session === undefined
-        ? {}
-        : { session: state.session }
-      : { session: action.session }),
   }
 }
 
-export function projectExecutionView(state: ExecutionViewState): ExecutionView {
+export function projectExecutionView(
+  state: ExecutionViewState,
+  session?: ApiSessionDetail,
+): ExecutionView {
   const entries: ExecutionEntry[] = []
   const tools = new Map<
     string,
@@ -417,7 +405,7 @@ export function projectExecutionView(state: ExecutionViewState): ExecutionView {
     if (event.type === "tool.result") {
       const structured = parseToolOutput(
         event.data.output,
-        state.session?.workingDirectory,
+        session?.workingDirectory,
       )
       updateTool(tools, entries, event.data.toolCallId, {
         state: event.data.error === undefined ? "completed" : "failed",
@@ -498,7 +486,7 @@ export function projectExecutionView(state: ExecutionViewState): ExecutionView {
     (inputId) =>
       !startedInputIds.has(inputId) && !cancelledInputIds.has(inputId),
   )
-  const sessionActiveTurnId = state.session?.activeTurnId
+  const sessionActiveTurnId = session?.activeTurnId
   const activeTurnId =
     sessionActiveTurnId === undefined ||
     terminalTurnIds.has(sessionActiveTurnId)
@@ -514,15 +502,13 @@ export function projectExecutionView(state: ExecutionViewState): ExecutionView {
   return {
     entries,
     ...(activeTurnId === undefined ? {} : { activeTurnId }),
-    ...(state.session?.mateId === undefined
+    ...(session?.mateId === undefined ? {} : { mateId: session.mateId }),
+    ...(session?.mateRevisionId === undefined
       ? {}
-      : { mateId: state.session.mateId }),
-    ...(state.session?.mateRevisionId === undefined
+      : { mateRevisionId: session.mateRevisionId }),
+    ...(session?.workingDirectory === undefined
       ? {}
-      : { mateRevisionId: state.session.mateRevisionId }),
-    ...(state.session?.workingDirectory === undefined
-      ? {}
-      : { workingDirectory: state.session.workingDirectory }),
+      : { workingDirectory: session.workingDirectory }),
     queuedInputIds,
     ...(lastModel === undefined ? {} : { lastModel }),
     ...(lastTurnUsage === undefined ? {} : { lastTurnUsage }),

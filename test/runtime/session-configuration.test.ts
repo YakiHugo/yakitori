@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest"
+import { createRuntimeLimits } from "../../src/runtime/limits.ts"
 import {
-  createRuntimeLimits,
   createTurnContext,
   SessionConfiguration,
-} from "../../src/index.ts"
+} from "../../src/runtime/session-configuration.ts"
 
 function resolveSessionConfiguration(
   input: Omit<

@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest"
 import {
   createEventEnvelope,
-  createRuntimeLimits,
   EventType,
   InputRole,
   isKernelEvent,
-} from "../../src/index.ts"
+} from "../../src/kernel/events.ts"
+import { createRuntimeLimits } from "../../src/runtime/limits.ts"
 
 describe("kernel facts", () => {
   it("contains exactly the coarse witness vocabulary", () => {

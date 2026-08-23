@@ -2,6 +2,7 @@ import { createYakitoriError, YakitoriErrorCode } from "./errors.ts"
 import type { EventStore } from "./event-store.ts"
 import {
   type AssistantContentBlock,
+  type ContextWindowReplacement,
   type EventEnvelope,
   type EventMetadata,
   EventType,
@@ -12,7 +13,6 @@ import {
   type JsonValue,
   type KernelError,
   type KernelEvent,
-  type ContextWindowReplacement,
   type ModelMessage,
   type ModelSelection,
   PermissionBehavior,
@@ -21,8 +21,8 @@ import {
   type StoredEventEnvelope,
   type TextContent,
   type TokenUsage,
-  type TurnMetrics,
   type TurnExecutionContext,
+  type TurnMetrics,
   type WorldStateFragment,
 } from "./events.ts"
 import {
@@ -42,6 +42,7 @@ import {
   InputState,
   PermissionState,
   type SessionProjection,
+  type SessionSummary,
   type ToolProjection,
   ToolState,
   type TurnProjection,
@@ -146,21 +147,6 @@ export type ListSessionsInput = {
   readonly cursor?: string
   readonly order?: "recent" | "created"
   readonly workingDirectory?: string
-}
-export type SessionSummary = {
-  readonly sessionId: string
-  readonly conversationId: string
-  readonly seq: number
-  readonly createdAt: string
-  readonly updatedAt: string
-  readonly title?: string
-  readonly workingDirectory?: string
-  readonly mateId?: string
-  readonly mateRevisionId?: string
-  readonly parentSessionId?: string
-  readonly forkedFromInputId?: string
-  readonly forkReason?: ForkReason
-  readonly metadata?: EventMetadata
 }
 export type ListSessionsResult = {
   readonly sessions: readonly SessionSummary[]

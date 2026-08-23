@@ -6,16 +6,16 @@ import {
   type EventMetadata,
   type InputProjection,
   InputRole,
-  isJsonValue,
   ItemKind,
+  isJsonValue,
   type JsonObject,
   type KernelError,
   type ModelSelection,
   PermissionBehavior,
   PermissionState,
+  type SessionFiles,
   type SessionKernel,
   type SessionProjection,
-  type SessionFiles,
   type TokenUsage,
   type TurnExecutionContext,
   type TurnMetrics,
@@ -24,9 +24,9 @@ import {
 } from "../kernel/index.ts"
 import type { MateKernel } from "../mates/index.ts"
 import {
-  createAgentControl,
   type AgentModelTarget,
   type AgentRunOutcome,
+  createAgentControl,
   type ForkTurns,
 } from "./agent-control.ts"
 import {
@@ -52,11 +52,11 @@ import {
 } from "./model.ts"
 import {
   buildModelContext,
+  type CompactionSourceGroup,
   collectUncoveredTurns,
   createCompactionReplacementHistory,
   createForkedModelContext,
   measureModelMessagesBytes,
-  type CompactionSourceGroup,
 } from "./model-context.ts"
 import { createPermissionGate, type PermissionGate } from "./permission-gate.ts"
 import { loadProjectInstructions } from "./project-instructions.ts"
@@ -120,8 +120,20 @@ export type SessionRunner = {
 type LaneState = {
   dirty: boolean
   worker?: Promise<void> | undefined
-  abort?: AbortController | undefined
-  activeTurnId?: string | undefined
+  activeTurn?: ActiveTurnRuntime | undefined
+}
+
+type ActiveTurnRuntime = {
+  readonly turnId: string
+  readonly abort: AbortController
+  readonly telemetry: TurnTelemetry
+  forkContext?: ForkContext | undefined
+}
+
+type ForkContext = {
+  readonly messages: readonly ModelMessage[]
+  readonly forkTurnStartIndexes: readonly number[]
+  readonly worldState?: JsonObject
 }
 
 type TurnTelemetry = {
@@ -153,18 +165,9 @@ export function createSessionRunner(
   const projectInstructionLoader =
     options.loadProjectInstructions ?? loadProjectInstructions
   const lanes = new Map<string, LaneState>()
-  const turnTelemetry = new Map<string, TurnTelemetry>()
   // Consecutive compaction failures per session; after the cap the lane
   // stops paying for doomed summary calls until one succeeds again.
   const compactionFailures = new Map<string, number>()
-  const activeModelContexts = new Map<
-    string,
-    {
-      readonly messages: readonly ModelMessage[]
-      readonly forkTurnStartIndexes: readonly number[]
-    }
-  >()
-  const activeWorldStates = new Map<string, JsonObject>()
   let closed = false
 
   const publishDurable = (events: readonly EventEnvelope[]) => {
@@ -276,13 +279,15 @@ export function createSessionRunner(
     publishDurable(started.events)
 
     const lane = lanes.get(session.id) ?? { dirty: false }
-    const abort = new AbortController()
-    lane.abort = abort
-    lane.activeTurnId = started.turnId
+    const activeTurn: ActiveTurnRuntime = {
+      turnId: started.turnId,
+      abort: new AbortController(),
+      telemetry: createTurnTelemetry(),
+    }
+    lane.activeTurn = activeTurn
     lanes.set(session.id, lane)
-    turnTelemetry.set(started.turnId, createTurnTelemetry())
 
-    if (closed) abort.abort()
+    if (closed) activeTurn.abort.abort()
 
     try {
       if (isCompactDirectiveInput(queuedInput)) {
@@ -292,7 +297,7 @@ export function createSessionRunner(
           inputId: queuedInput.inputId,
           turn,
           executionContext,
-          signal: abort.signal,
+          signal: activeTurn.abort.signal,
         })
       } else {
         await executeTextTurn({
@@ -300,18 +305,14 @@ export function createSessionRunner(
           turnId: started.turnId,
           inputId: queuedInput.inputId,
           turn,
-          signal: abort.signal,
+          signal: activeTurn.abort.signal,
         })
       }
     } catch (error) {
       await failActiveTurn(session.id, started.turnId, error)
     } finally {
       const current = lanes.get(session.id)
-      if (current?.activeTurnId === started.turnId) {
-        current.activeTurnId = undefined
-        current.abort = undefined
-      }
-      turnTelemetry.delete(started.turnId)
+      if (current?.activeTurn === activeTurn) current.activeTurn = undefined
     }
   }
 
@@ -441,8 +442,19 @@ export function createSessionRunner(
     })
   }
 
-  function requireTurnTelemetry(turnId: string): TurnTelemetry {
-    const telemetry = turnTelemetry.get(turnId)
+  function activeTurnRuntime(
+    sessionId: string,
+    turnId: string,
+  ): ActiveTurnRuntime | undefined {
+    const activeTurn = lanes.get(sessionId)?.activeTurn
+    return activeTurn?.turnId === turnId ? activeTurn : undefined
+  }
+
+  function requireTurnTelemetry(
+    sessionId: string,
+    turnId: string,
+  ): TurnTelemetry {
+    const telemetry = activeTurnRuntime(sessionId, turnId)?.telemetry
     if (telemetry !== undefined) return telemetry
     throw new Error(`Turn telemetry for ${turnId} was not initialized.`)
   }
@@ -457,7 +469,7 @@ export function createSessionRunner(
     const executionContext = input.turn.execution
     let modelCallIndex = 0
     let toolCallCount = 0
-    const telemetry = requireTurnTelemetry(input.turnId)
+    const telemetry = requireTurnTelemetry(input.sessionId, input.turnId)
     const usages = telemetry.usages
     while (modelCallIndex < executionContext.limits.modelCallsPerTurn) {
       if (input.signal.aborted) {
@@ -493,6 +505,7 @@ export function createSessionRunner(
           candidateHistory: context.compactableHistory,
           worldState: step.worldState,
           usages,
+          telemetry,
           signal: input.signal,
         })
         if (outcome === "compacted") {
@@ -524,14 +537,16 @@ export function createSessionRunner(
         [...context.messages, ...agentControl.takeMessages(input.sessionId)],
         options.sessionFiles,
       )
-      activeModelContexts.set(input.sessionId, {
+      const activeTurn = activeTurnRuntime(input.sessionId, input.turnId)
+      if (activeTurn === undefined) {
+        throw new Error(`Turn runtime for ${input.turnId} is no longer active.`)
+      }
+      activeTurn.forkContext = {
         messages: context.messages,
         forkTurnStartIndexes: context.forkTurnStartIndexes,
-      })
-      if (session.worldState === undefined) {
-        activeWorldStates.delete(input.sessionId)
-      } else {
-        activeWorldStates.set(input.sessionId, session.worldState.state)
+        ...(session.worldState === undefined
+          ? {}
+          : { worldState: session.worldState.state }),
       }
       const request: ModelRequest = {
         target: step.turn.configuration.target,
@@ -798,6 +813,7 @@ export function createSessionRunner(
     readonly candidateHistory: readonly CompactionSourceGroup[]
     readonly worldState: WorldState
     readonly usages: ModelUsage[]
+    readonly telemetry: TurnTelemetry
     readonly signal: AbortSignal
   }): Promise<"compacted" | "not_smaller" | "failed"> {
     const sessionId = input.session.id
@@ -842,11 +858,8 @@ export function createSessionRunner(
           }
           source = reduced
         } finally {
-          const telemetry = turnTelemetry.get(input.turnId)
-          if (telemetry !== undefined) {
-            telemetry.modelCalls += 1
-            telemetry.modelDurationMs += Date.now() - modelStartedAt
-          }
+          input.telemetry.modelCalls += 1
+          input.telemetry.modelDurationMs += Date.now() - modelStartedAt
         }
       }
       // A checkpoint that is not smaller than the history it replaces buys
@@ -937,7 +950,7 @@ export function createSessionRunner(
       step,
     })
     const source = collectUncoveredTurns(session, input.executionContext.limits)
-    const telemetry = requireTurnTelemetry(input.turnId)
+    const telemetry = requireTurnTelemetry(input.sessionId, input.turnId)
     const usages = telemetry.usages
     let note: string
     if (source.length === 0) {
@@ -953,6 +966,7 @@ export function createSessionRunner(
         candidateHistory: source,
         worldState: step.worldState,
         usages,
+        telemetry,
         signal: input.signal,
       })
       if (input.signal.aborted) {
@@ -1406,16 +1420,14 @@ export function createSessionRunner(
     readonly forkTurns: ForkTurns
   }) {
     if (input.forkTurns === "none") return undefined
-    const context = activeModelContexts.get(input.parentSessionId)
+    const context = lanes.get(input.parentSessionId)?.activeTurn?.forkContext
     if (context === undefined) return undefined
     const messages =
       input.forkTurns === "all"
         ? context.messages
         : lastModelTurns(context, input.forkTurns)
     const worldState =
-      input.forkTurns === "all"
-        ? activeWorldStates.get(input.parentSessionId)
-        : undefined
+      input.forkTurns === "all" ? context.worldState : undefined
     return createForkedModelContext({
       sourceSessionId: input.parentSessionId,
       messages,
@@ -1427,7 +1439,7 @@ export function createSessionRunner(
   // Keyed off durable state rather than lane state: an interrupt can race a
   // terminal child, in which case there is nothing left to cancel.
   async function interruptAgentTurn(sessionId: string): Promise<void> {
-    lanes.get(sessionId)?.abort?.abort()
+    lanes.get(sessionId)?.activeTurn?.abort.abort()
     const read = await options.kernel.readSession({ sessionId })
     const session = read.session
     if (!session) return
@@ -1450,7 +1462,7 @@ export function createSessionRunner(
     const active = (await options.kernel.readSession({ sessionId })).session
       ?.activeTurn
     if (!active) return
-    lanes.get(sessionId)?.abort?.abort()
+    lanes.get(sessionId)?.activeTurn?.abort.abort()
     await cancelActiveTurn(sessionId, active.turnId, "agent_interrupted")
   }
 
@@ -1703,7 +1715,7 @@ export function createSessionRunner(
     const active = read.session?.activeTurn
     if (!active || active.turnId !== turnId) return
 
-    const telemetry = turnTelemetry.get(turnId)
+    const telemetry = activeTurnRuntime(sessionId, turnId)?.telemetry
     const usage =
       telemetry === undefined
         ? undefined
@@ -1724,7 +1736,7 @@ export function createSessionRunner(
     code: string,
     message: string,
   ): Promise<void> {
-    const telemetry = turnTelemetry.get(turnId)
+    const telemetry = activeTurnRuntime(sessionId, turnId)?.telemetry
     const usage =
       telemetry === undefined
         ? undefined
@@ -1747,7 +1759,7 @@ export function createSessionRunner(
     const read = await options.kernel.readSession({ sessionId })
     const active = read.session?.activeTurn
     if (!active || active.turnId !== turnId) return
-    const telemetry = turnTelemetry.get(turnId)
+    const telemetry = activeTurnRuntime(sessionId, turnId)?.telemetry
     const usage =
       telemetry === undefined
         ? undefined
@@ -1793,7 +1805,7 @@ export function createSessionRunner(
     wake,
     async interrupt(input) {
       const lane = lanes.get(input.sessionId)
-      if (!lane || lane.activeTurnId !== input.turnId) {
+      if (lane?.activeTurn?.turnId !== input.turnId) {
         // Fall back to durable state: cancel only if the turn is still active.
         const read = await options.kernel.readSession({
           sessionId: input.sessionId,
@@ -1811,7 +1823,7 @@ export function createSessionRunner(
           })
         }
       }
-      lane?.abort?.abort()
+      lane?.activeTurn?.abort.abort()
       try {
         await cancelActiveTurn(
           input.sessionId,
@@ -1828,7 +1840,7 @@ export function createSessionRunner(
     },
     async close() {
       closed = true
-      for (const lane of lanes.values()) lane.abort?.abort()
+      for (const lane of lanes.values()) lane.activeTurn?.abort.abort()
       await agentControl.close()
       await Promise.all(
         Array.from(lanes.values(), (lane) => lane.worker).filter(

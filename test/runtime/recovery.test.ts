@@ -2,18 +2,18 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
+import { EventType } from "../../src/kernel/events.ts"
+import { createJsonlEventStore } from "../../src/kernel/jsonl-event-store.ts"
+import { createSessionKernel } from "../../src/kernel/session-kernel.ts"
+import { createMateKernel } from "../../src/mates/mate-kernel.ts"
+import { createSqliteMateStore } from "../../src/mates/sqlite-mate-store.ts"
 import {
-  acquireRuntimeLock,
-  createJsonlEventStore,
-  createMateKernel,
-  createSessionKernel,
-  createSqliteMateStore,
   discoverRecoveryState,
-  EventType,
   reconcileSessionHistory,
   recoverSessions,
   scheduleRecoveryExecution,
-} from "../../src/index.ts"
+} from "../../src/runtime/recovery.ts"
+import { acquireRuntimeLock } from "../../src/runtime/runtime-lock.ts"
 
 describe("runtime recovery", () => {
   it("records an honest interrupted Turn and is idempotent", async () => {

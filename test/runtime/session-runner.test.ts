@@ -3,31 +3,37 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it, vi } from "vitest"
 import {
-  COMPACT_DIRECTIVE,
-  createDurableEventHub,
-  createFauxProvider,
-  createMateKernel,
-  createProviderRegistry,
-  createRuntimeLimits,
-  createSessionKernel,
-  createSessionRunner,
-  createJsonlEventStore,
-  createSqliteMateStore,
-  createTransientEventHub,
   createYakitoriError,
+  YakitoriErrorCode,
+} from "../../src/kernel/errors.ts"
+import {
+  COMPACT_DIRECTIVE,
+  type ContextWindowReplacement,
+  type EventEnvelope,
   EventType,
   InputRole,
-  ModelStopReason,
-  SessionConfiguration,
-  YakitoriErrorCode,
-  type EventEnvelope,
-  type ContextWindowReplacement,
-  type LiveSessionEvent,
   type ModelContentBlock,
+} from "../../src/kernel/events.ts"
+import { createJsonlEventStore } from "../../src/kernel/jsonl-event-store.ts"
+import { createSessionKernel } from "../../src/kernel/session-kernel.ts"
+import { createMateKernel } from "../../src/mates/mate-kernel.ts"
+import { createSqliteMateStore } from "../../src/mates/sqlite-mate-store.ts"
+import { createFauxProvider } from "../../src/runtime/faux-provider.ts"
+import { createRuntimeLimits } from "../../src/runtime/limits.ts"
+import {
+  createTransientEventHub,
+  type LiveSessionEvent,
+} from "../../src/runtime/live-events.ts"
+import {
   type ModelRequest,
+  ModelStopReason,
   type ModelStopReason as ModelStopReasonType,
   type StreamFn,
-} from "../../src/index.ts"
+} from "../../src/runtime/model.ts"
+import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
+import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
+import { createSessionRunner } from "../../src/runtime/session-runner.ts"
+import { createDurableEventHub } from "../../src/server/event-hub.ts"
 
 describe("session runner", () => {
   it("runs a text-only turn with exact durable journal sequence and replay", async () => {

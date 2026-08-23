@@ -11,6 +11,22 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import {
+  createEventEnvelope,
+  type EventEnvelope,
+  EventType,
+} from "../../src/kernel/events.ts"
+import { createInputId, createSessionId } from "../../src/kernel/ids.ts"
+import { createJsonlEventStore } from "../../src/kernel/jsonl-event-store.ts"
+import { createSessionKernel } from "../../src/kernel/session-kernel.ts"
+import { createDurableEventHub } from "../../src/server/event-hub.ts"
+import { createServerHandlers } from "../../src/server/handlers.ts"
+import {
+  createYakitoriHttpServer,
+  type YakitoriHttpServerOptions,
+  type YakitoriStaticAssets,
+} from "../../src/server/http.ts"
+import { createProjectRegistry } from "../../src/server/project-registry.ts"
+import {
   type ApiAdmitInputResponse,
   type ApiCancelInputResponse,
   type ApiCreateSessionResponse,
@@ -20,21 +36,8 @@ import {
   type ApiListSessionsResponse,
   type ApiReadSessionResponse,
   type ApiUpdateUserModelPreferenceResponse,
-  createDurableEventHub,
-  createEventEnvelope,
-  createInputId,
-  createJsonlEventStore,
-  createProjectRegistry,
-  createServerHandlers,
-  createSessionId,
-  createSessionKernel,
-  createUserConfigStore,
-  createYakitoriHttpServer,
-  type EventEnvelope,
-  EventType,
-  type YakitoriHttpServerOptions,
-  type YakitoriStaticAssets,
-} from "../../src/index.ts"
+} from "../../src/server/protocol.ts"
+import { createUserConfigStore } from "../../src/server/user-config.ts"
 import { createMemoryEventStore } from "../kernel/memory-event-store.ts"
 
 describe("HTTP server", () => {

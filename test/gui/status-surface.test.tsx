@@ -12,7 +12,11 @@ import {
   createInitialAppState,
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
-import { createEventEnvelope, EventType, InputRole } from "../../src/index.ts"
+import {
+  createEventEnvelope,
+  EventType,
+  InputRole,
+} from "../../src/kernel/events.ts"
 
 const sessionId = "session_1"
 
@@ -26,7 +30,7 @@ afterEach(() => {
 
 describe("status surface", () => {
   it("labels an active turn as reasoning before response text arrives", () => {
-    useAppStore.setState({ execution: seedActiveTurn() })
+    useAppStore.setState(seedActiveTurn())
     render(
       <TooltipProvider>
         <StatusSurface />
@@ -38,7 +42,7 @@ describe("status surface", () => {
 
   it("shows stopping after an interrupt request", () => {
     useAppStore.setState({
-      execution: seedActiveTurn(),
+      ...seedActiveTurn(),
       inFlightActions: new Set(["cancel:turn_1"]),
     })
     render(
@@ -110,7 +114,7 @@ function seedQueuedInput() {
 }
 
 function seedActiveTurn() {
-  let state = reduceExecutionView(createExecutionViewState(), {
+  const execution = reduceExecutionView(createExecutionViewState(), {
     type: "durable",
     event: createEventEnvelope({
       sessionId,
@@ -121,10 +125,11 @@ function seedActiveTurn() {
       },
     }),
   })
-  state = reduceExecutionView(state, {
-    type: "session",
-    session: {
+  return {
+    execution,
+    selectedSession: {
       id: sessionId,
+      conversationId: "conversation_1",
       seq: 1,
       createdAt: "2026-07-24T00:00:00.000Z",
       updatedAt: "2026-07-24T00:00:00.000Z",
@@ -138,6 +143,5 @@ function seedActiveTurn() {
         tools: 0,
       },
     },
-  })
-  return state
+  }
 }

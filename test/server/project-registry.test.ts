@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
-import { createProjectRegistry } from "../../src/index.ts"
+import { createProjectRegistry } from "../../src/server/project-registry.ts"
 
 const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => {

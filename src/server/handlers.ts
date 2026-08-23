@@ -14,10 +14,11 @@ import {
   type ModelSelection,
   PermissionBehavior,
   type PermissionDecisionReason,
-  type SessionKernel,
   type SessionFiles,
+  type SessionKernel,
   type SessionProjection,
   type SessionSummary,
+  summarizeSessionProjection,
   type TextContent,
   YakitoriErrorCode,
 } from "../kernel/index.ts"
@@ -443,29 +444,7 @@ function mapSessionSummary(summary: SessionSummary): ApiSessionSummary {
 
 function mapSessionDetail(session: SessionProjection): ApiSessionDetail {
   return {
-    id: session.id,
-    conversationId: session.conversationId,
-    seq: session.seq,
-    createdAt: session.createdAt,
-    updatedAt: session.updatedAt,
-    ...(session.title === undefined ? {} : { title: session.title }),
-    ...(session.workingDirectory === undefined
-      ? {}
-      : { workingDirectory: session.workingDirectory }),
-    ...(session.mateId === undefined ? {} : { mateId: session.mateId }),
-    ...(session.mateRevisionId === undefined
-      ? {}
-      : { mateRevisionId: session.mateRevisionId }),
-    ...(session.parentSessionId === undefined
-      ? {}
-      : { parentSessionId: session.parentSessionId }),
-    ...(session.forkedFromInputId === undefined
-      ? {}
-      : { forkedFromInputId: session.forkedFromInputId }),
-    ...(session.forkReason === undefined
-      ? {}
-      : { forkReason: session.forkReason }),
-    ...(session.metadata === undefined ? {} : { metadata: session.metadata }),
+    ...mapSessionSummary(summarizeSessionProjection(session)),
     ...(session.activeTurn === undefined
       ? {}
       : { activeTurnId: session.activeTurn.turnId }),

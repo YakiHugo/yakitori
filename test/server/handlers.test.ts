@@ -1,15 +1,19 @@
 import { describe, expect, it } from "vitest"
 import {
-  ApiErrorCode,
-  type ApiHandlerResult,
   COMPACT_DIRECTIVE,
-  createServerHandlers,
-  createSessionId,
-  createSessionKernel,
   EventType,
   InputRole,
+} from "../../src/kernel/events.ts"
+import { createSessionId } from "../../src/kernel/ids.ts"
+import { createSessionKernel } from "../../src/kernel/session-kernel.ts"
+import {
+  createServerHandlers,
   type ServerHandlers,
-} from "../../src/index.ts"
+} from "../../src/server/handlers.ts"
+import {
+  ApiErrorCode,
+  type ApiHandlerResult,
+} from "../../src/server/protocol.ts"
 import { createMemoryEventStore } from "../kernel/memory-event-store.ts"
 
 describe("server handlers", () => {

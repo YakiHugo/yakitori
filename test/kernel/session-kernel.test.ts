@@ -2,21 +2,22 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
+import { YakitoriErrorCode } from "../../src/kernel/errors.ts"
+import type { EventStore } from "../../src/kernel/event-store.ts"
+import { EventType, PermissionBehavior } from "../../src/kernel/events.ts"
+import { createSessionId } from "../../src/kernel/ids.ts"
+import { createJsonlEventStore } from "../../src/kernel/jsonl-event-store.ts"
 import {
-  createJsonlEventStore,
-  createSessionId,
   createSessionKernel,
-  type EventStore,
-  EventType,
-  InputState,
-  PermissionBehavior,
-  PermissionState,
-  SessionConfiguration,
   type SessionKernel,
+} from "../../src/kernel/session-kernel.ts"
+import {
+  InputState,
+  PermissionState,
   ToolState,
   TurnState,
-  YakitoriErrorCode,
-} from "../../src/index.ts"
+} from "../../src/kernel/session-states.ts"
+import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
 import { createMemoryEventStore } from "./memory-event-store.ts"
 
 const cleanup: Array<() => Promise<void>> = []

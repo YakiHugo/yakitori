@@ -2,20 +2,18 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import {
-  createFauxProvider,
-  createJsonlEventStore,
-  createMateKernel,
-  createReadFileTool,
-  createRuntimeLimits,
-  createSessionKernel,
-  createSessionRunner,
-  createSqliteMateStore,
-  createToolRegistry,
-  EventType,
-  ModelStopReason,
-  type RuntimeTool,
-} from "../../../src/index.ts"
+import { EventType } from "../../../src/kernel/events.ts"
+import { createJsonlEventStore } from "../../../src/kernel/jsonl-event-store.ts"
+import { createSessionKernel } from "../../../src/kernel/session-kernel.ts"
+import { createMateKernel } from "../../../src/mates/mate-kernel.ts"
+import { createSqliteMateStore } from "../../../src/mates/sqlite-mate-store.ts"
+import { createFauxProvider } from "../../../src/runtime/faux-provider.ts"
+import { createRuntimeLimits } from "../../../src/runtime/limits.ts"
+import { ModelStopReason } from "../../../src/runtime/model.ts"
+import { createSessionRunner } from "../../../src/runtime/session-runner.ts"
+import { createReadFileTool } from "../../../src/runtime/tools/read-file.ts"
+import { createToolRegistry } from "../../../src/runtime/tools/registry.ts"
+import type { RuntimeTool } from "../../../src/runtime/tools/types.ts"
 
 describe("tool loop", () => {
   it("reads a file, continues the model, and completes with final text", async () => {

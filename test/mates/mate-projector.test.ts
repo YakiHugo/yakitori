@@ -1,13 +1,12 @@
 import { describe, expect, it } from "vitest"
+import { YakitoriErrorCode } from "../../src/kernel/errors.ts"
 import {
   createMateEventEnvelope,
-  createMateId,
-  createMateRevisionId,
   MateEventType,
   MateLifecycle,
-  projectMate,
-  YakitoriErrorCode,
-} from "../../src/index.ts"
+} from "../../src/mates/events.ts"
+import { createMateId, createMateRevisionId } from "../../src/mates/ids.ts"
+import { projectMate } from "../../src/mates/mate-projector.ts"
 
 describe("mate projector", () => {
   it("rejects skipped profile revision numbers", () => {

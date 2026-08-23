@@ -207,7 +207,7 @@ export type ApiReadSessionEventsResponse = {
 
 export type ApiSessionSummary = {
   readonly id: string
-  readonly conversationId?: string
+  readonly conversationId: string
   readonly seq: number
   readonly createdAt: string
   readonly updatedAt: string

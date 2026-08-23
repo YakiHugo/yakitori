@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { matchCatastrophicCommand } from "../../../src/index.ts"
+import { matchCatastrophicCommand } from "../../../src/runtime/tools/command-fuse.ts"
 
 describe("catastrophic command fuse", () => {
   it.each([

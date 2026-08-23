@@ -2,11 +2,9 @@ import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import {
-  createGlobTool,
-  createGrepTool,
-  resolveWorkspaceRoot,
-} from "../../../src/index.ts"
+import { createGlobTool } from "../../../src/runtime/tools/glob.ts"
+import { createGrepTool } from "../../../src/runtime/tools/grep.ts"
+import { resolveWorkspaceRoot } from "../../../src/runtime/tools/path-policy.ts"
 
 describe("workspace search tools", () => {
   it("greps content with bounded ripgrep output and respects gitignore", async () => {

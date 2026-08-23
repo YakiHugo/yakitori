@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest"
 import {
-  catalogContextWindowTokens,
-  catalogModelCapacity,
   createRuntimeLimits,
   deriveCompactionContextBytes,
   deriveModelVisibleContextBytes,
-} from "../../src/index.ts"
+} from "../../src/runtime/limits.ts"
+import {
+  catalogContextWindowTokens,
+  catalogModelCapacity,
+} from "../../src/runtime/model-catalog.ts"
 
 describe("model catalog context windows", () => {
   it("returns the curated window for known models", () => {

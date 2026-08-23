@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from "vitest"
 import {
   AgentControlError,
-  createMultiAgentTools,
   type BoundAgentControl,
-  type ToolExecutionContext,
-} from "../../../src/index.ts"
+} from "../../../src/runtime/agent-control.ts"
+import { createMultiAgentTools } from "../../../src/runtime/tools/multi-agent.ts"
+import type { ToolExecutionContext } from "../../../src/runtime/tools/types.ts"
 
 describe("multi-agent tools", () => {
   it("registers the Codex V2 control surface with stable schemas", () => {

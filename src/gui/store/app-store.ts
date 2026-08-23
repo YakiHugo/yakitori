@@ -56,7 +56,6 @@ export type AppStoreData = {
   composerFocusRevision: number
   defaultModel: string | undefined
   defaultProvider: string | undefined
-  events: StoredEventEnvelope[]
   execution: ExecutionViewState
   inFlightActions: ReadonlySet<string>
   message: string | undefined
@@ -122,7 +121,6 @@ export function createInitialAppState(): AppStoreData {
     composerFocusRevision: 0,
     defaultModel: undefined,
     defaultProvider: undefined,
-    events: [],
     execution: createExecutionViewState(),
     inFlightActions: new Set(),
     message: undefined,
@@ -190,7 +188,13 @@ export const useAppStore = create<AppStore>()((set, get) => {
 
   const mergeEvent = (event: StoredEventEnvelope): void => {
     const state = get()
-    if (state.events.some((candidate) => candidate.id === event.id)) return
+    if (
+      state.execution.durableEvents.some(
+        (candidate) => candidate.id === event.id,
+      )
+    ) {
+      return
+    }
     const restored = restoringModelSelections.has(event.sessionId)
       ? modelSelectionFromTurn(event)
       : undefined
@@ -200,15 +204,9 @@ export const useAppStore = create<AppStore>()((set, get) => {
         : { ...state.modelSelections, [event.sessionId]: restored }
     if (restored !== undefined) persistModelSelections(modelSelections)
     set({
-      events: [...state.events, event].sort(
-        (left, right) => left.seq - right.seq,
-      ),
       execution: reduceExecutionView(state.execution, {
         type: "durable",
         event,
-        ...(state.selectedSession === undefined
-          ? {}
-          : { session: state.selectedSession }),
       }),
       modelSelections,
     })
@@ -240,13 +238,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
     ) {
       return false
     }
-    set({
-      selectedSession: response.session,
-      execution: reduceExecutionView(get().execution, {
-        type: "session",
-        session: response.session,
-      }),
-    })
+    set({ selectedSession: response.session })
     return true
   }
 
@@ -357,7 +349,6 @@ export const useAppStore = create<AppStore>()((set, get) => {
         selection: { ...state.selection },
         sessionDetailRevision: state.sessionDetailRevision + 1,
         selectedSession: undefined,
-        events: [],
         execution: createExecutionViewState(),
       }))
     },
@@ -462,11 +453,9 @@ export const useAppStore = create<AppStore>()((set, get) => {
           const selection = activateSession(response.session.id)
           set({
             selectedSession: response.session,
-            events: [response.event],
             execution: reduceExecutionView(createExecutionViewState(), {
               type: "durable",
               event: response.event,
-              session: response.session,
             }),
             promptDraft: undefined,
             promptAttachments: [],
@@ -484,7 +473,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
       if (get().inFlightActions.has(key)) return
       const intentRevision = get().sessionSelectionIntentRevision + 1
       const state = get()
-      const sourceEvents = [...state.events]
+      const sourceEvents = [...state.execution.durableEvents]
       const sourceModelSelection = normalizeKimiModelSelection(
         resolveEffectiveModel({
           sessionCurrent: state.modelSelections[sourceSelection.sessionId],
@@ -559,13 +548,11 @@ export const useAppStore = create<AppStore>()((set, get) => {
           closeStream()
           set((state) => ({
             selectedSession: response.session,
-            events,
             execution: events.reduce(
               (execution, event) =>
                 reduceExecutionView(execution, {
                   type: "durable",
                   event,
-                  session: response.session,
                 }),
               createExecutionViewState(),
             ),
@@ -607,7 +594,6 @@ export const useAppStore = create<AppStore>()((set, get) => {
             sessionSelectionIntentRevision:
               state.sessionSelectionIntentRevision + 1,
             selectedSession: undefined,
-            events: [],
             execution: createExecutionViewState(),
           }))
         }
@@ -633,7 +619,6 @@ export const useAppStore = create<AppStore>()((set, get) => {
         sessionSelectionIntentRevision:
           state.sessionSelectionIntentRevision + 1,
         selectedSession: undefined,
-        events: [],
         execution: createExecutionViewState(),
         nextCursor: undefined,
         promptDraft: undefined,
@@ -678,7 +663,6 @@ export const useAppStore = create<AppStore>()((set, get) => {
       const selection = activateSession(sessionId)
       closeStream()
       set({
-        events: [],
         execution: createExecutionViewState(),
         promptDraft: undefined,
         promptAttachments: [],
@@ -984,7 +968,11 @@ export function normalizeKimiModelSelection(
 
 export function useExecutionView(): ExecutionView {
   const execution = useAppStore((state) => state.execution)
-  return useMemo(() => projectExecutionView(execution), [execution])
+  const selectedSession = useAppStore((state) => state.selectedSession)
+  return useMemo(
+    () => projectExecutionView(execution, selectedSession),
+    [execution, selectedSession],
+  )
 }
 
 function initialApiBase(): string {
