@@ -24,6 +24,7 @@ describe("Session files", () => {
     const attachment = {
       name: "screen.png",
       mediaType: "image/png" as const,
+      detail: "original" as const,
       sizeBytes: data.byteLength,
       data: data.toString("base64"),
     }
@@ -40,6 +41,7 @@ describe("Session files", () => {
       {
         name: "screen.png",
         mediaType: "image/png",
+        detail: "original",
         sizeBytes: data.byteLength,
         file: {
           sessionId,

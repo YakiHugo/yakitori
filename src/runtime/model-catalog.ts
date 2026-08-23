@@ -1,20 +1,35 @@
 import catalog from "./model-catalog.json" with { type: "json" }
 
-export type PromptId = "anthropic" | "default" | "gpt" | "kimi"
+export type InstructionProfileId =
+  | "anthropic"
+  | "codex"
+  | "default"
+  | "grok"
+  | "kimi"
 
 export type ResolvedModel = {
   readonly provider: string
   readonly model: string
-  readonly promptId: PromptId
+  readonly instructionProfileId: InstructionProfileId
 }
 
 export type CatalogModel = {
   readonly model: string
-  readonly promptId: PromptId
+  readonly instructionProfileId: InstructionProfileId
   readonly displayName?: string
   readonly efforts?: readonly string[]
   readonly speeds?: readonly string[]
+  readonly inputModalities: readonly ModelInputModality[]
+  readonly imageDetailModes: readonly ModelImageDetailMode[]
 }
+
+export type ModelInputModality = "image" | "text" | "video"
+export type ModelImageDetailMode = "high" | "original"
+
+export type ModelCapabilities = Readonly<{
+  inputModalities: readonly ModelInputModality[]
+  imageDetailModes: readonly ModelImageDetailMode[]
+}>
 
 export type ModelCapacity = Readonly<{
   contextWindowTokens: number
@@ -28,7 +43,9 @@ export function listCatalogModels(provider: string): CatalogModel[] {
     .filter((entry) => entry.provider.toLowerCase() === normalized)
     .map((entry) => ({
       model: entry.model,
-      promptId: requirePromptId(entry.promptId),
+      instructionProfileId: requireInstructionProfileId(
+        entry.instructionProfileId,
+      ),
       ...("displayName" in entry && entry.displayName !== undefined
         ? { displayName: entry.displayName }
         : {}),
@@ -38,17 +55,20 @@ export function listCatalogModels(provider: string): CatalogModel[] {
       ...("speeds" in entry && entry.speeds !== undefined
         ? { speeds: entry.speeds }
         : {}),
+      inputModalities: requireInputModalities(entry.inputModalities),
+      imageDetailModes: requireImageDetailModes(entry.imageDetailModes),
     }))
 }
 
-// Opt-in curation of the models.dev firehose: providers with an entry show
-// only these ids, in this order; others show every sanitized model.
-export function directoryAllowlist(
-  provider: string,
-): readonly string[] | undefined {
-  return catalog.directoryAllowlist[
-    provider.toLowerCase() as keyof typeof catalog.directoryAllowlist
-  ]
+export function catalogModelCapabilities(input: {
+  readonly provider: string
+  readonly model: string
+}): ModelCapabilities {
+  const entry = findCatalogEntry(input)
+  return {
+    inputModalities: requireInputModalities(entry?.inputModalities),
+    imageDetailModes: requireImageDetailModes(entry?.imageDetailModes),
+  }
 }
 
 export function resolveModel(input: {
@@ -62,21 +82,14 @@ export function resolveModel(input: {
       candidate.provider.toLowerCase() === provider &&
       candidate.model.toLowerCase() === model,
   )
-  if (exact) return { ...input, promptId: requirePromptId(exact.promptId) }
-
-  const fallback = catalog.fallbackRules.find((rule) =>
-    matchesRule(model, rule),
-  )
-  if (fallback) {
-    return { ...input, promptId: requirePromptId(fallback.promptId) }
-  }
-
-  const providerDefault =
-    catalog.providerDefaults[provider as keyof typeof catalog.providerDefaults]
-  return {
-    ...input,
-    promptId: requirePromptId(providerDefault ?? catalog.defaultPromptId),
-  }
+  if (exact)
+    return {
+      ...input,
+      instructionProfileId: requireInstructionProfileId(
+        exact.instructionProfileId,
+      ),
+    }
+  return { ...input, instructionProfileId: "default" }
 }
 
 export function validateModelSelection(input: {
@@ -113,27 +126,6 @@ export function validateModelSelection(input: {
       `Speed ${input.speed} is not supported by ${input.provider}/${input.model}.`,
     )
   }
-}
-
-type FallbackRule = {
-  readonly promptId: string
-  readonly modelContainsAny?: readonly string[]
-  readonly modelContainsAll?: readonly string[]
-  readonly modelMatchesAny?: readonly string[]
-}
-
-function matchesRule(model: string, rule: FallbackRule): boolean {
-  const containsAny = rule.modelContainsAny ?? []
-  const containsAll = rule.modelContainsAll ?? []
-  const matchesAny = rule.modelMatchesAny ?? []
-  return (
-    (containsAny.length > 0 &&
-      containsAny.some((part) => model.includes(part))) ||
-    (containsAll.length > 0 &&
-      containsAll.every((part) => model.includes(part))) ||
-    (matchesAny.length > 0 &&
-      matchesAny.some((pattern) => new RegExp(pattern, "u").test(model)))
-  )
 }
 
 export function catalogContextWindowTokens(input: {
@@ -177,14 +169,55 @@ export function catalogModelCapacity(input: {
   }
 }
 
-export function requirePromptId(value: string): PromptId {
+export function requireInstructionProfileId(
+  value: string,
+): InstructionProfileId {
   if (
     value === "anthropic" ||
+    value === "codex" ||
     value === "default" ||
-    value === "gpt" ||
+    value === "grok" ||
     value === "kimi"
   ) {
     return value
   }
-  throw new Error(`Unknown prompt ID in model catalog: ${value}`)
+  throw new Error(`Unknown instruction profile ID in model catalog: ${value}`)
+}
+
+function findCatalogEntry(input: {
+  readonly provider: string
+  readonly model: string
+}) {
+  const provider = input.provider.toLowerCase()
+  const model = input.model.toLowerCase()
+  return catalog.models.find(
+    (candidate) =>
+      candidate.provider.toLowerCase() === provider &&
+      candidate.model.toLowerCase() === model,
+  )
+}
+
+function requireInputModalities(
+  values: readonly string[] | undefined,
+): readonly ModelInputModality[] {
+  const modalities = values ?? ["text"]
+  if (
+    modalities.length === 0 ||
+    modalities.some(
+      (value) => value !== "image" && value !== "text" && value !== "video",
+    )
+  ) {
+    throw new Error("Model catalog contains invalid input modalities.")
+  }
+  return modalities as readonly ModelInputModality[]
+}
+
+function requireImageDetailModes(
+  values: readonly string[] | undefined,
+): readonly ModelImageDetailMode[] {
+  const modes = values ?? []
+  if (modes.some((value) => value !== "high" && value !== "original")) {
+    throw new Error("Model catalog contains invalid image detail modes.")
+  }
+  return modes as readonly ModelImageDetailMode[]
 }

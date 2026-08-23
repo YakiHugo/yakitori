@@ -94,8 +94,38 @@ describe("OpenAI Responses provider", () => {
           { type: "input_text", text: "Inspect this" },
           {
             type: "input_image",
-            detail: "auto",
+            detail: "high",
             image_url: "data:image/webp;base64,aGVsbG8=",
+          },
+        ],
+      },
+    ])
+  })
+
+  it("preserves original image detail on the wire", () => {
+    const input = toOpenAIInput([
+      {
+        role: "user",
+        content: [],
+        images: [
+          {
+            type: "image",
+            mediaType: "image/png",
+            detail: "original",
+            data: "aGVsbG8=",
+          },
+        ],
+      },
+    ])
+
+    expect(input).toEqual([
+      {
+        role: "user",
+        content: [
+          {
+            type: "input_image",
+            detail: "original",
+            image_url: "data:image/png;base64,aGVsbG8=",
           },
         ],
       },
@@ -379,7 +409,7 @@ describe("OpenAI Responses provider", () => {
         target: {
           provider: "openai",
           model: "gpt-request",
-          promptId: "gpt",
+          instructionProfileId: "codex",
           effort: "high",
         },
       }),
@@ -419,7 +449,7 @@ describe("OpenAI Responses provider", () => {
         target: {
           provider: "codex",
           model: "gpt-5.6-sol",
-          promptId: "gpt",
+          instructionProfileId: "codex",
           effort: "high",
           speed: "fast",
         },
@@ -462,7 +492,7 @@ describe("OpenAI Responses provider", () => {
           target: {
             provider: "codex",
             model: "gpt-5.6-sol",
-            promptId: "gpt",
+            instructionProfileId: "codex",
             ...(speed === undefined ? {} : { speed }),
           },
         }),
@@ -690,7 +720,7 @@ function requestFixture(overrides: Partial<ModelRequest> = {}): ModelRequest {
     target: {
       provider: "openai",
       model: "gpt-request",
-      promptId: "gpt",
+      instructionProfileId: "codex",
     },
     system: [{ id: "base", revision: "base-1", text: "Be helpful." }],
     messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],

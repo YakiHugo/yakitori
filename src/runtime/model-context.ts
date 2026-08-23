@@ -13,7 +13,6 @@ import {
   type WorldStateFragment,
 } from "../kernel/index.ts"
 import type {
-  ModelImageBlock,
   ModelMessage,
   ModelToolResultMessage,
   ModelUserMessage,
@@ -431,24 +430,14 @@ function toDroppedTurn(
 function prepareCompactionMessages(
   messages: readonly ModelMessage[],
 ): readonly ModelMessage[] {
-  return messages.flatMap((message) => {
+  return messages.filter((message) => {
     if (
       (message.role === "user" || message.role === "developer") &&
       message.context?.type === "world_state"
     ) {
-      return []
+      return false
     }
-    if (message.role !== "user" || message.images === undefined) return message
-    return {
-      role: "user" as const,
-      content: [
-        ...message.content,
-        ...message.images.map((image) => ({
-          type: "text" as const,
-          text: `[Attached ${image.mediaType} image omitted from compaction input; ${modelImageBytes(image)} encoded bytes.]`,
-        })),
-      ],
-    }
+    return true
   })
 }
 
@@ -808,6 +797,7 @@ function modelUserMessage(content: TextContent): ModelUserMessage {
   const images = (content.attachments ?? []).map((attachment) => ({
     type: "image" as const,
     mediaType: attachment.mediaType,
+    detail: attachment.detail ?? "high",
     file: attachment.file,
     sizeBytes: attachment.sizeBytes,
   }))
@@ -968,12 +958,6 @@ export function measureModelMessagesBytes(
       return value
     }),
   )
-}
-
-function modelImageBytes(image: ModelImageBlock): number {
-  return "data" in image && image.data !== undefined
-    ? Math.floor((image.data.length * 3) / 4)
-    : image.sizeBytes
 }
 
 function buildReadResultKeys(

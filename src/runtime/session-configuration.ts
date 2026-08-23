@@ -19,7 +19,7 @@ import {
   validateModelSelection,
 } from "./model-catalog.ts"
 import type { ModelSystemSection, ModelTarget } from "./model.ts"
-import { getPrompt } from "./prompt-registry.ts"
+import { getInstructionProfile } from "./prompt-registry.ts"
 
 export type ApprovalPolicy = "auto_file_tools" | "never"
 
@@ -75,7 +75,7 @@ export class SessionConfiguration {
   }): SessionConfiguration {
     validateModelSelection(input.selection)
     const model = resolveModel(input.selection)
-    const prompt = getPrompt(model.promptId)
+    const prompt = getInstructionProfile(model.instructionProfileId)
     const baseInstructions = resolveBaseInstructions(input.baseInstructions, {
       prompt,
       model,
@@ -85,7 +85,7 @@ export class SessionConfiguration {
     }
     validateContextWindowOverride(model, input.modelContextWindowTokens)
     return new SessionConfiguration({
-      schemaVersion: 2,
+      schemaVersion: 3,
       workspaceRoot: input.workspaceRoot,
       promptCacheKey: input.promptCacheKey,
       defaultTarget: { ...input.selection },
@@ -126,7 +126,7 @@ export class SessionConfiguration {
     validateModelSelection(selection)
     const model = resolveModel(selection)
     validateContextWindowOverride(model, this.snapshot.modelContextWindowTokens)
-    const prompt = getPrompt(model.promptId)
+    const prompt = getInstructionProfile(model.instructionProfileId)
     const modelCapacity = resolveModelCapacity(
       model,
       this.snapshot.modelContextWindowTokens,
@@ -135,7 +135,7 @@ export class SessionConfiguration {
       target: {
         provider: model.provider,
         model: model.model,
-        promptId: model.promptId,
+        instructionProfileId: model.instructionProfileId,
         ...(selection.effort === undefined ? {} : { effort: selection.effort }),
         ...(selection.speed === undefined ? {} : { speed: selection.speed }),
       },
@@ -168,7 +168,7 @@ function resolveBaseInstructions(
     readonly model: {
       readonly provider: string
       readonly model: string
-      readonly promptId: string
+      readonly instructionProfileId: string
     }
   },
 ): SessionConfigurationSnapshot["baseInstructions"] {
@@ -180,7 +180,7 @@ function resolveBaseInstructions(
         type: "model",
         provider: input.model.provider,
         model: input.model.model,
-        promptId: input.model.promptId,
+        instructionProfileId: input.model.instructionProfileId,
       },
     }
   }
@@ -209,7 +209,7 @@ export function createTurnContext(input: {
       mateRevisionId: input.mateRevisionId,
       provider: input.configuration.target.provider,
       model: input.configuration.target.model,
-      promptId: input.configuration.target.promptId,
+      instructionProfileId: input.configuration.target.instructionProfileId,
       baseInstructionsRevision: input.configuration.baseInstructions.revision,
       modelInstructionsRevision: input.configuration.modelInstructions.revision,
       ...(input.configuration.target.effort === undefined

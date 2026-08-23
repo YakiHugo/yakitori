@@ -290,7 +290,7 @@ describe("anthropic provider conversion", () => {
       target: {
         provider: "anthropic",
         model: "claude-sonnet-4-6",
-        promptId: "anthropic",
+        instructionProfileId: "anthropic",
       },
       system: [],
       messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
@@ -338,7 +338,7 @@ describe("anthropic provider conversion", () => {
       target: {
         provider: "anthropic",
         model: "claude-test",
-        promptId: "anthropic",
+        instructionProfileId: "anthropic",
       },
       system: [
         { id: "base", revision: "base-1", text: "base" },
@@ -429,7 +429,7 @@ describe("anthropic provider conversion", () => {
       target: {
         provider: "anthropic",
         model: "claude-test",
-        promptId: "anthropic",
+        instructionProfileId: "anthropic",
       },
       system: [{ id: "base", revision: "base-1", text: "base" }],
       messages: [
@@ -491,7 +491,7 @@ describe("anthropic provider conversion", () => {
       target: {
         provider: "kimi",
         model: "kimi-for-coding",
-        promptId: "kimi",
+        instructionProfileId: "kimi",
       },
       system: [
         { id: "base", revision: "base-1", text: "base" },
@@ -767,20 +767,20 @@ function effortRequest(
 ): ModelRequest {
   const known: Record<
     string,
-    { readonly model: string; readonly promptId: string }
+    { readonly model: string; readonly instructionProfileId: string }
   > = {
-    anthropic: { model: "claude-test", promptId: "anthropic" },
-    kimi: { model: "kimi-for-coding", promptId: "kimi" },
+    anthropic: { model: "claude-test", instructionProfileId: "anthropic" },
+    kimi: { model: "kimi-for-coding", instructionProfileId: "kimi" },
   }
   const target = known[provider] ?? {
     model: "other-model",
-    promptId: "default",
+    instructionProfileId: "default",
   }
   return {
     target: {
       provider,
       model: target.model,
-      promptId: target.promptId,
+      instructionProfileId: target.instructionProfileId,
       ...(effort === undefined ? {} : { effort }),
     },
     system: [{ id: "base", revision: "base-1", text: "Be helpful." }],
@@ -931,7 +931,7 @@ async function collectWithClient(
     target: {
       provider: "anthropic",
       model: "claude-test",
-      promptId: "anthropic",
+      instructionProfileId: "anthropic",
     },
     system: [{ id: "base", revision: "base-1", text: "Be helpful." }],
     messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],

@@ -61,6 +61,7 @@ async function readImageFile(file: File): Promise<InlineImageAttachment> {
   return {
     name: file.name,
     mediaType: file.type,
+    detail: "high",
     data: url.slice(separator + 1),
     sizeBytes: file.size,
   }

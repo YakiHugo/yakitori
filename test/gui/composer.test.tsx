@@ -105,7 +105,7 @@ describe("composer", () => {
     expect(button).toHaveProperty("disabled", true)
   })
 
-  it("attaches and sends an image without requiring text", async () => {
+  it("attaches an image, selects original detail, and sends without text", async () => {
     const user = userEvent.setup()
     const admitInput = vi.fn(() => Promise.resolve())
     useAppStore.setState({
@@ -126,15 +126,67 @@ describe("composer", () => {
     await waitFor(() => {
       expect(useAppStore.getState().promptAttachments).toHaveLength(1)
     })
+    await user.click(
+      screen.getByRole("button", {
+        name: "Use original detail for screenshot.png",
+      }),
+    )
     await user.click(screen.getByRole("button", { name: "Send" }))
 
     expect(admitInput).toHaveBeenCalledWith("", [
       {
         name: "screenshot.png",
         mediaType: "image/png",
+        detail: "original",
         data: "AQID",
         sizeBytes: 3,
       },
+    ])
+  })
+
+  it("explains and normalizes original detail for a model without that mode", async () => {
+    const user = userEvent.setup()
+    const admitInput = vi.fn(() => Promise.resolve())
+    useAppStore.setState({
+      admitInput,
+      selection: { revision: 1, sessionId: "session_1" },
+      defaultProvider: "kimi",
+      defaultModel: "k3",
+      providers: [
+        {
+          name: "kimi",
+          models: [
+            {
+              id: "k3",
+              instructionProfileId: "kimi",
+              inputModalities: ["text", "image"],
+              imageDetailModes: [],
+            },
+          ],
+        },
+      ],
+      promptAttachments: [
+        {
+          name: "screenshot.png",
+          mediaType: "image/png",
+          detail: "original",
+          data: "AQID",
+          sizeBytes: 3,
+        },
+      ],
+    })
+    render(<Composer />)
+
+    expect(screen.getByText(/Original detail is unavailable/)).toBeDefined()
+    expect(
+      screen.getByRole("button", {
+        name: "Original detail unavailable for screenshot.png",
+      }),
+    ).toHaveProperty("disabled", true)
+    await user.click(screen.getByRole("button", { name: "Send" }))
+
+    expect(admitInput).toHaveBeenCalledWith("", [
+      expect.objectContaining({ detail: "high" }),
     ])
   })
 })
@@ -151,14 +203,14 @@ describe("model selector", () => {
             {
               id: "gpt-5.1-codex",
               displayName: "GPT 5.1 Codex",
-              family: "gpt",
+              instructionProfileId: "codex",
               efforts: ["low", "medium", "high"],
               speeds: ["standard", "fast"],
             },
             {
               id: "gpt-5",
               displayName: "GPT-5",
-              family: "gpt",
+              instructionProfileId: "codex",
               efforts: ["low", "medium", "high"],
               speeds: ["standard", "fast"],
             },
@@ -170,7 +222,7 @@ describe("model selector", () => {
             {
               id: "gpt-5.6-sol",
               displayName: "GPT-5.6 Sol",
-              family: "gpt",
+              instructionProfileId: "codex",
               efforts: ["low", "medium", "high", "xhigh"],
               speeds: ["standard", "fast"],
             },
@@ -182,12 +234,12 @@ describe("model selector", () => {
             {
               id: "kimi-for-coding",
               displayName: "K2.7 Coding",
-              family: "kimi",
+              instructionProfileId: "kimi",
             },
             {
               id: "k3",
               displayName: "K3",
-              family: "kimi",
+              instructionProfileId: "kimi",
               efforts: ["low", "high", "max"],
             },
           ],
@@ -198,7 +250,7 @@ describe("model selector", () => {
             {
               id: "claude-sonnet-4-6",
               displayName: "Claude Sonnet 4.6",
-              family: "anthropic",
+              instructionProfileId: "anthropic",
               efforts: ["low", "medium", "high"],
             },
           ],
@@ -209,7 +261,7 @@ describe("model selector", () => {
             {
               id: "grok-4.20-non-reasoning",
               displayName: "Grok 4.20 Non-Reasoning",
-              family: "default",
+              instructionProfileId: "default",
             },
           ],
         },

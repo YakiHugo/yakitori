@@ -10,21 +10,22 @@ import type {
   ToolResultBlockParam,
 } from "@anthropic-ai/sdk/resources/messages"
 import {
-  isJsonValue,
   isJsonObject,
+  isJsonValue,
   type JsonObject,
   type JsonValue,
 } from "../kernel/index.ts"
 import { isAbortError } from "./errors.ts"
 import {
+  DEFAULT_MODEL_MAX_OUTPUT_TOKENS,
   flattenModelSystem,
-  ModelStopReason,
-  requireModelImageData,
   type ModelContentBlock,
   type ModelMessage,
   type ModelRequest,
   type ModelResponse,
+  ModelStopReason,
   type ModelStreamEvent,
+  requireModelImageData,
   type StreamFn,
 } from "./model.ts"
 
@@ -96,7 +97,7 @@ async function* streamAnthropic(
     stream = client.messages.stream(
       {
         model: request.target.model || defaultModel,
-        max_tokens: 8_192,
+        max_tokens: request.maxOutputTokens ?? DEFAULT_MODEL_MAX_OUTPUT_TOKENS,
         system: toAnthropicSystem(request.system, explicitPromptCaching),
         messages: toAnthropicRequestMessages(
           request.messages,

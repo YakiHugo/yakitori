@@ -1,13 +1,13 @@
 import { spawn } from "node:child_process"
 import { realpath, stat } from "node:fs/promises"
 import { userInfo } from "node:os"
-import { basename } from "node:path"
+import { basename, delimiter, join } from "node:path"
 
 const PROBE_TIMEOUT_MS = 5_000
 const PROBE_CAPTURE_BYTES = 1024 * 1024
 const PROBE_FORCE_COMPLETION_MS = 100
 const PROBE_SENTINEL = "__YAKITORI_ENV_START_7F31B6A9__"
-const SUPPORTED_SHELLS = new Set(["zsh", "bash", "sh", "dash"])
+const SUPPORTED_SHELLS = new Set(["zsh", "bash", "sh"])
 const SHELL_STARTUP_ENV_NAMES = new Set(["BASH_ENV", "ENV", "ZDOTDIR"])
 const SECRET_ENV_NAMES = new Set(
   [
@@ -51,7 +51,6 @@ export type ShellProbeResult = {
 export function createUserShellEnv(
   options: {
     readonly appEnv?: NodeJS.ProcessEnv
-    readonly platform?: NodeJS.Platform
     readonly resolveShell?: () => Promise<ResolvedCommandShell>
     readonly runProbe?: (
       shell: string,
@@ -61,20 +60,13 @@ export function createUserShellEnv(
   } = {},
 ): UserShellEnv {
   const appEnv = { ...(options.appEnv ?? process.env) }
-  const platform = options.platform ?? process.platform
   const resolveShell = options.resolveShell ?? resolveCommandShell
   const runProbe =
     options.runProbe ??
     ((shell, command) =>
-      runShellProbe(shell, command, filterProbeEnvironment(appEnv), platform))
+      runShellProbe(shell, command, filterProbeEnvironment(appEnv)))
   const log = options.log ?? ((message: string) => console.log(message))
-  const shellPromise =
-    platform === "win32"
-      ? Promise.resolve({
-          shell: appEnv.ComSpec ?? "cmd.exe",
-          warnings: [] as readonly string[],
-        })
-      : resolveShell()
+  const shellPromise = resolveShell()
   const fallback = Object.freeze(filterCommandEnvironment(appEnv))
   let probed: Readonly<NodeJS.ProcessEnv> | undefined
   let probePromise: Promise<"ready" | "unavailable"> | undefined
@@ -96,7 +88,6 @@ export function createUserShellEnv(
     },
     async probe() {
       if (probePromise !== undefined) return probePromise
-      if (platform === "win32") return "unavailable"
       log("run_command shell-env probe: pending")
       probePromise = (async () => {
         const resolved = await shellPromise
@@ -133,42 +124,57 @@ export type ResolvedCommandShell = {
   readonly warnings: readonly string[]
 }
 
-export async function resolveCommandShell(): Promise<ResolvedCommandShell> {
-  const candidates: string[] = []
-  const envShell = process.env.SHELL
-  if (
-    envShell !== undefined &&
-    envShell.trim() !== "" &&
-    envShell !== "unknown"
-  ) {
-    candidates.push(envShell)
-  }
+export async function resolveCommandShell(
+  options: {
+    readonly accountShell?: () => string | null
+    readonly path?: string
+    readonly resolveCandidate?: (path: string) => Promise<string | undefined>
+  } = {},
+): Promise<ResolvedCommandShell> {
+  let accountShell: string | null = null
   try {
-    const accountShell = userInfo().shell
-    if (accountShell !== null && accountShell.trim() !== "") {
-      candidates.push(accountShell)
-    }
+    accountShell = (options.accountShell ?? (() => userInfo().shell))()
   } catch {
-    // Containers and directory-service failures still have fixed fallbacks.
+    // Directory-service failures still have PATH and fixed fallbacks.
   }
-  candidates.push("/bin/zsh", "/bin/bash", "/bin/sh")
+  const pathEntries = (options.path ?? process.env.PATH ?? "")
+    .split(delimiter)
+    .filter((entry) => entry.length > 0)
+  const candidates = [
+    ...(accountShell !== null &&
+    accountShell.trim() !== "" &&
+    SUPPORTED_SHELLS.has(basename(accountShell))
+      ? [accountShell]
+      : []),
+    ...pathEntries.map((entry) => join(entry, "zsh")),
+    ...pathEntries.map((entry) => join(entry, "bash")),
+    "/bin/zsh",
+    "/bin/bash",
+    "/bin/sh",
+  ]
+  const resolveCandidate = options.resolveCandidate ?? verifyShellCandidate
 
   for (const candidate of new Set(candidates)) {
-    try {
-      const shell = await realpath(candidate)
-      const info = await stat(shell)
-      if (info.isFile() && SUPPORTED_SHELLS.has(basename(shell))) {
-        return { shell, warnings: [] }
-      }
-    } catch {
-      // Try the next supported shell.
-    }
+    const shell = await resolveCandidate(candidate)
+    if (shell !== undefined) return { shell, warnings: [] }
   }
   return {
     shell: "/bin/sh",
     warnings: [
       "No supported user shell could be verified; falling back to /bin/sh.",
     ],
+  }
+}
+
+async function verifyShellCandidate(
+  candidate: string,
+): Promise<string | undefined> {
+  try {
+    const shell = await realpath(candidate)
+    const info = await stat(shell)
+    if (info.isFile() && SUPPORTED_SHELLS.has(basename(shell))) return shell
+  } catch {
+    // Try the next supported shell.
   }
 }
 
@@ -279,13 +285,12 @@ async function runShellProbe(
   shell: string,
   command: "env -0" | "printenv",
   env: NodeJS.ProcessEnv,
-  platform: NodeJS.Platform,
 ): Promise<ShellProbeResult> {
   return new Promise((resolve) => {
     let child: ReturnType<typeof spawn>
     try {
       child = spawn(shell, ["-l", "-c", shellProbeCommand(command)], {
-        detached: platform !== "win32",
+        detached: true,
         env,
         stdio: ["ignore", "pipe", "ignore"],
         windowsHide: true,
@@ -335,7 +340,7 @@ async function runShellProbe(
     })
     const timeout = setTimeout(() => {
       timedOut = true
-      signalProbe(child, platform)
+      signalProbe(child)
       forceCompletion = setTimeout(() => {
         child.stdout?.destroy()
         finish({
@@ -380,12 +385,9 @@ function stripProbePreamble(
   return index < 0 ? undefined : output.subarray(index + marker.byteLength)
 }
 
-function signalProbe(
-  child: ReturnType<typeof spawn>,
-  platform: NodeJS.Platform,
-): void {
+function signalProbe(child: ReturnType<typeof spawn>): void {
   try {
-    if (platform !== "win32" && child.pid !== undefined) {
+    if (child.pid !== undefined) {
       process.kill(-child.pid, "SIGKILL")
       return
     }

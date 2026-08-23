@@ -16,6 +16,7 @@ import {
   type ModelContentBlock,
 } from "../../src/kernel/events.ts"
 import { createJsonlEventStore } from "../../src/kernel/jsonl-event-store.ts"
+import { createSessionFiles } from "../../src/kernel/session-files.ts"
 import { createSessionKernel } from "../../src/kernel/session-kernel.ts"
 import { createMateKernel } from "../../src/mates/mate-kernel.ts"
 import { createSqliteMateStore } from "../../src/mates/sqlite-mate-store.ts"
@@ -216,19 +217,23 @@ describe("session runner", () => {
         read.session?.turns.map((turn) => ({
           provider: turn.executionContext?.provider,
           model: turn.executionContext?.model,
-          promptId: turn.executionContext?.promptId,
+          instructionProfileId: turn.executionContext?.instructionProfileId,
         })),
       ).toEqual([
-        { provider: "faux", model: "scripted", promptId: "default" },
         {
-          provider: "anthropic",
-          model: "claude-opus-4-6",
-          promptId: "anthropic",
+          provider: "faux",
+          model: "scripted",
+          instructionProfileId: "default",
         },
         {
           provider: "anthropic",
           model: "claude-opus-4-6",
-          promptId: "anthropic",
+          instructionProfileId: "anthropic",
+        },
+        {
+          provider: "anthropic",
+          model: "claude-opus-4-6",
+          instructionProfileId: "anthropic",
         },
       ])
     })
@@ -1233,6 +1238,86 @@ describe("session runner", () => {
     })
   })
 
+  it("compacts an image-heavy Turn using hydrated model-visible cost", async () => {
+    await withRuntime(async (runtime) => {
+      const provider = createFauxProvider([
+        { content: [{ type: "text", text: "image noted" }] },
+        { content: [{ type: "text", text: "Goal: ".padEnd(500, "s") }] },
+        { content: [{ type: "text", text: "follow-up answer" }] },
+      ])
+      const sessionFiles = createSessionFiles(
+        join(runtime.rootDir, "session-files"),
+      )
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+        sessionFiles,
+      })
+      const session = await createAttributedSession(runtime)
+      const executionPolicy = createSessionExecutionPolicy({
+        modelVisibleMessageBlocks: 100,
+        modelVisibleContextBytes: 100_000,
+        compactionTriggerRatio: 0.000_01,
+        compactionRetainRatio: 0,
+        compactionSummaryBytes: 16 * 1024,
+      })
+      await runtime.kernel.configureSession({
+        sessionId: session.sessionId,
+        configuration: SessionConfiguration.create({
+          promptCacheKey: "image-compaction",
+          selection: { provider: "faux", model: "scripted" },
+          workspaceRoot: runtime.rootDir,
+          enabledTools: [],
+          approvalPolicy: "never",
+          executionPolicy,
+        }).snapshot,
+      })
+      const png = Buffer.alloc(24)
+      Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(png)
+      png.writeUInt32BE(6_400, 16)
+      png.writeUInt32BE(3_200, 20)
+      const attachments = await sessionFiles.persistImageAttachments(
+        session.sessionId,
+        "request_image_compaction",
+        [
+          {
+            name: "large.png",
+            mediaType: "image/png",
+            detail: "original",
+            data: png.toString("base64"),
+            sizeBytes: png.byteLength,
+          },
+        ],
+      )
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "inspect", attachments },
+      })
+      await runner.wake(session.sessionId)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "continue" },
+      })
+      await runner.wake(session.sessionId)
+
+      const replayed = await runtime.kernel.replaySession({
+        sessionId: session.sessionId,
+      })
+      expect(
+        replayed.events.some(
+          (event) => event.type === EventType.ContextCompacted,
+        ),
+      ).toBe(true)
+      expect(provider.requests[1]?.messages).toContainEqual(
+        expect.objectContaining({
+          role: "user",
+          images: [expect.objectContaining({ detail: "original" })],
+        }),
+      )
+    })
+  })
+
   it("does not count the compaction call against the model call budget", async () => {
     await withRuntime(async (runtime) => {
       const provider = createFauxProvider([
@@ -1421,7 +1506,7 @@ describe("session runner", () => {
     })
   })
 
-  it("retries an over-long summary request with a reduced source", async () => {
+  it("uses two-pass compaction when a complete summary request overflows", async () => {
     await withRuntime(async (runtime) => {
       const provider = createFauxProvider([
         {
@@ -1435,6 +1520,7 @@ describe("session runner", () => {
             "prompt is too long: 250000 tokens > 200000 maximum",
           ),
         },
+        { content: [{ type: "text", text: "Goal: intermediate." }] },
         { content: [{ type: "text", text: "Goal: checkpoint." }] },
         { content: [{ type: "text", text: "third answer" }] },
       ])
@@ -1462,16 +1548,18 @@ describe("session runner", () => {
         await runner.wake(session.sessionId)
       }
 
-      expect(provider.callCount).toBe(5)
-      // The third turn's first summary request carries both uncovered
-      // dropped turns; the retry keeps the oldest half so checkpoint coverage
-      // remains a continuous historical prefix.
+      expect(provider.callCount).toBe(6)
+      // The third turn's first summary request carries both uncovered Turns.
+      // Pass one summarizes the oldest complete prefix; pass two combines its
+      // carrier note with the untouched tail.
       const firstAttempt = JSON.stringify(provider.requests[2]?.messages)
       expect(firstAttempt).toContain("first question")
       expect(firstAttempt).toContain("second question")
-      const retryAttempt = JSON.stringify(provider.requests[3]?.messages)
-      expect(retryAttempt).toContain("first question")
-      expect(retryAttempt).not.toContain("second question")
+      const passOne = JSON.stringify(provider.requests[3]?.messages)
+      expect(passOne).toContain("first question")
+      const passTwo = JSON.stringify(provider.requests[4]?.messages)
+      expect(passTwo).toContain("Goal: intermediate.")
+      expect(passTwo).toContain("second question")
 
       const replayed = await runtime.kernel.replaySession({
         sessionId: session.sessionId,
@@ -1481,12 +1569,84 @@ describe("session runner", () => {
       )
       expect(compacted).toHaveLength(1)
       const turns = replayed.session?.turns ?? []
-      // Coverage follows the reduced source and leaves the next Turn verbatim.
       expect(compacted[0]?.data).toMatchObject({
-        coveredTurnIds: [turns[0]?.turnId],
+        coveredTurnIds: [turns[0]?.turnId, turns[1]?.turnId],
         summary: "Goal: checkpoint.",
       })
       expect(replayed.session?.completedTurns).toHaveLength(3)
+    })
+  })
+
+  it("accounts pass-one usage when reactive pass two overflows before retry", async () => {
+    await withRuntime(async (runtime) => {
+      const overflow = new Error(
+        "prompt is too long: 250000 tokens > 200000 maximum",
+      )
+      const provider = createFauxProvider([
+        {
+          content: [{ type: "text", text: "first answer".padEnd(1_000, "a") }],
+        },
+        {
+          content: [{ type: "text", text: "second answer".padEnd(1_000, "b") }],
+        },
+        { throwDuring: overflow },
+        {
+          content: [{ type: "text", text: "Goal: intermediate." }],
+          usage: { inputTokens: 10, outputTokens: 1 },
+        },
+        { throwDuring: overflow },
+        {
+          content: [{ type: "text", text: "Goal: reduced checkpoint." }],
+          usage: { inputTokens: 20, outputTokens: 2 },
+        },
+        {
+          content: [{ type: "text", text: "third answer" }],
+          usage: { inputTokens: 30, outputTokens: 3 },
+        },
+      ])
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+        executionPolicy: createSessionExecutionPolicy({
+          modelVisibleMessageBlocks: 100,
+          modelVisibleContextBytes: 10_000,
+          compactionTriggerRatio: 0.5,
+          compactionRetainRatio: 0,
+        }),
+      })
+      const session = await createAttributedSession(runtime)
+      for (const question of [
+        "first question",
+        "second question",
+        "third question",
+      ]) {
+        await runtime.kernel.admitInput({
+          sessionId: session.sessionId,
+          content: { kind: "text", text: question.padEnd(1_000, "q") },
+        })
+        await runner.wake(session.sessionId)
+      }
+
+      expect(provider.callCount).toBe(7)
+      const reduced = JSON.stringify(provider.requests[5]?.messages)
+      expect(reduced).toContain("first question")
+      expect(reduced).not.toContain("second question")
+      const replayed = await runtime.kernel.replaySession({
+        sessionId: session.sessionId,
+      })
+      const compacted = replayed.events.find(
+        (event) => event.type === EventType.ContextCompacted,
+      )
+      expect(compacted?.data).toMatchObject({
+        coveredTurnIds: [replayed.session?.turns[0]?.turnId],
+        summary: "Goal: reduced checkpoint.",
+        usage: { inputTokens: 20, outputTokens: 2 },
+      })
+      expect(replayed.session?.turns[2]?.usage).toEqual({
+        inputTokens: 60,
+        outputTokens: 6,
+      })
     })
   })
 

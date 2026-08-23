@@ -102,7 +102,10 @@ type ImageAttachmentMetadata = {
   readonly name: string
   readonly mediaType: "image/gif" | "image/jpeg" | "image/png" | "image/webp"
   readonly sizeBytes: number
+  readonly detail?: ImageDetail
 }
+
+export type ImageDetail = "high" | "original"
 
 export type ImageAttachment = ImageAttachmentMetadata & {
   readonly file: SessionFileReference
@@ -130,6 +133,7 @@ export type ModelImageBlock =
   | {
       readonly type: "image"
       readonly mediaType: ImageAttachment["mediaType"]
+      readonly detail?: ImageDetail
       readonly data: string
       readonly file?: never
       readonly sizeBytes?: never
@@ -137,6 +141,7 @@ export type ModelImageBlock =
   | {
       readonly type: "image"
       readonly mediaType: ImageAttachment["mediaType"]
+      readonly detail?: ImageDetail
       readonly file: SessionFileReference
       readonly sizeBytes: number
       readonly data?: never
@@ -271,7 +276,7 @@ export type BaseInstructionsSnapshot = {
         readonly type: "model"
         readonly provider: string
         readonly model: string
-        readonly promptId: string
+        readonly instructionProfileId: string
       }
     | { readonly type: "custom" }
 }
@@ -290,7 +295,7 @@ export type SessionExecutionPolicyDefaultsSnapshot = {
 }
 
 export type SessionConfigurationSnapshot = {
-  readonly schemaVersion: 2
+  readonly schemaVersion: 3
   readonly workspaceRoot: string
   readonly promptCacheKey: string
   readonly defaultTarget: ModelSelection
@@ -308,7 +313,7 @@ export type TurnExecutionContext = {
   readonly model: string
   readonly effort?: string
   readonly speed?: string
-  readonly promptId: string
+  readonly instructionProfileId: string
   readonly baseInstructionsRevision: string
   readonly modelInstructionsRevision: string
   /** Selected window after applying the session configuration override. */
@@ -1133,8 +1138,9 @@ function isModelImageBlock(value: unknown): boolean {
   return (
     isRecord(value) &&
     value.type === "image" &&
-    onlyKeys(value, ["type", "mediaType", "file", "sizeBytes"]) &&
+    onlyKeys(value, ["type", "mediaType", "detail", "file", "sizeBytes"]) &&
     isSupportedImageMediaType(value.mediaType) &&
+    (value.detail === undefined || isImageDetail(value.detail)) &&
     isSessionFileReference(value.file) &&
     isNonNegativeInteger(value.sizeBytes)
   )
@@ -1166,7 +1172,7 @@ function isSessionConfigurationSnapshot(
       "executionPolicyDefaults",
       "modelContextWindowTokens",
     ]) ||
-    value.schemaVersion !== 2 ||
+    value.schemaVersion !== 3 ||
     !isString(value.workspaceRoot) ||
     !isString(value.promptCacheKey) ||
     value.promptCacheKey.trim().length === 0 ||
@@ -1202,10 +1208,15 @@ function isBaseInstructionsSnapshot(
   }
   return (
     value.provenance.type === "model" &&
-    onlyKeys(value.provenance, ["type", "provider", "model", "promptId"]) &&
+    onlyKeys(value.provenance, [
+      "type",
+      "provider",
+      "model",
+      "instructionProfileId",
+    ]) &&
     isString(value.provenance.provider) &&
     isString(value.provenance.model) &&
-    isString(value.provenance.promptId)
+    isString(value.provenance.instructionProfileId)
   )
 }
 
@@ -1378,9 +1389,10 @@ function isTextContent(value: unknown): value is TextContent {
 function isImageAttachment(value: unknown): value is ImageAttachment {
   return (
     isRecord(value) &&
-    onlyKeys(value, ["name", "mediaType", "file", "sizeBytes"]) &&
+    onlyKeys(value, ["name", "mediaType", "detail", "file", "sizeBytes"]) &&
     isString(value.name) &&
     isSupportedImageMediaType(value.mediaType) &&
+    (value.detail === undefined || isImageDetail(value.detail)) &&
     isNonNegativeInteger(value.sizeBytes) &&
     isSessionFileReference(value.file)
   )
@@ -1404,6 +1416,10 @@ function isSupportedImageMediaType(
     value === "image/png" ||
     value === "image/webp"
   )
+}
+
+function isImageDetail(value: unknown): value is ImageDetail {
+  return value === "high" || value === "original"
 }
 
 function isModelSelection(value: unknown): value is ModelSelection {
@@ -1461,7 +1477,7 @@ function isTurnExecutionContext(value: unknown): value is TurnExecutionContext {
     isString(value.model) &&
     (value.effort === undefined || isString(value.effort)) &&
     (value.speed === undefined || isString(value.speed)) &&
-    isString(value.promptId) &&
+    isString(value.instructionProfileId) &&
     isString(value.baseInstructionsRevision) &&
     isString(value.modelInstructionsRevision) &&
     (value.modelContextWindowTokens === undefined ||

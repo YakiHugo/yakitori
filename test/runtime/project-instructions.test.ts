@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
@@ -20,11 +20,7 @@ describe("project instructions", () => {
         workingDirectory: nested,
       })
 
-      expect(result?.files).toEqual([
-        await realpath(join(root, "AGENTS.md")),
-        await realpath(join(nested, "AGENTS.override.md")),
-      ])
-      const text = result?.message.content[0]?.text ?? ""
+      const text = result?.text ?? ""
       expect(text).toContain("root rules")
       expect(text).toContain("override rules")
       expect(text).not.toContain("ignored local rules")
@@ -64,12 +60,9 @@ describe("project instructions", () => {
         maxBytes: 4,
       })
 
-      expect(result?.truncated).toBe(true)
-      expect(result?.message.content[0]?.text).toContain("abcd")
-      expect(result?.message.content[0]?.text).not.toContain("abcde")
-      expect(result?.message.content[0]?.text).toContain(
-        "Project instructions were truncated",
-      )
+      expect(result?.text).toContain("abcd")
+      expect(result?.text).not.toContain("abcde")
+      expect(result?.text).toContain("Project instructions were truncated")
     } finally {
       await rm(root, { recursive: true, force: true })
     }

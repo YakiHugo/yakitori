@@ -14,11 +14,11 @@ import {
   type ModelSelection,
   PermissionBehavior,
   PermissionState,
+  type RuntimeEventEnvelope,
   type SessionFiles,
   type SessionKernel,
   type SessionProjection,
   type TokenUsage,
-  type RuntimeEventEnvelope,
   type TurnExecutionContext,
   type TurnMetrics,
   TurnState,
@@ -35,6 +35,7 @@ import {
   buildCompactionRequest,
   isContextOverflowError,
   runCompaction,
+  runTwoPassCompaction,
 } from "./compaction.ts"
 import { isAbortError } from "./errors.ts"
 import {
@@ -65,6 +66,13 @@ import {
   createForkedModelContext,
   measureModelMessagesBytes,
 } from "./model-context.ts"
+import { adaptImagesForModel } from "./model-images.ts"
+import {
+  createModelUsageBaseline,
+  effectiveRequestInputTokens,
+  estimateModelRequestBudget,
+  type ModelUsageBaseline,
+} from "./model-request-budget.ts"
 import { createPermissionGate, type PermissionGate } from "./permission-gate.ts"
 import { loadProjectInstructions } from "./project-instructions.ts"
 import {
@@ -126,6 +134,16 @@ export type ContextPreparedDiagnostics = Readonly<{
   truncatedToolResultCount: number
   prunedToolResultCount: number
   droppedCompactionCheckpoint: boolean
+  omittedImageCount: number
+  downgradedOriginalImageCount: number
+  estimatedInputTokens: number
+  effectiveInputTokens: number
+  requiredContextTokens: number
+  envelopeTokens: number
+  systemTokens: number
+  messageTokens: number
+  toolTokens: number
+  imageTokens: number
 }>
 
 export type SessionRunner = {
@@ -191,6 +209,7 @@ export function createSessionRunner(
   // Consecutive compaction failures per session; after the cap the lane
   // stops paying for doomed summary calls until one succeeds again.
   const compactionFailures = new Map<string, number>()
+  const usageBaselines = new Map<string, ModelUsageBaseline>()
   let closed = false
 
   const publishDurable = (events: readonly EventEnvelope[]) => {
@@ -491,6 +510,7 @@ export function createSessionRunner(
     const executionContext = input.turn.execution
     let modelCallIndex = 0
     let toolCallCount = 0
+    let pendingAgentMessages: readonly ModelMessage[] = []
     const telemetry = requireTurnTelemetry(input.sessionId, input.turnId)
     const usages = telemetry.usages
     while (
@@ -557,10 +577,19 @@ export function createSessionRunner(
         })
       }
 
-      const requestMessages = await resolveSessionFileImages(
-        [...context.messages, ...agentControl.takeMessages(input.sessionId)],
+      pendingAgentMessages = [
+        ...pendingAgentMessages,
+        ...agentControl.takeMessages(input.sessionId),
+      ]
+      const resolvedRequestMessages = await resolveSessionFileImages(
+        [...context.messages, ...pendingAgentMessages],
         options.sessionFiles,
       )
+      const imageAdaptation = adaptImagesForModel(
+        resolvedRequestMessages,
+        step.turn.configuration.target,
+      )
+      const requestMessages = imageAdaptation.messages
       const activeTurn = activeTurnRuntime(input.sessionId, input.turnId)
       if (activeTurn === undefined) {
         throw new Error(`Turn runtime for ${input.turnId} is no longer active.`)
@@ -580,6 +609,63 @@ export function createSessionRunner(
         tools: step.tools.definitions,
         signal: input.signal,
       }
+      const contextWindowId =
+        session.compaction?.replacement?.windowId ?? session.id
+      const requestBudget = estimateModelRequestBudget(request)
+      const usageBaseline = usageBaselines.get(input.sessionId)
+      const effectiveInputTokens = effectiveRequestInputTokens({
+        request,
+        contextWindowId,
+        budget: requestBudget,
+        ...(usageBaseline === undefined ? {} : { baseline: usageBaseline }),
+      })
+      const requiredContextTokens =
+        effectiveInputTokens + requestBudget.outputReserveTokens
+      const contextWindowTokens =
+        executionContext.effectiveModelContextWindowTokens
+      const compactionTriggerTokens =
+        contextWindowTokens === undefined
+          ? undefined
+          : Math.floor(
+              contextWindowTokens *
+                input.turn.configuration.executionPolicy.compactionTriggerRatio,
+            )
+      if (
+        compactionTriggerTokens !== undefined &&
+        requiredContextTokens >= compactionTriggerTokens
+      ) {
+        const candidateHistory =
+          context.compactableHistory.length > 0
+            ? context.compactableHistory
+            : collectUncoveredTurns(session, executionContext.executionPolicy)
+        if (candidateHistory.length > 0) {
+          const outcome = await attemptCompaction({
+            session,
+            turnId: input.turnId,
+            configuration: input.turn.configuration,
+            candidateHistory,
+            worldState: step.worldState,
+            usages,
+            telemetry,
+            signal: input.signal,
+          })
+          if (outcome === "compacted") continue
+        }
+      }
+      if (
+        contextWindowTokens !== undefined &&
+        requiredContextTokens > contextWindowTokens
+      ) {
+        throw createYakitoriError({
+          code: YakitoriErrorCode.InvalidState,
+          message: "The complete model request exceeds the context window.",
+          details: {
+            code: "context_compaction_required",
+            requiredContextTokens,
+            contextWindowTokens,
+          },
+        })
+      }
       const streamId = `stream_${input.turnId}_${modelCallIndex + 1}`
       if (options.onContextPrepared !== undefined) {
         try {
@@ -593,6 +679,17 @@ export function createSessionRunner(
             truncatedToolResultCount: context.truncatedToolResultCount,
             prunedToolResultCount: context.prunedToolResultCount,
             droppedCompactionCheckpoint: context.droppedCompactionCheckpoint,
+            omittedImageCount: imageAdaptation.omittedImageCount,
+            downgradedOriginalImageCount:
+              imageAdaptation.downgradedOriginalCount,
+            estimatedInputTokens: requestBudget.estimatedInputTokens,
+            effectiveInputTokens,
+            requiredContextTokens,
+            envelopeTokens: requestBudget.envelopeTokens,
+            systemTokens: requestBudget.systemTokens,
+            messageTokens: requestBudget.messageTokens,
+            toolTokens: requestBudget.toolTokens,
+            imageTokens: requestBudget.imageTokens,
           })
         } catch (error) {
           if (options.onRuntimeError === undefined) {
@@ -630,9 +727,20 @@ export function createSessionRunner(
         throw error
       }
       recordModelCall(telemetry, consumed)
+      pendingAgentMessages = []
       const response = consumed.response
       modelCallIndex += 1
       if (response.usage !== undefined) usages.push(response.usage)
+      if (response.usage !== undefined) {
+        const baseline = createModelUsageBaseline({
+          request,
+          contextWindowId,
+          budget: requestBudget,
+          usage: response.usage,
+        })
+        if (baseline !== undefined)
+          usageBaselines.set(input.sessionId, baseline)
+      }
 
       if (
         response.stopReason === ModelStopReason.Aborted ||
@@ -824,12 +932,11 @@ export function createSessionRunner(
     return requireSession(input.session.id)
   }
 
-  // Housekeeping: fold the longest fitting continuous history prefix into a
-  // durable checkpoint, then rebuild context. An over-long summary request is
-  // retried with a shorter oldest prefix (up to
-  // MAX_COMPACTION_ATTEMPTS); any other failure leaves the checkpoint
-  // unchanged, and repeated failures trip a per-session circuit breaker. The
-  // caller may continue only when the unabridged context still fits.
+  // Housekeeping: fold a continuous history prefix into a durable checkpoint,
+  // then rebuild context. A request that cannot fit is summarized in two
+  // passes at complete group boundaries; an overflowing pass falls back to a
+  // shorter oldest prefix (up to MAX_COMPACTION_ATTEMPTS). Other failures
+  // leave the checkpoint unchanged and trip the per-session circuit breaker.
   async function attemptCompaction(input: {
     readonly session: SessionProjection
     readonly turnId: string
@@ -856,57 +963,129 @@ export function createSessionRunner(
       const throughSeq = input.session.seq
       let result: Awaited<ReturnType<typeof runCompaction>> | undefined
       let attempts = 0
-      while (result === undefined) {
+      const compact = async (request: ModelRequest) => {
         const modelStartedAt = Date.now()
         try {
-          result = await runCompaction({
+          const compacted = await runCompaction({
             stream: options.stream,
-            request: buildCompactionRequest({
-              source,
-              target: input.configuration.target,
-              baseInstructions: input.configuration.baseInstructions,
-              cacheKey: input.configuration.promptCacheKey,
-              signal: input.signal,
-            }),
+            request,
           })
-        } catch (error) {
-          if (input.signal.aborted || isAbortError(error)) throw error
-          attempts += 1
-          const reduced = reduceCompactionSourcePrefix(source)
-          if (
-            !isContextOverflowError(error) ||
-            attempts >= MAX_COMPACTION_ATTEMPTS ||
-            reduced.length === source.length
-          ) {
-            throw error
-          }
-          source = reduced
+          if (compacted.usage !== undefined) input.usages.push(compacted.usage)
+          return compacted
         } finally {
           input.telemetry.modelCalls += 1
           input.telemetry.modelDurationMs += Date.now() - modelStartedAt
         }
       }
-      // A checkpoint that is not smaller than the history it replaces buys
-      // nothing. This is not a failure: keep history, skip the error log and
-      // the circuit breaker, and let callers tell the two outcomes apart.
+      while (result === undefined) {
+        const capacity =
+          input.configuration.modelCapacity?.effectiveContextWindowTokens
+        let attemptedTwoPass = false
+        try {
+          const hydratedSource = await resolveCompactionSourceImages(
+            source,
+            input.configuration.target,
+          )
+          const request = buildCompactionRequest({
+            source: hydratedSource,
+            target: input.configuration.target,
+            baseInstructions: input.configuration.baseInstructions,
+            cacheKey: input.configuration.promptCacheKey,
+            signal: input.signal,
+          })
+          const needsTwoPass =
+            capacity !== undefined &&
+            estimateModelRequestBudget(request).requiredContextTokens > capacity
+          if (needsTwoPass) {
+            attemptedTwoPass = true
+            result = await runTwoPassCompaction({
+              source: hydratedSource,
+              target: input.configuration.target,
+              baseInstructions: input.configuration.baseInstructions,
+              cacheKey: input.configuration.promptCacheKey,
+              capacityTokens: capacity,
+              signal: input.signal,
+              compact,
+            })
+            if (result === undefined) {
+              throw new Error(
+                "Compaction source exceeds the model context window and cannot be split at a complete Turn boundary.",
+              )
+            }
+          } else {
+            result = await compact(request)
+          }
+        } catch (error) {
+          if (input.signal.aborted || isAbortError(error)) throw error
+          attempts += 1
+          let failure = error
+          if (isContextOverflowError(failure) && !attemptedTwoPass) {
+            try {
+              const twoPass = await runTwoPassCompaction({
+                source: await resolveCompactionSourceImages(
+                  source,
+                  input.configuration.target,
+                ),
+                target: input.configuration.target,
+                baseInstructions: input.configuration.baseInstructions,
+                cacheKey: input.configuration.promptCacheKey,
+                ...(capacity === undefined ? {} : { capacityTokens: capacity }),
+                signal: input.signal,
+                compact,
+              })
+              if (twoPass !== undefined) {
+                result = twoPass
+                continue
+              }
+            } catch (twoPassError) {
+              if (input.signal.aborted || isAbortError(twoPassError)) {
+                throw twoPassError
+              }
+              failure = twoPassError
+            }
+          }
+          const reduced = reduceCompactionSourcePrefix(source)
+          if (
+            !isContextOverflowError(failure) ||
+            attempts >= MAX_COMPACTION_ATTEMPTS ||
+            reduced.length === source.length
+          ) {
+            throw failure
+          }
+          source = reduced
+        }
+      }
+      // Compare the future model-visible token cost, not durable JSON bytes:
+      // image file references are tiny on disk but expensive after hydration.
       const replacement = createCompactionReplacement(
         input.worldState,
         result.summary,
         source.some((group) => group.kind === "inherited"),
       )
-      const sourceBytes = measureModelMessagesBytes(
-        source.flatMap((group) => group.messages),
+      const sourceMessages = (
+        await resolveCompactionSourceImages(source, input.configuration.target)
+      ).flatMap((group) => group.messages)
+      const replacementMessages = replacement.history.filter(
+        (message) =>
+          !(
+            (message.role === "user" || message.role === "developer") &&
+            message.context?.type === "world_state"
+          ),
       )
-      const replacementBytes = measureModelMessagesBytes(
-        replacement.history.filter(
-          (message) =>
-            !(
-              (message.role === "user" || message.role === "developer") &&
-              message.context?.type === "world_state"
-            ),
-        ),
-      )
-      if (replacementBytes >= sourceBytes) {
+      const comparisonRequest = {
+        target: input.configuration.target,
+        system: [input.configuration.baseInstructions],
+        tools: [],
+      }
+      const sourceTokens = estimateModelRequestBudget({
+        ...comparisonRequest,
+        messages: sourceMessages,
+      }).estimatedInputTokens
+      const replacementTokens = estimateModelRequestBudget({
+        ...comparisonRequest,
+        messages: replacementMessages,
+      }).estimatedInputTokens
+      if (replacementTokens >= sourceTokens) {
         return "not_smaller"
       }
       if (
@@ -931,7 +1110,6 @@ export function createSessionRunner(
         ...(result.usage === undefined ? {} : { usage: result.usage }),
       })
       publishDurable([recorded.event])
-      if (result.usage !== undefined) input.usages.push(result.usage)
       compactionFailures.delete(sessionId)
       return "compacted"
     } catch (error) {
@@ -1299,12 +1477,28 @@ export function createSessionRunner(
             return {
               type: "image" as const,
               mediaType: image.mediaType,
+              detail: image.detail ?? "high",
               data: bytes.toString("base64"),
             }
           }),
         )
         return { ...message, images }
       }),
+    )
+  }
+
+  async function resolveCompactionSourceImages(
+    source: readonly CompactionSourceGroup[],
+    target: ModelRequest["target"],
+  ): Promise<readonly CompactionSourceGroup[]> {
+    return Promise.all(
+      source.map(async (group) => ({
+        ...group,
+        messages: adaptImagesForModel(
+          await resolveSessionFileImages(group.messages, options.sessionFiles),
+          target,
+        ).messages,
+      })),
     )
   }
 
@@ -1870,6 +2064,7 @@ export function createSessionRunner(
           (worker): worker is Promise<void> => worker !== undefined,
         ),
       )
+      usageBaselines.clear()
     },
   }
 }

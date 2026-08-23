@@ -1004,7 +1004,19 @@ function requireImageAttachment(
       `content.attachments[${index}].sizeBytes does not match its data.`,
     )
   }
-  return { name, mediaType, data: value.data, sizeBytes: decoded.length }
+  const detail = value.detail ?? "high"
+  if (detail !== "high" && detail !== "original") {
+    throw invalidInput(
+      `content.attachments[${index}].detail must be high or original.`,
+    )
+  }
+  return {
+    name,
+    mediaType,
+    detail,
+    data: value.data,
+    sizeBytes: decoded.length,
+  }
 }
 
 function optionalStringField(

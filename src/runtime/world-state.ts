@@ -53,7 +53,12 @@ export function buildWorldState(input: {
       modelSection(input.configuration, previousModel(input.session)),
       ...(input.multiAgent === undefined
         ? []
-        : [multiAgentSection(input.multiAgent)]),
+        : [
+            multiAgentSection(
+              input.multiAgent,
+              input.configuration.enabledTools.includes("spawn_agent"),
+            ),
+          ]),
       projectInstructionsSection(input.projectInstructions),
       environmentSection(input.environment),
     ],
@@ -62,6 +67,7 @@ export function buildWorldState(input: {
 
 function multiAgentSection(
   context: AgentRuntimeContext,
+  canSpawnAgent: boolean,
 ): ErasedWorldStateSection {
   const snapshot: JsonObject = {
     path: context.path,
@@ -86,8 +92,9 @@ function multiAgentSection(
         context.agentType === "explore"
           ? "This is an exploration role. Inspect and report; do not modify files or run mutating commands."
           : "Complete the assigned task and report concrete results."
-      const delegation =
-        context.depth >= context.maxDepth
+      const delegation = !canSpawnAgent
+        ? "No descendant-delegation tool is available in this Step."
+        : context.depth >= context.maxDepth
           ? `Delegation depth ${String(context.maxDepth)} has been reached. Do not retry spawn_agent; complete the work yourself.`
           : `You may spawn descendants up to depth ${String(context.maxDepth)} when a bounded task can run independently.`
       return [
@@ -168,7 +175,7 @@ type ProjectInstructionsSnapshot = Readonly<{
 function projectInstructionsSection(
   instructions: ProjectInstructions | undefined,
 ): ErasedWorldStateSection {
-  const text = instructions?.message.content.map((block) => block.text).join("")
+  const text = instructions?.text
   const snapshot: ProjectInstructionsSnapshot = {
     ...(instructions === undefined
       ? {}

@@ -209,7 +209,7 @@ function baseRequest(overrides: Partial<ModelRequest> = {}): ModelRequest {
 }
 
 function target(model: string): ModelRequest["target"] {
-  return { provider: "faux", model, promptId: "default" }
+  return { provider: "faux", model, instructionProfileId: "default" }
 }
 
 async function collect(
