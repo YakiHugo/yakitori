@@ -62,8 +62,11 @@ export type ModelRequest = {
   readonly system: readonly ModelSystemSection[]
   readonly messages: readonly ModelMessage[]
   readonly tools: readonly ModelToolDefinition[]
+  readonly maxOutputTokens?: number
   readonly signal?: AbortSignal
 }
+
+export const DEFAULT_MODEL_MAX_OUTPUT_TOKENS = 8_192
 
 export function flattenModelSystem(
   sections: readonly ModelSystemSection[],

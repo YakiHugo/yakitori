@@ -8,14 +8,15 @@ import type { ReasoningEffort } from "openai/resources/shared"
 import { isJsonObject, isJsonValue, type JsonObject } from "../kernel/index.ts"
 import { isAbortError } from "./errors.ts"
 import {
+  DEFAULT_MODEL_MAX_OUTPUT_TOKENS,
   flattenModelSystem,
-  ModelStopReason,
-  requireModelImageData,
   type ModelContentBlock,
   type ModelMessage,
   type ModelRequest,
   type ModelResponse,
+  ModelStopReason,
   type ModelStreamEvent,
+  requireModelImageData,
   type StreamFn,
 } from "./model.ts"
 
@@ -61,7 +62,8 @@ async function* streamOpenAI(
         input: toOpenAIInput(request.messages),
         tools: toOpenAITools(request.tools),
         parallel_tool_calls: false,
-        max_output_tokens: 8_192,
+        max_output_tokens:
+          request.maxOutputTokens ?? DEFAULT_MODEL_MAX_OUTPUT_TOKENS,
         store: false,
         stream: true,
         ...(request.cacheKey === undefined
@@ -172,7 +174,7 @@ export function toOpenAIInput(
           })),
           ...(message.images ?? []).map((block) => ({
             type: "input_image" as const,
-            detail: "auto" as const,
+            detail: block.detail ?? "high",
             image_url: `data:${block.mediaType};base64,${requireModelImageData(block)}`,
           })),
         ],

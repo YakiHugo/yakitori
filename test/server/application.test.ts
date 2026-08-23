@@ -10,7 +10,6 @@ import type { Server as HttpServer } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
-import { testTurnExecutionContext } from "../kernel/turn-context.ts"
 import { EventType } from "../../src/kernel/events.ts"
 import { InputState } from "../../src/kernel/session-states.ts"
 import { MateLifecycle } from "../../src/mates/events.ts"
@@ -28,6 +27,7 @@ import {
   type ApiHandlerResult,
   type ApiListProvidersResponse,
 } from "../../src/server/protocol.ts"
+import { testTurnExecutionContext } from "../kernel/turn-context.ts"
 
 async function listen(server: HttpServer): Promise<string> {
   await new Promise<void>((resolve) => {
@@ -110,6 +110,7 @@ describe("application composition", () => {
             content: {
               attachments: [
                 {
+                  detail: "high",
                   file: {
                     sessionId,
                     path: "attachments/request_image/1.png",
@@ -142,6 +143,7 @@ describe("application composition", () => {
             {
               type: "image",
               mediaType: "image/png",
+              detail: "high",
               data: Buffer.from("image-bytes").toString("base64"),
             },
           ],
@@ -832,6 +834,8 @@ describe("application composition", () => {
                   displayName: "GPT-5.1 Codex",
                   instructionProfileId: "codex",
                   efforts: ["low", "medium", "high"],
+                  inputModalities: ["text", "image"],
+                  imageDetailModes: ["high", "original"],
                 },
                 {
                   id: "gpt-5",
@@ -880,6 +884,8 @@ describe("application composition", () => {
               displayName: "GPT-5.1 Codex",
               instructionProfileId: "codex",
               efforts: ["low", "medium", "high"],
+              inputModalities: ["text", "image"],
+              imageDetailModes: ["high", "original"],
             },
             {
               id: "gpt-5",

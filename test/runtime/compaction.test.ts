@@ -4,6 +4,7 @@ import {
   COMPACTION_SYSTEM_PROMPT,
   isContextOverflowError,
   runCompaction,
+  runTwoPassCompaction,
 } from "../../src/runtime/compaction.ts"
 import {
   type ModelRequest,
@@ -12,6 +13,7 @@ import {
   type StreamFn,
 } from "../../src/runtime/model.ts"
 import type { DroppedTurn } from "../../src/runtime/model-context.ts"
+import { estimateModelRequestBudget } from "../../src/runtime/model-request-budget.ts"
 
 describe("compaction request", () => {
   it("flattens source groups and appends the checkpoint instruction", () => {
@@ -112,6 +114,96 @@ describe("compaction request", () => {
     if (instruction?.role !== "user") throw new Error("missing instruction")
     expect(request.messages).toContainEqual(checkpoint.messages[0])
     expect(instruction.content[0]?.text).toContain("supersede")
+  })
+})
+
+describe("two-pass compaction", () => {
+  it("chooses the largest complete prefix that fits the model capacity", async () => {
+    const source = ["first", "second", "third"].map((text) => ({
+      messages: [
+        {
+          role: "user" as const,
+          content: [{ type: "text" as const, text: text.repeat(500) }],
+        },
+      ],
+    }))
+    const target = {
+      provider: "faux",
+      model: "scripted",
+      instructionProfileId: "codex" as const,
+    }
+    const baseInstructions = {
+      id: "base.instructions",
+      revision: "base-1",
+      text: "coding agent instructions",
+    }
+    const capacityTokens = estimateModelRequestBudget(
+      buildCompactionRequest({
+        source: source.slice(0, 2),
+        target,
+        baseInstructions,
+      }),
+    ).requiredContextTokens
+    const requests: ModelRequest[] = []
+
+    const result = await runTwoPassCompaction({
+      source,
+      target,
+      baseInstructions,
+      capacityTokens,
+      async compact(request) {
+        requests.push(request)
+        return {
+          summary: requests.length === 1 ? "NOTE_UNIQUE_CONTENT" : "final",
+        }
+      },
+    })
+
+    expect(result?.summary).toBe("final")
+    expect(JSON.stringify(requests[0]?.messages)).toContain("secondsecond")
+    expect(JSON.stringify(requests[0]?.messages)).not.toContain("thirdthird")
+    expect(JSON.stringify(requests[1]?.messages)).toContain(
+      "NOTE_UNIQUE_CONTENT",
+    )
+    expect(JSON.stringify(requests[1]?.messages)).toContain("thirdthird")
+    const finalInstruction = requests[1]?.messages.at(-1)
+    if (finalInstruction?.role !== "user") {
+      throw new Error("missing final two-pass instruction")
+    }
+    expect(finalInstruction.content[0]?.text).toContain(
+      "preceding <intermediate_compaction>",
+    )
+    expect(finalInstruction.content[0]?.text).toContain(
+      "do not omit the earlier prefix",
+    )
+    expect(
+      JSON.stringify(requests[1]?.messages).match(/NOTE_UNIQUE_CONTENT/g),
+    ).toHaveLength(1)
+  })
+
+  it("marks a truncated intermediate checkpoint in the final instruction", async () => {
+    const requests: ModelRequest[] = []
+    await runTwoPassCompaction({
+      source: [sourceTurn(), sourceTurn()],
+      target: {
+        provider: "faux",
+        model: "scripted",
+        instructionProfileId: "codex",
+      },
+      baseInstructions: {
+        id: "base.instructions",
+        revision: "base-1",
+        text: "coding agent instructions",
+      },
+      async compact(request) {
+        requests.push(request)
+        return { summary: requests.length === 1 ? "x".repeat(13_000) : "final" }
+      },
+    })
+
+    expect(JSON.stringify(requests[1]?.messages)).toContain(
+      "NOTE_1 truncated at the intermediate checkpoint limit",
+    )
   })
 })
 

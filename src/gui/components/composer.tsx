@@ -5,7 +5,12 @@ import {
   appendImageFiles,
   imageAttachmentUrl,
 } from "../composer-attachments.ts"
-import { useAppStore, useExecutionView } from "../store/app-store.ts"
+import {
+  normalizeKimiModelSelection,
+  resolveEffectiveModel,
+  useAppStore,
+  useExecutionView,
+} from "../store/app-store.ts"
 import { ModelSelector } from "./model-selector.tsx"
 import { Button } from "./ui/button.tsx"
 
@@ -15,8 +20,17 @@ export function Composer() {
   const busy = useAppStore((state) => state.busy)
   const focusRevision = useAppStore((state) => state.composerFocusRevision)
   const modelSelectionReady = useAppStore((state) => state.modelSelectionReady)
+  const providers = useAppStore((state) => state.providers)
+  const defaultProvider = useAppStore((state) => state.defaultProvider)
+  const defaultModel = useAppStore((state) => state.defaultModel)
+  const userPreference = useAppStore((state) => state.userPreference)
   const inFlightActions = useAppStore((state) => state.inFlightActions)
   const sessionId = useAppStore((state) => state.selection.sessionId)
+  const sessionCurrent = useAppStore((state) =>
+    state.selection.sessionId === undefined
+      ? undefined
+      : state.modelSelections[state.selection.sessionId],
+  )
   const setPromptDraft = useAppStore((state) => state.setPromptDraft)
   const setPromptAttachments = useAppStore(
     (state) => state.setPromptAttachments,
@@ -27,6 +41,26 @@ export function Composer() {
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [attachmentError, setAttachmentError] = useState<string>()
   const [readingImages, setReadingImages] = useState(false)
+
+  const effectiveModel = normalizeKimiModelSelection(
+    resolveEffectiveModel({
+      sessionCurrent,
+      userPreference,
+      defaultProvider,
+      defaultModel,
+    }),
+  )
+  const modelEntry = providers
+    .find((provider) => provider.name === effectiveModel?.provider)
+    ?.models.find((model) => model.id === effectiveModel?.model)
+  const supportsImages =
+    modelEntry === undefined
+      ? true
+      : (modelEntry.inputModalities?.includes("image") ?? false)
+  const supportsOriginal =
+    modelEntry === undefined
+      ? true
+      : (modelEntry.imageDetailModes?.includes("original") ?? false)
 
   useLayoutEffect(() => {
     const textarea = textareaRef.current
@@ -74,7 +108,16 @@ export function Composer() {
   const submit = () => {
     if (!canSend) return
     if (attachments.length === 0) void admitInput(text)
-    else void admitInput(text, attachments)
+    else
+      void admitInput(
+        text,
+        supportsOriginal
+          ? attachments
+          : attachments.map((attachment) => ({
+              ...attachment,
+              detail: "high" as const,
+            })),
+      )
   }
 
   return (
@@ -121,12 +164,52 @@ export function Composer() {
                   >
                     <X className="size-3" />
                   </button>
+                  <button
+                    type="button"
+                    aria-label={
+                      supportsOriginal
+                        ? `Use ${attachment.detail === "original" ? "high" : "original"} detail for ${attachment.name}`
+                        : `Original detail unavailable for ${attachment.name}`
+                    }
+                    disabled={!supportsOriginal}
+                    onClick={() =>
+                      setPromptAttachments(
+                        attachments.map((candidate, candidateIndex) =>
+                          candidateIndex === index
+                            ? {
+                                ...candidate,
+                                detail:
+                                  candidate.detail === "original"
+                                    ? "high"
+                                    : "original",
+                              }
+                            : candidate,
+                        ),
+                      )
+                    }
+                    className="absolute top-1 left-1 rounded bg-black/65 px-1 py-0.5 text-[9px] font-medium text-white transition-colors hover:bg-black focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white disabled:cursor-not-allowed disabled:opacity-70"
+                  >
+                    {supportsOriginal && attachment.detail === "original"
+                      ? "Original"
+                      : "High"}
+                  </button>
                   <span className="absolute right-1 bottom-1 left-1 truncate rounded bg-black/55 px-1 py-0.5 text-[9px] text-white opacity-0 transition-opacity group-hover/image:opacity-100">
                     {attachment.name}
                   </span>
                 </div>
               ))}
             </div>
+          ) : null}
+          {attachments.length > 0 && !supportsImages ? (
+            <p className="px-3 pt-2 text-xs text-amber-700 dark:text-amber-300">
+              The selected model does not support images. Attachments will be
+              omitted and the model will receive a notice.
+            </p>
+          ) : attachments.length > 0 && !supportsOriginal ? (
+            <p className="px-3 pt-2 text-xs text-muted-foreground">
+              Original detail is unavailable for the selected model. Images will
+              use High detail.
+            </p>
           ) : null}
 
           <textarea

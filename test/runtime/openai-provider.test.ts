@@ -94,8 +94,38 @@ describe("OpenAI Responses provider", () => {
           { type: "input_text", text: "Inspect this" },
           {
             type: "input_image",
-            detail: "auto",
+            detail: "high",
             image_url: "data:image/webp;base64,aGVsbG8=",
+          },
+        ],
+      },
+    ])
+  })
+
+  it("preserves original image detail on the wire", () => {
+    const input = toOpenAIInput([
+      {
+        role: "user",
+        content: [],
+        images: [
+          {
+            type: "image",
+            mediaType: "image/png",
+            detail: "original",
+            data: "aGVsbG8=",
+          },
+        ],
+      },
+    ])
+
+    expect(input).toEqual([
+      {
+        role: "user",
+        content: [
+          {
+            type: "input_image",
+            detail: "original",
+            image_url: "data:image/png;base64,aGVsbG8=",
           },
         ],
       },

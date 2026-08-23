@@ -4,29 +4,36 @@
     {
       "provider": "openai",
       "model": "gpt-5.1-codex",
-      "instructionProfileId": "codex"
+      "instructionProfileId": "codex",
+      "inputModalities": ["text", "image"],
+      "imageDetailModes": ["high"]
     },
     {
       "provider": "openai",
       "model": "gpt-5",
-      "instructionProfileId": "codex"
+      "instructionProfileId": "codex",
+      "inputModalities": ["text", "image"],
+      "imageDetailModes": ["high"]
     },
     {
       "provider": "anthropic",
       "model": "claude-sonnet-4-6",
       "instructionProfileId": "anthropic",
+      "inputModalities": ["text", "image"],
       "contextWindowTokens": 200000
     },
     {
       "provider": "anthropic",
       "model": "claude-opus-4-6",
       "instructionProfileId": "anthropic",
+      "inputModalities": ["text", "image"],
       "contextWindowTokens": 200000
     },
     {
       "provider": "anthropic",
       "model": "claude-haiku-4-5",
       "instructionProfileId": "anthropic",
+      "inputModalities": ["text", "image"],
       "contextWindowTokens": 200000
     },
     {
@@ -34,6 +41,7 @@
       "model": "kimi-for-coding",
       "instructionProfileId": "kimi",
       "displayName": "K2.7 Coding",
+      "inputModalities": ["text", "image", "video"],
       "contextWindowTokens": 262144
     },
     {
@@ -41,6 +49,7 @@
       "model": "kimi-for-coding-highspeed",
       "instructionProfileId": "kimi",
       "displayName": "K2.7 Coding Highspeed",
+      "inputModalities": ["text", "image", "video"],
       "contextWindowTokens": 262144
     },
     {
@@ -48,11 +57,8 @@
       "model": "k3",
       "instructionProfileId": "kimi",
       "displayName": "K3",
-      "efforts": [
-        "low",
-        "high",
-        "max"
-      ],
+      "inputModalities": ["text", "image", "video"],
+      "efforts": ["low", "high", "max"],
       "contextWindowTokens": 1048576
     },
     {
@@ -60,11 +66,8 @@
       "model": "k3-256k",
       "instructionProfileId": "kimi",
       "displayName": "K3-256k",
-      "efforts": [
-        "low",
-        "high",
-        "max"
-      ],
+      "inputModalities": ["text", "image"],
+      "efforts": ["low", "high", "max"],
       "contextWindowTokens": 262144
     },
     {
@@ -72,18 +75,10 @@
       "model": "gpt-5.6-sol",
       "instructionProfileId": "codex",
       "displayName": "GPT-5.6-Sol",
-      "efforts": [
-        "low",
-        "medium",
-        "high",
-        "xhigh",
-        "max",
-        "ultra"
-      ],
-      "speeds": [
-        "standard",
-        "fast"
-      ],
+      "inputModalities": ["text", "image"],
+      "imageDetailModes": ["high", "original"],
+      "efforts": ["low", "medium", "high", "xhigh", "max", "ultra"],
+      "speeds": ["standard", "fast"],
       "contextWindowTokens": 272000,
       "maxContextWindowTokens": 872000,
       "effectiveContextWindowPercent": 95
@@ -93,18 +88,10 @@
       "model": "gpt-5.6-terra",
       "instructionProfileId": "codex",
       "displayName": "GPT-5.6-Terra",
-      "efforts": [
-        "low",
-        "medium",
-        "high",
-        "xhigh",
-        "max",
-        "ultra"
-      ],
-      "speeds": [
-        "standard",
-        "fast"
-      ],
+      "inputModalities": ["text", "image"],
+      "imageDetailModes": ["high", "original"],
+      "efforts": ["low", "medium", "high", "xhigh", "max", "ultra"],
+      "speeds": ["standard", "fast"],
       "contextWindowTokens": 272000,
       "maxContextWindowTokens": 872000,
       "effectiveContextWindowPercent": 95
@@ -114,17 +101,10 @@
       "model": "gpt-5.6-luna",
       "instructionProfileId": "codex",
       "displayName": "GPT-5.6-Luna",
-      "efforts": [
-        "low",
-        "medium",
-        "high",
-        "xhigh",
-        "max"
-      ],
-      "speeds": [
-        "standard",
-        "fast"
-      ],
+      "inputModalities": ["text", "image"],
+      "imageDetailModes": ["high", "original"],
+      "efforts": ["low", "medium", "high", "xhigh", "max"],
+      "speeds": ["standard", "fast"],
       "contextWindowTokens": 272000,
       "maxContextWindowTokens": 872000,
       "effectiveContextWindowPercent": 95
@@ -134,16 +114,10 @@
       "model": "gpt-5.5",
       "instructionProfileId": "codex",
       "displayName": "GPT-5.5",
-      "efforts": [
-        "low",
-        "medium",
-        "high",
-        "xhigh"
-      ],
-      "speeds": [
-        "standard",
-        "fast"
-      ],
+      "inputModalities": ["text", "image"],
+      "imageDetailModes": ["high", "original"],
+      "efforts": ["low", "medium", "high", "xhigh"],
+      "speeds": ["standard", "fast"],
       "contextWindowTokens": 272000,
       "maxContextWindowTokens": 272000,
       "effectiveContextWindowPercent": 95
@@ -153,16 +127,10 @@
       "model": "gpt-5.4",
       "instructionProfileId": "codex",
       "displayName": "GPT-5.4",
-      "efforts": [
-        "low",
-        "medium",
-        "high",
-        "xhigh"
-      ],
-      "speeds": [
-        "standard",
-        "fast"
-      ],
+      "inputModalities": ["text", "image"],
+      "imageDetailModes": ["high", "original"],
+      "efforts": ["low", "medium", "high", "xhigh"],
+      "speeds": ["standard", "fast"],
       "contextWindowTokens": 272000,
       "maxContextWindowTokens": 1000000,
       "effectiveContextWindowPercent": 95
@@ -172,12 +140,9 @@
       "model": "gpt-5.4-mini",
       "instructionProfileId": "codex",
       "displayName": "GPT-5.4-Mini",
-      "efforts": [
-        "low",
-        "medium",
-        "high",
-        "xhigh"
-      ],
+      "inputModalities": ["text", "image"],
+      "imageDetailModes": ["high", "original"],
+      "efforts": ["low", "medium", "high", "xhigh"],
       "contextWindowTokens": 272000,
       "maxContextWindowTokens": 272000,
       "effectiveContextWindowPercent": 95
@@ -187,12 +152,7 @@
       "model": "gpt-5.3-codex-spark",
       "instructionProfileId": "codex",
       "displayName": "GPT-5.3-Codex-Spark",
-      "efforts": [
-        "low",
-        "medium",
-        "high",
-        "xhigh"
-      ],
+      "efforts": ["low", "medium", "high", "xhigh"],
       "contextWindowTokens": 128000,
       "maxContextWindowTokens": 128000,
       "effectiveContextWindowPercent": 95
@@ -202,12 +162,9 @@
       "model": "grok-4.6",
       "instructionProfileId": "grok",
       "displayName": "Grok 4.6",
-      "efforts": [
-        "low",
-        "medium",
-        "high",
-        "xhigh"
-      ],
+      "inputModalities": ["text", "image"],
+      "imageDetailModes": ["high"],
+      "efforts": ["low", "medium", "high", "xhigh"],
       "contextWindowTokens": 500000
     },
     {
@@ -215,17 +172,17 @@
       "model": "grok-4.5",
       "instructionProfileId": "grok",
       "displayName": "Grok 4.5",
-      "efforts": [
-        "low",
-        "medium",
-        "high"
-      ],
+      "inputModalities": ["text", "image"],
+      "imageDetailModes": ["high"],
+      "efforts": ["low", "medium", "high"],
       "contextWindowTokens": 500000
     },
     {
       "provider": "faux",
       "model": "scripted",
-      "instructionProfileId": "default"
+      "instructionProfileId": "default",
+      "inputModalities": ["text", "image"],
+      "imageDetailModes": ["high", "original"]
     }
   ]
 }

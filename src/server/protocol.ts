@@ -104,6 +104,8 @@ export type ApiProviderModel = {
   readonly instructionProfileId: string
   readonly efforts?: readonly string[]
   readonly speeds?: readonly string[]
+  readonly inputModalities?: readonly ("image" | "text" | "video")[]
+  readonly imageDetailModes?: readonly ("high" | "original")[]
 }
 
 export type ApiProviderSummary = {

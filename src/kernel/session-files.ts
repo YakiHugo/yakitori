@@ -1,20 +1,20 @@
-import { constants } from "node:fs"
 import { createHash, randomUUID } from "node:crypto"
+import { constants } from "node:fs"
 import {
+  type FileHandle,
   link,
   mkdir,
   open,
   readFile,
   rm,
-  type FileHandle,
 } from "node:fs/promises"
 import { dirname, join, posix, resolve, sep } from "node:path"
+import { assertEventStoreSessionId } from "./event-store.ts"
 import type {
   ImageAttachment,
   InlineImageAttachment,
   SessionFileReference,
 } from "./events.ts"
-import { assertEventStoreSessionId } from "./event-store.ts"
 
 export type PreparedCommandFiles = {
   readonly stdout: {
@@ -101,6 +101,9 @@ export function createSessionFiles(sessionsDir: string): SessionFiles {
             name: attachment.name,
             mediaType: attachment.mediaType,
             sizeBytes: attachment.sizeBytes,
+            ...(attachment.detail === undefined
+              ? {}
+              : { detail: attachment.detail }),
             file: reference,
           }
         }),

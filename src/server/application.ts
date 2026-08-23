@@ -340,6 +340,12 @@ async function providerSummary(
       instructionProfileId: entry.instructionProfileId as string,
       ...(entry.efforts === undefined ? {} : { efforts: entry.efforts }),
       ...(entry.speeds === undefined ? {} : { speeds: entry.speeds }),
+      ...(entry.inputModalities === undefined
+        ? {}
+        : { inputModalities: entry.inputModalities }),
+      ...(entry.imageDetailModes === undefined
+        ? {}
+        : { imageDetailModes: entry.imageDetailModes }),
     }),
   )
   if (configuredModel === undefined) return { name, models }

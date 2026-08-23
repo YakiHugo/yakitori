@@ -10,8 +10,16 @@ describe("model directory", () => {
         id: "gpt-5.1-codex",
         displayName: "gpt-5.1-codex",
         instructionProfileId: "codex",
+        inputModalities: ["text", "image"],
+        imageDetailModes: ["high"],
       },
-      { id: "gpt-5", displayName: "gpt-5", instructionProfileId: "codex" },
+      {
+        id: "gpt-5",
+        displayName: "gpt-5",
+        instructionProfileId: "codex",
+        inputModalities: ["text", "image"],
+        imageDetailModes: ["high"],
+      },
     ])
   })
 
@@ -24,12 +32,16 @@ describe("model directory", () => {
         displayName: "Grok 4.6",
         instructionProfileId: "grok",
         efforts: ["low", "medium", "high", "xhigh"],
+        inputModalities: ["text", "image"],
+        imageDetailModes: ["high"],
       },
       {
         id: "grok-4.5",
         displayName: "Grok 4.5",
         instructionProfileId: "grok",
         efforts: ["low", "medium", "high"],
+        inputModalities: ["text", "image"],
+        imageDetailModes: ["high"],
       },
     ])
   })
@@ -53,12 +65,16 @@ describe("model directory", () => {
       instructionProfileId: "codex",
       efforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
       speeds: ["standard", "fast"],
+      inputModalities: ["text", "image"],
+      imageDetailModes: ["high", "original"],
     })
     expect(models.at(-1)).toEqual({
       id: "gpt-5.3-codex-spark",
       displayName: "GPT-5.3-Codex-Spark",
       instructionProfileId: "codex",
       efforts: ["low", "medium", "high", "xhigh"],
+      inputModalities: ["text"],
+      imageDetailModes: [],
     })
   })
 

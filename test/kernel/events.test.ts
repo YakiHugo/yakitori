@@ -146,6 +146,7 @@ describe("kernel facts", () => {
       event({
         name: "screen.png",
         mediaType: "image/png",
+        detail: "original",
         sizeBytes: 5,
         file: {
           sessionId: "session_00000000-0000-4000-8000-000000000000",
@@ -153,6 +154,18 @@ describe("kernel facts", () => {
         },
       }),
     ).toBe(true)
+    expect(
+      event({
+        name: "screen.png",
+        mediaType: "image/png",
+        detail: "auto",
+        sizeBytes: 5,
+        file: {
+          sessionId: "session_00000000-0000-4000-8000-000000000000",
+          path: "attachments/request-1/1.png",
+        },
+      }),
+    ).toBe(false)
     expect(
       event({
         name: "inline.png",

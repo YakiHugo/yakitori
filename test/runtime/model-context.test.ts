@@ -339,7 +339,7 @@ describe("model context", () => {
     )
   })
 
-  it("replaces images with semantic markers in compaction sources", async () => {
+  it("preserves image references in compaction sources", async () => {
     const source = await withAttributedSession(
       async ({ kernel, sessionId }) => {
         const admitted = await kernel.admitInput({
@@ -384,10 +384,18 @@ describe("model context", () => {
     const first = source[0]?.messages[0]
     expect(first?.role).toBe("user")
     if (first?.role !== "user") throw new Error("missing user message")
-    expect(first.images).toBeUndefined()
-    expect(first.content.at(-1)?.text).toContain(
-      "image/png image omitted from compaction input; 3072 encoded bytes",
-    )
+    expect(first.images).toEqual([
+      {
+        type: "image",
+        mediaType: "image/png",
+        detail: "high",
+        sizeBytes: 3_072,
+        file: {
+          sessionId: expect.any(String),
+          path: "attachments/request_image/1.png",
+        },
+      },
+    ])
   })
 
   it("synthesizes a view-only error for a completed Turn with an open tool", async () => {

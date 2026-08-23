@@ -1,6 +1,6 @@
 import {
-  listCatalogModels,
   type InstructionProfileId,
+  listCatalogModels,
 } from "../runtime/index.ts"
 
 export type DirectoryModel = {
@@ -9,6 +9,8 @@ export type DirectoryModel = {
   readonly instructionProfileId: InstructionProfileId
   readonly efforts?: readonly string[]
   readonly speeds?: readonly string[]
+  readonly inputModalities?: readonly ("image" | "text" | "video")[]
+  readonly imageDetailModes?: readonly ("high" | "original")[]
 }
 
 export type ModelDirectory = {
@@ -24,6 +26,8 @@ export function createModelDirectory(): ModelDirectory {
         instructionProfileId: entry.instructionProfileId,
         ...(entry.efforts === undefined ? {} : { efforts: entry.efforts }),
         ...(entry.speeds === undefined ? {} : { speeds: entry.speeds }),
+        inputModalities: entry.inputModalities,
+        imageDetailModes: entry.imageDetailModes,
       }))
     },
   }

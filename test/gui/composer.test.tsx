@@ -105,7 +105,7 @@ describe("composer", () => {
     expect(button).toHaveProperty("disabled", true)
   })
 
-  it("attaches and sends an image without requiring text", async () => {
+  it("attaches an image, selects original detail, and sends without text", async () => {
     const user = userEvent.setup()
     const admitInput = vi.fn(() => Promise.resolve())
     useAppStore.setState({
@@ -126,15 +126,67 @@ describe("composer", () => {
     await waitFor(() => {
       expect(useAppStore.getState().promptAttachments).toHaveLength(1)
     })
+    await user.click(
+      screen.getByRole("button", {
+        name: "Use original detail for screenshot.png",
+      }),
+    )
     await user.click(screen.getByRole("button", { name: "Send" }))
 
     expect(admitInput).toHaveBeenCalledWith("", [
       {
         name: "screenshot.png",
         mediaType: "image/png",
+        detail: "original",
         data: "AQID",
         sizeBytes: 3,
       },
+    ])
+  })
+
+  it("explains and normalizes original detail for a model without that mode", async () => {
+    const user = userEvent.setup()
+    const admitInput = vi.fn(() => Promise.resolve())
+    useAppStore.setState({
+      admitInput,
+      selection: { revision: 1, sessionId: "session_1" },
+      defaultProvider: "kimi",
+      defaultModel: "k3",
+      providers: [
+        {
+          name: "kimi",
+          models: [
+            {
+              id: "k3",
+              instructionProfileId: "kimi",
+              inputModalities: ["text", "image"],
+              imageDetailModes: [],
+            },
+          ],
+        },
+      ],
+      promptAttachments: [
+        {
+          name: "screenshot.png",
+          mediaType: "image/png",
+          detail: "original",
+          data: "AQID",
+          sizeBytes: 3,
+        },
+      ],
+    })
+    render(<Composer />)
+
+    expect(screen.getByText(/Original detail is unavailable/)).toBeDefined()
+    expect(
+      screen.getByRole("button", {
+        name: "Original detail unavailable for screenshot.png",
+      }),
+    ).toHaveProperty("disabled", true)
+    await user.click(screen.getByRole("button", { name: "Send" }))
+
+    expect(admitInput).toHaveBeenCalledWith("", [
+      expect.objectContaining({ detail: "high" }),
     ])
   })
 })

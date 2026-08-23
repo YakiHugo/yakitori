@@ -19,7 +19,17 @@ export type CatalogModel = {
   readonly displayName?: string
   readonly efforts?: readonly string[]
   readonly speeds?: readonly string[]
+  readonly inputModalities: readonly ModelInputModality[]
+  readonly imageDetailModes: readonly ModelImageDetailMode[]
 }
+
+export type ModelInputModality = "image" | "text" | "video"
+export type ModelImageDetailMode = "high" | "original"
+
+export type ModelCapabilities = Readonly<{
+  inputModalities: readonly ModelInputModality[]
+  imageDetailModes: readonly ModelImageDetailMode[]
+}>
 
 export type ModelCapacity = Readonly<{
   contextWindowTokens: number
@@ -45,7 +55,20 @@ export function listCatalogModels(provider: string): CatalogModel[] {
       ...("speeds" in entry && entry.speeds !== undefined
         ? { speeds: entry.speeds }
         : {}),
+      inputModalities: requireInputModalities(entry.inputModalities),
+      imageDetailModes: requireImageDetailModes(entry.imageDetailModes),
     }))
+}
+
+export function catalogModelCapabilities(input: {
+  readonly provider: string
+  readonly model: string
+}): ModelCapabilities {
+  const entry = findCatalogEntry(input)
+  return {
+    inputModalities: requireInputModalities(entry?.inputModalities),
+    imageDetailModes: requireImageDetailModes(entry?.imageDetailModes),
+  }
 }
 
 export function resolveModel(input: {
@@ -159,4 +182,42 @@ export function requireInstructionProfileId(
     return value
   }
   throw new Error(`Unknown instruction profile ID in model catalog: ${value}`)
+}
+
+function findCatalogEntry(input: {
+  readonly provider: string
+  readonly model: string
+}) {
+  const provider = input.provider.toLowerCase()
+  const model = input.model.toLowerCase()
+  return catalog.models.find(
+    (candidate) =>
+      candidate.provider.toLowerCase() === provider &&
+      candidate.model.toLowerCase() === model,
+  )
+}
+
+function requireInputModalities(
+  values: readonly string[] | undefined,
+): readonly ModelInputModality[] {
+  const modalities = values ?? ["text"]
+  if (
+    modalities.length === 0 ||
+    modalities.some(
+      (value) => value !== "image" && value !== "text" && value !== "video",
+    )
+  ) {
+    throw new Error("Model catalog contains invalid input modalities.")
+  }
+  return modalities as readonly ModelInputModality[]
+}
+
+function requireImageDetailModes(
+  values: readonly string[] | undefined,
+): readonly ModelImageDetailMode[] {
+  const modes = values ?? []
+  if (modes.some((value) => value !== "high" && value !== "original")) {
+    throw new Error("Model catalog contains invalid image detail modes.")
+  }
+  return modes as readonly ModelImageDetailMode[]
 }
