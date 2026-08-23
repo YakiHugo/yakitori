@@ -1,14 +1,15 @@
 import { describe, expect, it } from "vitest"
+import { parseStoredEventEnvelope } from "../../src/kernel/event-store.ts"
 import {
-  applySessionFacts,
   createEventEnvelope,
   EventType,
   InputRole,
+} from "../../src/kernel/events.ts"
+import {
+  applySessionFacts,
   projectSession,
-  ToolState,
-  TurnState,
-} from "../../src/index.ts"
-import { parseStoredEventEnvelope } from "../../src/kernel/event-store.ts"
+} from "../../src/kernel/session-projector.ts"
+import { ToolState, TurnState } from "../../src/kernel/session-states.ts"
 
 describe("session fact projection", () => {
   it("returns no projection without a session.created fact", () => {

@@ -1,14 +1,13 @@
 import { describe, expect, it } from "vitest"
+import { ItemKind, ItemStatus } from "../../src/kernel/events.ts"
+import { createSessionKernel } from "../../src/kernel/session-kernel.ts"
+import { createMateKernel } from "../../src/mates/mate-kernel.ts"
 import {
-  boundCommandContent,
   buildModelContext,
   collectUncoveredTurns,
   createForkedModelContext,
-  createMateKernel,
-  createSessionKernel,
-  ItemKind,
-  ItemStatus,
-} from "../../src/index.ts"
+} from "../../src/runtime/model-context.ts"
+import { boundCommandContent } from "../../src/runtime/tools/run-command.ts"
 import { createMemoryEventStore } from "../kernel/memory-event-store.ts"
 import { createMemoryMateStore } from "../mates/memory-mate-store.ts"
 

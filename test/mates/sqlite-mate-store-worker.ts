@@ -1,10 +1,8 @@
 import { parentPort, workerData } from "node:worker_threads"
-import {
-  createMateRevisionId,
-  createSqliteMateStore,
-  isYakitoriError,
-  MateEventType,
-} from "../../src/index.ts"
+import { isYakitoriError } from "../../src/kernel/errors.ts"
+import { MateEventType } from "../../src/mates/events.ts"
+import { createMateRevisionId } from "../../src/mates/ids.ts"
+import { createSqliteMateStore } from "../../src/mates/sqlite-mate-store.ts"
 
 type WorkerInput = {
   readonly databasePath: string

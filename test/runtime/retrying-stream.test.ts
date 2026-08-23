@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest"
 import {
-  ModelStopReason,
   type ModelRequest,
+  ModelStopReason,
   type ModelStreamEvent,
   type StreamFn,
-} from "../../src/index.ts"
+} from "../../src/runtime/model.ts"
 import { withRetries } from "../../src/runtime/retrying-stream.ts"
 
 describe("withRetries", () => {

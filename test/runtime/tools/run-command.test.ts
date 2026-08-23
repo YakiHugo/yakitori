@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs"
 import {
   access,
   mkdir,
@@ -6,19 +7,18 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises"
-import { existsSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
+import { createSessionId } from "../../../src/kernel/ids.ts"
+import { createSessionFiles } from "../../../src/kernel/session-files.ts"
+import { createReadSessionFileTool } from "../../../src/runtime/tools/read-session-file.ts"
 import {
   boundCommandContent,
-  createReadSessionFileTool,
   createRunCommandTool,
-  createSessionFiles,
-  createSessionId,
-  createUserShellEnv,
   type RunCommandLauncher,
-} from "../../../src/index.ts"
+} from "../../../src/runtime/tools/run-command.ts"
+import { createUserShellEnv } from "../../../src/runtime/user-shell-env.ts"
 
 const workspaces: string[] = []
 

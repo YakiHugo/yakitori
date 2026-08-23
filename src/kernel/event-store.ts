@@ -4,14 +4,13 @@ import {
   type EventEnvelope,
   type EventMetadata,
   EventType,
-  type ForkReason,
   isJsonObject,
   isKernelEvent,
   type KernelEvent,
   type SessionCreatedEvent,
   type StoredEventEnvelope,
 } from "./events.ts"
-import type { SessionProjection } from "./session-projector.ts"
+import type { SessionProjection, SessionSummary } from "./session-projector.ts"
 
 export type EventStore = {
   createSession(
@@ -89,24 +88,8 @@ export type EventStoreListSessionsInput = {
 }
 
 export type EventStoreListSessionsResult = {
-  readonly sessions: readonly EventStoreSessionSummary[]
+  readonly sessions: readonly SessionSummary[]
   readonly nextCursor?: string
-}
-
-export type EventStoreSessionSummary = {
-  readonly sessionId: string
-  readonly conversationId: string
-  readonly seq: number
-  readonly createdAt: string
-  readonly updatedAt: string
-  readonly title?: string
-  readonly workingDirectory?: string
-  readonly mateId?: string
-  readonly mateRevisionId?: string
-  readonly parentSessionId?: string
-  readonly forkedFromInputId?: string
-  readonly forkReason?: ForkReason
-  readonly metadata?: EventMetadata
 }
 
 export function requireAdmissionFingerprint(
@@ -177,40 +160,8 @@ export function appendForkCutTurnClosures(
   }
 }
 
-export function summarizeSessionProjection(
-  projection: SessionProjection,
-): EventStoreSessionSummary {
-  return {
-    sessionId: projection.id,
-    conversationId: projection.conversationId,
-    seq: projection.seq,
-    createdAt: projection.createdAt,
-    updatedAt: projection.updatedAt,
-    ...(projection.title === undefined ? {} : { title: projection.title }),
-    ...(projection.workingDirectory === undefined
-      ? {}
-      : { workingDirectory: projection.workingDirectory }),
-    ...(projection.mateId === undefined ? {} : { mateId: projection.mateId }),
-    ...(projection.mateRevisionId === undefined
-      ? {}
-      : { mateRevisionId: projection.mateRevisionId }),
-    ...(projection.parentSessionId === undefined
-      ? {}
-      : { parentSessionId: projection.parentSessionId }),
-    ...(projection.forkedFromInputId === undefined
-      ? {}
-      : { forkedFromInputId: projection.forkedFromInputId }),
-    ...(projection.forkReason === undefined
-      ? {}
-      : { forkReason: projection.forkReason }),
-    ...(projection.metadata === undefined
-      ? {}
-      : { metadata: projection.metadata }),
-  }
-}
-
 export function paginateSessionSummaries(
-  summaries: readonly EventStoreSessionSummary[],
+  summaries: readonly SessionSummary[],
   input: EventStoreListSessionsInput = {},
 ): EventStoreListSessionsResult {
   const limit = input.limit ?? 50
@@ -259,9 +210,9 @@ export function paginateSessionSummaries(
 }
 
 export function collapseSessionConversations(
-  summaries: readonly EventStoreSessionSummary[],
-): EventStoreSessionSummary[] {
-  const groups = new Map<string, EventStoreSessionSummary[]>()
+  summaries: readonly SessionSummary[],
+): SessionSummary[] {
+  const groups = new Map<string, SessionSummary[]>()
   for (const summary of summaries) {
     const group = groups.get(summary.conversationId)
     if (group === undefined) groups.set(summary.conversationId, [summary])
@@ -340,7 +291,7 @@ export function assertEventStoreSessionId(sessionId: string): void {
 }
 
 function sessionSummaryCursor(
-  summary: EventStoreSessionSummary,
+  summary: SessionSummary,
   order: "recent" | "created",
 ): string {
   return `${order}\t${order === "created" ? summary.createdAt : summary.updatedAt}\t${summary.sessionId}`

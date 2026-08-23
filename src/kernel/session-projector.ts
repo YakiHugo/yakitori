@@ -1,18 +1,18 @@
 import {
+  type ContextWindowReplacement,
   type EventEnvelope,
   type EventMetadata,
   EventType,
   type ForkReason,
   type InputRole,
   type ItemContent,
-  type ContextWindowReplacement,
   ItemKind,
   type ItemKind as ItemKindType,
   ItemStatus,
   type ItemStatus as ItemStatusType,
   isKernelEvent,
-  type JsonValue,
   type JsonObject,
+  type JsonValue,
   type KernelError,
   type ModelMessage,
   type ModelSelection,
@@ -22,8 +22,8 @@ import {
   type StoredEventEnvelope,
   type TextContent,
   type TokenUsage,
-  type TurnMetrics,
   type TurnExecutionContext,
+  type TurnMetrics,
   type WorldStateFragment,
 } from "./events.ts"
 import {
@@ -70,6 +70,54 @@ export type SessionProjection = {
   readonly permissions: readonly PermissionProjection[]
   readonly tools: readonly ToolProjection[]
   readonly turns: readonly TurnProjection[]
+}
+
+export type SessionSummary = {
+  readonly sessionId: string
+  readonly conversationId: string
+  readonly seq: number
+  readonly createdAt: string
+  readonly updatedAt: string
+  readonly title?: string
+  readonly workingDirectory?: string
+  readonly mateId?: string
+  readonly mateRevisionId?: string
+  readonly parentSessionId?: string
+  readonly forkedFromInputId?: string
+  readonly forkReason?: ForkReason
+  readonly metadata?: EventMetadata
+}
+
+export function summarizeSessionProjection(
+  projection: SessionProjection,
+): SessionSummary {
+  return {
+    sessionId: projection.id,
+    conversationId: projection.conversationId,
+    seq: projection.seq,
+    createdAt: projection.createdAt,
+    updatedAt: projection.updatedAt,
+    ...(projection.title === undefined ? {} : { title: projection.title }),
+    ...(projection.workingDirectory === undefined
+      ? {}
+      : { workingDirectory: projection.workingDirectory }),
+    ...(projection.mateId === undefined ? {} : { mateId: projection.mateId }),
+    ...(projection.mateRevisionId === undefined
+      ? {}
+      : { mateRevisionId: projection.mateRevisionId }),
+    ...(projection.parentSessionId === undefined
+      ? {}
+      : { parentSessionId: projection.parentSessionId }),
+    ...(projection.forkedFromInputId === undefined
+      ? {}
+      : { forkedFromInputId: projection.forkedFromInputId }),
+    ...(projection.forkReason === undefined
+      ? {}
+      : { forkReason: projection.forkReason }),
+    ...(projection.metadata === undefined
+      ? {}
+      : { metadata: projection.metadata }),
+  }
 }
 
 // The latest checkpoint replaces the previous one; coverage is cumulative by

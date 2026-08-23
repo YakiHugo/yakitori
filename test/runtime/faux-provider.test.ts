@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest"
+import { createFauxProvider } from "../../src/runtime/faux-provider.ts"
 import {
-  createFauxProvider,
-  ModelStopReason,
   type ModelRequest,
+  ModelStopReason,
   type ModelStreamEvent,
-} from "../../src/index.ts"
+} from "../../src/runtime/model.ts"
 
 describe("faux provider", () => {
   it("emits scripted snapshots then a terminal response in order", async () => {

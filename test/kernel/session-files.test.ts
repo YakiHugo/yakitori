@@ -2,12 +2,10 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
-import {
-  createJsonlEventStore,
-  createSessionFiles,
-  createSessionId,
-  EventType,
-} from "../../src/index.ts"
+import { EventType } from "../../src/kernel/events.ts"
+import { createSessionId } from "../../src/kernel/ids.ts"
+import { createJsonlEventStore } from "../../src/kernel/jsonl-event-store.ts"
+import { createSessionFiles } from "../../src/kernel/session-files.ts"
 
 const roots: string[] = []
 

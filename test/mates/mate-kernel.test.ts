@@ -1,11 +1,8 @@
 import { describe, expect, it } from "vitest"
-import {
-  createMateKernel,
-  isMateId,
-  isMateRevisionId,
-  MateLifecycle,
-  YakitoriErrorCode,
-} from "../../src/index.ts"
+import { YakitoriErrorCode } from "../../src/kernel/errors.ts"
+import { MateLifecycle } from "../../src/mates/events.ts"
+import { isMateId, isMateRevisionId } from "../../src/mates/ids.ts"
+import { createMateKernel } from "../../src/mates/mate-kernel.ts"
 import { createMemoryMateStore } from "./memory-mate-store.ts"
 
 describe("mate kernel", () => {

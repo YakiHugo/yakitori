@@ -7,7 +7,11 @@ import {
   resolveEffectiveModel,
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
-import { createEventEnvelope, EventType, InputRole } from "../../src/index.ts"
+import {
+  createEventEnvelope,
+  EventType,
+  InputRole,
+} from "../../src/kernel/events.ts"
 import type { ApiSessionDetail } from "../../src/server/protocol.ts"
 
 type Listener = (event: unknown) => void
@@ -45,6 +49,7 @@ class FakeEventSource {
 
 const sessionDetail: ApiSessionDetail = {
   id: "session_1",
+  conversationId: "conversation_1",
   seq: 1,
   createdAt: "2026-07-24T00:00:00.000Z",
   updatedAt: "2026-07-24T00:00:00.000Z",
@@ -123,9 +128,9 @@ describe("app store event stream", () => {
     })
     source?.emit("session.event", admitted)
     await vi.waitFor(() => {
-      expect(useAppStore.getState().events.map((event) => event.id)).toContain(
-        admitted.id,
-      )
+      expect(
+        useAppStore.getState().execution.durableEvents.map((event) => event.id),
+      ).toContain(admitted.id)
     })
     source?.emit("session.replay-complete")
     expect(useAppStore.getState().modelSelectionReady).toBe(true)
@@ -199,7 +204,7 @@ describe("app store event stream", () => {
       }),
     )
 
-    expect(useAppStore.getState().events).toEqual([])
+    expect(useAppStore.getState().execution.durableEvents).toEqual([])
     expect(useAppStore.getState().selectedSession?.id).toBe("session_b")
     expect(useAppStore.getState().streamStatus).toBe("connecting")
   })
@@ -348,6 +353,7 @@ describe("delete session", () => {
   function summary(id: string) {
     return {
       id,
+      conversationId: `conversation_${id}`,
       seq: 1,
       createdAt: "2026-07-24T00:00:00.000Z",
       updatedAt: "2026-07-24T00:00:00.000Z",
@@ -400,7 +406,7 @@ describe("delete session", () => {
 
     expect(useAppStore.getState().selectedSession).toBeUndefined()
     expect(useAppStore.getState().selection.sessionId).toBeUndefined()
-    expect(useAppStore.getState().events).toEqual([])
+    expect(useAppStore.getState().execution.durableEvents).toEqual([])
     expect(useAppStore.getState().sessions).toEqual([])
     expect(source?.closed).toBe(true)
   })

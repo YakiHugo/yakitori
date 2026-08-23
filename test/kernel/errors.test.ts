@@ -3,7 +3,7 @@ import {
   createYakitoriError,
   isYakitoriError,
   YakitoriErrorCode,
-} from "../../src/index.ts"
+} from "../../src/kernel/errors.ts"
 
 describe("kernel errors", () => {
   it("carries stable error code, details, and cause", () => {

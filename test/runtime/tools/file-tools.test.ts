@@ -10,16 +10,14 @@ import {
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import {
-  createEditFileTool,
-  createReadFileTool,
-  createToolRegistry,
-  createVisibleFileObservations,
-  createWriteFileTool,
-  resolveWorkspaceRoot,
-  type ToolProjection,
-  ToolState,
-} from "../../../src/index.ts"
+import type { ToolProjection } from "../../../src/kernel/session-projector.ts"
+import { ToolState } from "../../../src/kernel/session-states.ts"
+import { createEditFileTool } from "../../../src/runtime/tools/edit-file.ts"
+import { resolveWorkspaceRoot } from "../../../src/runtime/tools/path-policy.ts"
+import { createReadFileTool } from "../../../src/runtime/tools/read-file.ts"
+import { createToolRegistry } from "../../../src/runtime/tools/registry.ts"
+import { createVisibleFileObservations } from "../../../src/runtime/tools/visible-file-observations.ts"
+import { createWriteFileTool } from "../../../src/runtime/tools/write-file.ts"
 
 describe("bounded file tools", () => {
   it("reads a live UTF-8 page without a full-file revision", async () => {

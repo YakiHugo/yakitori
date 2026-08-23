@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest"
+import type { ModelMessage } from "../../src/kernel/events.ts"
 import {
-  createAgentControl,
   type AgentControlAdapter,
   type AgentRunOutcome,
+  createAgentControl,
   type ForkTurns,
-  type ModelMessage,
-} from "../../src/index.ts"
+} from "../../src/runtime/agent-control.ts"
 
 const TARGET = { provider: "faux", model: "scripted" }
 

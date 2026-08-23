@@ -1,9 +1,9 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
-import { afterEach, describe, expect, it, vi } from "vitest"
 import { parse } from "smol-toml"
-import { createUserConfigStore } from "../../src/index.ts"
+import { afterEach, describe, expect, it, vi } from "vitest"
+import { createUserConfigStore } from "../../src/server/user-config.ts"
 
 afterEach(() => {
   vi.restoreAllMocks()

@@ -5,7 +5,8 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { promisify } from "node:util"
 import { describe, expect, it } from "vitest"
-import { createReadFileTool, resolveWorkspaceRoot } from "../../../src/index.ts"
+import { resolveWorkspaceRoot } from "../../../src/runtime/tools/path-policy.ts"
+import { createReadFileTool } from "../../../src/runtime/tools/read-file.ts"
 import {
   captureTextFilePage,
   UnsupportedTextFileTypeError,

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest"
-import { createModelDirectory, directoryAllowlist } from "../../src/index.ts"
+import { directoryAllowlist } from "../../src/runtime/model-catalog.ts"
+import { createModelDirectory } from "../../src/server/model-directory.ts"
 
 const directoryFixture = {
   openai: {

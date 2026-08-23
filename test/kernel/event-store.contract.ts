@@ -1,5 +1,6 @@
 import { expect, it } from "vitest"
-import { type EventStore, EventType } from "../../src/index.ts"
+import type { EventStore } from "../../src/kernel/event-store.ts"
+import { EventType } from "../../src/kernel/events.ts"
 import { fingerprintInputAdmission } from "../../src/kernel/operation.ts"
 
 export function defineEventStoreContract(options: {

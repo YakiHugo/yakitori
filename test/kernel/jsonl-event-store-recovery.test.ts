@@ -2,16 +2,13 @@ import { mkdir, mkdtemp, open, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import {
-  createJsonlEventStore,
-  type EventEnvelope,
-  EventType,
-  TurnState,
-  YakitoriErrorCode,
-} from "../../src/index.ts"
+import { YakitoriErrorCode } from "../../src/kernel/errors.ts"
+import { type EventEnvelope, EventType } from "../../src/kernel/events.ts"
+import { createJsonlEventStore } from "../../src/kernel/jsonl-event-store.ts"
 import type { JournalCommitRecord } from "../../src/kernel/jsonl-event-store-format.ts"
 import { serializeFactLine } from "../../src/kernel/jsonl-event-store-format.ts"
 import { fingerprintInputAdmission } from "../../src/kernel/operation.ts"
+import { TurnState } from "../../src/kernel/session-states.ts"
 
 const cleanup: Array<() => Promise<void>> = []
 

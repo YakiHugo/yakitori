@@ -1,17 +1,20 @@
 import {
-  createMateEventEnvelope,
   createYakitoriError,
-  invalidMateListCursor,
-  projectMate,
-  requireMateListLimit,
-  summarizeMate,
+  YakitoriErrorCode,
+} from "../../src/kernel/errors.ts"
+import {
+  createMateEventEnvelope,
   type MateEvent,
   type MateEventEnvelope,
+} from "../../src/mates/events.ts"
+import { projectMate, summarizeMate } from "../../src/mates/mate-projector.ts"
+import {
+  invalidMateListCursor,
   type MateStore,
   type MateStoreAppendOptions,
   type MateStoreListInput,
-  YakitoriErrorCode,
-} from "../../src/index.ts"
+  requireMateListLimit,
+} from "../../src/mates/mate-store.ts"
 
 export function createMemoryMateStore(): MateStore {
   const mates = new Map<string, MateEventEnvelope[]>()

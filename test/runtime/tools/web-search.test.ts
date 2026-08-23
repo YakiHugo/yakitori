@@ -1,12 +1,12 @@
 import { createServer, type Server, type ServerResponse } from "node:http"
 import type { AddressInfo } from "node:net"
 import { afterEach, describe, expect, it } from "vitest"
+import { createDefaultTools } from "../../../src/runtime/tools/registry.ts"
 import {
-  createDefaultTools,
   createExaMcpSearchProvider,
   createWebSearchTool,
   type ExaMcpSearchProviderOptions,
-} from "../../../src/index.ts"
+} from "../../../src/runtime/tools/web-search.ts"
 
 const CITATION_REMINDER =
   "Cite the relevant URLs from these results as markdown links when you use them."

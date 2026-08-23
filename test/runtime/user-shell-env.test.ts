@@ -10,7 +10,7 @@ import {
   mergeShellEnvironment,
   parseNullEnvironment,
   parsePrintenvEnvironment,
-} from "../../src/index.ts"
+} from "../../src/runtime/user-shell-env.ts"
 
 const workspaces: string[] = []
 

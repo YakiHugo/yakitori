@@ -4,7 +4,11 @@ import {
   projectExecutionView,
   reduceExecutionView,
 } from "../../src/gui/execution-view.ts"
-import { createEventEnvelope, EventType, InputRole } from "../../src/index.ts"
+import {
+  createEventEnvelope,
+  EventType,
+  InputRole,
+} from "../../src/kernel/events.ts"
 
 const sessionId = "session_00000000-0000-4000-8000-000000000000"
 
@@ -701,26 +705,24 @@ describe("execution view", () => {
         }),
       state,
     )
-    state = reduceExecutionView(state, {
-      type: "session",
-      session: {
-        id: sessionId,
-        seq: 3,
-        createdAt: "2026-07-24T00:00:00.000Z",
-        updatedAt: "2026-07-24T00:00:02.000Z",
-        activeTurnId: "turn_9",
-        counts: {
-          inputs: 2,
-          pendingInputs: 1,
-          turns: 0,
-          items: 0,
-          permissions: 0,
-          tools: 0,
-        },
+    const session = {
+      id: sessionId,
+      conversationId: "conversation_1",
+      seq: 3,
+      createdAt: "2026-07-24T00:00:00.000Z",
+      updatedAt: "2026-07-24T00:00:02.000Z",
+      activeTurnId: "turn_9",
+      counts: {
+        inputs: 2,
+        pendingInputs: 1,
+        turns: 0,
+        items: 0,
+        permissions: 0,
+        tools: 0,
       },
-    })
+    }
 
-    const view = projectExecutionView(state)
+    const view = projectExecutionView(state, session)
     expect(view.queuedInputIds).toEqual(["input_1"])
     expect(view.activeTurnId).toBe("turn_9")
     expect(view.activeTurnStartedAt).toBeUndefined()
@@ -738,7 +740,7 @@ describe("execution view", () => {
       }),
     })
 
-    const next = projectExecutionView(state)
+    const next = projectExecutionView(state, session)
     expect(next.queuedInputIds).toEqual([])
     expect(next.activeTurnStartedAt).toBe("2026-07-24T00:00:03.000Z")
   })
@@ -755,11 +757,8 @@ describe("execution view", () => {
         },
       }),
     })
-    state = reduceExecutionView(state, {
-      type: "session",
-      session: activeSession("turn_1", 1),
-    })
-    expect(projectExecutionView(state).activeActivity).toEqual({
+    const session = activeSession("turn_1", 1)
+    expect(projectExecutionView(state, session).activeActivity).toEqual({
       kind: "reasoning",
     })
 
@@ -774,7 +773,7 @@ describe("execution view", () => {
         createdAt: "2026-07-24T00:00:01.000Z",
       },
     })
-    expect(projectExecutionView(state).activeActivity).toEqual({
+    expect(projectExecutionView(state, session).activeActivity).toEqual({
       kind: "responding",
     })
 
@@ -796,7 +795,7 @@ describe("execution view", () => {
         },
       }),
     })
-    expect(projectExecutionView(state).activeActivity).toEqual({
+    expect(projectExecutionView(state, session).activeActivity).toEqual({
       kind: "running_tool",
       name: "run_command",
     })
@@ -817,7 +816,7 @@ describe("execution view", () => {
         },
       }),
     })
-    expect(projectExecutionView(state).activeActivity).toEqual({
+    expect(projectExecutionView(state, session).activeActivity).toEqual({
       kind: "waiting_permission",
       action: "run_command",
     })
@@ -827,6 +826,7 @@ describe("execution view", () => {
 function activeSession(activeTurnId: string, seq: number) {
   return {
     id: sessionId,
+    conversationId: "conversation_1",
     seq,
     createdAt: "2026-07-24T00:00:00.000Z",
     updatedAt: "2026-07-24T00:00:00.000Z",

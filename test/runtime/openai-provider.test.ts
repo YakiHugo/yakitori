@@ -2,14 +2,16 @@ import OpenAI from "openai"
 import type { Response } from "openai/resources/responses/responses"
 import { describe, expect, it } from "vitest"
 import {
+  type ModelRequest,
+  ModelStopReason,
+  type ModelStreamEvent,
+} from "../../src/runtime/model.ts"
+import {
   createOpenAIProvider,
   fromOpenAIResponse,
-  ModelStopReason,
   toOpenAIInput,
   toOpenAITools,
-  type ModelRequest,
-  type ModelStreamEvent,
-} from "../../src/index.ts"
+} from "../../src/runtime/openai-provider.ts"
 
 describe("OpenAI Responses provider", () => {
   it("converts internal history and function tools", () => {

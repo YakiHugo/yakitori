@@ -10,22 +10,23 @@ import type { Server as HttpServer } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { EventType } from "../../src/kernel/events.ts"
+import { InputState } from "../../src/kernel/session-states.ts"
+import { MateLifecycle } from "../../src/mates/events.ts"
+import { createMateKernel } from "../../src/mates/mate-kernel.ts"
+import { createSqliteMateStore } from "../../src/mates/sqlite-mate-store.ts"
+import { createFauxProvider } from "../../src/runtime/faux-provider.ts"
+import { type ModelRequest, ModelStopReason } from "../../src/runtime/model.ts"
+import { listCatalogModels } from "../../src/runtime/model-catalog.ts"
+import {
+  createYakitoriApplication,
+  resolveWorkspaceDirectory,
+} from "../../src/server/application.ts"
 import {
   ApiErrorCode,
   type ApiHandlerResult,
   type ApiListProvidersResponse,
-  createFauxProvider,
-  createMateKernel,
-  createSqliteMateStore,
-  createYakitoriApplication,
-  EventType,
-  InputState,
-  MateLifecycle,
-  type ModelRequest,
-  ModelStopReason,
-  resolveWorkspaceDirectory,
-} from "../../src/index.ts"
-import { listCatalogModels } from "../../src/runtime/model-catalog.ts"
+} from "../../src/server/protocol.ts"
 
 async function listen(server: HttpServer): Promise<string> {
   await new Promise<void>((resolve) => {
@@ -473,6 +474,45 @@ describe("application composition", () => {
       } finally {
         await application.close()
       }
+    })
+  })
+
+  it("does not let an optional provider stream bypass primary credentials", async () => {
+    const previousApiKey = process.env.ANTHROPIC_API_KEY
+    delete process.env.ANTHROPIC_API_KEY
+    try {
+      await withApplicationRoot(async (rootDir, workspace) => {
+        const injected = createFauxProvider([])
+        await expect(
+          createYakitoriApplication({
+            rootDir,
+            workspace,
+            recoverOnStart: false,
+            provider: "anthropic",
+            model: "claude-test",
+            providerStreams: { anthropic: injected.stream },
+          }),
+        ).rejects.toThrow(
+          "ANTHROPIC_API_KEY is required when YAKITORI_PROVIDER=anthropic.",
+        )
+      })
+    } finally {
+      if (previousApiKey === undefined) delete process.env.ANTHROPIC_API_KEY
+      else process.env.ANTHROPIC_API_KEY = previousApiKey
+    }
+  })
+
+  it("rejects object prototype keys as unknown providers", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      await expect(
+        createYakitoriApplication({
+          rootDir,
+          workspace,
+          recoverOnStart: false,
+          provider: "constructor",
+          model: "unexpected",
+        }),
+      ).rejects.toThrow('Provider "constructor" is not configured.')
     })
   })
 

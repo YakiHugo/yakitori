@@ -7,7 +7,6 @@ export type {
   EventStoreListSessionsInput,
   EventStoreListSessionsResult,
   EventStoreRebuildProjectionResult,
-  EventStoreSessionSummary,
 } from "./event-store.ts"
 export * from "./events.ts"
 export * from "./ids.ts"

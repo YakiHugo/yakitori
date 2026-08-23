@@ -1,10 +1,7 @@
 import { describe, expect, it } from "vitest"
-import {
-  createDurableEventHub,
-  createEventEnvelope,
-  createSessionId,
-  EventType,
-} from "../../src/index.ts"
+import { createEventEnvelope, EventType } from "../../src/kernel/events.ts"
+import { createSessionId } from "../../src/kernel/ids.ts"
+import { createDurableEventHub } from "../../src/server/event-hub.ts"
 
 describe("durable event hub", () => {
   it("isolates synchronous listener failures", () => {

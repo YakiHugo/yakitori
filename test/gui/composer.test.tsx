@@ -4,10 +4,14 @@ import { userEvent } from "@testing-library/user-event"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { Composer } from "../../src/gui/components/composer.tsx"
 import {
+  createExecutionViewState,
+  reduceExecutionView,
+} from "../../src/gui/execution-view.ts"
+import {
   createInitialAppState,
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
-import { createEventEnvelope, EventType } from "../../src/index.ts"
+import { createEventEnvelope, EventType } from "../../src/kernel/events.ts"
 
 beforeEach(() => {
   useAppStore.setState(createInitialAppState())
@@ -248,7 +252,10 @@ describe("model selector", () => {
     })
     useAppStore.setState({
       ...selectModelState(),
-      events: [started],
+      execution: reduceExecutionView(createExecutionViewState(), {
+        type: "durable",
+        event: started,
+      }),
       modelSelections: {
         session_1: {
           provider: "anthropic",

@@ -1,14 +1,9 @@
 import { describe, expect, it } from "vitest"
-import {
-  createMateId,
-  createMateRevisionId,
-  MateEventType,
-  projectMate,
-  summarizeMate,
-  type MateEvent,
-  type MateStore,
-  YakitoriErrorCode,
-} from "../../src/index.ts"
+import { YakitoriErrorCode } from "../../src/kernel/errors.ts"
+import { type MateEvent, MateEventType } from "../../src/mates/events.ts"
+import { createMateId, createMateRevisionId } from "../../src/mates/ids.ts"
+import { projectMate, summarizeMate } from "../../src/mates/mate-projector.ts"
+import type { MateStore } from "../../src/mates/mate-store.ts"
 
 export function defineMateStoreContract(options: {
   readonly name: string

@@ -2,7 +2,6 @@
 import { cleanup, render, screen } from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { createEventEnvelope, EventType } from "../../src/index.ts"
 import { ApprovalBar } from "../../src/gui/components/approval-bar.tsx"
 import {
   createExecutionViewState,
@@ -12,6 +11,7 @@ import {
   createInitialAppState,
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
+import { createEventEnvelope, EventType } from "../../src/kernel/events.ts"
 
 const sessionId = "session_1"
 
