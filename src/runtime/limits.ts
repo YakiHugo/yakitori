@@ -1,4 +1,6 @@
-export const RuntimeLimits = {
+import type { SessionExecutionPolicyDefaultsSnapshot } from "../kernel/events.ts"
+
+export const SessionExecutionPolicyDefaults = {
   modelCallsPerTurn: 16,
   toolCallsPerTurn: 32,
   modelVisibleMessageBlocks: 200,
@@ -8,44 +10,75 @@ export const RuntimeLimits = {
   modelVisibleToolResultBytes: 50 * 1024,
   modelVisibleToolResultLines: 2_000,
   compactionSummaryBytes: 16 * 1024,
+  assistantResponseBytes: 256 * 1024,
+} as const satisfies SessionExecutionPolicyDefaultsSnapshot
+
+// Tool-installation defaults are intentionally absent from Session history.
+export type ToolLimitPolicy = Readonly<{
+  toolPreviewBytes: number
+  toolPreviewLines: number
+  fileWriteBytes: number
+  toolDiffBytes: number
+  commandOutputBytes: number
+  commandPersistedOutputBytes: number
+  commandTextBytes: number
+  runCommandDefaultTimeoutSeconds: number
+  runCommandMaxTimeoutSeconds: number
+  commandKillGraceMs: number
+}>
+
+export type RunnerTimingPolicy = Readonly<{
+  permissionWaitTimeoutMs: number
+  assistantSnapshotPublicationsPerSecond: number
+}>
+
+export const ToolLimitDefaults = {
+  toolPreviewBytes: 50 * 1024,
+  toolPreviewLines: 2_000,
   fileWriteBytes: 1 * 1024 * 1024,
   toolDiffBytes: 64 * 1024,
   commandOutputBytes: 1 * 1024 * 1024,
   commandPersistedOutputBytes: 32 * 1024 * 1024,
   commandTextBytes: 16 * 1024,
-  assistantResponseBytes: 256 * 1024,
   runCommandDefaultTimeoutSeconds: 120,
   runCommandMaxTimeoutSeconds: 600,
-  permissionWaitTimeoutMs: 10 * 60 * 1000,
   commandKillGraceMs: 2_000,
-  assistantSnapshotPublicationsPerSecond: 20,
-} as const
+} as const satisfies ToolLimitPolicy
 
-export type RuntimeLimits = {
-  readonly [K in keyof typeof RuntimeLimits]: number
+export const RunnerTimingDefaults = {
+  permissionWaitTimeoutMs: 10 * 60 * 1000,
+  assistantSnapshotPublicationsPerSecond: 20,
+} as const satisfies RunnerTimingPolicy
+
+export function createRunnerTimingPolicy(
+  overrides: Partial<RunnerTimingPolicy> = {},
+): RunnerTimingPolicy {
+  return { ...RunnerTimingDefaults, ...overrides }
 }
 
-export function createRuntimeLimits(
-  overrides: Partial<RuntimeLimits> = {},
-): RuntimeLimits {
-  const limits = {
-    ...RuntimeLimits,
+export type SessionExecutionPolicy = SessionExecutionPolicyDefaultsSnapshot
+
+export function createSessionExecutionPolicy(
+  overrides: Partial<SessionExecutionPolicy> = {},
+): SessionExecutionPolicy {
+  const policy = {
+    ...SessionExecutionPolicyDefaults,
     ...overrides,
   }
-  if (limits.compactionTriggerRatio <= 0 || limits.compactionTriggerRatio > 1) {
+  if (policy.compactionTriggerRatio <= 0 || policy.compactionTriggerRatio > 1) {
     throw new Error(
       "compactionTriggerRatio must be greater than 0 and at most 1.",
     )
   }
   if (
-    limits.compactionRetainRatio < 0 ||
-    limits.compactionRetainRatio >= limits.compactionTriggerRatio
+    policy.compactionRetainRatio < 0 ||
+    policy.compactionRetainRatio >= policy.compactionTriggerRatio
   ) {
     throw new Error(
       "compactionRetainRatio must be non-negative and less than compactionTriggerRatio.",
     )
   }
-  return limits
+  return policy
 }
 
 export function deriveCompactionContextBytes(input: {
@@ -64,8 +97,8 @@ export function deriveCompactionContextBytes(input: {
   }
 }
 
-// Byte measurement is the harness's tokenizer-free capacity proxy. Keep the
-// full estimated window here; proactive compaction ratios reserve headroom.
+// A tokenizer-free fallback used only when a model catalog does not provide a
+// more specific estimator. Complete-request budgeting owns the final decision.
 export function deriveModelVisibleContextBytes(
   contextWindowTokens: number,
 ): number {

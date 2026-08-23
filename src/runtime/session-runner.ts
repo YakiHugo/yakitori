@@ -8,6 +8,7 @@ import {
   InputRole,
   ItemKind,
   isJsonValue,
+  isKernelEvent,
   type JsonObject,
   type KernelError,
   type ModelSelection,
@@ -17,6 +18,7 @@ import {
   type SessionKernel,
   type SessionProjection,
   type TokenUsage,
+  type RuntimeEventEnvelope,
   type TurnExecutionContext,
   type TurnMetrics,
   TurnState,
@@ -35,7 +37,12 @@ import {
   runCompaction,
 } from "./compaction.ts"
 import { isAbortError } from "./errors.ts"
-import { createRuntimeLimits, type RuntimeLimits } from "./limits.ts"
+import {
+  createRunnerTimingPolicy,
+  createSessionExecutionPolicy,
+  type RunnerTimingPolicy,
+  type SessionExecutionPolicy,
+} from "./limits.ts"
 import {
   createCoalescingSnapshotPublisher,
   type TransientEventHub,
@@ -88,14 +95,15 @@ export type SessionRunnerOptions = {
   readonly mateKernel: MateKernel
   readonly stream: StreamFn
   readonly durableHub?: {
-    publish(events: readonly EventEnvelope[]): void
+    publish(events: readonly RuntimeEventEnvelope[]): void
   }
   readonly transientHub?: TransientEventHub
   readonly toolRegistry?: ToolRegistry
   readonly permissionGate?: PermissionGate
   readonly provider?: string
   readonly model?: string
-  readonly limits?: RuntimeLimits
+  readonly executionPolicy?: SessionExecutionPolicy
+  readonly runtimeTiming?: RunnerTimingPolicy
   readonly approvalPolicy?: "auto_file_tools" | "never"
   readonly baseInstructions?: string
   readonly modelContextWindowTokens?: number
@@ -104,8 +112,21 @@ export type SessionRunnerOptions = {
   readonly loadProjectInstructions?: typeof loadProjectInstructions
   readonly now?: () => Date
   readonly onRuntimeError?: (error: unknown) => void
+  readonly onContextPrepared?: (diagnostics: ContextPreparedDiagnostics) => void
   readonly sessionFiles?: SessionFiles
 }
+
+export type ContextPreparedDiagnostics = Readonly<{
+  sessionId: string
+  turnId: string
+  modelCallId: string
+  modelCallIndex: number
+  selectedItemIds: readonly string[]
+  droppedTurnCount: number
+  truncatedToolResultCount: number
+  prunedToolResultCount: number
+  droppedCompactionCheckpoint: boolean
+}>
 
 export type SessionRunner = {
   wake(sessionId: string): Promise<void>
@@ -155,7 +176,9 @@ type ConsumedModelResponse = {
 export function createSessionRunner(
   options: SessionRunnerOptions,
 ): SessionRunner {
-  const limits = options.limits ?? createRuntimeLimits()
+  const executionPolicy =
+    options.executionPolicy ?? createSessionExecutionPolicy()
+  const runtimeTiming = options.runtimeTiming ?? createRunnerTimingPolicy()
   const provider = options.provider ?? "faux"
   const model = options.model ?? "scripted"
   const toolRegistry = options.toolRegistry ?? createToolRegistry()
@@ -171,8 +194,11 @@ export function createSessionRunner(
   let closed = false
 
   const publishDurable = (events: readonly EventEnvelope[]) => {
-    if (events.length === 0) return
-    options.durableHub?.publish(events)
+    const runtimeEvents = events.filter(
+      (event): event is RuntimeEventEnvelope => isKernelEvent(event),
+    )
+    if (runtimeEvents.length === 0) return
+    options.durableHub?.publish(runtimeEvents)
   }
 
   const agentControl = createAgentControl({
@@ -412,17 +438,14 @@ export function createSessionRunner(
             ...(options.baseInstructions === undefined
               ? {}
               : { baseInstructions: options.baseInstructions }),
-            limits,
+            executionPolicy,
             ...(options.modelContextWindowTokens === undefined
               ? {}
               : {
                   modelContextWindowTokens: options.modelContextWindowTokens,
                 }),
           })
-        : SessionConfiguration.restore(
-            session.configuration,
-            session.conversationId,
-          )
+        : SessionConfiguration.restore(session.configuration)
     if (session.configuration === undefined) {
       const configured = await options.kernel.configureSession({
         sessionId: session.id,
@@ -431,7 +454,6 @@ export function createSessionRunner(
       if (configured.event !== undefined) publishDurable([configured.event])
       sessionConfiguration = SessionConfiguration.restore(
         configured.configuration,
-        session.conversationId,
       )
     }
     const configuration = sessionConfiguration.resolveTurn(selectedTarget)
@@ -471,7 +493,9 @@ export function createSessionRunner(
     let toolCallCount = 0
     const telemetry = requireTurnTelemetry(input.sessionId, input.turnId)
     const usages = telemetry.usages
-    while (modelCallIndex < executionContext.limits.modelCallsPerTurn) {
+    while (
+      modelCallIndex < executionContext.executionPolicy.modelCallsPerTurn
+    ) {
       if (input.signal.aborted) {
         await cancelAfterRuntimeAbort(input.sessionId, input.turnId)
         return
@@ -495,7 +519,7 @@ export function createSessionRunner(
       let context = buildModelContext({
         session,
         currentInputId: input.inputId,
-        limits: executionContext.limits,
+        limits: executionContext.executionPolicy,
       })
       if (context.compactableHistory.length > 0) {
         const outcome = await attemptCompaction({
@@ -513,7 +537,7 @@ export function createSessionRunner(
           context = buildModelContext({
             session,
             currentInputId: input.inputId,
-            limits: executionContext.limits,
+            limits: executionContext.executionPolicy,
           })
         }
       }
@@ -556,6 +580,28 @@ export function createSessionRunner(
         tools: step.tools.definitions,
         signal: input.signal,
       }
+      const streamId = `stream_${input.turnId}_${modelCallIndex + 1}`
+      if (options.onContextPrepared !== undefined) {
+        try {
+          options.onContextPrepared({
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            modelCallId: streamId,
+            modelCallIndex: modelCallIndex + 1,
+            selectedItemIds: [...context.selectedItemIds],
+            droppedTurnCount: context.droppedTurnCount,
+            truncatedToolResultCount: context.truncatedToolResultCount,
+            prunedToolResultCount: context.prunedToolResultCount,
+            droppedCompactionCheckpoint: context.droppedCompactionCheckpoint,
+          })
+        } catch (error) {
+          if (options.onRuntimeError === undefined) {
+            console.error("Context diagnostics consumer failed.", error)
+          } else {
+            options.onRuntimeError(error)
+          }
+        }
+      }
       const observationEligibleToolResultItemIds = new Set(
         context.observationEligibleToolResultItemIds,
       )
@@ -567,7 +613,6 @@ export function createSessionRunner(
         ),
       )
 
-      const streamId = `stream_${input.turnId}_${modelCallIndex + 1}`
       const modelStartedAt = Date.now()
       let consumed: ConsumedModelResponse
       try {
@@ -576,6 +621,8 @@ export function createSessionRunner(
           turnId: input.turnId,
           streamId,
           request,
+          assistantResponseBytes:
+            executionContext.executionPolicy.assistantResponseBytes,
         })
       } catch (error) {
         telemetry.modelCalls += 1
@@ -632,7 +679,7 @@ export function createSessionRunner(
         const content = assistantContent(response.content)
         if (
           assistantContentBytes(content) >
-          executionContext.limits.assistantResponseBytes
+          executionContext.executionPolicy.assistantResponseBytes
         ) {
           await failTurnWithCode(
             input.sessionId,
@@ -644,13 +691,13 @@ export function createSessionRunner(
         }
         if (
           toolCallCount + toolCalls.length >
-          executionContext.limits.toolCallsPerTurn
+          executionContext.executionPolicy.toolCallsPerTurn
         ) {
           await failTurnWithCode(
             input.sessionId,
             input.turnId,
             "tool_budget_exhausted",
-            `Turn exceeded tool call budget of ${executionContext.limits.toolCallsPerTurn}.`,
+            `Turn exceeded tool call budget of ${executionContext.executionPolicy.toolCallsPerTurn}.`,
           )
           return
         }
@@ -667,23 +714,9 @@ export function createSessionRunner(
             executionContext,
             toolPlan: step.tools,
             workspaceRoot: step.workspaceRoot,
-            contextMetadata: {
-              selectedItemIds: [...context.selectedItemIds],
-              observationEligibleToolResultItemIds: [
-                ...context.observationEligibleToolResultItemIds,
-              ],
-              droppedTurnCount: context.droppedTurnCount,
-              truncatedToolResultCount: context.truncatedToolResultCount,
-              ...(context.prunedToolResultCount > 0
-                ? { prunedToolResultCount: context.prunedToolResultCount }
-                : {}),
-              ...(context.droppedCompactionCheckpoint
-                ? { droppedCompactionCheckpoint: true }
-                : {}),
-              ...(response.providerRequestId === undefined
-                ? {}
-                : { providerRequestId: response.providerRequestId }),
-            },
+            ...(response.providerRequestId === undefined
+              ? {}
+              : { providerRequestId: response.providerRequestId }),
             signal: input.signal,
             visibleFileObservations,
           })
@@ -707,7 +740,7 @@ export function createSessionRunner(
       const content = assistantContent(response.content)
       if (
         assistantContentBytes(content) >
-        executionContext.limits.assistantResponseBytes
+        executionContext.executionPolicy.assistantResponseBytes
       ) {
         await failTurnWithCode(
           input.sessionId,
@@ -740,15 +773,6 @@ export function createSessionRunner(
           model: executionContext.model,
           callIndex: modelCallIndex,
           streamId,
-          selectedItemIds: [...context.selectedItemIds],
-          observationEligibleToolResultItemIds: [
-            ...context.observationEligibleToolResultItemIds,
-          ],
-          droppedTurnCount: context.droppedTurnCount,
-          truncatedToolResultCount: context.truncatedToolResultCount,
-          ...(context.droppedCompactionCheckpoint
-            ? { droppedCompactionCheckpoint: true }
-            : {}),
           ...(response.providerRequestId === undefined
             ? {}
             : { providerRequestId: response.providerRequestId }),
@@ -764,7 +788,7 @@ export function createSessionRunner(
       input.sessionId,
       input.turnId,
       "model_budget_exhausted",
-      `Turn exceeded model call budget of ${executionContext.limits.modelCallsPerTurn}.`,
+      `Turn exceeded model call budget of ${executionContext.executionPolicy.modelCallsPerTurn}.`,
     )
   }
 
@@ -826,7 +850,7 @@ export function createSessionRunner(
     try {
       let source = selectCompactionSource(
         input.candidateHistory,
-        input.configuration.limits.modelVisibleContextBytes,
+        input.configuration.executionPolicy.modelVisibleContextBytes,
       )
       if (source.length === 0) return "failed"
       const throughSeq = input.session.seq
@@ -887,10 +911,10 @@ export function createSessionRunner(
       }
       if (
         utf8Bytes(result.summary) >
-        input.configuration.limits.compactionSummaryBytes
+        input.configuration.executionPolicy.compactionSummaryBytes
       ) {
         throw new Error(
-          `Compaction checkpoint exceeds the configured ${input.configuration.limits.compactionSummaryBytes}-byte limit.`,
+          `Compaction checkpoint exceeds the configured ${input.configuration.executionPolicy.compactionSummaryBytes}-byte limit.`,
         )
       }
       const recorded = await options.kernel.recordCompaction({
@@ -949,7 +973,10 @@ export function createSessionRunner(
       turnId: input.turnId,
       step,
     })
-    const source = collectUncoveredTurns(session, input.executionContext.limits)
+    const source = collectUncoveredTurns(
+      session,
+      input.executionContext.executionPolicy,
+    )
     const telemetry = requireTurnTelemetry(input.sessionId, input.turnId)
     const usages = telemetry.usages
     let note: string
@@ -1006,7 +1033,7 @@ export function createSessionRunner(
     readonly executionContext: TurnExecutionContext
     readonly toolPlan: StepToolPlan
     readonly workspaceRoot: string
-    readonly contextMetadata: EventMetadata
+    readonly providerRequestId?: string
     readonly signal: AbortSignal
     readonly visibleFileObservations: ReturnType<
       typeof createVisibleFileObservations
@@ -1021,7 +1048,9 @@ export function createSessionRunner(
         model: input.executionContext.model,
         callIndex: input.modelCallIndex,
         streamId: input.streamId,
-        ...input.contextMetadata,
+        ...(input.providerRequestId === undefined
+          ? {}
+          : { providerRequestId: input.providerRequestId }),
       },
       toolCalls: input.toolCalls.map((call) => {
         const tool = input.toolPlan.get(call.name)
@@ -1157,8 +1186,6 @@ export function createSessionRunner(
       }
       return disabled
     }
-    // The registry owns dispatch; the lookup here is only for permission
-    // metadata (autoAllow), mirroring codex's ToolRouter split.
     const tool = input.toolPlan.get(input.call.name)
     let permissionRequestId: string | undefined
     if (
@@ -1338,13 +1365,8 @@ export function createSessionRunner(
         `Parent Session ${input.parentSessionId} has no persisted configuration.`,
       )
     }
-    const root =
-      input.rootSessionId === parent.id
-        ? parent
-        : await requireSession(input.rootSessionId)
     const inheritedConfiguration = SessionConfiguration.restore(
       parent.configuration,
-      root.conversationId,
     ).snapshot
     const created = await options.kernel.createSession({
       parentSessionId: input.parentSessionId,
@@ -1511,7 +1533,7 @@ export function createSessionRunner(
         readonly message: string
       }
   > {
-    const deadline = Date.now() + limits.permissionWaitTimeoutMs
+    const deadline = Date.now() + runtimeTiming.permissionWaitTimeoutMs
     for (;;) {
       const outcome = await readPermissionOutcome(input)
       if (outcome !== undefined) return outcome
@@ -1610,6 +1632,7 @@ export function createSessionRunner(
     readonly turnId: string
     readonly streamId: string
     readonly request: ModelRequest
+    readonly assistantResponseBytes: number
   }): Promise<ConsumedModelResponse> {
     const startedAt = Date.now()
     let firstEventAt: number | undefined
@@ -1618,14 +1641,14 @@ export function createSessionRunner(
         ? undefined
         : createCoalescingSnapshotPublisher(
             options.transientHub,
-            limits.assistantSnapshotPublicationsPerSecond,
+            runtimeTiming.assistantSnapshotPublicationsPerSecond,
           )
     const reasoningPublisher =
       options.transientHub === undefined
         ? undefined
         : createCoalescingSnapshotPublisher(
             options.transientHub,
-            limits.assistantSnapshotPublicationsPerSecond,
+            runtimeTiming.assistantSnapshotPublicationsPerSecond,
             "reasoning.snapshot",
           )
 
@@ -1634,7 +1657,7 @@ export function createSessionRunner(
       for await (const event of options.stream(input.request)) {
         firstEventAt ??= Date.now()
         if (event.type === "reasoning_snapshot") {
-          if (utf8Bytes(event.text) > limits.assistantResponseBytes) {
+          if (utf8Bytes(event.text) > input.assistantResponseBytes) {
             throw createYakitoriError({
               code: YakitoriErrorCode.InvalidState,
               message: "Reasoning snapshot exceeded the configured byte limit.",
@@ -1650,7 +1673,7 @@ export function createSessionRunner(
           continue
         }
         if (event.type === "snapshot") {
-          if (utf8Bytes(event.text) > limits.assistantResponseBytes) {
+          if (utf8Bytes(event.text) > input.assistantResponseBytes) {
             throw createYakitoriError({
               code: YakitoriErrorCode.InvalidState,
               message: "Assistant snapshot exceeded the configured byte limit.",

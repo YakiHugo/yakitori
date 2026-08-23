@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import {
-  createRuntimeLimits,
+  createSessionExecutionPolicy,
   deriveCompactionContextBytes,
   deriveModelVisibleContextBytes,
 } from "../../src/runtime/limits.ts"
@@ -61,7 +61,7 @@ describe("deriveModelVisibleContextBytes", () => {
 
 describe("compaction context baseline", () => {
   it("derives an 80% trigger and 16% verbatim tail by default", () => {
-    const limits = createRuntimeLimits()
+    const limits = createSessionExecutionPolicy()
     expect(
       deriveCompactionContextBytes({
         modelVisibleContextBytes: 1_000_000,
@@ -73,7 +73,7 @@ describe("compaction context baseline", () => {
 
   it("rejects a retention target that reaches the trigger", () => {
     expect(() =>
-      createRuntimeLimits({
+      createSessionExecutionPolicy({
         compactionTriggerRatio: 0.8,
         compactionRetainRatio: 0.8,
       }),

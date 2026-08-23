@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { createRuntimeLimits } from "../../src/runtime/limits.ts"
+import { createSessionExecutionPolicy } from "../../src/runtime/limits.ts"
 import {
   createTurnContext,
   SessionConfiguration,
@@ -45,7 +45,7 @@ describe("session configuration", () => {
       modelInstructionsRevision: configuration.modelInstructions.revision,
       modelContextWindowTokens: 272_000,
       effectiveModelContextWindowTokens: 258_400,
-      limits: {
+      executionPolicy: {
         modelVisibleContextBytes: 1_033_600,
         compactionTriggerContextBytes: 826_880,
         compactionRetainContextBytes: 165_376,
@@ -85,7 +85,9 @@ describe("session configuration", () => {
       workspaceRoot: "/workspace",
       enabledTools: [],
       approvalPolicy: "never",
-      limits: createRuntimeLimits({ modelVisibleContextBytes: 123_456 }),
+      executionPolicy: createSessionExecutionPolicy({
+        modelVisibleContextBytes: 123_456,
+      }),
     })
     const turn = createTurnContext({
       configuration,
@@ -93,7 +95,9 @@ describe("session configuration", () => {
       mateRevisionId: "mate_revision_1",
     })
 
-    expect(turn.execution.limits.modelVisibleContextBytes).toBe(123_456)
+    expect(turn.execution.executionPolicy.modelVisibleContextBytes).toBe(
+      123_456,
+    )
   })
 
   it("restores the exact persisted base instructions instead of re-resolving them", () => {
@@ -104,17 +108,14 @@ describe("session configuration", () => {
       enabledTools: ["read_file"],
       approvalPolicy: "never",
     })
-    const restored = SessionConfiguration.restore(
-      {
-        ...created.snapshot,
-        baseInstructions: {
-          ...created.snapshot.baseInstructions,
-          text: "persisted session instructions",
-          revision: "persisted-revision",
-        },
+    const restored = SessionConfiguration.restore({
+      ...created.snapshot,
+      baseInstructions: {
+        ...created.snapshot.baseInstructions,
+        text: "persisted session instructions",
+        revision: "persisted-revision",
       },
-      "fallback-cache",
-    ).resolveTurn(created.snapshot.defaultTarget)
+    }).resolveTurn(created.snapshot.defaultTarget)
 
     expect(restored.baseInstructions).toEqual({
       id: "base.instructions",
@@ -154,7 +155,7 @@ describe("session configuration", () => {
     )
   })
 
-  it("resolves cache identity once and restores old snapshots with a fallback", () => {
+  it("persists cache identity as required session metadata", () => {
     const created = SessionConfiguration.create({
       promptCacheKey: "persisted-cache",
       selection: { provider: "codex", model: "gpt-5.6-sol" },
@@ -162,42 +163,11 @@ describe("session configuration", () => {
       enabledTools: [],
       approvalPolicy: "never",
     })
-    const { promptCacheKey: _removed, ...legacy } = created.snapshot
-
     expect(
-      SessionConfiguration.restore(
-        created.snapshot,
-        "fallback-cache",
-      ).resolveTurn(created.snapshot.defaultTarget).promptCacheKey,
-    ).toBe("persisted-cache")
-    expect(
-      SessionConfiguration.restore(legacy, "fallback-cache").resolveTurn(
-        legacy.defaultTarget,
+      SessionConfiguration.restore(created.snapshot).resolveTurn(
+        created.snapshot.defaultTarget,
       ).promptCacheKey,
-    ).toBe("fallback-cache")
-  })
-
-  it("fills runtime limits added to schema v1 when restoring an older snapshot", () => {
-    const created = SessionConfiguration.create({
-      promptCacheKey: "session-cache",
-      selection: { provider: "codex", model: "gpt-5.6-sol" },
-      workspaceRoot: "/workspace",
-      enabledTools: ["read_file"],
-      approvalPolicy: "never",
-    })
-    const { compactionRetainRatio: _removedLimit, ...legacyRuntimeLimits } =
-      created.snapshot.runtimeLimits
-    const restored = SessionConfiguration.restore(
-      {
-        ...created.snapshot,
-        runtimeLimits: legacyRuntimeLimits,
-      },
-      "fallback-cache",
-    )
-
-    expect(restored.snapshot.runtimeLimits.compactionRetainRatio).toBe(
-      createRuntimeLimits().compactionRetainRatio,
-    )
+    ).toBe("persisted-cache")
   })
 
   it("rejects an explicitly unsupported effort or speed", () => {

@@ -3,6 +3,7 @@ import { parseStoredEventEnvelope } from "../../src/kernel/event-store.ts"
 import {
   createEventEnvelope,
   EventType,
+  HistoryRecordType,
   InputRole,
 } from "../../src/kernel/events.ts"
 import {
@@ -49,7 +50,7 @@ describe("session fact projection", () => {
         sessionId,
         seq: 4,
         event: {
-          type: EventType.ToolCall,
+          type: HistoryRecordType.ModelToolCall,
           data: {
             toolCallId: "tool_1",
             itemId: "item_call",
@@ -94,7 +95,7 @@ describe("session fact projection", () => {
         id: "event_unknown",
         sessionId: events[0]?.sessionId,
         seq: 6,
-        version: 1,
+        version: 2,
         createdAt: "2026-07-24T00:00:00.000Z",
         type: "provider.future_fact",
         data: { value: "opaque" },
@@ -120,7 +121,7 @@ describe("session fact projection", () => {
         seq: 6,
         version: 2,
         createdAt: "2026-07-24T00:00:00.000Z",
-        type: "assistant.message",
+        type: "provider.future",
         data: {
           messageId: "message_future",
           turnId: "turn_1",
@@ -143,7 +144,7 @@ describe("session fact projection", () => {
         id: "event_unknown_incremental",
         sessionId: events[0]?.sessionId,
         seq: 6,
-        version: 1,
+        version: 2,
         createdAt: "2026-07-24T00:00:00.000Z",
         type: "provider.future_fact",
         data: { value: "opaque" },
@@ -193,7 +194,7 @@ describe("session fact projection", () => {
         sessionId,
         seq: 2,
         event: {
-          type: EventType.WorldStateUpdated,
+          type: HistoryRecordType.WorldState,
           data: {
             turnId: "turn_1",
             full: true,
@@ -216,7 +217,7 @@ describe("session fact projection", () => {
         sessionId,
         seq: 3,
         event: {
-          type: EventType.WorldStateUpdated,
+          type: HistoryRecordType.WorldState,
           data: {
             turnId: "turn_2",
             afterItemId: "item_2",
@@ -333,7 +334,7 @@ function baseWithInterruptedTool() {
       sessionId,
       seq: 4,
       event: {
-        type: EventType.ToolCall,
+        type: HistoryRecordType.ModelToolCall,
         data: {
           toolCallId: "tool_1",
           itemId: "item_call",

@@ -2,13 +2,14 @@ import {
   PermissionState,
   TurnState,
   YakitoriErrorCode,
-  type EventEnvelope,
+  isKernelEvent,
+  type RuntimeEventEnvelope,
   type SessionKernel,
 } from "../kernel/index.ts"
 
 export type HistoryRecoveryResult = {
   readonly recoveredSessionIds: readonly string[]
-  readonly events: readonly EventEnvelope[]
+  readonly events: readonly RuntimeEventEnvelope[]
 }
 
 export type RecoveryState = {
@@ -23,10 +24,10 @@ export type RecoveryResult = HistoryRecoveryResult & {
 
 export async function reconcileSessionHistory(input: {
   readonly kernel: SessionKernel
-  readonly publish?: (events: readonly EventEnvelope[]) => void
+  readonly publish?: (events: readonly RuntimeEventEnvelope[]) => void
 }): Promise<HistoryRecoveryResult> {
   const recoveredSessionIds: string[] = []
-  const events: EventEnvelope[] = []
+  const events: RuntimeEventEnvelope[] = []
 
   for await (const sessionId of listSessionIds(input.kernel)) {
     const read = await input.kernel.readSession({ sessionId })
@@ -40,8 +41,11 @@ export async function reconcileSessionHistory(input: {
         reason: "Runtime stopped before the Turn reached a recorded boundary.",
       })
       if (!interrupted.created) continue
-      events.push(...interrupted.events)
-      input.publish?.(interrupted.events)
+      const runtimeEvents = interrupted.events.filter(
+        (event): event is RuntimeEventEnvelope => isKernelEvent(event),
+      )
+      events.push(...runtimeEvents)
+      input.publish?.(runtimeEvents)
       recoveredSessionIds.push(sessionId)
     } catch (error) {
       if (!isInvalidState(error)) throw error
@@ -95,7 +99,7 @@ export function scheduleRecoveryExecution(input: {
 export async function recoverSessions(input: {
   readonly kernel: SessionKernel
   readonly wake?: (sessionId: string) => Promise<void>
-  readonly publish?: (events: readonly EventEnvelope[]) => void
+  readonly publish?: (events: readonly RuntimeEventEnvelope[]) => void
   readonly onWakeError?: (error: unknown, sessionId: string) => void
 }): Promise<RecoveryResult> {
   const history = await reconcileSessionHistory(input)

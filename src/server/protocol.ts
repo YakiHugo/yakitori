@@ -223,6 +223,7 @@ export type ApiSessionSummary = {
 
 export type ApiSessionDetail = ApiSessionSummary & {
   readonly activeTurnId?: string
+  readonly currentModel?: ModelSelection
   readonly counts: {
     readonly inputs: number
     readonly pendingInputs: number

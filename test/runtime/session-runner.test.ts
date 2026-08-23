@@ -11,6 +11,7 @@ import {
   type ContextWindowReplacement,
   type EventEnvelope,
   EventType,
+  HistoryRecordType,
   InputRole,
   type ModelContentBlock,
 } from "../../src/kernel/events.ts"
@@ -19,7 +20,7 @@ import { createSessionKernel } from "../../src/kernel/session-kernel.ts"
 import { createMateKernel } from "../../src/mates/mate-kernel.ts"
 import { createSqliteMateStore } from "../../src/mates/sqlite-mate-store.ts"
 import { createFauxProvider } from "../../src/runtime/faux-provider.ts"
-import { createRuntimeLimits } from "../../src/runtime/limits.ts"
+import { createSessionExecutionPolicy } from "../../src/runtime/limits.ts"
 import {
   createTransientEventHub,
   type LiveSessionEvent,
@@ -32,7 +33,10 @@ import {
 } from "../../src/runtime/model.ts"
 import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
 import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
-import { createSessionRunner } from "../../src/runtime/session-runner.ts"
+import {
+  type ContextPreparedDiagnostics,
+  createSessionRunner,
+} from "../../src/runtime/session-runner.ts"
 import { createDurableEventHub } from "../../src/server/event-hub.ts"
 
 describe("session runner", () => {
@@ -45,11 +49,15 @@ describe("session runner", () => {
           stopReason: ModelStopReason.EndTurn,
         },
       ])
+      const contextDiagnostics: ContextPreparedDiagnostics[] = []
       const runner = createSessionRunner({
         kernel: runtime.kernel,
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
         durableHub: runtime.durableHub,
+        onContextPrepared(diagnostics) {
+          contextDiagnostics.push(diagnostics)
+        },
       })
 
       const session = await createAttributedSession(runtime)
@@ -65,10 +73,12 @@ describe("session runner", () => {
       expect(replayed.events.map((event) => event.type)).toEqual([
         EventType.SessionCreated,
         EventType.InputAdmitted,
-        EventType.SessionConfigured,
+        HistoryRecordType.SessionMetadata,
+        HistoryRecordType.TurnContext,
         EventType.TurnStarted,
-        EventType.WorldStateUpdated,
-        EventType.AssistantMessage,
+        HistoryRecordType.WorldState,
+        HistoryRecordType.AgentMessage,
+        EventType.ItemCompleted,
         EventType.TurnCompleted,
       ])
       expect(replayed.session?.completedTurns).toHaveLength(1)
@@ -81,6 +91,28 @@ describe("session runner", () => {
       ])
       expect(replayed.session?.activeTurn).toBeUndefined()
       expect(provider.callCount).toBe(1)
+      expect(contextDiagnostics).toEqual([
+        expect.objectContaining({
+          sessionId: session.sessionId,
+          modelCallIndex: 1,
+          selectedItemIds: expect.any(Array),
+          droppedTurnCount: 0,
+          truncatedToolResultCount: 0,
+          prunedToolResultCount: 0,
+          droppedCompactionCheckpoint: false,
+        }),
+      ])
+      const agentMetadata = replayed.events.flatMap((event) =>
+        event.type === HistoryRecordType.AgentMessage
+          ? [event.data.providerMetadata]
+          : [],
+      )
+      expect(agentMetadata).toEqual([
+        expect.not.objectContaining({
+          selectedItemIds: expect.anything(),
+          prunedToolResultCount: expect.anything(),
+        }),
+      ])
     })
   })
 
@@ -689,7 +721,7 @@ describe("session runner", () => {
         sessionId: session.sessionId,
       })
       const updates = replayed.events.flatMap((event) =>
-        event.type === EventType.WorldStateUpdated ? [event] : [],
+        event.type === HistoryRecordType.WorldState ? [event] : [],
       )
       expect(updates).toHaveLength(2)
       expect(updates[0]?.data.full).toBe(true)
@@ -804,12 +836,17 @@ describe("session runner", () => {
         true,
       )
       expect(
-        durable.some((event) => event.type === EventType.AssistantMessage),
+        durable.some((event) => event.type === EventType.ItemCompleted),
       ).toBe(true)
-      expect(
-        durable.find((event) => event.type === EventType.AssistantMessage)?.data
-          .content,
-      ).toEqual([
+      const completed = durable.find(
+        (
+          event,
+        ): event is Extract<
+          EventEnvelope,
+          { type: typeof EventType.ItemCompleted }
+        > => event.type === EventType.ItemCompleted,
+      )
+      expect(completed?.data.item.content).toEqual([
         { type: "reasoning", text: "inspect files" },
         { type: "text", text: "final text" },
       ])
@@ -847,13 +884,13 @@ describe("session runner", () => {
           },
         ],
         "failed",
-        createRuntimeLimits({ assistantResponseBytes: 100 }),
+        createSessionExecutionPolicy({ assistantResponseBytes: 100 }),
       )
       await expectTerminal(
         runtime,
         [{ content: [{ type: "text", text: "never used" }] }],
         "failed",
-        createRuntimeLimits({ modelCallsPerTurn: 0 }),
+        createSessionExecutionPolicy({ modelCallsPerTurn: 0 }),
       )
 
       const abortProvider = createFauxProvider([{ waitForAbort: true }])
@@ -888,6 +925,53 @@ describe("session runner", () => {
         sessionId: session.sessionId,
       })
       expect(final.session?.cancelledTurns).toHaveLength(1)
+    })
+  })
+
+  it("uses the restored Turn response limit instead of the new runner default", async () => {
+    await withRuntime(async (runtime) => {
+      const session = await createAttributedSession(runtime)
+      const persistedPolicy = createSessionExecutionPolicy({
+        assistantResponseBytes: 1_000,
+      })
+      const first = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: createFauxProvider([
+          { content: [{ type: "text", text: "seed" }] },
+        ]).stream,
+        executionPolicy: persistedPolicy,
+      })
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "first" },
+      })
+      await first.wake(session.sessionId)
+
+      const second = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: createFauxProvider([
+          {
+            snapshots: ["x".repeat(200)],
+            content: [{ type: "text", text: "x".repeat(200) }],
+          },
+        ]).stream,
+        executionPolicy: createSessionExecutionPolicy({
+          assistantResponseBytes: 100,
+        }),
+      })
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "second" },
+      })
+      await second.wake(session.sessionId)
+
+      const read = await runtime.kernel.readSession({
+        sessionId: session.sessionId,
+      })
+      expect(read.session?.completedTurns).toHaveLength(2)
+      expect(read.session?.failedTurns).toEqual([])
     })
   })
 
@@ -976,7 +1060,7 @@ describe("session runner", () => {
         kernel: runtime.kernel,
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
-        limits: createRuntimeLimits({
+        executionPolicy: createSessionExecutionPolicy({
           modelVisibleMessageBlocks: 100,
           modelVisibleContextBytes: 100_000,
           compactionTriggerRatio: 0.000_01,
@@ -993,7 +1077,7 @@ describe("session runner", () => {
           workspaceRoot: runtime.rootDir,
           enabledTools: ["read_file"],
           approvalPolicy: "never",
-          limits: createRuntimeLimits({
+          executionPolicy: createSessionExecutionPolicy({
             modelVisibleMessageBlocks: 100,
             modelVisibleContextBytes: 100_000,
             compactionTriggerRatio: 0.000_01,
@@ -1128,7 +1212,7 @@ describe("session runner", () => {
         expect(
           replayed.events.find(
             (event) =>
-              event.type === EventType.WorldStateUpdated &&
+              event.type === HistoryRecordType.WorldState &&
               event.data.turnId === checkpoint.data.turnId &&
               event.data.full &&
               event.seq > checkpoint.seq,
@@ -1182,7 +1266,7 @@ describe("session runner", () => {
         kernel: runtime.kernel,
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
-        limits: createRuntimeLimits({
+        executionPolicy: createSessionExecutionPolicy({
           modelCallsPerTurn: 2,
           modelVisibleMessageBlocks: 100,
           modelVisibleContextBytes: 100_000,
@@ -1216,7 +1300,7 @@ describe("session runner", () => {
         sessionId: session.sessionId,
       })
       const assistantMetadata = replayed.events.flatMap((event) =>
-        event.type === EventType.AssistantMessage
+        event.type === HistoryRecordType.AgentMessage
           ? [event.data.providerMetadata]
           : [],
       )
@@ -1238,7 +1322,9 @@ describe("session runner", () => {
         kernel: runtime.kernel,
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
-        limits: createRuntimeLimits({ modelVisibleMessageBlocks: 3 }),
+        executionPolicy: createSessionExecutionPolicy({
+          modelVisibleMessageBlocks: 3,
+        }),
       })
       const session = await createAttributedSession(runtime)
       await runtime.kernel.admitInput({
@@ -1287,7 +1373,9 @@ describe("session runner", () => {
         kernel: runtime.kernel,
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
-        limits: createRuntimeLimits({ modelVisibleMessageBlocks: 3 }),
+        executionPolicy: createSessionExecutionPolicy({
+          modelVisibleMessageBlocks: 3,
+        }),
       })
       const session = await createAttributedSession(runtime)
       await runtime.kernel.admitInput({
@@ -1354,7 +1442,7 @@ describe("session runner", () => {
         kernel: runtime.kernel,
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
-        limits: createRuntimeLimits({
+        executionPolicy: createSessionExecutionPolicy({
           modelVisibleMessageBlocks: 100,
           modelVisibleContextBytes: 10_000,
           compactionTriggerRatio: 0.5,
@@ -1413,7 +1501,7 @@ describe("session runner", () => {
         kernel: runtime.kernel,
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
-        limits: createRuntimeLimits({
+        executionPolicy: createSessionExecutionPolicy({
           modelVisibleMessageBlocks: 100,
           modelVisibleContextBytes: 100_000,
           compactionTriggerRatio: 0.000_01,
@@ -1467,7 +1555,7 @@ describe("session runner", () => {
         kernel: runtime.kernel,
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
-        limits: createRuntimeLimits({
+        executionPolicy: createSessionExecutionPolicy({
           modelVisibleMessageBlocks: 100,
           modelVisibleContextBytes: 100_000,
           compactionTriggerRatio: 0.000_01,
@@ -1947,14 +2035,14 @@ async function expectTerminal(
   runtime: RuntimeContext,
   script: Parameters<typeof createFauxProvider>[0],
   terminal: "failed" | "cancelled",
-  limits = createRuntimeLimits(),
+  limits = createSessionExecutionPolicy(),
 ): Promise<void> {
   const provider = createFauxProvider(script)
   const runner = createSessionRunner({
     kernel: runtime.kernel,
     mateKernel: runtime.mateKernel,
     stream: provider.stream,
-    limits,
+    executionPolicy: limits,
   })
   const session = await createAttributedSession(runtime)
   await runtime.kernel.admitInput({

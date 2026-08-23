@@ -2,7 +2,6 @@ import { createEventId } from "./ids.ts"
 
 export const EventType = {
   SessionCreated: "session.created",
-  SessionConfigured: "session.configured",
   InputAdmitted: "input.admitted",
   InputCancelled: "input.cancelled",
   TurnStarted: "turn.started",
@@ -10,14 +9,24 @@ export const EventType = {
   TurnFailed: "turn.failed",
   TurnCancelled: "turn.cancelled",
   TurnInterrupted: "turn.interrupted",
-  AssistantMessage: "assistant.message",
-  ToolCall: "tool.call",
-  ToolResult: "tool.result",
+  ItemStarted: "item.started",
+  ItemCompleted: "item.completed",
   PermissionRequested: "permission.requested",
   PermissionResolved: "permission.resolved",
-  WorldStateUpdated: "world_state.updated",
-  ContextWindowSeeded: "context_window.seeded",
   ContextCompacted: "context.compacted",
+} as const
+
+// Mirrors Codex's ResponseItem/history versus EventMsg boundary: these records
+// are durable inputs to replay, resume, fork, and context construction, not
+// runtime events delivered to GUI subscribers.
+export const HistoryRecordType = {
+  SessionMetadata: "session.metadata",
+  TurnContext: "turn.context",
+  InitialContext: "history.initialized",
+  WorldState: "world_state",
+  AgentMessage: "conversation.agent_message",
+  ModelToolCall: "conversation.tool_call",
+  ModelToolResult: "conversation.tool_result",
 } as const
 
 export const ForkReason = {
@@ -59,6 +68,8 @@ export const PermissionBehavior = {
 } as const
 
 export type EventType = (typeof EventType)[keyof typeof EventType]
+export type HistoryRecordType =
+  (typeof HistoryRecordType)[keyof typeof HistoryRecordType]
 export type InputRole = (typeof InputRole)[keyof typeof InputRole]
 export type ItemKind = (typeof ItemKind)[keyof typeof ItemKind]
 export type ItemStatus = (typeof ItemStatus)[keyof typeof ItemStatus]
@@ -238,10 +249,8 @@ export type TurnExecutionLimits = {
   readonly toolCallsPerTurn: number
   readonly modelVisibleMessageBlocks: number
   readonly modelVisibleContextBytes: number
-  /** Missing on Turns recorded before proactive compaction thresholds existed. */
-  readonly compactionTriggerContextBytes?: number
-  /** Missing on Turns recorded before verbatim-tail retention was explicit. */
-  readonly compactionRetainContextBytes?: number
+  readonly compactionTriggerContextBytes: number
+  readonly compactionRetainContextBytes: number
   readonly modelVisibleToolResultBytes: number
   readonly modelVisibleToolResultLines: number
   readonly assistantResponseBytes: number
@@ -267,16 +276,28 @@ export type BaseInstructionsSnapshot = {
     | { readonly type: "custom" }
 }
 
+export type SessionExecutionPolicyDefaultsSnapshot = {
+  readonly modelCallsPerTurn: number
+  readonly toolCallsPerTurn: number
+  readonly modelVisibleMessageBlocks: number
+  readonly modelVisibleContextBytes: number
+  readonly compactionTriggerRatio: number
+  readonly compactionRetainRatio: number
+  readonly modelVisibleToolResultBytes: number
+  readonly modelVisibleToolResultLines: number
+  readonly compactionSummaryBytes: number
+  readonly assistantResponseBytes: number
+}
+
 export type SessionConfigurationSnapshot = {
-  readonly schemaVersion: 1
+  readonly schemaVersion: 2
   readonly workspaceRoot: string
-  /** Missing on Sessions created before prompt-cache identity was persisted. */
-  readonly promptCacheKey?: string
+  readonly promptCacheKey: string
   readonly defaultTarget: ModelSelection
   readonly baseInstructions: BaseInstructionsSnapshot
   readonly enabledTools: readonly string[]
   readonly approvalPolicy: "auto_file_tools" | "never"
-  readonly runtimeLimits: { readonly [key: string]: number }
+  readonly executionPolicyDefaults: SessionExecutionPolicyDefaultsSnapshot
   readonly modelContextWindowTokens?: number
 }
 
@@ -287,14 +308,9 @@ export type TurnExecutionContext = {
   readonly model: string
   readonly effort?: string
   readonly speed?: string
-  /** Missing only on events written before prompt attribution was introduced. */
-  readonly promptId?: string
-  /** Legacy combined revision written before base/model attribution split. */
-  readonly promptRevision?: string
-  /** Exact persisted Session base-instruction revision. */
-  readonly baseInstructionsRevision?: string
-  /** Selected model template revision for model-switch attribution. */
-  readonly modelInstructionsRevision?: string
+  readonly promptId: string
+  readonly baseInstructionsRevision: string
+  readonly modelInstructionsRevision: string
   /** Selected window after applying the session configuration override. */
   readonly modelContextWindowTokens?: number
   /** Window available to the harness after the model's safety margin. */
@@ -302,7 +318,7 @@ export type TurnExecutionContext = {
   readonly workingDirectory: string
   readonly enabledTools: readonly string[]
   readonly approvalPolicy: string
-  readonly limits: TurnExecutionLimits
+  readonly executionPolicy: TurnExecutionLimits
 }
 
 export type SessionCreatedEvent = {
@@ -321,10 +337,18 @@ export type SessionCreatedEvent = {
   }
 }
 
-export type SessionConfiguredEvent = {
-  readonly type: typeof EventType.SessionConfigured
+export type SessionMetadataRecord = {
+  readonly type: typeof HistoryRecordType.SessionMetadata
   readonly data: {
     readonly configuration: SessionConfigurationSnapshot
+  }
+}
+
+export type TurnContextRecord = {
+  readonly type: typeof HistoryRecordType.TurnContext
+  readonly data: {
+    readonly turnId: string
+    readonly context: TurnExecutionContext
   }
 }
 
@@ -361,7 +385,6 @@ export type TurnStartedEvent = {
     readonly turnId: string
     readonly inputId: string
     readonly parentTurnId?: string
-    readonly executionContext?: TurnExecutionContext
     readonly metadata?: EventMetadata
   }
 }
@@ -407,8 +430,8 @@ export type TurnInterruptedEvent = {
   }
 }
 
-export type AssistantMessageEvent = {
-  readonly type: typeof EventType.AssistantMessage
+export type AgentMessageRecord = {
+  readonly type: typeof HistoryRecordType.AgentMessage
   readonly data: {
     readonly messageId: string
     readonly turnId: string
@@ -417,8 +440,8 @@ export type AssistantMessageEvent = {
   }
 }
 
-export type ToolCallEvent = {
-  readonly type: typeof EventType.ToolCall
+export type ModelToolCallRecord = {
+  readonly type: typeof HistoryRecordType.ModelToolCall
   readonly data: {
     readonly toolCallId: string
     readonly itemId: string
@@ -430,8 +453,8 @@ export type ToolCallEvent = {
   }
 }
 
-export type ToolResultEvent = {
-  readonly type: typeof EventType.ToolResult
+export type ModelToolResultRecord = {
+  readonly type: typeof HistoryRecordType.ModelToolResult
   readonly data: {
     readonly toolResultId: string
     readonly toolCallId: string
@@ -439,6 +462,54 @@ export type ToolResultEvent = {
     readonly content: ItemContent
     readonly output?: JsonValue
     readonly error?: KernelError
+  }
+}
+
+export type ToolExecutionType =
+  | "command_execution"
+  | "file_change"
+  | "file_read"
+  | "search"
+  | "web"
+  | "collab_agent"
+  | "tool_execution"
+
+export type AgentMessageExecutionItem = {
+  readonly type: "agent_message"
+  readonly itemId: string
+  readonly content: readonly AssistantContentBlock[]
+  readonly streamId?: string
+}
+
+export type ToolExecutionItem = {
+  readonly type: ToolExecutionType
+  readonly itemId: string
+  readonly toolCallId: string
+  readonly name: string
+  readonly input: JsonValue
+  readonly requiresPermission: boolean
+}
+
+export type ItemStartedEvent = {
+  readonly type: typeof EventType.ItemStarted
+  readonly data: {
+    readonly turnId: string
+    readonly item: ToolExecutionItem
+  }
+}
+
+export type ItemCompletedEvent = {
+  readonly type: typeof EventType.ItemCompleted
+  readonly data: {
+    readonly turnId: string
+    readonly item:
+      | AgentMessageExecutionItem
+      | (ToolExecutionItem & {
+          readonly resultItemId: string
+          readonly content: ItemContent
+          readonly output?: JsonValue
+          readonly error?: KernelError
+        })
   }
 }
 
@@ -473,8 +544,8 @@ export type WorldStateFragment = {
   readonly text: string
 }
 
-export type WorldStateUpdatedEvent = {
-  readonly type: typeof EventType.WorldStateUpdated
+export type WorldStateRecord = {
+  readonly type: typeof HistoryRecordType.WorldState
   readonly data: {
     readonly turnId: string
     readonly afterItemId?: string
@@ -500,8 +571,8 @@ export type ContextCompactedEvent = {
   }
 }
 
-export type ContextWindowSeededEvent = {
-  readonly type: typeof EventType.ContextWindowSeeded
+export type InitialContextRecord = {
+  readonly type: typeof HistoryRecordType.InitialContext
   readonly data: {
     readonly windowId: string
     readonly sourceSessionId: string
@@ -512,7 +583,6 @@ export type ContextWindowSeededEvent = {
 
 export type KernelEvent =
   | SessionCreatedEvent
-  | SessionConfiguredEvent
   | InputAdmittedEvent
   | InputCancelledEvent
   | TurnStartedEvent
@@ -520,14 +590,26 @@ export type KernelEvent =
   | TurnFailedEvent
   | TurnCancelledEvent
   | TurnInterruptedEvent
-  | AssistantMessageEvent
-  | ToolCallEvent
-  | ToolResultEvent
+  | ItemStartedEvent
+  | ItemCompletedEvent
   | PermissionRequestedEvent
   | PermissionResolvedEvent
-  | WorldStateUpdatedEvent
-  | ContextWindowSeededEvent
   | ContextCompactedEvent
+
+export type ConversationRecord =
+  | AgentMessageRecord
+  | ModelToolCallRecord
+  | ModelToolResultRecord
+
+export type SessionHistoryRecord =
+  | SessionMetadataRecord
+  | TurnContextRecord
+  | WorldStateRecord
+  | InitialContextRecord
+
+export type HistoryRecord = SessionHistoryRecord | ConversationRecord
+
+export type KernelFact = KernelEvent | HistoryRecord
 
 export type EventEnvelopeBase = {
   readonly id: string
@@ -537,7 +619,9 @@ export type EventEnvelopeBase = {
   readonly createdAt: string
 }
 
-export type EventEnvelope = EventEnvelopeBase & KernelEvent
+export type EventEnvelope = EventEnvelopeBase & KernelFact
+export type RuntimeEventEnvelope = EventEnvelopeBase & KernelEvent
+export type HistoryRecordEnvelope = EventEnvelopeBase & HistoryRecord
 
 export type OpaqueEventEnvelope = EventEnvelopeBase & {
   readonly type: string
@@ -546,24 +630,26 @@ export type OpaqueEventEnvelope = EventEnvelopeBase & {
 
 export type StoredEventEnvelope = EventEnvelope | OpaqueEventEnvelope
 
-export type EventEnvelopeInput = {
+export type EventEnvelopeInput<Fact extends KernelFact = KernelFact> = {
   readonly sessionId: string
   readonly seq: number
-  readonly event: KernelEvent
+  readonly event: Fact
   readonly version?: number
   readonly id?: string
   readonly createdAt?: string
 }
 
-export function createEventEnvelope(input: EventEnvelopeInput): EventEnvelope {
+export function createEventEnvelope<const Fact extends KernelFact>(
+  input: EventEnvelopeInput<Fact>,
+): EventEnvelopeBase & Fact {
   if (!Number.isInteger(input.seq) || input.seq <= 0) {
     throw new RangeError("Event sequence must be a positive integer.")
   }
-  const version = input.version ?? 1
+  const version = input.version ?? 2
   if (!Number.isInteger(version) || version <= 0) {
     throw new RangeError("Event version must be a positive integer.")
   }
-  requireKernelEvent(input.event)
+  requireKernelFact(input.event)
   return {
     id: input.id ?? createEventId(),
     sessionId: input.sessionId,
@@ -578,19 +664,45 @@ export function isKnownEventType(value: unknown): value is EventType {
   return typeof value === "string" && eventTypes.has(value)
 }
 
+export function isKnownHistoryRecordType(
+  value: unknown,
+): value is HistoryRecordType {
+  return typeof value === "string" && historyRecordTypes.has(value)
+}
+
 export function isKernelEvent(value: unknown): value is KernelEvent {
+  if (!isRecord(value) || !isKnownEventType(value.type)) return false
   try {
-    requireKernelEvent(value)
+    requireKernelFact(value)
     return true
   } catch {
     return false
   }
 }
 
-function requireKernelEvent(value: unknown): asserts value is KernelEvent {
+export function isHistoryRecord(value: unknown): value is HistoryRecord {
+  if (!isRecord(value) || !isKnownHistoryRecordType(value.type)) return false
+  try {
+    requireKernelFact(value)
+    return true
+  } catch {
+    return false
+  }
+}
+
+export function isKernelFact(value: unknown): value is KernelFact {
+  try {
+    requireKernelFact(value)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function requireKernelFact(value: unknown): asserts value is KernelFact {
   if (
     !isRecord(value) ||
-    !isKnownEventType(value.type) ||
+    (!isKnownEventType(value.type) && !isKnownHistoryRecordType(value.type)) ||
     !isRecord(value.data)
   ) {
     throw new TypeError("Invalid kernel event.")
@@ -616,7 +728,7 @@ function requireKernelEvent(value: unknown): asserts value is KernelEvent {
           (data.historyBase === undefined ||
             isSessionHistoryPosition(data.historyBase))
         )
-      case EventType.SessionConfigured:
+      case HistoryRecordType.SessionMetadata:
         return (
           onlyKeys(data, ["configuration"]) &&
           isSessionConfigurationSnapshot(data.configuration)
@@ -643,17 +755,16 @@ function requireKernelEvent(value: unknown): asserts value is KernelEvent {
         return onlyKeys(data, ["inputId", "reason"]) && isString(data.inputId)
       case EventType.TurnStarted:
         return (
-          onlyKeys(data, [
-            "turnId",
-            "inputId",
-            "parentTurnId",
-            "executionContext",
-            "metadata",
-          ]) &&
+          onlyKeys(data, ["turnId", "inputId", "parentTurnId", "metadata"]) &&
           isString(data.turnId) &&
           isString(data.inputId) &&
-          (data.executionContext === undefined ||
-            isTurnExecutionContext(data.executionContext))
+          (data.parentTurnId === undefined || isString(data.parentTurnId))
+        )
+      case HistoryRecordType.TurnContext:
+        return (
+          onlyKeys(data, ["turnId", "context"]) &&
+          isString(data.turnId) &&
+          isTurnExecutionContext(data.context)
         )
       case EventType.TurnCompleted:
         return (
@@ -684,7 +795,7 @@ function requireKernelEvent(value: unknown): asserts value is KernelEvent {
           (data.usage === undefined || isTokenUsage(data.usage)) &&
           (data.metrics === undefined || isTurnMetrics(data.metrics))
         )
-      case EventType.AssistantMessage:
+      case HistoryRecordType.AgentMessage:
         return (
           onlyKeys(data, [
             "messageId",
@@ -697,7 +808,7 @@ function requireKernelEvent(value: unknown): asserts value is KernelEvent {
           Array.isArray(data.content) &&
           data.content.every(isAssistantContentBlock)
         )
-      case EventType.ToolCall:
+      case HistoryRecordType.ModelToolCall:
         return (
           onlyKeys(data, [
             "toolCallId",
@@ -715,7 +826,7 @@ function requireKernelEvent(value: unknown): asserts value is KernelEvent {
           isJsonValue(data.input) &&
           typeof data.requiresPermission === "boolean"
         )
-      case EventType.ToolResult:
+      case HistoryRecordType.ModelToolResult:
         return (
           onlyKeys(data, [
             "toolResultId",
@@ -731,6 +842,18 @@ function requireKernelEvent(value: unknown): asserts value is KernelEvent {
           isItemContent(data.content) &&
           (data.output === undefined || isJsonValue(data.output)) &&
           (data.error === undefined || isKernelError(data.error))
+        )
+      case EventType.ItemStarted:
+        return (
+          onlyKeys(data, ["turnId", "item"]) &&
+          isString(data.turnId) &&
+          isToolExecutionItem(data.item)
+        )
+      case EventType.ItemCompleted:
+        return (
+          onlyKeys(data, ["turnId", "item"]) &&
+          isString(data.turnId) &&
+          isCompletedExecutionItem(data.item)
         )
       case EventType.PermissionRequested:
         return (
@@ -761,7 +884,7 @@ function requireKernelEvent(value: unknown): asserts value is KernelEvent {
           isString(data.turnId) &&
           isPermissionBehavior(data.behavior)
         )
-      case EventType.WorldStateUpdated:
+      case HistoryRecordType.WorldState:
         return (
           onlyKeys(data, [
             "turnId",
@@ -798,7 +921,7 @@ function requireKernelEvent(value: unknown): asserts value is KernelEvent {
           (data.replacement === undefined ||
             isContextWindowReplacement(data.replacement))
         )
-      case EventType.ContextWindowSeeded:
+      case HistoryRecordType.InitialContext:
         return (
           onlyKeys(data, [
             "windowId",
@@ -829,6 +952,96 @@ function isWorldStateFragment(value: unknown): value is WorldStateFragment {
     (value.role === "user" || value.role === "developer") &&
     isString(value.text)
   )
+}
+
+function isToolExecutionItem(value: unknown): value is ToolExecutionItem {
+  return (
+    isRecord(value) &&
+    onlyKeys(value, [
+      "type",
+      "itemId",
+      "toolCallId",
+      "name",
+      "input",
+      "requiresPermission",
+    ]) &&
+    isToolExecutionType(value.type) &&
+    isString(value.itemId) &&
+    isString(value.toolCallId) &&
+    isString(value.name) &&
+    isJsonValue(value.input) &&
+    typeof value.requiresPermission === "boolean"
+  )
+}
+
+function isCompletedExecutionItem(
+  value: unknown,
+): value is ItemCompletedEvent["data"]["item"] {
+  if (!isRecord(value)) return false
+  if (value.type === "agent_message") {
+    return (
+      onlyKeys(value, ["type", "itemId", "content", "streamId"]) &&
+      isString(value.itemId) &&
+      Array.isArray(value.content) &&
+      value.content.every(isAssistantContentBlock) &&
+      (value.streamId === undefined || isString(value.streamId))
+    )
+  }
+  return (
+    onlyKeys(value, [
+      "type",
+      "itemId",
+      "toolCallId",
+      "name",
+      "input",
+      "requiresPermission",
+      "resultItemId",
+      "content",
+      "output",
+      "error",
+    ]) &&
+    isToolExecutionType(value.type) &&
+    isString(value.itemId) &&
+    isString(value.toolCallId) &&
+    isString(value.name) &&
+    isJsonValue(value.input) &&
+    typeof value.requiresPermission === "boolean" &&
+    isString(value.resultItemId) &&
+    isItemContent(value.content) &&
+    (value.output === undefined || isJsonValue(value.output)) &&
+    (value.error === undefined || isKernelError(value.error))
+  )
+}
+
+function isToolExecutionType(value: unknown): value is ToolExecutionType {
+  return (
+    value === "command_execution" ||
+    value === "file_change" ||
+    value === "file_read" ||
+    value === "search" ||
+    value === "web" ||
+    value === "collab_agent" ||
+    value === "tool_execution"
+  )
+}
+
+export function toolExecutionType(name: string): ToolExecutionType {
+  if (name === "run_command") return "command_execution"
+  if (name === "edit_file" || name === "write_file") return "file_change"
+  if (name === "read_file" || name === "read_session_file") return "file_read"
+  if (name === "grep" || name === "glob") return "search"
+  if (name === "web_fetch" || name === "web_search") return "web"
+  if (
+    name === "spawn_agent" ||
+    name === "send_message" ||
+    name === "followup_task" ||
+    name === "wait_agent" ||
+    name === "interrupt_agent" ||
+    name === "list_agents"
+  ) {
+    return "collab_agent"
+  }
+  return "tool_execution"
 }
 
 function isContextWindowReplacement(
@@ -950,21 +1163,20 @@ function isSessionConfigurationSnapshot(
       "baseInstructions",
       "enabledTools",
       "approvalPolicy",
-      "runtimeLimits",
+      "executionPolicyDefaults",
       "modelContextWindowTokens",
     ]) ||
-    value.schemaVersion !== 1 ||
+    value.schemaVersion !== 2 ||
     !isString(value.workspaceRoot) ||
-    (value.promptCacheKey !== undefined &&
-      (!isString(value.promptCacheKey) ||
-        value.promptCacheKey.trim().length === 0)) ||
+    !isString(value.promptCacheKey) ||
+    value.promptCacheKey.trim().length === 0 ||
     !isModelSelection(value.defaultTarget) ||
     !isBaseInstructionsSnapshot(value.baseInstructions) ||
     !Array.isArray(value.enabledTools) ||
     !value.enabledTools.every(isString) ||
     (value.approvalPolicy !== "auto_file_tools" &&
       value.approvalPolicy !== "never") ||
-    !isNumericConfiguration(value.runtimeLimits) ||
+    !isSessionExecutionPolicyDefaults(value.executionPolicyDefaults) ||
     (value.modelContextWindowTokens !== undefined &&
       !isPositiveInteger(value.modelContextWindowTokens))
   ) {
@@ -997,19 +1209,39 @@ function isBaseInstructionsSnapshot(
   )
 }
 
-function isNumericConfiguration(
+function isSessionExecutionPolicyDefaults(
   value: unknown,
-): value is { readonly [key: string]: number } {
+): value is SessionExecutionPolicyDefaultsSnapshot {
   return (
     isRecord(value) &&
+    onlyKeys(value, sessionExecutionPolicyKeys) &&
+    Object.keys(value).length === sessionExecutionPolicyKeys.length &&
     Object.values(value).every(
-      (item) => typeof item === "number" && Number.isFinite(item),
-    )
+      (item) => typeof item === "number" && Number.isFinite(item) && item >= 0,
+    ) &&
+    typeof value.compactionTriggerRatio === "number" &&
+    value.compactionTriggerRatio > 0 &&
+    value.compactionTriggerRatio <= 1 &&
+    typeof value.compactionRetainRatio === "number" &&
+    value.compactionRetainRatio < value.compactionTriggerRatio
   )
 }
 
+const sessionExecutionPolicyKeys = [
+  "modelCallsPerTurn",
+  "toolCallsPerTurn",
+  "modelVisibleMessageBlocks",
+  "modelVisibleContextBytes",
+  "compactionTriggerRatio",
+  "compactionRetainRatio",
+  "modelVisibleToolResultBytes",
+  "modelVisibleToolResultLines",
+  "compactionSummaryBytes",
+  "assistantResponseBytes",
+] as const
+
 function optionalFieldsAreValid(
-  type: EventType,
+  type: EventType | HistoryRecordType,
   data: Record<string, unknown>,
 ): boolean {
   if ("reason" in data && data.reason !== undefined) {
@@ -1218,8 +1450,10 @@ function isPermissionDecisionReason(
 }
 
 function isTurnExecutionContext(value: unknown): value is TurnExecutionContext {
-  if (!isRecord(value) || !isRecord(value.limits)) return false
-  const limits = value.limits
+  if (!isRecord(value) || !isRecord(value.executionPolicy)) return false
+  const policy = value.executionPolicy
+  const compactionTriggerContextBytes = policy.compactionTriggerContextBytes
+  const compactionRetainContextBytes = policy.compactionRetainContextBytes
   return (
     isString(value.mateId) &&
     isString(value.mateRevisionId) &&
@@ -1227,12 +1461,9 @@ function isTurnExecutionContext(value: unknown): value is TurnExecutionContext {
     isString(value.model) &&
     (value.effort === undefined || isString(value.effort)) &&
     (value.speed === undefined || isString(value.speed)) &&
-    (value.promptId === undefined || isString(value.promptId)) &&
-    (value.promptRevision === undefined || isString(value.promptRevision)) &&
-    (value.baseInstructionsRevision === undefined ||
-      isString(value.baseInstructionsRevision)) &&
-    (value.modelInstructionsRevision === undefined ||
-      isString(value.modelInstructionsRevision)) &&
+    isString(value.promptId) &&
+    isString(value.baseInstructionsRevision) &&
+    isString(value.modelInstructionsRevision) &&
     (value.modelContextWindowTokens === undefined ||
       isPositiveInteger(value.modelContextWindowTokens)) &&
     (value.effectiveModelContextWindowTokens === undefined ||
@@ -1245,14 +1476,12 @@ function isTurnExecutionContext(value: unknown): value is TurnExecutionContext {
     isString(value.approvalPolicy) &&
     Array.isArray(value.enabledTools) &&
     value.enabledTools.every(isString) &&
-    (limits.compactionTriggerContextBytes === undefined ||
-      isNonNegativeInteger(limits.compactionTriggerContextBytes)) &&
-    (limits.compactionRetainContextBytes === undefined ||
-      isNonNegativeInteger(limits.compactionRetainContextBytes)) &&
-    (typeof limits.compactionTriggerContextBytes !== "number" ||
-      typeof limits.compactionRetainContextBytes !== "number" ||
-      limits.compactionRetainContextBytes <
-        limits.compactionTriggerContextBytes) &&
+    isNonNegativeInteger(compactionTriggerContextBytes) &&
+    isNonNegativeInteger(compactionRetainContextBytes) &&
+    compactionRetainIsBelowTrigger(
+      compactionRetainContextBytes,
+      compactionTriggerContextBytes,
+    ) &&
     [
       "modelCallsPerTurn",
       "toolCallsPerTurn",
@@ -1261,7 +1490,7 @@ function isTurnExecutionContext(value: unknown): value is TurnExecutionContext {
       "modelVisibleToolResultBytes",
       "modelVisibleToolResultLines",
       "assistantResponseBytes",
-    ].every((key) => isNonNegativeInteger(limits[key]))
+    ].every((key) => isNonNegativeInteger(policy[key]))
   )
 }
 
@@ -1281,6 +1510,17 @@ function isNonNegativeInteger(value: unknown): boolean {
   return typeof value === "number" && Number.isInteger(value) && value >= 0
 }
 
+function compactionRetainIsBelowTrigger(
+  retain: unknown,
+  trigger: unknown,
+): boolean {
+  return (
+    typeof retain === "number" &&
+    typeof trigger === "number" &&
+    retain < trigger
+  )
+}
+
 function isPositiveInteger(value: unknown): boolean {
   return typeof value === "number" && Number.isInteger(value) && value >= 1
 }
@@ -1294,5 +1534,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 const eventTypes = new Set<string>(Object.values(EventType))
+const historyRecordTypes = new Set<string>(Object.values(HistoryRecordType))
 const inputRoles = new Set<string>(Object.values(InputRole))
 const permissionBehaviors = new Set<string>(Object.values(PermissionBehavior))

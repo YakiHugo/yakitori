@@ -24,7 +24,6 @@ import {
   type EventStoreReadEventsInput,
   type EventStoreRebuildProjectionResult,
   paginateSessionSummaries,
-  parseStoredEventEnvelope,
   requireAdmissionFingerprint,
   requireExpectedSequence,
 } from "./event-store.ts"
@@ -32,8 +31,9 @@ import {
   createEventEnvelope,
   type EventEnvelope,
   EventType,
+  isKernelFact,
   isKernelEvent,
-  type KernelEvent,
+  type KernelFact,
   type SessionCreatedEvent,
   type SessionHistoryPosition,
   type StoredEventEnvelope,
@@ -42,12 +42,12 @@ import { isRequestId } from "./ids.ts"
 import {
   invalidEventLog,
   isNotFound,
-  type JournalCommitRecord,
-  type JournalLine,
   parseJournalLine,
+  parseJournalRecord,
   pathExists,
   readSummaryCache,
   type SessionSummaryCache,
+  serializeFactBatchLine,
   serializeFactLine,
   summaryVersion,
   summaryWithoutCacheFields,
@@ -116,7 +116,7 @@ type PhysicalEventRecord = {
   readonly event: StoredEventEnvelope
   readonly lineStart: number
   readonly lineEnd: number
-  readonly eventIndex: number
+  readonly lineEventIndex: number
 }
 
 export function createJsonlEventStore(
@@ -302,7 +302,7 @@ export function createJsonlEventStore(
 
   async function appendEvents(
     sessionId: string,
-    events: readonly KernelEvent[],
+    events: readonly KernelFact[],
     appendOptions: EventStoreAppendOptions = {},
   ): Promise<EventEnvelope[]> {
     assertEventStoreSessionId(sessionId)
@@ -370,7 +370,11 @@ export function createJsonlEventStore(
             details: { sessionId },
           })
         }
-        const bytes = Buffer.from(envelopes.map(serializeFactLine).join(""))
+        const bytes = Buffer.from(
+          optionsSnapshot.atomic === true && envelopes.length > 1
+            ? serializeFactBatchLine(envelopes)
+            : envelopes.map(serializeFactLine).join(""),
+        )
 
         try {
           await writeAll(loaded.handle, bytes)
@@ -807,7 +811,7 @@ export function createJsonlEventStore(
     }
     const records = await readHistorySegmentRecords(segment)
     const boundary = records.find((record) => record.event.seq === boundarySeq)
-    if (boundary === undefined || boundary.eventIndex !== 0) {
+    if (boundary === undefined || boundary.lineEventIndex !== 0) {
       throw invalidEventLog(
         "Fork history boundary is not a stable journal line boundary.",
         { sessionId: segment.sessionId, boundarySeq },
@@ -852,12 +856,6 @@ export function createJsonlEventStore(
         chunks.push(read.subarray(0, newline))
         const line = Buffer.concat(chunks).toString("utf8")
         const parsed = parseJournalLine(line, 1)
-        if (isCommitRecord(parsed)) {
-          throw invalidEventLog(
-            "Legacy commit journals cannot contribute referenced history.",
-            { sessionId },
-          )
-        }
         if (
           parsed.sessionId !== sessionId ||
           parsed.seq !== 1 ||
@@ -1456,10 +1454,6 @@ function summaryCache(loaded: LoadedSession): SessionSummaryCache | undefined {
   }
 }
 
-function isCommitRecord(line: JournalLine): line is JournalCommitRecord {
-  return "record" in line
-}
-
 function parsePhysicalJournal(
   sessionId: string,
   content: Buffer,
@@ -1478,65 +1472,22 @@ function parsePhysicalJournal(
       })
     }
     const lineEnd = newline + 1
-    const parsed = parseJournalLine(
+    const parsed = parseJournalRecord(
       content.subarray(lineStart, newline).toString("utf8"),
       recordNumber,
     )
-    if (isCommitRecord(parsed) && parsed.sessionId !== sessionId) {
-      throw invalidEventLog(
-        `Session journal record ${recordNumber} belongs to another Session.`,
-        {
-          sessionId,
-          recordNumber,
-          recordSessionId: parsed.sessionId,
-        },
-      )
-    }
-    const events = isCommitRecord(parsed)
-      ? parsed.events.map((event, eventIndex) =>
-          parseStoredEventEnvelope(
-            JSON.stringify(event),
-            recordNumber * 1_000_000 + eventIndex + 1,
-          ),
-        )
-      : [parsed]
-    const first = events[0]
-    if (
-      isCommitRecord(parsed) &&
-      first !== undefined &&
-      parsed.firstSeq !== first.seq
-    ) {
-      throw invalidEventLog(
-        `Session journal record ${recordNumber} firstSeq does not match its first event.`,
-        {
-          sessionId,
-          recordNumber,
-          expectedSeq: parsed.firstSeq,
-          actualSeq: first.seq,
-        },
-      )
-    }
-    for (const [eventIndex, event] of events.entries()) {
-      const preceding = events[eventIndex - 1]
-      if (
-        event.sessionId !== sessionId ||
-        (preceding !== undefined && event.seq !== preceding.seq + 1)
-      ) {
+    for (const [lineEventIndex, event] of parsed.entries()) {
+      if (event.sessionId !== sessionId) {
         throw invalidEventLog(
-          `Invalid event ordering in Session journal record ${recordNumber}.`,
+          `Session journal record ${recordNumber} belongs to another Session.`,
           {
             sessionId,
             recordNumber,
-            eventIndex,
-            actualSeq: event.seq,
-            eventSessionId: event.sessionId,
-            ...(preceding === undefined
-              ? {}
-              : { expectedSeq: preceding.seq + 1 }),
+            recordSessionId: event.sessionId,
           },
         )
       }
-      records.push({ event, lineStart, lineEnd, eventIndex })
+      records.push({ event, lineStart, lineEnd, lineEventIndex })
     }
     lineStart = lineEnd
     recordNumber += 1
@@ -1592,7 +1543,7 @@ function collectJournalAdmissions(
 
 function requireAdmissionOption(
   sessionId: string,
-  events: readonly KernelEvent[],
+  events: readonly KernelFact[],
   admission: EventStoreAppendOptions["admission"],
 ): void {
   if (admission === undefined) return
@@ -1704,7 +1655,7 @@ function reconcileCommittedAppend(
         event.id === attempted[index]?.id &&
         JSON.stringify(event) === JSON.stringify(attempted[index]),
     ) ||
-    !recorded.every(isKernelEvent)
+    !recorded.every(isKernelFact)
   ) {
     return undefined
   }

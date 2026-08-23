@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto"
 import { readFile } from "node:fs/promises"
 import type { JsonObject } from "../../kernel/index.ts"
-import { RuntimeLimits } from "../limits.ts"
+import { ToolLimitDefaults } from "../limits.ts"
 import {
   closestEditCandidates,
   matchedEditLocations,
@@ -24,7 +24,7 @@ type EditInput = {
 }
 
 export function createEditFileTool(
-  maxBytes = RuntimeLimits.fileWriteBytes,
+  maxBytes = ToolLimitDefaults.fileWriteBytes,
 ): RuntimeTool {
   return {
     name: "edit_file",

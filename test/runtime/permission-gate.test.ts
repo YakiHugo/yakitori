@@ -8,7 +8,7 @@ import { createSessionKernel } from "../../src/kernel/session-kernel.ts"
 import { createMateKernel } from "../../src/mates/mate-kernel.ts"
 import { createSqliteMateStore } from "../../src/mates/sqlite-mate-store.ts"
 import { createFauxProvider } from "../../src/runtime/faux-provider.ts"
-import { createRuntimeLimits } from "../../src/runtime/limits.ts"
+import { createRunnerTimingPolicy } from "../../src/runtime/limits.ts"
 import { ModelStopReason } from "../../src/runtime/model.ts"
 import { createPermissionGate } from "../../src/runtime/permission-gate.ts"
 import { createSessionRunner } from "../../src/runtime/session-runner.ts"
@@ -203,7 +203,9 @@ describe("permission gate", () => {
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
         permissionGate: createPermissionGate(),
-        limits: createRuntimeLimits({ permissionWaitTimeoutMs: 20 }),
+        runtimeTiming: createRunnerTimingPolicy({
+          permissionWaitTimeoutMs: 20,
+        }),
         toolRegistry: createToolRegistry([
           permissionCommandTool({
             launch: async () => {

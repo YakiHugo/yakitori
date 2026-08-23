@@ -1,7 +1,7 @@
-import type { EventEnvelope } from "../kernel/index.ts"
+import type { RuntimeEventEnvelope } from "../kernel/index.ts"
 
 export type DurableEventListener = (
-  events: readonly EventEnvelope[],
+  events: readonly RuntimeEventEnvelope[],
 ) => void | Promise<void>
 
 export type DurableEventSubscription = {
@@ -9,7 +9,7 @@ export type DurableEventSubscription = {
 }
 
 export type DurableEventHub = {
-  publish(events: readonly EventEnvelope[]): void
+  publish(events: readonly RuntimeEventEnvelope[]): void
   subscribe(
     sessionId: string,
     listener: DurableEventListener,
@@ -56,9 +56,9 @@ export function createDurableEventHub(
 }
 
 function groupEventsBySession(
-  events: readonly EventEnvelope[],
-): Map<string, EventEnvelope[]> {
-  const grouped = new Map<string, EventEnvelope[]>()
+  events: readonly RuntimeEventEnvelope[],
+): Map<string, RuntimeEventEnvelope[]> {
+  const grouped = new Map<string, RuntimeEventEnvelope[]>()
   for (const event of events) {
     grouped.set(event.sessionId, [
       ...(grouped.get(event.sessionId) ?? []),

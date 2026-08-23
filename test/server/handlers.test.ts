@@ -15,6 +15,7 @@ import {
   type ApiHandlerResult,
 } from "../../src/server/protocol.ts"
 import { createMemoryEventStore } from "../kernel/memory-event-store.ts"
+import { testTurnExecutionContext } from "../kernel/turn-context.ts"
 
 describe("server handlers", () => {
   it("creates a session with a public detail shape", async () => {
@@ -336,6 +337,16 @@ describe("server handlers", () => {
         },
       },
     })
+    const read = await server.readSession({
+      sessionId: created.body.session.id,
+    })
+    expectOk(read)
+    expect(read.body.session.currentModel).toEqual({
+      provider: "openai",
+      model: "gpt-5.6-sol",
+      effort: "high",
+      speed: "fast",
+    })
 
     const badSpeed = await server.admitInput({
       sessionId: created.body.session.id,
@@ -454,6 +465,7 @@ describe("server handlers", () => {
     await kernel.startTurn({
       sessionId: busy.body.session.id,
       inputId: admitted.body.inputId,
+      executionContext: testTurnExecutionContext(),
     })
     expectError(
       await server.deleteSession({ sessionId: busy.body.session.id }),

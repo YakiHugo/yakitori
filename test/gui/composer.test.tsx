@@ -228,25 +228,6 @@ describe("model selector", () => {
         data: {
           turnId: "turn_1",
           inputId: "input_1",
-          executionContext: {
-            mateId: "mate_1",
-            mateRevisionId: "revision_1",
-            provider: "openai",
-            model: "gpt-5.1-codex",
-            effort: "high",
-            workingDirectory: "/p/a",
-            enabledTools: [],
-            approvalPolicy: "on-request",
-            limits: {
-              modelCallsPerTurn: 10,
-              toolCallsPerTurn: 10,
-              modelVisibleMessageBlocks: 10,
-              modelVisibleContextBytes: 10,
-              modelVisibleToolResultBytes: 10,
-              modelVisibleToolResultLines: 10,
-              assistantResponseBytes: 10,
-            },
-          },
         },
       },
     })

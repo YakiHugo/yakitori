@@ -14,6 +14,7 @@ import {
   scheduleRecoveryExecution,
 } from "../../src/runtime/recovery.ts"
 import { acquireRuntimeLock } from "../../src/runtime/runtime-lock.ts"
+import { testTurnExecutionContext } from "../kernel/turn-context.ts"
 
 describe("runtime recovery", () => {
   it("records an honest interrupted Turn and is idempotent", async () => {
@@ -26,24 +27,12 @@ describe("runtime recovery", () => {
       await runtime.kernel.startTurn({
         sessionId: session.sessionId,
         inputId: admitted.inputId,
-        executionContext: {
+        executionContext: testTurnExecutionContext({
           mateId: session.mateId,
           mateRevisionId: session.mateRevisionId,
-          provider: "faux",
-          model: "scripted",
           workingDirectory: runtime.workspace,
-          enabledTools: [],
           approvalPolicy: "auto_file_tools",
-          limits: {
-            modelCallsPerTurn: 16,
-            toolCallsPerTurn: 32,
-            modelVisibleMessageBlocks: 200,
-            modelVisibleContextBytes: 256_000,
-            modelVisibleToolResultBytes: 50_000,
-            modelVisibleToolResultLines: 2_000,
-            assistantResponseBytes: 256_000,
-          },
-        },
+        }),
       })
 
       const first = await recoverSessions({ kernel: runtime.kernel })
@@ -83,6 +72,7 @@ describe("runtime recovery", () => {
       await firstKernel.startTurn({
         sessionId: session.sessionId,
         inputId: admitted.inputId,
+        executionContext: testTurnExecutionContext(),
       })
       await eventStore.close()
 
@@ -163,6 +153,7 @@ describe("runtime recovery", () => {
       const turn = await runtime.kernel.startTurn({
         sessionId: session.sessionId,
         inputId: admitted.inputId,
+        executionContext: testTurnExecutionContext(),
       })
       const kernel = {
         ...runtime.kernel,
@@ -201,6 +192,7 @@ describe("runtime recovery", () => {
         await runtime.kernel.startTurn({
           sessionId: session.sessionId,
           inputId: admitted.inputId,
+          executionContext: testTurnExecutionContext(),
         })
       }
 

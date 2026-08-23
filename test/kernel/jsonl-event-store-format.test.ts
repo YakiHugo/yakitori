@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest"
 import { EventType } from "../../src/kernel/events.ts"
 import {
-  type JournalCommitRecord,
   parseJournalLine,
+  parseJournalRecord,
+  serializeFactBatchLine,
   serializeFactLine,
 } from "../../src/kernel/jsonl-event-store-format.ts"
 
@@ -11,7 +12,7 @@ describe("Session journal format", () => {
     id: "event_format",
     sessionId: "session_00000000-0000-4000-8000-000000000000",
     seq: 1,
-    version: 1,
+    version: 2,
     createdAt: "2026-07-30T00:00:00.000Z",
     type: EventType.SessionCreated,
     data: { title: "Format" },
@@ -24,17 +25,13 @@ describe("Session journal format", () => {
     expect(parseJournalLine(line, 1)).toEqual(fact)
   })
 
-  it("parses a legacy commit line for read compatibility", () => {
-    const record: JournalCommitRecord = {
-      record: "commit",
-      version: 1,
-      sessionId: fact.sessionId,
-      firstSeq: 1,
-      operation: { id: "legacy-request", fingerprint: "legacy" },
-      events: [fact],
-    }
+  it("round-trips a crash-atomic fact batch in one physical record", () => {
+    const second = { ...fact, id: "event_format_2", seq: 2 }
+    const line = serializeFactBatchLine([fact, second])
 
-    expect(parseJournalLine(JSON.stringify(record), 1)).toEqual(record)
+    expect(line.match(/\n/g)).toHaveLength(1)
+    expect(parseJournalRecord(line, 1)).toEqual([fact, second])
+    expect(() => parseJournalLine(line, 1)).toThrow("contains a fact batch")
   })
 
   it("rejects malformed JSON and extra fact-envelope keys", () => {
@@ -46,12 +43,12 @@ describe("Session journal format", () => {
     ).toThrow("Invalid Session fact at record 4")
   })
 
-  it("routes the reserved record key only to the legacy validator", () => {
+  it("rejects obsolete commit wrappers", () => {
     expect(() =>
       parseJournalLine(
         JSON.stringify({ ...fact, record: "future-framing" }),
         5,
       ),
-    ).toThrow("Invalid Session journal record 5")
+    ).toThrow("Invalid Session fact at record 5")
   })
 })

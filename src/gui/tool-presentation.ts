@@ -75,7 +75,7 @@ export type ToolDetail =
       readonly fallbackText?: string
     }
   | {
-      readonly kind: "task"
+      readonly kind: "collaboration"
       readonly text?: string
       readonly sessionId?: string
     }
@@ -91,22 +91,27 @@ export type ToolPresentation = {
   readonly detail?: ToolDetail
 }
 
-type ToolAdapter = (entry: ToolEntry) => ToolPresentation
-
-const adapters: Readonly<Record<string, ToolAdapter>> = {
-  read_file: presentReadFile,
-  grep: presentGrep,
-  glob: presentGlob,
-  edit_file: (entry) => presentDiff(entry, "Edit", "Editing"),
-  write_file: (entry) => presentDiff(entry, "Write", "Writing"),
-  run_command: presentRunCommand,
-  web_fetch: presentWebFetch,
-  web_search: presentWebSearch,
-  task: presentTask,
-}
-
 export function presentTool(entry: ToolEntry): ToolPresentation {
-  return (adapters[entry.name] ?? presentUnknown)(entry)
+  switch (entry.executionType) {
+    case "command_execution":
+      return presentRunCommand(entry)
+    case "file_change":
+      return entry.name === "write_file"
+        ? presentDiff(entry, "Write", "Writing")
+        : presentDiff(entry, "Edit", "Editing")
+    case "file_read":
+      return presentReadFile(entry)
+    case "search":
+      return entry.name === "glob" ? presentGlob(entry) : presentGrep(entry)
+    case "web":
+      return entry.name === "web_search"
+        ? presentWebSearch(entry)
+        : presentWebFetch(entry)
+    case "collab_agent":
+      return presentCollaboration(entry)
+    case "tool_execution":
+      return presentUnknown(entry)
+  }
 }
 
 function presentReadFile(entry: ToolEntry): ToolPresentation {
@@ -340,23 +345,24 @@ function presentWebSearch(entry: ToolEntry): ToolPresentation {
   }
 }
 
-function presentTask(entry: ToolEntry): ToolPresentation {
+function presentCollaboration(entry: ToolEntry): ToolPresentation {
   const input = recordOf(entry.input)
   const output = recordOf(entry.output)
-  const description = stringOf(input?.description) ?? entry.summary
-  const sessionId = stringOf(output?.sessionId)
-  const agent = stringOf(output?.agent) ?? stringOf(input?.agent)
+  const description =
+    stringOf(input?.message) ?? stringOf(input?.task_name) ?? entry.summary
+  const sessionId = stringOf(output?.agentId)
+  const path = stringOf(output?.path)
   return {
-    verb: "Delegate",
-    activeVerb: "Delegating",
+    verb: "Collaborate",
+    activeVerb: "Collaborating",
     subject: `“${truncateLine(description, 110)}”`,
     subjectTone: "text",
-    meta: agent === undefined ? [] : [agent],
+    meta: path === undefined ? [] : [path],
     ...(sessionId === undefined
       ? {}
       : { target: { kind: "session" as const, sessionId } }),
     detail: {
-      kind: "task",
+      kind: "collaboration",
       ...(entry.resultText === undefined ? {} : { text: entry.resultText }),
       ...(sessionId === undefined ? {} : { sessionId }),
     },

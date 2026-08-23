@@ -19,11 +19,11 @@ import {
 import {
   type EventEnvelope,
   EventType,
-  type KernelEvent,
+  HistoryRecordType,
+  type KernelFact,
 } from "../../src/kernel/events.ts"
 import { createJsonlEventStore } from "../../src/kernel/jsonl-event-store.ts"
 import {
-  type JournalCommitRecord,
   parseJournalLine,
   serializeFactLine,
 } from "../../src/kernel/jsonl-event-store-format.ts"
@@ -59,7 +59,7 @@ describe("stored event tolerance", () => {
           id: "event_future",
           sessionId: "session_00000000-0000-4000-8000-000000000000",
           seq: 2,
-          version: 1,
+          version: 2,
           createdAt: "2026-07-24T00:00:00.000Z",
           type: "future.fact",
           data: { payload: true },
@@ -95,7 +95,7 @@ describe("Session journal format", () => {
     id: "event_format",
     sessionId: "session_00000000-0000-4000-8000-000000000000",
     seq: 1,
-    version: 1,
+    version: 2,
     createdAt: "2026-07-30T00:00:00.000Z",
     type: EventType.SessionCreated,
     data: { title: "Format" },
@@ -108,19 +108,6 @@ describe("Session journal format", () => {
     expect(parseJournalLine(line, 1)).toEqual(fact)
   })
 
-  it("parses a legacy commit line for read compatibility", () => {
-    const record: JournalCommitRecord = {
-      record: "commit",
-      version: 1,
-      sessionId: fact.sessionId,
-      firstSeq: 1,
-      operation: { id: "legacy-request", fingerprint: "legacy" },
-      events: [fact],
-    }
-
-    expect(parseJournalLine(JSON.stringify(record), 1)).toEqual(record)
-  })
-
   it("rejects malformed JSON and extra fact-envelope keys", () => {
     expect(() => parseJournalLine('{"id":', 3)).toThrow(
       "Invalid Session journal JSON at record 3",
@@ -130,13 +117,13 @@ describe("Session journal format", () => {
     ).toThrow("Invalid Session fact at record 4")
   })
 
-  it("routes the reserved record key only to the legacy validator", () => {
+  it("rejects obsolete commit wrappers", () => {
     expect(() =>
       parseJournalLine(
         JSON.stringify({ ...fact, record: "future-framing" }),
         5,
       ),
-    ).toThrow("Invalid Session journal record 5")
+    ).toThrow("Invalid Session fact at record 5")
   })
 })
 
@@ -487,7 +474,7 @@ describe("JSONL persistence", () => {
       EventType.SessionCreated,
       EventType.InputAdmitted,
       EventType.TurnStarted,
-      EventType.AssistantMessage,
+      HistoryRecordType.AgentMessage,
     ])
     expect(replayed.projection?.activeTurn).toMatchObject({
       turnId: "turn_crash_prefix",
@@ -496,7 +483,44 @@ describe("JSONL persistence", () => {
     expect(replayed.projection?.completedTurns).toEqual([])
   })
 
-  it("reads legacy and fact lines with one contiguous sequence", async () => {
+  it("discards an incomplete crash-atomic fact batch as a whole", async () => {
+    const fixture = await createStoreFixture("yakitori-atomic-prefix-")
+    const sessionId = "session_00000000-0000-4000-8000-00000000001d"
+    await createRoot(fixture.store, sessionId)
+    await fixture.store.appendEvents(
+      sessionId,
+      [
+        {
+          type: EventType.InputAdmitted,
+          data: {
+            requestId: "request:atomic",
+            inputId: "input_atomic",
+            role: "user",
+            content: { kind: "text", text: "atomic" },
+          },
+        },
+        {
+          type: EventType.TurnStarted,
+          data: { turnId: "turn_atomic", inputId: "input_atomic" },
+        },
+      ],
+      { expectedSeq: 1, atomic: true },
+    )
+    await fixture.store.close()
+    const journal = await readFile(fixture.journal(sessionId))
+    await writeFile(
+      fixture.journal(sessionId),
+      journal.subarray(0, journal.byteLength - 1),
+    )
+
+    const replayed = await fixture.reopen().rebuildProjection(sessionId)
+
+    expect(replayed.events.map((event) => event.type)).toEqual([
+      EventType.SessionCreated,
+    ])
+  })
+
+  it("reads flat fact lines with one contiguous sequence", async () => {
     const fixture = await createStoreFixture("yakitori-mixed-")
     const sessionId = "session_00000000-0000-4000-8000-00000000001a"
     await createRoot(fixture.store, sessionId, { title: "Mixed" })
@@ -507,7 +531,7 @@ describe("JSONL persistence", () => {
         id: "event_mixed_fact",
         sessionId,
         seq: 2,
-        version: 1,
+        version: 2,
         createdAt: "2026-07-30T00:00:00.000Z",
         type: "provider.mixed",
         data: { format: "fact" },
@@ -526,46 +550,6 @@ describe("JSONL persistence", () => {
       { seq: 2, type: "provider.mixed" },
       { seq: 3, type: EventType.InputCancelled },
     ])
-  })
-
-  it("rebuilds admission reconciliation from a legacy receipt fixture", async () => {
-    const fixture = await createStoreFixture("yakitori-legacy-admission-")
-    const sessionId = "session_00000000-0000-4000-8000-00000000001d"
-    const admission = createAdmission(
-      "request:legacy",
-      "input_legacy",
-      "legacy",
-    )
-    await writeLegacyJournal(fixture.journal(sessionId), {
-      record: "commit",
-      version: 1,
-      sessionId,
-      firstSeq: 1,
-      operation: { id: "input.admit:request:legacy", fingerprint: "old" },
-      events: [
-        storedFact(sessionId, 1, "event_legacy_session", {
-          type: EventType.SessionCreated,
-          data: {},
-        }),
-        storedFact(sessionId, 2, "event_legacy_admission", admission.event),
-      ],
-    })
-
-    const retry = createAdmission(
-      "request:legacy",
-      "input_retry_not_written",
-      "legacy",
-    )
-    const replayed = await fixture.store.appendEvent(sessionId, retry.event, {
-      expectedSeq: 2,
-      admission: retry.reconciliation,
-    })
-
-    expect(replayed).toMatchObject({
-      seq: 2,
-      data: { inputId: "input_legacy" },
-    })
-    expect(await fixture.store.readEvents(sessionId)).toHaveLength(2)
   })
 
   it("truncates only a non-newline tail during initialization", async () => {
@@ -606,8 +590,8 @@ describe("JSONL persistence", () => {
     expect((await stat(fixture.journal(sessionId))).size).toBe(corruptBytes)
   })
 
-  it("rejects a malformed newline-committed legacy record", async () => {
-    const fixture = await createStoreFixture("yakitori-corrupt-legacy-")
+  it("rejects an obsolete newline-committed commit wrapper", async () => {
+    const fixture = await createStoreFixture("yakitori-obsolete-commit-")
     const sessionId = "session_00000000-0000-4000-8000-00000000001f"
     await createRoot(fixture.store, sessionId)
     await fixture.store.close()
@@ -878,7 +862,7 @@ describe("JSONL persistence", () => {
         id: "event_after_listing",
         sessionId,
         seq: 2,
-        version: 1,
+        version: 2,
         createdAt: "2026-07-27T00:00:00.000Z",
         type: "provider.after_listing",
         data: {},
@@ -924,7 +908,7 @@ describe("JSONL persistence", () => {
         id: "event_unknown_repair",
         sessionId,
         seq: 2,
-        version: 1,
+        version: 2,
         createdAt: "2026-07-24T00:00:00.000Z",
         type: "provider.future_fact",
         data: { value: "opaque" },
@@ -1007,7 +991,7 @@ function createRoot(
 async function appendRootEvents(
   store: EventStore,
   sessionId: string,
-  events: readonly KernelEvent[],
+  events: readonly KernelFact[],
 ) {
   const [created, ...rest] = events
   if (created?.type !== EventType.SessionCreated) {
@@ -1035,7 +1019,7 @@ function completeTurnFacts(
   requestId: string,
   inputId: string,
   turnId: string,
-): readonly KernelEvent[] {
+): readonly KernelFact[] {
   return [
     { type: EventType.SessionCreated, data: {} },
     {
@@ -1049,7 +1033,7 @@ function completeTurnFacts(
     },
     { type: EventType.TurnStarted, data: { turnId, inputId } },
     {
-      type: EventType.AssistantMessage,
+      type: HistoryRecordType.AgentMessage,
       data: {
         messageId: "message_prefix",
         turnId,
@@ -1067,44 +1051,32 @@ function storedFact(
   sessionId: string,
   seq: number,
   id: string,
-  event: KernelEvent,
+  event: KernelFact,
 ): EventEnvelope {
   return {
     id,
     sessionId,
     seq,
-    version: 1,
+    version: 2,
     createdAt: `2026-07-30T00:00:0${seq}.000Z`,
     ...event,
   }
 }
 
-async function writeLegacyJournal(
-  path: string,
-  record: JournalCommitRecord,
-): Promise<void> {
-  await mkdir(dirname(path), { recursive: true })
-  await writeFile(path, `${JSON.stringify(record)}\n`)
-}
-
 async function seedSessionJournal(path: string, sessionId: string) {
-  await writeLegacyJournal(path, {
-    record: "commit",
-    version: 1,
-    sessionId,
-    firstSeq: 1,
-    events: [
-      {
-        id: "event_seed",
-        sessionId,
-        seq: 1,
-        version: 1,
-        createdAt: "2026-07-27T00:00:00.000Z",
-        type: EventType.SessionCreated,
-        data: {},
-      },
-    ],
-  })
+  await mkdir(dirname(path), { recursive: true })
+  await writeFile(
+    path,
+    serializeFactLine({
+      id: "event_seed",
+      sessionId,
+      seq: 1,
+      version: 2,
+      createdAt: "2026-07-27T00:00:00.000Z",
+      type: EventType.SessionCreated,
+      data: {},
+    }),
+  )
 }
 
 async function spyOnFileHandleSync(path: string) {

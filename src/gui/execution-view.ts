@@ -1,8 +1,9 @@
 import {
-  type EventEnvelope,
   type ImageAttachment,
   isKernelEvent,
+  type RuntimeEventEnvelope,
   type StoredEventEnvelope,
+  type ToolExecutionType,
   type TokenUsage,
   type TurnMetrics,
 } from "../kernel/events.ts"
@@ -38,6 +39,7 @@ export type ExecutionEntry =
       readonly toolCallId: string
       readonly turnId: string
       readonly name: string
+      readonly executionType: ToolExecutionType
       readonly summary: string
       readonly input: unknown
       readonly state: string
@@ -196,15 +198,14 @@ export function reduceExecutionView(
   let reasoningSnapshots = state.reasoningSnapshots
   const event = knownEvent(action.event)
   if (
-    event?.type === "assistant.message" &&
-    typeof event.data.providerMetadata?.streamId === "string"
+    event?.type === "item.completed" &&
+    event.data.item.type === "agent_message" &&
+    event.data.item.streamId !== undefined
   ) {
-    const { [event.data.providerMetadata.streamId]: _, ...rest } = snapshots
+    const { [event.data.item.streamId]: _, ...rest } = snapshots
     snapshots = rest
-    const {
-      [event.data.providerMetadata.streamId]: _reasoning,
-      ...reasoningRest
-    } = reasoningSnapshots
+    const { [event.data.item.streamId]: _reasoning, ...reasoningRest } =
+      reasoningSnapshots
     reasoningSnapshots = reasoningRest
   }
   if (
@@ -251,9 +252,9 @@ export function projectExecutionView(
   const cancelledInputIds = new Set<string>()
   const turnStartedAt = new Map<string, string>()
   const terminalTurnIds = new Set<string>()
-  let lastModel:
+  const lastModel:
     | { readonly provider: string; readonly model: string }
-    | undefined
+    | undefined = session?.currentModel
   let lastTurnUsage: TokenUsage | undefined
   let lastTurnMetrics: TurnMetrics | undefined
   let telemetry: SessionTelemetry = {
@@ -292,10 +293,6 @@ export function projectExecutionView(
     if (event.type === "turn.started") {
       startedInputIds.add(event.data.inputId)
       turnStartedAt.set(event.data.turnId, stored.createdAt)
-      const context = event.data.executionContext
-      if (context !== undefined) {
-        lastModel = { provider: context.provider, model: context.model }
-      }
       continue
     }
     if (
@@ -356,30 +353,31 @@ export function projectExecutionView(
       }
       continue
     }
-    if (event.type === "assistant.message") {
-      const streamId =
-        typeof event.data.providerMetadata?.streamId === "string"
-          ? event.data.providerMetadata.streamId
-          : undefined
+    if (
+      event.type === "item.completed" &&
+      event.data.item.type === "agent_message"
+    ) {
+      const { item } = event.data
+      const streamId = item.streamId
       if (streamId) streamIdsSeen.add(streamId)
-      for (const [index, block] of event.data.content.entries()) {
+      for (const [index, block] of item.content.entries()) {
         if (block.type !== "reasoning" || block.text.length === 0) continue
         entries.push({
           kind: "reasoning",
-          itemId: `${event.data.messageId}:reasoning:${index}`,
+          itemId: `${item.itemId}:reasoning:${index}`,
           text: block.text,
           status: "completed",
           at: event.createdAt,
         })
       }
-      const text = event.data.content
+      const text = item.content
         .filter((block) => block.type === "text")
         .map((block) => block.text)
         .join("")
       if (text.length > 0) {
         entries.push({
           kind: "assistant",
-          itemId: event.data.messageId,
+          itemId: item.itemId,
           ...(streamId === undefined ? {} : { streamId }),
           text,
           status: "completed",
@@ -388,38 +386,39 @@ export function projectExecutionView(
       }
       continue
     }
-    if (event.type === "tool.call") {
+    if (event.type === "item.started") {
+      const { item } = event.data
       const entry: Extract<ExecutionEntry, { readonly kind: "tool" }> = {
         kind: "tool",
-        toolCallId: event.data.toolCallId,
+        toolCallId: item.toolCallId,
         turnId: event.data.turnId,
-        name: event.data.name,
-        summary: summarizeTool(event.data.name, event.data.input),
-        input: event.data.input,
+        name: item.name,
+        executionType: item.type,
+        summary: summarizeTool(item.name, item.input),
+        input: item.input,
         state: "requested",
       }
-      tools.set(event.data.toolCallId, entry)
+      tools.set(item.toolCallId, entry)
       entries.push(entry)
       continue
     }
-    if (event.type === "tool.result") {
-      const structured = parseToolOutput(
-        event.data.output,
-        session?.workingDirectory,
-      )
-      updateTool(tools, entries, event.data.toolCallId, {
-        state: event.data.error === undefined ? "completed" : "failed",
-        ...(event.data.output === undefined
-          ? {}
-          : { output: event.data.output }),
+    if (
+      event.type === "item.completed" &&
+      event.data.item.type !== "agent_message"
+    ) {
+      const { item } = event.data
+      const structured = parseToolOutput(item.output, session?.workingDirectory)
+      updateTool(tools, entries, item.toolCallId, {
+        state: item.error === undefined ? "completed" : "failed",
+        ...(item.output === undefined ? {} : { output: item.output }),
         resultText:
-          event.data.content.kind === "text"
-            ? event.data.content.text
-            : JSON.stringify(event.data.content.value),
-        ...(event.data.error === undefined ? {} : { resultError: true }),
-        ...(event.data.error === undefined
+          item.content.kind === "text"
+            ? item.content.text
+            : JSON.stringify(item.content.value),
+        ...(item.error === undefined ? {} : { resultError: true }),
+        ...(item.error === undefined
           ? {}
-          : { resultErrorMessage: event.data.error.message }),
+          : { resultErrorMessage: item.error.message }),
         ...(structured.diff === undefined ? {} : { diff: structured.diff }),
         ...(structured.commandResult === undefined
           ? {}
@@ -596,7 +595,9 @@ function markPendingPermissionsStale(
   }
 }
 
-function knownEvent(event: StoredEventEnvelope): EventEnvelope | undefined {
+function knownEvent(
+  event: StoredEventEnvelope,
+): RuntimeEventEnvelope | undefined {
   if (!isKernelEvent(event)) return undefined
   return event
 }

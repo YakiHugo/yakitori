@@ -6,7 +6,7 @@ import {
   EventType,
   isJsonObject,
   isKernelEvent,
-  type KernelEvent,
+  type KernelFact,
   type SessionCreatedEvent,
   type StoredEventEnvelope,
 } from "./events.ts"
@@ -19,12 +19,12 @@ export type EventStore = {
   ): Promise<EventEnvelope>
   appendEvent(
     sessionId: string,
-    event: KernelEvent,
+    event: KernelFact,
     options?: EventStoreAppendOptions,
   ): Promise<EventEnvelope>
   appendEvents(
     sessionId: string,
-    events: readonly KernelEvent[],
+    events: readonly KernelFact[],
     options?: EventStoreAppendOptions,
   ): Promise<EventEnvelope[]>
   forkSession(
@@ -47,6 +47,8 @@ export type EventStore = {
 
 export type EventStoreAppendOptions = {
   readonly expectedSeq?: number
+  /** Commit every fact in this append as one crash-atomic physical record. */
+  readonly atomic?: boolean
   readonly admission?: {
     readonly requestId: string
     readonly fingerprint: string
@@ -59,7 +61,7 @@ export type EventStoreForkSessionInput = {
   readonly atInputId: string
   readonly expectedSourceSeq: number
   readonly created: SessionCreatedEvent
-  readonly initialEvents?: readonly KernelEvent[]
+  readonly initialEvents?: readonly KernelFact[]
 }
 
 export type EventStoreForkSessionResult = {
@@ -264,7 +266,7 @@ export function parseStoredEventEnvelope(
     typeof value.id !== "string" ||
     typeof value.sessionId !== "string" ||
     !isPositiveInteger(value.seq) ||
-    !isPositiveInteger(value.version) ||
+    value.version !== 2 ||
     typeof value.createdAt !== "string" ||
     typeof value.type !== "string" ||
     !isJsonObject(value.data)

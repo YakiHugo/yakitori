@@ -3,9 +3,12 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { YakitoriErrorCode } from "../../src/kernel/errors.ts"
-import { type EventEnvelope, EventType } from "../../src/kernel/events.ts"
+import {
+  type EventEnvelope,
+  EventType,
+  HistoryRecordType,
+} from "../../src/kernel/events.ts"
 import { createJsonlEventStore } from "../../src/kernel/jsonl-event-store.ts"
-import type { JournalCommitRecord } from "../../src/kernel/jsonl-event-store-format.ts"
 import { serializeFactLine } from "../../src/kernel/jsonl-event-store-format.ts"
 import { fingerprintInputAdmission } from "../../src/kernel/operation.ts"
 import { TurnState } from "../../src/kernel/session-states.ts"
@@ -18,73 +21,6 @@ afterEach(async () => {
 })
 
 describe("JSONL recovery fault models", () => {
-  it("reads a legacy prefix and continues with flat fact lines", async () => {
-    const sessionId = "session_00000000-0000-4000-8000-000000000101"
-    const legacy: JournalCommitRecord = {
-      record: "commit",
-      version: 1,
-      sessionId,
-      firstSeq: 1,
-      events: [
-        storedFact(sessionId, 1, "event_mixed_session", {
-          type: EventType.SessionCreated,
-          data: { title: "Mixed" },
-        }),
-      ],
-    }
-    const fixture = await createJournalFixture(sessionId, [
-      `${JSON.stringify(legacy)}\n`,
-      serializeFactLine({
-        id: "event_mixed_future",
-        sessionId,
-        seq: 2,
-        version: 1,
-        createdAt: "2026-07-30T00:00:02.000Z",
-        type: "provider.mixed",
-        data: { format: "fact" },
-      }),
-    ])
-
-    await expect(
-      fixture.store.appendEvent(
-        sessionId,
-        { type: EventType.InputCancelled, data: { inputId: "input_mixed" } },
-        { expectedSeq: 2 },
-      ),
-    ).resolves.toMatchObject({ seq: 3 })
-    expect(await fixture.store.readEvents(sessionId)).toMatchObject([
-      { seq: 1, type: EventType.SessionCreated },
-      { seq: 2, type: "provider.mixed" },
-      { seq: 3, type: EventType.InputCancelled },
-    ])
-  })
-
-  it("rejects a legacy wrapper owned by another Session", async () => {
-    const sessionId = "session_00000000-0000-4000-8000-000000000102"
-    const fixture = await createJournalFixture(sessionId, [
-      `${JSON.stringify({
-        record: "commit",
-        version: 1,
-        sessionId: "session_00000000-0000-4000-8000-000000000999",
-        firstSeq: 1,
-        events: [
-          storedFact(sessionId, 1, "event_wrong_wrapper", {
-            type: EventType.SessionCreated,
-            data: {},
-          }),
-        ],
-      })}\n`,
-    ])
-
-    await expect(fixture.store.readEvents(sessionId)).rejects.toMatchObject({
-      code: YakitoriErrorCode.InvalidEventLog,
-      details: {
-        sessionId,
-        recordSessionId: "session_00000000-0000-4000-8000-000000000999",
-      },
-    })
-  })
-
   it("reserves an opaque input admission ID without replaying it", async () => {
     const sessionId = "session_00000000-0000-4000-8000-000000000103"
     const requestId = "request:opaque"
@@ -217,7 +153,7 @@ describe("JSONL recovery fault models", () => {
         sessionId,
         [
           {
-            type: EventType.AssistantMessage,
+            type: HistoryRecordType.AgentMessage,
             data: {
               messageId: "message_partial_write",
               turnId: "turn_partial_write",
@@ -241,7 +177,7 @@ describe("JSONL recovery fault models", () => {
       EventType.SessionCreated,
       EventType.InputAdmitted,
       EventType.TurnStarted,
-      EventType.AssistantMessage,
+      HistoryRecordType.AgentMessage,
     ])
     expect(replayed.projection?.activeTurn).toMatchObject({
       turnId: "turn_partial_write",
@@ -260,7 +196,7 @@ function storedFact(
     id,
     sessionId,
     seq,
-    version: 1,
+    version: 2,
     createdAt: `2026-07-30T00:00:0${seq}.000Z`,
     ...event,
   } as EventEnvelope

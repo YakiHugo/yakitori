@@ -11,6 +11,7 @@ import {
   createEventEnvelope,
   EventType,
   InputRole,
+  type ModelSelection,
 } from "../../src/kernel/events.ts"
 import type { ApiSessionDetail } from "../../src/server/protocol.ts"
 
@@ -940,7 +941,16 @@ describe("model selection", () => {
       "fetch",
       vi.fn(async (input: unknown) => {
         if (String(input) === "http://api.test/sessions/session_1") {
-          return jsonResponse({ session: sessionDetail })
+          return jsonResponse({
+            session: {
+              ...sessionDetail,
+              currentModel: {
+                provider: "codex",
+                model: "gpt-5.6-sol",
+                effort: "high",
+              },
+            },
+          })
         }
         return errorResponse(404)
       }),
@@ -956,17 +966,6 @@ describe("model selection", () => {
     })
 
     await useAppStore.getState().selectSession("session_1")
-    const source = FakeEventSource.instances[0]
-    source?.emit(
-      "session.event",
-      turnStartedEvent(2, "openai", "gpt-5.1-codex", "medium"),
-    )
-    source?.emit(
-      "session.event",
-      turnStartedEvent(3, "codex", "gpt-5.6-sol", "high"),
-    )
-    source?.emit("session.replay-complete")
-
     await vi.waitFor(() => {
       expect(useAppStore.getState().modelSelections.session_1).toEqual({
         provider: "codex",
@@ -1012,9 +1011,13 @@ describe("model selection", () => {
     })
   })
 
-  it("does not admit an old Session input before model restoration completes", async () => {
+  it("restores the Session model before admitting its next input", async () => {
     window.localStorage.clear()
-    const fetchMock = admissionFetchMock()
+    const fetchMock = admissionFetchMock({
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      effort: "high",
+    })
     vi.stubGlobal("fetch", fetchMock)
     useAppStore.setState({
       modelSelections: {},
@@ -1025,17 +1028,6 @@ describe("model selection", () => {
     })
 
     await useAppStore.getState().selectSession("session_1")
-    await useAppStore.getState().admitInput("too early")
-    expect(
-      fetchMock.mock.calls.some(([input]) => String(input).endsWith("/inputs")),
-    ).toBe(false)
-
-    const source = FakeEventSource.instances[0]
-    source?.emit(
-      "session.event",
-      turnStartedEvent(2, "codex", "gpt-5.6-sol", "high"),
-    )
-    source?.emit("session.replay-complete")
     await useAppStore.getState().admitInput("restored")
 
     const admitCall = fetchMock.mock.calls.find(([input]) =>
@@ -1206,7 +1198,7 @@ function detailCallCount(fetchMock: ReturnType<typeof vi.fn>): number {
   ).length
 }
 
-function admissionFetchMock() {
+function admissionFetchMock(currentModel?: ModelSelection) {
   return vi.fn(async (input: unknown, init?: RequestInit) => {
     const url = String(input)
     if (url === "http://api.test/user-preference") {
@@ -1235,50 +1227,17 @@ function admissionFetchMock() {
       })
     }
     if (url === "http://api.test/sessions/session_1") {
-      return jsonResponse({ session: sessionDetail })
+      return jsonResponse({
+        session: {
+          ...sessionDetail,
+          ...(currentModel === undefined ? {} : { currentModel }),
+        },
+      })
     }
     if (url.startsWith("http://api.test/sessions?")) {
       return jsonResponse({ sessions: [] })
     }
     return errorResponse(404)
-  })
-}
-
-function turnStartedEvent(
-  seq: number,
-  provider: string,
-  model: string,
-  effort: string,
-) {
-  return createEventEnvelope({
-    sessionId: "session_1",
-    seq,
-    event: {
-      type: EventType.TurnStarted,
-      data: {
-        turnId: `turn_${seq}`,
-        inputId: `input_${seq}`,
-        executionContext: {
-          mateId: "mate_1",
-          mateRevisionId: "revision_1",
-          provider,
-          model,
-          effort,
-          workingDirectory: "/p/a",
-          enabledTools: [],
-          approvalPolicy: "on-request",
-          limits: {
-            modelCallsPerTurn: 10,
-            toolCallsPerTurn: 10,
-            modelVisibleMessageBlocks: 10,
-            modelVisibleContextBytes: 10,
-            modelVisibleToolResultBytes: 10,
-            modelVisibleToolResultLines: 10,
-            assistantResponseBytes: 10,
-          },
-        },
-      },
-    },
   })
 }
 

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import type { ExecutionEntry } from "../../src/gui/execution-view.ts"
 import { presentTool } from "../../src/gui/tool-presentation.ts"
+import { toolExecutionType } from "../../src/kernel/events.ts"
 
 type ToolEntry = Extract<ExecutionEntry, { readonly kind: "tool" }>
 
@@ -267,7 +268,7 @@ describe("tool presentation", () => {
     ).toMatchObject({ meta: ["exit 0", "1.2s"], detail: { kind: "command" } })
   })
 
-  it("extracts web links and child task navigation from old results", () => {
+  it("extracts web links and typed collaboration navigation", () => {
     expect(
       presentTool(
         entry("web_search", {
@@ -296,16 +297,16 @@ describe("tool presentation", () => {
 
     expect(
       presentTool(
-        entry("task", {
-          input: { description: "Inspect auth", agent: "explore" },
-          output: { sessionId: "session_child", agent: "explore" },
+        entry("spawn_agent", {
+          input: { task_name: "inspect_auth", message: "Inspect auth" },
+          output: { agentId: "session_child", path: "/root/inspect_auth" },
           resultText: "Found the validation path.",
         }),
       ),
     ).toMatchObject({
-      verb: "Delegate",
+      verb: "Collaborate",
       target: { kind: "session", sessionId: "session_child" },
-      detail: { kind: "task", sessionId: "session_child" },
+      detail: { kind: "collaboration", sessionId: "session_child" },
     })
   })
 })
@@ -319,6 +320,7 @@ function entry(
     toolCallId: `tool_${name}`,
     turnId: "turn_1",
     name,
+    executionType: toolExecutionType(name),
     summary: name,
     input: {},
     state: "completed",

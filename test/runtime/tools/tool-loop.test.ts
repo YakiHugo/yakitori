@@ -2,13 +2,13 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { EventType } from "../../../src/kernel/events.ts"
+import { EventType, HistoryRecordType } from "../../../src/kernel/events.ts"
 import { createJsonlEventStore } from "../../../src/kernel/jsonl-event-store.ts"
 import { createSessionKernel } from "../../../src/kernel/session-kernel.ts"
 import { createMateKernel } from "../../../src/mates/mate-kernel.ts"
 import { createSqliteMateStore } from "../../../src/mates/sqlite-mate-store.ts"
 import { createFauxProvider } from "../../../src/runtime/faux-provider.ts"
-import { createRuntimeLimits } from "../../../src/runtime/limits.ts"
+import { createSessionExecutionPolicy } from "../../../src/runtime/limits.ts"
 import { ModelStopReason } from "../../../src/runtime/model.ts"
 import { createSessionRunner } from "../../../src/runtime/session-runner.ts"
 import { createReadFileTool } from "../../../src/runtime/tools/read-file.ts"
@@ -55,9 +55,9 @@ describe("tool loop", () => {
       })
       expect(replayed.events.map((event) => event.type)).toEqual(
         expect.arrayContaining([
-          EventType.ToolCall,
-          EventType.ToolResult,
-          EventType.AssistantMessage,
+          HistoryRecordType.ModelToolCall,
+          HistoryRecordType.ModelToolResult,
+          HistoryRecordType.AgentMessage,
           EventType.TurnCompleted,
         ]),
       )
@@ -655,7 +655,9 @@ describe("tool loop", () => {
         kernel: runtime.kernel,
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
-        limits: createRuntimeLimits({ modelVisibleToolResultLines: 1 }),
+        executionPolicy: createSessionExecutionPolicy({
+          modelVisibleToolResultLines: 1,
+        }),
       })
       const session = await createSession(runtime)
       await runtime.kernel.admitInput({
@@ -841,7 +843,7 @@ describe("tool loop", () => {
         kernel: runtime.kernel,
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
-        limits: createRuntimeLimits({ toolCallsPerTurn: 1 }),
+        executionPolicy: createSessionExecutionPolicy({ toolCallsPerTurn: 1 }),
       })
       const session = await createSession(runtime)
       await runtime.kernel.admitInput({
