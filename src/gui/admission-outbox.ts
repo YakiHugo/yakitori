@@ -1,11 +1,11 @@
-import type { ImageAttachment } from "../kernel/events.ts"
+import type { InlineImageAttachment } from "../kernel/events.ts"
 import { createRequestId, isRequestId } from "../kernel/ids.ts"
 
 export type AdmissionDraft = {
   readonly apiBase: string
   readonly sessionId: string
   readonly text: string
-  readonly attachments?: readonly ImageAttachment[]
+  readonly attachments?: readonly InlineImageAttachment[]
 }
 
 export type PendingAdmission = AdmissionDraft & {

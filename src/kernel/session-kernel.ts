@@ -442,7 +442,7 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
     forkSession(input) {
       return command(input.sessionId, async () => {
         let source = await requireSession(eventStore, input.sessionId)
-        requireInput(source, input.atInputId)
+        const forkPoint = requireInput(source, input.atInputId)
         if (source.activeTurn !== undefined) {
           invalidState(
             `Session ${source.id} has an active turn; interrupt it before forking the session.`,
@@ -483,13 +483,21 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
           })
         }
         if (input.content !== undefined) {
+          const content =
+            input.content.attachments === undefined &&
+            forkPoint.content.attachments !== undefined
+              ? {
+                  ...input.content,
+                  attachments: forkPoint.content.attachments,
+                }
+              : input.content
           initialEvents.push({
             type: EventType.InputAdmitted,
             data: {
               requestId: createRequestId(),
               inputId: createInputId(),
               role: InputRole.User,
-              content: input.content,
+              content,
               ...(input.modelSelection === undefined
                 ? {}
                 : { modelSelection: input.modelSelection }),

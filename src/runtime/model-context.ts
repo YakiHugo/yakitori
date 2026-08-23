@@ -13,6 +13,7 @@ import {
   type WorldStateFragment,
 } from "../kernel/index.ts"
 import type {
+  ModelImageBlock,
   ModelMessage,
   ModelToolResultMessage,
   ModelUserMessage,
@@ -444,7 +445,7 @@ function prepareCompactionMessages(
         ...message.content,
         ...message.images.map((image) => ({
           type: "text" as const,
-          text: `[Attached ${image.mediaType} image omitted from compaction input; ${Math.floor((image.data.length * 3) / 4)} encoded bytes.]`,
+          text: `[Attached ${image.mediaType} image omitted from compaction input; ${modelImageBytes(image)} encoded bytes.]`,
         })),
       ],
     }
@@ -807,7 +808,8 @@ function modelUserMessage(content: TextContent): ModelUserMessage {
   const images = (content.attachments ?? []).map((attachment) => ({
     type: "image" as const,
     mediaType: attachment.mediaType,
-    data: attachment.data,
+    file: attachment.file,
+    sizeBytes: attachment.sizeBytes,
   }))
   return {
     role: "user",
@@ -950,17 +952,28 @@ export function measureModelMessagesBytes(
         value !== null &&
         "type" in value &&
         value.type === "image" &&
-        "data" in value &&
-        typeof value.data === "string"
+        (("data" in value && typeof value.data === "string") ||
+          ("file" in value && "sizeBytes" in value))
       ) {
+        const image = value as Record<string, unknown>
         return {
-          ...(value as Record<string, unknown>),
-          data: `[base64 image: ${Math.floor((value.data.length * 3) / 4)} bytes]`,
+          ...image,
+          ...(typeof image.data === "string"
+            ? {
+                data: `[base64 image: ${Math.floor((image.data.length * 3) / 4)} bytes]`,
+              }
+            : { file: `[session image: ${String(image.sizeBytes)} bytes]` }),
         }
       }
       return value
     }),
   )
+}
+
+function modelImageBytes(image: ModelImageBlock): number {
+  return "data" in image && image.data !== undefined
+    ? Math.floor((image.data.length * 3) / 4)
+    : image.sizeBytes
 }
 
 function buildReadResultKeys(

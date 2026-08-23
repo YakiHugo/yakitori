@@ -82,11 +82,23 @@ export type TextContent = {
   readonly attachments?: readonly ImageAttachment[]
 }
 
-export type ImageAttachment = {
+export type SessionFileReference = {
+  readonly sessionId: string
+  readonly path: string
+}
+
+type ImageAttachmentMetadata = {
   readonly name: string
   readonly mediaType: "image/gif" | "image/jpeg" | "image/png" | "image/webp"
-  readonly data: string
   readonly sizeBytes: number
+}
+
+export type ImageAttachment = ImageAttachmentMetadata & {
+  readonly file: SessionFileReference
+}
+
+export type InlineImageAttachment = ImageAttachmentMetadata & {
+  readonly data: string
 }
 
 export type JsonContent = {
@@ -103,11 +115,21 @@ export type ModelTextBlock = {
   readonly text: string
 }
 
-export type ModelImageBlock = {
-  readonly type: "image"
-  readonly mediaType: ImageAttachment["mediaType"]
-  readonly data: string
-}
+export type ModelImageBlock =
+  | {
+      readonly type: "image"
+      readonly mediaType: ImageAttachment["mediaType"]
+      readonly data: string
+      readonly file?: never
+      readonly sizeBytes?: never
+    }
+  | {
+      readonly type: "image"
+      readonly mediaType: ImageAttachment["mediaType"]
+      readonly file: SessionFileReference
+      readonly sizeBytes: number
+      readonly data?: never
+    }
 
 export type ModelReasoningBlock = {
   readonly type: "reasoning"
@@ -897,10 +919,11 @@ function isModelContentBlock(value: unknown): boolean {
 function isModelImageBlock(value: unknown): boolean {
   return (
     isRecord(value) &&
-    onlyKeys(value, ["type", "mediaType", "data"]) &&
     value.type === "image" &&
+    onlyKeys(value, ["type", "mediaType", "file", "sizeBytes"]) &&
     isSupportedImageMediaType(value.mediaType) &&
-    isString(value.data)
+    isSessionFileReference(value.file) &&
+    isNonNegativeInteger(value.sizeBytes)
   )
 }
 
@@ -1123,11 +1146,20 @@ function isTextContent(value: unknown): value is TextContent {
 function isImageAttachment(value: unknown): value is ImageAttachment {
   return (
     isRecord(value) &&
-    onlyKeys(value, ["name", "mediaType", "data", "sizeBytes"]) &&
+    onlyKeys(value, ["name", "mediaType", "file", "sizeBytes"]) &&
     isString(value.name) &&
     isSupportedImageMediaType(value.mediaType) &&
-    isString(value.data) &&
-    isNonNegativeInteger(value.sizeBytes)
+    isNonNegativeInteger(value.sizeBytes) &&
+    isSessionFileReference(value.file)
+  )
+}
+
+function isSessionFileReference(value: unknown): value is SessionFileReference {
+  return (
+    isRecord(value) &&
+    onlyKeys(value, ["sessionId", "path"]) &&
+    isString(value.sessionId) &&
+    isString(value.path)
   )
 }
 

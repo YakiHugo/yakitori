@@ -350,8 +350,11 @@ describe("model context", () => {
               {
                 name: "screen.png",
                 mediaType: "image/png",
-                data: "a".repeat(4_096),
                 sizeBytes: 3_072,
+                file: {
+                  sessionId,
+                  path: "attachments/request_image/1.png",
+                },
               },
             ],
           },
@@ -1134,7 +1137,54 @@ describe("model context", () => {
     if (result?.role !== "tool") throw new Error("missing command result")
     expect(result.content).toContain("line-2999")
     expect(result.content).toContain("(exit 1, 4.1s)")
-    expect(result.content).toContain("cmd > out.log 2>&1")
+    expect(result.content).toContain("read_session_file")
+    expect(context.truncatedToolResultCount).toBe(0)
+  })
+
+  it("keeps maximum text and binary Session-file pages intact", async () => {
+    const pages = [
+      `${"x".repeat(32 * 1024)}\n(0-32768 of 61440 bytes; utf8; more available)`,
+      `${Buffer.alloc(32 * 1024, 0xff).toString("base64")}\n(0-32768 of 61440 bytes; base64; more available)`,
+    ]
+    const context = await withAttributedSession(
+      async ({ kernel, sessionId }) => {
+        const active = await admitAndStartTurn(kernel, sessionId, "read logs")
+        await kernel.recordAssistantOutput({
+          sessionId,
+          turnId: active.turnId,
+          toolCalls: pages.map((_, index) => ({
+            id: `tool_session_page_${index}`,
+            name: "read_session_file",
+            input: { path: `tools/call_${index}/stdout.log` },
+            requiresPermission: false,
+          })),
+        })
+        for (const [index, page] of pages.entries()) {
+          await kernel.recordToolResult({
+            sessionId,
+            turnId: active.turnId,
+            toolCallId: `tool_session_page_${index}`,
+            content: { kind: "text", text: page },
+          })
+        }
+        const read = await kernel.readSession({ sessionId })
+        if (!read.session) throw new Error("missing session")
+        return buildModelContext({
+          session: read.session,
+          currentInputId: active.inputId,
+          limits: {
+            ...generousLimits(),
+            modelVisibleToolResultBytes: 50 * 1024,
+          },
+        })
+      },
+    )
+
+    expect(
+      context.messages
+        .filter((message) => message.role === "tool")
+        .map((message) => message.content),
+    ).toEqual(pages)
     expect(context.truncatedToolResultCount).toBe(0)
   })
 

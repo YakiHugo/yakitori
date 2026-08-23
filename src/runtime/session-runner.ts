@@ -15,6 +15,7 @@ import {
   PermissionState,
   type SessionKernel,
   type SessionProjection,
+  type SessionFiles,
   type TokenUsage,
   type TurnExecutionContext,
   type TurnMetrics,
@@ -103,6 +104,7 @@ export type SessionRunnerOptions = {
   readonly loadProjectInstructions?: typeof loadProjectInstructions
   readonly now?: () => Date
   readonly onRuntimeError?: (error: unknown) => void
+  readonly sessionFiles?: SessionFiles
 }
 
 export type SessionRunner = {
@@ -518,10 +520,10 @@ export function createSessionRunner(
         })
       }
 
-      const requestMessages = [
-        ...context.messages,
-        ...agentControl.takeMessages(input.sessionId),
-      ]
+      const requestMessages = await resolveSessionFileImages(
+        [...context.messages, ...agentControl.takeMessages(input.sessionId)],
+        options.sessionFiles,
+      )
       activeModelContexts.set(input.sessionId, {
         messages: context.messages,
         forkTurnStartIndexes: context.forkTurnStartIndexes,
@@ -1209,6 +1211,11 @@ export function createSessionRunner(
       input.call.input,
       {
         workspaceRoot: input.workspaceRoot,
+        sessionId: input.sessionId,
+        toolCallId: input.call.id,
+        ...(options.sessionFiles === undefined
+          ? {}
+          : { sessionFiles: options.sessionFiles }),
         signal: input.signal,
         visibleFileObservations: input.observations,
         agentControl: agentControl.bind(
@@ -1226,6 +1233,38 @@ export function createSessionRunner(
       observations: input.observations,
     })
     return recorded === "aborted" ? "aborted" : result
+  }
+
+  async function resolveSessionFileImages(
+    messages: readonly ModelMessage[],
+    sessionFiles: SessionFiles | undefined,
+  ): Promise<readonly ModelMessage[]> {
+    return Promise.all(
+      messages.map(async (message): Promise<ModelMessage> => {
+        if (message.role !== "user" || message.images === undefined)
+          return message
+        const images = await Promise.all(
+          message.images.map(async (image) => {
+            if ("data" in image && image.data !== undefined) return image
+            if (sessionFiles === undefined) {
+              throw new Error("Session image storage is unavailable.")
+            }
+            const bytes = await sessionFiles.read(image.file)
+            if (bytes.byteLength !== image.sizeBytes) {
+              throw new Error(
+                "Session image size does not match its recorded size.",
+              )
+            }
+            return {
+              type: "image" as const,
+              mediaType: image.mediaType,
+              data: bytes.toString("base64"),
+            }
+          }),
+        )
+        return { ...message, images }
+      }),
+    )
   }
 
   async function recordExecutedTool(input: {

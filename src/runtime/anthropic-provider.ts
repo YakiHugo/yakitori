@@ -19,6 +19,7 @@ import { isAbortError } from "./errors.ts"
 import {
   flattenModelSystem,
   ModelStopReason,
+  requireModelImageData,
   type ModelContentBlock,
   type ModelMessage,
   type ModelRequest,
@@ -203,7 +204,7 @@ export function toAnthropicMessages(
           source: {
             type: "base64" as const,
             media_type: block.mediaType,
-            data: block.data,
+            data: requireModelImageData(block),
           },
         })),
       ])

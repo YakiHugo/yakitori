@@ -125,6 +125,48 @@ describe("kernel facts", () => {
     ).toThrow("Invalid event data")
   })
 
+  it("accepts Session image references and rejects inline image data", () => {
+    const event = (attachment: unknown) =>
+      isKernelEvent({
+        type: EventType.InputAdmitted,
+        data: {
+          requestId: "request-1",
+          inputId: "input_1",
+          role: InputRole.User,
+          content: { kind: "text", text: "image", attachments: [attachment] },
+        },
+      })
+
+    expect(
+      event({
+        name: "screen.png",
+        mediaType: "image/png",
+        sizeBytes: 5,
+        file: {
+          sessionId: "session_00000000-0000-4000-8000-000000000000",
+          path: "attachments/request-1/1.png",
+        },
+      }),
+    ).toBe(true)
+    expect(
+      event({
+        name: "inline.png",
+        mediaType: "image/png",
+        sizeBytes: 5,
+        data: "aGVsbG8=",
+      }),
+    ).toBe(false)
+    expect(
+      event({
+        name: "invalid.png",
+        mediaType: "image/png",
+        sizeBytes: 5,
+        data: "aGVsbG8=",
+        file: { sessionId: "session_bad", path: "image.png" },
+      }),
+    ).toBe(false)
+  })
+
   it("accepts modelSelection with effort/speed and rejects malformed ones", () => {
     const admitted = (modelSelection: unknown) =>
       isKernelEvent({
@@ -341,6 +383,31 @@ describe("kernel facts", () => {
         },
       }),
     ).toBe(true)
+  })
+
+  it("rejects inline images in a durable inherited context window", () => {
+    expect(
+      isKernelEvent({
+        type: EventType.ContextWindowSeeded,
+        data: {
+          windowId: "context_window_1",
+          sourceSessionId: "session_parent",
+          history: [
+            {
+              role: "user",
+              content: [{ type: "text", text: "inspect" }],
+              images: [
+                {
+                  type: "image",
+                  mediaType: "image/png",
+                  data: "aGVsbG8=",
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    ).toBe(false)
   })
 
   it("recognizes a strict world_state.updated fact", () => {

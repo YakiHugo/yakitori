@@ -156,10 +156,15 @@ kernel fact protocol ahead of a concrete consumer.
   `output` remains available to projections and the GUI.
 - Add bounded unified diff data to successful `write_file` and `edit_file`
   structured `output` before building the GUI diff view. Keep the model-facing
-  write result concise. Record a truncation flag when the inline diff reaches
-  its cap; introduce a content-addressed artifact reference only when real
-  large-diff/output consumers justify extending the durable fact protocol.
-- Before diff/artifact work expands the durable shape, re-compare the concrete
+  write result concise and record a truncation flag when the inline diff
+  reaches its cap.
+- Oversized command output and user image attachments are Session files. They
+  deliberately use paths owned and deleted by the Session rather than a
+  content-addressed artifact store: command output is paged through
+  `read_session_file`, while images are resolved only at the model and HTTP
+  boundaries. Future tool downloads and generated media should reuse one of
+  those two paths unless a concrete cross-Session consumer appears.
+- Before expanding the durable tool-result shape, re-compare the concrete
   consumers and record the decision beside the persistence module.
   Claude Code separates model tool-result text from structured native results
   such as patches; OpenCode keeps output, metadata, attachments, and timing in
@@ -167,8 +172,8 @@ kernel fact protocol ahead of a concrete consumer.
   separately from provider function output. These references do not justify a
   universal `presentation`/`attachments`/`provenance` object before Yakitori
   has callers for those fields.
-- When the callers arrive, record semantic, non-derivable data only: an exact
-  bounded model-visible result, structured tool output, and content-addressed
+- When more callers arrive, record semantic, non-derivable data only: an exact
+  bounded model-visible result, structured tool output, and Session-file
   references for oversized payloads. Client-only view state remains outside
   the Session journal.
 

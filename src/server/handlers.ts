@@ -5,7 +5,7 @@ import {
   type EventMetadata,
   ForkReason,
   IdPrefix,
-  type ImageAttachment,
+  type InlineImageAttachment,
   InputRole,
   isIdWithPrefix,
   isJsonValue,
@@ -15,6 +15,7 @@ import {
   PermissionBehavior,
   type PermissionDecisionReason,
   type SessionKernel,
+  type SessionFiles,
   type SessionProjection,
   type SessionSummary,
   type TextContent,
@@ -63,6 +64,7 @@ export type ServerHandlerOptions = {
   }) => Promise<void>
   readonly maxInputBytes?: number
   readonly availableProviders?: readonly string[]
+  readonly sessionFiles?: SessionFiles
 }
 
 export type ServerHandlers = {
@@ -96,6 +98,12 @@ const maxCancelReasonLength = 512
 const maxImageAttachments = 4
 const maxImageAttachmentBytes = 4 * 1024 * 1024
 const maxImageAttachmentsBytes = 10 * 1024 * 1024
+
+type AdmissionTextContent = {
+  readonly kind: "text"
+  readonly text: string
+  readonly attachments?: readonly InlineImageAttachment[]
+}
 
 export function createServerHandlers(
   kernel: SessionKernel,
@@ -253,7 +261,26 @@ export function createServerHandlers(
           request.modelSelection?.provider,
           options.availableProviders,
         )
-        const admitted = await kernel.admitInput(request)
+        let content: TextContent = {
+          kind: "text",
+          text: request.content.text,
+        }
+        if (request.content.attachments !== undefined) {
+          if (options.sessionFiles === undefined) {
+            throw invalidInput(
+              "Image attachments require Session file storage.",
+            )
+          }
+          content = {
+            ...content,
+            attachments: await options.sessionFiles.persistImageAttachments(
+              request.sessionId,
+              request.requestId,
+              request.content.attachments,
+            ),
+          }
+        }
+        const admitted = await kernel.admitInput({ ...request, content })
         if (admitted.created) options.eventHub?.publish([admitted.event])
         // Wake even on idempotent replay: original process may have crashed
         // after commit and before scheduling.
@@ -592,7 +619,7 @@ function requireForkSessionRequest(input: unknown, maxInputBytes: number) {
   const content =
     record.content === undefined
       ? undefined
-      : requireTextContent(record.content, maxInputBytes)
+      : requireForkTextContent(record.content, maxInputBytes)
   const modelSelection = optionalModelSelectionField(record, "modelSelection")
   if (reason === ForkReason.Edit && content === undefined) {
     throw invalidInput("content is required when reason is edit.", {
@@ -629,7 +656,7 @@ function requireAdmitInputRequest(input: unknown, maxInputBytes: number) {
   return {
     sessionId: requireSessionId(record.sessionId, "sessionId"),
     requestId: requireRequestId(record.requestId),
-    content: requireTextContent(record.content, maxInputBytes),
+    content: requireAdmissionTextContent(record.content, maxInputBytes),
     ...optionalModelSelectionField(record, "modelSelection"),
     ...optionalInputRoleField(record, "role"),
     ...optionalStringField(record, "parentInputId"),
@@ -854,10 +881,24 @@ function requireOptionalSequence(
   })
 }
 
-function requireTextContent(
+function requireForkTextContent(
   value: unknown,
   maxInputBytes: number,
 ): TextContent {
+  if (isRecord(value) && value.attachments !== undefined) {
+    throw invalidInput(
+      "Fork content attachments are inherited and must not be provided.",
+      { field: "content.attachments" },
+    )
+  }
+  const content = requireAdmissionTextContent(value, maxInputBytes)
+  return { kind: "text", text: content.text }
+}
+
+function requireAdmissionTextContent(
+  value: unknown,
+  maxInputBytes: number,
+): AdmissionTextContent {
   if (!isRecord(value)) {
     throw invalidInput("content must be a text content object.")
   }
@@ -881,7 +922,9 @@ function requireTextContent(
   throw invalidInput("content must include kind text and a string text value.")
 }
 
-function requireImageAttachments(value: unknown): readonly ImageAttachment[] {
+function requireImageAttachments(
+  value: unknown,
+): readonly InlineImageAttachment[] {
   if (value === undefined) return []
   if (!Array.isArray(value) || value.length > maxImageAttachments) {
     throw invalidInput(
@@ -912,7 +955,7 @@ function requireImageAttachments(value: unknown): readonly ImageAttachment[] {
 function requireImageAttachment(
   value: unknown,
   index: number,
-): ImageAttachment {
+): InlineImageAttachment {
   if (!isRecord(value)) {
     throw invalidInput(`content.attachments[${index}] must be an image object.`)
   }

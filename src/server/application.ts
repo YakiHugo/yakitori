@@ -2,6 +2,7 @@ import { mkdir, realpath, stat } from "node:fs/promises"
 import { join } from "node:path"
 import {
   createJsonlEventStore,
+  createSessionFiles,
   createSessionKernel,
   type JsonlEventStore,
   type SessionKernel,
@@ -136,6 +137,7 @@ export async function createYakitoriApplication(
     const ownedEventStore = createJsonlEventStore({
       sessionsDir: sessionStoreRoot,
     })
+    const sessionFiles = createSessionFiles(sessionStoreRoot)
     eventStore = ownedEventStore
     const ownedMateStore = createSqliteMateStore({
       databasePath: mateDatabasePath,
@@ -233,6 +235,7 @@ export async function createYakitoriApplication(
       transientHub,
       permissionGate,
       toolRegistry,
+      sessionFiles,
       // codex analog: AskForApproval::Never — opt-in escape hatch that skips
       // permission prompts entirely.
       ...(process.env.YAKITORI_APPROVAL_POLICY === "never"
@@ -259,6 +262,7 @@ export async function createYakitoriApplication(
         await runner.interrupt(input)
       },
       availableProviders: providerRegistry.providers,
+      sessionFiles,
     })
 
     if (shouldRecover) {
@@ -296,6 +300,7 @@ export async function createYakitoriApplication(
           providers,
           userConfig,
           availableProviders: providerRegistry.providers,
+          sessionFiles,
           ...(options.guiStaticDir === undefined
             ? {}
             : { staticAssets: { directory: options.guiStaticDir } }),

@@ -324,6 +324,53 @@ for (const implementation of ["memory", "jsonl"] as const) {
       })
     })
 
+    it("keeps the edited Input's Session image references", async () => {
+      await withKernel(implementation, async ({ kernel }) => {
+        const source = await kernel.createSession()
+        const admitted = await kernel.admitInput({
+          sessionId: source.sessionId,
+          content: {
+            kind: "text",
+            text: "inspect",
+            attachments: [
+              {
+                name: "screen.png",
+                mediaType: "image/png",
+                sizeBytes: 5,
+                file: {
+                  sessionId: source.sessionId,
+                  path: "attachments/request_1/1.png",
+                },
+              },
+            ],
+          },
+        })
+
+        const forked = await kernel.forkSession({
+          sessionId: source.sessionId,
+          atInputId: admitted.inputId,
+          reason: "edit",
+          content: { kind: "text", text: "inspect more carefully" },
+        })
+
+        expect(forked.session.pendingInputs[0]?.content).toEqual({
+          kind: "text",
+          text: "inspect more carefully",
+          attachments: [
+            {
+              name: "screen.png",
+              mediaType: "image/png",
+              sizeBytes: 5,
+              file: {
+                sessionId: source.sessionId,
+                path: "attachments/request_1/1.png",
+              },
+            },
+          ],
+        })
+      })
+    })
+
     it("persists the inherited execution contract after the history cut", async () => {
       await withKernel(implementation, async ({ kernel, store }) => {
         const source = await kernel.createSession()

@@ -12,7 +12,10 @@ import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import {
   boundCommandContent,
+  createReadSessionFileTool,
   createRunCommandTool,
+  createSessionFiles,
+  createSessionId,
   createUserShellEnv,
   type RunCommandLauncher,
 } from "../../../src/index.ts"
@@ -242,6 +245,159 @@ describe("run_command contract", () => {
     expect(result.content).toContain("Raise timeoutSeconds")
     expect(result.content).toContain("do not retry it unchanged")
   })
+
+  it("retains complete stdout and stderr as readable Session files", async () => {
+    const workspace = await makeWorkspace()
+    const sessionId = createSessionId()
+    const sessionFiles = createSessionFiles(join(workspace, ".sessions"))
+    const script = [
+      'process.stdout.write("head\\n" + "x".repeat(4096) + "\\ntail\\n")',
+      'process.stderr.write("warning\\n")',
+    ].join(";")
+    const context = {
+      workspaceRoot: workspace,
+      sessionId,
+      toolCallId: "call_output",
+      sessionFiles,
+    }
+    const result = await createRunCommandTool({ maxOutputBytes: 64 }).execute(
+      {
+        command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`,
+      },
+      context,
+    )
+
+    expect(result).toMatchObject({
+      ok: true,
+      output: {
+        truncated: true,
+        files: {
+          stdout: { sessionId, path: "tools/call_output/stdout.log" },
+          stderr: { sessionId, path: "tools/call_output/stderr.log" },
+        },
+        totalBytes: { stdout: 4_107, stderr: 8 },
+      },
+    })
+    expect(result.content).toContain("read_session_file")
+
+    const read = await createReadSessionFileTool().execute(
+      { path: "tools/call_output/stdout.log", offset: 4_100, limit: 32 },
+      context,
+    )
+    expect(read).toMatchObject({
+      ok: true,
+      output: { totalBytes: 4_107, hasMore: false },
+    })
+    expect(read.content).toContain("tail")
+  })
+
+  it("caps retained output and reports that the Session file is incomplete", async () => {
+    const workspace = await makeWorkspace()
+    const sessionId = createSessionId()
+    const sessionFiles = createSessionFiles(join(workspace, ".sessions"))
+    const result = await createRunCommandTool({
+      maxOutputBytes: 32,
+      maxPersistedOutputBytes: 64,
+    }).execute(
+      {
+        command: `${JSON.stringify(process.execPath)} -e 'process.stdout.write("x".repeat(256))'`,
+      },
+      {
+        workspaceRoot: workspace,
+        sessionId,
+        toolCallId: "call_capped",
+        sessionFiles,
+      },
+    )
+
+    expect(result).toMatchObject({
+      ok: true,
+      output: {
+        totalBytes: { stdout: 256 },
+        filesTruncated: { stdout: true, stderr: false },
+      },
+    })
+    expect(result.content).toContain("64-byte limit")
+    await expect(
+      sessionFiles.read({
+        sessionId,
+        path: "tools/call_capped/stdout.log",
+      }),
+    ).resolves.toEqual(Buffer.from("x".repeat(64)))
+  })
+
+  it("pages UTF-8 without broken characters and encodes binary pages", async () => {
+    const workspace = await makeWorkspace()
+    const sessionId = createSessionId()
+    const sessionFiles = createSessionFiles(join(workspace, ".sessions"))
+    const context = {
+      workspaceRoot: workspace,
+      sessionId,
+      toolCallId: "call_read",
+      sessionFiles,
+    }
+    const textFile = await sessionFiles.prepareCommandFiles(
+      sessionId,
+      "call_unicode",
+    )
+    await writeFile(textFile.stdout.path, "你好吗")
+    const reader = createReadSessionFileTool()
+
+    const first = await reader.execute(
+      { path: textFile.stdout.reference.path, limit: 4 },
+      context,
+    )
+    expect(first).toMatchObject({
+      ok: true,
+      output: {
+        content: "你好",
+        encoding: "utf8",
+        offset: 0,
+        endOffset: 6,
+        hasMore: true,
+      },
+    })
+    expect(first.content).not.toContain("�")
+    const second = await reader.execute(
+      { path: textFile.stdout.reference.path, offset: 6, limit: 4 },
+      context,
+    )
+    expect(second).toMatchObject({
+      ok: true,
+      output: { content: "吗", offset: 6, endOffset: 9, hasMore: false },
+    })
+
+    await writeFile(textFile.stdout.path, "你".repeat(20 * 1024))
+    const largeText = await reader.execute(
+      { path: textFile.stdout.reference.path },
+      context,
+    )
+    expect(largeText).toMatchObject({
+      ok: true,
+      output: { encoding: "utf8", hasMore: true },
+    })
+    expect(largeText.content).not.toContain("�")
+    expect(Buffer.byteLength(largeText.content)).toBeLessThan(50 * 1024)
+
+    const binaryFile = await sessionFiles.prepareCommandFiles(
+      sessionId,
+      "call_binary",
+    )
+    await writeFile(binaryFile.stdout.path, Buffer.alloc(60 * 1024, 0xff))
+    const binary = await reader.execute(
+      { path: binaryFile.stdout.reference.path },
+      context,
+    )
+    expect(binary).toMatchObject({
+      ok: true,
+      output: {
+        encoding: "base64",
+        endOffset: 32 * 1024,
+        hasMore: true,
+      },
+    })
+    expect(Buffer.byteLength(binary.content)).toBeLessThan(50 * 1024)
+  })
 })
 
 describe("run_command process lifecycle", () => {
@@ -336,9 +492,11 @@ describe("run_command process lifecycle", () => {
   )
 
   it.skipIf(process.platform === "win32")(
-    "returns at the hard timeout even when a detached descendant keeps stdout open",
+    "returns and finishes Session files when a detached descendant keeps stdout open",
     async () => {
       const workspace = await makeWorkspace()
+      const sessionId = createSessionId()
+      const sessionFiles = createSessionFiles(join(workspace, ".sessions"))
       const descendant = "setTimeout(() => undefined, 4000)"
       const script = [
         'const { spawn } = require("node:child_process")',
@@ -351,15 +509,33 @@ describe("run_command process lifecycle", () => {
           command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`,
           timeoutSeconds: 1,
         },
-        { workspaceRoot: workspace },
+        {
+          workspaceRoot: workspace,
+          sessionId,
+          toolCallId: "call_timeout",
+          sessionFiles,
+        },
       )
 
       expect(result).toMatchObject({
         ok: false,
         code: "command_timeout",
-        output: { timedOut: true, truncated: true },
+        output: {
+          timedOut: true,
+          truncated: true,
+          files: {
+            stdout: { path: "tools/call_timeout/stdout.log" },
+            stderr: { path: "tools/call_timeout/stderr.log" },
+          },
+        },
       })
       expect(Date.now() - startedAt).toBeLessThan(2_000)
+      await expect(
+        sessionFiles.read({
+          sessionId,
+          path: "tools/call_timeout/stdout.log",
+        }),
+      ).resolves.toBeInstanceOf(Buffer)
     },
   )
 
@@ -391,10 +567,8 @@ describe("run_command model output bound", () => {
     expect(bounded.split("\n")).toHaveLength(2_000)
     expect(bounded).toContain("line-0")
     expect(bounded).toContain("line-2999")
-    expect(bounded).toContain("cmd > out.log 2>&1")
-    expect(bounded).toContain(
-      "Full captured output is not available in model context",
-    )
+    expect(bounded).toContain("read_session_file")
+    expect(bounded).toContain("for complete output when available")
     expect(bounded.indexOf("line-0")).toBeLessThan(bounded.indexOf("line-2999"))
   })
 
