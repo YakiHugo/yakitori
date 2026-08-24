@@ -46,7 +46,7 @@ Recommended execution order:
 1. Establish M1's durable event and item vocabulary.
 2. Rebuild M2 context capacity and M3 tool/permission ownership against it.
 3. Close M4 persistence/recovery and M6 process/error lifecycles.
-4. Adapt providers, GUI, and collaboration in M5/M7/M9.
+4. Adapt providers, GUI, instructions, and collaboration in M5/M7/M8/M9.
 5. Perform M10 export and dead-surface cleanup after callers have moved.
 
 ## M1 — Durable event and execution-item protocol
@@ -505,6 +505,71 @@ reconnection logic consumes it.
 - Session switching cannot expose a stale model selection.
 - Usage/metrics replay identically after restart.
 
+## M8 — Instructions, environment context, and shell discovery
+
+Status: completed 2026-08-24.
+
+### Landed boundary for models and instructions
+
+The bundled model catalog is the only production model-directory source.
+Yakitori does not fetch models.dev at runtime: the supported Codex, Grok, and
+Kimi coding-agent models have explicit capabilities and instruction-profile
+assignments in the catalog. An uncataloged custom model receives the generic
+`default` profile; it never inherits a profile from its name or provider.
+
+Instruction profiles describe coding-agent behavior rather than model
+families. Codex, Grok, and Kimi have explicit profiles; Grok follows the Grok
+Build work-policy/tool-calling direction while naming only Yakitori
+capabilities. Static profiles do not advertise optional collaboration tools.
+The world-state collaboration section names `spawn_agent` only when the
+finalized Step exposes it.
+
+Profiles load through packaged files only. Their content hash remains the
+revision used by Session configuration and model-switch detection; the
+unreachable `data:` and generic URL protocol branches are gone.
+
+`ProjectInstructions` contains only the applicable directory and rendered
+text. The world-state section owns diffing and revision fingerprints over that
+model-visible representation. Source lists, duplicate revisions, and exposed
+truncation metadata were removed; provenance can return when a real watcher,
+trust, inspection, or multi-environment consumer exists.
+
+### Landed macOS shell boundary
+
+Yakitori currently targets macOS and does not maintain speculative Windows or
+Linux shell-selection branches. Shell discovery ignores the parent process
+`$SHELL` and resolves in this order:
+
+```text
+supported account-default path
+-> zsh in PATH
+-> bash in PATH
+-> /bin/zsh
+-> /bin/bash
+-> /bin/sh
+```
+
+The existing login-shell environment probe, secret filtering, PATH merge, and
+bounded process cleanup remain unchanged.
+
+### Verified invariants
+
+- Cataloged models use explicit instruction profiles and capabilities.
+- Unknown custom models use `default` without family inference.
+- Every profile is readable, cached, non-empty, and revisioned.
+- Static profiles cannot mention `spawn_agent`; the dynamic world-state section
+  can mention it only when the Step router exposes it.
+- Project-instruction world-state compares only directory and rendered text.
+- Shell tests cover account lookup, unsupported account shells, PATH lookup,
+  and fixed fallbacks without reading the test process `$SHELL`.
+
+Reference anchors:
+
+- `.references/public/codex/codex-rs/core/src/session/multi_agents.rs`
+- `.references/public/codex/codex-rs/core/src/agents_md.rs`
+- `.references/public/codex/codex-rs/core/src/context/world_state/agents_md.rs`
+- `.references/public/codex/codex-rs/shell-command/src/shell_detect.rs`
+
 ## M9 — Agent collaboration and Mate lifecycle
 
 ### Confirmed problems
@@ -571,6 +636,38 @@ not obscure the architectural move.
   deliberate public contract.
 - Generic object checks occur at untrusted wire/storage/config boundaries, not
   throughout domain logic.
+
+## Original finding traceability
+
+| Original finding | Owning module |
+| --- | --- |
+| 1. Removed `task` still in prompts/GUI | M1, M8, M9 |
+| 2. Duplicate/drifted context metadata | M2 |
+| 3. Duplicated server entry/shutdown | M6 |
+| 4. Three keyed Promise queues | M4 |
+| 5. Falsely configurable RuntimeLimits | M3 |
+| 6. SessionSummary field expansion | M4 |
+| 7. Provider retry mirrors | M5 |
+| 8. GUI formatting/tool maps | M1, M7 |
+| 9. Repeated invalid-state checks | M6 |
+| 10. Production `autoAllow` always true | M3 |
+| 11. Duplicate ToolRegistry/Step dispatch | M3 |
+| 12. Recovery result/stale permission gap | M4 |
+| 13. Unreachable prompt URL branches | M8 |
+| 14. Unconsumed resolved capacity fields | M2 |
+| 15. Speculative PermissionGate clock/defaults | M3 |
+| 16. GUI usage/metrics/transient fields | M7 |
+| 17. Unconsumed project-instruction metadata | M8 |
+| 18. Unobservable `pending_init` | M9 |
+| 19. Silent EventHub listener errors | M6 |
+| 20. Production-exported faux provider | M10 |
+| 21. Over-broad barrels | M10 |
+| 22. Dead exports/repeated generic record checks | M10 |
+| GUI double sentinel and double dedup | M7, M1 |
+| HTTP handlers/kernel/eventStore union | M6 |
+| Speculative Mate write paths | M9 |
+| Incomplete/model-insensitive context budget | M2, M5 |
+| Shell discovery divergence | M8 |
 
 ## Findings deliberately not reopened
 
