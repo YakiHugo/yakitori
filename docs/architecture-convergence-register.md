@@ -30,15 +30,15 @@ Reference baseline:
 
 | ID | Module | Priority | Depends on | Status |
 | --- | --- | --- | --- | --- |
-| M1 | Durable event and execution-item protocol | P0 | None | Planned |
+| M1 | Durable event and execution-item protocol | P0 | None | Done |
 | M2 | Context manager, model capacity, and compaction | P0 | M1 lifecycle decisions | Planned |
-| M3 | Tool catalog, execution policy, and permissions | P0 | M1 item decisions | Planned |
+| M3 | Tool catalog, execution policy, and permissions | P0 | M1 item decisions | In progress |
 | M4 | Persistence, recovery, and keyed concurrency | P1 | M1, M3 permission terminal states | Planned |
 | M5 | Provider transport, retry, and usage accounting | P1 | M2 capacity contract | Planned |
 | M6 | Server lifecycle, errors, and event delivery | P1 | M1, M4 | Planned |
-| M7 | GUI projections and transient state | P1 | M1 | Planned |
+| M7 | GUI projections and transient state | P1 | M1 | In progress |
 | M8 | Instructions, environment context, and shell discovery | P2 | M2 StepContext boundary | Done |
-| M9 | Agent collaboration and Mate lifecycle | P2 | M1, M3 | Planned |
+| M9 | Agent collaboration and Mate lifecycle | P2 | M1, M3 | In progress |
 | M10 | Public module surface and test support | P3, cross-cutting | Owning modules stabilized | Planned |
 
 Recommended execution order:
@@ -51,22 +51,9 @@ Recommended execution order:
 
 ## M1 — Durable event and execution-item protocol
 
-### Confirmed problems
+Status: completed 2026-08-24.
 
-- Provider stop reasons (`tool_use`, `end_turn`), durable facts
-  (`assistant.message`, `tool.call`, `tool.result`), and GUI presentation types
-  are three separate representations with partially duplicated semantics.
-- GUI presentation is keyed by raw tool name. The removed `task` tool still
-  has a dedicated historical adapter while all current collaboration tools use
-  the unknown-tool fallback.
-- Tool summaries and tool details maintain separate tool-name tables.
-- Durable-event deduplication happens both before and inside GUI reduction.
-- Context-construction facts have been attached to assistant output metadata,
-  coupling model output to request assembly.
-
-### Target boundary
-
-Follow Codex's stable item lifecycle:
+The landed boundary follows Codex's stable item lifecycle:
 
 ```text
 provider stream and stop reason (internal)
@@ -80,49 +67,47 @@ provider stream and stop reason (internal)
     history / session / GUI / API projections
 ```
 
-Introduce a provider-neutral `ExecutionItem` union owned by the kernel, with
-variants such as:
+Provider adapters keep stop reasons internal. The runner converts execution
+into provider-neutral `item.started` and `item.completed` facts. Tool producers
+attach semantic descriptors at the execution boundary; the kernel validates,
+orders, persists, and broadcasts them without classifying raw tool names.
+Reasoning has its own durable item identity. Collaboration items persist child
+Session identity paired with its task path, and unknown tools use the dynamic
+item variant.
 
-- agent message;
-- reasoning;
-- command execution;
-- file change;
-- dynamic/unknown tool call;
-- collaboration-agent action.
+The durable item union stays flat, following Codex's `TurnItem` shape. Stable
+product semantics are represented directly as `command_execution`,
+`file_read`, `file_search`, `file_change`, `web_fetch`, `web_search`,
+`collaboration_tool_call`, and `mcp_tool_call`; runtime-defined tools use
+`dynamic_tool_call`. There is deliberately no `builtin_tool_call` layer:
+whether a tool is bundled is runtime provenance, not a durable domain fact.
+`file_search` groups grep and glob through its operation field, while
+collaboration groups spawn/message/follow-up/wait/interrupt/list through its
+action field because those families share stable result and navigation data.
 
-Persist item lifecycle through `item.started` and `item.completed` (or an
-equivalent paired contract). Do not add durable event types for individual
-tool names. Keep streaming text, reasoning, and command-output deltas transient.
-Keep model stop reasons inside provider/runner code.
+`file_change` records both the requested edit/write/patch operation and the
+actual add/delete/update changes. An update may include a destination path to
+represent a move, matching Codex's structured patch shape. Changes carry
+structured unified diffs and are completed by the tool producer; GUI replay
+does not recover a change by inspecting a tool name or reparsing raw output.
 
-Turn termination should have one explicit outcome vocabulary. Whether it is a
-single `turn.finished { outcome }` event or Codex-like complete/aborted events
-must be decided once in this module; GUI and recovery must not invent their
-own terminal-state mapping.
+Completed built-in executions carry typed command, file, search, web, and MCP
+results. Each runtime tool owns the mapping from its raw model-facing output
+to that durable result through the finalized router; the runner only forwards
+the descriptor. MCP results preserve protocol content, structured content,
+error indication, and metadata instead of storing an arbitrary JSON value.
 
-Usage and Turn metrics remain durable fields on the Turn terminal event. GUI
-`lastTurnUsage` and `lastTurnMetrics` are projections of that fact, not a
-second persisted copy.
+Execution items are the single durable conversation representation. The
+context manager projects them into the provider-neutral, model-visible IR in
+memory; GUI and API project the same items for product use. Durable history
+records remain only for configuration, inherited context, and world state,
+which are not execution items.
 
-### Work absorbed here
-
-- Remove the legacy `task` event/presentation path and its compatibility tests.
-- Map all collaboration tools to one typed collaboration item containing child
-  Session/thread identity for navigation.
-- Map unknown tools to a generic dynamic-tool item.
-- Make summary, detail, navigation, and model-history projection consume the
-  same item union.
-- Perform event-ID/sequence deduplication once at the ingestion boundary.
-- Remove context diagnostics from assistant/provider metadata.
-
-### Done when
-
-- Adding or removing a tool does not require editing multiple GUI switch
-  statements.
-- A collaboration call replays with child-Session navigation without reading
-  its raw tool name.
-- Durable replay and live delivery produce the same item projection.
-- Provider stop reasons cannot appear in the durable kernel protocol.
+All Turn endings use `turn.completed { outcome }`; the Turn does not duplicate
+a pointer to a final message because its ordered items already establish that
+fact. Usage and metrics remain on the terminal event. GUI event-ID/sequence
+deduplication occurs once at store ingestion, and one typed-item presenter owns
+summary, detail, links, and child Session navigation.
 
 Reference anchors:
 
@@ -237,13 +222,29 @@ Reference anchors:
 
 ## M3 — Tool catalog, execution policy, and permissions
 
+Status: in progress. The finalized per-Step router and shared file-path
+resolution boundary have landed; limit ownership and the remaining command /
+mutation approval-policy cleanup are still open.
+
+### Landed boundary
+
+`ToolRegistry.finalize(enabled)` now creates the one immutable Step router.
+The same selected tools produce model-visible definitions, execution
+descriptors, completed-result projection, permission requirements, and
+dispatch. Duplicate tool names fail when the catalog is constructed, and
+disabled or unknown tools share one failure contract.
+
+File tools accept workspace-relative paths, parent traversal, absolute paths,
+and paths through symlinks. They do not receive or branch on a
+workspace-boundary permission flag. One resolver canonicalizes existing
+targets and the parent of new targets, supplies an execution path plus a
+display path, rejects unsupported file kinds, and is re-run immediately before
+compare-and-write. The current YOLO product policy relies on host-user access;
+file locks, read-before-write, revision checks, bounded I/O, and symlink
+revalidation remain hard safety rules.
+
 ### Confirmed problems
 
-- `ToolRegistry` implements `get`, definitions, dispatch, and unknown-tool
-  failure, then `StepToolPlan` rebuilds the same map/specs/dispatch and uses a
-  different failure message.
-- Model-visible specs and execution routing therefore have two potential
-  owners.
 - `RuntimeLimits` mixes Session semantics, per-call tool requests, and process
   safety caps. Eight tool-side keys are persisted and validated but tools read
   module constants instead.
@@ -288,6 +289,13 @@ Permissions remain a core safety boundary. Remove the speculative `autoAllow`
 surface and make approval requirements a real result of tool policy for file
 mutation and command execution. One Permission owner controls request,
 resolution, timeout, abort, and recovery expiry.
+
+The current product default is YOLO (`never` ask), matching its single-user
+coding-agent stage. Path normalization, bounded I/O, compare-and-write,
+non-regular-file rejection, and command fuses are hard
+safety policy and do not disappear in YOLO mode. A future interactive mode
+changes only approval policy; it must not change tool schemas or path
+resolution.
 
 ### Work absorbed here
 
@@ -472,27 +480,25 @@ Reference anchor:
 
 ## M7 — GUI projections and transient state
 
+Status: in progress. Live and replay execution now share one event reducer,
+event identity is deduplicated at ingestion, and one typed presenter owns tool
+summary, details, file links, web links, and collaboration navigation. The
+remaining model-selection and transient-state cleanup below is still open.
+
 ### Confirmed problems
 
-- GUI summary/detail/navigation knowledge is split across raw tool-name maps.
 - `formatDuration` and `truncateLine` have duplicate implementations.
 - `modelSelectionReady` and `restoringModelSelections` represent one restore
   lifecycle through a global boolean plus a per-Session Set; the Set's extra
   granularity is not currently observable.
-- Event deduplication is duplicated before and inside reduction.
 - Turn usage/metrics are durable and expected to gain product consumers, while
   `streamStatus` is only connection state.
 
 ### Target boundary
 
-GUI consumes M1's typed ExecutionItems. One item presenter provides summary,
-detail, status, links, and child-Session navigation. Unknown/dynamic tools have
-a complete generic presentation.
-
 Represent model-selection restoration with one explicit status owned by the
 current selection (`loading | ready | failed`) unless real concurrent
-per-Session restoration creates a second consumer. Deduplicate durable events
-once before reduction.
+per-Session restoration creates a second consumer.
 
 Keep usage and metrics in durable Turn facts and derive GUI selectors from
 them. Keep streaming connection status transient and retain it only when UI or
@@ -500,8 +506,6 @@ reconnection logic consumes it.
 
 ### Done when
 
-- A new tool receives generic summary/detail presentation without GUI code.
-- A new typed item requires one presenter, not parallel name switches.
 - Session switching cannot expose a stale model selection.
 - Usage/metrics replay identically after restart.
 
@@ -572,11 +576,15 @@ Reference anchors:
 
 ## M9 — Agent collaboration and Mate lifecycle
 
+Status: in progress. Typed collaboration execution items and child Session
+navigation have landed; speculative Mate lifecycle surfaces remain open.
+
 ### Confirmed problems
 
 - Agent `pending_init` is assigned and then synchronously overwritten by
   `running` before any await, event, or caller observation.
-- Collaboration tool calls have no typed durable/UI representation.
+- Collaboration tool calls now have a typed durable/UI representation; the
+  remaining work is Mate lifecycle cleanup.
 - `reviseMate` and `setMateLifecycle` have no production write consumer while
   Mate/Room collaboration is explicitly a later product stage.
 
@@ -663,7 +671,7 @@ not obscure the architectural move.
 | 20. Production-exported faux provider | M10 |
 | 21. Over-broad barrels | M10 |
 | 22. Dead exports/repeated generic record checks | M10 |
-| GUI double sentinel and double dedup | M7, M1 |
+| GUI double sentinel | M7 |
 | HTTP handlers/kernel/eventStore union | M6 |
 | Speculative Mate write paths | M9 |
 | Incomplete/model-insensitive context budget | M2, M5 |
