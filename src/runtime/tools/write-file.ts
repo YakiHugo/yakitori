@@ -1,6 +1,10 @@
 import { ToolLimitDefaults } from "../limits.ts"
 import { resolveWritePath } from "./path-policy.ts"
 import { compareAndWriteTextFile } from "./text-file-write.ts"
+import {
+  completeFileChangeExecution,
+  fileChangeExecution,
+} from "./execution-descriptors.ts"
 import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
 
 export function createWriteFileTool(
@@ -9,16 +13,18 @@ export function createWriteFileTool(
   return {
     name: "write_file",
     description:
-      "Create or intentionally replace a complete UTF-8 text file using compare-and-write. New files are created without a prior read. Before replacing an existing file, read the complete current file; write_file rejects missing, partial, or stale observations. Prefer edit_file for focused modifications.",
+      "Create or intentionally replace a complete UTF-8 text file using compare-and-write. Accepts paths relative to the workspace and absolute paths. New files are created without a prior read. Before replacing an existing file, read the complete current file; write_file rejects missing, partial, or stale observations. Prefer edit_file for focused modifications.",
     autoAllow: true,
     effect: "mutate",
+    describeExecution: fileChangeExecution("write"),
+    completeExecution: completeFileChangeExecution,
     inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: {
         path: {
           type: "string",
-          description: "Workspace-relative path of the text file.",
+          description: "Workspace-relative or absolute path of the text file.",
         },
         content: {
           type: "string",
@@ -38,12 +44,12 @@ export function createWriteFileTool(
         return writeFailure(resolved.error.code, resolved.error.message)
       }
       const observed = context.visibleFileObservations?.latest(
-        resolved.relativePath,
+        resolved.displayPath,
       )
       if (resolved.exists && observed === undefined) {
         return writeFailure(
           "file_not_observed",
-          `${resolved.relativePath} has not been read in the current model context.`,
+          `${resolved.displayPath} has not been read in the current model context.`,
           "Read the complete file before replacing it.",
         )
       }
@@ -53,19 +59,21 @@ export function createWriteFileTool(
       ) {
         return writeFailure(
           "file_not_fully_observed",
-          `${resolved.relativePath} has only been partially observed.`,
+          `${resolved.displayPath} has only been partially observed.`,
           "Read the complete file before replacing it.",
         )
       }
 
       const written = await compareAndWriteTextFile({
         workspaceRoot: context.workspaceRoot,
-        path: resolved.relativePath,
+        path: resolved.displayPath,
         content: parsed.content,
         expectedSha256: observed?.sha256 ?? null,
       })
       if (!written.ok) return written
-      return withFileObservation(written, "write")
+      const observedResult = withFileObservation(written, "write")
+      if (!observedResult.ok) return observedResult
+      return observedResult
     },
   }
 }

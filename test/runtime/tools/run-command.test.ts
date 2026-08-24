@@ -12,7 +12,7 @@ import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { createSessionId } from "../../../src/kernel/ids.ts"
 import { createSessionFiles } from "../../../src/kernel/session-files.ts"
-import { createReadSessionFileTool } from "../../../src/runtime/tools/read-session-file.ts"
+import { createReadFileTool } from "../../../src/runtime/tools/read-file.ts"
 import {
   boundCommandContent,
   createRunCommandTool,
@@ -272,21 +272,28 @@ describe("run_command contract", () => {
       output: {
         truncated: true,
         files: {
-          stdout: { sessionId, path: "tools/call_output/stdout.log" },
-          stderr: { sessionId, path: "tools/call_output/stderr.log" },
+          stdout: expect.stringContaining("stdout.log"),
+          stderr: expect.stringContaining("stderr.log"),
         },
         totalBytes: { stdout: 4_107, stderr: 8 },
       },
     })
-    expect(result.content).toContain("read_session_file")
-
-    const read = await createReadSessionFileTool().execute(
-      { path: "tools/call_output/stdout.log", offset: 4_100, limit: 32 },
-      context,
+    expect(result.content).toContain("read_file")
+    if (
+      !result.ok ||
+      typeof result.output !== "object" ||
+      result.output === null
+    )
+      throw new Error("missing command output")
+    const stdoutPath = (result.output as { files?: { stdout?: string } }).files
+      ?.stdout
+    if (stdoutPath === undefined) throw new Error("missing stdout path")
+    const read = await createReadFileTool().execute(
+      { path: stdoutPath, offset: 2, limit: 2 },
+      { workspaceRoot: workspace },
     )
     expect(read).toMatchObject({
       ok: true,
-      output: { totalBytes: 4_107, hasMore: false },
     })
     expect(read.content).toContain("tail")
   })
@@ -324,79 +331,6 @@ describe("run_command contract", () => {
         path: "tools/call_capped/stdout.log",
       }),
     ).resolves.toEqual(Buffer.from("x".repeat(64)))
-  })
-
-  it("pages UTF-8 without broken characters and encodes binary pages", async () => {
-    const workspace = await makeWorkspace()
-    const sessionId = createSessionId()
-    const sessionFiles = createSessionFiles(join(workspace, ".sessions"))
-    const context = {
-      workspaceRoot: workspace,
-      sessionId,
-      toolCallId: "call_read",
-      sessionFiles,
-    }
-    const textFile = await sessionFiles.prepareCommandFiles(
-      sessionId,
-      "call_unicode",
-    )
-    await writeFile(textFile.stdout.path, "你好吗")
-    const reader = createReadSessionFileTool()
-
-    const first = await reader.execute(
-      { path: textFile.stdout.reference.path, limit: 4 },
-      context,
-    )
-    expect(first).toMatchObject({
-      ok: true,
-      output: {
-        content: "你好",
-        encoding: "utf8",
-        offset: 0,
-        endOffset: 6,
-        hasMore: true,
-      },
-    })
-    expect(first.content).not.toContain("�")
-    const second = await reader.execute(
-      { path: textFile.stdout.reference.path, offset: 6, limit: 4 },
-      context,
-    )
-    expect(second).toMatchObject({
-      ok: true,
-      output: { content: "吗", offset: 6, endOffset: 9, hasMore: false },
-    })
-
-    await writeFile(textFile.stdout.path, "你".repeat(20 * 1024))
-    const largeText = await reader.execute(
-      { path: textFile.stdout.reference.path },
-      context,
-    )
-    expect(largeText).toMatchObject({
-      ok: true,
-      output: { encoding: "utf8", hasMore: true },
-    })
-    expect(largeText.content).not.toContain("�")
-    expect(Buffer.byteLength(largeText.content)).toBeLessThan(50 * 1024)
-
-    const binaryFile = await sessionFiles.prepareCommandFiles(
-      sessionId,
-      "call_binary",
-    )
-    await writeFile(binaryFile.stdout.path, Buffer.alloc(60 * 1024, 0xff))
-    const binary = await reader.execute(
-      { path: binaryFile.stdout.reference.path },
-      context,
-    )
-    expect(binary).toMatchObject({
-      ok: true,
-      output: {
-        encoding: "base64",
-        endOffset: 32 * 1024,
-        hasMore: true,
-      },
-    })
-    expect(Buffer.byteLength(binary.content)).toBeLessThan(50 * 1024)
   })
 })
 
@@ -524,8 +458,8 @@ describe("run_command process lifecycle", () => {
           timedOut: true,
           truncated: true,
           files: {
-            stdout: { path: "tools/call_timeout/stdout.log" },
-            stderr: { path: "tools/call_timeout/stderr.log" },
+            stdout: expect.stringContaining("tools/call_timeout/stdout.log"),
+            stderr: expect.stringContaining("tools/call_timeout/stderr.log"),
           },
         },
       })
@@ -567,7 +501,7 @@ describe("run_command model output bound", () => {
     expect(bounded.split("\n")).toHaveLength(2_000)
     expect(bounded).toContain("line-0")
     expect(bounded).toContain("line-2999")
-    expect(bounded).toContain("read_session_file")
+    expect(bounded).toContain("read_file")
     expect(bounded).toContain("for complete output when available")
     expect(bounded.indexOf("line-0")).toBeLessThan(bounded.indexOf("line-2999"))
   })

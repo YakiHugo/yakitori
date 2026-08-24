@@ -6,6 +6,10 @@ import {
   type ForkTurns,
 } from "../agent-control.ts"
 import type { JsonObject, JsonValue } from "../../kernel/index.ts"
+import {
+  collaborationExecution,
+  completeCollaborationExecution,
+} from "./execution-descriptors.ts"
 import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
 
 const MAX_MESSAGE_CHARACTERS = 65_536
@@ -33,6 +37,8 @@ function createSpawnAgentTool(): RuntimeTool {
     // Multiple spawn calls in one model response are intentionally safe to
     // execute together; they do not mutate the workspace themselves.
     effect: "observe",
+    describeExecution: collaborationExecution("spawn"),
+    completeExecution: completeCollaborationExecution,
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -92,6 +98,8 @@ function createSendMessageTool(): RuntimeTool {
       "Send a message to an existing agent. The message is delivered at the next model sampling boundary and does not start a new turn.",
     autoAllow: true,
     effect: "opaque",
+    describeExecution: collaborationExecution("send_message"),
+    completeExecution: completeCollaborationExecution,
     inputSchema: targetMessageSchema(
       "Relative task name, canonical task path, or agent id.",
     ),
@@ -101,8 +109,11 @@ function createSendMessageTool(): RuntimeTool {
       const parsed = parseTargetMessage(input)
       if (!parsed.ok) return failure("invalid_tool_input", parsed.message)
       return runControl(async () => {
-        await control.value.sendMessage(parsed.value)
-        return success({ delivered: true }, "Message queued for delivery.")
+        const receiver = await control.value.sendMessage(parsed.value)
+        return success(
+          { delivered: true, ...receiver },
+          "Message queued for delivery.",
+        )
       })
     },
   }
@@ -115,6 +126,8 @@ function createFollowupTaskTool(): RuntimeTool {
       "Send a follow-up task to a non-root agent. If it is idle, this starts a new turn; if it is running, the task is queued for the next turn boundary.",
     autoAllow: true,
     effect: "opaque",
+    describeExecution: collaborationExecution("follow_up"),
+    completeExecution: completeCollaborationExecution,
     inputSchema: targetMessageSchema(
       "Relative task name, canonical task path, or agent id.",
     ),
@@ -124,8 +137,11 @@ function createFollowupTaskTool(): RuntimeTool {
       const parsed = parseTargetMessage(input)
       if (!parsed.ok) return failure("invalid_tool_input", parsed.message)
       return runControl(async () => {
-        await control.value.followup(parsed.value)
-        return success({ accepted: true }, "Follow-up task accepted.")
+        const receiver = await control.value.followup(parsed.value)
+        return success(
+          { accepted: true, ...receiver },
+          "Follow-up task accepted.",
+        )
       })
     },
   }
@@ -138,6 +154,8 @@ function createWaitAgentTool(): RuntimeTool {
       "Wait for a mailbox or final-status update from any agent in the current tree. Returns immediately when an update is already queued, or after the timeout with an empty update list.",
     autoAllow: true,
     effect: "opaque",
+    describeExecution: collaborationExecution("wait"),
+    completeExecution: completeCollaborationExecution,
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -171,6 +189,8 @@ function createInterruptAgentTool(): RuntimeTool {
       "Interrupt an agent's current turn, if any, and return its previous status. The agent remains available for messages and follow-up tasks.",
     autoAllow: true,
     effect: "opaque",
+    describeExecution: collaborationExecution("interrupt"),
+    completeExecution: completeCollaborationExecution,
     inputSchema: targetSchema(),
     async execute(input, context) {
       const control = requireControl(context.agentControl)
@@ -178,10 +198,13 @@ function createInterruptAgentTool(): RuntimeTool {
       const parsed = parseTarget(input)
       if (!parsed.ok) return failure("invalid_tool_input", parsed.message)
       return runControl(async () => {
-        const previousStatus = await control.value.interrupt(parsed.target)
+        const interrupted = await control.value.interrupt(parsed.target)
         return success(
-          { previousStatus: statusValue(previousStatus) },
-          JSON.stringify({ previousStatus }),
+          {
+            ...interrupted,
+            previousStatus: statusValue(interrupted.previousStatus),
+          },
+          JSON.stringify({ previousStatus: interrupted.previousStatus }),
         )
       })
     },
@@ -195,6 +218,8 @@ function createListAgentsTool(): RuntimeTool {
       "List agents in the current root tree, optionally filtered by a canonical task-path prefix.",
     autoAllow: true,
     effect: "observe",
+    describeExecution: collaborationExecution("list"),
+    completeExecution: completeCollaborationExecution,
     inputSchema: {
       type: "object",
       additionalProperties: false,

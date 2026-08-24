@@ -12,7 +12,7 @@ describe("Session journal format", () => {
     id: "event_format",
     sessionId: "session_00000000-0000-4000-8000-000000000000",
     seq: 1,
-    version: 2,
+    version: 4,
     createdAt: "2026-07-30T00:00:00.000Z",
     type: EventType.SessionCreated,
     data: { title: "Format" },

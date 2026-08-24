@@ -226,11 +226,10 @@ export async function createYakitoriApplication(
       permissionGate,
       toolRegistry,
       sessionFiles,
-      // codex analog: AskForApproval::Never — opt-in escape hatch that skips
-      // permission prompts entirely.
-      ...(process.env.YAKITORI_APPROVAL_POLICY === "never"
-        ? { approvalPolicy: "never" as const }
-        : {}),
+      approvalPolicy:
+        process.env.YAKITORI_APPROVAL_POLICY === "auto_file_tools"
+          ? "auto_file_tools"
+          : "never",
       onRuntimeError: (error) => {
         console.error("Session lane failed", error)
       },

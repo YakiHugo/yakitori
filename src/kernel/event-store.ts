@@ -1,5 +1,6 @@
 import { createYakitoriError, YakitoriErrorCode } from "./errors.ts"
 import {
+  EVENT_SCHEMA_VERSION,
   createEventEnvelope,
   type EventEnvelope,
   type EventMetadata,
@@ -123,8 +124,8 @@ export function requireExpectedSequence(
 // An input admitted mid-turn sits between turn.started and its terminal
 // event, so a fork cutting before that input can leave a turn permanently
 // Started in the target Session — which would block its run lane forever.
-// Close such turns with a synthetic turn.interrupted, the same shape Codex
-// uses when a fork snapshot ends mid-turn.
+// Close such turns with a synthetic interrupted outcome, the same lifecycle
+// boundary Codex uses when a fork snapshot ends mid-turn.
 export function appendForkCutTurnClosures(
   sessionId: string,
   events: StoredEventEnvelope[],
@@ -136,12 +137,7 @@ export function appendForkCutTurnClosures(
       open.add(event.data.turnId)
       continue
     }
-    if (
-      event.type === EventType.TurnCompleted ||
-      event.type === EventType.TurnFailed ||
-      event.type === EventType.TurnCancelled ||
-      event.type === EventType.TurnInterrupted
-    ) {
+    if (event.type === EventType.TurnCompleted) {
       open.delete(event.data.turnId)
     }
   }
@@ -151,10 +147,13 @@ export function appendForkCutTurnClosures(
         sessionId,
         seq: events.length + 1,
         event: {
-          type: EventType.TurnInterrupted,
+          type: EventType.TurnCompleted,
           data: {
             turnId,
-            reason: "The Session was forked before this Turn finished.",
+            outcome: {
+              status: "interrupted",
+              reason: "The Session was forked before this Turn finished.",
+            },
           },
         },
       }),
@@ -266,7 +265,7 @@ export function parseStoredEventEnvelope(
     typeof value.id !== "string" ||
     typeof value.sessionId !== "string" ||
     !isPositiveInteger(value.seq) ||
-    value.version !== 2 ||
+    !isPositiveInteger(value.version) ||
     typeof value.createdAt !== "string" ||
     typeof value.type !== "string" ||
     !isJsonObject(value.data)
@@ -274,6 +273,16 @@ export function parseStoredEventEnvelope(
     throw invalidEventLog(`Invalid event envelope at record ${recordNumber}.`, {
       recordNumber,
     })
+  }
+  if (value.version !== EVENT_SCHEMA_VERSION) {
+    throw invalidEventLog(
+      `Unsupported event schema version ${String(value.version)} at record ${recordNumber}; expected ${String(EVENT_SCHEMA_VERSION)}.`,
+      {
+        recordNumber,
+        version: value.version,
+        expectedVersion: EVENT_SCHEMA_VERSION,
+      },
+    )
   }
   return value as StoredEventEnvelope
 }

@@ -11,6 +11,11 @@ agent itself works.
 Work in small, reviewable modules and update this file as project conventions
 become concrete.
 
+This project is under rapid iteration. Large breaking changes and broad
+refactors are expected and reasonable; do not add compatibility layers or
+data migrations unless an explicit requirement establishes a real
+compatibility obligation.
+
 Reference material lives under `.references/` and is intentionally gitignored.
 Do not make source code, tests, build scripts, or runtime behavior depend on
 files in `.references/`.

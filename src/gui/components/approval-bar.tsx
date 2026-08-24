@@ -34,7 +34,8 @@ export function ApprovalBar() {
                 </p>
               )}
               <p className="text-xs text-muted-foreground">
-                Runs with host user authority (files, process, network).
+                {entry.reason ??
+                  "Runs with host user authority (files, process, network)."}
               </p>
             </div>
             <Button

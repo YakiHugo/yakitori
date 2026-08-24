@@ -19,6 +19,7 @@ import {
   type SessionKernel,
   type SessionProjection,
   type TokenUsage,
+  type ToolExecutionDescriptor,
   type TurnExecutionContext,
   type TurnMetrics,
   TurnState,
@@ -91,6 +92,7 @@ import type {
   RuntimeTool,
   ToolEffect,
   ToolExecutionResult,
+  ToolPermissionRequest,
 } from "./tools/types.ts"
 import {
   createVisibleFileObservations,
@@ -122,6 +124,17 @@ export type SessionRunnerOptions = {
   readonly onRuntimeError?: (error: unknown) => void
   readonly onContextPrepared?: (diagnostics: ContextPreparedDiagnostics) => void
   readonly sessionFiles?: SessionFiles
+}
+
+function requireToolExecution(
+  executions: ReadonlyMap<string, ToolExecutionDescriptor>,
+  toolCallId: string,
+): ToolExecutionDescriptor {
+  const execution = executions.get(toolCallId)
+  if (execution === undefined) {
+    throw new Error(`Missing execution descriptor for tool call ${toolCallId}.`)
+  }
+  return execution
 }
 
 export type ContextPreparedDiagnostics = Readonly<{
@@ -202,7 +215,10 @@ export function createSessionRunner(
   const toolRegistry = options.toolRegistry ?? createToolRegistry()
   const permissionGate = options.permissionGate ?? createPermissionGate()
   const enabledTools = toolRegistry.tools.map((tool) => tool.name)
-  const approvalPolicy = options.approvalPolicy ?? "auto_file_tools"
+  // The current product runs in YOLO mode. Keep the permission protocol as a
+  // policy boundary, but do not introduce prompts until M3 exposes a real
+  // user-selectable mode.
+  const approvalPolicy = options.approvalPolicy ?? "never"
   const projectInstructionLoader =
     options.loadProjectInstructions ?? loadProjectInstructions
   const lanes = new Map<string, LaneState>()
@@ -822,9 +838,6 @@ export function createSessionRunner(
             executionContext,
             toolPlan: step.tools,
             workspaceRoot: step.workspaceRoot,
-            ...(response.providerRequestId === undefined
-              ? {}
-              : { providerRequestId: response.providerRequestId }),
             signal: input.signal,
             visibleFileObservations,
           })
@@ -881,9 +894,6 @@ export function createSessionRunner(
           model: executionContext.model,
           callIndex: modelCallIndex,
           streamId,
-          ...(response.providerRequestId === undefined
-            ? {}
-            : { providerRequestId: response.providerRequestId }),
         },
         ...(usage === undefined ? {} : { usage }),
         metrics: turnMetrics(telemetry),
@@ -1211,12 +1221,30 @@ export function createSessionRunner(
     readonly executionContext: TurnExecutionContext
     readonly toolPlan: StepToolPlan
     readonly workspaceRoot: string
-    readonly providerRequestId?: string
     readonly signal: AbortSignal
     readonly visibleFileObservations: ReturnType<
       typeof createVisibleFileObservations
     >
   }): Promise<void> {
+    const executions = new Map(
+      input.toolCalls.map((call) => [
+        call.id,
+        input.toolPlan.describeExecution(call.name, call.input),
+      ]),
+    )
+    const permissionRequests = new Map(
+      await Promise.all(
+        input.toolCalls.map(
+          async (call) =>
+            [
+              call.id,
+              await input.toolPlan.permissionRequest(call.name, call.input, {
+                workspaceRoot: input.workspaceRoot,
+              }),
+            ] as const,
+        ),
+      ),
+    )
     const recorded = await options.kernel.recordAssistantOutput({
       sessionId: input.sessionId,
       turnId: input.turnId,
@@ -1226,19 +1254,15 @@ export function createSessionRunner(
         model: input.executionContext.model,
         callIndex: input.modelCallIndex,
         streamId: input.streamId,
-        ...(input.providerRequestId === undefined
-          ? {}
-          : { providerRequestId: input.providerRequestId }),
       },
       toolCalls: input.toolCalls.map((call) => {
-        const tool = input.toolPlan.get(call.name)
         return {
           id: call.id,
           name: call.name,
           input: call.input,
+          execution: requireToolExecution(executions, call.id),
           requiresPermission:
-            tool !== undefined &&
-            !tool.autoAllow &&
+            permissionRequests.get(call.id) !== undefined &&
             input.executionContext.approvalPolicy !== "never",
         }
       }),
@@ -1267,10 +1291,14 @@ export function createSessionRunner(
               call,
               executionContext: input.executionContext,
               toolPlan: input.toolPlan,
+              execution: requireToolExecution(executions, call.id),
               workspaceRoot: input.workspaceRoot,
               signal: input.signal,
               observations,
               record: false,
+              ...(permissionRequests.get(call.id) === undefined
+                ? {}
+                : { permissionRequest: permissionRequests.get(call.id) }),
             }),
           }
         } catch (error) {
@@ -1292,6 +1320,8 @@ export function createSessionRunner(
         turnId: input.turnId,
         call: outcome.call,
         result: outcome.result,
+        execution: requireToolExecution(executions, outcome.call.id),
+        toolPlan: input.toolPlan,
         observations,
       })
       if (recorded === "aborted") prefixAborted = true
@@ -1313,10 +1343,14 @@ export function createSessionRunner(
           call,
           executionContext: input.executionContext,
           toolPlan: input.toolPlan,
+          execution: requireToolExecution(executions, call.id),
           workspaceRoot: input.workspaceRoot,
           signal: input.signal,
           observations,
           record: true,
+          ...(permissionRequests.get(call.id) === undefined
+            ? {}
+            : { permissionRequest: permissionRequests.get(call.id) }),
         })
         if (result === "aborted") {
           await cancelAfterRuntimeAbort(input.sessionId, input.turnId)
@@ -1338,10 +1372,12 @@ export function createSessionRunner(
     readonly call: ModelToolCallBlock
     readonly executionContext: TurnExecutionContext
     readonly toolPlan: StepToolPlan
+    readonly execution: ToolExecutionDescriptor
     readonly workspaceRoot: string
     readonly signal: AbortSignal
     readonly observations: ReturnType<typeof createVisibleFileObservations>
     readonly record: boolean
+    readonly permissionRequest?: ToolPermissionRequest | undefined
   }): Promise<ToolExecutionResult | "aborted"> {
     // Defense in depth: the model only sees enabledTools definitions, but the
     // persisted Session contract must still hold if a disabled call arrives.
@@ -1358,34 +1394,30 @@ export function createSessionRunner(
           turnId: input.turnId,
           call: input.call,
           result: disabled,
+          execution: input.execution,
+          toolPlan: input.toolPlan,
           observations: input.observations,
         })
         return recorded === "aborted" ? "aborted" : disabled
       }
       return disabled
     }
-    const tool = input.toolPlan.get(input.call.name)
     let permissionRequestId: string | undefined
     if (
-      tool !== undefined &&
-      !tool.autoAllow &&
+      input.permissionRequest !== undefined &&
       input.executionContext.approvalPolicy !== "never"
     ) {
-      const command =
-        typeof input.call.input === "object" &&
-        input.call.input !== null &&
-        "command" in input.call.input &&
-        typeof (input.call.input as { command: unknown }).command === "string"
-          ? (input.call.input as { command: string }).command
-          : input.call.name
       const permission = await options.kernel.requestPermission({
         sessionId: input.sessionId,
         turnId: input.turnId,
         toolCallId: input.call.id,
-        action: input.call.name,
-        subject: command,
-        reason:
-          "Command runs with the host user's filesystem, process, environment, and network authority.",
+        action: input.permissionRequest.action,
+        ...(input.permissionRequest.subject === undefined
+          ? {}
+          : { subject: input.permissionRequest.subject }),
+        ...(input.permissionRequest.reason === undefined
+          ? {}
+          : { reason: input.permissionRequest.reason }),
       })
       publishDurable([permission.event])
       permissionRequestId = permission.permissionRequestId
@@ -1411,6 +1443,8 @@ export function createSessionRunner(
             turnId: input.turnId,
             call: input.call,
             result: denied,
+            execution: input.execution,
+            toolPlan: input.toolPlan,
             observations: input.observations,
           })
           return recorded === "aborted" ? "aborted" : denied
@@ -1449,6 +1483,8 @@ export function createSessionRunner(
       turnId: input.turnId,
       call: input.call,
       result,
+      execution: input.execution,
+      toolPlan: input.toolPlan,
       observations: input.observations,
     })
     return recorded === "aborted" ? "aborted" : result
@@ -1507,13 +1543,22 @@ export function createSessionRunner(
     readonly turnId: string
     readonly call: ModelToolCallBlock
     readonly result: ToolExecutionResult
+    readonly execution: ToolExecutionDescriptor
+    readonly toolPlan: StepToolPlan
     readonly observations: ReturnType<typeof createVisibleFileObservations>
   }): Promise<"ok" | "aborted"> {
     if (input.result.ok) {
+      const execution = input.toolPlan.completeExecution(
+        input.call.name,
+        input.execution,
+        input.result.output,
+        true,
+      )
       const resolved = await options.kernel.recordToolResult({
         sessionId: input.sessionId,
         turnId: input.turnId,
         toolCallId: input.call.id,
+        execution,
         output: input.result.output,
         content: { kind: "text", text: input.result.content },
       })
@@ -1525,10 +1570,20 @@ export function createSessionRunner(
       return "ok"
     }
 
+    const execution =
+      input.result.output === undefined
+        ? input.execution
+        : input.toolPlan.completeExecution(
+            input.call.name,
+            input.execution,
+            input.result.output,
+            false,
+          )
     const resolved = await options.kernel.recordToolResult({
       sessionId: input.sessionId,
       turnId: input.turnId,
       toolCallId: input.call.id,
+      execution,
       ...(input.result.output === undefined
         ? {}
         : { output: input.result.output }),

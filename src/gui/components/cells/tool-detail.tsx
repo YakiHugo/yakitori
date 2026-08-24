@@ -104,6 +104,37 @@ export function ToolDetailView({
           <DiffView diff={detail.diff} />
         </div>
       )
+    case "file_changes":
+      return (
+        <div className="space-y-4">
+          {detail.changes.map((change) => (
+            <div key={`${change.kind}:${change.path}`} className="space-y-2">
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
+                  {change.kind}
+                </span>
+                <FileLink
+                  target={{ kind: "file", path: change.path }}
+                  workspaceRoot={workspaceRoot}
+                />
+                {change.kind !== "update" ||
+                change.movePath === undefined ? null : (
+                  <>
+                    <span className="text-muted-foreground">→</span>
+                    <FileLink
+                      target={{ kind: "file", path: change.movePath }}
+                      workspaceRoot={workspaceRoot}
+                    />
+                  </>
+                )}
+              </div>
+              {change.diff === undefined ? null : (
+                <DiffView diff={change.diff} />
+              )}
+            </div>
+          ))}
+        </div>
+      )
     case "command":
       return (
         <CommandOutput
@@ -127,13 +158,15 @@ export function ToolDetailView({
       return (
         <div className="space-y-2">
           {detail.text === undefined ? null : <TextOutput text={detail.text} />}
-          {detail.sessionId === undefined ||
-          onOpenSession === undefined ? null : (
-            <ActionButton
-              label="Open child task"
-              action={() => onOpenSession(detail.sessionId as string)}
-            />
-          )}
+          {onOpenSession === undefined
+            ? null
+            : detail.receivers.map((receiver) => (
+                <ActionButton
+                  key={receiver.sessionId}
+                  label={receiver.path}
+                  action={() => onOpenSession(receiver.sessionId)}
+                />
+              ))}
         </div>
       )
     case "text":

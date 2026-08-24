@@ -1,7 +1,27 @@
 import { describe, expect, it } from "vitest"
 import type { ExecutionEntry } from "../../src/gui/execution-view.ts"
 import { presentTool } from "../../src/gui/tool-presentation.ts"
-import { toolExecutionType } from "../../src/kernel/events.ts"
+import type {
+  JsonValue,
+  ToolExecutionDescriptor,
+} from "../../src/kernel/events.ts"
+import {
+  commandExecution,
+  collaborationExecution,
+  completeCollaborationExecution,
+  completeCommandExecution,
+  completeFileChangeExecution,
+  completeFileReadExecution,
+  completeFileSearchExecution,
+  completeWebFetchExecution,
+  completeWebSearchExecution,
+  dynamicToolExecution,
+  fileChangeExecution,
+  fileReadExecution,
+  fileSearchExecution,
+  webFetchExecution,
+  webSearchExecution,
+} from "../../src/runtime/tools/execution-descriptors.ts"
 
 type ToolEntry = Extract<ExecutionEntry, { readonly kind: "tool" }>
 
@@ -28,11 +48,18 @@ describe("tool presentation", () => {
     })
   })
 
-  it("recognizes historical directory reads without structured output", () => {
+  it("presents a structured directory read", () => {
     expect(
       presentTool(
         entry("read_file", {
           input: { path: "src" },
+          output: {
+            path: "src",
+            kind: "directory",
+            count: 2,
+            entries: ["a.ts", "b.ts"],
+            truncated: false,
+          },
           resultText: "Listed 2 entries in src.\na.ts\nb.ts",
         }),
       ),
@@ -46,7 +73,7 @@ describe("tool presentation", () => {
     })
   })
 
-  it("groups historical grep text into clickable file matches", () => {
+  it("groups structured grep matches into clickable files", () => {
     expect(
       presentTool(
         entry("grep", {
@@ -55,7 +82,18 @@ describe("tool presentation", () => {
             path: "src",
             output_mode: "content",
           },
-          output: { count: 3, truncated: false, outputMode: "content" },
+          output: {
+            path: "src",
+            count: 3,
+            truncated: false,
+            timedOut: false,
+            outputMode: "content",
+            locations: [
+              { path: "src/a.ts", line: 7, text: "first" },
+              { path: "src/a.ts", line: 12, text: "second" },
+              { path: "src/b.ts", line: 4, text: "third" },
+            ],
+          },
           resultText:
             "Grep returned 3 results.\nsrc/a.ts:7:first\nsrc/a.ts:12:second\nsrc/b.ts:4:third",
         }),
@@ -101,7 +139,7 @@ describe("tool presentation", () => {
     })
   })
 
-  it("restores grep content when historical results omit line numbers", () => {
+  it("presents grep matches without line numbers", () => {
     expect(
       presentTool(
         entry("grep", {
@@ -110,7 +148,17 @@ describe("tool presentation", () => {
             output_mode: "content",
             "-n": false,
           },
-          output: { count: 2, outputMode: "content" },
+          output: {
+            path: ".",
+            count: 2,
+            truncated: false,
+            timedOut: false,
+            outputMode: "content",
+            locations: [
+              { path: "src/a.ts", text: "first" },
+              { path: "src/a.ts", text: "second:with colon" },
+            ],
+          },
           resultText:
             "Grep returned 2 results.\nsrc/a.ts:first\nsrc/a.ts:second:with colon",
         }),
@@ -140,7 +188,7 @@ describe("tool presentation", () => {
           output: {
             count: 1,
             outputMode: "content",
-            locations: [{ path: "src/a.ts", line: 7 }],
+            locations: [{ path: "src/a.ts", line: 7, text: "matched text" }],
           },
           resultText: "Grep returned 1 result.\nsrc/a.ts:matched text",
         }),
@@ -158,11 +206,19 @@ describe("tool presentation", () => {
     })
   })
 
-  it("normalizes the historical count_matches alias", () => {
+  it("normalizes the model-facing count_matches alias", () => {
     expect(
       presentTool(
         entry("grep", {
           input: { pattern: "needle", output_mode: "count_matches" },
+          output: {
+            path: ".",
+            count: 1,
+            outputMode: "count",
+            truncated: false,
+            timedOut: false,
+            locations: [{ path: "src/a.ts", count: 3 }],
+          },
           resultText: "Grep returned 1 result.\nsrc/a.ts:3",
         }),
       ),
@@ -198,12 +254,17 @@ describe("tool presentation", () => {
     })
   })
 
-  it("turns historical glob output into a file list", () => {
+  it("turns structured glob output into a file list", () => {
     expect(
       presentTool(
         entry("glob", {
           input: { pattern: "src/**/*.test.ts" },
-          output: { count: 2, truncated: false },
+          output: {
+            path: ".",
+            count: 2,
+            truncated: false,
+            paths: ["src/a.test.ts", "src/b.test.ts"],
+          },
           resultText: "Glob returned 2 files.\nsrc/a.test.ts\nsrc/b.test.ts",
         }),
       ),
@@ -268,11 +329,141 @@ describe("tool presentation", () => {
     ).toMatchObject({ meta: ["exit 0", "1.2s"], detail: { kind: "command" } })
   })
 
+  it("keeps every file in a multi-file change", () => {
+    const base = entry("edit_file", {
+      input: { path: "src/a.ts" },
+      resultText: "Changed two files.",
+    })
+
+    expect(
+      presentTool({
+        ...base,
+        execution: {
+          ...base.execution,
+          type: "file_change",
+          request: {
+            operation: "apply_patch",
+            paths: ["src/a.ts", "src/b.ts"],
+          },
+          changes: [
+            {
+              path: "src/a.ts",
+              kind: "update",
+              diff: {
+                format: "unified",
+                text: "--- a/src/a.ts\n+++ b/src/a.ts\n-old\n+new",
+                truncated: false,
+              },
+            },
+            {
+              path: "src/b.ts",
+              kind: "add",
+              diff: {
+                format: "unified",
+                text: "--- /dev/null\n+++ b/src/b.ts\n+new",
+                truncated: false,
+              },
+            },
+          ],
+        },
+      }),
+    ).toMatchObject({
+      verb: "Change",
+      subject: "2 files",
+      meta: ["+2 −1"],
+      detail: {
+        kind: "file_changes",
+        changes: [
+          { path: "src/a.ts", kind: "update" },
+          { path: "src/b.ts", kind: "add" },
+        ],
+      },
+    })
+  })
+
+  it("presents a moved file with its destination as the navigation target", () => {
+    const base = entry("edit_file", {
+      input: { path: "src/old.ts" },
+      resultText: "Moved file.",
+    })
+
+    expect(
+      presentTool({
+        ...base,
+        execution: {
+          ...base.execution,
+          type: "file_change",
+          request: { operation: "apply_patch", paths: ["src/old.ts"] },
+          changes: [
+            {
+              path: "src/old.ts",
+              kind: "update",
+              movePath: "src/new.ts",
+              diff: {
+                format: "unified",
+                text: "--- a/src/old.ts\n+++ b/src/new.ts",
+                truncated: false,
+              },
+            },
+          ],
+        },
+      }),
+    ).toMatchObject({
+      subject: "src/old.ts → src/new.ts",
+      target: { kind: "file", path: "src/new.ts" },
+      detail: { kind: "diff", path: "src/new.ts" },
+    })
+  })
+
+  it("keeps every receiver in a multi-agent collaboration", () => {
+    const base = entry("spawn_agent", {
+      input: { task_name: "review", message: "Review changes" },
+      resultText: "Reviewers started.",
+    })
+
+    expect(
+      presentTool({
+        ...base,
+        execution: {
+          ...base.execution,
+          type: "collaboration_tool_call",
+          action: "spawn",
+          description: "Review changes",
+          receivers: [
+            { sessionId: "session_a", path: "/root/review_a" },
+            { sessionId: "session_b", path: "/root/review_b" },
+          ],
+        },
+      }),
+    ).toMatchObject({
+      meta: ["2 agents"],
+      detail: {
+        kind: "collaboration",
+        receivers: [
+          { sessionId: "session_a", path: "/root/review_a" },
+          { sessionId: "session_b", path: "/root/review_b" },
+        ],
+      },
+    })
+  })
+
   it("extracts web links and typed collaboration navigation", () => {
     expect(
       presentTool(
         entry("web_search", {
           input: { query: "Electron shell" },
+          output: {
+            links: [
+              {
+                title: "Electron shell",
+                url: "https://electronjs.org/docs/latest/api/shell",
+              },
+              {
+                title: "Security",
+                url: "https://electronjs.org/docs/latest/tutorial/security",
+              },
+            ],
+          },
           resultText:
             "1. Electron shell — https://electronjs.org/docs/latest/api/shell\n2. Security — https://electronjs.org/docs/latest/tutorial/security",
         }),
@@ -306,24 +497,117 @@ describe("tool presentation", () => {
     ).toMatchObject({
       verb: "Collaborate",
       target: { kind: "session", sessionId: "session_child" },
-      detail: { kind: "collaboration", sessionId: "session_child" },
+      detail: {
+        kind: "collaboration",
+        receivers: [{ sessionId: "session_child", path: "/root/inspect_auth" }],
+      },
     })
   })
 })
 
 function entry(
   name: string,
-  input: Partial<Omit<ToolEntry, "kind" | "toolCallId" | "turnId" | "name">>,
+  input: Partial<
+    Omit<ToolEntry, "kind" | "toolCallId" | "turnId" | "execution">
+  > & {
+    readonly input?: JsonValue
+    readonly diff?: { readonly text: string; readonly truncated: boolean }
+    readonly commandResult?: unknown
+  },
 ): ToolEntry {
+  const {
+    input: rawInput = {},
+    diff,
+    commandResult,
+    output: rawOutput,
+    ...rest
+  } = input
+  const output =
+    commandResult ??
+    (diff === undefined
+      ? rawOutput
+      : {
+          ...(recordOf(rawOutput) ?? {}),
+          diff: { format: "unified", ...diff },
+        })
+  const toolCallId = `tool_${name}`
   return {
     kind: "tool",
-    toolCallId: `tool_${name}`,
+    toolCallId,
     turnId: "turn_1",
-    name,
-    executionType: toolExecutionType(name),
-    summary: name,
-    input: {},
+    execution: {
+      ...executionDescriptor(name, rawInput, output),
+      itemId: `item_${name}`,
+      toolCallId,
+      name,
+      input: rawInput,
+      requiresPermission: false,
+    },
     state: "completed",
-    ...input,
+    ...(output === undefined ? {} : { output }),
+    ...rest,
   }
+}
+
+function executionDescriptor(
+  name: string,
+  input: JsonValue,
+  output: unknown,
+): ToolExecutionDescriptor {
+  const started = startedExecutionDescriptor(name, input)
+  if (output === undefined) return started
+  const value = output as JsonValue
+  switch (started.type) {
+    case "command_execution":
+      return completeCommandExecution(started, value)
+    case "file_change":
+      return completeFileChangeExecution(started, value)
+    case "file_read":
+      return completeFileReadExecution(started, value)
+    case "file_search":
+      return completeFileSearchExecution(started, value)
+    case "web_fetch":
+      return completeWebFetchExecution(started, value)
+    case "web_search":
+      return completeWebSearchExecution(started, value)
+    case "collaboration_tool_call":
+      return completeCollaborationExecution(started, value)
+    case "mcp_tool_call":
+    case "dynamic_tool_call":
+      return started
+  }
+}
+
+function startedExecutionDescriptor(
+  name: string,
+  input: JsonValue,
+): ToolExecutionDescriptor {
+  switch (name) {
+    case "run_command":
+      return commandExecution(input)
+    case "edit_file":
+      return fileChangeExecution("edit")(input)
+    case "write_file":
+      return fileChangeExecution("write")(input)
+    case "read_file":
+      return fileReadExecution(input)
+    case "grep":
+      return fileSearchExecution("grep")(input)
+    case "glob":
+      return fileSearchExecution("glob")(input)
+    case "web_fetch":
+      return webFetchExecution(input)
+    case "web_search":
+      return webSearchExecution(input)
+    case "spawn_agent":
+      return collaborationExecution("spawn")(input)
+    default:
+      return dynamicToolExecution()
+  }
+}
+
+function recordOf(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined
 }

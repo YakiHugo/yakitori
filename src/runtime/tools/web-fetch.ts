@@ -1,4 +1,8 @@
 import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
+import {
+  completeWebFetchExecution,
+  webFetchExecution,
+} from "./execution-descriptors.ts"
 
 // web_fetch deliberately performs no SSRF protection: it runs with the host
 // user's full network authority, same as run_command. This mirrors dsh's
@@ -89,6 +93,8 @@ export function createWebFetchTool(
       "Fetch a specific http(s) URL and return its content as text. Read-only. HTML is converted to plain text with links preserved as markdown. Redirects to a different origin are not followed; call web_fetch again with the redirect URL instead. Binary content types are not supported. Not a search tool — use it only when you already have a URL.",
     autoAllow: true,
     effect: "observe",
+    describeExecution: webFetchExecution,
+    completeExecution: completeWebFetchExecution,
     inputSchema: {
       type: "object",
       additionalProperties: false,

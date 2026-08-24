@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
@@ -13,12 +13,82 @@ import { ModelStopReason } from "../../src/runtime/model.ts"
 import { createPermissionGate } from "../../src/runtime/permission-gate.ts"
 import { createSessionRunner } from "../../src/runtime/session-runner.ts"
 import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
+import { createReadFileTool } from "../../src/runtime/tools/read-file.ts"
 import {
   type CommandLaunchResult,
   createRunCommandTool,
 } from "../../src/runtime/tools/run-command.ts"
 
 describe("permission gate", () => {
+  it.each([
+    ["default YOLO policy", undefined],
+    ["interactive policy", "auto_file_tools" as const],
+  ])("reads an external file under %s", async (_, approvalPolicy) => {
+    await withPermissionRuntime(async (runtime) => {
+      const externalDirectory = await mkdtemp(
+        join(tmpdir(), "yakitori-external-read-"),
+      )
+      const externalPath = join(externalDirectory, "result.log")
+      await writeFile(externalPath, "outside\n")
+      const canonicalExternalPath = await realpath(externalPath)
+      try {
+        const provider = createFauxProvider([
+          {
+            stopReason: ModelStopReason.ToolUse,
+            content: [
+              {
+                type: "tool_call",
+                id: "tool_read",
+                name: "read_file",
+                input: { path: externalPath },
+              },
+            ],
+          },
+          {
+            assertRequest: (request) => {
+              expect(
+                request.messages.find((message) => message.role === "tool"),
+              ).toMatchObject({
+                role: "tool",
+                content: expect.stringContaining("outside"),
+              })
+            },
+            content: [{ type: "text", text: "done" }],
+          },
+        ])
+        const runner = createSessionRunner({
+          ...(approvalPolicy === undefined ? {} : { approvalPolicy }),
+          kernel: runtime.kernel,
+          mateKernel: runtime.mateKernel,
+          stream: provider.stream,
+          toolRegistry: createToolRegistry([createReadFileTool()]),
+        })
+        const session = await createSession(runtime)
+        await runtime.kernel.admitInput({
+          sessionId: session.sessionId,
+          content: { kind: "text", text: "read the external result" },
+        })
+
+        await runner.wake(session.sessionId)
+
+        const completed = await runtime.kernel.readSession({
+          sessionId: session.sessionId,
+        })
+        if (approvalPolicy === undefined) {
+          expect(completed.session?.configuration?.approvalPolicy).toBe("never")
+        }
+        expect(completed.session?.permissions).toEqual([])
+        expect(completed.session?.tools[0]).toMatchObject({
+          state: "completed",
+          requiresPermission: false,
+          output: { path: canonicalExternalPath },
+        })
+      } finally {
+        await rm(externalDirectory, { recursive: true, force: true })
+      }
+    })
+  })
+
   it("does not start a process before durable allow", async () => {
     await withPermissionRuntime(async (runtime) => {
       let launches = 0
@@ -49,6 +119,7 @@ describe("permission gate", () => {
       ])
       const gate = createPermissionGate()
       const runner = createSessionRunner({
+        approvalPolicy: "auto_file_tools",
         kernel: runtime.kernel,
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
@@ -135,6 +206,7 @@ describe("permission gate", () => {
       ])
       const gate = createPermissionGate()
       const runner = createSessionRunner({
+        approvalPolicy: "auto_file_tools",
         kernel: runtime.kernel,
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
@@ -199,6 +271,7 @@ describe("permission gate", () => {
         { content: [{ type: "text", text: "timed out" }] },
       ])
       const runner = createSessionRunner({
+        approvalPolicy: "auto_file_tools",
         kernel: runtime.kernel,
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
@@ -280,6 +353,7 @@ describe("permission gate", () => {
         },
       }
       const runner = createSessionRunner({
+        approvalPolicy: "auto_file_tools",
         kernel,
         mateKernel: runtime.mateKernel,
         stream: provider.stream,

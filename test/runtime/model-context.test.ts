@@ -1151,11 +1151,11 @@ describe("model context", () => {
     if (result?.role !== "tool") throw new Error("missing command result")
     expect(result.content).toContain("line-2999")
     expect(result.content).toContain("(exit 1, 4.1s)")
-    expect(result.content).toContain("read_session_file")
+    expect(result.content).toContain("read_file")
     expect(context.truncatedToolResultCount).toBe(0)
   })
 
-  it("keeps maximum text and binary Session-file pages intact", async () => {
+  it("keeps maximum text and binary file pages intact", async () => {
     const pages = [
       `${"x".repeat(32 * 1024)}\n(0-32768 of 61440 bytes; utf8; more available)`,
       `${Buffer.alloc(32 * 1024, 0xff).toString("base64")}\n(0-32768 of 61440 bytes; base64; more available)`,
@@ -1168,8 +1168,8 @@ describe("model context", () => {
           turnId: active.turnId,
           toolCalls: pages.map((_, index) => ({
             id: `tool_session_page_${index}`,
-            name: "read_session_file",
-            input: { path: `tools/call_${index}/stdout.log` },
+            name: "read_file",
+            input: { path: `/tmp/call_${index}/stdout.log` },
             requiresPermission: false,
           })),
         })

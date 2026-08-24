@@ -19,7 +19,6 @@ import {
 import {
   type EventEnvelope,
   EventType,
-  HistoryRecordType,
   type KernelFact,
 } from "../../src/kernel/events.ts"
 import { createJsonlEventStore } from "../../src/kernel/jsonl-event-store.ts"
@@ -52,6 +51,23 @@ defineEventStoreContract({
 })
 
 describe("stored event tolerance", () => {
+  it("rejects journals from the previous event schema explicitly", () => {
+    expect(() =>
+      parseStoredEventEnvelope(
+        JSON.stringify({
+          id: "event_old_schema",
+          sessionId: "session_00000000-0000-4000-8000-000000000000",
+          seq: 1,
+          version: 2,
+          createdAt: "2026-07-24T00:00:00.000Z",
+          type: "turn.completed",
+          data: { turnId: "turn_1" },
+        }),
+        1,
+      ),
+    ).toThrow("Unsupported event schema version 2 at record 1; expected 4")
+  })
+
   it("preserves an unknown fact opaquely", () => {
     expect(
       parseStoredEventEnvelope(
@@ -59,7 +75,7 @@ describe("stored event tolerance", () => {
           id: "event_future",
           sessionId: "session_00000000-0000-4000-8000-000000000000",
           seq: 2,
-          version: 2,
+          version: 4,
           createdAt: "2026-07-24T00:00:00.000Z",
           type: "future.fact",
           data: { payload: true },
@@ -76,7 +92,7 @@ describe("stored event tolerance", () => {
           id: "event_future_payload",
           sessionId: "session_00000000-0000-4000-8000-000000000000",
           seq: 2,
-          version: 2,
+          version: 4,
           createdAt: "2026-07-24T00:00:00.000Z",
           type: "turn.started",
           data: { turnId: "turn_1", inputId: "input_1", future: true },
@@ -95,7 +111,7 @@ describe("Session journal format", () => {
     id: "event_format",
     sessionId: "session_00000000-0000-4000-8000-000000000000",
     seq: 1,
-    version: 2,
+    version: 4,
     createdAt: "2026-07-30T00:00:00.000Z",
     type: EventType.SessionCreated,
     data: { title: "Format" },
@@ -379,7 +395,10 @@ describe("JSONL persistence", () => {
         [
           createAdmission(`request:deep:${index}`, inputId, "step").event,
           { type: EventType.TurnStarted, data: { turnId, inputId } },
-          { type: EventType.TurnCompleted, data: { turnId } },
+          {
+            type: EventType.TurnCompleted,
+            data: { turnId, outcome: { status: "completed" } },
+          },
           createAdmission(`request:deep-cut:${index}`, cutInputId, "cut").event,
         ],
         { expectedSeq: index * 3 + 1 },
@@ -474,7 +493,7 @@ describe("JSONL persistence", () => {
       EventType.SessionCreated,
       EventType.InputAdmitted,
       EventType.TurnStarted,
-      HistoryRecordType.AgentMessage,
+      EventType.ItemCompleted,
     ])
     expect(replayed.projection?.activeTurn).toMatchObject({
       turnId: "turn_crash_prefix",
@@ -531,7 +550,7 @@ describe("JSONL persistence", () => {
         id: "event_mixed_fact",
         sessionId,
         seq: 2,
-        version: 2,
+        version: 4,
         createdAt: "2026-07-30T00:00:00.000Z",
         type: "provider.mixed",
         data: { format: "fact" },
@@ -862,7 +881,7 @@ describe("JSONL persistence", () => {
         id: "event_after_listing",
         sessionId,
         seq: 2,
-        version: 2,
+        version: 4,
         createdAt: "2026-07-27T00:00:00.000Z",
         type: "provider.after_listing",
         data: {},
@@ -908,7 +927,7 @@ describe("JSONL persistence", () => {
         id: "event_unknown_repair",
         sessionId,
         seq: 2,
-        version: 2,
+        version: 4,
         createdAt: "2026-07-24T00:00:00.000Z",
         type: "provider.future_fact",
         data: { value: "opaque" },
@@ -1033,16 +1052,22 @@ function completeTurnFacts(
     },
     { type: EventType.TurnStarted, data: { turnId, inputId } },
     {
-      type: HistoryRecordType.AgentMessage,
+      type: EventType.ItemCompleted,
       data: {
-        messageId: "message_prefix",
         turnId,
-        content: [{ type: "text", text: "durable prefix" }],
+        item: {
+          type: "agent_message",
+          itemId: "message_prefix",
+          content: [{ type: "text", text: "durable prefix" }],
+        },
       },
     },
     {
       type: EventType.TurnCompleted,
-      data: { turnId, outputMessageId: "message_prefix" },
+      data: {
+        turnId,
+        outcome: { status: "completed" },
+      },
     },
   ]
 }
@@ -1057,7 +1082,7 @@ function storedFact(
     id,
     sessionId,
     seq,
-    version: 2,
+    version: 4,
     createdAt: `2026-07-30T00:00:0${seq}.000Z`,
     ...event,
   }
@@ -1071,7 +1096,7 @@ async function seedSessionJournal(path: string, sessionId: string) {
       id: "event_seed",
       sessionId,
       seq: 1,
-      version: 2,
+      version: 4,
       createdAt: "2026-07-27T00:00:00.000Z",
       type: EventType.SessionCreated,
       data: {},

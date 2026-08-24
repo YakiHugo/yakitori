@@ -3,11 +3,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { YakitoriErrorCode } from "../../src/kernel/errors.ts"
-import {
-  type EventEnvelope,
-  EventType,
-  HistoryRecordType,
-} from "../../src/kernel/events.ts"
+import { type EventEnvelope, EventType } from "../../src/kernel/events.ts"
 import { createJsonlEventStore } from "../../src/kernel/jsonl-event-store.ts"
 import { serializeFactLine } from "../../src/kernel/jsonl-event-store-format.ts"
 import { fingerprintInputAdmission } from "../../src/kernel/operation.ts"
@@ -35,7 +31,7 @@ describe("JSONL recovery fault models", () => {
         id: "event_opaque_admission",
         sessionId,
         seq: 2,
-        version: 2,
+        version: 4,
         createdAt: "2026-07-30T00:00:02.000Z",
         type: EventType.InputAdmitted,
         data: { requestId, futureShape: true },
@@ -82,7 +78,7 @@ describe("JSONL recovery fault models", () => {
           id: `event_opaque_duplicate_${seq}`,
           sessionId,
           seq,
-          version: 2,
+          version: 4,
           createdAt: `2026-07-30T00:00:0${seq}.000Z`,
           type: EventType.InputAdmitted,
           data: { requestId, futureShape: seq },
@@ -153,18 +149,21 @@ describe("JSONL recovery fault models", () => {
         sessionId,
         [
           {
-            type: HistoryRecordType.AgentMessage,
+            type: EventType.ItemCompleted,
             data: {
-              messageId: "message_partial_write",
               turnId: "turn_partial_write",
-              content: [{ type: "text", text: "durable prefix" }],
+              item: {
+                type: "agent_message",
+                itemId: "message_partial_write",
+                content: [{ type: "text", text: "durable prefix" }],
+              },
             },
           },
           {
             type: EventType.TurnCompleted,
             data: {
               turnId: "turn_partial_write",
-              outputMessageId: "message_partial_write",
+              outcome: { status: "completed" },
             },
           },
         ],
@@ -177,7 +176,7 @@ describe("JSONL recovery fault models", () => {
       EventType.SessionCreated,
       EventType.InputAdmitted,
       EventType.TurnStarted,
-      HistoryRecordType.AgentMessage,
+      EventType.ItemCompleted,
     ])
     expect(replayed.projection?.activeTurn).toMatchObject({
       turnId: "turn_partial_write",
@@ -196,7 +195,7 @@ function storedFact(
     id,
     sessionId,
     seq,
-    version: 2,
+    version: 4,
     createdAt: `2026-07-30T00:00:0${seq}.000Z`,
     ...event,
   } as EventEnvelope

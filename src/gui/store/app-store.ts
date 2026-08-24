@@ -189,7 +189,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
     const state = get()
     if (
       state.execution.durableEvents.some(
-        (candidate) => candidate.id === event.id,
+        (candidate) =>
+          candidate.id === event.id ||
+          (candidate.sessionId === event.sessionId &&
+            candidate.seq === event.seq),
       )
     ) {
       return

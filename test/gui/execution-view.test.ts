@@ -4,12 +4,17 @@ import {
   projectExecutionView,
   reduceExecutionView,
 } from "../../src/gui/execution-view.ts"
+import { presentTool } from "../../src/gui/tool-presentation.ts"
 import {
   createEventEnvelope,
   EventType,
   HistoryRecordType,
   InputRole,
-  toolExecutionType,
+  type ItemContent,
+  type JsonValue,
+  type KernelError,
+  type KernelFact,
+  type ToolExecutionDescriptor,
 } from "../../src/kernel/events.ts"
 
 const sessionId = "session_00000000-0000-4000-8000-000000000000"
@@ -33,15 +38,12 @@ describe("execution view", () => {
       event: createExecutionEnvelope({
         sessionId,
         seq: 1,
-        event: {
-          type: HistoryRecordType.AgentMessage,
-          data: {
-            messageId: "item_1",
-            turnId: "turn_1",
-            content: [{ type: "text", text: "Hello" }],
-            providerMetadata: { streamId: "stream_1" },
-          },
-        },
+        event: agentCompleted({
+          itemId: "item_1",
+          turnId: "turn_1",
+          text: "Hello",
+          streamId: "stream_1",
+        }),
       }),
     })
 
@@ -84,15 +86,34 @@ describe("execution view", () => {
         sessionId,
         seq: 1,
         event: {
-          type: HistoryRecordType.AgentMessage,
+          type: EventType.ItemCompleted,
           data: {
-            messageId: "item_1",
             turnId: "turn_1",
-            content: [
-              { type: "reasoning", text: "Inspecting files" },
-              { type: "text", text: "Done." },
-            ],
-            providerMetadata: { streamId: "stream_1" },
+            item: {
+              type: "reasoning",
+              itemId: "reasoning_1",
+              text: "Inspecting files",
+              streamId: "stream_1",
+            },
+          },
+        },
+      }),
+    })
+    state = reduceExecutionView(state, {
+      type: "durable",
+      event: createExecutionEnvelope({
+        sessionId,
+        seq: 2,
+        event: {
+          type: EventType.ItemCompleted,
+          data: {
+            turnId: "turn_1",
+            item: {
+              type: "agent_message",
+              itemId: "item_1",
+              content: [{ type: "text", text: "Done." }],
+              streamId: "stream_1",
+            },
           },
         },
       }),
@@ -113,30 +134,49 @@ describe("execution view", () => {
   })
 
   it("projects public reasoning separately from the assistant answer", () => {
-    const state = reduceExecutionView(createExecutionViewState(), {
-      type: "durable",
-      event: createExecutionEnvelope({
-        sessionId,
-        seq: 1,
-        createdAt: "2026-07-24T00:00:00.000Z",
-        event: {
-          type: HistoryRecordType.AgentMessage,
-          data: {
-            messageId: "item_1",
-            turnId: "turn_1",
+    const state = [
+      {
+        type: EventType.ItemCompleted,
+        data: {
+          turnId: "turn_1",
+          item: {
+            type: "reasoning" as const,
+            itemId: "reasoning_1",
+            text: "Inspect the event ordering.",
+          },
+        },
+      },
+      {
+        type: EventType.ItemCompleted,
+        data: {
+          turnId: "turn_1",
+          item: {
+            type: "agent_message" as const,
+            itemId: "item_1",
             content: [
-              { type: "reasoning", text: "Inspect the event ordering." },
-              { type: "text", text: "The ordering is correct." },
+              { type: "text" as const, text: "The ordering is correct." },
             ],
           },
         },
-      }),
-    })
+      },
+    ].reduce(
+      (current, event, index) =>
+        reduceExecutionView(current, {
+          type: "durable",
+          event: createExecutionEnvelope({
+            sessionId,
+            seq: index + 1,
+            createdAt: `2026-07-24T00:00:0${index}.000Z`,
+            event,
+          }),
+        }),
+      createExecutionViewState(),
+    )
 
     expect(projectExecutionView(state).entries).toEqual([
       {
         kind: "reasoning",
-        itemId: "item_1:reasoning:0",
+        itemId: "reasoning_1",
         text: "Inspect the event ordering.",
         status: "completed",
         at: "2026-07-24T00:00:00.000Z",
@@ -150,7 +190,7 @@ describe("execution view", () => {
   })
 
   it("projects coarse input, tool, result, and permission facts", () => {
-    const facts = [
+    const facts: KernelFact[] = [
       {
         type: EventType.InputAdmitted,
         data: {
@@ -160,17 +200,14 @@ describe("execution view", () => {
           content: { kind: "text" as const, text: "run" },
         },
       },
-      {
-        type: HistoryRecordType.ModelToolCall,
-        data: {
-          toolCallId: "tool_1",
-          itemId: "item_call",
-          turnId: "turn_1",
-          name: "run_command",
-          input: { command: "pwd" },
-          requiresPermission: true,
-        },
-      },
+      toolStarted({
+        toolCallId: "tool_1",
+        itemId: "item_call",
+        turnId: "turn_1",
+        name: "run_command",
+        input: { command: "pwd" },
+        requiresPermission: true,
+      }),
       {
         type: EventType.PermissionRequested,
         data: {
@@ -178,6 +215,8 @@ describe("execution view", () => {
           turnId: "turn_1",
           toolCallId: "tool_1",
           action: "run_command",
+          subject: "pnpm test",
+          reason: "Command runs with host authority.",
         },
       },
       {
@@ -188,15 +227,12 @@ describe("execution view", () => {
           behavior: "allow" as const,
         },
       },
-      {
-        type: HistoryRecordType.ModelToolResult,
-        data: {
-          toolResultId: "item_result",
-          toolCallId: "tool_1",
-          turnId: "turn_1",
-          content: { kind: "text" as const, text: "/workspace" },
-        },
-      },
+      toolCompleted({
+        resultItemId: "item_result",
+        toolCallId: "tool_1",
+        turnId: "turn_1",
+        content: { kind: "text", text: "/workspace" },
+      }),
     ]
     const state = facts.reduce(
       (current, event, index) =>
@@ -218,6 +254,8 @@ describe("execution view", () => {
       expect.objectContaining({
         kind: "permission",
         permissionRequestId: "permission_1",
+        subject: "pnpm test",
+        reason: "Command runs with host authority.",
         state: "resolved",
         behavior: "allow",
       }),
@@ -225,55 +263,81 @@ describe("execution view", () => {
   })
 
   it("extracts structured diff and command results from tool output", () => {
-    const facts = [
-      {
-        type: HistoryRecordType.ModelToolCall,
-        data: {
-          toolCallId: "tool_1",
-          itemId: "item_call_1",
-          turnId: "turn_1",
-          name: "edit_file",
-          input: { path: "src/index.ts" },
-          requiresPermission: false,
-        },
-      },
-      {
-        type: HistoryRecordType.ModelToolResult,
-        data: {
-          toolResultId: "item_result_1",
-          toolCallId: "tool_1",
-          turnId: "turn_1",
-          content: { kind: "text" as const, text: "edited src/index.ts" },
-          output: {
-            path: "src/index.ts",
-            sha256: "abc",
-            diff: {
-              format: "unified",
-              text: "--- a/src/index.ts\n+++ b/src/index.ts\n@@ -1 +1 @@\n-old\n+new",
-              truncated: false,
-            },
+    const facts: KernelFact[] = [
+      toolStarted({
+        toolCallId: "tool_1",
+        itemId: "item_call_1",
+        turnId: "turn_1",
+        name: "edit_file",
+        input: { path: "src/index.ts" },
+        requiresPermission: false,
+      }),
+      toolCompleted({
+        resultItemId: "item_result_1",
+        toolCallId: "tool_1",
+        turnId: "turn_1",
+        content: { kind: "text", text: "edited src/index.ts" },
+        output: {
+          path: "src/index.ts",
+          sha256: "abc",
+          diff: {
+            format: "unified",
+            text: "--- a/src/index.ts\n+++ b/src/index.ts\n@@ -1 +1 @@\n-old\n+new",
+            truncated: false,
           },
         },
-      },
-      {
-        type: HistoryRecordType.ModelToolCall,
-        data: {
-          toolCallId: "tool_2",
-          itemId: "item_call_2",
-          turnId: "turn_1",
-          name: "run_command",
-          input: { command: "pnpm test", description: "Run the test suite" },
-          requiresPermission: true,
+        execution: {
+          type: "file_change",
+          request: { operation: "edit", paths: ["src/index.ts"] },
+          changes: [
+            {
+              path: "src/index.ts",
+              kind: "update",
+              diff: {
+                format: "unified",
+                text: "--- a/src/index.ts\n+++ b/src/index.ts\n@@ -1 +1 @@\n-old\n+new",
+                truncated: false,
+              },
+            },
+          ],
         },
-      },
-      {
-        type: HistoryRecordType.ModelToolResult,
-        data: {
-          toolResultId: "item_result_2",
-          toolCallId: "tool_2",
-          turnId: "turn_1",
-          content: { kind: "text" as const, text: "all green" },
-          output: {
+      }),
+      toolStarted({
+        toolCallId: "tool_2",
+        itemId: "item_call_2",
+        turnId: "turn_1",
+        name: "run_command",
+        input: { command: "pnpm test", description: "Run the test suite" },
+        requiresPermission: true,
+      }),
+      toolCompleted({
+        resultItemId: "item_result_2",
+        toolCallId: "tool_2",
+        turnId: "turn_1",
+        content: { kind: "text", text: "all green" },
+        output: {
+          exitCode: 0,
+          signal: null,
+          stdout: "all green",
+          stderr: "",
+          truncated: false,
+          timedOut: false,
+          durationMs: 4100,
+          cwd: "/workspace/packages/gui",
+          shell: "/bin/zsh",
+          blocked: { rule: "rm_root" },
+          binary: {
+            stdout: false,
+            stderr: true,
+            stdoutBytes: 9,
+            stderrBytes: 3,
+          },
+        },
+        execution: {
+          type: "command_execution",
+          command: "pnpm test",
+          description: "Run the test suite",
+          result: {
             exitCode: 0,
             signal: null,
             stdout: "all green",
@@ -292,7 +356,7 @@ describe("execution view", () => {
             },
           },
         },
-      },
+      }),
     ]
     const state = facts.reduce(
       (current, event, index) =>
@@ -303,75 +367,99 @@ describe("execution view", () => {
       createExecutionViewState(),
     )
 
-    expect(projectExecutionView(state).entries).toEqual([
+    const entries = projectExecutionView(state).entries
+    expect(entries).toEqual([
       expect.objectContaining({
         kind: "tool",
         toolCallId: "tool_1",
         output: expect.objectContaining({ path: "src/index.ts" }),
-        diff: {
-          text: "--- a/src/index.ts\n+++ b/src/index.ts\n@@ -1 +1 @@\n-old\n+new",
-          truncated: false,
-        },
       }),
       expect.objectContaining({
         kind: "tool",
         toolCallId: "tool_2",
-        summary: "Run the test suite",
         output: expect.objectContaining({ exitCode: 0, stdout: "all green" }),
-        commandResult: {
-          exitCode: 0,
-          signal: null,
-          stdout: "all green",
-          stderr: "",
-          truncated: false,
-          timedOut: false,
-          durationMs: 4100,
-          cwd: "/workspace/packages/gui",
-          shell: "/bin/zsh",
-          blocked: { rule: "rm_root" },
-          binary: {
-            stdout: false,
-            stderr: true,
-            stdoutBytes: 9,
-            stderrBytes: 3,
+      }),
+    ])
+    const presentations = entries.flatMap((entry) =>
+      entry.kind === "tool" ? [presentTool(entry)] : [],
+    )
+    expect(presentations).toEqual([
+      expect.objectContaining({
+        detail: {
+          kind: "diff",
+          path: "src/index.ts",
+          diff: {
+            format: "unified",
+            text: "--- a/src/index.ts\n+++ b/src/index.ts\n@@ -1 +1 @@\n-old\n+new",
+            truncated: false,
           },
         },
+      }),
+      expect.objectContaining({
+        subject: "Run the test suite",
+        detail: expect.objectContaining({
+          kind: "command",
+          result: {
+            exitCode: 0,
+            signal: null,
+            stdout: "all green",
+            stderr: "",
+            truncated: false,
+            timedOut: false,
+            durationMs: 4100,
+            cwd: "/workspace/packages/gui",
+            shell: "/bin/zsh",
+            blocked: { rule: "rm_root" },
+            binary: {
+              stdout: false,
+              stderr: true,
+              stdoutBytes: 9,
+              stderrBytes: 3,
+            },
+          },
+        }),
       }),
     ])
   })
 
   it("projects a timed-out command result with partial output and no exit code", () => {
     const facts = [
-      {
-        type: HistoryRecordType.ModelToolCall,
-        data: {
-          toolCallId: "tool_1",
-          itemId: "item_call_1",
-          turnId: "turn_1",
-          name: "run_command",
-          input: { command: "sleep 60" },
-          requiresPermission: true,
+      toolStarted({
+        toolCallId: "tool_1",
+        itemId: "item_call_1",
+        turnId: "turn_1",
+        name: "run_command",
+        input: { command: "sleep 60" },
+        requiresPermission: true,
+      }),
+      toolCompleted({
+        resultItemId: "item_result_1",
+        toolCallId: "tool_1",
+        turnId: "turn_1",
+        content: {
+          kind: "text",
+          text: "Command timed out after 30s.",
         },
-      },
-      {
-        type: HistoryRecordType.ModelToolResult,
-        data: {
-          toolResultId: "item_result_1",
-          toolCallId: "tool_1",
-          turnId: "turn_1",
-          content: {
-            kind: "text" as const,
-            text: "Command timed out after 30s.",
-          },
-          output: {
-            timedOut: true,
+        output: {
+          timedOut: true,
+          stdout: "partial",
+          stderr: "",
+          truncated: false,
+        },
+        execution: {
+          type: "command_execution",
+          command: "sleep 60",
+          result: {
+            exitCode: null,
+            signal: null,
             stdout: "partial",
             stderr: "",
             truncated: false,
+            timedOut: true,
           },
-          error: { code: "command_timeout", message: "Command timed out." },
         },
-      },
+        error: { code: "command_timeout", message: "Command timed out." },
+      }),
     ]
     const state = facts.reduce(
       (current, event, index) =>
@@ -382,14 +470,19 @@ describe("execution view", () => {
       createExecutionViewState(),
     )
 
-    expect(projectExecutionView(state).entries).toEqual([
-      expect.objectContaining({
-        kind: "tool",
-        toolCallId: "tool_1",
-        state: "failed",
-        resultError: true,
-        resultErrorMessage: "Command timed out.",
-        commandResult: {
+    const entry = projectExecutionView(state).entries[0]
+    expect(entry).toMatchObject({
+      kind: "tool",
+      toolCallId: "tool_1",
+      state: "failed",
+      resultError: true,
+      resultErrorMessage: "Command timed out.",
+    })
+    if (entry?.kind !== "tool") throw new Error("Expected a tool entry.")
+    expect(presentTool(entry)).toMatchObject({
+      detail: {
+        kind: "command",
+        result: {
           exitCode: null,
           signal: null,
           stdout: "partial",
@@ -397,23 +490,20 @@ describe("execution view", () => {
           truncated: false,
           timedOut: true,
         },
-      }),
-    ])
+      },
+    })
   })
 
   it("renders interruption separately from failure", () => {
-    const facts = [
-      {
-        type: HistoryRecordType.ModelToolCall,
-        data: {
-          toolCallId: "tool_1",
-          itemId: "item_call",
-          turnId: "turn_1",
-          name: "run_command",
-          input: { command: "sleep 30" },
-          requiresPermission: true,
-        },
-      },
+    const facts: KernelFact[] = [
+      toolStarted({
+        toolCallId: "tool_1",
+        itemId: "item_call",
+        turnId: "turn_1",
+        name: "run_command",
+        input: { command: "sleep 30" },
+        requiresPermission: true,
+      }),
       {
         type: EventType.PermissionRequested,
         data: {
@@ -424,8 +514,11 @@ describe("execution view", () => {
         },
       },
       {
-        type: EventType.TurnInterrupted,
-        data: { turnId: "turn_1", reason: "runtime restart" },
+        type: EventType.TurnCompleted,
+        data: {
+          turnId: "turn_1",
+          outcome: { status: "interrupted", reason: "runtime restart" },
+        },
       },
     ]
     const state = facts.reduce(
@@ -465,7 +558,7 @@ describe("execution view", () => {
         id: "event_future",
         sessionId,
         seq: 1,
-        version: 2,
+        version: 4,
         createdAt: "2026-07-24T00:00:00.000Z",
         type: "provider.future_fact",
         data: { payload: true },
@@ -497,14 +590,11 @@ describe("execution view", () => {
           summary: "Goal: ship the feature.",
         },
       },
-      {
-        type: HistoryRecordType.AgentMessage,
-        data: {
-          messageId: "item_1",
-          turnId: "turn_2",
-          content: [{ type: "text" as const, text: "Continuing." }],
-        },
-      },
+      agentCompleted({
+        itemId: "item_1",
+        turnId: "turn_2",
+        text: "Continuing.",
+      }),
     ]
     const state = facts.reduce(
       (current, event, index) =>
@@ -533,7 +623,7 @@ describe("execution view", () => {
   })
 
   it("summarizes tool entries and tracks model, usage, and queued inputs", () => {
-    const facts = [
+    const facts: KernelFact[] = [
       {
         type: EventType.InputAdmitted,
         data: {
@@ -585,35 +675,30 @@ describe("execution view", () => {
         type: EventType.TurnStarted,
         data: { turnId: "turn_1", inputId: "input_1" },
       },
-      {
-        type: HistoryRecordType.ModelToolCall,
-        data: {
-          toolCallId: "tool_1",
-          itemId: "item_call_1",
-          turnId: "turn_1",
-          name: "run_command",
-          input: {
-            command:
-              "pnpm test -- --run some/very/long/command/that/keeps/going/and/going/and/going/past/limit",
-          },
-          requiresPermission: true,
+      toolStarted({
+        toolCallId: "tool_1",
+        itemId: "item_call_1",
+        turnId: "turn_1",
+        name: "run_command",
+        input: {
+          command:
+            "pnpm test -- --run some/very/long/command/that/keeps/going/and/going/and/going/past/limit",
         },
-      },
-      {
-        type: HistoryRecordType.ModelToolCall,
-        data: {
-          toolCallId: "tool_2",
-          itemId: "item_call_2",
-          turnId: "turn_1",
-          name: "read_file",
-          input: { path: "src/index.ts" },
-          requiresPermission: false,
-        },
-      },
+        requiresPermission: true,
+      }),
+      toolStarted({
+        toolCallId: "tool_2",
+        itemId: "item_call_2",
+        turnId: "turn_1",
+        name: "read_file",
+        input: { path: "src/index.ts" },
+        requiresPermission: false,
+      }),
       {
         type: EventType.TurnCompleted,
         data: {
           turnId: "turn_1",
+          outcome: { status: "completed" },
           usage: {
             inputTokens: 120,
             outputTokens: 45,
@@ -681,15 +766,18 @@ describe("execution view", () => {
       expect.objectContaining({ kind: "tool", toolCallId: "tool_2" }),
     ])
 
-    const toolSummaries = view.entries.flatMap((entry) =>
-      entry.kind === "tool" ? [entry.summary] : [],
+    const toolExecutions = view.entries.flatMap((entry) =>
+      entry.kind === "tool" ? [entry.execution] : [],
     )
-    expect(toolSummaries).toHaveLength(2)
-    expect(toolSummaries[1]).toBe("src/index.ts")
-    const commandSummary = toolSummaries[0] ?? ""
-    expect(commandSummary.startsWith("pnpm test -- --run")).toBe(true)
-    expect(commandSummary).toHaveLength(80)
-    expect(commandSummary.endsWith("…")).toBe(true)
+    expect(toolExecutions).toHaveLength(2)
+    expect(toolExecutions[1]).toMatchObject({
+      type: "file_read",
+      path: "src/index.ts",
+    })
+    expect(toolExecutions[0]).toMatchObject({
+      type: "command_execution",
+      command: expect.stringContaining("pnpm test -- --run"),
+    })
   })
 
   it("drops cancelled inputs from the queue and reports the active turn start", () => {
@@ -807,17 +895,14 @@ describe("execution view", () => {
       event: createExecutionEnvelope({
         sessionId,
         seq: 2,
-        event: {
-          type: HistoryRecordType.ModelToolCall,
-          data: {
-            toolCallId: "tool_1",
-            itemId: "item_1",
-            turnId: "turn_1",
-            name: "run_command",
-            input: { command: "pnpm test" },
-            requiresPermission: true,
-          },
-        },
+        event: toolStarted({
+          toolCallId: "tool_1",
+          itemId: "item_1",
+          turnId: "turn_1",
+          name: "run_command",
+          input: { command: "pnpm test" },
+          requiresPermission: true,
+        }),
       }),
     })
     expect(projectExecutionView(state, session).activeActivity).toEqual({
@@ -851,73 +936,134 @@ describe("execution view", () => {
 function createExecutionEnvelope(
   input: Parameters<typeof createEventEnvelope>[0],
 ) {
-  const { event } = input
-  if (event.type === HistoryRecordType.AgentMessage) {
-    return createEventEnvelope({
-      ...input,
-      event: {
-        type: EventType.ItemCompleted,
-        data: {
-          turnId: event.data.turnId,
-          item: {
-            type: "agent_message",
-            itemId: event.data.messageId,
-            content: event.data.content,
-            ...(typeof event.data.providerMetadata?.streamId === "string"
-              ? { streamId: event.data.providerMetadata.streamId }
-              : {}),
-          },
-        },
-      },
-    })
-  }
-  if (event.type === HistoryRecordType.ModelToolCall) {
-    return createEventEnvelope({
-      ...input,
-      event: {
-        type: EventType.ItemStarted,
-        data: {
-          turnId: event.data.turnId,
-          item: {
-            type: toolExecutionType(event.data.name),
-            itemId: event.data.itemId,
-            toolCallId: event.data.toolCallId,
-            name: event.data.name,
-            input: event.data.input,
-            requiresPermission: event.data.requiresPermission,
-          },
-        },
-      },
-    })
-  }
-  if (event.type === HistoryRecordType.ModelToolResult) {
-    return createEventEnvelope({
-      ...input,
-      event: {
-        type: EventType.ItemCompleted,
-        data: {
-          turnId: event.data.turnId,
-          item: {
-            type: "tool_execution",
-            itemId: `call:${event.data.toolCallId}`,
-            toolCallId: event.data.toolCallId,
-            name: "tool",
-            input: {},
-            requiresPermission: false,
-            resultItemId: event.data.toolResultId,
-            content: event.data.content,
-            ...(event.data.output === undefined
-              ? {}
-              : { output: event.data.output }),
-            ...(event.data.error === undefined
-              ? {}
-              : { error: event.data.error }),
-          },
-        },
-      },
-    })
-  }
   return createEventEnvelope(input)
+}
+
+function agentCompleted(input: {
+  readonly itemId: string
+  readonly turnId: string
+  readonly text: string
+  readonly streamId?: string
+}): KernelFact {
+  return {
+    type: EventType.ItemCompleted,
+    data: {
+      turnId: input.turnId,
+      item: {
+        type: "agent_message",
+        itemId: input.itemId,
+        content: [{ type: "text", text: input.text }],
+        ...(input.streamId === undefined ? {} : { streamId: input.streamId }),
+      },
+    },
+  }
+}
+
+function toolStarted(input: {
+  readonly toolCallId: string
+  readonly itemId: string
+  readonly turnId: string
+  readonly name: string
+  readonly input: JsonValue
+  readonly requiresPermission: boolean
+}): KernelFact {
+  return {
+    type: EventType.ItemStarted,
+    data: {
+      turnId: input.turnId,
+      item: {
+        ...executionDescriptor(input.name, input.input),
+        itemId: input.itemId,
+        toolCallId: input.toolCallId,
+        name: input.name,
+        input: input.input,
+        requiresPermission: input.requiresPermission,
+      },
+    },
+  }
+}
+
+function toolCompleted(input: {
+  readonly resultItemId: string
+  readonly toolCallId: string
+  readonly turnId: string
+  readonly content: ItemContent
+  readonly output?: JsonValue
+  readonly error?: KernelError
+  readonly execution?: ToolExecutionDescriptor
+}): KernelFact {
+  return {
+    type: EventType.ItemCompleted,
+    data: {
+      turnId: input.turnId,
+      item: {
+        ...(input.execution ?? { type: "dynamic_tool_call" as const }),
+        itemId: `call:${input.toolCallId}`,
+        toolCallId: input.toolCallId,
+        name: "tool",
+        input: {},
+        requiresPermission: false,
+        resultItemId: input.resultItemId,
+        content: input.content,
+        ...(input.output === undefined ? {} : { output: input.output }),
+        ...(input.error === undefined ? {} : { error: input.error }),
+      },
+    },
+  }
+}
+
+function executionDescriptor(
+  name: string,
+  input: unknown,
+): ToolExecutionDescriptor {
+  const fields = recordOf(input)
+  if (name === "run_command") {
+    return {
+      type: "command_execution",
+      command: stringOf(fields?.command) ?? "",
+      ...(stringOf(fields?.description) === undefined
+        ? {}
+        : { description: stringOf(fields?.description) as string }),
+    }
+  }
+  if (name === "read_file") {
+    return {
+      type: "file_read",
+      path: stringOf(fields?.path) ?? "",
+      ...(numberOf(fields?.offset) === undefined
+        ? {}
+        : { offset: numberOf(fields?.offset) as number }),
+      ...(numberOf(fields?.limit) === undefined
+        ? {}
+        : { limit: numberOf(fields?.limit) as number }),
+    }
+  }
+  if (name === "edit_file" || name === "write_file") {
+    const path = stringOf(fields?.path) ?? ""
+    return {
+      type: "file_change",
+      request: {
+        operation: name === "write_file" ? "write" : "edit",
+        paths: [path],
+      },
+      changes: [],
+    }
+  }
+  return { type: "dynamic_tool_call" }
+}
+
+function recordOf(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined
+}
+
+function stringOf(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined
+}
+
+function numberOf(value: unknown): number | undefined {
+  return typeof value === "number" ? value : undefined
 }
 
 function activeSession(activeTurnId: string, seq: number) {

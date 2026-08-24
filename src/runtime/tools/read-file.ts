@@ -3,6 +3,10 @@ import { isAbortError } from "../errors.ts"
 import { ToolLimitDefaults } from "../limits.ts"
 import { resolveReadPath } from "./path-policy.ts"
 import {
+  completeFileReadExecution,
+  fileReadExecution,
+} from "./execution-descriptors.ts"
+import {
   type CapturedLine,
   captureTextFilePage,
   FileChangedDuringReadError,
@@ -30,16 +34,19 @@ export function createReadFileTool(
   return {
     name: "read_file",
     description:
-      "Read a live, bounded page from a regular UTF-8 text file, or list a directory. File lines are prefixed {N}\\t for display; never include those prefixes in edit_file oldString. offset is a 1-based starting line and limit is 1-2000. Pagination is best effort against the file's current contents. Output is capped at 2,000 lines, 2,000 characters per displayed line, and 50 KB. Directory listings do not authorize edits.",
+      "Read a live, bounded page from a regular UTF-8 text file, or list a directory. Accepts paths relative to the workspace and absolute paths. File lines are prefixed {N}\\t for display; never include those prefixes in edit_file oldString. offset is a 1-based starting line and limit is 1-2000. Pagination is best effort against the file's current contents. Output is capped at 2,000 lines, 2,000 characters per displayed line, and 50 KB. Directory listings do not authorize edits.",
     autoAllow: true,
     effect: "observe",
+    describeExecution: fileReadExecution,
+    completeExecution: completeFileReadExecution,
     inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: {
         path: {
           type: "string",
-          description: "Workspace-relative path of the UTF-8 text file.",
+          description:
+            "Workspace-relative path or absolute path of the UTF-8 text file.",
         },
         offset: {
           type: "integer",
@@ -64,7 +71,7 @@ export function createReadFileTool(
         return readFailure(resolved.error.code, resolved.error.message)
       }
       if (resolved.kind === "directory") {
-        return listDirectory(resolved.relativePath, resolved.absolutePath)
+        return listDirectory(resolved.displayPath, resolved.absolutePath)
       }
 
       let page: TextFilePage
@@ -171,14 +178,14 @@ export function createReadFileTool(
       const fileObservation =
         complete && fullMetadata !== undefined
           ? {
-              path: resolved.relativePath,
+              path: resolved.displayPath,
               kind: "whole_file_read" as const,
               complete: true,
               sha256: fullMetadata.sha256,
             }
           : selected.lineCount > 0
             ? {
-                path: resolved.relativePath,
+                path: resolved.displayPath,
                 kind: "ranged_read" as const,
                 complete: false,
                 ranges: [
@@ -190,7 +197,7 @@ export function createReadFileTool(
               }
             : undefined
       const output = {
-        path: resolved.relativePath,
+        path: resolved.displayPath,
         complete,
         ...(complete && fullMetadata !== undefined
           ? fullMetadata
@@ -219,7 +226,7 @@ export function createReadFileTool(
 }
 
 async function listDirectory(
-  relativePath: string,
+  displayPath: string,
   absolutePath: string,
 ): Promise<ToolExecutionResult> {
   let names: string[]
@@ -233,7 +240,7 @@ async function listDirectory(
   const entries = names.slice(0, MAX_DIRECTORY_ENTRIES)
   const noun = entries.length === 1 ? "entry" : "entries"
   const content = [
-    `Listed ${entries.length} ${noun} in ${relativePath}.`,
+    `Listed ${entries.length} ${noun} in ${displayPath}.`,
     ...entries,
     ...(truncated
       ? [`(Listing truncated at ${MAX_DIRECTORY_ENTRIES} entries.)`]
@@ -242,9 +249,10 @@ async function listDirectory(
   return {
     ok: true,
     output: {
-      path: relativePath,
+      path: displayPath,
       kind: "directory",
       count: entries.length,
+      entries,
       truncated,
       content,
     },

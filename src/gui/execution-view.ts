@@ -3,7 +3,7 @@ import {
   isKernelEvent,
   type RuntimeEventEnvelope,
   type StoredEventEnvelope,
-  type ToolExecutionType,
+  type ToolExecutionItem,
   type TokenUsage,
   type TurnMetrics,
 } from "../kernel/events.ts"
@@ -38,17 +38,12 @@ export type ExecutionEntry =
       readonly kind: "tool"
       readonly toolCallId: string
       readonly turnId: string
-      readonly name: string
-      readonly executionType: ToolExecutionType
-      readonly summary: string
-      readonly input: unknown
+      readonly execution: ToolExecutionItem
       readonly state: string
       readonly output?: unknown
       readonly resultText?: string
       readonly resultError?: boolean
       readonly resultErrorMessage?: string
-      readonly diff?: ToolDiff
-      readonly commandResult?: CommandResult
     }
   | {
       readonly kind: "permission"
@@ -57,6 +52,7 @@ export type ExecutionEntry =
       readonly toolCallId: string
       readonly action: string
       readonly subject?: string
+      readonly reason?: string
       readonly state: string
       readonly behavior?: string
     }
@@ -181,14 +177,6 @@ export function reduceExecutionView(
     }
   }
 
-  const existing = state.durableEvents.find(
-    (event) =>
-      event.id === action.event.id ||
-      (event.sessionId === action.event.sessionId &&
-        event.seq === action.event.seq),
-  )
-  if (existing) return state
-
   const durableEvents = [...state.durableEvents, action.event].sort(
     (left, right) => left.seq - right.seq,
   )
@@ -199,21 +187,19 @@ export function reduceExecutionView(
   const event = knownEvent(action.event)
   if (
     event?.type === "item.completed" &&
-    event.data.item.type === "agent_message" &&
+    (event.data.item.type === "agent_message" ||
+      event.data.item.type === "reasoning") &&
     event.data.item.streamId !== undefined
   ) {
-    const { [event.data.item.streamId]: _, ...rest } = snapshots
-    snapshots = rest
-    const { [event.data.item.streamId]: _reasoning, ...reasoningRest } =
-      reasoningSnapshots
-    reasoningSnapshots = reasoningRest
+    if (event.data.item.type === "agent_message") {
+      const { [event.data.item.streamId]: _, ...rest } = snapshots
+      snapshots = rest
+    } else {
+      const { [event.data.item.streamId]: _, ...rest } = reasoningSnapshots
+      reasoningSnapshots = rest
+    }
   }
-  if (
-    event?.type === "turn.completed" ||
-    event?.type === "turn.failed" ||
-    event?.type === "turn.cancelled" ||
-    event?.type === "turn.interrupted"
-  ) {
+  if (event?.type === "turn.completed") {
     snapshots = Object.fromEntries(
       Object.entries(snapshots).filter(
         ([, snapshot]) => snapshot.turnId !== event.data.turnId,
@@ -295,12 +281,7 @@ export function projectExecutionView(
       turnStartedAt.set(event.data.turnId, stored.createdAt)
       continue
     }
-    if (
-      event.type === "turn.completed" ||
-      event.type === "turn.failed" ||
-      event.type === "turn.cancelled" ||
-      event.type === "turn.interrupted"
-    ) {
+    if (event.type === "turn.completed") {
       terminalTurnIds.add(event.data.turnId)
       if (event.data.usage !== undefined) lastTurnUsage = event.data.usage
       if (event.data.metrics !== undefined) lastTurnMetrics = event.data.metrics
@@ -315,9 +296,10 @@ export function projectExecutionView(
           event.data.metrics.averageTimeToFirstTokenMs * samples
         timeToFirstTokenSamples += samples
       }
-      if (event.type !== "turn.completed") {
+      const outcome = event.data.outcome
+      if (outcome.status !== "completed") {
         markPendingPermissionsStale(permissions, entries, event.data.turnId)
-        if (event.type === "turn.interrupted") {
+        if (outcome.status === "interrupted") {
           for (const tool of tools.values()) {
             if (
               tool.turnId !== event.data.turnId ||
@@ -336,17 +318,12 @@ export function projectExecutionView(
         entries.push({
           kind: "turn_terminal",
           turnId: event.data.turnId,
-          state:
-            event.type === "turn.failed"
-              ? "failed"
-              : event.type === "turn.cancelled"
-                ? "cancelled"
-                : "interrupted",
+          state: outcome.status,
           message:
-            event.type === "turn.failed"
-              ? event.data.error.message
-              : (event.data.reason ??
-                (event.type === "turn.cancelled"
+            outcome.status === "failed"
+              ? outcome.error.message
+              : (outcome.reason ??
+                (outcome.status === "cancelled"
                   ? "Turn cancelled."
                   : "Turn interrupted.")),
         })
@@ -355,25 +332,25 @@ export function projectExecutionView(
     }
     if (
       event.type === "item.completed" &&
-      event.data.item.type === "agent_message"
+      (event.data.item.type === "agent_message" ||
+        event.data.item.type === "reasoning")
     ) {
       const { item } = event.data
       const streamId = item.streamId
       if (streamId) streamIdsSeen.add(streamId)
-      for (const [index, block] of item.content.entries()) {
-        if (block.type !== "reasoning" || block.text.length === 0) continue
+      if (item.type === "reasoning") {
+        if (item.text.length === 0) continue
         entries.push({
           kind: "reasoning",
-          itemId: `${item.itemId}:reasoning:${index}`,
-          text: block.text,
+          itemId: item.itemId,
+          ...(streamId === undefined ? {} : { streamId }),
+          text: item.text,
           status: "completed",
           at: event.createdAt,
         })
+        continue
       }
-      const text = item.content
-        .filter((block) => block.type === "text")
-        .map((block) => block.text)
-        .join("")
+      const text = item.content.map((block) => block.text).join("")
       if (text.length > 0) {
         entries.push({
           kind: "assistant",
@@ -392,10 +369,7 @@ export function projectExecutionView(
         kind: "tool",
         toolCallId: item.toolCallId,
         turnId: event.data.turnId,
-        name: item.name,
-        executionType: item.type,
-        summary: summarizeTool(item.name, item.input),
-        input: item.input,
+        execution: item,
         state: "requested",
       }
       tools.set(item.toolCallId, entry)
@@ -404,11 +378,12 @@ export function projectExecutionView(
     }
     if (
       event.type === "item.completed" &&
-      event.data.item.type !== "agent_message"
+      event.data.item.type !== "agent_message" &&
+      event.data.item.type !== "reasoning"
     ) {
       const { item } = event.data
-      const structured = parseToolOutput(item.output, session?.workingDirectory)
       updateTool(tools, entries, item.toolCallId, {
+        ...(item.type === "dynamic_tool_call" ? {} : { execution: item }),
         state: item.error === undefined ? "completed" : "failed",
         ...(item.output === undefined ? {} : { output: item.output }),
         resultText:
@@ -419,10 +394,6 @@ export function projectExecutionView(
         ...(item.error === undefined
           ? {}
           : { resultErrorMessage: item.error.message }),
-        ...(structured.diff === undefined ? {} : { diff: structured.diff }),
-        ...(structured.commandResult === undefined
-          ? {}
-          : { commandResult: structured.commandResult }),
       })
       continue
     }
@@ -436,6 +407,9 @@ export function projectExecutionView(
         ...(event.data.subject === undefined
           ? {}
           : { subject: event.data.subject }),
+        ...(event.data.reason === undefined
+          ? {}
+          : { reason: event.data.reason }),
         state: "requested",
       }
       permissions.set(event.data.permissionRequestId, entry)
@@ -548,7 +522,7 @@ function projectActiveActivity(
     .reverse()
     .find((tool) => tool.turnId === turnId && tool.state === "requested")
   if (runningTool !== undefined) {
-    return { kind: "running_tool", name: runningTool.name }
+    return { kind: "running_tool", name: runningTool.execution.name }
   }
 
   if (Object.values(snapshots).some((snapshot) => snapshot.turnId === turnId)) {
@@ -637,142 +611,4 @@ function updatePermission(
       entry.permissionRequestId === permissionRequestId,
   )
   if (index >= 0) entries[index] = next
-}
-
-function parseToolOutput(
-  output: unknown,
-  workspaceRoot?: string,
-): {
-  readonly diff?: ToolDiff
-  readonly commandResult?: CommandResult
-} {
-  if (!isRecord(output)) return {}
-  const diff = parseDiff(output.diff)
-  const commandResult = parseCommandResult(output, workspaceRoot)
-  return {
-    ...(diff === undefined ? {} : { diff }),
-    ...(commandResult === undefined ? {} : { commandResult }),
-  }
-}
-
-function parseDiff(value: unknown): ToolDiff | undefined {
-  if (!isRecord(value)) return undefined
-  if (
-    value.format !== "unified" ||
-    typeof value.text !== "string" ||
-    typeof value.truncated !== "boolean"
-  ) {
-    return undefined
-  }
-  return { text: value.text, truncated: value.truncated }
-}
-
-function parseCommandResult(
-  output: Record<string, unknown>,
-  workspaceRoot?: string,
-): CommandResult | undefined {
-  if (
-    typeof output.stdout !== "string" ||
-    typeof output.stderr !== "string" ||
-    typeof output.truncated !== "boolean"
-  ) {
-    return undefined
-  }
-  const exitCode =
-    typeof output.exitCode === "number" || output.exitCode === null
-      ? output.exitCode
-      : null
-  const signal = typeof output.signal === "string" ? output.signal : null
-  const binary = parseBinary(output.binary)
-  const warnings = Array.isArray(output.warnings)
-    ? output.warnings.filter(
-        (warning): warning is string => typeof warning === "string",
-      )
-    : undefined
-  const blocked =
-    isRecord(output.blocked) && typeof output.blocked.rule === "string"
-      ? { rule: output.blocked.rule }
-      : undefined
-  return {
-    exitCode,
-    signal,
-    stdout: output.stdout,
-    stderr: output.stderr,
-    truncated: output.truncated,
-    timedOut: output.timedOut === true,
-    ...(typeof output.durationMs === "number"
-      ? { durationMs: output.durationMs }
-      : {}),
-    ...(typeof output.cwd === "string"
-      ? { cwd: workspaceRelativePath(workspaceRoot, output.cwd) }
-      : {}),
-    ...(typeof output.shell === "string" ? { shell: output.shell } : {}),
-    ...(warnings === undefined || warnings.length === 0 ? {} : { warnings }),
-    ...(blocked === undefined ? {} : { blocked }),
-    ...(binary === undefined ? {} : { binary }),
-  }
-}
-
-function parseBinary(value: unknown): CommandResult["binary"] {
-  if (!isRecord(value)) return undefined
-  if (
-    typeof value.stdout !== "boolean" ||
-    typeof value.stderr !== "boolean" ||
-    typeof value.stdoutBytes !== "number" ||
-    typeof value.stderrBytes !== "number"
-  ) {
-    return undefined
-  }
-  return {
-    stdout: value.stdout,
-    stderr: value.stderr,
-    stdoutBytes: value.stdoutBytes,
-    stderrBytes: value.stderrBytes,
-  }
-}
-
-function summarizeTool(name: string, input: unknown): string {
-  if (isRecord(input)) {
-    if (
-      (name === "read_file" ||
-        name === "edit_file" ||
-        name === "write_file" ||
-        name === "grep" ||
-        name === "glob") &&
-      typeof input.path === "string"
-    ) {
-      return input.path
-    }
-    if (name === "run_command" && typeof input.command === "string") {
-      if (typeof input.description === "string") {
-        return truncateLine(input.description, 80)
-      }
-      return truncateLine(input.command, 80)
-    }
-  }
-  return name
-}
-
-function workspaceRelativePath(
-  workspaceRoot: string | undefined,
-  cwd: string,
-): string {
-  if (workspaceRoot === undefined) return cwd
-  const normalizedRoot = workspaceRoot.replaceAll("\\", "/").replace(/\/$/, "")
-  const normalizedCwd = cwd.replaceAll("\\", "/").replace(/\/$/, "")
-  if (normalizedCwd === normalizedRoot) return "."
-  return normalizedCwd.startsWith(`${normalizedRoot}/`)
-    ? normalizedCwd.slice(normalizedRoot.length + 1)
-    : cwd
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-}
-
-function truncateLine(value: string, max: number): string {
-  const singleLine = value.replace(/\s+/g, " ").trim()
-  return singleLine.length <= max
-    ? singleLine
-    : `${singleLine.slice(0, max - 1)}…`
 }

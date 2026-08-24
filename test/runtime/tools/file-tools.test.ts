@@ -3,6 +3,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   symlink,
   writeFile,
@@ -815,7 +816,6 @@ describe("bounded file tools", () => {
     const definitions = createToolRegistry().definitions()
     expect(definitions.map((tool) => tool.name)).toEqual([
       "read_file",
-      "read_session_file",
       "grep",
       "glob",
       "edit_file",
@@ -876,48 +876,63 @@ describe("bounded file tools", () => {
     }
   })
 
-  it("rejects path traversal and symlink escapes", async () => {
+  it("accepts absolute paths and symlinks outside the workspace", async () => {
     await withWorkspace(async (workspace) => {
       const outside = await mkdtemp(join(tmpdir(), "yakitori-outside-"))
       try {
         await writeFile(join(outside, "secret.txt"), "secret")
+        const canonicalOutside = await realpath(outside)
         await symlink(outside, join(workspace, "link"))
         const read = createReadFileTool()
         const write = createWriteFileTool()
 
-        for (const tool of [read, write]) {
-          const traversal = await tool.execute(
-            {
-              path: "../secret.txt",
-              content: "x",
-            },
-            { workspaceRoot: workspace },
-          )
-          expect(traversal.ok).toBe(false)
-
-          const symlinkEscape = await tool.execute(
-            {
-              path: "link/secret.txt",
-              content: "x",
-            },
-            { workspaceRoot: workspace },
-          )
-          expect(symlinkEscape.ok).toBe(false)
-        }
-
         const edit = createEditFileTool()
-        expect(
-          await edit.execute(
-            { path: "../created.txt", oldString: "", newString: "x" },
-            { workspaceRoot: workspace },
-          ),
-        ).toMatchObject({ ok: false, code: "path_denied" })
-        expect(
-          await edit.execute(
-            { path: "link/created.txt", oldString: "", newString: "x" },
-            { workspaceRoot: workspace },
-          ),
-        ).toMatchObject({ ok: false, code: "path_denied" })
+        const absoluteRead = await read.execute(
+          { path: join(outside, "secret.txt") },
+          { workspaceRoot: workspace },
+        )
+        expect(absoluteRead).toMatchObject({
+          ok: true,
+          output: { path: join(canonicalOutside, "secret.txt") },
+          content: expect.stringContaining("secret"),
+        })
+        const symlinkRead = await read.execute(
+          { path: "link/secret.txt" },
+          { workspaceRoot: workspace },
+        )
+        expect(symlinkRead).toMatchObject({
+          ok: true,
+          output: { path: join(canonicalOutside, "secret.txt") },
+        })
+        const created = await edit.execute(
+          {
+            path: join(outside, "created.txt"),
+            oldString: "",
+            newString: "approved",
+          },
+          { workspaceRoot: workspace },
+        )
+        expect(created).toMatchObject({
+          ok: true,
+          output: {
+            path: join(canonicalOutside, "created.txt"),
+            created: true,
+          },
+        })
+        await expect(
+          readFile(join(outside, "created.txt"), "utf8"),
+        ).resolves.toBe("approved")
+        const written = await write.execute(
+          { path: join(outside, "written.txt"), content: "written" },
+          { workspaceRoot: workspace },
+        )
+        expect(written).toMatchObject({
+          ok: true,
+          output: {
+            path: join(canonicalOutside, "written.txt"),
+            created: true,
+          },
+        })
         expect(
           await edit.execute(
             { path: ".env.local", oldString: "", newString: "secret" },
@@ -1118,6 +1133,14 @@ function toolProjection(
     turnId: "turn_observation",
     name,
     input: {},
+    execution: {
+      type: "dynamic_tool_call",
+      itemId: `item_observation_${toolProjectionIndex}`,
+      toolCallId: `tool_observation_${toolProjectionIndex}`,
+      name,
+      input: {},
+      requiresPermission: false,
+    },
     state: ToolState.Completed,
     requestedAt: "2026-08-05T00:00:00.000Z",
     updatedAt: "2026-08-05T00:00:01.000Z",

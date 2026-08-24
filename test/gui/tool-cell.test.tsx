@@ -3,6 +3,35 @@ import { cleanup, render, screen } from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
 import { afterEach, describe, expect, it } from "vitest"
 import { ToolCell } from "../../src/gui/components/cells/tool-cell.tsx"
+import type {
+  CommandResult,
+  ExecutionEntry,
+  ToolDiff,
+} from "../../src/gui/execution-view.ts"
+import type {
+  JsonValue,
+  ToolExecutionDescriptor,
+} from "../../src/kernel/events.ts"
+import {
+  commandExecution,
+  completeCommandExecution,
+  completeFileChangeExecution,
+  completeFileReadExecution,
+  completeFileSearchExecution,
+  fileChangeExecution,
+  fileReadExecution,
+  fileSearchExecution,
+} from "../../src/runtime/tools/execution-descriptors.ts"
+
+type ToolEntry = Extract<ExecutionEntry, { readonly kind: "tool" }>
+type LegacyToolEntry = Omit<ToolEntry, "execution"> & {
+  readonly name: string
+  readonly executionType: string
+  readonly summary: string
+  readonly input: JsonValue
+  readonly diff?: ToolDiff
+  readonly commandResult?: CommandResult
+}
 
 afterEach(() => {
   cleanup()
@@ -13,7 +42,7 @@ describe("tool cell", () => {
     const user = userEvent.setup()
     render(
       <ToolCell
-        entry={{
+        entry={toolEntry({
           kind: "tool",
           toolCallId: "tool_1",
           turnId: "turn_1",
@@ -23,7 +52,7 @@ describe("tool cell", () => {
           input: { path: "src/index.ts" },
           state: "completed",
           resultText: "file contents",
-        }}
+        })}
       />,
     )
 
@@ -42,7 +71,7 @@ describe("tool cell", () => {
     const user = userEvent.setup()
     render(
       <ToolCell
-        entry={{
+        entry={toolEntry({
           kind: "tool",
           toolCallId: "tool_2",
           turnId: "turn_1",
@@ -52,7 +81,7 @@ describe("tool cell", () => {
           input: { command: "pnpm test" },
           state: "completed",
           resultText: "all green",
-        }}
+        })}
       />,
     )
 
@@ -68,7 +97,7 @@ describe("tool cell", () => {
     const user = userEvent.setup()
     render(
       <ToolCell
-        entry={{
+        entry={toolEntry({
           kind: "tool",
           toolCallId: "tool_3",
           turnId: "turn_1",
@@ -89,7 +118,7 @@ describe("tool cell", () => {
             cwd: "packages/gui",
             shell: "/bin/zsh",
           },
-        }}
+        })}
       />,
     )
 
@@ -106,7 +135,7 @@ describe("tool cell", () => {
   it("renders blocked commands as failed without implying a process started", async () => {
     render(
       <ToolCell
-        entry={{
+        entry={toolEntry({
           kind: "tool",
           toolCallId: "tool_blocked",
           turnId: "turn_1",
@@ -132,7 +161,7 @@ describe("tool cell", () => {
             shell: "/bin/zsh",
             blocked: { rule: "rm_root" },
           },
-        }}
+        })}
       />,
     )
 
@@ -145,7 +174,7 @@ describe("tool cell", () => {
   it("renders structured command execution errors", async () => {
     render(
       <ToolCell
-        entry={{
+        entry={toolEntry({
           kind: "tool",
           toolCallId: "tool_spawn_error",
           turnId: "turn_1",
@@ -167,7 +196,7 @@ describe("tool cell", () => {
             cwd: ".",
             shell: "/bin/zsh",
           },
-        }}
+        })}
       />,
     )
 
@@ -183,7 +212,7 @@ describe("tool cell", () => {
     const user = userEvent.setup()
     render(
       <ToolCell
-        entry={{
+        entry={toolEntry({
           kind: "tool",
           toolCallId: "tool_4",
           turnId: "turn_1",
@@ -197,7 +226,7 @@ describe("tool cell", () => {
             text: "--- a/src/index.ts\n+++ b/src/index.ts\n@@ -1 +1 @@\n-old\n+new",
             truncated: false,
           },
-        }}
+        })}
       />,
     )
 
@@ -210,10 +239,54 @@ describe("tool cell", () => {
     expect(screen.queryByText(/"oldString"/)).toBeNull()
   })
 
-  it("uses a text shimmer instead of a status badge while running", () => {
+  it("renders both paths for a moved file", async () => {
+    const user = userEvent.setup()
+    const base = toolEntry({
+      kind: "tool",
+      toolCallId: "tool_move",
+      turnId: "turn_1",
+      name: "edit_file",
+      executionType: "file_change",
+      summary: "2 files",
+      input: { path: "src/old.ts" },
+      state: "completed",
+      resultText: "Moved file.",
+    })
     render(
       <ToolCell
         entry={{
+          ...base,
+          execution: {
+            ...base.execution,
+            type: "file_change",
+            request: {
+              operation: "apply_patch",
+              paths: ["src/old.ts", "src/other.ts"],
+            },
+            changes: [
+              {
+                path: "src/old.ts",
+                kind: "update",
+                movePath: "src/new.ts",
+              },
+              { path: "src/other.ts", kind: "update" },
+            ],
+          },
+        }}
+      />,
+    )
+
+    await user.click(screen.getByRole("button", { name: /Change 2 files/ }))
+
+    expect(await screen.findByText("src/old.ts")).toBeTruthy()
+    expect(screen.getByText("src/new.ts")).toBeTruthy()
+    expect(screen.getByText("→")).toBeTruthy()
+  })
+
+  it("uses a text shimmer instead of a status badge while running", () => {
+    render(
+      <ToolCell
+        entry={toolEntry({
           kind: "tool",
           toolCallId: "tool_running",
           turnId: "turn_1",
@@ -222,7 +295,7 @@ describe("tool cell", () => {
           summary: "src",
           input: { pattern: "needle", path: "src" },
           state: "requested",
-        }}
+        })}
       />,
     )
 
@@ -237,7 +310,7 @@ describe("tool cell", () => {
     const user = userEvent.setup()
     const { rerender } = render(
       <ToolCell
-        entry={{
+        entry={toolEntry({
           kind: "tool",
           toolCallId: "tool_replayed",
           turnId: "turn_1",
@@ -246,7 +319,7 @@ describe("tool cell", () => {
           summary: "src/index.ts",
           input: { path: "src/index.ts" },
           state: "requested",
-        }}
+        })}
       />,
     )
 
@@ -260,7 +333,7 @@ describe("tool cell", () => {
 
     rerender(
       <ToolCell
-        entry={{
+        entry={toolEntry({
           kind: "tool",
           toolCallId: "tool_replayed",
           turnId: "turn_1",
@@ -270,7 +343,7 @@ describe("tool cell", () => {
           input: { path: "src/index.ts" },
           state: "completed",
           resultText: "file contents",
-        }}
+        })}
       />,
     )
 
@@ -278,3 +351,76 @@ describe("tool cell", () => {
     expect(screen.getByText("file contents")).toBeTruthy()
   })
 })
+
+function toolEntry(input: LegacyToolEntry): ToolEntry {
+  const {
+    name,
+    executionType: _,
+    summary: _summary,
+    input: rawInput,
+    diff,
+    commandResult,
+    output: rawOutput,
+    ...entry
+  } = input
+  const output =
+    commandResult ??
+    (diff === undefined
+      ? rawOutput
+      : {
+          ...(recordOf(rawOutput) ?? {}),
+          diff: { format: "unified", ...diff },
+        })
+  const startedExecution = (() => {
+    if (name === "run_command") return commandExecution(rawInput)
+    if (name === "edit_file") {
+      return fileChangeExecution("edit")(rawInput)
+    }
+    if (name === "grep") return fileSearchExecution("grep")(rawInput)
+    return fileReadExecution(rawInput)
+  })()
+  const execution =
+    output === undefined
+      ? startedExecution
+      : completeTestExecution(startedExecution, output as JsonValue)
+  return {
+    ...entry,
+    execution: {
+      ...execution,
+      itemId: `item_${input.toolCallId}`,
+      toolCallId: input.toolCallId,
+      name,
+      input: rawInput,
+      requiresPermission: false,
+    },
+    ...(output === undefined ? {} : { output }),
+  }
+}
+
+function completeTestExecution(
+  started: ToolExecutionDescriptor,
+  output: JsonValue,
+): ToolExecutionDescriptor {
+  switch (started.type) {
+    case "command_execution":
+      return completeCommandExecution(started, output)
+    case "file_change":
+      return completeFileChangeExecution(started, output)
+    case "file_search":
+      return completeFileSearchExecution(started, output)
+    case "file_read":
+      return completeFileReadExecution(started, output)
+    case "web_fetch":
+    case "web_search":
+    case "collaboration_tool_call":
+    case "mcp_tool_call":
+    case "dynamic_tool_call":
+      return started
+  }
+}
+
+function recordOf(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined
+}

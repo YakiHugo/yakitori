@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { EventType, HistoryRecordType } from "../../../src/kernel/events.ts"
+import { EventType } from "../../../src/kernel/events.ts"
 import { createJsonlEventStore } from "../../../src/kernel/jsonl-event-store.ts"
 import { createSessionKernel } from "../../../src/kernel/session-kernel.ts"
 import { createMateKernel } from "../../../src/mates/mate-kernel.ts"
@@ -55,9 +55,8 @@ describe("tool loop", () => {
       })
       expect(replayed.events.map((event) => event.type)).toEqual(
         expect.arrayContaining([
-          HistoryRecordType.ModelToolCall,
-          HistoryRecordType.ModelToolResult,
-          HistoryRecordType.AgentMessage,
+          EventType.ItemStarted,
+          EventType.ItemCompleted,
           EventType.TurnCompleted,
         ]),
       )

@@ -124,7 +124,11 @@ describe("agent control", () => {
     expect(harness.followups).toEqual([
       { sessionId: child.agentId, message: "next task", target: TARGET },
     ])
-    await expect(root.interrupt(child.agentId)).resolves.toBe("running")
+    await expect(root.interrupt(child.agentId)).resolves.toEqual({
+      agentId: child.agentId,
+      path: "/root/worker",
+      previousStatus: "running",
+    })
     expect(harness.interrupted).toEqual([child.agentId])
   })
 

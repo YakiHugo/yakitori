@@ -806,7 +806,7 @@ describe("application composition", () => {
         })
         expect(forked.body.events.map((event) => event.type)).toEqual([
           EventType.SessionCreated,
-          EventType.TurnInterrupted,
+          EventType.TurnCompleted,
           EventType.InputCancelled,
         ])
       } finally {

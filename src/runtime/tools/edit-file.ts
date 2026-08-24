@@ -9,6 +9,10 @@ import {
 import { locateEditMatches } from "./edit-file-match.ts"
 import { resolveReadPath, resolveWritePath } from "./path-policy.ts"
 import {
+  completeFileChangeExecution,
+  fileChangeExecution,
+} from "./execution-descriptors.ts"
+import {
   dominantLineEnding,
   normalizeReplacementLineEndings,
   preserveCurlyQuoteStyle,
@@ -29,16 +33,18 @@ export function createEditFileTool(
   return {
     name: "edit_file",
     description:
-      "Replace text in an existing UTF-8 file, or create a new file by setting oldString to an empty string. An empty oldString never overwrites an existing file. Read existing files before editing them. Supply the smallest unique non-empty oldString, usually 2-4 lines, and exclude read_file's {N}\\t line prefixes. A ranged read requires an exact unique oldString; replaceAll requires a complete read. For a complete unchanged revision, matching is exact first, followed only by deterministic line-ending, curly-quote, and trailing-whitespace equivalence. Indentation, internal whitespace, and single-vs-double quote delimiters remain exact. No similarity edit is ever applied.",
+      "Replace text in an existing UTF-8 file, or create a new file by setting oldString to an empty string. Accepts paths relative to the workspace and absolute paths. An empty oldString never overwrites an existing file. Read existing files before editing them. Supply the smallest unique non-empty oldString, usually 2-4 lines, and exclude read_file's {N}\\t line prefixes. A ranged read requires an exact unique oldString; replaceAll requires a complete read. For a complete unchanged revision, matching is exact first, followed only by deterministic line-ending, curly-quote, and trailing-whitespace equivalence. No similarity edit is ever applied.",
     autoAllow: true,
     effect: "mutate",
+    describeExecution: fileChangeExecution("edit"),
+    completeExecution: completeFileChangeExecution,
     inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: {
         path: {
           type: "string",
-          description: "Workspace-relative path of the text file.",
+          description: "Workspace-relative or absolute path of the text file.",
         },
         oldString: {
           type: "string",
@@ -69,22 +75,22 @@ export function createEditFileTool(
         if (!resolved.ok) {
           return editFailure(resolved.error.code, resolved.error.message)
         }
-        if (resolved.exists) return fileExistsFailure(resolved.relativePath)
+        if (resolved.exists) return fileExistsFailure(resolved.displayPath)
 
         const written = await compareAndWriteTextFile({
           workspaceRoot: context.workspaceRoot,
-          path: parsed.path,
+          path: resolved.displayPath,
           content: parsed.newString,
           expectedSha256: null,
         })
         if (!written.ok) {
           return written.code === "file_exists"
-            ? fileExistsFailure(resolved.relativePath)
+            ? fileExistsFailure(resolved.displayPath)
             : written
         }
         const baseOutput = asJsonObject(written.output)
         const createdGrant = writeGrant(baseOutput, "edit", { created: true })
-        return {
+        const result = {
           ok: true,
           output: {
             ...baseOutput,
@@ -93,8 +99,9 @@ export function createEditFileTool(
               ? {}
               : { fileObservation: createdGrant }),
           },
-          content: `Created ${resolved.relativePath} (${Buffer.byteLength(parsed.newString, "utf8")} bytes).`,
-        }
+          content: `Created ${resolved.displayPath} (${Buffer.byteLength(parsed.newString, "utf8")} bytes).`,
+        } satisfies ToolExecutionResult
+        return result
       }
 
       const resolved = await resolveReadPath(context.workspaceRoot, parsed.path)
@@ -105,12 +112,12 @@ export function createEditFileTool(
       }
 
       const observed = context.visibleFileObservations?.latest(
-        resolved.relativePath,
+        resolved.displayPath,
       )
       if (observed === undefined) {
         return editFailure(
           "file_not_observed",
-          `${resolved.relativePath} is not visible in the current model context.`,
+          `${resolved.displayPath} is not visible in the current model context.`,
           { suggestion: "Read it first with read_file." },
         )
       }
@@ -183,7 +190,7 @@ export function createEditFileTool(
         }
         return editFailure(
           "old_string_not_found",
-          `oldString was not found exactly in the current ${resolved.relativePath}.`,
+          `oldString was not found exactly in the current ${resolved.displayPath}.`,
           {
             suggestion: "Read the current text and use an exact unique anchor.",
           },
@@ -203,14 +210,14 @@ export function createEditFileTool(
         const nearMatches = closestEditCandidates(content, parsed.oldString)
         return editFailure(
           "old_string_not_found",
-          `oldString was not found in ${resolved.relativePath}.`,
+          `oldString was not found in ${resolved.displayPath}.`,
           nearMatches.length === 0 ? {} : { nearMatches },
         )
       }
       if (!parsed.replaceAll && located.matches.length > 1) {
         return editFailure(
           "old_string_ambiguous",
-          `oldString matched ${located.matches.length} locations in ${resolved.relativePath}.`,
+          `oldString matched ${located.matches.length} locations in ${resolved.displayPath}.`,
           {
             matchMode: located.mode,
             matchCount: located.matches.length,
@@ -261,7 +268,7 @@ export function createEditFileTool(
 
       const written = await compareAndWriteTextFile({
         workspaceRoot: context.workspaceRoot,
-        path: parsed.path,
+        path: resolved.displayPath,
         content: updated,
         expectedSha256: currentSha256,
       })
@@ -301,7 +308,7 @@ export function createEditFileTool(
       return {
         ok: true,
         output,
-        content: `Updated ${resolved.relativePath}: replaced ${matches.length} ${matches.length === 1 ? "match" : "matches"} (${located.mode}).`,
+        content: `Updated ${resolved.displayPath}: replaced ${matches.length} ${matches.length === 1 ? "match" : "matches"} (${located.mode}).`,
       }
     },
   }
