@@ -11,34 +11,24 @@ agent itself works.
 Work in small, reviewable modules and update this file as project conventions
 become concrete.
 
+This project is under rapid iteration. Large breaking changes and broad
+refactors are expected and reasonable; do not add compatibility layers or
+data migrations unless an explicit requirement establishes a real
+compatibility obligation.
+
 Reference material lives under `.references/` and is intentionally gitignored.
 Do not make source code, tests, build scripts, or runtime behavior depend on
 files in `.references/`.
-
-Reference priority:
-
-- Primary references: `.references/public/codex` and
-  `.references/public/grok-build`. Use these by default as the foundation for
-  coding-agent behavior, architecture, and implementation decisions.
-- Secondary references: `.references/public/opencode-v2`,
-  `.references/public/claude-code-sourcemap`, and public Claude Code
-  documentation and observable product behavior. Use these to fill gaps or
-  compare alternatives after checking the primary references.
-- Other references, including `.references/public/dsh` and public Raft
-  documentation, are opt-in. Before consulting one, explicitly propose it and
-  explain why the primary and secondary references are insufficient. Raft is
-  relevant only to the later persistent-colleague direction (Rooms and
-  mentions), not its consensus protocol.
 
 ## Documentation
 
 - Treat code and tests as the authoritative description of implementation.
   Do not maintain prose that duplicates behavior already expressed clearly by
   public types, tests, or code.
-- `docs/` root holds only living documents and the one active stage plan. When
-  a stage completes, move its plan to `docs/archive/` with an archive banner
-  and update inbound links. Archived documents are historical records: never
-  implement from them.
+- `docs/` holds only living documents and the one active stage plan. When a
+  stage completes, move any surviving decision or non-obvious contract beside
+  its owning module, then delete the plan. Git history preserves completed
+  plans; do not maintain an in-tree documentation archive.
 - Keep a non-obvious subsystem contract beside the module that owns it through
   public types, focused tests, and necessary code comments. Do not create a
   repository-wide architecture document merely to duplicate them.
@@ -162,27 +152,23 @@ in the final response for the task.
 
 ## Reference Comparison
 
-Start design and implementation comparisons with Codex and Grok Build. Treat
-their implementations and product direction as the baseline.
+Start comparisons with `.references/public/codex` and
+`.references/public/grok-build`; treat their implementations and product
+direction as the baseline. Use `.references/public/opencode-v2`,
+`.references/public/claude-code-sourcemap`, and public Claude Code behavior
+only to fill a concrete gap or materially clarify a decision.
 
-Use opencode and Claude Code only as secondary references: consult them when
-the primary references leave a gap or when a comparison would materially
-clarify a decision.
-
-Do not consult DSH, Gemini CLI, Kimi Code, Manus, Raft, or any other reference
-by default. Propose the additional reference explicitly and state why it is
-needed before using it.
+Other references, including DSH, Gemini CLI, Kimi Code, Manus, and Raft, are
+opt-in. Propose the additional reference and explain why the primary and
+secondary sources are insufficient before consulting it. Raft is relevant
+only to the later Rooms-and-mentions direction, not its consensus protocol.
 
 Do not take design cues from small personal projects, niche frameworks, or
 unaffiliated "industry analysis" sites — their design docs describe their own
 opinions, not validated practice.
 
-By default, adopt the reference's implementation as-is, including the design
-direction its developers or community have publicly planned. Only design an
-independent approach when there is an explicit reason it fits our scenario
-better, and record that reason where the decision lives (module notes or code
-comments).
-
-When using reference projects for a design decision, record the comparison in
-module notes or code comments only when it affects an implementation boundary.
-Do not copy large blocks of code or prose from reference repositories.
+By default, adopt the reference implementation and its planned direction.
+Design an independent approach only for an explicit project-specific reason,
+and record that reason beside the owning module when it affects an
+implementation boundary. Do not copy large blocks of code or prose from
+reference repositories.
