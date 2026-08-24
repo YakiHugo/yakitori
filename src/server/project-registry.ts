@@ -32,7 +32,7 @@ export function createProjectRegistry(options: {
     const projects = await list()
     if (projects.includes(resolved)) return projects
     cached = [...projects, resolved]
-    void writeProjects(registryPath, cached)
+    await writeProjects(registryPath, cached)
     return [...cached]
   }
 
