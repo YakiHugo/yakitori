@@ -13,6 +13,7 @@ import {
   EventType,
   HistoryRecordType,
   InputRole,
+  isKernelEvent,
   type ModelContentBlock,
 } from "../../src/kernel/events.ts"
 import { createJsonlEventStore } from "../../src/kernel/jsonl-event-store.ts"
@@ -78,7 +79,6 @@ describe("session runner", () => {
         HistoryRecordType.TurnContext,
         EventType.TurnStarted,
         HistoryRecordType.WorldState,
-        HistoryRecordType.AgentMessage,
         EventType.ItemCompleted,
         EventType.TurnCompleted,
       ])
@@ -104,8 +104,10 @@ describe("session runner", () => {
         }),
       ])
       const agentMetadata = replayed.events.flatMap((event) =>
-        event.type === HistoryRecordType.AgentMessage
-          ? [event.data.providerMetadata]
+        isKernelEvent(event) &&
+        event.type === EventType.ItemCompleted &&
+        event.data.item.type === "agent_message"
+          ? [event.data.item.providerMetadata]
           : [],
       )
       expect(agentMetadata).toEqual([
@@ -689,6 +691,51 @@ describe("session runner", () => {
     })
   })
 
+  it("does not turn a failed edit diagnostic into a file change", async () => {
+    await withRuntime(async (runtime) => {
+      await writeFile(join(runtime.rootDir, "unread.ts"), "old")
+      const provider = createFauxProvider([
+        {
+          content: [
+            {
+              type: "tool_call",
+              id: "call_failed_edit",
+              name: "edit_file",
+              input: {
+                path: "unread.ts",
+                oldString: "old",
+                newString: "new",
+              },
+            },
+          ],
+          stopReason: ModelStopReason.ToolUse,
+        },
+        { content: [{ type: "text", text: "edit failed" }] },
+      ])
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+      })
+      const session = await createAttributedSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "edit unread.ts" },
+      })
+
+      await runner.wake(session.sessionId)
+
+      const read = await runtime.kernel.readSession({
+        sessionId: session.sessionId,
+      })
+      expect(read.session?.tools[0]).toMatchObject({
+        state: "failed",
+        output: { suggestion: expect.any(String) },
+        execution: { type: "file_change", changes: [] },
+      })
+    })
+  })
+
   it("captures an AGENTS change as an anchored world-state diff before the next step", async () => {
     await withRuntime(async (runtime) => {
       const provider = createFauxProvider([
@@ -804,6 +851,7 @@ describe("session runner", () => {
       const transientHub = createTransientEventHub()
       const provider = createFauxProvider([
         {
+          providerRequestId: "provider_internal",
           snapshots: ["partial", "final text"],
           reasoningSnapshots: ["inspect", "inspect files"],
           content: [
@@ -843,7 +891,7 @@ describe("session runner", () => {
       expect(
         durable.some((event) => event.type === EventType.ItemCompleted),
       ).toBe(true)
-      const completed = durable.find(
+      const completed = durable.filter(
         (
           event,
         ): event is Extract<
@@ -851,13 +899,17 @@ describe("session runner", () => {
           { type: typeof EventType.ItemCompleted }
         > => event.type === EventType.ItemCompleted,
       )
-      expect(completed?.data.item.content).toEqual([
-        { type: "reasoning", text: "inspect files" },
-        { type: "text", text: "final text" },
+      expect(completed.map((event) => event.data.item)).toEqual([
+        expect.objectContaining({ type: "reasoning", text: "inspect files" }),
+        expect.objectContaining({
+          type: "agent_message",
+          content: [{ type: "text", text: "final text" }],
+        }),
       ])
       const replayed = await runtime.kernel.replaySession({
         sessionId: session.sessionId,
       })
+      expect(JSON.stringify(replayed.events)).not.toContain("provider_internal")
       expect(
         replayed.events.every(
           (event) =>
@@ -1385,8 +1437,10 @@ describe("session runner", () => {
         sessionId: session.sessionId,
       })
       const assistantMetadata = replayed.events.flatMap((event) =>
-        event.type === HistoryRecordType.AgentMessage
-          ? [event.data.providerMetadata]
+        isKernelEvent(event) &&
+        event.type === EventType.ItemCompleted &&
+        event.data.item.type === "agent_message"
+          ? [event.data.item.providerMetadata]
           : [],
       )
       expect(assistantMetadata).toEqual([
@@ -1926,9 +1980,32 @@ describe("multi-agent runtime", () => {
       expect(parent.session?.completedTurns).toHaveLength(1)
       expect(child.session?.completedTurns).toHaveLength(1)
       expect(
+        parent.session?.tools.find((tool) => tool.name === "spawn_agent")
+          ?.execution,
+      ).toMatchObject({
+        type: "collaboration_tool_call",
+        action: "spawn",
+        receivers: [
+          { sessionId: childSummary.sessionId, path: "/root/survey" },
+        ],
+      })
+      expect(
         parent.session?.tools.find((tool) => tool.name === "wait_agent")
           ?.output,
       ).toMatchObject({ timedOut: false })
+      const replayedParent = await runtime.kernel.replaySession({
+        sessionId: root.sessionId,
+      })
+      expect(
+        replayedParent.session?.tools.find(
+          (tool) => tool.name === "spawn_agent",
+        )?.execution,
+      ).toMatchObject({
+        type: "collaboration_tool_call",
+        receivers: [
+          { sessionId: childSummary.sessionId, path: "/root/survey" },
+        ],
+      })
       expect(child.session?.metadata).toMatchObject({
         agent: {
           kind: "subagent",

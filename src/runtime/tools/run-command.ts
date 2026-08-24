@@ -2,10 +2,13 @@ import { spawn, type ChildProcess } from "node:child_process"
 import { createWriteStream } from "node:fs"
 import { basename } from "node:path"
 import { Transform } from "node:stream"
-import type { SessionFileReference } from "../../kernel/index.ts"
 import { ToolLimitDefaults } from "../limits.ts"
 import { createUserShellEnv, type UserShellEnv } from "../user-shell-env.ts"
 import { matchCatastrophicCommand } from "./command-fuse.ts"
+import {
+  commandExecution,
+  completeCommandExecution,
+} from "./execution-descriptors.ts"
 import { resolveCommandCwd } from "./path-policy.ts"
 import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
 
@@ -64,8 +67,8 @@ export type RunCommandOutput = {
   readonly warnings?: readonly string[]
   readonly totalBytes: { readonly stdout: number; readonly stderr: number }
   readonly files?: {
-    readonly stdout?: SessionFileReference
-    readonly stderr?: SessionFileReference
+    readonly stdout?: string
+    readonly stderr?: string
   }
   readonly filesTruncated?: {
     readonly stdout: boolean
@@ -113,9 +116,11 @@ export function createRunCommandTool(
 
   return {
     name: "run_command",
-    description: `Run one non-interactive shell command, optionally from an in-workspace cwd. Use it for git, package managers, builds, and tests; prefer glob, grep, read_file, edit_file, and write_file for file work. It runs immediately with the host user's full files, process, and network authority and is not sandboxed. A small, bypassable fuse blocks only obvious catastrophic commands. Use timeoutSeconds for long work; there are no timeout/workdir aliases and no interactive stdin. Up to ${maxPersistedOutputBytes} bytes from each stdout/stderr stream are retained as Session files when Session storage is available; use read_session_file on a returned path after preview truncation.`,
+    description: `Run one non-interactive shell command, optionally from an in-workspace cwd. Use it for git, package managers, builds, and tests; prefer glob, grep, read_file, edit_file, and write_file for file work. It runs immediately with the host user's full files, process, and network authority and is not sandboxed. A small, bypassable fuse blocks only obvious catastrophic commands. Use timeoutSeconds for long work; there are no timeout/workdir aliases and no interactive stdin. Up to ${maxPersistedOutputBytes} bytes from each stdout/stderr stream are retained as files when Session storage is available; use read_file on a returned absolute path after preview truncation.`,
     autoAllow: true,
     effect: "opaque",
+    describeExecution: commandExecution,
+    completeExecution: completeCommandExecution,
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -242,10 +247,10 @@ export function createRunCommandTool(
           ? undefined
           : {
               ...(result.persisted.stdout
-                ? { stdout: commandFiles.stdout.reference }
+                ? { stdout: commandFiles.stdout.path }
                 : {}),
               ...(result.persisted.stderr
-                ? { stderr: commandFiles.stderr.reference }
+                ? { stderr: commandFiles.stderr.path }
                 : {}),
             }
       if (commandFiles !== undefined && result.persisted?.stdout === false) {
@@ -402,18 +407,14 @@ function renderCommandContent(
     const paths = [
       ...(output.files.stdout === undefined
         ? []
-        : [
-            `Full stdout: session://${output.files.stdout.sessionId}/${output.files.stdout.path}`,
-          ]),
+        : [`Full stdout: ${output.files.stdout}`]),
       ...(output.files.stderr === undefined
         ? []
-        : [
-            `Full stderr: session://${output.files.stderr.sessionId}/${output.files.stderr.path}`,
-          ]),
+        : [`Full stderr: ${output.files.stderr}`]),
     ]
     if (paths.length > 0) {
       sections.push(
-        `Session output retained; use read_session_file with a path below:\n${paths.join("\n")}`,
+        `Session output retained; use read_file with an absolute path below:\n${paths.join("\n")}`,
       )
     }
   }
@@ -829,7 +830,7 @@ function truncationMarker(
   totalBytes: number,
   omittedLines: number,
 ): string {
-  return `...[truncated: showing first ${headBytes} + last ${tailBytes} of ${totalBytes} captured bytes; ${omittedLines} lines omitted. Use read_session_file on the returned stdout/stderr path for complete output when available, or rerun with a narrower command.]...`
+  return `...[truncated: showing first ${headBytes} + last ${tailBytes} of ${totalBytes} captured bytes; ${omittedLines} lines omitted. Use read_file on the returned stdout/stderr path for complete output when available, or rerun with a narrower command.]...`
 }
 
 function takeHead(text: string, maxBytes: number, maxLines: number): string {

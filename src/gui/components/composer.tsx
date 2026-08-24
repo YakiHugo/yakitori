@@ -277,10 +277,10 @@ export function Composer() {
               </Button>
               <div
                 className="flex min-w-0 items-center gap-1.5 px-2 text-xs text-muted-foreground"
-                title="Tools can write inside the selected workspace; other actions still follow runtime permissions."
+                title="YOLO mode: tools run without approval prompts; hard safety bounds still apply."
               >
                 <ShieldCheck className="size-4 shrink-0" />
-                <span className="truncate">Workspace write</span>
+                <span className="truncate">Full access</span>
               </div>
             </div>
 

@@ -1073,12 +1073,7 @@ export function createJsonlEventStore(
         pendingInputs.delete(event.data.inputId)
         continue
       }
-      if (
-        event.type === EventType.TurnCompleted ||
-        event.type === EventType.TurnFailed ||
-        event.type === EventType.TurnCancelled ||
-        event.type === EventType.TurnInterrupted
-      ) {
+      if (event.type === EventType.TurnCompleted) {
         activeTurns.delete(event.data.turnId)
       }
     }

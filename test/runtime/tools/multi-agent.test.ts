@@ -3,8 +3,16 @@ import {
   AgentControlError,
   type BoundAgentControl,
 } from "../../../src/runtime/agent-control.ts"
+import type {
+  JsonValue,
+  ToolExecutionDescriptor,
+} from "../../../src/kernel/index.ts"
 import { createMultiAgentTools } from "../../../src/runtime/tools/multi-agent.ts"
-import type { ToolExecutionContext } from "../../../src/runtime/tools/types.ts"
+import type {
+  RuntimeTool,
+  ToolExecutionContext,
+  ToolExecutionResult,
+} from "../../../src/runtime/tools/types.ts"
 
 describe("multi-agent tools", () => {
   it("registers the Codex V2 control surface with stable schemas", () => {
@@ -52,6 +60,47 @@ describe("multi-agent tools", () => {
       ok: true,
       output: { agentId: "agent_1", path: "/root/survey" },
     })
+    expect(
+      completedExecution(
+        tool,
+        { task_name: "survey", message: "inspect" },
+        result,
+      ),
+    ).toMatchObject({
+      type: "collaboration_tool_call",
+      action: "spawn",
+      receivers: [{ sessionId: "agent_1", path: "/root/survey" }],
+    })
+  })
+
+  it("keeps each collaboration Session paired with its task path", async () => {
+    const tool = requireTool("wait_agent")
+    const result = await tool.execute(
+      {},
+      context(
+        control({
+          wait: async () => [
+            { agentId: "session_1", path: "/root/one", status: "running" },
+            {
+              agentId: "session_2",
+              path: "/root/two",
+              status: { completed: "done" },
+            },
+          ],
+        }),
+      ),
+    )
+
+    expect(result).toMatchObject({
+      ok: true,
+    })
+    expect(completedExecution(tool, {}, result)).toMatchObject({
+      type: "collaboration_tool_call",
+      receivers: [
+        { sessionId: "session_1", path: "/root/one" },
+        { sessionId: "session_2", path: "/root/two" },
+      ],
+    })
   })
 
   it("maps control policy failures to structured tool errors", async () => {
@@ -79,6 +128,18 @@ describe("multi-agent tools", () => {
   })
 })
 
+function completedExecution(
+  tool: RuntimeTool,
+  input: JsonValue,
+  result: ToolExecutionResult,
+): ToolExecutionDescriptor {
+  if (!result.ok || tool.describeExecution === undefined) {
+    throw new Error("Expected a successful typed tool result.")
+  }
+  const started = tool.describeExecution(input)
+  return tool.completeExecution?.(started, result.output, true) ?? started
+}
+
 function requireTool(name: string) {
   const tool = createMultiAgentTools().find(
     (candidate) => candidate.name === name,
@@ -100,10 +161,17 @@ function control(
       taskName: "default",
       path: "/root/default",
     }),
-    sendMessage: async () => undefined,
-    followup: async () => undefined,
+    sendMessage: async () => ({
+      agentId: "agent_default",
+      path: "/root/default",
+    }),
+    followup: async () => ({ agentId: "agent_default", path: "/root/default" }),
     wait: async () => [],
-    interrupt: async () => "running",
+    interrupt: async () => ({
+      agentId: "agent_default",
+      path: "/root/default",
+      previousStatus: "running",
+    }),
     list: () => [],
     ...overrides,
   }

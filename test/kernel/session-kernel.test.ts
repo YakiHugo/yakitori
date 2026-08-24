@@ -640,8 +640,11 @@ for (const implementation of ["memory", "jsonl"] as const) {
         ])
         const targetEvents = await store.readEvents(forked.sessionId)
         expect(targetEvents.at(-1)).toMatchObject({
-          type: EventType.TurnInterrupted,
-          data: { turnId: firstTurn.turnId },
+          type: EventType.TurnCompleted,
+          data: {
+            turnId: firstTurn.turnId,
+            outcome: { status: "interrupted" },
+          },
         })
         expect(targetEvents.map((event) => event.seq)).toEqual(
           targetEvents.map((_, index) => index + 1),
@@ -720,9 +723,8 @@ for (const implementation of ["memory", "jsonl"] as const) {
         const read = await kernel.readSession({ sessionId: active.sessionId })
 
         expect(output.events.map((event) => event.type)).toEqual([
-          HistoryRecordType.AgentMessage,
           EventType.ItemCompleted,
-          HistoryRecordType.ModelToolCall,
+          EventType.ItemCompleted,
           EventType.ItemStarted,
         ])
         expect(read.session?.tools[0]).toMatchObject({
@@ -736,6 +738,39 @@ for (const implementation of ["memory", "jsonl"] as const) {
           "tool_call",
           "tool_result",
         ])
+      })
+    })
+
+    it("rejects a tool whose semantic type changes after it starts", async () => {
+      await withKernel(implementation, async ({ kernel }) => {
+        const active = await activeTurn(kernel)
+        await kernel.recordAssistantOutput({
+          ...active,
+          toolCalls: [
+            {
+              id: "tool_drift",
+              name: "read_file",
+              input: { path: "README.md" },
+              execution: { type: "file_read", path: "README.md" },
+              requiresPermission: false,
+            },
+          ],
+        })
+
+        await expect(
+          kernel.recordToolResult({
+            ...active,
+            toolCallId: "tool_drift",
+            execution: {
+              type: "file_change",
+              request: { operation: "edit", paths: ["README.md"] },
+              changes: [],
+            },
+            content: { kind: "text", text: "contents" },
+          }),
+        ).rejects.toThrow(
+          "Tool execution type changed from file_read to file_change.",
+        )
       })
     })
 
@@ -1009,8 +1044,13 @@ for (const implementation of ["memory", "jsonl"] as const) {
 
         expect(first.created).toBe(true)
         expect(retry).toEqual({ events: [], created: false })
-        expect(replay.events.map((event) => event.type)).toContain(
-          EventType.TurnInterrupted,
+        expect(replay.events).toContainEqual(
+          expect.objectContaining({
+            type: EventType.TurnCompleted,
+            data: expect.objectContaining({
+              outcome: { status: "interrupted", reason: "restart" },
+            }),
+          }),
         )
         expect(replay.events.map((event) => event.type)).not.toContain(
           "permission.cancelled",
@@ -1071,10 +1111,13 @@ for (const implementation of ["memory", "jsonl"] as const) {
 
         expect(failed.events).toEqual([failed.event])
         expect(failed.event).toMatchObject({
-          type: EventType.TurnFailed,
+          type: EventType.TurnCompleted,
           data: {
             turnId: failedTurn.turnId,
-            error: { code: "provider_error", message: "unavailable" },
+            outcome: {
+              status: "failed",
+              error: { code: "provider_error", message: "unavailable" },
+            },
             usage: {
               inputTokens: 100,
               outputTokens: 8,
@@ -1091,8 +1134,11 @@ for (const implementation of ["memory", "jsonl"] as const) {
         })
         expect(cancelled.events).toEqual([cancelled.event])
         expect(cancelled.event).toMatchObject({
-          type: EventType.TurnCancelled,
-          data: { turnId: cancelledTurn.turnId, reason: "user stopped" },
+          type: EventType.TurnCompleted,
+          data: {
+            turnId: cancelledTurn.turnId,
+            outcome: { status: "cancelled", reason: "user stopped" },
+          },
         })
         const read = await kernel.readSession({ sessionId: session.sessionId })
         expect(read.session?.failedTurns).toEqual([

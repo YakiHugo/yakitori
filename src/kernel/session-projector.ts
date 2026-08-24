@@ -23,10 +23,12 @@ import {
   type StoredEventEnvelope,
   type TextContent,
   type TokenUsage,
+  type ToolExecutionItem,
   type TurnExecutionContext,
   type TurnMetrics,
   type WorldStateFragment,
 } from "./events.ts"
+import { jsonValuesEqual } from "./json-equality.ts"
 import {
   InputState,
   type InputState as InputStateType,
@@ -37,6 +39,10 @@ import {
   TurnState,
   type TurnState as TurnStateType,
 } from "./session-states.ts"
+import {
+  executionDescriptor,
+  toolExecutionDescriptorsCompatible,
+} from "./tool-execution.ts"
 
 export { InputState, PermissionState, ToolState, TurnState }
 
@@ -181,7 +187,6 @@ export type TurnProjection = {
   readonly updatedAt: string
   readonly parentTurnId?: string
   readonly executionContext?: TurnExecutionContext
-  readonly outputMessageId?: string
   readonly error?: KernelError
   readonly cancelledReason?: string
   readonly interruptedReason?: string
@@ -222,6 +227,7 @@ export type ToolProjection = {
   readonly turnId: string
   readonly name: string
   readonly input: JsonValue
+  readonly execution: ToolExecutionItem
   readonly state: ToolStateType
   readonly requestedAt: string
   readonly updatedAt: string
@@ -578,58 +584,44 @@ function applyKnownEvent(
     case EventType.TurnCompleted: {
       const turn = turns.get(event.data.turnId)
       if (!turn) return
-      turn.state = TurnState.Completed
       turn.updatedAt = event.createdAt
-      if (event.data.outputMessageId !== undefined) {
-        turn.outputMessageId = event.data.outputMessageId
+      if (event.data.usage !== undefined) turn.usage = event.data.usage
+      if (event.data.metrics !== undefined) turn.metrics = event.data.metrics
+      const outcome = event.data.outcome
+      switch (outcome.status) {
+        case "completed":
+          turn.state = TurnState.Completed
+          break
+        case "failed":
+          turn.state = TurnState.Failed
+          turn.error = outcome.error
+          break
+        case "cancelled":
+          turn.state = TurnState.Cancelled
+          if (outcome.reason !== undefined)
+            turn.cancelledReason = outcome.reason
+          break
+        case "interrupted":
+          turn.state = TurnState.Interrupted
+          if (outcome.reason !== undefined) {
+            turn.interruptedReason = outcome.reason
+          }
+          break
       }
-      if (event.data.usage !== undefined) turn.usage = event.data.usage
-      if (event.data.metrics !== undefined) turn.metrics = event.data.metrics
       return
     }
-    case EventType.TurnFailed: {
-      const turn = turns.get(event.data.turnId)
-      if (!turn) return
-      turn.state = TurnState.Failed
-      turn.error = event.data.error
-      turn.updatedAt = event.createdAt
-      if (event.data.usage !== undefined) turn.usage = event.data.usage
-      if (event.data.metrics !== undefined) turn.metrics = event.data.metrics
-      return
-    }
-    case EventType.TurnCancelled: {
-      const turn = turns.get(event.data.turnId)
-      if (!turn) return
-      turn.state = TurnState.Cancelled
-      turn.updatedAt = event.createdAt
-      if (event.data.usage !== undefined) turn.usage = event.data.usage
-      if (event.data.metrics !== undefined) turn.metrics = event.data.metrics
-      if (event.data.reason !== undefined)
-        turn.cancelledReason = event.data.reason
-      return
-    }
-    case EventType.TurnInterrupted: {
-      const turn = turns.get(event.data.turnId)
-      if (!turn) return
-      turn.state = TurnState.Interrupted
-      turn.updatedAt = event.createdAt
-      if (event.data.usage !== undefined) turn.usage = event.data.usage
-      if (event.data.metrics !== undefined) turn.metrics = event.data.metrics
-      if (event.data.reason !== undefined)
-        turn.interruptedReason = event.data.reason
-      return
-    }
-    case HistoryRecordType.AgentMessage:
-      applyAssistantMessage(turns, items, event)
-      return
-    case HistoryRecordType.ModelToolCall:
-      applyToolCall(turns, items, tools, event)
-      return
-    case HistoryRecordType.ModelToolResult:
-      applyToolResult(turns, items, tools, event)
-      return
     case EventType.ItemStarted:
+      applyToolStarted(turns, items, tools, event)
+      return
     case EventType.ItemCompleted:
+      if (
+        event.data.item.type === "agent_message" ||
+        event.data.item.type === "reasoning"
+      ) {
+        applyAssistantItem(turns, items, event)
+      } else {
+        applyToolCompleted(turns, items, tools, event)
+      }
       return
     case EventType.PermissionRequested:
       applyPermissionRequested(tools, permissions, event)
@@ -731,130 +723,166 @@ function compactionProjection(
   }
 }
 
-function applyAssistantMessage(
+function applyAssistantItem(
   turns: Map<string, MutableTurn>,
   items: Map<string, ItemProjection>,
-  event: Extract<
-    EventEnvelope,
-    { type: typeof HistoryRecordType.AgentMessage }
-  >,
+  event: Extract<EventEnvelope, { type: typeof EventType.ItemCompleted }>,
 ): void {
+  const execution = event.data.item
+  if (execution.type !== "agent_message" && execution.type !== "reasoning") {
+    return
+  }
   const turn = turns.get(event.data.turnId)
-  if (!turn) return
-  const text = event.data.content
-    .filter((block) => block.type === "text")
-    .map((block) => block.text)
-    .join("")
+  if (!turn) {
+    invalidReplay(`Item ${execution.itemId} has no matching Turn.`)
+  }
+  requireNewItemId(items, execution.itemId)
+  const text =
+    execution.type === "reasoning"
+      ? execution.text
+      : execution.content.map((block) => block.text).join("")
   const item: ItemProjection = {
-    itemId: event.data.messageId,
+    itemId: execution.itemId,
     turnId: event.data.turnId,
-    kind: ItemKind.AssistantMessage,
+    kind:
+      execution.type === "reasoning"
+        ? ItemKind.Reasoning
+        : ItemKind.AssistantMessage,
     content: { kind: "text", text },
     status: ItemStatus.Completed,
     appendedAt: event.createdAt,
     updatedAt: event.createdAt,
-    ...(event.data.providerMetadata === undefined
+    ...(execution.providerMetadata === undefined
       ? {}
-      : { providerMetadata: event.data.providerMetadata }),
-  }
-  for (const [index, block] of event.data.content.entries()) {
-    if (block.type !== "reasoning") continue
-    const reasoning: ItemProjection = {
-      itemId: `${event.data.messageId}:reasoning:${index}`,
-      turnId: event.data.turnId,
-      kind: ItemKind.Reasoning,
-      content: { kind: "text", text: block.text },
-      status: ItemStatus.Completed,
-      appendedAt: event.createdAt,
-      updatedAt: event.createdAt,
-      ...(block.providerMetadata === undefined
-        ? {}
-        : { providerMetadata: block.providerMetadata }),
-    }
-    items.set(reasoning.itemId, reasoning)
-    turn.itemIds.push(reasoning.itemId)
+      : { providerMetadata: execution.providerMetadata }),
   }
   items.set(item.itemId, item)
   turn.itemIds.push(item.itemId)
 }
 
-function applyToolCall(
+function applyToolStarted(
   turns: Map<string, MutableTurn>,
   items: Map<string, ItemProjection>,
   tools: Map<string, MutableTool>,
-  event: Extract<
-    EventEnvelope,
-    { type: typeof HistoryRecordType.ModelToolCall }
-  >,
+  event: Extract<EventEnvelope, { type: typeof EventType.ItemStarted }>,
 ): void {
+  const execution = event.data.item
   const turn = turns.get(event.data.turnId)
-  if (!turn) return
-  items.set(event.data.itemId, {
-    itemId: event.data.itemId,
+  if (!turn) {
+    invalidReplay(`Tool start ${execution.toolCallId} has no matching Turn.`)
+  }
+  requireNewItemId(items, execution.itemId)
+  if (tools.has(execution.toolCallId)) {
+    invalidReplay(`Tool call ID ${execution.toolCallId} is not unique.`)
+  }
+  items.set(execution.itemId, {
+    itemId: execution.itemId,
     turnId: event.data.turnId,
     kind: ItemKind.ToolCall,
     content: {
       kind: "json",
       value: {
-        id: event.data.toolCallId,
-        name: event.data.name,
-        input: event.data.input,
+        id: execution.toolCallId,
+        name: execution.name,
+        input: execution.input,
       },
     },
     status: ItemStatus.Completed,
     appendedAt: event.createdAt,
     updatedAt: event.createdAt,
-    ...(event.data.providerMetadata === undefined
-      ? {}
-      : { providerMetadata: event.data.providerMetadata }),
   })
-  tools.set(event.data.toolCallId, {
-    toolCallId: event.data.toolCallId,
+  tools.set(execution.toolCallId, {
+    toolCallId: execution.toolCallId,
     turnId: event.data.turnId,
-    name: event.data.name,
-    input: event.data.input,
+    name: execution.name,
+    input: execution.input,
+    execution,
     state: ToolState.Requested,
     requestedAt: event.createdAt,
     updatedAt: event.createdAt,
-    requestItemId: event.data.itemId,
-    requiresPermission: event.data.requiresPermission,
-    ...(event.data.providerMetadata === undefined
-      ? {}
-      : { providerMetadata: event.data.providerMetadata }),
+    requestItemId: execution.itemId,
+    requiresPermission: execution.requiresPermission,
   })
-  turn.itemIds.push(event.data.itemId)
+  turn.itemIds.push(execution.itemId)
 }
 
-function applyToolResult(
+function applyToolCompleted(
   turns: Map<string, MutableTurn>,
   items: Map<string, ItemProjection>,
   tools: Map<string, MutableTool>,
-  event: Extract<
-    EventEnvelope,
-    { type: typeof HistoryRecordType.ModelToolResult }
-  >,
+  event: Extract<EventEnvelope, { type: typeof EventType.ItemCompleted }>,
 ): void {
-  const tool = tools.get(event.data.toolCallId)
-  if (!tool) return
+  const execution = event.data.item
+  if (execution.type === "agent_message" || execution.type === "reasoning") {
+    return
+  }
+  const tool = tools.get(execution.toolCallId)
+  if (!tool) {
+    invalidReplay(
+      `Tool completion ${execution.toolCallId} has no matching start.`,
+    )
+  }
+  if (tool.turnId !== event.data.turnId) {
+    invalidReplay(
+      `Tool completion ${execution.toolCallId} belongs to a different turn.`,
+    )
+  }
+  if (tool.state !== ToolState.Requested || tool.resultItemId !== undefined) {
+    invalidReplay(`Tool ${execution.toolCallId} completed more than once.`)
+  }
+  if (
+    tool.requestItemId !== execution.itemId ||
+    tool.name !== execution.name ||
+    !jsonValuesEqual(tool.input, execution.input) ||
+    tool.requiresPermission !== execution.requiresPermission
+  ) {
+    invalidReplay(
+      `Tool completion ${execution.toolCallId} does not match its start.`,
+    )
+  }
+  const startedDescriptor = executionDescriptor(tool.execution)
+  const completedDescriptor = executionDescriptor(execution)
+  if (
+    !toolExecutionDescriptorsCompatible(startedDescriptor, completedDescriptor)
+  ) {
+    invalidReplay(
+      `Tool completion ${execution.toolCallId} changed execution semantics.`,
+    )
+  }
+  requireNewItemId(items, execution.resultItemId)
   const status =
-    event.data.error === undefined ? ItemStatus.Completed : ItemStatus.Failed
-  items.set(event.data.toolResultId, {
-    itemId: event.data.toolResultId,
+    execution.error === undefined ? ItemStatus.Completed : ItemStatus.Failed
+  items.set(execution.resultItemId, {
+    itemId: execution.resultItemId,
     turnId: event.data.turnId,
     kind: ItemKind.ToolResult,
-    content: event.data.content,
+    content: execution.content,
     status,
     appendedAt: event.createdAt,
     updatedAt: event.createdAt,
   })
   tool.state =
-    event.data.error === undefined ? ToolState.Completed : ToolState.Failed
+    execution.error === undefined ? ToolState.Completed : ToolState.Failed
   tool.updatedAt = event.createdAt
-  tool.resultItemId = event.data.toolResultId
-  if (event.data.output !== undefined) tool.output = event.data.output
-  if (event.data.error !== undefined) tool.error = event.data.error
+  tool.resultItemId = execution.resultItemId
+  tool.execution = execution
+  if (execution.output !== undefined) tool.output = execution.output
+  if (execution.error !== undefined) tool.error = execution.error
   const turn = turns.get(event.data.turnId)
-  turn?.itemIds.push(event.data.toolResultId)
+  turn?.itemIds.push(execution.resultItemId)
+}
+
+function invalidReplay(message: string): never {
+  throw new Error(`Invalid Session replay: ${message}`)
+}
+
+function requireNewItemId(
+  items: ReadonlyMap<string, ItemProjection>,
+  itemId: string,
+): void {
+  if (items.has(itemId)) {
+    invalidReplay(`Item ID ${itemId} is not unique.`)
+  }
 }
 
 function applyPermissionRequested(

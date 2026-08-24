@@ -3,8 +3,14 @@ import type {
   ExecutionEntry,
   ToolDiff,
 } from "./execution-view.ts"
+import type { ToolExecutionItem } from "../kernel/events.ts"
+import type { FileChange } from "../kernel/events.ts"
 
 type ToolEntry = Extract<ExecutionEntry, { readonly kind: "tool" }>
+type ExecutionOf<Type extends ToolExecutionItem["type"]> = Extract<
+  ToolExecutionItem,
+  { readonly type: Type }
+>
 
 export type FileTarget = {
   readonly kind: "file"
@@ -63,6 +69,10 @@ export type ToolDetail =
       readonly diff: ToolDiff
     }
   | {
+      readonly kind: "file_changes"
+      readonly changes: readonly FileChange[]
+    }
+  | {
       readonly kind: "command"
       readonly command: string
       readonly result?: CommandResult
@@ -77,7 +87,10 @@ export type ToolDetail =
   | {
       readonly kind: "collaboration"
       readonly text?: string
-      readonly sessionId?: string
+      readonly receivers: readonly {
+        readonly sessionId: string
+        readonly path: string
+      }[]
     }
   | { readonly kind: "text"; readonly text: string }
 
@@ -91,45 +104,50 @@ export type ToolPresentation = {
   readonly detail?: ToolDetail
 }
 
-export function presentTool(entry: ToolEntry): ToolPresentation {
-  switch (entry.executionType) {
+export function presentTool(
+  entry: ToolEntry,
+  workspaceRoot?: string,
+): ToolPresentation {
+  switch (entry.execution.type) {
     case "command_execution":
-      return presentRunCommand(entry)
+      return presentRunCommand(entry, entry.execution, workspaceRoot)
     case "file_change":
-      return entry.name === "write_file"
-        ? presentDiff(entry, "Write", "Writing")
-        : presentDiff(entry, "Edit", "Editing")
+      return presentDiff(entry, entry.execution)
     case "file_read":
-      return presentReadFile(entry)
-    case "search":
-      return entry.name === "glob" ? presentGlob(entry) : presentGrep(entry)
-    case "web":
-      return entry.name === "web_search"
-        ? presentWebSearch(entry)
-        : presentWebFetch(entry)
-    case "collab_agent":
-      return presentCollaboration(entry)
-    case "tool_execution":
-      return presentUnknown(entry)
+      return presentReadFile(entry, entry.execution)
+    case "file_search":
+      return entry.execution.operation === "glob"
+        ? presentGlob(entry, entry.execution)
+        : presentGrep(entry, entry.execution)
+    case "web_fetch":
+      return presentWebFetch(entry, entry.execution)
+    case "web_search":
+      return presentWebSearch(entry, entry.execution)
+    case "collaboration_tool_call":
+      return presentCollaboration(entry, entry.execution)
+    case "mcp_tool_call":
+      return presentMcpToolCall(entry, entry.execution)
+    case "dynamic_tool_call":
+      return presentUnknown(entry, entry.execution)
   }
 }
 
-function presentReadFile(entry: ToolEntry): ToolPresentation {
-  const input = recordOf(entry.input)
-  const output = recordOf(entry.output)
-  const path = stringOf(output?.path) ?? stringOf(input?.path) ?? entry.summary
+function presentReadFile(
+  entry: ToolEntry,
+  execution: ExecutionOf<"file_read">,
+): ToolPresentation {
+  const result = execution.result
+  const path = result?.path ?? execution.path
   const resultText = entry.resultText
-  const isDirectory =
-    output?.kind === "directory" || resultText?.startsWith("Listed ") === true
-  const range = recordOf(output?.range)
-  const offset = numberOf(range?.offset) ?? numberOf(input?.offset)
-  const length = numberOf(range?.limit)
+  const isDirectory = result?.kind === "directory"
+  const offset = result?.range?.offset ?? execution.offset
+  const length = result?.range?.limit ?? execution.limit
   const meta = [
     offset !== undefined && length !== undefined && length > 0
       ? `lines ${offset}–${offset + length - 1}`
       : undefined,
-    output?.empty === true ? "empty" : undefined,
-    output?.truncated === true ? "partial" : undefined,
+    result?.empty === true ? "empty" : undefined,
+    result?.truncated === true ? "partial" : undefined,
   ].filter(isString)
   return {
     verb: isDirectory ? "List" : "Read",
@@ -148,8 +166,8 @@ function presentReadFile(entry: ToolEntry): ToolPresentation {
         ? {
             detail: {
               kind: "file_list" as const,
-              paths: directoryPaths(path, resultText),
-              truncated: output?.truncated === true,
+              paths: directoryPaths(path, result?.entries ?? []),
+              truncated: result?.truncated === true,
             },
           }
         : {
@@ -158,27 +176,23 @@ function presentReadFile(entry: ToolEntry): ToolPresentation {
               path,
               content: resultText,
               ...(offset === undefined ? {} : { startLine: offset }),
-              truncated: output?.truncated === true,
+              truncated: result?.truncated === true,
             },
           }),
   }
 }
 
-function presentGrep(entry: ToolEntry): ToolPresentation {
-  const input = recordOf(entry.input)
-  const output = recordOf(entry.output)
-  const pattern = stringOf(input?.pattern) ?? "pattern"
-  const path = stringOf(input?.path) ?? stringOf(output?.path) ?? "."
-  const mode = normalizeGrepMode(
-    stringOf(output?.outputMode) ?? stringOf(input?.output_mode),
-  )
-  const count = numberOf(output?.count)
-  const parsed = parseGrepResult(
-    entry.resultText,
-    mode,
-    input?.["-n"] !== false,
-    output?.locations,
-  )
+function presentGrep(
+  entry: ToolEntry,
+  execution: ExecutionOf<"file_search">,
+): ToolPresentation {
+  const result = execution.result
+  const pattern = execution.pattern || "pattern"
+  const path = result?.path ?? execution.path ?? "."
+  const mode =
+    result?.outputMode ?? execution.outputMode ?? "files_with_matches"
+  const count = result?.count
+  const parsed = fileSearchPresentation(result, mode)
   const fileCount = parsed.groups.length
   const meta = [
     count === undefined
@@ -189,8 +203,8 @@ function presentGrep(entry: ToolEntry): ToolPresentation {
     mode === "content" && fileCount > 0
       ? `${fileCount} ${fileCount === 1 ? "file" : "files"}`
       : undefined,
-    output?.timedOut === true ? "timed out" : undefined,
-    output?.truncated === true ? "partial" : undefined,
+    result?.timedOut === true ? "timed out" : undefined,
+    result?.truncated === true ? "partial" : undefined,
   ].filter(isString)
 
   return {
@@ -199,20 +213,19 @@ function presentGrep(entry: ToolEntry): ToolPresentation {
     subject: `“${truncateLine(pattern, 96)}” in ${path}`,
     subjectTone: "code",
     meta,
-    ...grepDetail(entry, parsed, output?.truncated === true),
+    ...grepDetail(entry, parsed, result?.truncated === true),
   }
 }
 
-function presentGlob(entry: ToolEntry): ToolPresentation {
-  const input = recordOf(entry.input)
-  const output = recordOf(entry.output)
-  const pattern =
-    stringOf(input?.pattern) ?? stringOf(output?.pattern) ?? "files"
-  const path = stringOf(input?.path) ?? stringOf(output?.path)
-  const count = numberOf(output?.count)
-  const paths =
-    stringArrayOf(output?.paths) ??
-    parseListedPaths(entry.resultText, "Glob returned")
+function presentGlob(
+  entry: ToolEntry,
+  execution: ExecutionOf<"file_search">,
+): ToolPresentation {
+  const result = execution.result
+  const pattern = execution.pattern || "files"
+  const path = result?.path ?? execution.path
+  const count = result?.count
+  const paths = result?.paths ?? []
   return {
     verb: "Find",
     activeVerb: "Finding",
@@ -222,7 +235,7 @@ function presentGlob(entry: ToolEntry): ToolPresentation {
       count === undefined
         ? undefined
         : `${count} ${count === 1 ? "file" : "files"}`,
-      output?.truncated === true ? "partial" : undefined,
+      result?.truncated === true ? "partial" : undefined,
     ].filter(isString),
     ...(entry.resultText === undefined
       ? {}
@@ -232,7 +245,7 @@ function presentGlob(entry: ToolEntry): ToolPresentation {
             detail: {
               kind: "file_list" as const,
               paths,
-              truncated: output?.truncated === true,
+              truncated: result?.truncated === true,
             },
           }),
   }
@@ -240,38 +253,75 @@ function presentGlob(entry: ToolEntry): ToolPresentation {
 
 function presentDiff(
   entry: ToolEntry,
-  verb: string,
-  activeVerb: string,
+  execution: ExecutionOf<"file_change">,
 ): ToolPresentation {
-  const input = recordOf(entry.input)
-  const output = recordOf(entry.output)
-  const path = stringOf(output?.path) ?? stringOf(input?.path) ?? entry.summary
-  const counts =
-    entry.diff === undefined ? undefined : diffCounts(entry.diff.text)
-  const created = output?.created === true
+  const change = execution.changes[0]
+  const sourcePath = change?.path ?? execution.request.paths[0] ?? "file"
+  const movePath = change?.kind === "update" ? change.movePath : undefined
+  const targetPath = movePath ?? sourcePath
+  const operation = execution.request.operation
+  const verb = operation === "write" ? "Write" : "Edit"
+  const activeVerb = operation === "write" ? "Writing" : "Editing"
+  const diff = change?.diff
+  const counts = execution.changes.reduce(
+    (total, current) => {
+      const next =
+        current.diff === undefined ? undefined : diffCounts(current.diff.text)
+      return next === undefined
+        ? total
+        : {
+            added: total.added + next.added,
+            deleted: total.deleted + next.deleted,
+          }
+    },
+    { added: 0, deleted: 0 },
+  )
+  const hasDiff = execution.changes.some(
+    (current) => current.diff !== undefined,
+  )
+  const created = change?.kind === "add"
+  const multiple = execution.changes.length > 1
   return {
-    verb: created ? "Create" : verb,
-    activeVerb: created ? "Creating" : activeVerb,
-    subject: path,
+    verb: multiple ? "Change" : created ? "Create" : verb,
+    activeVerb: multiple ? "Changing" : created ? "Creating" : activeVerb,
+    subject: multiple
+      ? `${execution.changes.length} files`
+      : movePath === undefined
+        ? sourcePath
+        : `${sourcePath} → ${movePath}`,
     subjectTone: "code",
     meta: [
-      counts === undefined ? undefined : `+${counts.added} −${counts.deleted}`,
-      entry.diff?.truncated === true ? "partial" : undefined,
+      hasDiff ? `+${counts.added} −${counts.deleted}` : undefined,
+      execution.changes.some((current) => current.diff?.truncated === true)
+        ? "partial"
+        : undefined,
     ].filter(isString),
-    target: { kind: "file", path },
-    ...(entry.diff === undefined
-      ? entry.resultText === undefined
-        ? {}
-        : { detail: { kind: "text" as const, text: entry.resultText } }
-      : { detail: { kind: "diff" as const, path, diff: entry.diff } }),
+    ...(multiple
+      ? {}
+      : { target: { kind: "file" as const, path: targetPath } }),
+    ...(multiple
+      ? {
+          detail: {
+            kind: "file_changes" as const,
+            changes: execution.changes,
+          },
+        }
+      : diff === undefined
+        ? entry.resultText === undefined
+          ? {}
+          : { detail: { kind: "text" as const, text: entry.resultText } }
+        : { detail: { kind: "diff" as const, path: targetPath, diff } }),
   }
 }
 
-function presentRunCommand(entry: ToolEntry): ToolPresentation {
-  const input = recordOf(entry.input)
-  const command = stringOf(input?.command) ?? entry.summary
-  const description = stringOf(input?.description)
-  const result = entry.commandResult
+function presentRunCommand(
+  entry: ToolEntry,
+  execution: ExecutionOf<"command_execution">,
+  workspaceRoot?: string,
+): ToolPresentation {
+  const command = execution.command
+  const description = execution.description
+  const result = displayCommandResult(execution.result, workspaceRoot)
   return {
     verb: "Run",
     activeVerb: "Running",
@@ -300,18 +350,20 @@ function presentRunCommand(entry: ToolEntry): ToolPresentation {
   }
 }
 
-function presentWebFetch(entry: ToolEntry): ToolPresentation {
-  const input = recordOf(entry.input)
-  const output = recordOf(entry.output)
-  const url = stringOf(output?.url) ?? stringOf(input?.url) ?? entry.summary
+function presentWebFetch(
+  entry: ToolEntry,
+  execution: ExecutionOf<"web_fetch">,
+): ToolPresentation {
+  const result = execution.result
+  const url = result?.url ?? execution.url
   return {
     verb: "Fetch",
     activeVerb: "Fetching",
     subject: displayUrl(url),
     subjectTone: "code",
     meta: [
-      numberOf(output?.status)?.toString(),
-      output?.truncated === true ? "partial" : undefined,
+      result?.status.toString(),
+      result?.truncated === true ? "partial" : undefined,
     ].filter(isString),
     ...(isHttpUrl(url) ? { target: { kind: "url" as const, url } } : {}),
     ...(entry.resultText === undefined
@@ -320,10 +372,12 @@ function presentWebFetch(entry: ToolEntry): ToolPresentation {
   }
 }
 
-function presentWebSearch(entry: ToolEntry): ToolPresentation {
-  const input = recordOf(entry.input)
-  const query = stringOf(input?.query) ?? entry.summary
-  const links = extractLinks(entry.resultText ?? "")
+function presentWebSearch(
+  entry: ToolEntry,
+  execution: ExecutionOf<"web_search">,
+): ToolPresentation {
+  const query = execution.query
+  const links = execution.result?.links ?? []
   return {
     verb: "Search web",
     activeVerb: "Searching web",
@@ -345,35 +399,65 @@ function presentWebSearch(entry: ToolEntry): ToolPresentation {
   }
 }
 
-function presentCollaboration(entry: ToolEntry): ToolPresentation {
-  const input = recordOf(entry.input)
-  const output = recordOf(entry.output)
-  const description =
-    stringOf(input?.message) ?? stringOf(input?.task_name) ?? entry.summary
-  const sessionId = stringOf(output?.agentId)
-  const path = stringOf(output?.path)
+function presentCollaboration(
+  entry: ToolEntry,
+  execution: ExecutionOf<"collaboration_tool_call">,
+): ToolPresentation {
+  const description = execution.description
+  const receiver =
+    execution.receivers.length === 1 ? execution.receivers[0] : undefined
   return {
     verb: "Collaborate",
     activeVerb: "Collaborating",
     subject: `“${truncateLine(description, 110)}”`,
     subjectTone: "text",
-    meta: path === undefined ? [] : [path],
-    ...(sessionId === undefined
+    meta:
+      execution.receivers.length === 0
+        ? []
+        : execution.receivers.length === 1
+          ? [execution.receivers[0]?.path ?? ""]
+          : [`${execution.receivers.length} agents`],
+    ...(receiver === undefined
       ? {}
-      : { target: { kind: "session" as const, sessionId } }),
+      : {
+          target: {
+            kind: "session" as const,
+            sessionId: receiver.sessionId,
+          },
+        }),
     detail: {
       kind: "collaboration",
       ...(entry.resultText === undefined ? {} : { text: entry.resultText }),
-      ...(sessionId === undefined ? {} : { sessionId }),
+      receivers: execution.receivers,
     },
   }
 }
 
-function presentUnknown(entry: ToolEntry): ToolPresentation {
+function presentMcpToolCall(
+  entry: ToolEntry,
+  execution: ExecutionOf<"mcp_tool_call">,
+): ToolPresentation {
   return {
-    verb: humanize(entry.name),
-    activeVerb: `${humanize(entry.name)}…`,
-    subject: entry.summary === entry.name ? "" : entry.summary,
+    verb: humanize(execution.tool),
+    activeVerb: `${humanize(execution.tool)}…`,
+    subject: execution.server,
+    subjectTone: "code",
+    meta: ["MCP"],
+    ...(entry.resultText === undefined
+      ? {}
+      : { detail: { kind: "text" as const, text: entry.resultText } }),
+  }
+}
+
+function presentUnknown(
+  entry: ToolEntry,
+  execution: ExecutionOf<"dynamic_tool_call">,
+): ToolPresentation {
+  const subject = summarizeDynamicInput(execution.input)
+  return {
+    verb: humanize(execution.name),
+    activeVerb: `${humanize(execution.name)}…`,
+    subject,
     subjectTone: "text",
     meta: [],
     ...(entry.resultText === undefined
@@ -382,11 +466,19 @@ function presentUnknown(entry: ToolEntry): ToolPresentation {
   }
 }
 
-function parseGrepResult(
-  text: string | undefined,
+function summarizeDynamicInput(input: unknown): string {
+  const value = recordOf(input)
+  const subject =
+    stringOf(value?.description) ??
+    stringOf(value?.path) ??
+    stringOf(value?.query) ??
+    stringOf(value?.message)
+  return subject === undefined ? "" : truncateLine(subject, 120)
+}
+
+function fileSearchPresentation(
+  result: ExecutionOf<"file_search">["result"],
   mode: string,
-  lineNumbers: boolean,
-  locations: unknown,
 ):
   | { readonly kind: "matches"; readonly groups: readonly FileMatchGroup[] }
   | {
@@ -394,52 +486,19 @@ function parseGrepResult(
       readonly paths: readonly string[]
       readonly groups: readonly []
     } {
-  const lines = resultLines(text, "Grep returned")
-  const structured = searchLocationsOf(locations)
   if (mode !== "content") {
     const paths =
-      structured.length > 0
-        ? structured.map((location) => location.path)
-        : lines.map((line) =>
-            mode === "count" ? line.replace(/:\d+$/, "") : line,
-          )
+      result?.paths ?? result?.matches?.map((match) => match.path) ?? []
     return { kind: "files", paths, groups: [] }
   }
-  const parsedLines = lines.flatMap((line) => {
-    const parsed = parseGrepContentLine(line, lineNumbers)
-    return parsed === undefined ? [] : [parsed]
-  })
-  const textByLocation = new Map<string, string[]>()
-  for (const parsed of parsedLines) {
-    const key = grepLocationKey(parsed.path, parsed.line)
-    textByLocation.set(key, [...(textByLocation.get(key) ?? []), parsed.text])
-  }
   const groups = new Map<string, FileMatch[]>()
-  if (structured.length > 0) {
-    for (const location of structured) {
-      const entries = groups.get(location.path) ?? []
-      const candidates = textByLocation.get(
-        grepLocationKey(location.path, lineNumbers ? location.line : undefined),
-      )
-      const text = candidates?.shift()
-      entries.push({
-        ...(location.line === undefined ? {} : { line: location.line }),
-        ...(text === undefined ? {} : { text }),
-      })
-      groups.set(location.path, entries)
-    }
-    return {
-      kind: "matches",
-      groups: [...groups].map(([path, matches]) => ({ path, matches })),
-    }
-  }
-  for (const parsed of parsedLines) {
-    const entries = groups.get(parsed.path) ?? []
+  for (const match of result?.matches ?? []) {
+    const entries = groups.get(match.path) ?? []
     entries.push({
-      ...(parsed.line === undefined ? {} : { line: parsed.line }),
-      text: parsed.text,
+      ...(match.line === undefined ? {} : { line: match.line }),
+      ...(match.text === undefined ? {} : { text: match.text }),
     })
-    groups.set(parsed.path, entries)
+    groups.set(match.path, entries)
   }
   return {
     kind: "matches",
@@ -449,7 +508,7 @@ function parseGrepResult(
 
 function grepDetail(
   entry: ToolEntry,
-  parsed: ReturnType<typeof parseGrepResult>,
+  parsed: ReturnType<typeof fileSearchPresentation>,
   truncated: boolean,
 ): Pick<ToolPresentation, "detail"> | Record<string, never> {
   if (entry.resultText === undefined) return {}
@@ -474,86 +533,13 @@ function grepDetail(
       }
 }
 
-function parseGrepContentLine(
-  line: string,
-  lineNumbers: boolean,
-):
-  | { readonly path: string; readonly line?: number; readonly text: string }
-  | undefined {
-  const match = lineNumbers
-    ? /^(.*?):(\d+):(.*)$/u.exec(line)
-    : /^(.*?):(.*)$/u.exec(line)
-  if (match === null || match[1] === undefined) return undefined
-  const lineNumber = lineNumbers ? Number(match[2]) : undefined
-  if (lineNumbers && !Number.isFinite(lineNumber)) return undefined
-  return {
-    path: match[1],
-    ...(lineNumber === undefined ? {} : { line: lineNumber }),
-    text: (lineNumbers ? match[3] : match[2]) ?? "",
-  }
-}
-
-function grepLocationKey(path: string, line: number | undefined): string {
-  return line === undefined ? path : `${path}:${line}`
-}
-
-function normalizeGrepMode(value: string | undefined): string {
-  if (value === "count_matches") return "count"
-  return value ?? "files_with_matches"
-}
-
-function searchLocationsOf(
-  value: unknown,
-): readonly { readonly path: string; readonly line?: number }[] {
-  if (!Array.isArray(value)) return []
-  return value.flatMap((item) => {
-    const location = recordOf(item)
-    const path = stringOf(location?.path)
-    const line = numberOf(location?.line)
-    return path === undefined
-      ? []
-      : [{ path, ...(line === undefined ? {} : { line }) }]
-  })
-}
-
-function directoryPaths(directory: string, text: string): string[] {
-  return parseListedPaths(text, "Listed").map((name) =>
+function directoryPaths(
+  directory: string,
+  entries: readonly string[],
+): string[] {
+  return entries.map((name) =>
     directory === "." ? name : `${directory.replace(/\/$/, "")}/${name}`,
   )
-}
-
-function parseListedPaths(text: string | undefined, prefix: string): string[] {
-  return resultLines(text, prefix)
-}
-
-function resultLines(text: string | undefined, prefix: string): string[] {
-  if (text === undefined) return []
-  return text
-    .split("\n")
-    .filter((line, index) => index > 0 || !line.startsWith(prefix))
-    .filter(
-      (line) =>
-        line !== "" &&
-        line !== "No files found." &&
-        line !== "No matches found." &&
-        !line.startsWith("("),
-    )
-}
-
-function extractLinks(text: string): WebLink[] {
-  const links: WebLink[] = []
-  const seen = new Set<string>()
-  for (const line of text.split("\n")) {
-    for (const match of line.matchAll(/https?:\/\/[^\s)>\]}]+/gu)) {
-      const url = match[0].replace(/[.,;:]$/, "")
-      if (seen.has(url)) continue
-      seen.add(url)
-      const before = line.slice(0, match.index).replace(/^\s*\d+[.)]\s*/, "")
-      const title = before.replace(/[\s—–:-]+$/, "").trim()
-      links.push({ title: title === "" ? displayUrl(url) : title, url })
-    }
-  }
-  return links
 }
 
 function diffCounts(text: string): {
@@ -568,6 +554,32 @@ function diffCounts(text: string): {
     if (line.startsWith("-")) deleted += 1
   }
   return { added, deleted }
+}
+
+function displayCommandResult(
+  result: ExecutionOf<"command_execution">["result"],
+  workspaceRoot?: string,
+): CommandResult | undefined {
+  if (result === undefined) return undefined
+  return {
+    ...result,
+    ...(result.cwd === undefined
+      ? {}
+      : { cwd: workspaceRelativePath(workspaceRoot, result.cwd) }),
+  }
+}
+
+function workspaceRelativePath(
+  workspaceRoot: string | undefined,
+  cwd: string,
+): string {
+  if (workspaceRoot === undefined) return cwd
+  const normalizedRoot = workspaceRoot.replaceAll("\\", "/").replace(/\/$/, "")
+  const normalizedCwd = cwd.replaceAll("\\", "/").replace(/\/$/, "")
+  if (normalizedCwd === normalizedRoot) return "."
+  return normalizedCwd.startsWith(`${normalizedRoot}/`)
+    ? normalizedCwd.slice(normalizedRoot.length + 1)
+    : cwd
 }
 
 function displayUrl(value: string): string {
@@ -613,16 +625,6 @@ function recordOf(value: unknown): Record<string, unknown> | undefined {
 
 function stringOf(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined
-}
-
-function numberOf(value: unknown): number | undefined {
-  return typeof value === "number" ? value : undefined
-}
-
-function stringArrayOf(value: unknown): readonly string[] | undefined {
-  return Array.isArray(value) && value.every((item) => typeof item === "string")
-    ? value
-    : undefined
 }
 
 function isString(value: string | undefined): value is string {

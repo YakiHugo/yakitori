@@ -1,4 +1,7 @@
 import { createEventId } from "./ids.ts"
+import { jsonValuesEqual } from "./json-equality.ts"
+
+export const EVENT_SCHEMA_VERSION = 4
 
 export const EventType = {
   SessionCreated: "session.created",
@@ -6,9 +9,6 @@ export const EventType = {
   InputCancelled: "input.cancelled",
   TurnStarted: "turn.started",
   TurnCompleted: "turn.completed",
-  TurnFailed: "turn.failed",
-  TurnCancelled: "turn.cancelled",
-  TurnInterrupted: "turn.interrupted",
   ItemStarted: "item.started",
   ItemCompleted: "item.completed",
   PermissionRequested: "permission.requested",
@@ -16,17 +16,13 @@ export const EventType = {
   ContextCompacted: "context.compacted",
 } as const
 
-// Mirrors Codex's ResponseItem/history versus EventMsg boundary: these records
-// are durable inputs to replay, resume, fork, and context construction, not
-// runtime events delivered to GUI subscribers.
+// Durable configuration and context records are separate from execution
+// events delivered to GUI subscribers.
 export const HistoryRecordType = {
   SessionMetadata: "session.metadata",
   TurnContext: "turn.context",
   InitialContext: "history.initialized",
   WorldState: "world_state",
-  AgentMessage: "conversation.agent_message",
-  ModelToolCall: "conversation.tool_call",
-  ModelToolResult: "conversation.tool_result",
 } as const
 
 export const ForkReason = {
@@ -398,125 +394,223 @@ export type TurnCompletedEvent = {
   readonly type: typeof EventType.TurnCompleted
   readonly data: {
     readonly turnId: string
-    readonly outputMessageId?: string
+    readonly outcome: TurnOutcome
     readonly usage?: TokenUsage
     readonly metrics?: TurnMetrics
     readonly metadata?: EventMetadata
   }
 }
 
-export type TurnFailedEvent = {
-  readonly type: typeof EventType.TurnFailed
-  readonly data: {
-    readonly turnId: string
-    readonly error: KernelError
-    readonly usage?: TokenUsage
-    readonly metrics?: TurnMetrics
-  }
-}
-
-export type TurnCancelledEvent = {
-  readonly type: typeof EventType.TurnCancelled
-  readonly data: {
-    readonly turnId: string
-    readonly reason?: string
-    readonly usage?: TokenUsage
-    readonly metrics?: TurnMetrics
-  }
-}
-
-export type TurnInterruptedEvent = {
-  readonly type: typeof EventType.TurnInterrupted
-  readonly data: {
-    readonly turnId: string
-    readonly reason?: string
-    readonly usage?: TokenUsage
-    readonly metrics?: TurnMetrics
-  }
-}
-
-export type AgentMessageRecord = {
-  readonly type: typeof HistoryRecordType.AgentMessage
-  readonly data: {
-    readonly messageId: string
-    readonly turnId: string
-    readonly content: readonly AssistantContentBlock[]
-    readonly providerMetadata?: EventMetadata
-  }
-}
-
-export type ModelToolCallRecord = {
-  readonly type: typeof HistoryRecordType.ModelToolCall
-  readonly data: {
-    readonly toolCallId: string
-    readonly itemId: string
-    readonly turnId: string
-    readonly name: string
-    readonly input: JsonValue
-    readonly requiresPermission: boolean
-    readonly providerMetadata?: EventMetadata
-  }
-}
-
-export type ModelToolResultRecord = {
-  readonly type: typeof HistoryRecordType.ModelToolResult
-  readonly data: {
-    readonly toolResultId: string
-    readonly toolCallId: string
-    readonly turnId: string
-    readonly content: ItemContent
-    readonly output?: JsonValue
-    readonly error?: KernelError
-  }
-}
+export type TurnOutcome =
+  | Readonly<{ status: "completed" }>
+  | Readonly<{ status: "failed"; error: KernelError }>
+  | Readonly<{ status: "cancelled"; reason?: string }>
+  | Readonly<{ status: "interrupted"; reason?: string }>
 
 export type ToolExecutionType =
   | "command_execution"
   | "file_change"
   | "file_read"
-  | "search"
-  | "web"
-  | "collab_agent"
-  | "tool_execution"
+  | "file_search"
+  | "web_fetch"
+  | "web_search"
+  | "collaboration_tool_call"
+  | "mcp_tool_call"
+  | "dynamic_tool_call"
 
-export type AgentMessageExecutionItem = {
-  readonly type: "agent_message"
-  readonly itemId: string
-  readonly content: readonly AssistantContentBlock[]
-  readonly streamId?: string
-}
+export type CollaborationAction =
+  | "spawn"
+  | "send_message"
+  | "follow_up"
+  | "wait"
+  | "interrupt"
+  | "list"
 
-export type ToolExecutionItem = {
-  readonly type: ToolExecutionType
-  readonly itemId: string
-  readonly toolCallId: string
-  readonly name: string
-  readonly input: JsonValue
-  readonly requiresPermission: boolean
-}
+export type CollaborationReceiver = Readonly<{
+  sessionId: string
+  path: string
+}>
 
-export type ItemStartedEvent = {
-  readonly type: typeof EventType.ItemStarted
-  readonly data: {
-    readonly turnId: string
-    readonly item: ToolExecutionItem
-  }
-}
+type FileChangeDiff = Readonly<{
+  format: "unified"
+  text: string
+  truncated: boolean
+}>
 
-export type ItemCompletedEvent = {
-  readonly type: typeof EventType.ItemCompleted
-  readonly data: {
-    readonly turnId: string
-    readonly item:
+export type FileChange =
+  | Readonly<{ path: string; kind: "add" | "delete"; diff?: FileChangeDiff }>
+  | Readonly<{
+      path: string
+      kind: "update"
+      movePath?: string
+      diff?: FileChangeDiff
+    }>
+
+export type CommandExecutionResult = Readonly<{
+  exitCode: number | null
+  signal: string | null
+  stdout: string
+  stderr: string
+  truncated: boolean
+  timedOut: boolean
+  durationMs?: number
+  cwd?: string
+  shell?: string
+  warnings?: ReadonlyArray<string>
+  blocked?: Readonly<{ rule: string }>
+  binary?: Readonly<{
+    stdout: boolean
+    stderr: boolean
+    stdoutBytes: number
+    stderrBytes: number
+  }>
+}>
+
+export type FileReadResult = Readonly<{
+  path: string
+  kind: "file" | "directory"
+  count?: number
+  entries?: ReadonlyArray<string>
+  range?: Readonly<{ offset: number; limit: number }>
+  empty: boolean
+  truncated: boolean
+}>
+
+export type FileSearchResult = Readonly<{
+  path: string
+  outputMode: "content" | "files_with_matches" | "count"
+  count: number
+  truncated: boolean
+  timedOut: boolean
+  paths?: ReadonlyArray<string>
+  matches?: ReadonlyArray<
+    Readonly<{ path: string; line?: number; text?: string; count?: number }>
+  >
+}>
+
+export type WebFetchResult = Readonly<{
+  url: string
+  status: number
+  truncated: boolean
+}>
+
+export type WebSearchResult = Readonly<{
+  links: ReadonlyArray<Readonly<{ title: string; url: string }>>
+}>
+
+export type McpToolCallResult = Readonly<{
+  content: ReadonlyArray<JsonValue>
+  structuredContent?: JsonValue
+  isError?: boolean
+  _meta?: JsonValue
+}>
+
+export type AgentMessageExecutionItem = Readonly<{
+  type: "agent_message"
+  itemId: string
+  content: ReadonlyArray<ModelTextBlock>
+  streamId?: string
+  providerMetadata?: EventMetadata
+}>
+
+export type ReasoningExecutionItem = Readonly<{
+  type: "reasoning"
+  itemId: string
+  text: string
+  streamId?: string
+  providerMetadata?: EventMetadata
+}>
+
+type ToolExecutionItemBase = Readonly<{
+  itemId: string
+  toolCallId: string
+  name: string
+  input: JsonValue
+  requiresPermission: boolean
+}>
+
+export type ToolExecutionDescriptor =
+  | Readonly<{
+      type: "command_execution"
+      command: string
+      description?: string
+      result?: CommandExecutionResult
+    }>
+  | Readonly<{
+      type: "file_change"
+      request: Readonly<{
+        operation: "edit" | "write" | "apply_patch"
+        paths: ReadonlyArray<string>
+      }>
+      changes: ReadonlyArray<FileChange>
+    }>
+  | Readonly<{
+      type: "file_read"
+      path: string
+      offset?: number
+      limit?: number
+      result?: FileReadResult
+    }>
+  | Readonly<{
+      type: "file_search"
+      operation: "grep" | "glob"
+      pattern: string
+      path?: string
+      outputMode?: "content" | "files_with_matches" | "count"
+      lineNumbers: boolean
+      result?: FileSearchResult
+    }>
+  | Readonly<{
+      type: "web_fetch"
+      url: string
+      result?: WebFetchResult
+    }>
+  | Readonly<{
+      type: "web_search"
+      query: string
+      result?: WebSearchResult
+    }>
+  | Readonly<{
+      type: "collaboration_tool_call"
+      action: CollaborationAction
+      description: string
+      receivers: ReadonlyArray<CollaborationReceiver>
+    }>
+  | Readonly<{
+      type: "mcp_tool_call"
+      server: string
+      tool: string
+      arguments: JsonValue
+      // Server-provided display hint only. Permission decisions use the
+      // runtime tool policy and must never trust this value.
+      readOnlyHint?: boolean
+      result?: McpToolCallResult
+    }>
+  | Readonly<{ type: "dynamic_tool_call" }>
+
+export type ToolExecutionItem = ToolExecutionItemBase & ToolExecutionDescriptor
+
+export type ItemStartedEvent = Readonly<{
+  type: typeof EventType.ItemStarted
+  data: Readonly<{ turnId: string; item: ToolExecutionItem }>
+}>
+
+export type ItemCompletedEvent = Readonly<{
+  type: typeof EventType.ItemCompleted
+  data: Readonly<{
+    turnId: string
+    item:
       | AgentMessageExecutionItem
-      | (ToolExecutionItem & {
-          readonly resultItemId: string
-          readonly content: ItemContent
-          readonly output?: JsonValue
-          readonly error?: KernelError
-        })
-  }
-}
+      | ReasoningExecutionItem
+      | (ToolExecutionItem &
+          Readonly<{
+            resultItemId: string
+            content: ItemContent
+            output?: JsonValue
+            error?: KernelError
+          }>)
+  }>
+}>
 
 export type PermissionRequestedEvent = {
   readonly type: typeof EventType.PermissionRequested
@@ -592,19 +686,11 @@ export type KernelEvent =
   | InputCancelledEvent
   | TurnStartedEvent
   | TurnCompletedEvent
-  | TurnFailedEvent
-  | TurnCancelledEvent
-  | TurnInterruptedEvent
   | ItemStartedEvent
   | ItemCompletedEvent
   | PermissionRequestedEvent
   | PermissionResolvedEvent
   | ContextCompactedEvent
-
-export type ConversationRecord =
-  | AgentMessageRecord
-  | ModelToolCallRecord
-  | ModelToolResultRecord
 
 export type SessionHistoryRecord =
   | SessionMetadataRecord
@@ -612,7 +698,7 @@ export type SessionHistoryRecord =
   | WorldStateRecord
   | InitialContextRecord
 
-export type HistoryRecord = SessionHistoryRecord | ConversationRecord
+export type HistoryRecord = SessionHistoryRecord
 
 export type KernelFact = KernelEvent | HistoryRecord
 
@@ -650,9 +736,11 @@ export function createEventEnvelope<const Fact extends KernelFact>(
   if (!Number.isInteger(input.seq) || input.seq <= 0) {
     throw new RangeError("Event sequence must be a positive integer.")
   }
-  const version = input.version ?? 2
-  if (!Number.isInteger(version) || version <= 0) {
-    throw new RangeError("Event version must be a positive integer.")
+  const version = input.version ?? EVENT_SCHEMA_VERSION
+  if (version !== EVENT_SCHEMA_VERSION) {
+    throw new RangeError(
+      `Event version must be ${String(EVENT_SCHEMA_VERSION)}.`,
+    )
   }
   requireKernelFact(input.event)
   return {
@@ -775,78 +863,15 @@ function requireKernelFact(value: unknown): asserts value is KernelFact {
         return (
           onlyKeys(data, [
             "turnId",
-            "outputMessageId",
+            "outcome",
             "usage",
             "metrics",
             "metadata",
           ]) &&
           isString(data.turnId) &&
+          isTurnOutcome(data.outcome) &&
           (data.usage === undefined || isTokenUsage(data.usage)) &&
           (data.metrics === undefined || isTurnMetrics(data.metrics))
-        )
-      case EventType.TurnFailed:
-        return (
-          onlyKeys(data, ["turnId", "error", "usage", "metrics"]) &&
-          isString(data.turnId) &&
-          isKernelError(data.error) &&
-          (data.usage === undefined || isTokenUsage(data.usage)) &&
-          (data.metrics === undefined || isTurnMetrics(data.metrics))
-        )
-      case EventType.TurnCancelled:
-      case EventType.TurnInterrupted:
-        return (
-          onlyKeys(data, ["turnId", "reason", "usage", "metrics"]) &&
-          isString(data.turnId) &&
-          (data.usage === undefined || isTokenUsage(data.usage)) &&
-          (data.metrics === undefined || isTurnMetrics(data.metrics))
-        )
-      case HistoryRecordType.AgentMessage:
-        return (
-          onlyKeys(data, [
-            "messageId",
-            "turnId",
-            "content",
-            "providerMetadata",
-          ]) &&
-          isString(data.messageId) &&
-          isString(data.turnId) &&
-          Array.isArray(data.content) &&
-          data.content.every(isAssistantContentBlock)
-        )
-      case HistoryRecordType.ModelToolCall:
-        return (
-          onlyKeys(data, [
-            "toolCallId",
-            "itemId",
-            "turnId",
-            "name",
-            "input",
-            "requiresPermission",
-            "providerMetadata",
-          ]) &&
-          isString(data.toolCallId) &&
-          isString(data.itemId) &&
-          isString(data.turnId) &&
-          isString(data.name) &&
-          isJsonValue(data.input) &&
-          typeof data.requiresPermission === "boolean"
-        )
-      case HistoryRecordType.ModelToolResult:
-        return (
-          onlyKeys(data, [
-            "toolResultId",
-            "toolCallId",
-            "turnId",
-            "content",
-            "output",
-            "error",
-          ]) &&
-          isString(data.toolResultId) &&
-          isString(data.toolCallId) &&
-          isString(data.turnId) &&
-          isItemContent(data.content) &&
-          (data.output === undefined || isJsonValue(data.output)) &&
-          (data.error === undefined || isKernelError(data.error))
         )
       case EventType.ItemStarted:
         return (
@@ -960,23 +985,7 @@ function isWorldStateFragment(value: unknown): value is WorldStateFragment {
 }
 
 function isToolExecutionItem(value: unknown): value is ToolExecutionItem {
-  return (
-    isRecord(value) &&
-    onlyKeys(value, [
-      "type",
-      "itemId",
-      "toolCallId",
-      "name",
-      "input",
-      "requiresPermission",
-    ]) &&
-    isToolExecutionType(value.type) &&
-    isString(value.itemId) &&
-    isString(value.toolCallId) &&
-    isString(value.name) &&
-    isJsonValue(value.input) &&
-    typeof value.requiresPermission === "boolean"
-  )
+  return isRecord(value) && isToolExecutionItemWithLifecycle(value, false)
 }
 
 function isCompletedExecutionItem(
@@ -985,32 +994,45 @@ function isCompletedExecutionItem(
   if (!isRecord(value)) return false
   if (value.type === "agent_message") {
     return (
-      onlyKeys(value, ["type", "itemId", "content", "streamId"]) &&
+      onlyKeys(value, [
+        "type",
+        "itemId",
+        "content",
+        "streamId",
+        "providerMetadata",
+      ]) &&
       isString(value.itemId) &&
       Array.isArray(value.content) &&
-      value.content.every(isAssistantContentBlock) &&
-      (value.streamId === undefined || isString(value.streamId))
+      value.content.every(
+        (block) =>
+          isRecord(block) &&
+          onlyKeys(block, ["type", "text"]) &&
+          block.type === "text" &&
+          isString(block.text),
+      ) &&
+      (value.streamId === undefined || isString(value.streamId)) &&
+      (value.providerMetadata === undefined ||
+        isJsonObject(value.providerMetadata))
+    )
+  }
+  if (value.type === "reasoning") {
+    return (
+      onlyKeys(value, [
+        "type",
+        "itemId",
+        "text",
+        "streamId",
+        "providerMetadata",
+      ]) &&
+      isString(value.itemId) &&
+      isString(value.text) &&
+      (value.streamId === undefined || isString(value.streamId)) &&
+      (value.providerMetadata === undefined ||
+        isJsonObject(value.providerMetadata))
     )
   }
   return (
-    onlyKeys(value, [
-      "type",
-      "itemId",
-      "toolCallId",
-      "name",
-      "input",
-      "requiresPermission",
-      "resultItemId",
-      "content",
-      "output",
-      "error",
-    ]) &&
-    isToolExecutionType(value.type) &&
-    isString(value.itemId) &&
-    isString(value.toolCallId) &&
-    isString(value.name) &&
-    isJsonValue(value.input) &&
-    typeof value.requiresPermission === "boolean" &&
+    isToolExecutionItemWithLifecycle(value, true) &&
     isString(value.resultItemId) &&
     isItemContent(value.content) &&
     (value.output === undefined || isJsonValue(value.output)) &&
@@ -1018,35 +1040,346 @@ function isCompletedExecutionItem(
   )
 }
 
-function isToolExecutionType(value: unknown): value is ToolExecutionType {
+function isToolExecutionItemWithLifecycle(
+  value: Record<string, unknown>,
+  completed: boolean,
+): value is ToolExecutionItem & Record<string, unknown> {
+  const lifecycleKeys = completed
+    ? ["resultItemId", "content", "output", "error"]
+    : []
+  const commonKeys = [
+    "type",
+    "itemId",
+    "toolCallId",
+    "name",
+    "input",
+    "requiresPermission",
+    ...lifecycleKeys,
+  ]
+  if (
+    !isString(value.itemId) ||
+    !isString(value.toolCallId) ||
+    !isString(value.name) ||
+    !isJsonValue(value.input) ||
+    typeof value.requiresPermission !== "boolean"
+  ) {
+    return false
+  }
+  switch (value.type) {
+    case "command_execution":
+      return (
+        onlyKeys(value, [...commonKeys, "command", "description", "result"]) &&
+        isString(value.command) &&
+        (value.description === undefined || isString(value.description)) &&
+        (value.result === undefined || isCommandExecutionResult(value.result))
+      )
+    case "file_change":
+      return (
+        onlyKeys(value, [...commonKeys, "request", "changes"]) &&
+        isFileChangeRequest(value.request) &&
+        isFileChanges(value.changes)
+      )
+    case "file_read":
+      return (
+        onlyKeys(value, [...commonKeys, "path", "offset", "limit", "result"]) &&
+        isString(value.path) &&
+        (value.offset === undefined || isPositiveInteger(value.offset)) &&
+        (value.limit === undefined || isPositiveInteger(value.limit)) &&
+        (value.result === undefined || isFileReadResult(value.result))
+      )
+    case "file_search":
+      return (
+        onlyKeys(value, [
+          ...commonKeys,
+          "operation",
+          "pattern",
+          "path",
+          "outputMode",
+          "lineNumbers",
+          "result",
+        ]) &&
+        (value.operation === "grep" || value.operation === "glob") &&
+        isString(value.pattern) &&
+        (value.path === undefined || isString(value.path)) &&
+        (value.outputMode === undefined ||
+          value.outputMode === "content" ||
+          value.outputMode === "files_with_matches" ||
+          value.outputMode === "count") &&
+        typeof value.lineNumbers === "boolean" &&
+        (value.result === undefined || isFileSearchResult(value.result))
+      )
+    case "web_fetch":
+      return (
+        onlyKeys(value, [...commonKeys, "url", "result"]) &&
+        isString(value.url) &&
+        (value.result === undefined || isWebFetchResult(value.result))
+      )
+    case "web_search":
+      return (
+        onlyKeys(value, [...commonKeys, "query", "result"]) &&
+        isString(value.query) &&
+        (value.result === undefined || isWebSearchResult(value.result))
+      )
+    case "collaboration_tool_call":
+      return (
+        onlyKeys(value, [
+          ...commonKeys,
+          "action",
+          "description",
+          "receivers",
+        ]) &&
+        isCollaborationAction(value.action) &&
+        isString(value.description) &&
+        isCollaborationReceivers(value.receivers)
+      )
+    case "mcp_tool_call":
+      return (
+        onlyKeys(value, [
+          ...commonKeys,
+          "server",
+          "tool",
+          "arguments",
+          "readOnlyHint",
+          "result",
+        ]) &&
+        isString(value.server) &&
+        isString(value.tool) &&
+        isJsonValue(value.arguments) &&
+        jsonValuesEqual(value.input, value.arguments) &&
+        (value.readOnlyHint === undefined ||
+          typeof value.readOnlyHint === "boolean") &&
+        (value.result === undefined || isMcpToolCallResult(value.result))
+      )
+    case "dynamic_tool_call":
+      return onlyKeys(value, commonKeys)
+    default:
+      return false
+  }
+}
+
+function isFileChangeRequest(value: unknown): boolean {
   return (
-    value === "command_execution" ||
-    value === "file_change" ||
-    value === "file_read" ||
-    value === "search" ||
-    value === "web" ||
-    value === "collab_agent" ||
-    value === "tool_execution"
+    isRecord(value) &&
+    onlyKeys(value, ["operation", "paths"]) &&
+    (value.operation === "edit" ||
+      value.operation === "write" ||
+      value.operation === "apply_patch") &&
+    Array.isArray(value.paths) &&
+    value.paths.every(isString)
   )
 }
 
-export function toolExecutionType(name: string): ToolExecutionType {
-  if (name === "run_command") return "command_execution"
-  if (name === "edit_file" || name === "write_file") return "file_change"
-  if (name === "read_file" || name === "read_session_file") return "file_read"
-  if (name === "grep" || name === "glob") return "search"
-  if (name === "web_fetch" || name === "web_search") return "web"
-  if (
-    name === "spawn_agent" ||
-    name === "send_message" ||
-    name === "followup_task" ||
-    name === "wait_agent" ||
-    name === "interrupt_agent" ||
-    name === "list_agents"
-  ) {
-    return "collab_agent"
-  }
-  return "tool_execution"
+function isFileChanges(value: unknown): value is readonly FileChange[] {
+  return (
+    Array.isArray(value) &&
+    value.every((change) => {
+      if (!isRecord(change) || !isString(change.path)) return false
+      if (change.kind === "add" || change.kind === "delete") {
+        return (
+          onlyKeys(change, ["path", "kind", "diff"]) &&
+          (change.diff === undefined || isUnifiedDiff(change.diff))
+        )
+      }
+      return (
+        change.kind === "update" &&
+        onlyKeys(change, ["path", "kind", "movePath", "diff"]) &&
+        (change.movePath === undefined || isString(change.movePath)) &&
+        (change.diff === undefined || isUnifiedDiff(change.diff))
+      )
+    })
+  )
+}
+
+function isMcpToolCallResult(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    onlyKeys(value, ["content", "structuredContent", "isError", "_meta"]) &&
+    Array.isArray(value.content) &&
+    value.content.every(isJsonValue) &&
+    (value.structuredContent === undefined ||
+      isJsonValue(value.structuredContent)) &&
+    (value.isError === undefined || typeof value.isError === "boolean") &&
+    (value._meta === undefined || isJsonValue(value._meta))
+  )
+}
+
+function isUnifiedDiff(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    onlyKeys(value, ["format", "text", "truncated"]) &&
+    value.format === "unified" &&
+    isString(value.text) &&
+    typeof value.truncated === "boolean"
+  )
+}
+
+function isCommandExecutionResult(value: unknown): boolean {
+  if (!isRecord(value)) return false
+  const binary = value.binary
+  const blocked = value.blocked
+  return (
+    onlyKeys(value, [
+      "exitCode",
+      "signal",
+      "stdout",
+      "stderr",
+      "truncated",
+      "timedOut",
+      "durationMs",
+      "cwd",
+      "shell",
+      "warnings",
+      "blocked",
+      "binary",
+    ]) &&
+    (value.exitCode === null || typeof value.exitCode === "number") &&
+    (value.signal === null || isString(value.signal)) &&
+    isString(value.stdout) &&
+    isString(value.stderr) &&
+    typeof value.truncated === "boolean" &&
+    typeof value.timedOut === "boolean" &&
+    (value.durationMs === undefined || typeof value.durationMs === "number") &&
+    (value.cwd === undefined || isString(value.cwd)) &&
+    (value.shell === undefined || isString(value.shell)) &&
+    (value.warnings === undefined ||
+      (Array.isArray(value.warnings) && value.warnings.every(isString))) &&
+    (blocked === undefined ||
+      (isRecord(blocked) &&
+        onlyKeys(blocked, ["rule"]) &&
+        isString(blocked.rule))) &&
+    (binary === undefined ||
+      (isRecord(binary) &&
+        onlyKeys(binary, ["stdout", "stderr", "stdoutBytes", "stderrBytes"]) &&
+        typeof binary.stdout === "boolean" &&
+        typeof binary.stderr === "boolean" &&
+        typeof binary.stdoutBytes === "number" &&
+        typeof binary.stderrBytes === "number"))
+  )
+}
+
+function isFileReadResult(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    onlyKeys(value, [
+      "path",
+      "kind",
+      "count",
+      "entries",
+      "range",
+      "empty",
+      "truncated",
+    ]) &&
+    isString(value.path) &&
+    (value.kind === "file" || value.kind === "directory") &&
+    (value.count === undefined || typeof value.count === "number") &&
+    (value.entries === undefined ||
+      (Array.isArray(value.entries) && value.entries.every(isString))) &&
+    (value.range === undefined || isResultRange(value.range)) &&
+    typeof value.empty === "boolean" &&
+    typeof value.truncated === "boolean"
+  )
+}
+
+function isResultRange(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    onlyKeys(value, ["offset", "limit"]) &&
+    isPositiveInteger(value.offset) &&
+    Number.isInteger(value.limit) &&
+    typeof value.limit === "number" &&
+    value.limit >= 0
+  )
+}
+
+function isFileSearchResult(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    onlyKeys(value, [
+      "path",
+      "outputMode",
+      "count",
+      "truncated",
+      "timedOut",
+      "paths",
+      "matches",
+    ]) &&
+    isString(value.path) &&
+    (value.outputMode === "content" ||
+      value.outputMode === "files_with_matches" ||
+      value.outputMode === "count") &&
+    typeof value.count === "number" &&
+    typeof value.truncated === "boolean" &&
+    typeof value.timedOut === "boolean" &&
+    (value.paths === undefined ||
+      (Array.isArray(value.paths) && value.paths.every(isString))) &&
+    (value.matches === undefined || isFileSearchMatches(value.matches))
+  )
+}
+
+function isFileSearchMatches(value: unknown): boolean {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (match) =>
+        isRecord(match) &&
+        onlyKeys(match, ["path", "line", "text", "count"]) &&
+        isString(match.path) &&
+        (match.line === undefined || typeof match.line === "number") &&
+        (match.text === undefined || isString(match.text)) &&
+        (match.count === undefined || typeof match.count === "number"),
+    )
+  )
+}
+
+function isWebFetchResult(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    onlyKeys(value, ["url", "status", "truncated"]) &&
+    isString(value.url) &&
+    typeof value.status === "number" &&
+    typeof value.truncated === "boolean"
+  )
+}
+
+function isWebSearchResult(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    onlyKeys(value, ["links"]) &&
+    Array.isArray(value.links) &&
+    value.links.every(
+      (link) =>
+        isRecord(link) &&
+        onlyKeys(link, ["title", "url"]) &&
+        isString(link.title) &&
+        isString(link.url),
+    )
+  )
+}
+
+function isCollaborationReceivers(
+  value: unknown,
+): value is readonly CollaborationReceiver[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (receiver) =>
+        isRecord(receiver) &&
+        onlyKeys(receiver, ["sessionId", "path"]) &&
+        isString(receiver.sessionId) &&
+        isString(receiver.path),
+    )
+  )
+}
+
+function isCollaborationAction(value: unknown): value is CollaborationAction {
+  return (
+    value === "spawn" ||
+    value === "send_message" ||
+    value === "follow_up" ||
+    value === "wait" ||
+    value === "interrupt" ||
+    value === "list"
+  )
 }
 
 function isContextWindowReplacement(
@@ -1282,7 +1615,6 @@ function optionalFieldsAreValid(
     "forkedFromInputId",
     "parentInputId",
     "parentTurnId",
-    "outputMessageId",
     "subject",
   ] as const) {
     if (key in data && data[key] !== undefined && !isString(data[key]))
@@ -1316,17 +1648,6 @@ function onlyKeys(
   keys: readonly string[],
 ): boolean {
   return Object.keys(value).every((key) => keys.includes(key))
-}
-
-function isAssistantContentBlock(value: unknown): boolean {
-  if (!isRecord(value) || !isString(value.text)) return false
-  if (value.type === "text") return onlyKeys(value, ["type", "text"])
-  return (
-    value.type === "reasoning" &&
-    onlyKeys(value, ["type", "text", "providerMetadata"]) &&
-    (value.providerMetadata === undefined ||
-      isJsonObject(value.providerMetadata))
-  )
 }
 
 function isInputRole(value: unknown): value is InputRole {
@@ -1452,6 +1773,24 @@ function isKernelError(value: unknown): value is KernelError {
     (value.code === undefined || isString(value.code)) &&
     (value.details === undefined || isJsonObject(value.details))
   )
+}
+
+function isTurnOutcome(value: unknown): value is TurnOutcome {
+  if (!isRecord(value)) return false
+  switch (value.status) {
+    case "completed":
+      return onlyKeys(value, ["status"])
+    case "failed":
+      return onlyKeys(value, ["status", "error"]) && isKernelError(value.error)
+    case "cancelled":
+    case "interrupted":
+      return (
+        onlyKeys(value, ["status", "reason"]) &&
+        (value.reason === undefined || isString(value.reason))
+      )
+    default:
+      return false
+  }
 }
 
 function isPermissionDecisionReason(

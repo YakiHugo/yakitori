@@ -1,5 +1,9 @@
 import { stat } from "node:fs/promises"
 import { resolveSearchPath } from "./path-policy.ts"
+import {
+  completeFileSearchExecution,
+  fileSearchExecution,
+} from "./execution-descriptors.ts"
 import { type RipgrepRecordStopReason, runRipgrepRecords } from "./ripgrep.ts"
 import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
 
@@ -35,9 +39,11 @@ export function createGlobTool(
   return {
     name: "glob",
     description:
-      "Fast file pattern matching that works with any codebase size. Supports patterns such as **/*.js and src/**/*.ts, returns workspace-relative file paths sorted lexicographically, and caps results at 100 files. Use glob to find files by name pattern or wildcard.",
+      "Fast file pattern matching that works with any codebase size. Supports patterns such as **/*.js and src/**/*.ts, accepts workspace-relative or absolute search paths, returns normalized file paths sorted lexicographically, and caps results at 100 files.",
     autoAllow: true,
     effect: "observe",
+    describeExecution: fileSearchExecution("glob"),
+    completeExecution: completeFileSearchExecution,
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -49,7 +55,7 @@ export function createGlobTool(
         path: {
           type: "string",
           description:
-            'The workspace-relative directory to search in. If not specified, the current working directory is used. Omit this field for the default; do not pass "undefined" or null. Must be a valid directory if provided.',
+            'The workspace-relative or absolute directory to search in. If not specified, the workspace is used. Omit this field for the default; do not pass "undefined" or null. Must be a valid directory if provided.',
         },
       },
       required: ["pattern"],
@@ -58,10 +64,6 @@ export function createGlobTool(
       const parsed = parseGlobInput(input)
       if (!parsed.ok) return parsed.result
 
-      // TODO(external-roots): Allow absolute paths under user-authorized
-      // additional roots, following Claude Code's add-dir model. Keep arbitrary
-      // external paths denied until Runtime permission decisions can authorize
-      // and record them.
       const resolved = await resolveSearchPath(
         context.workspaceRoot,
         parsed.path ?? ".",
@@ -75,13 +77,13 @@ export function createGlobTool(
       } catch {
         return failure(
           "path_not_found",
-          `Glob path does not exist: ${resolved.relativePath}`,
+          `Glob path does not exist: ${resolved.displayPath}`,
         )
       }
       if (!searchRoot.isDirectory()) {
         return failure(
           "path_not_directory",
-          `Glob path is not a directory: ${resolved.relativePath}`,
+          `Glob path is not a directory: ${resolved.displayPath}`,
         )
       }
 
@@ -97,7 +99,7 @@ export function createGlobTool(
           delimiter: "null",
           onRecord(record) {
             const path = workspaceRelativePath(
-              resolved.relativePath,
+              resolved.displayPath,
               normalizePath(record),
             )
             if (isVcsWorkspacePath(path)) {
@@ -127,7 +129,7 @@ export function createGlobTool(
       const content = renderGlobContent(paths, truncationReason)
       const output = {
         pattern: parsed.pattern,
-        path: resolved.relativePath,
+        path: resolved.displayPath,
         count: paths.length,
         paths,
         truncated: truncationReason !== undefined,

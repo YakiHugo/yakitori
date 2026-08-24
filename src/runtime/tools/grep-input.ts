@@ -32,7 +32,7 @@ export const GrepInputSchema: JsonObject = {
     path: {
       type: "string",
       description:
-        'Workspace-relative file or directory to search. Defaults to ".".',
+        'Workspace-relative or absolute file or directory to search. Defaults to ".". External absolute paths require approval.',
     },
     glob: {
       type: "string",

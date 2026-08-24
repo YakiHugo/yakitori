@@ -1,4 +1,11 @@
-import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises"
+import {
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  utimes,
+  writeFile,
+} from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
@@ -920,7 +927,7 @@ describe("workspace search tools", () => {
     })
   })
 
-  it("searches only directories and keeps returned paths workspace-relative", async () => {
+  it("searches external directories and normalizes returned paths", async () => {
     await withWorkspace(async (workspace) => {
       await mkdir(join(workspace, "src"))
       await writeFile(join(workspace, "src", "main.ts"), "main")
@@ -947,23 +954,37 @@ describe("workspace search tools", () => {
         code: "path_not_directory",
       })
 
-      const outside = await createGlobTool().execute(
-        { pattern: "*", path: "../" },
-        { workspaceRoot: workspace },
-      )
-      expect(outside).toMatchObject({
-        ok: false,
-        code: "path_denied",
-      })
-
-      const absolute = await createGlobTool().execute(
-        { pattern: "*", path: tmpdir() },
-        { workspaceRoot: workspace },
-      )
-      expect(absolute).toMatchObject({
-        ok: false,
-        code: "path_denied",
-      })
+      const external = await mkdtemp(join(tmpdir(), "yakitori-search-outside-"))
+      try {
+        await writeFile(join(external, "outside.ts"), "external needle\n")
+        const canonicalExternal = await realpath(external)
+        const approvedGlob = await createGlobTool().execute(
+          { pattern: "*.ts", path: external },
+          { workspaceRoot: workspace },
+        )
+        expect(approvedGlob).toMatchObject({
+          ok: true,
+          output: {
+            path: canonicalExternal,
+            paths: [join(canonicalExternal, "outside.ts")],
+          },
+        })
+        const approvedGrep = await createGrepTool().execute(
+          { pattern: "needle", path: external, output_mode: "content" },
+          { workspaceRoot: workspace },
+        )
+        expect(approvedGrep).toMatchObject({
+          ok: true,
+          output: {
+            path: canonicalExternal,
+            locations: [
+              { path: join(canonicalExternal, "outside.ts"), line: 1 },
+            ],
+          },
+        })
+      } finally {
+        await rm(external, { recursive: true, force: true })
+      }
 
       const empty = await createGlobTool().execute(
         { pattern: "*.missing" },

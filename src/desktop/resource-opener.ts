@@ -13,9 +13,10 @@ export function registerResourceOpener(
     requireTrustedSender(event.sender, event.senderFrame, trustedWindow)
     const request = requireFileRequest(input)
     const workspacePath = await realpath(workspace)
-    const requestedPath = path.resolve(workspacePath, request.path)
+    const requestedPath = path.isAbsolute(request.path)
+      ? request.path
+      : path.resolve(workspacePath, request.path)
     const targetPath = await realpath(requestedPath)
-    requireInsideWorkspace(workspacePath, targetPath)
     const error = await shell.openPath(targetPath)
     if (error !== "") throw new Error(error)
   })
@@ -68,19 +69,6 @@ function requireFileRequest(input: unknown): {
       ? { line: input.line }
       : {}),
   }
-}
-
-function requireInsideWorkspace(workspace: string, target: string): void {
-  const relative = path.relative(workspace, target)
-  if (
-    relative === "" ||
-    (!relative.startsWith(`..${path.sep}`) &&
-      relative !== ".." &&
-      !path.isAbsolute(relative))
-  ) {
-    return
-  }
-  throw new Error("Refusing to open a file outside the active workspace.")
 }
 
 function requireHttpUrl(input: unknown): URL {

@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto"
 import { link, open, readFile, rename, rm } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { ToolLimitDefaults } from "../limits.ts"
-import { resolveWritePath, type ResolvedWorkspacePath } from "./path-policy.ts"
+import { resolveWritePath, type ResolvedFileTarget } from "./path-policy.ts"
 import type { ToolExecutionResult } from "./types.ts"
 import { createBoundedUnifiedDiff } from "./unified-diff.ts"
 
@@ -85,13 +85,13 @@ export async function compareAndWriteTextFile(
 
         const written = Buffer.from(input.content, "utf8")
         const output = {
-          path: target.relativePath,
+          path: target.displayPath,
           previousSha256: checked.currentSha256,
           sha256: sha256(written),
           byteCount: written.byteLength,
           created: !target.exists,
           diff: createBoundedUnifiedDiff({
-            path: target.relativePath,
+            path: target.displayPath,
             before:
               checked.currentContent === null
                 ? null
@@ -141,7 +141,7 @@ async function withPathWriteLock<T>(
 }
 
 async function checkPrecondition(
-  target: Extract<ResolvedWorkspacePath, { readonly ok: true }>,
+  target: Extract<ResolvedFileTarget, { readonly ok: true }>,
   expectedSha256: string | null,
 ): Promise<
   | {
@@ -201,7 +201,7 @@ async function checkPrecondition(
 }
 
 function pathError(
-  target: Extract<ResolvedWorkspacePath, { readonly ok: false }>,
+  target: Extract<ResolvedFileTarget, { readonly ok: false }>,
 ): ToolExecutionResult {
   return writeFailure(target.error.code, target.error.message)
 }

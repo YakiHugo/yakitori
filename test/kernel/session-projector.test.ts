@@ -17,53 +17,8 @@ describe("session fact projection", () => {
     expect(projectSession([])).toBeUndefined()
   })
 
-  it("derives Items and Tools from coarse facts", () => {
-    const sessionId = "session_00000000-0000-4000-8000-000000000000"
-    const events = [
-      createEventEnvelope({
-        sessionId,
-        seq: 1,
-        event: { type: EventType.SessionCreated, data: {} },
-      }),
-      createEventEnvelope({
-        sessionId,
-        seq: 2,
-        event: {
-          type: EventType.InputAdmitted,
-          data: {
-            requestId: "request:1",
-            inputId: "input_1",
-            role: InputRole.User,
-            content: { kind: "text", text: "work" },
-          },
-        },
-      }),
-      createEventEnvelope({
-        sessionId,
-        seq: 3,
-        event: {
-          type: EventType.TurnStarted,
-          data: { turnId: "turn_1", inputId: "input_1" },
-        },
-      }),
-      createEventEnvelope({
-        sessionId,
-        seq: 4,
-        event: {
-          type: HistoryRecordType.ModelToolCall,
-          data: {
-            toolCallId: "tool_1",
-            itemId: "item_call",
-            turnId: "turn_1",
-            name: "read_file",
-            input: { path: "README.md" },
-            requiresPermission: false,
-          },
-        },
-      }),
-    ]
-
-    const projection = projectSession(events)
+  it("derives Items and Tools from execution-item facts", () => {
+    const projection = projectSession(baseWithStartedTool())
     expect(projection?.activeTurn?.state).toBe(TurnState.Started)
     expect(projection?.tools).toEqual([
       expect.objectContaining({
@@ -75,6 +30,140 @@ describe("session fact projection", () => {
     expect(projection?.items).toEqual([
       expect.objectContaining({ itemId: "item_call", kind: "tool_call" }),
     ])
+  })
+
+  it("rejects a completed tool fact that changes the started execution", () => {
+    const sessionId = "session_00000000-0000-4000-8000-000000000000"
+    const events = [
+      ...baseWithStartedTool(),
+      createEventEnvelope({
+        sessionId,
+        seq: 5,
+        event: {
+          type: EventType.ItemCompleted,
+          data: {
+            turnId: "turn_1",
+            item: {
+              type: "file_change",
+              itemId: "item_call",
+              toolCallId: "tool_1",
+              name: "run_command",
+              input: { command: "sleep 30" },
+              requiresPermission: true,
+              request: { operation: "edit", paths: ["README.md"] },
+              changes: [],
+              resultItemId: "item_result",
+              content: { kind: "text", text: "changed" },
+            },
+          },
+        },
+      }),
+    ]
+
+    expect(() => projectSession(events)).toThrow(
+      "Tool completion tool_1 changed execution semantics.",
+    )
+  })
+
+  it("rejects orphaned and duplicate execution-item identities", () => {
+    const sessionId = "session_00000000-0000-4000-8000-000000000000"
+    const orphanedStart = [
+      createEventEnvelope({
+        sessionId,
+        seq: 1,
+        event: { type: EventType.SessionCreated, data: {} },
+      }),
+      createEventEnvelope({
+        sessionId,
+        seq: 2,
+        event: {
+          type: EventType.ItemStarted,
+          data: {
+            turnId: "turn_missing",
+            item: {
+              type: "file_read",
+              itemId: "item_call",
+              toolCallId: "tool_1",
+              name: "read_file",
+              input: { path: "README.md" },
+              requiresPermission: false,
+              path: "README.md",
+            },
+          },
+        },
+      }),
+    ]
+    expect(() => projectSession(orphanedStart)).toThrow(
+      "Tool start tool_1 has no matching Turn.",
+    )
+
+    const duplicateAssistantItem = createEventEnvelope({
+      sessionId,
+      seq: 6,
+      event: {
+        type: EventType.ItemCompleted,
+        data: {
+          turnId: "turn_1",
+          item: {
+            type: "agent_message",
+            itemId: "item_call",
+            content: [{ type: "text", text: "duplicate" }],
+          },
+        },
+      },
+    })
+    expect(() =>
+      projectSession([...baseWithInterruptedTool(), duplicateAssistantItem]),
+    ).toThrow("Item ID item_call is not unique.")
+
+    const duplicateToolCall = createEventEnvelope({
+      sessionId,
+      seq: 5,
+      event: {
+        type: EventType.ItemStarted,
+        data: {
+          turnId: "turn_1",
+          item: {
+            type: "file_read",
+            itemId: "item_second_call",
+            toolCallId: "tool_1",
+            name: "read_file",
+            input: { path: "README.md" },
+            requiresPermission: false,
+            path: "README.md",
+          },
+        },
+      },
+    })
+    expect(() =>
+      projectSession([...baseWithStartedTool(), duplicateToolCall]),
+    ).toThrow("Tool call ID tool_1 is not unique.")
+
+    const started = baseWithStartedTool()
+    const duplicateResultItem = createEventEnvelope({
+      sessionId,
+      seq: 5,
+      event: {
+        type: EventType.ItemCompleted,
+        data: {
+          turnId: "turn_1",
+          item: {
+            type: "command_execution",
+            itemId: "item_call",
+            toolCallId: "tool_1",
+            name: "run_command",
+            input: { command: "sleep 30" },
+            requiresPermission: true,
+            command: "sleep 30",
+            resultItemId: "item_call",
+            content: { kind: "text", text: "done" },
+          },
+        },
+      },
+    })
+    expect(() => projectSession([...started, duplicateResultItem])).toThrow(
+      "Item ID item_call is not unique.",
+    )
   })
 
   it("keeps a result-less tool call as honest open history", () => {
@@ -95,7 +184,7 @@ describe("session fact projection", () => {
         id: "event_unknown",
         sessionId: events[0]?.sessionId,
         seq: 6,
-        version: 2,
+        version: 4,
         createdAt: "2026-07-24T00:00:00.000Z",
         type: "provider.future_fact",
         data: { value: "opaque" },
@@ -119,7 +208,7 @@ describe("session fact projection", () => {
         id: "event_future_payload",
         sessionId: events[0]?.sessionId,
         seq: 6,
-        version: 2,
+        version: 4,
         createdAt: "2026-07-24T00:00:00.000Z",
         type: "provider.future",
         data: {
@@ -144,7 +233,7 @@ describe("session fact projection", () => {
         id: "event_unknown_incremental",
         sessionId: events[0]?.sessionId,
         seq: 6,
-        version: 2,
+        version: 4,
         createdAt: "2026-07-24T00:00:00.000Z",
         type: "provider.future_fact",
         data: { value: "opaque" },
@@ -334,14 +423,18 @@ function baseWithInterruptedTool() {
       sessionId,
       seq: 4,
       event: {
-        type: HistoryRecordType.ModelToolCall,
+        type: EventType.ItemStarted,
         data: {
-          toolCallId: "tool_1",
-          itemId: "item_call",
           turnId: "turn_1",
-          name: "run_command",
-          input: { command: "sleep 30" },
-          requiresPermission: true,
+          item: {
+            type: "command_execution",
+            itemId: "item_call",
+            toolCallId: "tool_1",
+            name: "run_command",
+            input: { command: "sleep 30" },
+            requiresPermission: true,
+            command: "sleep 30",
+          },
         },
       },
     }),
@@ -349,9 +442,16 @@ function baseWithInterruptedTool() {
       sessionId,
       seq: 5,
       event: {
-        type: EventType.TurnInterrupted,
-        data: { turnId: "turn_1", reason: "restart" },
+        type: EventType.TurnCompleted,
+        data: {
+          turnId: "turn_1",
+          outcome: { status: "interrupted", reason: "restart" },
+        },
       },
     }),
   ]
+}
+
+function baseWithStartedTool() {
+  return baseWithInterruptedTool().slice(0, 4)
 }

@@ -5,6 +5,10 @@ import {
   parseGrepInput,
 } from "./grep-input.ts"
 import { resolveSearchPath } from "./path-policy.ts"
+import {
+  completeFileSearchExecution,
+  fileSearchExecution,
+} from "./execution-descriptors.ts"
 import { runRipgrepRecords } from "./ripgrep.ts"
 import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
 
@@ -66,9 +70,11 @@ export function createGrepTool(
   return {
     name: "grep",
     description:
-      "Search file contents with ripgrep. Read the relevant file before editing it. Supports regex, file globs, file types, context lines, case-insensitive and multiline search. files_with_matches is sorted newest-first; content and count are sorted by path and line. Results are paginated and bounded.",
+      "Search file contents with ripgrep. Read the relevant file before editing it. Supports regex, file globs, file types, context lines, case-insensitive and multiline search, and workspace-relative or absolute paths. Results are paginated and bounded.",
     autoAllow: true,
     effect: "observe",
+    describeExecution: fileSearchExecution("grep"),
+    completeExecution: completeFileSearchExecution,
     inputSchema: GrepInputSchema,
     async execute(input, context): Promise<ToolExecutionResult> {
       const parsed = parseGrepInput(input, limits.maxResults)
@@ -112,7 +118,7 @@ export function createGrepTool(
       }
 
       const result = await runRecords(
-        buildGrepArguments(parsed, resolved.relativePath, includeIgnored),
+        buildGrepArguments(parsed, resolved.displayPath, includeIgnored),
         {
           cwd: context.workspaceRoot,
           ...(context.signal === undefined ? {} : { signal: context.signal }),
@@ -154,7 +160,7 @@ export function createGrepTool(
 
       return buildSuccess({
         parsed,
-        resolvedPath: resolved.relativePath,
+        resolvedPath: resolved.displayPath,
         entries,
         hasMore,
         timedOut,
@@ -319,7 +325,11 @@ function searchLocation(
   outputMode: GrepInput["outputMode"],
 ) {
   if (entry.match !== undefined) {
-    return { path: entry.match.path, line: entry.match.line }
+    return {
+      path: entry.match.path,
+      line: entry.match.line,
+      text: entry.match.text,
+    }
   }
   if (outputMode === "count") {
     const separator = entry.content.lastIndexOf(":")

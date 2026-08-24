@@ -74,13 +74,17 @@ export type BoundAgentControl = Readonly<{
   sendMessage(input: {
     readonly target: string
     readonly message: string
-  }): Promise<void>
+  }): Promise<{ readonly agentId: string; readonly path: string }>
   followup(input: {
     readonly target: string
     readonly message: string
-  }): Promise<void>
+  }): Promise<{ readonly agentId: string; readonly path: string }>
   wait(timeoutMs?: number): Promise<readonly AgentUpdate[]>
-  interrupt(target: string): Promise<AgentStatus>
+  interrupt(target: string): Promise<{
+    readonly agentId: string
+    readonly path: string
+    readonly previousStatus: AgentStatus
+  }>
   list(pathPrefix?: string): readonly AgentSummary[]
 }>
 
@@ -242,6 +246,7 @@ export function createAgentControl(input: {
           targetAgent.agentId,
           `<inter_agent_message from="${actor.path}">\n${request.message}\n</inter_agent_message>`,
         )
+        return { agentId: targetAgent.agentId, path: targetAgent.path }
       },
       async followup(request) {
         const targetAgent = resolveTarget(actor, request.target)
@@ -260,6 +265,7 @@ export function createAgentControl(input: {
           targetAgent.status = "running"
           start(targetAgent, input.adapter.runChild(targetAgent.agentId))
         }
+        return { agentId: targetAgent.agentId, path: targetAgent.path }
       },
       async wait(timeoutMs = 30_000) {
         const pending = drainUpdates(sessionId)
@@ -287,7 +293,11 @@ export function createAgentControl(input: {
             targetAgent.status = "interrupted"
           }
         }
-        return previous
+        return {
+          agentId: targetAgent.agentId,
+          path: targetAgent.path,
+          previousStatus: previous,
+        }
       },
       list(pathPrefix) {
         const prefix = pathPrefix?.trim()

@@ -46,14 +46,22 @@ describe("approval bar", () => {
             permissionRequestId: "permission_1",
             turnId: "turn_1",
             toolCallId: "tool_1",
-            action: "run_command",
-            subject: "pnpm test",
+            action: "read_file",
+            subject: "/tmp/result.log",
+            reason:
+              "This tool will read a path outside the selected workspace.",
           },
         },
       ]),
       resolvePermission,
     })
     render(<ApprovalBar />)
+
+    expect(
+      screen.getByText(
+        "This tool will read a path outside the selected workspace.",
+      ),
+    ).not.toBeNull()
 
     await user.click(screen.getByRole("button", { name: "Allow" }))
     expect(resolvePermission).toHaveBeenCalledWith(

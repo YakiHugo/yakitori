@@ -26,7 +26,7 @@ export function ToolCell({
   readonly workspaceRoot?: string | undefined
   readonly onOpenSession?: ((sessionId: string) => Promise<void>) | undefined
 }) {
-  const presentation = presentTool(entry)
+  const presentation = presentTool(entry, workspaceRoot)
   const [open, setOpen] = useState(
     entry.state === "failed" || entry.state === "interrupted",
   )

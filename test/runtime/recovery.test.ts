@@ -38,7 +38,11 @@ describe("runtime recovery", () => {
       const first = await recoverSessions({ kernel: runtime.kernel })
       expect(first.recoveredSessionIds).toEqual([session.sessionId])
       expect(
-        first.events.some((event) => event.type === EventType.TurnInterrupted),
+        first.events.some(
+          (event) =>
+            event.type === EventType.TurnCompleted &&
+            event.data.outcome.status === "interrupted",
+        ),
       ).toBe(true)
 
       const second = await recoverSessions({ kernel: runtime.kernel })
@@ -82,7 +86,11 @@ describe("runtime recovery", () => {
 
       expect(recovered.recoveredSessionIds).toEqual([session.sessionId])
       expect(recovered.events).toMatchObject([
-        { sessionId: session.sessionId, type: EventType.TurnInterrupted },
+        {
+          sessionId: session.sessionId,
+          type: EventType.TurnCompleted,
+          data: { outcome: { status: "interrupted" } },
+        },
       ])
       const read = await recoveredKernel.readSession({
         sessionId: session.sessionId,

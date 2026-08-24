@@ -17,11 +17,11 @@ export type PathPolicyError = {
   readonly message: string
 }
 
-export type ResolvedWorkspacePath =
+export type ResolvedFileTarget =
   | {
       readonly ok: true
       readonly absolutePath: string
-      readonly relativePath: string
+      readonly displayPath: string
       readonly exists: boolean
       readonly kind: "file" | "directory"
     }
@@ -42,7 +42,7 @@ export async function resolveWorkspaceRoot(workspace: string): Promise<string> {
 export async function resolveCommandCwd(
   workspaceRoot: string,
   cwd?: string,
-): Promise<ResolvedWorkspacePath> {
+): Promise<ResolvedFileTarget> {
   const canonicalRoot = await resolveWorkspaceRoot(workspaceRoot)
   if (cwd !== undefined && (cwd.length === 0 || cwd.includes("\0"))) {
     return pathError("invalid_cwd", "Command cwd must be a non-empty path.")
@@ -68,7 +68,7 @@ export async function resolveCommandCwd(
     return {
       ok: true,
       absolutePath,
-      relativePath: toRelativePath(canonicalRoot, absolutePath) || ".",
+      displayPath: toRelativePath(canonicalRoot, absolutePath) || ".",
       exists: true,
       kind: "directory",
     }
@@ -79,27 +79,20 @@ export async function resolveCommandCwd(
 
 export async function resolveReadPath(
   workspaceRoot: string,
-  relativePath: string,
-): Promise<ResolvedWorkspacePath> {
-  const validated = validateRelativePathInput(relativePath)
+  requestedPath: string,
+): Promise<ResolvedFileTarget> {
+  const validated = validatePathInput(requestedPath)
   if (!validated.ok) return validated
-
-  const candidate = resolve(workspaceRoot, validated.relativePath)
-  if (!isInsideWorkspace(workspaceRoot, candidate)) {
-    return pathDenied("Path escapes the workspace.")
-  }
-
+  const canonicalRoot = await resolveWorkspaceRoot(workspaceRoot)
+  const candidate = pathCandidate(canonicalRoot, validated.path)
   try {
     const absolutePath = await realpath(candidate)
-    if (!isInsideWorkspace(workspaceRoot, absolutePath)) {
-      return pathDenied("Path escapes the workspace via symlink.")
-    }
     const stats = await lstat(absolutePath)
     if (stats.isDirectory()) {
       return {
         ok: true,
         absolutePath,
-        relativePath: toRelativePath(workspaceRoot, absolutePath) || ".",
+        displayPath: displayPath(canonicalRoot, absolutePath) || ".",
         exists: true,
         kind: "directory",
       }
@@ -113,12 +106,14 @@ export async function resolveReadPath(
     return {
       ok: true,
       absolutePath,
-      relativePath: toRelativePath(workspaceRoot, absolutePath),
+      displayPath: displayPath(canonicalRoot, absolutePath),
       exists: true,
       kind: "file",
     }
   } catch {
-    const suggestion = await formatPathSuggestions(workspaceRoot, relativePath)
+    const suggestion = isInsideWorkspace(canonicalRoot, candidate)
+      ? await formatPathSuggestions(canonicalRoot, requestedPath)
+      : undefined
     return pathError(
       "path_not_found",
       suggestion === undefined
@@ -130,21 +125,14 @@ export async function resolveReadPath(
 
 export async function resolveWritePath(
   workspaceRoot: string,
-  relativePath: string,
-): Promise<ResolvedWorkspacePath> {
-  const validated = validateRelativePathInput(relativePath)
+  requestedPath: string,
+): Promise<ResolvedFileTarget> {
+  const validated = validatePathInput(requestedPath)
   if (!validated.ok) return validated
-
-  const candidate = resolve(workspaceRoot, validated.relativePath)
-  if (!isInsideWorkspace(workspaceRoot, candidate)) {
-    return pathDenied("Path escapes the workspace.")
-  }
-
+  const canonicalRoot = await resolveWorkspaceRoot(workspaceRoot)
+  const candidate = pathCandidate(canonicalRoot, validated.path)
   try {
     const absolutePath = await realpath(candidate)
-    if (!isInsideWorkspace(workspaceRoot, absolutePath)) {
-      return pathDenied("Path escapes the workspace via symlink.")
-    }
     const stats = await lstat(absolutePath)
     if (stats.isDirectory()) {
       return pathDenied("Path is a directory; a file is required.")
@@ -152,7 +140,7 @@ export async function resolveWritePath(
     return {
       ok: true,
       absolutePath,
-      relativePath: toRelativePath(workspaceRoot, absolutePath),
+      displayPath: displayPath(canonicalRoot, absolutePath),
       exists: true,
       kind: "file",
     }
@@ -161,21 +149,18 @@ export async function resolveWritePath(
     const parentCandidate = dirname(candidate)
     try {
       const parentPath = await realpath(parentCandidate)
-      if (!isInsideWorkspace(workspaceRoot, parentPath)) {
-        return pathDenied("Parent path escapes the workspace.")
-      }
       const parentStats = await lstat(parentPath)
       if (!parentStats.isDirectory()) {
         return pathDenied("Parent path is not a directory.")
       }
       const absolutePath = join(
         parentPath,
-        validated.relativePath.split(/[/\\]/).at(-1) ?? validated.relativePath,
+        validated.path.split(/[/\\]/).at(-1) ?? validated.path,
       )
       return {
         ok: true,
         absolutePath,
-        relativePath: toRelativePath(workspaceRoot, absolutePath),
+        displayPath: displayPath(canonicalRoot, absolutePath),
         exists: false,
         kind: "file",
       }
@@ -187,24 +172,19 @@ export async function resolveWritePath(
 
 export async function resolveSearchPath(
   workspaceRoot: string,
-  relativePath: string,
-): Promise<ResolvedWorkspacePath> {
-  const validated = validateRelativePathInput(relativePath)
+  requestedPath: string,
+): Promise<ResolvedFileTarget> {
+  const validated = validatePathInput(requestedPath)
   if (!validated.ok) return validated
-  const candidate = resolve(workspaceRoot, validated.relativePath)
-  if (!isInsideWorkspace(workspaceRoot, candidate)) {
-    return pathDenied("Path escapes the workspace.")
-  }
+  const canonicalRoot = await resolveWorkspaceRoot(workspaceRoot)
+  const candidate = pathCandidate(canonicalRoot, validated.path)
   try {
     const absolutePath = await realpath(candidate)
-    if (!isInsideWorkspace(workspaceRoot, absolutePath)) {
-      return pathDenied("Path escapes the workspace via symlink.")
-    }
     const stats = await lstat(absolutePath)
     return {
       ok: true,
       absolutePath,
-      relativePath: toRelativePath(workspaceRoot, absolutePath) || ".",
+      displayPath: displayPath(canonicalRoot, absolutePath) || ".",
       exists: true,
       kind: stats.isDirectory() ? "directory" : "file",
     }
@@ -213,21 +193,26 @@ export async function resolveSearchPath(
   }
 }
 
-function validateRelativePathInput(
-  relativePath: string,
+function validatePathInput(
+  requestedPath: string,
 ):
-  | { readonly ok: true; readonly relativePath: string }
+  | { readonly ok: true; readonly path: string }
   | { readonly ok: false; readonly error: PathPolicyError } {
-  if (typeof relativePath !== "string" || relativePath.length === 0) {
-    return pathDenied("Path must be a non-empty relative string.")
+  if (typeof requestedPath !== "string" || requestedPath.length === 0) {
+    return pathDenied("Path must be a non-empty string.")
   }
-  if (relativePath.includes("\0")) {
+  if (requestedPath.includes("\0")) {
     return pathDenied("Path must not contain NUL bytes.")
   }
-  if (isAbsolute(relativePath)) {
-    return pathDenied("Path must be relative to the workspace.")
-  }
-  return { ok: true, relativePath }
+  return { ok: true, path: requestedPath }
+}
+
+function pathCandidate(workspaceRoot: string, requestedPath: string): string {
+  return resolve(
+    isAbsolute(requestedPath)
+      ? requestedPath
+      : resolve(workspaceRoot, requestedPath),
+  )
 }
 
 export function isInsideWorkspace(
@@ -243,6 +228,12 @@ export function isInsideWorkspace(
 
 function toRelativePath(workspaceRoot: string, absolutePath: string): string {
   return relative(workspaceRoot, absolutePath).split(sep).join("/")
+}
+
+function displayPath(workspaceRoot: string, absolutePath: string): string {
+  return isInsideWorkspace(workspaceRoot, absolutePath)
+    ? toRelativePath(workspaceRoot, absolutePath)
+    : absolutePath
 }
 
 function pathDenied(message: string): {

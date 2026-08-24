@@ -1,4 +1,8 @@
 import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
+import {
+  completeWebSearchExecution,
+  webSearchExecution,
+} from "./execution-descriptors.ts"
 
 // Zero-configuration default, mirroring opencode: Exa's anonymous MCP
 // endpoint (free tier, no account or handshake — a direct tools/call POST).
@@ -152,6 +156,8 @@ export function createWebSearchTool(
       "Search the web for current information beyond the model's knowledge cutoff. Returns a digest of relevant results with URLs. Include the current year in the query for time-sensitive topics. Follow up with web_fetch to read the full content of a result URL. Read-only.",
     autoAllow: true,
     effect: "observe",
+    describeExecution: webSearchExecution,
+    completeExecution: completeWebSearchExecution,
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -182,12 +188,32 @@ export function createWebSearchTool(
         output: {
           query: parsed.query,
           characters: outcome.text.length,
+          links: extractLinks(outcome.text),
           content,
         },
         content,
       }
     },
   }
+}
+
+function extractLinks(text: string): readonly {
+  readonly title: string
+  readonly url: string
+}[] {
+  const links: { title: string; url: string }[] = []
+  const seen = new Set<string>()
+  for (const line of text.split("\n")) {
+    for (const match of line.matchAll(/https?:\/\/[^\s)>\]}]+/gu)) {
+      const url = match[0].replace(/[.,;:]$/, "")
+      if (seen.has(url)) continue
+      seen.add(url)
+      const before = line.slice(0, match.index).replace(/^\s*\d+[.)]\s*/, "")
+      const title = before.replace(/[\s—–:-]+$/, "").trim()
+      links.push({ title: title === "" ? url : title, url })
+    }
+  }
+  return links
 }
 
 // The endpoint answers either one JSON-RPC document or an SSE stream of
