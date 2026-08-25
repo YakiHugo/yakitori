@@ -189,7 +189,7 @@ describe("execution view", () => {
     ])
   })
 
-  it("projects coarse input, tool, result, and permission facts", () => {
+  it("projects durable tool facts and a transient pending permission", () => {
     const facts: KernelFact[] = [
       {
         type: EventType.InputAdmitted,
@@ -208,25 +208,6 @@ describe("execution view", () => {
         input: { command: "pwd" },
         requiresPermission: true,
       }),
-      {
-        type: EventType.PermissionRequested,
-        data: {
-          permissionRequestId: "permission_1",
-          turnId: "turn_1",
-          toolCallId: "tool_1",
-          action: "run_command",
-          subject: "pnpm test",
-          reason: "Command runs with host authority.",
-        },
-      },
-      {
-        type: EventType.PermissionResolved,
-        data: {
-          permissionRequestId: "permission_1",
-          turnId: "turn_1",
-          behavior: "allow" as const,
-        },
-      },
       toolCompleted({
         resultItemId: "item_result",
         toolCallId: "tool_1",
@@ -234,7 +215,7 @@ describe("execution view", () => {
         content: { kind: "text", text: "/workspace" },
       }),
     ]
-    const state = facts.reduce(
+    let state = facts.reduce(
       (current, event, index) =>
         reduceExecutionView(current, {
           type: "durable",
@@ -242,6 +223,20 @@ describe("execution view", () => {
         }),
       createExecutionViewState(),
     )
+    state = reduceExecutionView(state, {
+      type: "transient",
+      event: {
+        type: "permission.requested",
+        sessionId,
+        permissionRequestId: "permission_1",
+        turnId: "turn_1",
+        toolCallId: "tool_1",
+        action: "run_command",
+        subject: "pnpm test",
+        reason: "Command runs with host authority.",
+        createdAt: "2026-08-25T00:00:00.000Z",
+      },
+    })
 
     expect(projectExecutionView(state).entries).toEqual([
       expect.objectContaining({ kind: "user_input", text: "run" }),
@@ -256,10 +251,44 @@ describe("execution view", () => {
         permissionRequestId: "permission_1",
         subject: "pnpm test",
         reason: "Command runs with host authority.",
-        state: "resolved",
-        behavior: "allow",
+        state: "requested",
       }),
     ])
+  })
+
+  it("drops transient permissions when their Turn reaches a durable terminal state", () => {
+    let state = reduceExecutionView(createExecutionViewState(), {
+      type: "transient",
+      event: {
+        type: "permission.requested",
+        sessionId,
+        permissionRequestId: "permission_terminal",
+        turnId: "turn_terminal",
+        toolCallId: "tool_terminal",
+        action: "run_command",
+        createdAt: "2026-08-25T00:00:00.000Z",
+      },
+    })
+    state = reduceExecutionView(state, {
+      type: "durable",
+      event: createExecutionEnvelope({
+        sessionId,
+        seq: 1,
+        event: {
+          type: EventType.TurnCompleted,
+          data: {
+            turnId: "turn_terminal",
+            outcome: { status: "cancelled" },
+          },
+        },
+      }),
+    })
+
+    expect(
+      projectExecutionView(state).entries.some(
+        (entry) => entry.kind === "permission",
+      ),
+    ).toBe(false)
   })
 
   it("extracts structured diff and command results from tool output", () => {
@@ -505,15 +534,6 @@ describe("execution view", () => {
         requiresPermission: true,
       }),
       {
-        type: EventType.PermissionRequested,
-        data: {
-          permissionRequestId: "permission_1",
-          turnId: "turn_1",
-          toolCallId: "tool_1",
-          action: "run_command",
-        },
-      },
-      {
         type: EventType.TurnCompleted,
         data: {
           turnId: "turn_1",
@@ -536,11 +556,6 @@ describe("execution view", () => {
         state: "interrupted",
         resultText:
           "Interrupted before a result was recorded. Side effects may be unknown.",
-      }),
-      expect.objectContaining({
-        kind: "permission",
-        permissionRequestId: "permission_1",
-        state: "stale",
       }),
       {
         kind: "turn_terminal",
@@ -729,6 +744,7 @@ describe("execution view", () => {
       seq: facts.length,
       createdAt: "2026-07-24T00:00:00.000Z",
       updatedAt: "2026-07-24T00:00:00.000Z",
+      pendingPermissions: [],
       currentModel: { provider: "faux", model: "faux-1" },
       counts: {
         inputs: 2,
@@ -825,6 +841,7 @@ describe("execution view", () => {
       createdAt: "2026-07-24T00:00:00.000Z",
       updatedAt: "2026-07-24T00:00:02.000Z",
       activeTurnId: "turn_9",
+      pendingPermissions: [],
       counts: {
         inputs: 2,
         pendingInputs: 1,
@@ -911,20 +928,16 @@ describe("execution view", () => {
     })
 
     state = reduceExecutionView(state, {
-      type: "durable",
-      event: createExecutionEnvelope({
+      type: "transient",
+      event: {
+        type: "permission.requested",
         sessionId,
-        seq: 3,
-        event: {
-          type: EventType.PermissionRequested,
-          data: {
-            permissionRequestId: "permission_1",
-            turnId: "turn_1",
-            toolCallId: "tool_1",
-            action: "run_command",
-          },
-        },
-      }),
+        permissionRequestId: "permission_1",
+        turnId: "turn_1",
+        toolCallId: "tool_1",
+        action: "run_command",
+        createdAt: "2026-08-25T00:00:00.000Z",
+      },
     })
     expect(projectExecutionView(state, session).activeActivity).toEqual({
       kind: "waiting_permission",
@@ -1074,6 +1087,7 @@ function activeSession(activeTurnId: string, seq: number) {
     createdAt: "2026-07-24T00:00:00.000Z",
     updatedAt: "2026-07-24T00:00:00.000Z",
     activeTurnId,
+    pendingPermissions: [],
     counts: {
       inputs: 1,
       pendingInputs: 0,

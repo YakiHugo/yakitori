@@ -43,6 +43,9 @@ export type ForkedModelContext = Readonly<{
   sourceSessionId: string
   messages: readonly ModelMessage[]
   worldState?: JsonObject
+  providerUsageBaseline?: NonNullable<
+    SessionProjection["providerUsageBaseline"]
+  >
 }>
 
 export type ModelContextBuildResult = {
@@ -252,6 +255,9 @@ export function createForkedModelContext(input: {
   readonly messages: readonly ModelMessage[]
   readonly worldState?: JsonObject
   readonly preserveWorldState?: boolean
+  readonly providerUsageBaseline?: NonNullable<
+    SessionProjection["providerUsageBaseline"]
+  >
 }): ForkedModelContext | undefined {
   const preserveWorldState = input.preserveWorldState ?? true
   const messages = sanitizeForkMessages(input.messages, preserveWorldState)
@@ -263,12 +269,17 @@ export function createForkedModelContext(input: {
             ([sectionId]) => sectionId !== WorldStateSectionId.MultiAgent,
           ),
         )
-  return messages.length === 0 && worldState === undefined
+  return messages.length === 0 &&
+    worldState === undefined &&
+    input.providerUsageBaseline === undefined
     ? undefined
     : {
         sourceSessionId: input.sourceSessionId,
         messages,
         ...(worldState === undefined ? {} : { worldState }),
+        ...(input.providerUsageBaseline === undefined
+          ? {}
+          : { providerUsageBaseline: input.providerUsageBaseline }),
       }
 }
 

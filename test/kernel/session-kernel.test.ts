@@ -4,11 +4,7 @@ import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { YakitoriErrorCode } from "../../src/kernel/errors.ts"
 import type { EventStore } from "../../src/kernel/event-store.ts"
-import {
-  EventType,
-  HistoryRecordType,
-  PermissionBehavior,
-} from "../../src/kernel/events.ts"
+import { EventType, HistoryRecordType } from "../../src/kernel/events.ts"
 import { createSessionId } from "../../src/kernel/ids.ts"
 import { createJsonlEventStore } from "../../src/kernel/jsonl-event-store.ts"
 import {
@@ -17,7 +13,6 @@ import {
 } from "../../src/kernel/session-kernel.ts"
 import {
   InputState,
-  PermissionState,
   ToolState,
   TurnState,
 } from "../../src/kernel/session-states.ts"
@@ -45,6 +40,20 @@ for (const implementation of ["memory", "jsonl"] as const) {
             },
           ],
           worldStateBaseline: { environment: { cwd: "/workspace" } },
+          providerUsageBaseline: {
+            turnId: "turn_parent",
+            modelCallId: "model_call_parent",
+            baseline: {
+              provider: "faux",
+              model: "scripted",
+              contextWindowId: "context_window_parent",
+              systemRevisions: ["base:1"],
+              toolContractDigest: "tools",
+              messagePrefixDigests: ["message"],
+              providerInputTokens: 1_000,
+              estimatedInputTokens: 800,
+            },
+          },
         })
         const replayed = await kernel.replaySession({
           sessionId: session.sessionId,
@@ -64,6 +73,18 @@ for (const implementation of ["memory", "jsonl"] as const) {
         expect(replayed.session?.worldState?.state).toEqual({
           environment: { cwd: "/workspace" },
         })
+        expect(replayed.session?.providerUsageBaseline).toMatchObject({
+          turnId: "turn_parent",
+          modelCallId: "model_call_parent",
+          baseline: {
+            contextWindowId: seeded.windowId,
+            providerInputTokens: 1_000,
+          },
+        })
+        expect(seeded.events.map((event) => event.type)).toEqual([
+          HistoryRecordType.InitialContext,
+          HistoryRecordType.ProviderUsageBaseline,
+        ])
         await expect(
           kernel.seedContextWindow({
             sessionId: session.sessionId,
@@ -424,6 +445,70 @@ for (const implementation of ["memory", "jsonl"] as const) {
       })
     })
 
+    it("forks the last provable provider usage baseline and drops later calibration", async () => {
+      await withKernel(implementation, async ({ kernel }) => {
+        const source = await kernel.createSession()
+        const firstInput = await admit(kernel, source.sessionId, "first")
+        const firstTurn = await kernel.startTurn({
+          sessionId: source.sessionId,
+          inputId: firstInput.inputId,
+          executionContext: testTurnExecutionContext(),
+        })
+        const firstBaseline = {
+          provider: "faux",
+          model: "scripted",
+          contextWindowId: source.sessionId,
+          systemRevisions: ["base:1"],
+          toolContractDigest: "tool-contract",
+          messagePrefixDigests: ["first-prefix"],
+          providerInputTokens: 1_000,
+          estimatedInputTokens: 800,
+        }
+        await kernel.recordProviderUsageBaseline({
+          sessionId: source.sessionId,
+          turnId: firstTurn.turnId,
+          modelCallId: "model_call_first",
+          baseline: firstBaseline,
+        })
+        await kernel.completeTurn({
+          sessionId: source.sessionId,
+          turnId: firstTurn.turnId,
+        })
+
+        const cutInput = await admit(kernel, source.sessionId, "cut")
+        const cutTurn = await kernel.startTurn({
+          sessionId: source.sessionId,
+          inputId: cutInput.inputId,
+          executionContext: testTurnExecutionContext(),
+        })
+        await kernel.recordProviderUsageBaseline({
+          sessionId: source.sessionId,
+          turnId: cutTurn.turnId,
+          modelCallId: "model_call_after_cut",
+          baseline: {
+            ...firstBaseline,
+            messagePrefixDigests: ["later-prefix"],
+            providerInputTokens: 2_000,
+          },
+        })
+        await kernel.completeTurn({
+          sessionId: source.sessionId,
+          turnId: cutTurn.turnId,
+        })
+
+        const forked = await kernel.forkSession({
+          sessionId: source.sessionId,
+          atInputId: cutInput.inputId,
+          reason: "undo",
+        })
+
+        expect(forked.session.providerUsageBaseline).toMatchObject({
+          modelCallId: "model_call_first",
+          baseline: firstBaseline,
+        })
+      })
+    })
+
     it("forks an exact event prefix into a new Session", async () => {
       await withKernel(implementation, async ({ kernel, store }) => {
         const source = await kernel.createSession({
@@ -710,10 +795,6 @@ for (const implementation of ["memory", "jsonl"] as const) {
             },
           ],
         })
-        await kernel.requireToolExecutionAllowed({
-          ...active,
-          toolCallId: "tool_read",
-        })
         await kernel.recordToolResult({
           ...active,
           toolCallId: "tool_read",
@@ -890,93 +971,6 @@ for (const implementation of ["memory", "jsonl"] as const) {
       })
     })
 
-    it("binds one permission decision to exactly one tool call", async () => {
-      await withKernel(implementation, async ({ kernel }) => {
-        const active = await activeTurn(kernel)
-        await kernel.recordAssistantOutput({
-          ...active,
-          toolCalls: [
-            {
-              id: "tool_shell",
-              name: "run_command",
-              input: { command: "pwd" },
-              requiresPermission: true,
-            },
-            {
-              id: "tool_other",
-              name: "run_command",
-              input: { command: "date" },
-              requiresPermission: true,
-            },
-          ],
-        })
-        const permission = await kernel.requestPermission({
-          ...active,
-          toolCallId: "tool_shell",
-          action: "run_command",
-        })
-        await kernel.resolvePermission({
-          ...active,
-          permissionRequestId: permission.permissionRequestId,
-          behavior: PermissionBehavior.Allow,
-        })
-
-        await expect(
-          kernel.requireToolExecutionAllowed({
-            ...active,
-            toolCallId: "tool_shell",
-          }),
-        ).resolves.toBeUndefined()
-        await expect(
-          kernel.requireToolExecutionAllowed({
-            ...active,
-            toolCallId: "tool_other",
-          }),
-        ).rejects.toThrow("has not been allowed")
-
-        const read = await kernel.readSession({ sessionId: active.sessionId })
-        expect(read.session?.permissions[0]).toMatchObject({
-          toolCallId: "tool_shell",
-          state: PermissionState.Resolved,
-          behavior: PermissionBehavior.Allow,
-        })
-      })
-    })
-
-    it("never binds a denied permission to its tool call", async () => {
-      await withKernel(implementation, async ({ kernel }) => {
-        const active = await activeTurn(kernel)
-        await kernel.recordAssistantOutput({
-          ...active,
-          toolCalls: [
-            {
-              id: "tool_denied",
-              name: "run_command",
-              input: { command: "rm file" },
-              requiresPermission: true,
-            },
-          ],
-        })
-        const permission = await kernel.requestPermission({
-          ...active,
-          toolCallId: "tool_denied",
-          action: "run_command",
-        })
-        await kernel.resolvePermission({
-          ...active,
-          permissionRequestId: permission.permissionRequestId,
-          behavior: PermissionBehavior.Deny,
-        })
-
-        await expect(
-          kernel.requireToolExecutionAllowed({
-            ...active,
-            toolCallId: "tool_denied",
-          }),
-        ).rejects.toThrow("has not been allowed")
-      })
-    })
-
     it("allows a Turn to finish with open work and accepts one late result", async () => {
       await withKernel(implementation, async ({ kernel }) => {
         const active = await activeTurn(kernel)
@@ -1025,11 +1019,6 @@ for (const implementation of ["memory", "jsonl"] as const) {
             },
           ],
         })
-        const permission = await kernel.requestPermission({
-          ...active,
-          toolCallId: "tool_stranded",
-          action: "run_command",
-        })
         const first = await kernel.interruptTurn({
           ...active,
           reason: "restart",
@@ -1060,10 +1049,6 @@ for (const implementation of ["memory", "jsonl"] as const) {
           interruptedReason: "restart",
         })
         expect(replay.session?.tools[0]?.state).toBe(ToolState.Requested)
-        expect(replay.session?.permissions[0]).toMatchObject({
-          permissionRequestId: permission.permissionRequestId,
-          state: PermissionState.Pending,
-        })
       })
     })
 
@@ -1179,16 +1164,6 @@ for (const implementation of ["memory", "jsonl"] as const) {
             },
           ],
         })
-        const resolved = await kernel.requestPermission({
-          ...completed,
-          toolCallId: "tool_allowed",
-          action: "run_command",
-        })
-        await kernel.resolvePermission({
-          ...completed,
-          permissionRequestId: resolved.permissionRequestId,
-          behavior: PermissionBehavior.Allow,
-        })
         await kernel.recordToolResult({
           ...completed,
           toolCallId: "tool_allowed",
@@ -1221,12 +1196,6 @@ for (const implementation of ["memory", "jsonl"] as const) {
               requiresPermission: true,
             },
           ],
-        })
-        await kernel.requestPermission({
-          sessionId: completed.sessionId,
-          turnId: interrupted.turnId,
-          toolCallId: "tool_pending",
-          action: "run_command",
         })
         await kernel.interruptTurn({
           sessionId: completed.sessionId,

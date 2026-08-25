@@ -1,8 +1,7 @@
-import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { PermissionBehavior } from "../../src/kernel/events.ts"
 import { createJsonlEventStore } from "../../src/kernel/jsonl-event-store.ts"
 import { createSessionKernel } from "../../src/kernel/session-kernel.ts"
 import { createMateKernel } from "../../src/mates/mate-kernel.ts"
@@ -10,614 +9,271 @@ import { createSqliteMateStore } from "../../src/mates/sqlite-mate-store.ts"
 import { createFauxProvider } from "../../src/runtime/faux-provider.ts"
 import { createRunnerTimingPolicy } from "../../src/runtime/limits.ts"
 import { ModelStopReason } from "../../src/runtime/model.ts"
-import { createPermissionGate } from "../../src/runtime/permission-gate.ts"
+import {
+  createPermissionGate,
+  type RuntimePermissionEvent,
+} from "../../src/runtime/permission-gate.ts"
 import { createSessionRunner } from "../../src/runtime/session-runner.ts"
 import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
-import { createReadFileTool } from "../../src/runtime/tools/read-file.ts"
 import {
   type CommandLaunchResult,
   createRunCommandTool,
 } from "../../src/runtime/tools/run-command.ts"
 
 describe("permission gate", () => {
-  it.each([
-    ["default YOLO policy", undefined],
-    ["interactive policy", "auto_file_tools" as const],
-  ])("reads an external file under %s", async (_, approvalPolicy) => {
-    await withPermissionRuntime(async (runtime) => {
-      const externalDirectory = await mkdtemp(
-        join(tmpdir(), "yakitori-external-read-"),
-      )
-      const externalPath = join(externalDirectory, "result.log")
-      await writeFile(externalPath, "outside\n")
-      const canonicalExternalPath = await realpath(externalPath)
-      try {
-        const provider = createFauxProvider([
-          {
-            stopReason: ModelStopReason.ToolUse,
-            content: [
-              {
-                type: "tool_call",
-                id: "tool_read",
-                name: "read_file",
-                input: { path: externalPath },
-              },
-            ],
-          },
-          {
-            assertRequest: (request) => {
-              expect(
-                request.messages.find((message) => message.role === "tool"),
-              ).toMatchObject({
-                role: "tool",
-                content: expect.stringContaining("outside"),
-              })
-            },
-            content: [{ type: "text", text: "done" }],
-          },
-        ])
-        const runner = createSessionRunner({
-          ...(approvalPolicy === undefined ? {} : { approvalPolicy }),
-          kernel: runtime.kernel,
-          mateKernel: runtime.mateKernel,
-          stream: provider.stream,
-          toolRegistry: createToolRegistry([createReadFileTool()]),
+  it("accepts a decision delivered synchronously with the request event", async () => {
+    let gate: ReturnType<typeof createPermissionGate>
+    const events: RuntimePermissionEvent[] = []
+    gate = createPermissionGate({
+      publish: (event) => {
+        events.push(event)
+        if (event.type !== "permission.requested") return
+        gate.resolve({
+          sessionId: event.sessionId,
+          turnId: event.turnId,
+          permissionRequestId: event.permissionRequestId,
+          behavior: "allow",
         })
-        const session = await createSession(runtime)
-        await runtime.kernel.admitInput({
-          sessionId: session.sessionId,
-          content: { kind: "text", text: "read the external result" },
-        })
-
-        await runner.wake(session.sessionId)
-
-        const completed = await runtime.kernel.readSession({
-          sessionId: session.sessionId,
-        })
-        if (approvalPolicy === undefined) {
-          expect(completed.session?.configuration?.approvalPolicy).toBe("never")
-        }
-        expect(completed.session?.permissions).toEqual([])
-        expect(completed.session?.tools[0]).toMatchObject({
-          state: "completed",
-          requiresPermission: false,
-          output: { path: canonicalExternalPath },
-        })
-      } finally {
-        await rm(externalDirectory, { recursive: true, force: true })
-      }
+      },
     })
+
+    await expect(
+      gate.request({
+        sessionId: "session_sync",
+        turnId: "turn_sync",
+        toolCallId: "tool_sync",
+        action: "command_execution",
+        timeoutMs: 10,
+      }),
+    ).resolves.toEqual({ kind: "allow" })
+    expect(gate.list("session_sync")).toEqual([])
+    expect(events.map((event) => event.type)).toEqual([
+      "permission.requested",
+      "permission.resolved",
+    ])
   })
 
-  it("does not start a process before durable allow", async () => {
+  it("keeps pending approval in active runtime and launches only after allow", async () => {
     await withPermissionRuntime(async (runtime) => {
       let launches = 0
-      const launch = async (): Promise<CommandLaunchResult> => {
+      const events: RuntimePermissionEvent[] = []
+      const gate = createPermissionGate({
+        publish: (event) => events.push(event),
+      })
+      const runner = createCommandRunner(runtime, gate, async () => {
         launches += 1
-        return {
-          exitCode: 0,
-          signal: null,
-          stdout: "ok",
-          stderr: "",
-          truncated: false,
-          timedOut: false,
-        }
-      }
-      const provider = createFauxProvider([
-        {
-          stopReason: ModelStopReason.ToolUse,
-          content: [
-            {
-              type: "tool_call",
-              id: "tool_cmd",
-              name: "run_command",
-              input: { command: "echo hi" },
-            },
-          ],
-        },
-        { content: [{ type: "text", text: "done" }] },
-      ])
-      const gate = createPermissionGate()
-      const runner = createSessionRunner({
-        approvalPolicy: "auto_file_tools",
-        kernel: runtime.kernel,
-        mateKernel: runtime.mateKernel,
-        stream: provider.stream,
-        permissionGate: gate,
-        toolRegistry: createToolRegistry([createRunCommandTool({ launch })]),
+        return successfulLaunch()
       })
-      const session = await createSession(runtime)
-      await runtime.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: { kind: "text", text: "run" },
-      })
+      const session = await admitCommand(runtime)
 
       const wake = runner.wake(session.sessionId)
-      const permissionRequestId = await waitForPermission(
-        runtime.kernel,
-        session.sessionId,
-      )
+      const pending = await waitForPending(gate, session.sessionId)
       expect(launches).toBe(0)
-
-      const pendingSession = await runtime.kernel.readSession({
-        sessionId: session.sessionId,
-      })
-      expect(pendingSession.session?.permissions[0]).toMatchObject({
+      expect(events[0]).toMatchObject({
+        type: "permission.requested",
+        permissionRequestId: pending.permissionRequestId,
         action: "command_execution",
         subject: "echo hi",
-        reason: expect.stringContaining(await realpath(runtime.workspace)),
       })
 
-      const activeTurnId = pendingSession.session?.activeTurn?.turnId
-      if (activeTurnId === undefined) throw new Error("missing active turn")
-      await runtime.kernel.resolvePermission({
-        sessionId: session.sessionId,
-        turnId: activeTurnId,
-        permissionRequestId,
-        behavior: PermissionBehavior.Allow,
-      })
-      gate.notify({
-        sessionId: session.sessionId,
-        turnId: activeTurnId,
-        permissionRequestId,
-      })
+      expect(
+        gate.resolve({
+          sessionId: session.sessionId,
+          turnId: pending.turnId,
+          permissionRequestId: pending.permissionRequestId,
+          behavior: "allow",
+        }),
+      ).toBe(true)
       await wake
 
       expect(launches).toBe(1)
+      expect(gate.list(session.sessionId)).toEqual([])
       const read = await runtime.kernel.readSession({
         sessionId: session.sessionId,
       })
       expect(read.session?.tools[0]?.state).toBe("completed")
-      expect(read.session?.completedTurns).toHaveLength(1)
+      const history = await runtime.kernel.readEvents({
+        sessionId: session.sessionId,
+      })
+      expect(history.events.map((event) => event.type)).not.toContain(
+        "permission.requested",
+      )
     })
   })
 
-  it("denial starts no process and continues the model loop", async () => {
+  it("records denial as the tool result without persisting an approval fact", async () => {
     await withPermissionRuntime(async (runtime) => {
       let launches = 0
-      const launch = async (): Promise<CommandLaunchResult> => {
-        launches += 1
-        return {
-          exitCode: 0,
-          signal: null,
-          stdout: "",
-          stderr: "",
-          truncated: false,
-          timedOut: false,
-        }
-      }
-      const provider = createFauxProvider([
-        {
-          stopReason: ModelStopReason.ToolUse,
-          content: [
-            {
-              type: "tool_call",
-              id: "tool_cmd",
-              name: "run_command",
-              input: { command: "echo denied" },
-            },
-          ],
-        },
-        {
-          assertRequest: (request) => {
-            const tool = request.messages.find(
-              (message) => message.role === "tool",
-            )
-            expect(tool).toMatchObject({
-              role: "tool",
-              isError: true,
-            })
-          },
-          content: [{ type: "text", text: "understood" }],
-        },
-      ])
       const gate = createPermissionGate()
-      const runner = createSessionRunner({
-        approvalPolicy: "auto_file_tools",
-        kernel: runtime.kernel,
-        mateKernel: runtime.mateKernel,
-        stream: provider.stream,
-        permissionGate: gate,
-        toolRegistry: createToolRegistry([createRunCommandTool({ launch })]),
+      const runner = createCommandRunner(runtime, gate, async () => {
+        launches += 1
+        return successfulLaunch()
       })
-      const session = await createSession(runtime)
-      await runtime.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: { kind: "text", text: "run" },
-      })
+      const session = await admitCommand(runtime)
+
       const wake = runner.wake(session.sessionId)
-      const permissionRequestId = await waitForPermission(
-        runtime.kernel,
-        session.sessionId,
-      )
-      const read = await runtime.kernel.readSession({
+      const pending = await waitForPending(gate, session.sessionId)
+      gate.resolve({
         sessionId: session.sessionId,
-      })
-      const turnId = read.session?.activeTurn?.turnId
-      if (!turnId) throw new Error("missing turn")
-      await runtime.kernel.resolvePermission({
-        sessionId: session.sessionId,
-        turnId,
-        permissionRequestId,
-        behavior: PermissionBehavior.Deny,
+        turnId: pending.turnId,
+        permissionRequestId: pending.permissionRequestId,
+        behavior: "deny",
         reason: { kind: "user_denied", message: "nope" },
       })
-      gate.notify({
-        sessionId: session.sessionId,
-        turnId,
-        permissionRequestId,
-      })
       await wake
-      expect(launches).toBe(0)
-      const final = await runtime.kernel.readSession({
-        sessionId: session.sessionId,
-      })
-      expect(final.session?.tools[0]?.state).toBe("failed")
-      expect(final.session?.completedTurns).toHaveLength(1)
-      expect(final.session?.permissions[0]?.behavior).toBe(
-        PermissionBehavior.Deny,
-      )
-    })
-  })
-
-  it("durably expires a permission after the bounded wait", async () => {
-    await withPermissionRuntime(async (runtime) => {
-      let launches = 0
-      const provider = createFauxProvider([
-        {
-          stopReason: ModelStopReason.ToolUse,
-          content: [
-            {
-              type: "tool_call",
-              id: "tool_timeout",
-              name: "run_command",
-              input: { command: "echo too-late" },
-            },
-          ],
-        },
-        { content: [{ type: "text", text: "timed out" }] },
-      ])
-      const runner = createSessionRunner({
-        approvalPolicy: "auto_file_tools",
-        kernel: runtime.kernel,
-        mateKernel: runtime.mateKernel,
-        stream: provider.stream,
-        permissionGate: createPermissionGate(),
-        runtimeTiming: createRunnerTimingPolicy({
-          permissionWaitTimeoutMs: 20,
-        }),
-        toolRegistry: createToolRegistry([
-          createRunCommandTool({
-            launch: async () => {
-              launches += 1
-              return {
-                exitCode: 0,
-                signal: null,
-                stdout: "",
-                stderr: "",
-                truncated: false,
-                timedOut: false,
-              }
-            },
-          }),
-        ]),
-      })
-      const session = await createSession(runtime)
-      await runtime.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: { kind: "text", text: "run" },
-      })
-
-      await runner.wake(session.sessionId)
 
       expect(launches).toBe(0)
       const read = await runtime.kernel.readSession({
         sessionId: session.sessionId,
       })
-      expect(read.session?.permissions[0]).toMatchObject({
-        behavior: PermissionBehavior.Expire,
-        decisionReason: {
-          kind: "timeout",
-          message: "Permission wait timed out.",
-        },
-      })
-      expect(read.session?.tools[0]?.state).toBe("failed")
-      expect(read.session?.completedTurns).toHaveLength(1)
-    })
-  })
-
-  it("honors an allow that wins the permission timeout race", async () => {
-    await withPermissionRuntime(async (runtime) => {
-      let launches = 0
-      const provider = createFauxProvider([
-        {
-          stopReason: ModelStopReason.ToolUse,
-          content: [
-            {
-              type: "tool_call",
-              id: "tool_race",
-              name: "run_command",
-              input: { command: "echo allowed" },
-            },
-          ],
-        },
-        { content: [{ type: "text", text: "done" }] },
-      ])
-      const kernel = {
-        ...runtime.kernel,
-        resolvePermission: async (
-          input: Parameters<typeof runtime.kernel.resolvePermission>[0],
-        ) => {
-          if (input.behavior !== PermissionBehavior.Expire) {
-            return runtime.kernel.resolvePermission(input)
-          }
-          await runtime.kernel.resolvePermission({
-            ...input,
-            behavior: PermissionBehavior.Allow,
-            reason: { kind: "user_allowed" },
-          })
-          return runtime.kernel.resolvePermission(input)
-        },
-      }
-      const runner = createSessionRunner({
-        approvalPolicy: "auto_file_tools",
-        kernel,
-        mateKernel: runtime.mateKernel,
-        stream: provider.stream,
-        permissionGate: {
-          notify() {},
-          async wait() {
-            return "timeout"
-          },
-        },
-        toolRegistry: createToolRegistry([
-          createRunCommandTool({
-            launch: async () => {
-              launches += 1
-              return {
-                exitCode: 0,
-                signal: null,
-                stdout: "allowed",
-                stderr: "",
-                truncated: false,
-                timedOut: false,
-              }
-            },
-          }),
-        ]),
-      })
-      const session = await createSession(runtime)
-      await runtime.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: { kind: "text", text: "run" },
-      })
-
-      await runner.wake(session.sessionId)
-
-      expect(launches).toBe(1)
-      const read = await runtime.kernel.readSession({
-        sessionId: session.sessionId,
-      })
-      expect(read.session?.permissions[0]?.behavior).toBe(
-        PermissionBehavior.Allow,
-      )
-      expect(read.session?.completedTurns).toHaveLength(1)
-    })
-  })
-
-  it("rejects invalid command input without requesting approval", async () => {
-    await withPermissionRuntime(async (runtime) => {
-      let launches = 0
-      let waits = 0
-      const provider = createFauxProvider([
-        {
-          stopReason: ModelStopReason.ToolUse,
-          content: [
-            {
-              type: "tool_call",
-              id: "tool_invalid",
-              name: "run_command",
-              input: { command: "echo invalid", timeoutSeconds: 0 },
-            },
-          ],
-        },
-        { content: [{ type: "text", text: "handled" }] },
-      ])
-      const runner = createSessionRunner({
-        approvalPolicy: "auto_file_tools",
-        kernel: runtime.kernel,
-        mateKernel: runtime.mateKernel,
-        stream: provider.stream,
-        permissionGate: {
-          notify() {},
-          async wait() {
-            waits += 1
-            return "timeout"
-          },
-        },
-        toolRegistry: createToolRegistry([
-          createRunCommandTool({
-            launch: async () => {
-              launches += 1
-              throw new Error("invalid command must not launch")
-            },
-          }),
-        ]),
-      })
-      const session = await createSession(runtime)
-      await runtime.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: { kind: "text", text: "run invalid input" },
-      })
-
-      await runner.wake(session.sessionId)
-
-      const read = await runtime.kernel.readSession({
-        sessionId: session.sessionId,
-      })
-      expect(launches).toBe(0)
-      expect(waits).toBe(0)
-      expect(read.session?.permissions).toEqual([])
       expect(read.session?.tools[0]).toMatchObject({
         state: "failed",
-        requiresPermission: false,
-        error: { code: "invalid_tool_input" },
+        error: { code: "permission_denied", message: "nope" },
+      })
+      const history = await runtime.kernel.readEvents({
+        sessionId: session.sessionId,
+      })
+      expect(history.events.map((event) => event.type)).not.toContain(
+        "permission.resolved",
+      )
+    })
+  })
+
+  it("removes the waiter on timeout and records the failed tool result", async () => {
+    await withPermissionRuntime(async (runtime) => {
+      let launches = 0
+      const gate = createPermissionGate()
+      const runner = createCommandRunner(
+        runtime,
+        gate,
+        async () => {
+          launches += 1
+          return successfulLaunch()
+        },
+        10,
+      )
+      const session = await admitCommand(runtime)
+
+      await runner.wake(session.sessionId)
+
+      expect(launches).toBe(0)
+      expect(gate.list(session.sessionId)).toEqual([])
+      const read = await runtime.kernel.readSession({
+        sessionId: session.sessionId,
+      })
+      expect(read.session?.tools[0]).toMatchObject({
+        state: "failed",
+        error: { code: "permission_timeout" },
       })
     })
   })
 
-  it("never consults the permission gate for production run_command", async () => {
+  it("drops the waiter when its active Turn is interrupted", async () => {
     await withPermissionRuntime(async (runtime) => {
-      let waits = 0
-      let launches = 0
-      const provider = createFauxProvider([
-        {
-          stopReason: ModelStopReason.ToolUse,
-          content: [
-            {
-              type: "tool_call",
-              id: "tool_yolo",
-              name: "run_command",
-              input: { command: "git status" },
-            },
-          ],
-        },
-        { content: [{ type: "text", text: "done" }] },
-      ])
-      const runner = createSessionRunner({
-        kernel: runtime.kernel,
-        mateKernel: runtime.mateKernel,
-        stream: provider.stream,
-        permissionGate: {
-          notify() {},
-          async wait() {
-            waits += 1
-            return "timeout"
-          },
-        },
-        toolRegistry: createToolRegistry([
-          createRunCommandTool({
-            launch: async () => {
-              launches += 1
-              return {
-                exitCode: 0,
-                signal: null,
-                stdout: "clean",
-                stderr: "",
-                truncated: false,
-                timedOut: false,
-              }
-            },
-          }),
-        ]),
-      })
-      const session = await createSession(runtime)
-      await runtime.kernel.admitInput({
+      const gate = createPermissionGate()
+      const runner = createCommandRunner(runtime, gate, async () =>
+        successfulLaunch(),
+      )
+      const session = await admitCommand(runtime)
+      const wake = runner.wake(session.sessionId)
+      const pending = await waitForPending(gate, session.sessionId)
+
+      await runner.interrupt({
         sessionId: session.sessionId,
-        content: { kind: "text", text: "status" },
+        turnId: pending.turnId,
+        reason: "test interrupt",
       })
+      await wake
 
-      await runner.wake(session.sessionId)
-
-      const read = await runtime.kernel.readSession({
-        sessionId: session.sessionId,
-      })
-      expect(launches).toBe(1)
-      expect(waits).toBe(0)
-      expect(read.session?.permissions).toEqual([])
-      expect(read.session?.tools[0]?.state).toBe("completed")
-    })
-  })
-
-  it("skips the permission request when the approval policy is never", async () => {
-    await withPermissionRuntime(async (runtime) => {
-      let launches = 0
-      const provider = createFauxProvider([
-        {
-          stopReason: ModelStopReason.ToolUse,
-          content: [
-            {
-              type: "tool_call",
-              id: "tool_never",
-              name: "run_command",
-              input: { command: "echo never" },
-            },
-          ],
-        },
-        { content: [{ type: "text", text: "done" }] },
-      ])
-      const runner = createSessionRunner({
-        kernel: runtime.kernel,
-        mateKernel: runtime.mateKernel,
-        stream: provider.stream,
-        approvalPolicy: "never",
-        toolRegistry: createToolRegistry([
-          createRunCommandTool({
-            launch: async () => {
-              launches += 1
-              return {
-                exitCode: 0,
-                signal: null,
-                stdout: "never",
-                stderr: "",
-                truncated: false,
-                timedOut: false,
-              }
-            },
-          }),
-        ]),
-      })
-      const session = await createSession(runtime)
-      await runtime.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: { kind: "text", text: "run" },
-      })
-
-      await runner.wake(session.sessionId)
-
-      expect(launches).toBe(1)
-      const read = await runtime.kernel.readSession({
-        sessionId: session.sessionId,
-      })
-      expect(read.session?.permissions).toEqual([])
-      expect(read.session?.tools[0]?.state).toBe("completed")
-      expect(read.session?.completedTurns).toHaveLength(1)
+      expect(gate.list(session.sessionId)).toEqual([])
+      expect(
+        gate.resolve({
+          sessionId: session.sessionId,
+          turnId: pending.turnId,
+          permissionRequestId: pending.permissionRequestId,
+          behavior: "allow",
+        }),
+      ).toBe(false)
     })
   })
 })
 
-async function waitForPermission(
-  kernel: ReturnType<typeof createSessionKernel>,
+function createCommandRunner(
+  runtime: Runtime,
+  permissionGate: ReturnType<typeof createPermissionGate>,
+  launch: () => Promise<CommandLaunchResult>,
+  permissionWaitTimeoutMs = 60_000,
+) {
+  const provider = createFauxProvider([
+    {
+      stopReason: ModelStopReason.ToolUse,
+      content: [
+        {
+          type: "tool_call",
+          id: "tool_cmd",
+          name: "run_command",
+          input: { command: "echo hi" },
+        },
+      ],
+    },
+    { content: [{ type: "text", text: "done" }] },
+  ])
+  return createSessionRunner({
+    approvalPolicy: "auto_file_tools",
+    kernel: runtime.kernel,
+    mateKernel: runtime.mateKernel,
+    stream: provider.stream,
+    permissionGate,
+    runtimeTiming: createRunnerTimingPolicy({ permissionWaitTimeoutMs }),
+    toolRegistry: createToolRegistry([createRunCommandTool({ launch })]),
+  })
+}
+
+async function admitCommand(runtime: Runtime) {
+  const mate = await runtime.mateKernel.createMate({
+    instructions: "Ask before shell.",
+    name: "PermMate",
+    role: "Assistant",
+  })
+  const session = await runtime.kernel.createSession({
+    workingDirectory: runtime.workspace,
+    mateId: mate.mate.id,
+    mateRevisionId: mate.mate.currentRevision.id,
+  })
+  await runtime.kernel.admitInput({
+    sessionId: session.sessionId,
+    content: { kind: "text", text: "run" },
+  })
+  return session
+}
+
+async function waitForPending(
+  gate: ReturnType<typeof createPermissionGate>,
   sessionId: string,
-): Promise<string> {
+) {
   for (let attempt = 0; attempt < 200; attempt += 1) {
-    const read = await kernel.readSession({ sessionId })
-    const permission = read.session?.permissions.find(
-      (candidate) => candidate.state === "pending",
-    )
-    if (permission) return permission.permissionRequestId
+    const pending = gate.list(sessionId)[0]
+    if (pending) return pending
     await new Promise((resolve) => setTimeout(resolve, 5))
   }
   throw new Error("Permission was not requested.")
+}
+
+function successfulLaunch(): CommandLaunchResult {
+  return {
+    exitCode: 0,
+    signal: null,
+    stdout: "ok",
+    stderr: "",
+    truncated: false,
+    timedOut: false,
+  }
 }
 
 type Runtime = {
   readonly kernel: ReturnType<typeof createSessionKernel>
   readonly mateKernel: ReturnType<typeof createMateKernel>
   readonly workspace: string
-}
-
-async function createSession(runtime: Runtime) {
-  const mate = await runtime.mateKernel.createMate({
-    instructions: "Ask before shell.",
-    name: "PermMate",
-    role: "Assistant",
-  })
-  return runtime.kernel.createSession({
-    workingDirectory: runtime.workspace,
-    mateId: mate.mate.id,
-    mateRevisionId: mate.mate.currentRevision.id,
-  })
 }
 
 async function withPermissionRuntime(run: (runtime: Runtime) => Promise<void>) {
@@ -636,7 +292,7 @@ async function withPermissionRuntime(run: (runtime: Runtime) => Promise<void>) {
       workspace,
     })
   } finally {
-    mateStore.close()
+    await mateStore.close()
     await eventStore.close()
     await rm(rootDir, { recursive: true, force: true })
     await rm(workspace, { recursive: true, force: true })

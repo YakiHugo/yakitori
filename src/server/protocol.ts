@@ -192,7 +192,7 @@ export type ApiResolvePermissionResponse = {
   readonly sessionId: string
   readonly turnId: string
   readonly permissionRequestId: string
-  readonly event: EventEnvelope
+  readonly behavior: "allow" | "deny"
 }
 
 export type ApiReadSessionEventsRequest = {
@@ -226,6 +226,7 @@ export type ApiSessionSummary = {
 export type ApiSessionDetail = ApiSessionSummary & {
   readonly activeTurnId?: string
   readonly currentModel?: ModelSelection
+  readonly pendingPermissions: readonly ApiPendingPermission[]
   readonly counts: {
     readonly inputs: number
     readonly pendingInputs: number
@@ -234,4 +235,14 @@ export type ApiSessionDetail = ApiSessionSummary & {
     readonly permissions: number
     readonly tools: number
   }
+}
+
+export type ApiPendingPermission = {
+  readonly permissionRequestId: string
+  readonly turnId: string
+  readonly toolCallId: string
+  readonly action: string
+  readonly subject?: string
+  readonly reason?: string
+  readonly createdAt: string
 }

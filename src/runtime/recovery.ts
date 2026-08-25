@@ -1,121 +1,60 @@
 import {
-  PermissionState,
-  TurnState,
   YakitoriErrorCode,
   isKernelEvent,
   type RuntimeEventEnvelope,
   type SessionKernel,
 } from "../kernel/index.ts"
 
-export type HistoryRecoveryResult = {
-  readonly recoveredSessionIds: readonly string[]
-  readonly events: readonly RuntimeEventEnvelope[]
-}
-
-export type RecoveryState = {
-  readonly pendingInputSessionIds: readonly string[]
-  readonly stalePermissionRequestIds: readonly string[]
-}
-
-export type RecoveryResult = HistoryRecoveryResult & {
-  readonly wokenSessionIds: readonly string[]
-  readonly stalePermissionRequestIds: readonly string[]
-}
-
-export async function reconcileSessionHistory(input: {
-  readonly kernel: SessionKernel
-  readonly publish?: (events: readonly RuntimeEventEnvelope[]) => void
-}): Promise<HistoryRecoveryResult> {
-  const recoveredSessionIds: string[] = []
-  const events: RuntimeEventEnvelope[] = []
-
-  for await (const sessionId of listSessionIds(input.kernel)) {
-    const read = await input.kernel.readSession({ sessionId })
-    const active = read.session?.activeTurn
-    if (!active) continue
-
-    try {
-      const interrupted = await input.kernel.interruptTurn({
-        sessionId,
-        turnId: active.turnId,
-        reason: "Runtime stopped before the Turn reached a recorded boundary.",
-      })
-      if (!interrupted.created) continue
-      const runtimeEvents = interrupted.events.filter(
-        (event): event is RuntimeEventEnvelope => isKernelEvent(event),
-      )
-      events.push(...runtimeEvents)
-      input.publish?.(runtimeEvents)
-      recoveredSessionIds.push(sessionId)
-    } catch (error) {
-      if (!isInvalidState(error)) throw error
-      const current = await input.kernel.readSession({ sessionId })
-      if (current.session?.activeTurn?.turnId === active.turnId) throw error
-    }
-  }
-
-  return { recoveredSessionIds, events }
-}
-
-export async function discoverRecoveryState(input: {
-  readonly kernel: SessionKernel
-}): Promise<RecoveryState> {
-  const pendingInputSessionIds: string[] = []
-  const stalePermissionRequestIds: string[] = []
-
-  for await (const sessionId of listSessionIds(input.kernel)) {
-    const read = await input.kernel.readSession({ sessionId })
-    const session = read.session
-    if (!session) continue
-    if (session.pendingInputs.length > 0) pendingInputSessionIds.push(sessionId)
-    for (const permission of session.permissions) {
-      if (permission.state !== PermissionState.Pending) continue
-      const turn = session.turns.find(
-        (candidate) => candidate.turnId === permission.turnId,
-      )
-      if (turn?.state !== TurnState.Started) {
-        stalePermissionRequestIds.push(permission.permissionRequestId)
-      }
-    }
-  }
-
-  return { pendingInputSessionIds, stalePermissionRequestIds }
-}
-
-export function scheduleRecoveryExecution(input: {
-  readonly sessionIds: readonly string[]
-  readonly wake?: (sessionId: string) => Promise<void>
-  readonly onWakeError?: (error: unknown, sessionId: string) => void
-}): readonly string[] {
-  if (input.wake === undefined) return [...input.sessionIds]
-  for (const sessionId of input.sessionIds) {
-    void input.wake(sessionId).catch((error) => {
-      input.onWakeError?.(error, sessionId)
-    })
-  }
-  return [...input.sessionIds]
-}
-
 export async function recoverSessions(input: {
   readonly kernel: SessionKernel
   readonly wake?: (sessionId: string) => Promise<void>
   readonly publish?: (events: readonly RuntimeEventEnvelope[]) => void
   readonly onWakeError?: (error: unknown, sessionId: string) => void
-}): Promise<RecoveryResult> {
-  const history = await reconcileSessionHistory(input)
-  const state = await discoverRecoveryState(input)
-  const wokenSessionIds = scheduleRecoveryExecution({
-    sessionIds: state.pendingInputSessionIds,
-    ...(input.wake === undefined ? {} : { wake: input.wake }),
-    ...(input.onWakeError === undefined
-      ? {}
-      : { onWakeError: input.onWakeError }),
-  })
-  return {
-    ...history,
-    wokenSessionIds,
-    stalePermissionRequestIds: state.stalePermissionRequestIds,
+}): Promise<void> {
+  const pendingInputSessionIds: string[] = []
+
+  for await (const sessionId of listSessionIds(input.kernel)) {
+    let session = (await input.kernel.readSession({ sessionId })).session
+    const active = session?.activeTurn
+    if (active !== undefined) {
+      try {
+        const interrupted = await input.kernel.interruptTurn({
+          sessionId,
+          turnId: active.turnId,
+          reason:
+            "Runtime stopped before the Turn reached a recorded boundary.",
+        })
+        publish(input.publish, interrupted.events)
+      } catch (error) {
+        if (!isInvalidState(error)) throw error
+        const current = await input.kernel.readSession({ sessionId })
+        if (current.session?.activeTurn?.turnId === active.turnId) throw error
+      }
+      session = (await input.kernel.readSession({ sessionId })).session
+    }
+    if (session !== undefined && session.pendingInputs.length > 0) {
+      pendingInputSessionIds.push(sessionId)
+    }
   }
+
+  if (input.wake === undefined) return
+  for (const sessionId of pendingInputSessionIds) {
+    void input.wake(sessionId).catch((error) => {
+      input.onWakeError?.(error, sessionId)
+    })
+  }
+}
+
+function publish(
+  consumer: ((events: readonly RuntimeEventEnvelope[]) => void) | undefined,
+  events: readonly { readonly type: string }[],
+): void {
+  if (consumer === undefined) return
+  consumer(
+    events.filter((event): event is RuntimeEventEnvelope =>
+      isKernelEvent(event),
+    ),
+  )
 }
 
 async function* listSessionIds(

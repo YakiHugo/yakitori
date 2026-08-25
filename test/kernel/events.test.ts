@@ -19,8 +19,6 @@ describe("kernel facts", () => {
       "turn.completed",
       "item.started",
       "item.completed",
-      "permission.requested",
-      "permission.resolved",
       "context.compacted",
     ])
     expect(Object.values(HistoryRecordType)).toEqual([
@@ -28,6 +26,7 @@ describe("kernel facts", () => {
       "turn.context",
       "history.initialized",
       "world_state",
+      "provider.usage_baseline",
     ])
   })
 

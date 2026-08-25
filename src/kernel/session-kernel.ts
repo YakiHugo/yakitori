@@ -17,8 +17,7 @@ import {
   type KernelFact,
   type ModelMessage,
   type ModelSelection,
-  PermissionBehavior,
-  type PermissionDecisionReason,
+  type ProviderUsageBaseline,
   type SessionConfigurationSnapshot,
   type StoredEventEnvelope,
   type TextContent,
@@ -33,7 +32,6 @@ import {
   createContextWindowId,
   createInputId,
   createItemId,
-  createPermissionRequestId,
   createRequestId,
   createSessionId,
   createTurnId,
@@ -43,7 +41,6 @@ import { fingerprintInputAdmission } from "./operation.ts"
 import {
   type InputProjection,
   InputState,
-  PermissionState,
   type SessionProjection,
   type SessionSummary,
   type ToolProjection,
@@ -76,18 +73,12 @@ export type SessionKernel = {
   recordAssistantOutput(
     input: RecordAssistantOutputInput,
   ): Promise<RecordAssistantOutputResult>
-  requestPermission(
-    input: RequestPermissionInput,
-  ): Promise<RequestPermissionResult>
-  resolvePermission(
-    input: ResolvePermissionInput,
-  ): Promise<ResolvePermissionResult>
-  requireToolExecutionAllowed(
-    input: RequireToolExecutionAllowedInput,
-  ): Promise<void>
   recordToolResult(
     input: RecordToolResultInput,
   ): Promise<RecordToolResultResult>
+  recordProviderUsageBaseline(
+    input: RecordProviderUsageBaselineInput,
+  ): Promise<RecordProviderUsageBaselineResult>
   recordCompaction(
     input: RecordCompactionInput,
   ): Promise<RecordCompactionResult>
@@ -129,10 +120,16 @@ export type SeedContextWindowInput = {
   readonly sourceSessionId: string
   readonly history: readonly ModelMessage[]
   readonly worldStateBaseline?: JsonObject
+  readonly providerUsageBaseline?: {
+    readonly turnId: string
+    readonly modelCallId: string
+    readonly baseline: ProviderUsageBaseline
+  }
 }
 export type SeedContextWindowResult = {
   readonly windowId: string
   readonly event: EventEnvelope
+  readonly events: readonly EventEnvelope[]
 }
 export type ForkSessionInput = {
   readonly sessionId: string
@@ -235,33 +232,6 @@ export type RecordAssistantOutputResult = {
   readonly toolCalls: readonly RecordedToolCall[]
   readonly events: readonly EventEnvelope[]
 }
-export type RequestPermissionInput = {
-  readonly sessionId: string
-  readonly turnId: string
-  readonly toolCallId: string
-  readonly action: string
-  readonly subject?: string
-  readonly reason?: string
-  readonly metadata?: EventMetadata
-}
-export type RequestPermissionResult = {
-  readonly permissionRequestId: string
-  readonly event: EventEnvelope
-}
-export type ResolvePermissionInput = {
-  readonly sessionId: string
-  readonly turnId: string
-  readonly permissionRequestId: string
-  readonly behavior: PermissionBehavior
-  readonly reason?: PermissionDecisionReason
-  readonly metadata?: EventMetadata
-}
-export type ResolvePermissionResult = { readonly event: EventEnvelope }
-export type RequireToolExecutionAllowedInput = {
-  readonly sessionId: string
-  readonly turnId: string
-  readonly toolCallId: string
-}
 export type RecordToolResultInput = {
   readonly sessionId: string
   readonly turnId: string
@@ -275,6 +245,15 @@ export type RecordToolResultResult = {
   readonly itemId: string
   readonly event: EventEnvelope
   readonly events: readonly EventEnvelope[]
+}
+export type RecordProviderUsageBaselineInput = {
+  readonly sessionId: string
+  readonly turnId: string
+  readonly modelCallId: string
+  readonly baseline: ProviderUsageBaseline
+}
+export type RecordProviderUsageBaselineResult = {
+  readonly event: EventEnvelope
 }
 export type RecordCompactionInput = {
   readonly sessionId: string
@@ -420,16 +399,36 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
           )
         }
         const windowId = createContextWindowId()
-        const event = await append(eventStore, session, {
-          type: HistoryRecordType.InitialContext,
-          data: compact({
-            windowId,
-            sourceSessionId: input.sourceSessionId,
-            history: input.history,
-            worldStateBaseline: input.worldStateBaseline,
-          }),
-        })
-        return { windowId, event }
+        const events = await appendMany(eventStore, session, [
+          {
+            type: HistoryRecordType.InitialContext,
+            data: compact({
+              windowId,
+              sourceSessionId: input.sourceSessionId,
+              history: input.history,
+              worldStateBaseline: input.worldStateBaseline,
+            }),
+          },
+          ...(input.providerUsageBaseline === undefined
+            ? []
+            : [
+                {
+                  type: HistoryRecordType.ProviderUsageBaseline,
+                  data: {
+                    turnId: input.providerUsageBaseline.turnId,
+                    modelCallId: input.providerUsageBaseline.modelCallId,
+                    baseline: {
+                      ...input.providerUsageBaseline.baseline,
+                      contextWindowId: windowId,
+                    },
+                  },
+                } as const,
+              ]),
+        ])
+        const event = events[0]
+        if (event === undefined)
+          throw new Error("Expected initial context fact.")
+        return { windowId, event, events }
       })
     },
 
@@ -748,72 +747,6 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
       })
     },
 
-    requestPermission(input) {
-      return command(input.sessionId, async () => {
-        const session = await requireSession(eventStore, input.sessionId)
-        requireActiveTurn(session, input.turnId)
-        const tool = requireTool(session, input.turnId, input.toolCallId)
-        if (!tool.requiresPermission)
-          invalidState(
-            `Tool call ${input.toolCallId} does not require permission.`,
-          )
-        if (tool.permissionRequestId !== undefined)
-          invalidState(
-            `Tool call ${input.toolCallId} already has a permission request.`,
-          )
-        const permissionRequestId = createPermissionRequestId()
-        const event = await append(eventStore, session, {
-          type: EventType.PermissionRequested,
-          data: compact({
-            permissionRequestId,
-            turnId: input.turnId,
-            toolCallId: input.toolCallId,
-            action: input.action,
-            subject: input.subject,
-            reason: input.reason,
-            metadata: input.metadata,
-          }),
-        })
-        return { permissionRequestId, event }
-      })
-    },
-
-    resolvePermission(input) {
-      return command(input.sessionId, async () => {
-        const session = await requireSession(eventStore, input.sessionId)
-        requireActiveTurn(session, input.turnId)
-        const permission = session.permissions.find(
-          (candidate) =>
-            candidate.permissionRequestId === input.permissionRequestId,
-        )
-        if (!permission || permission.turnId !== input.turnId)
-          notFound(`Permission ${input.permissionRequestId} was not found.`)
-        if (permission.state !== PermissionState.Pending)
-          invalidState(
-            `Permission ${input.permissionRequestId} is already resolved.`,
-          )
-        const event = await append(eventStore, session, {
-          type: EventType.PermissionResolved,
-          data: compact({
-            permissionRequestId: input.permissionRequestId,
-            turnId: input.turnId,
-            behavior: input.behavior,
-            reason: input.reason,
-            metadata: input.metadata,
-          }),
-        })
-        return { event }
-      })
-    },
-
-    requireToolExecutionAllowed(input) {
-      return command(input.sessionId, async () => {
-        const session = await requireSession(eventStore, input.sessionId)
-        const tool = requireTool(session, input.turnId, input.toolCallId)
-        requireAllowedTool(session, tool)
-      })
-    },
-
     recordToolResult(input) {
       return command(input.sessionId, async () => {
         const session = await requireSession(eventStore, input.sessionId)
@@ -842,6 +775,22 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
           },
         })
         return { itemId, event, events: [event] }
+      })
+    },
+
+    recordProviderUsageBaseline(input) {
+      return command(input.sessionId, async () => {
+        const session = await requireSession(eventStore, input.sessionId)
+        requireActiveTurn(session, input.turnId)
+        const event = await append(eventStore, session, {
+          type: HistoryRecordType.ProviderUsageBaseline,
+          data: {
+            turnId: input.turnId,
+            modelCallId: input.modelCallId,
+            baseline: input.baseline,
+          },
+        })
+        return { event }
       })
     },
 
@@ -1176,23 +1125,6 @@ function requireTool(
     toolCallId,
     turnId,
   })
-}
-
-function requireAllowedTool(
-  session: SessionProjection,
-  tool: ToolProjection,
-): void {
-  if (!tool.requiresPermission) return
-  const permission = session.permissions.find(
-    (candidate) => candidate.permissionRequestId === tool.permissionRequestId,
-  )
-  if (
-    permission?.toolCallId === tool.toolCallId &&
-    permission.state === PermissionState.Resolved &&
-    permission.behavior === PermissionBehavior.Allow
-  )
-    return
-  invalidState(`Tool call ${tool.toolCallId} has not been allowed.`)
 }
 
 function serializeSessionCommand<T>(

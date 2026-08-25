@@ -17,8 +17,7 @@ import {
   type KernelError,
   type ModelMessage,
   type ModelSelection,
-  type PermissionBehavior,
-  type PermissionDecisionReason,
+  type ProviderUsageBaseline,
   type SessionConfigurationSnapshot,
   type StoredEventEnvelope,
   type TextContent,
@@ -32,8 +31,6 @@ import { jsonValuesEqual } from "./json-equality.ts"
 import {
   InputState,
   type InputState as InputStateType,
-  PermissionState,
-  type PermissionState as PermissionStateType,
   ToolState,
   type ToolState as ToolStateType,
   TurnState,
@@ -44,7 +41,7 @@ import {
   toolExecutionDescriptorsCompatible,
 } from "./tool-execution.ts"
 
-export { InputState, PermissionState, ToolState, TurnState }
+export { InputState, ToolState, TurnState }
 
 export type SessionProjection = {
   readonly id: string
@@ -62,6 +59,7 @@ export type SessionProjection = {
   readonly metadata?: EventMetadata
   readonly configuration?: SessionConfigurationSnapshot
   readonly usage?: TokenUsage
+  readonly providerUsageBaseline?: ProviderUsageBaselineProjection
   readonly compaction?: CompactionProjection
   readonly inheritedContext?: InheritedContextProjection
   readonly worldState?: WorldStateProjection
@@ -74,7 +72,6 @@ export type SessionProjection = {
   readonly cancelledTurns: readonly TurnProjection[]
   readonly interruptedTurns: readonly TurnProjection[]
   readonly items: readonly ItemProjection[]
-  readonly permissions: readonly PermissionProjection[]
   readonly tools: readonly ToolProjection[]
   readonly turns: readonly TurnProjection[]
 }
@@ -164,6 +161,14 @@ export type WorldStateUpdateProjection = {
   readonly createdAt: string
 }
 
+export type ProviderUsageBaselineProjection = {
+  readonly turnId: string
+  readonly modelCallId: string
+  readonly baseline: ProviderUsageBaseline
+  readonly seq: number
+  readonly createdAt: string
+}
+
 export type InputProjection = {
   readonly requestId: string
   readonly inputId: string
@@ -207,21 +212,6 @@ export type ItemProjection = {
   readonly providerMetadata?: EventMetadata
 }
 
-export type PermissionProjection = {
-  readonly permissionRequestId: string
-  readonly turnId: string
-  readonly toolCallId: string
-  readonly action: string
-  readonly state: PermissionStateType
-  readonly requestedAt: string
-  readonly updatedAt: string
-  readonly subject?: string
-  readonly reason?: string
-  readonly behavior?: PermissionBehavior
-  readonly decisionReason?: PermissionDecisionReason
-  readonly metadata?: EventMetadata
-}
-
 export type ToolProjection = {
   readonly toolCallId: string
   readonly turnId: string
@@ -233,7 +223,6 @@ export type ToolProjection = {
   readonly updatedAt: string
   readonly requestItemId: string
   readonly resultItemId?: string
-  readonly permissionRequestId?: string
   readonly requiresPermission: boolean
   readonly providerMetadata?: EventMetadata
   readonly output?: JsonValue
@@ -267,12 +256,6 @@ export function applySessionFacts(
   )
   const tools = new Map(
     current?.tools.map((tool) => [tool.toolCallId, { ...tool }]) ?? [],
-  )
-  const permissions = new Map(
-    current?.permissions.map((permission) => [
-      permission.permissionRequestId,
-      { ...permission },
-    ]) ?? [],
   )
   const turnContexts = new Map(
     current?.turns.flatMap((turn) =>
@@ -365,15 +348,17 @@ export function applySessionFacts(
       })
       continue
     }
-    applyKnownEvent(
-      inputs,
-      turns,
-      items,
-      tools,
-      permissions,
-      turnContexts,
-      stored,
-    )
+    if (stored.type === HistoryRecordType.ProviderUsageBaseline) {
+      session.providerUsageBaseline = {
+        turnId: stored.data.turnId,
+        modelCallId: stored.data.modelCallId,
+        baseline: stored.data.baseline,
+        seq: stored.seq,
+        createdAt: stored.createdAt,
+      }
+      continue
+    }
+    applyKnownEvent(inputs, turns, items, tools, turnContexts, stored)
   }
 
   if (!session) return undefined
@@ -408,7 +393,6 @@ export function applySessionFacts(
     ),
     items: Array.from(items.values()),
     tools: Array.from(tools.values()),
-    permissions: Array.from(permissions.values()),
     turns: projectedTurns,
   }
 }
@@ -481,6 +465,9 @@ function mutableSession(current: SessionProjection): MutableSession {
     ...(current.inheritedContext === undefined
       ? {}
       : { inheritedContext: current.inheritedContext }),
+    ...(current.providerUsageBaseline === undefined
+      ? {}
+      : { providerUsageBaseline: current.providerUsageBaseline }),
   }
 }
 
@@ -501,6 +488,7 @@ type MutableSession = {
   configuration?: SessionConfigurationSnapshot
   compaction?: CompactionProjection
   inheritedContext?: InheritedContextProjection
+  providerUsageBaseline?: ProviderUsageBaselineProjection
 }
 
 type Mutable<T> = { -readonly [K in keyof T]: T[K] }
@@ -518,7 +506,6 @@ function applyKnownEvent(
   turns: Map<string, MutableTurn>,
   items: Map<string, ItemProjection>,
   tools: Map<string, MutableTool>,
-  permissions: Map<string, PermissionProjection>,
   turnContexts: ReadonlyMap<string, TurnExecutionContext>,
   event: EventEnvelope,
 ): void {
@@ -623,28 +610,9 @@ function applyKnownEvent(
         applyToolCompleted(turns, items, tools, event)
       }
       return
-    case EventType.PermissionRequested:
-      applyPermissionRequested(tools, permissions, event)
-      return
-    case EventType.PermissionResolved: {
-      const permission = permissions.get(event.data.permissionRequestId)
-      if (!permission) return
-      permissions.set(event.data.permissionRequestId, {
-        ...permission,
-        state: PermissionState.Resolved,
-        updatedAt: event.createdAt,
-        behavior: event.data.behavior,
-        ...(event.data.reason === undefined
-          ? {}
-          : { decisionReason: event.data.reason }),
-        ...(event.data.metadata === undefined
-          ? {}
-          : { metadata: event.data.metadata }),
-      })
-      return
-    }
     case HistoryRecordType.WorldState:
     case HistoryRecordType.InitialContext:
+    case HistoryRecordType.ProviderUsageBaseline:
     case EventType.ContextCompacted:
       return
   }
@@ -883,29 +851,4 @@ function requireNewItemId(
   if (items.has(itemId)) {
     invalidReplay(`Item ID ${itemId} is not unique.`)
   }
-}
-
-function applyPermissionRequested(
-  tools: Map<string, MutableTool>,
-  permissions: Map<string, PermissionProjection>,
-  event: Extract<EventEnvelope, { type: typeof EventType.PermissionRequested }>,
-): void {
-  permissions.set(event.data.permissionRequestId, {
-    permissionRequestId: event.data.permissionRequestId,
-    turnId: event.data.turnId,
-    toolCallId: event.data.toolCallId,
-    action: event.data.action,
-    state: PermissionState.Pending,
-    requestedAt: event.createdAt,
-    updatedAt: event.createdAt,
-    ...(event.data.subject === undefined
-      ? {}
-      : { subject: event.data.subject }),
-    ...(event.data.reason === undefined ? {} : { reason: event.data.reason }),
-    ...(event.data.metadata === undefined
-      ? {}
-      : { metadata: event.data.metadata }),
-  })
-  const tool = tools.get(event.data.toolCallId)
-  if (tool) tool.permissionRequestId = event.data.permissionRequestId
 }

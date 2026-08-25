@@ -149,7 +149,9 @@ export async function createYakitoriApplication(
     const mateKernel = createMateKernel(ownedMateStore)
     const eventHub = createDurableEventHub()
     const transientHub = createTransientEventHub()
-    const permissionGate = createPermissionGate()
+    const permissionGate = createPermissionGate({
+      publish: (event) => transientHub.publish(event),
+    })
     const projectRegistry = createProjectRegistry({
       defaultProject: workspace,
     })
@@ -246,9 +248,8 @@ export async function createYakitoriApplication(
           console.error("Session wake failed", error)
         })
       },
-      onPermissionResolved: (input) => {
-        permissionGate.notify(input)
-      },
+      resolvePermission: (input) => permissionGate.resolve(input),
+      listPendingPermissions: (sessionId) => permissionGate.list(sessionId),
       interruptTurn: async (input) => {
         await runner.interrupt(input)
       },
