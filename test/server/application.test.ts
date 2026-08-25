@@ -350,12 +350,12 @@ describe("application composition", () => {
     })
   })
 
-  it("keeps legacy Mate identity in events.sqlite when no Mate DB exists", async () => {
+  it("does not treat events.sqlite as the Mate database", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const legacyPath = join(rootDir, "events.sqlite")
       const mateStore = createSqliteMateStore({ databasePath: legacyPath })
-      const created = await createMateKernel(mateStore).createMate({
-        instructions: "Preserve this identity.",
+      const legacyMate = await createMateKernel(mateStore).createMate({
+        instructions: "Old development data.",
         name: "Legacy",
         role: "Builder",
       })
@@ -365,8 +365,8 @@ describe("application composition", () => {
         testApplicationOptions({ rootDir, workspace }),
       )
       try {
-        expect(application.mateDatabasePath).toBe(legacyPath)
-        expect(application.activeMate.mateId).toBe(created.mate.id)
+        expect(application.mateDatabasePath).toBe(join(rootDir, "mates.sqlite"))
+        expect(application.activeMate.mateId).not.toBe(legacyMate.mate.id)
         expect((await application.mateKernel.listMates()).mates).toHaveLength(1)
       } finally {
         await application.close()

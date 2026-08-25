@@ -640,7 +640,7 @@ export function createSessionRunner(
         signal: input.signal,
       }
       const contextWindowId =
-        session.compaction?.replacement?.windowId ??
+        session.compaction?.replacement.windowId ??
         session.inheritedContext?.windowId ??
         session.conversationId
       const requestBudget = estimateModelRequestBudget(request)
@@ -938,17 +938,8 @@ export function createSessionRunner(
     readonly step: StepContext
     readonly forceFull?: boolean
   }): Promise<SessionProjection> {
-    const compactionThroughSeq = input.session.compaction?.throughSeq
-    const compactionInvalidatedBaseline =
-      compactionThroughSeq !== undefined &&
-      input.session.compaction?.replacement === undefined &&
-      !input.session.worldStateUpdates.some(
-        (update) => update.full && update.seq > compactionThroughSeq,
-      )
     const diff = diffWorldState(
-      input.forceFull || compactionInvalidatedBaseline
-        ? undefined
-        : input.session.worldState?.state,
+      input.forceFull ? undefined : input.session.worldState?.state,
       input.step.worldState,
     )
     if (diff === undefined) return input.session
