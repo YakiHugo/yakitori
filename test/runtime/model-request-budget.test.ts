@@ -15,7 +15,12 @@ describe("complete model request budgeting", () => {
     expect(high.systemTokens).toBeGreaterThan(0)
     expect(high.messageTokens).toBeGreaterThan(0)
     expect(high.toolTokens).toBeGreaterThan(0)
-    expect(high.imageTokens).toBe(1_844)
+    expect(high.systemTokens).toBe(
+      Math.ceil(
+        Buffer.byteLength(JSON.stringify(requestWithImage("high").system)) / 4,
+      ),
+    )
+    expect(high.imageTokens).toBe(2_000)
     expect(original.imageTokens).toBe(10_000)
     expect(original.outputReserveTokens).toBe(4_096)
     expect(original.requiredContextTokens).toBe(

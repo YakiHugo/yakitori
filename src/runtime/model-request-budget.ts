@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto"
+import { readImageDimensions } from "../kernel/image-metadata.ts"
 import {
   DEFAULT_MODEL_MAX_OUTPUT_TOKENS,
   type ModelImageBlock,
@@ -6,13 +7,10 @@ import {
   type ModelUsage,
 } from "./model.ts"
 
-const HIGH_DETAIL_IMAGE_TOKENS = 1_844
+const HIGH_DETAIL_IMAGE_TOKENS = 2_000
 const ORIGINAL_IMAGE_PATCH_SIZE = 32
 const ORIGINAL_IMAGE_MAX_PATCHES = 10_000
-// Codex and Grok both use a 4-bytes/token local fallback. Keep that reference
-// baseline, but reserve 20% for tokenizer/language variance until the first
-// provider usage replaces it with a model-specific measurement.
-const FALLBACK_BYTES_PER_TOKEN = 3.2
+const APPROX_BYTES_PER_TOKEN = 4
 
 export type ModelRequestBudget = Readonly<{
   envelopeTokens: number
@@ -45,20 +43,12 @@ export function estimateModelRequestBudget(
       cacheKey: request.cacheKey,
       maxOutputTokens: request.maxOutputTokens,
     }),
-    FALLBACK_BYTES_PER_TOKEN,
   )
-  const systemTokens = estimateTextTokens(
-    JSON.stringify(request.system),
-    FALLBACK_BYTES_PER_TOKEN,
-  )
+  const systemTokens = estimateTextTokens(JSON.stringify(request.system))
   const messageTokens = estimateTextTokens(
     JSON.stringify(request.messages, omitImagePayload),
-    FALLBACK_BYTES_PER_TOKEN,
   )
-  const toolTokens = estimateTextTokens(
-    JSON.stringify(request.tools),
-    FALLBACK_BYTES_PER_TOKEN,
-  )
+  const toolTokens = estimateTextTokens(JSON.stringify(request.tools))
   const imageTokens = request.messages.reduce(
     (total, message) =>
       message.role !== "user"
@@ -154,8 +144,8 @@ function systemRevisions(request: ModelRequest): readonly string[] {
   return request.system.map((section) => `${section.id}:${section.revision}`)
 }
 
-function estimateTextTokens(text: string, bytesPerToken: number): number {
-  return Math.ceil(Buffer.byteLength(text, "utf8") / bytesPerToken)
+function estimateTextTokens(text: string): number {
+  return Math.ceil(Buffer.byteLength(text, "utf8") / APPROX_BYTES_PER_TOKEN)
 }
 
 function omitImagePayload(_key: string, value: unknown): unknown {
@@ -185,94 +175,6 @@ function estimateImageTokens(image: ModelImageBlock): number {
   const patchesWide = Math.ceil(dimensions.width / ORIGINAL_IMAGE_PATCH_SIZE)
   const patchesHigh = Math.ceil(dimensions.height / ORIGINAL_IMAGE_PATCH_SIZE)
   return Math.min(patchesWide * patchesHigh, ORIGINAL_IMAGE_MAX_PATCHES)
-}
-
-function readImageDimensions(
-  bytes: Buffer,
-  mediaType: ModelImageBlock["mediaType"],
-): { readonly width: number; readonly height: number } | undefined {
-  if (
-    mediaType === "image/png" &&
-    bytes.length >= 24 &&
-    bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
-  ) {
-    return dimensions(bytes.readUInt32BE(16), bytes.readUInt32BE(20))
-  }
-  if (
-    mediaType === "image/gif" &&
-    bytes.length >= 10 &&
-    (bytes.toString("ascii", 0, 6) === "GIF87a" ||
-      bytes.toString("ascii", 0, 6) === "GIF89a")
-  ) {
-    return dimensions(bytes.readUInt16LE(6), bytes.readUInt16LE(8))
-  }
-  if (mediaType === "image/jpeg" && bytes[0] === 0xff && bytes[1] === 0xd8) {
-    return readJpegDimensions(bytes)
-  }
-  if (mediaType === "image/webp") return readWebpDimensions(bytes)
-  return undefined
-}
-
-function readJpegDimensions(
-  bytes: Buffer,
-): { readonly width: number; readonly height: number } | undefined {
-  let offset = 2
-  while (offset + 9 < bytes.length) {
-    if (bytes[offset] !== 0xff) {
-      offset += 1
-      continue
-    }
-    const marker = bytes[offset + 1]
-    if (marker === undefined) return undefined
-    if (marker >= 0xc0 && marker <= 0xc3) {
-      return dimensions(
-        bytes.readUInt16BE(offset + 7),
-        bytes.readUInt16BE(offset + 5),
-      )
-    }
-    const segmentLength = bytes.readUInt16BE(offset + 2)
-    if (segmentLength < 2) return undefined
-    offset += segmentLength + 2
-  }
-  return undefined
-}
-
-function readWebpDimensions(
-  bytes: Buffer,
-): { readonly width: number; readonly height: number } | undefined {
-  if (
-    bytes.length < 30 ||
-    bytes.toString("ascii", 0, 4) !== "RIFF" ||
-    bytes.toString("ascii", 8, 12) !== "WEBP"
-  ) {
-    return undefined
-  }
-  const kind = bytes.toString("ascii", 12, 16)
-  if (kind === "VP8X") {
-    const width = 1 + bytes.readUIntLE(24, 3)
-    const height = 1 + bytes.readUIntLE(27, 3)
-    return dimensions(width, height)
-  }
-  if (kind === "VP8 " && bytes.length >= 30) {
-    return dimensions(
-      bytes.readUInt16LE(26) & 0x3fff,
-      bytes.readUInt16LE(28) & 0x3fff,
-    )
-  }
-  if (kind === "VP8L" && bytes.length >= 25) {
-    const packed = bytes.readUInt32LE(21)
-    const width = (packed & 0x3fff) + 1
-    const height = ((packed >> 14) & 0x3fff) + 1
-    return dimensions(width, height)
-  }
-  return undefined
-}
-
-function dimensions(
-  width: number,
-  height: number,
-): { readonly width: number; readonly height: number } | undefined {
-  return width > 0 && height > 0 ? { width, height } : undefined
 }
 
 function arraysEqual(
