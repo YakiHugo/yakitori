@@ -161,17 +161,16 @@ Reference anchors:
 
 ## M3 — Tool catalog, execution policy, and permissions
 
-Status: in progress. The finalized per-Step router and shared file-path
-resolution boundary have landed; limit ownership and the remaining command /
-mutation approval-policy cleanup are still open.
+Status: in progress. The finalized per-Step router, shared file-path resolution,
+and explicit tool approval requirements have landed; limit ownership and
+PermissionGate timeout cleanup remain open. The product default remains YOLO
+(`never`); approval requirements change no default execution behavior.
 
 ### Confirmed problems
 
 - `RuntimeLimits` mixes Session semantics, per-call tool requests, and process
   safety caps. Eight tool-side keys are persisted and validated but tools read
   module constants instead.
-- `RuntimeTool.autoAllow` is always true in production, leaving the permission
-  request path without a real trigger.
 - Permission timeout defaults and abort detection are duplicated; `now/sleep`
   dependency injection has no production caller.
 
@@ -193,38 +192,28 @@ The effective value is bounded by the most restrictive applicable layer:
 effective = min(call request, Session policy, hard safety cap)
 ```
 
-Permissions remain a core safety boundary. Remove the speculative `autoAllow`
-surface and make approval requirements a real result of tool policy for file
-mutation and command execution. One Permission owner controls request,
-resolution, timeout, abort, and recovery expiry.
-
-The current product default is YOLO (`never` ask), matching its single-user
-coding-agent stage. Path normalization, bounded I/O, compare-and-write,
-non-regular-file rejection, and command fuses are hard
-safety policy and do not disappear in YOLO mode. A future interactive mode
-changes only approval policy; it must not change tool schemas or path
-resolution.
-
 ### Remaining work
 
 - Remove tool-side keys from persisted `runtimeLimits` through a clean schema
   break.
-- Wire real approval requirements; do not delete the permission system merely
-  because the current trigger is inert.
 - Remove unused PermissionGate clock injection and duplicated timeout defaults.
 
 ### Done when
 
 - Changing Session policy changes only documented Session behavior; changing a
   safety cap cannot be serialized as a Session preference.
-- Permission allow, deny, expire, abort, recovery, and policy bypass have
-  integration tests through the real tool loop.
+- Permission timeout and abort use one runtime timing owner; recovery expiry is
+  closed under M4 startup reconciliation.
 
 Reference anchors:
 
 - `.references/public/codex/codex-rs/core/src/tools/router.rs`
 - `.references/public/codex/codex-rs/core/src/tools/context.rs`
+- `.references/public/codex/codex-rs/core/src/tools/orchestrator.rs`
+- `.references/public/codex/codex-rs/core/src/tools/sandboxing.rs`
+- `.references/public/codex/codex-rs/core/src/tools/approvals.rs`
 - `.references/public/codex/codex-rs/core/src/exec.rs`
+- `.references/public/grok-build/crates/codegen/xai-grok-workspace/src/permission/types.rs`
 
 ## M4 — Persistence, recovery, and keyed concurrency
 

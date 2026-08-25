@@ -4,6 +4,7 @@ import {
   GrepInputSchema,
   parseGrepInput,
 } from "./grep-input.ts"
+import { noToolApprovalRequired } from "./approval-requirements.ts"
 import { resolveSearchPath } from "./path-policy.ts"
 import {
   completeFileSearchExecution,
@@ -71,7 +72,7 @@ export function createGrepTool(
     name: "grep",
     description:
       "Search file contents with ripgrep. Read the relevant file before editing it. Supports regex, file globs, file types, context lines, case-insensitive and multiline search, and workspace-relative or absolute paths. Results are paginated and bounded.",
-    autoAllow: true,
+    approvalRequirement: noToolApprovalRequired,
     effect: "observe",
     describeExecution: fileSearchExecution("grep"),
     completeExecution: completeFileSearchExecution,

@@ -1,4 +1,5 @@
 import { stat } from "node:fs/promises"
+import { noToolApprovalRequired } from "./approval-requirements.ts"
 import { resolveSearchPath } from "./path-policy.ts"
 import {
   completeFileSearchExecution,
@@ -40,7 +41,7 @@ export function createGlobTool(
     name: "glob",
     description:
       "Fast file pattern matching that works with any codebase size. Supports patterns such as **/*.js and src/**/*.ts, accepts workspace-relative or absolute search paths, returns normalized file paths sorted lexicographically, and caps results at 100 files.",
-    autoAllow: true,
+    approvalRequirement: noToolApprovalRequired,
     effect: "observe",
     describeExecution: fileSearchExecution("glob"),
     completeExecution: completeFileSearchExecution,

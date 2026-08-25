@@ -48,11 +48,11 @@ async function fetchUrl(
 }
 
 describe("web_fetch contract", () => {
-  it("is auto-allowed, read-only, and part of the default tool set", () => {
+  it("requires no approval, is read-only, and is in the default tool set", () => {
     const tool = createWebFetchTool()
     expect(tool).toMatchObject({
       name: "web_fetch",
-      autoAllow: true,
+      approvalRequirement: { kind: "none" },
       effect: "observe",
       inputSchema: {
         additionalProperties: false,

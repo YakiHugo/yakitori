@@ -9,6 +9,17 @@ import type { VisibleFileObservations } from "./visible-file-observations.ts"
 
 export type ToolEffect = "observe" | "mutate" | "opaque"
 
+export type ToolApprovalAction = "command_execution" | "file_change"
+
+export type ToolApprovalRequirement =
+  | Readonly<{ kind: "none" }>
+  | Readonly<{
+      kind: "approval"
+      action: ToolApprovalAction
+      subject?: string
+      reason?: string
+    }>
+
 export type ToolExecutionContext = Readonly<{
   workspaceRoot: string
   sessionId?: string
@@ -21,7 +32,7 @@ export type ToolExecutionContext = Readonly<{
 
 export type ToolPermissionRequest = Readonly<{
   kind: "tool"
-  action: string
+  action: ToolApprovalAction
   subject?: string
   reason?: string
 }>
@@ -48,12 +59,13 @@ export type RuntimeTool = Readonly<{
   name: string
   description: string
   inputSchema: JsonObject
-  autoAllow: boolean
   effect: ToolEffect
-  permission?: (
-    input: unknown,
-    context: ToolPermissionContext,
-  ) => Promise<ToolPermissionRequest | undefined>
+  approvalRequirement:
+    | ToolApprovalRequirement
+    | ((
+        input: unknown,
+        context: ToolPermissionContext,
+      ) => ToolApprovalRequirement | Promise<ToolApprovalRequirement>)
   describeExecution?: (input: JsonValue) => ToolExecutionDescriptor
   completeExecution?: (
     started: ToolExecutionDescriptor,

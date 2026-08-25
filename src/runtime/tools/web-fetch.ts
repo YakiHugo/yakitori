@@ -1,4 +1,5 @@
 import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
+import { noToolApprovalRequired } from "./approval-requirements.ts"
 import {
   completeWebFetchExecution,
   webFetchExecution,
@@ -91,7 +92,7 @@ export function createWebFetchTool(
     name: "web_fetch",
     description:
       "Fetch a specific http(s) URL and return its content as text. Read-only. HTML is converted to plain text with links preserved as markdown. Redirects to a different origin are not followed; call web_fetch again with the redirect URL instead. Binary content types are not supported. Not a search tool — use it only when you already have a URL.",
-    autoAllow: true,
+    approvalRequirement: noToolApprovalRequired,
     effect: "observe",
     describeExecution: webFetchExecution,
     completeExecution: completeWebFetchExecution,

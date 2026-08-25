@@ -4,6 +4,7 @@ import { basename } from "node:path"
 import { Transform } from "node:stream"
 import { ToolLimitDefaults } from "../limits.ts"
 import { createUserShellEnv, type UserShellEnv } from "../user-shell-env.ts"
+import { commandApprovalRequirement } from "./approval-requirements.ts"
 import { matchCatastrophicCommand } from "./command-fuse.ts"
 import {
   commandExecution,
@@ -117,7 +118,26 @@ export function createRunCommandTool(
   return {
     name: "run_command",
     description: `Run one non-interactive shell command, optionally from an in-workspace cwd. Use it for git, package managers, builds, and tests; prefer glob, grep, read_file, edit_file, and write_file for file work. It runs immediately with the host user's full files, process, and network authority and is not sandboxed. A small, bypassable fuse blocks only obvious catastrophic commands. Use timeoutSeconds for long work; there are no timeout/workdir aliases and no interactive stdin. Up to ${maxPersistedOutputBytes} bytes from each stdout/stderr stream are retained as files when Session storage is available; use read_file on a returned absolute path after preview truncation.`,
-    autoAllow: true,
+    async approvalRequirement(rawInput, context) {
+      const parsed = parseRunCommandInput(rawInput, {
+        maxCommandBytes,
+        defaultTimeoutSeconds,
+        maxTimeoutSeconds,
+      })
+      if (
+        !parsed.ok ||
+        matchCatastrophicCommand(parsed.command) !== undefined
+      ) {
+        return { kind: "none" }
+      }
+      const cwd = await resolveCommandCwd(context.workspaceRoot, parsed.cwd)
+      return cwd.ok
+        ? commandApprovalRequirement({
+            command: parsed.command,
+            cwd: cwd.absolutePath,
+          })
+        : { kind: "none" }
+    },
     effect: "opaque",
     describeExecution: commandExecution,
     completeExecution: completeCommandExecution,

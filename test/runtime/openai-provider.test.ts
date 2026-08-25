@@ -199,6 +199,14 @@ describe("OpenAI Responses provider", () => {
               arguments: '{"path":"a.txt"}',
               status: "completed",
             },
+            {
+              type: "function_call",
+              id: "item_2",
+              call_id: "call_2",
+              name: "grep",
+              arguments: '{"pattern":"needle"}',
+              status: "completed",
+            },
           ],
           usage: { input_tokens: 10, output_tokens: 4 },
         }),
@@ -212,6 +220,12 @@ describe("OpenAI Responses provider", () => {
           id: "call_1",
           name: "read_file",
           input: { path: "a.txt" },
+        },
+        {
+          type: "tool_call",
+          id: "call_2",
+          name: "grep",
+          input: { pattern: "needle" },
         },
       ],
       usage: { inputTokens: 10, outputTokens: 4 },
@@ -341,7 +355,7 @@ describe("OpenAI Responses provider", () => {
       ],
       stream: true,
       store: false,
-      parallel_tool_calls: false,
+      parallel_tool_calls: true,
       prompt_cache_key: "conversation_1",
     })
   })

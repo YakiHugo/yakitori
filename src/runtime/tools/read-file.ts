@@ -1,6 +1,7 @@
 import { readdir } from "node:fs/promises"
 import { isAbortError } from "../errors.ts"
 import { ToolLimitDefaults } from "../limits.ts"
+import { noToolApprovalRequired } from "./approval-requirements.ts"
 import { resolveReadPath } from "./path-policy.ts"
 import {
   completeFileReadExecution,
@@ -35,7 +36,7 @@ export function createReadFileTool(
     name: "read_file",
     description:
       "Read a live, bounded page from a regular UTF-8 text file, or list a directory. Accepts paths relative to the workspace and absolute paths. File lines are prefixed {N}\\t for display; never include those prefixes in edit_file oldString. offset is a 1-based starting line and limit is 1-2000. Pagination is best effort against the file's current contents. Output is capped at 2,000 lines, 2,000 characters per displayed line, and 50 KB. Directory listings do not authorize edits.",
-    autoAllow: true,
+    approvalRequirement: noToolApprovalRequired,
     effect: "observe",
     describeExecution: fileReadExecution,
     completeExecution: completeFileReadExecution,

@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { EventType } from "../../../src/kernel/events.ts"
+import { EventType, PermissionBehavior } from "../../../src/kernel/events.ts"
 import { createJsonlEventStore } from "../../../src/kernel/jsonl-event-store.ts"
 import { createSessionKernel } from "../../../src/kernel/session-kernel.ts"
 import { createMateKernel } from "../../../src/mates/mate-kernel.ts"
@@ -10,6 +10,7 @@ import { createSqliteMateStore } from "../../../src/mates/sqlite-mate-store.ts"
 import { createFauxProvider } from "../../../src/runtime/faux-provider.ts"
 import { createSessionExecutionPolicy } from "../../../src/runtime/limits.ts"
 import { ModelStopReason } from "../../../src/runtime/model.ts"
+import { createPermissionGate } from "../../../src/runtime/permission-gate.ts"
 import { createSessionRunner } from "../../../src/runtime/session-runner.ts"
 import { createReadFileTool } from "../../../src/runtime/tools/read-file.ts"
 import { createToolRegistry } from "../../../src/runtime/tools/registry.ts"
@@ -92,11 +93,36 @@ describe("tool loop", () => {
     })
   })
 
-  it("executes two tool calls in provider order", async () => {
+  it("overlaps observe calls and returns their results in provider order", async () => {
     await withToolRuntime(async (runtime) => {
-      await writeFile(join(runtime.workspace, "a.txt"), "A")
-      await writeFile(join(runtime.workspace, "b.txt"), "B")
       const order: string[] = []
+      let active = 0
+      let maxActive = 0
+      let started = 0
+      let releaseBoth = () => {}
+      const bothStarted = new Promise<void>((resolve) => {
+        releaseBoth = resolve
+      })
+      const observeTool = (name: string): RuntimeTool => ({
+        name,
+        description: "Observe concurrently.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {},
+        },
+        approvalRequirement: { kind: "none" },
+        effect: "observe",
+        async execute() {
+          active += 1
+          maxActive = Math.max(maxActive, active)
+          started += 1
+          if (started === 2) releaseBoth()
+          await withTimeout(bothStarted, 1_000)
+          active -= 1
+          return { ok: true, output: { name }, content: name }
+        },
+      })
       const provider = createFauxProvider([
         {
           stopReason: ModelStopReason.ToolUse,
@@ -105,13 +131,13 @@ describe("tool loop", () => {
               type: "tool_call",
               id: "tool_a",
               name: "read_file",
-              input: { path: "a.txt" },
+              input: {},
             },
             {
               type: "tool_call",
               id: "tool_b",
-              name: "read_file",
-              input: { path: "b.txt" },
+              name: "grep",
+              input: {},
             },
           ],
         },
@@ -133,6 +159,10 @@ describe("tool loop", () => {
         kernel: runtime.kernel,
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
+        toolRegistry: createToolRegistry([
+          observeTool("read_file"),
+          observeTool("grep"),
+        ]),
       })
       const session = await createSession(runtime)
       await runtime.kernel.admitInput({
@@ -140,7 +170,247 @@ describe("tool loop", () => {
         content: { kind: "text", text: "read both" },
       })
       await runner.wake(session.sessionId)
+      expect(maxActive).toBe(2)
       expect(order).toEqual(["tool_a", "tool_b"])
+    })
+  })
+
+  it("returns an unexpected tool error to the model without cancelling observe siblings", async () => {
+    await withToolRuntime(async (runtime) => {
+      let slowCompleted = false
+      const throwingObserve: RuntimeTool = {
+        name: "read_file",
+        description: "Fail unexpectedly.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {},
+        },
+        approvalRequirement: { kind: "none" },
+        effect: "observe",
+        async execute() {
+          throw new Error("observe exploded")
+        },
+      }
+      const slowObserve: RuntimeTool = {
+        ...throwingObserve,
+        name: "grep",
+        description: "Complete despite a sibling failure.",
+        async execute() {
+          await new Promise((resolve) => setTimeout(resolve, 10))
+          slowCompleted = true
+          return { ok: true, output: {}, content: "grep completed" }
+        },
+      }
+      const provider = createFauxProvider([
+        {
+          stopReason: ModelStopReason.ToolUse,
+          content: [
+            { type: "tool_call", id: "fast", name: "read_file", input: {} },
+            { type: "tool_call", id: "slow", name: "grep", input: {} },
+          ],
+        },
+        {
+          assertRequest: (request) => {
+            const toolMessages = request.messages.filter(
+              (message) => message.role === "tool",
+            )
+            expect(toolMessages).toEqual([
+              {
+                role: "tool",
+                toolCallId: "fast",
+                content: "tool_execution_failed: observe exploded",
+                isError: true,
+              },
+              {
+                role: "tool",
+                toolCallId: "slow",
+                content: "grep completed",
+              },
+            ])
+          },
+          content: [{ type: "text", text: "handled" }],
+        },
+      ])
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+        toolRegistry: createToolRegistry([throwingObserve, slowObserve]),
+      })
+      const session = await createSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "run both" },
+      })
+
+      await runner.wake(session.sessionId)
+
+      const read = await runtime.kernel.readSession({
+        sessionId: session.sessionId,
+      })
+      expect(slowCompleted).toBe(true)
+      expect(read.session?.failedTurns).toHaveLength(0)
+      expect(read.session?.completedTurns).toHaveLength(1)
+      expect(read.session?.activeTurn).toBeUndefined()
+    })
+  })
+
+  it("serializes every call from the first mutation barrier onward", async () => {
+    await withToolRuntime(async (runtime) => {
+      const order: string[] = []
+      let active = 0
+      let maxActive = 0
+      const scheduledTool = (
+        name: string,
+        effect: RuntimeTool["effect"],
+      ): RuntimeTool => ({
+        name,
+        description: "Record scheduling order.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {},
+        },
+        approvalRequirement:
+          effect === "mutate"
+            ? { kind: "approval", action: "file_change" }
+            : { kind: "none" },
+        effect,
+        async execute() {
+          active += 1
+          maxActive = Math.max(maxActive, active)
+          order.push(`${name}:start`)
+          await new Promise((resolve) => setTimeout(resolve, 10))
+          order.push(`${name}:end`)
+          active -= 1
+          return { ok: true, output: { name }, content: name }
+        },
+      })
+      const provider = createFauxProvider([
+        {
+          stopReason: ModelStopReason.ToolUse,
+          content: [
+            { type: "tool_call", id: "read", name: "read_file", input: {} },
+            {
+              type: "tool_call",
+              id: "write",
+              name: "write_file",
+              input: {},
+            },
+            { type: "tool_call", id: "grep", name: "grep", input: {} },
+          ],
+        },
+        { content: [{ type: "text", text: "done" }] },
+      ])
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+        toolRegistry: createToolRegistry([
+          scheduledTool("read_file", "observe"),
+          scheduledTool("write_file", "mutate"),
+          scheduledTool("grep", "observe"),
+        ]),
+      })
+      const session = await createSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "run the batch" },
+      })
+
+      await runner.wake(session.sessionId)
+
+      expect(maxActive).toBe(1)
+      expect(order).toEqual([
+        "read_file:start",
+        "read_file:end",
+        "write_file:start",
+        "write_file:end",
+        "grep:start",
+        "grep:end",
+      ])
+    })
+  })
+
+  it("treats an approval request as a barrier for an observe tool", async () => {
+    await withToolRuntime(async (runtime) => {
+      const launches: string[] = []
+      const permissionGate = createPermissionGate()
+      const permissionedObserve: RuntimeTool = {
+        name: "read_file",
+        description: "Observe only after approval.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {},
+        },
+        approvalRequirement: {
+          kind: "approval",
+          action: "command_execution",
+        },
+        effect: "observe",
+        async execute() {
+          launches.push("read_file")
+          return { ok: true, output: {}, content: "read" }
+        },
+      }
+      const ordinaryObserve: RuntimeTool = {
+        ...permissionedObserve,
+        name: "grep",
+        approvalRequirement: { kind: "none" },
+        async execute() {
+          launches.push("grep")
+          return { ok: true, output: {}, content: "grep" }
+        },
+      }
+      const provider = createFauxProvider([
+        {
+          stopReason: ModelStopReason.ToolUse,
+          content: [
+            { type: "tool_call", id: "approval", name: "read_file", input: {} },
+            { type: "tool_call", id: "ordinary", name: "grep", input: {} },
+          ],
+        },
+        { content: [{ type: "text", text: "done" }] },
+      ])
+      const runner = createSessionRunner({
+        approvalPolicy: "auto_file_tools",
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+        permissionGate,
+        toolRegistry: createToolRegistry([
+          permissionedObserve,
+          ordinaryObserve,
+        ]),
+      })
+      const session = await createSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "run both" },
+      })
+
+      const wake = runner.wake(session.sessionId)
+      const pending = await waitForPendingPermission(
+        runtime.kernel,
+        session.sessionId,
+      )
+      expect(launches).toEqual([])
+      await runtime.kernel.resolvePermission({
+        sessionId: session.sessionId,
+        turnId: pending.turnId,
+        permissionRequestId: pending.permissionRequestId,
+        behavior: PermissionBehavior.Allow,
+      })
+      permissionGate.notify({
+        sessionId: session.sessionId,
+        turnId: pending.turnId,
+        permissionRequestId: pending.permissionRequestId,
+      })
+      await wake
+
+      expect(launches).toEqual(["read_file", "grep"])
     })
   })
 
@@ -867,7 +1137,7 @@ function hangingObserveTool(name: string): RuntimeTool {
   return {
     name,
     description: "Test helper that waits until the Turn is aborted.",
-    autoAllow: true,
+    approvalRequirement: { kind: "none" },
     effect: "observe",
     inputSchema: {
       type: "object",
@@ -888,6 +1158,44 @@ function hangingObserveTool(name: string): RuntimeTool {
       })
     },
   }
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number) {
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error("Timed out waiting for concurrent tools.")),
+          timeoutMs,
+        )
+      }),
+    ])
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout)
+  }
+}
+
+async function waitForPendingPermission(
+  kernel: ReturnType<typeof createSessionKernel>,
+  sessionId: string,
+): Promise<{ readonly turnId: string; readonly permissionRequestId: string }> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const read = await kernel.readSession({ sessionId })
+    const permission = read.session?.permissions.find(
+      (candidate) => candidate.state === "pending",
+    )
+    const turnId = read.session?.activeTurn?.turnId
+    if (permission !== undefined && turnId !== undefined) {
+      return {
+        turnId,
+        permissionRequestId: permission.permissionRequestId,
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+  throw new Error("Permission was not requested.")
 }
 
 type ToolRuntime = {

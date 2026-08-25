@@ -61,7 +61,7 @@ async function* streamOpenAI(
         instructions: flattenModelSystem(request.system),
         input: toOpenAIInput(request.messages),
         tools: toOpenAITools(request.tools),
-        parallel_tool_calls: false,
+        parallel_tool_calls: true,
         max_output_tokens:
           request.maxOutputTokens ?? DEFAULT_MODEL_MAX_OUTPUT_TOKENS,
         store: false,

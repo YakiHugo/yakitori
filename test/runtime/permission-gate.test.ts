@@ -124,7 +124,7 @@ describe("permission gate", () => {
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
         permissionGate: gate,
-        toolRegistry: createToolRegistry([permissionCommandTool({ launch })]),
+        toolRegistry: createToolRegistry([createRunCommandTool({ launch })]),
       })
       const session = await createSession(runtime)
       await runtime.kernel.admitInput({
@@ -139,9 +139,16 @@ describe("permission gate", () => {
       )
       expect(launches).toBe(0)
 
-      const activeTurnId = (
-        await runtime.kernel.readSession({ sessionId: session.sessionId })
-      ).session?.activeTurn?.turnId
+      const pendingSession = await runtime.kernel.readSession({
+        sessionId: session.sessionId,
+      })
+      expect(pendingSession.session?.permissions[0]).toMatchObject({
+        action: "command_execution",
+        subject: "echo hi",
+        reason: expect.stringContaining(await realpath(runtime.workspace)),
+      })
+
+      const activeTurnId = pendingSession.session?.activeTurn?.turnId
       if (activeTurnId === undefined) throw new Error("missing active turn")
       await runtime.kernel.resolvePermission({
         sessionId: session.sessionId,
@@ -211,7 +218,7 @@ describe("permission gate", () => {
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
         permissionGate: gate,
-        toolRegistry: createToolRegistry([permissionCommandTool({ launch })]),
+        toolRegistry: createToolRegistry([createRunCommandTool({ launch })]),
       })
       const session = await createSession(runtime)
       await runtime.kernel.admitInput({
@@ -280,7 +287,7 @@ describe("permission gate", () => {
           permissionWaitTimeoutMs: 20,
         }),
         toolRegistry: createToolRegistry([
-          permissionCommandTool({
+          createRunCommandTool({
             launch: async () => {
               launches += 1
               return {
@@ -364,7 +371,7 @@ describe("permission gate", () => {
           },
         },
         toolRegistry: createToolRegistry([
-          permissionCommandTool({
+          createRunCommandTool({
             launch: async () => {
               launches += 1
               return {
@@ -395,6 +402,67 @@ describe("permission gate", () => {
         PermissionBehavior.Allow,
       )
       expect(read.session?.completedTurns).toHaveLength(1)
+    })
+  })
+
+  it("rejects invalid command input without requesting approval", async () => {
+    await withPermissionRuntime(async (runtime) => {
+      let launches = 0
+      let waits = 0
+      const provider = createFauxProvider([
+        {
+          stopReason: ModelStopReason.ToolUse,
+          content: [
+            {
+              type: "tool_call",
+              id: "tool_invalid",
+              name: "run_command",
+              input: { command: "echo invalid", timeoutSeconds: 0 },
+            },
+          ],
+        },
+        { content: [{ type: "text", text: "handled" }] },
+      ])
+      const runner = createSessionRunner({
+        approvalPolicy: "auto_file_tools",
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: provider.stream,
+        permissionGate: {
+          notify() {},
+          async wait() {
+            waits += 1
+            return "timeout"
+          },
+        },
+        toolRegistry: createToolRegistry([
+          createRunCommandTool({
+            launch: async () => {
+              launches += 1
+              throw new Error("invalid command must not launch")
+            },
+          }),
+        ]),
+      })
+      const session = await createSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "run invalid input" },
+      })
+
+      await runner.wake(session.sessionId)
+
+      const read = await runtime.kernel.readSession({
+        sessionId: session.sessionId,
+      })
+      expect(launches).toBe(0)
+      expect(waits).toBe(0)
+      expect(read.session?.permissions).toEqual([])
+      expect(read.session?.tools[0]).toMatchObject({
+        state: "failed",
+        requiresPermission: false,
+        error: { code: "invalid_tool_input" },
+      })
     })
   })
 
@@ -484,7 +552,7 @@ describe("permission gate", () => {
         stream: provider.stream,
         approvalPolicy: "never",
         toolRegistry: createToolRegistry([
-          permissionCommandTool({
+          createRunCommandTool({
             launch: async () => {
               launches += 1
               return {
@@ -517,12 +585,6 @@ describe("permission gate", () => {
     })
   })
 })
-
-function permissionCommandTool(
-  input: Parameters<typeof createRunCommandTool>[0],
-) {
-  return { ...createRunCommandTool(input), autoAllow: false }
-}
 
 async function waitForPermission(
   kernel: ReturnType<typeof createSessionKernel>,

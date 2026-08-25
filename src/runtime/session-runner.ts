@@ -77,6 +77,7 @@ import {
 import { createPermissionGate, type PermissionGate } from "./permission-gate.ts"
 import { loadProjectInstructions } from "./project-instructions.ts"
 import {
+  type ApprovalPolicy,
   createTurnContext,
   type ResolvedTurnConfiguration,
   SessionConfiguration,
@@ -90,10 +91,12 @@ import {
 import { createToolRegistry, type ToolRegistry } from "./tools/registry.ts"
 import type {
   RuntimeTool,
+  ToolApprovalRequirement,
   ToolEffect,
   ToolExecutionResult,
   ToolPermissionRequest,
 } from "./tools/types.ts"
+import { resolveToolPermissionRequest } from "./tool-permissions.ts"
 import {
   createVisibleFileObservations,
   grantFromToolOutput,
@@ -114,7 +117,7 @@ export type SessionRunnerOptions = {
   readonly model?: string
   readonly executionPolicy?: SessionExecutionPolicy
   readonly runtimeTiming?: RunnerTimingPolicy
-  readonly approvalPolicy?: "auto_file_tools" | "never"
+  readonly approvalPolicy?: ApprovalPolicy
   readonly baseInstructions?: string
   readonly modelContextWindowTokens?: number
   readonly maxAgentDepth?: number
@@ -135,6 +138,17 @@ function requireToolExecution(
     throw new Error(`Missing execution descriptor for tool call ${toolCallId}.`)
   }
   return execution
+}
+
+function requireApprovalRequirement(
+  requirements: ReadonlyMap<string, ToolApprovalRequirement>,
+  toolCallId: string,
+): ToolApprovalRequirement {
+  const requirement = requirements.get(toolCallId)
+  if (requirement === undefined) {
+    throw new Error(`Missing approval requirement for tool call ${toolCallId}.`)
+  }
+  return requirement
 }
 
 export type ContextPreparedDiagnostics = Readonly<{
@@ -1231,18 +1245,27 @@ export function createSessionRunner(
         input.toolPlan.describeExecution(call.name, call.input),
       ]),
     )
-    const permissionRequests = new Map(
+    const approvalRequirements = new Map(
       await Promise.all(
         input.toolCalls.map(
           async (call) =>
             [
               call.id,
-              await input.toolPlan.permissionRequest(call.name, call.input, {
+              await input.toolPlan.approvalRequirement(call.name, call.input, {
                 workspaceRoot: input.workspaceRoot,
               }),
             ] as const,
         ),
       ),
+    )
+    const permissionRequests = new Map(
+      input.toolCalls.map((call) => [
+        call.id,
+        resolveToolPermissionRequest(
+          requireApprovalRequirement(approvalRequirements, call.id),
+          input.executionContext.approvalPolicy,
+        ),
+      ]),
     )
     const recorded = await options.kernel.recordAssistantOutput({
       sessionId: input.sessionId,
@@ -1260,9 +1283,7 @@ export function createSessionRunner(
           name: call.name,
           input: call.input,
           execution: requireToolExecution(executions, call.id),
-          requiresPermission:
-            permissionRequests.get(call.id) !== undefined &&
-            input.executionContext.approvalPolicy !== "never",
+          requiresPermission: permissionRequests.get(call.id) !== undefined,
         }
       }),
     })
@@ -1271,7 +1292,10 @@ export function createSessionRunner(
     const observations = input.visibleFileObservations
     const firstBarrier = input.toolCalls.findIndex((call) => {
       const tool = input.toolPlan.get(call.name)
-      return toolEffect(tool) !== "observe"
+      return (
+        toolEffect(tool) !== "observe" ||
+        permissionRequests.get(call.id) !== undefined
+      )
     })
     const prefix =
       firstBarrier < 0
@@ -1279,35 +1303,42 @@ export function createSessionRunner(
         : input.toolCalls.slice(0, firstBarrier)
     const rest = firstBarrier < 0 ? [] : input.toolCalls.slice(firstBarrier)
 
-    const prefixOutcomes = await Promise.all(
+    const prefixSettled = await Promise.allSettled(
       prefix.map(async (call) => {
-        try {
-          return {
+        return {
+          call,
+          result: await executeRecordedTool({
+            sessionId: input.sessionId,
+            turnId: input.turnId,
             call,
-            result: await executeRecordedTool({
-              sessionId: input.sessionId,
-              turnId: input.turnId,
-              call,
-              executionContext: input.executionContext,
-              toolPlan: input.toolPlan,
-              execution: requireToolExecution(executions, call.id),
-              workspaceRoot: input.workspaceRoot,
-              signal: input.signal,
-              observations,
-              record: false,
-              ...(permissionRequests.get(call.id) === undefined
-                ? {}
-                : { permissionRequest: permissionRequests.get(call.id) }),
-            }),
-          }
-        } catch (error) {
-          if (isAbortError(error)) {
-            return { call, result: "aborted" as const }
-          }
-          throw error
+            executionContext: input.executionContext,
+            toolPlan: input.toolPlan,
+            execution: requireToolExecution(executions, call.id),
+            workspaceRoot: input.workspaceRoot,
+            signal: input.signal,
+            observations,
+            record: false,
+            ...(permissionRequests.get(call.id) === undefined
+              ? {}
+              : { permissionRequest: permissionRequests.get(call.id) }),
+          }),
         }
       }),
     )
+    const prefixOutcomes: Array<{
+      readonly call: ModelToolCallBlock
+      readonly result: ToolExecutionResult | "aborted"
+    }> = []
+    let hasPrefixError = false
+    let prefixError: unknown
+    for (const outcome of prefixSettled) {
+      if (outcome.status === "rejected") {
+        if (!hasPrefixError) prefixError = outcome.reason
+        hasPrefixError = true
+        continue
+      }
+      prefixOutcomes.push(outcome.value)
+    }
     let prefixAborted = input.signal.aborted
     for (const outcome of prefixOutcomes) {
       if (outcome.result === "aborted") {
@@ -1325,6 +1356,7 @@ export function createSessionRunner(
       })
       if (recorded === "aborted") prefixAborted = true
     }
+    if (hasPrefixError) throw prefixError
     if (prefixAborted || input.signal.aborted) {
       await cancelAfterRuntimeAbort(input.sessionId, input.turnId)
       return
@@ -1402,10 +1434,7 @@ export function createSessionRunner(
       return disabled
     }
     let permissionRequestId: string | undefined
-    if (
-      input.permissionRequest !== undefined &&
-      input.executionContext.approvalPolicy !== "never"
-    ) {
+    if (input.permissionRequest !== undefined) {
       const permission = await options.kernel.requestPermission({
         sessionId: input.sessionId,
         turnId: input.turnId,
@@ -1458,24 +1487,40 @@ export function createSessionRunner(
       toolCallId: input.call.id,
     })
 
-    const result = await input.toolPlan.execute(
-      input.call.name,
-      input.call.input,
-      {
-        workspaceRoot: input.workspaceRoot,
-        sessionId: input.sessionId,
-        toolCallId: input.call.id,
-        ...(options.sessionFiles === undefined
-          ? {}
-          : { sessionFiles: options.sessionFiles }),
-        signal: input.signal,
-        visibleFileObservations: input.observations,
-        agentControl: agentControl.bind(
-          input.sessionId,
-          turnTarget(input.executionContext),
-        ),
-      },
-    )
+    let result: ToolExecutionResult
+    try {
+      result = await input.toolPlan.execute(
+        input.call.name,
+        input.call.input,
+        {
+          workspaceRoot: input.workspaceRoot,
+          sessionId: input.sessionId,
+          toolCallId: input.call.id,
+          ...(options.sessionFiles === undefined
+            ? {}
+            : { sessionFiles: options.sessionFiles }),
+          signal: input.signal,
+          visibleFileObservations: input.observations,
+          agentControl: agentControl.bind(
+            input.sessionId,
+            turnTarget(input.executionContext),
+          ),
+        },
+      )
+    } catch (error) {
+      if (input.signal.aborted || isAbortError(error)) throw error
+      options.onRuntimeError?.(error)
+      const message =
+        error instanceof Error && error.message.trim().length > 0
+          ? error.message
+          : "Tool execution failed unexpectedly."
+      result = {
+        ok: false,
+        code: "tool_execution_failed",
+        message,
+        content: `tool_execution_failed: ${message}`,
+      }
+    }
     if (!input.record) return result
     const recorded = await recordExecutedTool({
       sessionId: input.sessionId,
