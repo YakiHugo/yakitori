@@ -352,7 +352,7 @@ for (const implementation of ["memory", "jsonl"] as const) {
                 sizeBytes: 5,
                 file: {
                   sessionId: source.sessionId,
-                  path: "attachments/request_1/1.png",
+                  path: "attachments/requests/request_1/1.png",
                 },
               },
             ],
@@ -376,7 +376,7 @@ for (const implementation of ["memory", "jsonl"] as const) {
               sizeBytes: 5,
               file: {
                 sessionId: source.sessionId,
-                path: "attachments/request_1/1.png",
+                path: "attachments/requests/request_1/1.png",
               },
             },
           ],

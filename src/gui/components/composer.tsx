@@ -3,6 +3,8 @@ import { useLayoutEffect, useRef, useState } from "react"
 import { COMPACT_DIRECTIVE } from "../../kernel/events.ts"
 import {
   appendImageFiles,
+  appendPickedImages,
+  discardDraftImages,
   imageAttachmentUrl,
 } from "../composer-attachments.ts"
 import {
@@ -17,6 +19,7 @@ import { Button } from "./ui/button.tsx"
 export function Composer() {
   const draft = useAppStore((state) => state.promptDraft) ?? ""
   const attachments = useAppStore((state) => state.promptAttachments)
+  const apiBase = useAppStore((state) => state.apiBase)
   const busy = useAppStore((state) => state.busy)
   const focusRevision = useAppStore((state) => state.composerFocusRevision)
   const modelSelectionReady = useAppStore((state) => state.modelSelectionReady)
@@ -26,6 +29,9 @@ export function Composer() {
   const userPreference = useAppStore((state) => state.userPreference)
   const inFlightActions = useAppStore((state) => state.inFlightActions)
   const sessionId = useAppStore((state) => state.selection.sessionId)
+  const sessionSelectionIntentRevision = useAppStore(
+    (state) => state.sessionSelectionIntentRevision,
+  )
   const sessionCurrent = useAppStore((state) =>
     state.selection.sessionId === undefined
       ? undefined
@@ -38,7 +44,6 @@ export function Composer() {
   const admitInput = useAppStore((state) => state.admitInput)
   const view = useExecutionView()
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
-  const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [attachmentError, setAttachmentError] = useState<string>()
   const [readingImages, setReadingImages] = useState(false)
 
@@ -89,17 +94,68 @@ export function Composer() {
     !compactHasAttachments
 
   const addFiles = async (files: readonly File[]) => {
-    if (files.length === 0) return
+    if (files.length === 0 || sessionId === undefined) return
+    const importSessionId = sessionId
+    const importSelectionRevision = sessionSelectionIntentRevision
     setReadingImages(true)
     setAttachmentError(undefined)
     try {
-      setPromptAttachments(await appendImageFiles(attachments, files))
+      const next = await appendImageFiles(attachments, importSessionId, files)
+      const current = useAppStore.getState()
+      if (
+        current.selection.sessionId !== importSessionId ||
+        current.sessionSelectionIntentRevision !== importSelectionRevision
+      ) {
+        await discardDraftImages(next.slice(attachments.length))
+        return
+      }
+      setPromptAttachments(next)
     } catch (error) {
-      setAttachmentError(
-        error instanceof Error
-          ? error.message
-          : "Images could not be attached.",
-      )
+      const current = useAppStore.getState()
+      if (
+        current.selection.sessionId === importSessionId &&
+        current.sessionSelectionIntentRevision === importSelectionRevision
+      ) {
+        setAttachmentError(
+          error instanceof Error
+            ? error.message
+            : "Images could not be attached.",
+        )
+      }
+    } finally {
+      setReadingImages(false)
+    }
+  }
+
+  const pickImages = async () => {
+    if (sessionId === undefined) return
+    const importSessionId = sessionId
+    const importSelectionRevision = sessionSelectionIntentRevision
+    setReadingImages(true)
+    setAttachmentError(undefined)
+    try {
+      const next = await appendPickedImages(attachments, importSessionId)
+      const current = useAppStore.getState()
+      if (
+        current.selection.sessionId !== importSessionId ||
+        current.sessionSelectionIntentRevision !== importSelectionRevision
+      ) {
+        await discardDraftImages(next.slice(attachments.length))
+        return
+      }
+      setPromptAttachments(next)
+    } catch (error) {
+      const current = useAppStore.getState()
+      if (
+        current.selection.sessionId === importSessionId &&
+        current.sessionSelectionIntentRevision === importSelectionRevision
+      ) {
+        setAttachmentError(
+          error instanceof Error
+            ? error.message
+            : "Images could not be attached.",
+        )
+      }
     } finally {
       setReadingImages(false)
     }
@@ -142,24 +198,32 @@ export function Composer() {
             <div className="flex gap-2 overflow-x-auto px-3 pt-3">
               {attachments.map((attachment, index) => (
                 <div
-                  key={`${attachment.name}:${attachment.sizeBytes}:${attachment.data.slice(0, 24)}`}
+                  key={`${attachment.file.sessionId}:${attachment.file.path}`}
                   className="group/image relative size-18 shrink-0 overflow-hidden rounded-xl border bg-muted"
                 >
                   <img
-                    src={imageAttachmentUrl(attachment)}
+                    src={imageAttachmentUrl(attachment, apiBase)}
                     alt={attachment.name}
                     className="size-full object-cover"
                   />
                   <button
                     type="button"
+                    disabled={sending}
                     aria-label={`Remove ${attachment.name}`}
-                    onClick={() =>
+                    onClick={() => {
                       setPromptAttachments(
                         attachments.filter(
                           (_, candidate) => candidate !== index,
                         ),
                       )
-                    }
+                      void discardDraftImages([attachment]).catch((error) => {
+                        setAttachmentError(
+                          error instanceof Error
+                            ? error.message
+                            : "Image could not be removed.",
+                        )
+                      })
+                    }}
                     className="absolute top-1 right-1 grid size-5 place-items-center rounded-full bg-black/65 text-white opacity-90 transition-opacity hover:bg-black focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
                   >
                     <X className="size-3" />
@@ -171,7 +235,7 @@ export function Composer() {
                         ? `Use ${attachment.detail === "original" ? "high" : "original"} detail for ${attachment.name}`
                         : `Original detail unavailable for ${attachment.name}`
                     }
-                    disabled={!supportsOriginal}
+                    disabled={!supportsOriginal || sending}
                     onClick={() =>
                       setPromptAttachments(
                         attachments.map((candidate, candidateIndex) =>
@@ -247,18 +311,6 @@ export function Composer() {
 
           <div className="flex min-h-12 items-center justify-between gap-3 px-2.5 pb-2.5">
             <div className="flex min-w-0 items-center gap-1">
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/png,image/jpeg,image/gif,image/webp"
-                multiple
-                className="sr-only"
-                onChange={(event) => {
-                  const files = Array.from(event.currentTarget.files ?? [])
-                  event.currentTarget.value = ""
-                  void addFiles(files)
-                }}
-              />
               <Button
                 type="button"
                 variant="ghost"
@@ -267,7 +319,7 @@ export function Composer() {
                 aria-label="Attach images"
                 title="Attach images"
                 className="rounded-full bg-muted/70"
-                onClick={() => fileInputRef.current?.click()}
+                onClick={() => void pickImages()}
               >
                 {readingImages ? (
                   <LoaderCircle className="animate-spin" />

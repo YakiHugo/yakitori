@@ -354,7 +354,7 @@ describe("model context", () => {
                 sizeBytes: 3_072,
                 file: {
                   sessionId,
-                  path: "attachments/request_image/1.png",
+                  path: "attachments/requests/request_image/1.png",
                 },
               },
             ],
@@ -392,7 +392,7 @@ describe("model context", () => {
         sizeBytes: 3_072,
         file: {
           sessionId: expect.any(String),
-          path: "attachments/request_image/1.png",
+          path: "attachments/requests/request_image/1.png",
         },
       },
     ])

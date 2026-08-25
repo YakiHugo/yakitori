@@ -16,25 +16,31 @@ afterEach(async () => {
 })
 
 describe("Session files", () => {
-  it("persists image bytes once and returns a Session-relative reference", async () => {
+  it("separates staging images from idempotent request snapshots", async () => {
     const root = await makeRoot()
     const sessionId = createSessionId()
     const files = createSessionFiles(root)
-    const data = Buffer.from("image-bytes")
-    const attachment = {
-      name: "screen.png",
-      mediaType: "image/png" as const,
-      detail: "original" as const,
-      sizeBytes: data.byteLength,
-      data: data.toString("base64"),
-    }
+    const data = pngBytes()
 
-    const first = await files.persistImageAttachments(sessionId, "request_1", [
-      attachment,
+    const draft = await files.importImageBytes(sessionId, "attachment_1", [
+      { name: "screen.png", data },
     ])
-    const second = await files.persistImageAttachments(sessionId, "request_1", [
-      attachment,
-    ])
+    expect(draft[0]?.file.path).toBe("attachments/staging/attachment_1/1.png")
+    const detailed = draft.map((attachment) => ({
+      ...attachment,
+      detail: "original" as const,
+    }))
+    const first = await files.promoteImageAttachments(
+      sessionId,
+      "attachment_1",
+      detailed,
+    )
+    await files.discardDraftImageAttachments(detailed)
+    const second = await files.promoteImageAttachments(
+      sessionId,
+      "attachment_1",
+      detailed,
+    )
 
     expect(first).toEqual(second)
     expect(first).toEqual([
@@ -45,7 +51,7 @@ describe("Session files", () => {
         sizeBytes: data.byteLength,
         file: {
           sessionId,
-          path: "attachments/request_1/1.png",
+          path: "attachments/requests/attachment_1/1.png",
         },
       },
     ])
@@ -56,9 +62,41 @@ describe("Session files", () => {
     expect(await files.read(stored.file)).toEqual(data)
     expect(
       await readFile(
-        join(root, sessionId, "files", "attachments", "request_1", "1.png"),
+        join(
+          root,
+          sessionId,
+          "files",
+          "attachments",
+          "requests",
+          "attachment_1",
+          "1.png",
+        ),
       ),
     ).toEqual(data)
+    await expect(files.discardDraftImageAttachments(first)).rejects.toThrow(
+      "not a draft",
+    )
+  })
+
+  it("imports a native path as a snapshot and cleans abandoned staging", async () => {
+    const root = await makeRoot()
+    const sessionId = createSessionId()
+    const sourcePath = join(root, "selected.png")
+    await writeFile(sourcePath, pngBytes())
+    const files = createSessionFiles(root)
+
+    const [attachment] = await files.importImagePaths(
+      sessionId,
+      "draft_abandoned",
+      [sourcePath],
+    )
+    if (attachment === undefined) throw new Error("missing imported attachment")
+    await expect(files.read(attachment.file)).resolves.toEqual(pngBytes())
+
+    await files.cleanupStagingImageAttachments()
+    await expect(files.read(attachment.file)).rejects.toMatchObject({
+      code: "ENOENT",
+    })
   })
 
   it("pages files and rejects references that escape the Session", async () => {
@@ -80,17 +118,12 @@ describe("Session files", () => {
     const root = await makeRoot()
     const sessionId = createSessionId()
     const files = createSessionFiles(root)
-    const stored = await files.persistImageAttachments(sessionId, "request:1", [
-      {
-        name: "screen.png",
-        mediaType: "image/png",
-        sizeBytes: 1,
-        data: "eA==",
-      },
+    const stored = await files.importImageBytes(sessionId, "request:1", [
+      { name: "screen.png", data: pngBytes() },
     ])
     const attachment = stored[0]
     expect(attachment?.file.path).toMatch(
-      /^attachments\/id-[a-f0-9]{64}\/1\.png$/,
+      /^attachments\/staging\/id-[a-f0-9]{64}\/1\.png$/,
     )
     expect(attachment?.file.path).not.toContain(":")
 
@@ -98,6 +131,35 @@ describe("Session files", () => {
     expect(prepared.stdout.reference.path).toMatch(
       /^tools\/id-[a-f0-9]{64}\/stdout\.log$/,
     )
+  })
+
+  it("rolls back a staging batch when an image is invalid", async () => {
+    const root = await makeRoot()
+    const sessionId = createSessionId()
+    const files = createSessionFiles(root)
+
+    await expect(
+      files.importImageBytes(sessionId, "atomic_batch", [
+        { name: "valid.png", data: pngBytes() },
+        {
+          name: "truncated.png",
+          data: Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+        },
+      ]),
+    ).rejects.toThrow("truncated")
+    await expect(
+      readFile(
+        join(
+          root,
+          sessionId,
+          "files",
+          "attachments",
+          "staging",
+          "atomic_batch",
+          "1.png",
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "ENOENT" })
   })
 
   it("is deleted with the owning Session directory", async () => {
@@ -131,4 +193,12 @@ async function makeRoot(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "yakitori-session-files-"))
   roots.push(root)
   return root
+}
+
+function pngBytes(): Buffer {
+  const bytes = Buffer.alloc(24)
+  Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(bytes)
+  bytes.writeUInt32BE(1, 16)
+  bytes.writeUInt32BE(1, 20)
+  return bytes
 }

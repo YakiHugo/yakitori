@@ -15,6 +15,16 @@ import { createEventEnvelope, EventType } from "../../src/kernel/events.ts"
 
 beforeEach(() => {
   useAppStore.setState(createInitialAppState())
+  Object.defineProperty(window, "yakitoriDesktop", {
+    configurable: true,
+    value: {
+      pickImages: vi.fn(async () => [draftImage("high")]),
+      importImageFiles: vi.fn(async () => [draftImage("high")]),
+      discardDraftImages: vi.fn(async () => {}),
+      openFile: vi.fn(async () => {}),
+      openUrl: vi.fn(async () => {}),
+    },
+  })
   vi.stubGlobal(
     "fetch",
     vi.fn(async (_input: unknown, init?: RequestInit) => {
@@ -112,17 +122,8 @@ describe("composer", () => {
       admitInput,
       selection: { revision: 1, sessionId: "session_1" },
     })
-    const { container } = render(<Composer />)
-    const fileInput =
-      container.querySelector<HTMLInputElement>('input[type="file"]')
-    if (fileInput === null) throw new Error("missing image input")
-
-    await user.upload(
-      fileInput,
-      new File([new Uint8Array([1, 2, 3])], "screenshot.png", {
-        type: "image/png",
-      }),
-    )
+    render(<Composer />)
+    await user.click(screen.getByRole("button", { name: "Attach images" }))
     await waitFor(() => {
       expect(useAppStore.getState().promptAttachments).toHaveLength(1)
     })
@@ -138,8 +139,11 @@ describe("composer", () => {
         name: "screenshot.png",
         mediaType: "image/png",
         detail: "original",
-        data: "AQID",
-        sizeBytes: 3,
+        sizeBytes: 9,
+        file: {
+          sessionId: "session_1",
+          path: "attachments/staging/draft_1/1.png",
+        },
       },
     ])
   })
@@ -170,8 +174,11 @@ describe("composer", () => {
           name: "screenshot.png",
           mediaType: "image/png",
           detail: "original",
-          data: "AQID",
-          sizeBytes: 3,
+          sizeBytes: 9,
+          file: {
+            sessionId: "session_1",
+            path: "attachments/staging/draft_1/1.png",
+          },
         },
       ],
     })
@@ -190,6 +197,19 @@ describe("composer", () => {
     ])
   })
 })
+
+function draftImage(detail: "high" | "original") {
+  return {
+    name: "screenshot.png",
+    mediaType: "image/png" as const,
+    detail,
+    sizeBytes: 9,
+    file: {
+      sessionId: "session_1",
+      path: "attachments/staging/draft_1/1.png",
+    },
+  }
+}
 
 describe("model selector", () => {
   function selectModelState() {

@@ -21,6 +21,26 @@ describe("spawnServerProcess", () => {
     await server.stop()
   })
 
+  it("round-trips privileged attachment control over child IPC", async () => {
+    const server = await spawnServerProcess({
+      command: node,
+      args: [
+        "-e",
+        `process.on("message", (message) => {
+           process.send({ requestId: message.requestId, ok: true });
+         });
+         console.log("yakitori-listening http://127.0.0.1:1");
+         setInterval(() => {}, 60000)`,
+      ],
+    })
+
+    await expect(
+      server.request({ type: "discard_draft_images", attachments: [] }),
+    ).resolves.toMatchObject({ ok: true })
+
+    await server.stop()
+  })
+
   it("rejects and kills the child when no listening line arrives in time", async () => {
     const started = Date.now()
     await expect(

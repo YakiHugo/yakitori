@@ -1,20 +1,30 @@
 import { createHash, randomUUID } from "node:crypto"
-import { constants } from "node:fs"
+import { constants, type ReadStream } from "node:fs"
 import {
+  copyFile,
   type FileHandle,
   link,
   mkdir,
   open,
   readFile,
+  readdir,
   rm,
+  stat,
 } from "node:fs/promises"
-import { dirname, join, posix, resolve, sep } from "node:path"
+import { basename, dirname, join, posix, resolve, sep } from "node:path"
 import { assertEventStoreSessionId } from "./event-store.ts"
-import type {
-  ImageAttachment,
-  InlineImageAttachment,
-  SessionFileReference,
-} from "./events.ts"
+import type { ImageAttachment, SessionFileReference } from "./events.ts"
+import { inspectImageBytes } from "./image-metadata.ts"
+
+// Grok Build applies the same per-image send boundary. This is a transport
+// safety limit, independent from model context accounting or attachment count.
+const MAX_IMAGE_FILE_BYTES = 50_000_000
+const MAX_IMAGE_METADATA_BYTES = 1024 * 1024
+
+export type ImageBytesInput = {
+  readonly name: string
+  readonly data: Uint8Array
+}
 
 export type PreparedCommandFiles = {
   readonly stdout: {
@@ -28,11 +38,25 @@ export type PreparedCommandFiles = {
 }
 
 export type SessionFiles = {
-  persistImageAttachments(
+  importImagePaths(
     sessionId: string,
     ownerId: string,
-    attachments: readonly InlineImageAttachment[],
+    paths: readonly string[],
   ): Promise<readonly ImageAttachment[]>
+  importImageBytes(
+    sessionId: string,
+    ownerId: string,
+    images: readonly ImageBytesInput[],
+  ): Promise<readonly ImageAttachment[]>
+  promoteImageAttachments(
+    sessionId: string,
+    ownerId: string,
+    attachments: readonly ImageAttachment[],
+  ): Promise<readonly ImageAttachment[]>
+  discardDraftImageAttachments(
+    attachments: readonly ImageAttachment[],
+  ): Promise<void>
+  cleanupStagingImageAttachments(): Promise<void>
   prepareCommandFiles(
     sessionId: string,
     toolCallId: string,
@@ -43,6 +67,9 @@ export type SessionFiles = {
     offset: number,
     limit: number,
   ): Promise<{ readonly bytes: Buffer; readonly totalBytes: number }>
+  openRead(
+    reference: SessionFileReference,
+  ): Promise<{ readonly stream: ReadStream; readonly totalBytes: number }>
   resolve(reference: SessionFileReference): string
 }
 
@@ -75,38 +102,143 @@ export function createSessionFiles(sessionsDir: string): SessionFiles {
   }
 
   return {
-    async persistImageAttachments(sessionId, ownerId, attachments) {
+    async importImagePaths(sessionId, ownerId, paths) {
       assertEventStoreSessionId(sessionId)
       requirePathSegment(ownerId, "attachment owner")
       const ownerDirectory = fileNameForId(ownerId)
-      return Promise.all(
-        attachments.map(async (attachment, index) => {
-          const bytes = Buffer.from(attachment.data, "base64")
-          if (bytes.byteLength !== attachment.sizeBytes) {
-            throw new Error(
-              `Attachment ${attachment.name} size changed before persistence.`,
-            )
-          }
-          const reference = {
-            sessionId,
-            path: posix.join(
-              "attachments",
+      const attachments: ImageAttachment[] = []
+      try {
+        for (const [index, sourcePath] of paths.entries()) {
+          const name = basename(sourcePath)
+          requireAttachmentName(name)
+          const snapshot = await copyImageSnapshot({
+            root,
+            sourcePath,
+            stagingDirectory: stagingOwnerDirectory(
+              root,
+              sessionId,
               ownerDirectory,
-              `${String(index + 1)}${imageExtension(attachment.mediaType)}`,
             ),
-          }
-          const path = resolveReference(reference)
-          await writeOnce(root, path, bytes)
-          return {
-            name: attachment.name,
-            mediaType: attachment.mediaType,
-            sizeBytes: attachment.sizeBytes,
-            ...(attachment.detail === undefined
-              ? {}
-              : { detail: attachment.detail }),
+          })
+          const reference = imageReference(
+            sessionId,
+            "staging",
+            ownerDirectory,
+            index,
+            snapshot.mediaType,
+          )
+          await linkTemporaryFile(
+            snapshot.path,
+            resolveReference(reference),
+            dirname(resolveReference(reference)),
+            snapshot.sizeBytes,
+          )
+          await rm(snapshot.path, { force: true })
+          attachments.push({
+            name,
+            mediaType: snapshot.mediaType,
+            sizeBytes: snapshot.sizeBytes,
+            detail: "high",
             file: reference,
-          }
+          })
+        }
+        return attachments
+      } catch (error) {
+        await rm(stagingOwnerDirectory(root, sessionId, ownerDirectory), {
+          recursive: true,
+          force: true,
+        })
+        throw error
+      }
+    },
+
+    async importImageBytes(sessionId, ownerId, images) {
+      assertEventStoreSessionId(sessionId)
+      requirePathSegment(ownerId, "attachment owner")
+      const ownerDirectory = fileNameForId(ownerId)
+      const attachments: ImageAttachment[] = []
+      try {
+        for (const [index, image] of images.entries()) {
+          requireAttachmentName(image.name)
+          const bytes = Buffer.from(image.data)
+          requireImageSize(bytes.byteLength)
+          const { mediaType } = inspectImageBytes(bytes)
+          const reference = imageReference(
+            sessionId,
+            "staging",
+            ownerDirectory,
+            index,
+            mediaType,
+          )
+          await writeOnce(root, resolveReference(reference), bytes)
+          attachments.push({
+            name: image.name,
+            mediaType,
+            sizeBytes: bytes.byteLength,
+            detail: "high",
+            file: reference,
+          })
+        }
+        return attachments
+      } catch (error) {
+        await rm(stagingOwnerDirectory(root, sessionId, ownerDirectory), {
+          recursive: true,
+          force: true,
+        })
+        throw error
+      }
+    },
+
+    async promoteImageAttachments(sessionId, ownerId, attachments) {
+      assertEventStoreSessionId(sessionId)
+      requirePathSegment(ownerId, "attachment owner")
+      const ownerDirectory = fileNameForId(ownerId)
+      const promoted: ImageAttachment[] = []
+      for (const [index, attachment] of attachments.entries()) {
+        requireDraftImageAttachment(sessionId, attachment)
+        const file = imageReference(
+          sessionId,
+          "requests",
+          ownerDirectory,
+          index,
+          attachment.mediaType,
+        )
+        const targetPath = resolveReference(file)
+        const existing = await inspectStoredImageIfPresent(targetPath)
+        if (existing !== undefined) {
+          requireMatchingImageMetadata(existing, attachment)
+          promoted.push({ ...attachment, file })
+          continue
+        }
+        const sourcePath = resolveReference(attachment.file)
+        const source = await inspectStoredImage(sourcePath)
+        requireMatchingImageMetadata(source, attachment)
+        await linkOnce(root, sourcePath, targetPath, source.sizeBytes)
+        promoted.push({ ...attachment, file })
+      }
+      return promoted
+    },
+
+    async discardDraftImageAttachments(attachments) {
+      await Promise.all(
+        attachments.map(async (attachment) => {
+          requireDraftImageAttachment(attachment.file.sessionId, attachment)
+          await rm(resolveReference(attachment.file), { force: true })
         }),
+      )
+    },
+
+    async cleanupStagingImageAttachments() {
+      const entries = await readdirIfPresent(root)
+      await Promise.all(
+        entries
+          .filter((entry) => entry.isDirectory())
+          .map((entry) =>
+            rm(join(root, entry.name, "files", "attachments", "staging"), {
+              recursive: true,
+              force: true,
+            }),
+          ),
       )
     },
 
@@ -170,7 +302,201 @@ export function createSessionFiles(sessionsDir: string): SessionFiles {
       }
     },
 
+    async openRead(reference) {
+      const path = resolveReference(reference)
+      const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+      try {
+        const file = await handle.stat()
+        if (!file.isFile())
+          throw new Error("Session file is not a regular file.")
+        return {
+          stream: handle.createReadStream(),
+          totalBytes: file.size,
+        }
+      } catch (error) {
+        await handle.close()
+        throw error
+      }
+    },
+
     resolve: resolveReference,
+  }
+}
+
+function imageReference(
+  sessionId: string,
+  namespace: "staging" | "requests",
+  ownerDirectory: string,
+  index: number,
+  mediaType: ImageAttachment["mediaType"],
+): SessionFileReference {
+  return {
+    sessionId,
+    path: posix.join(
+      "attachments",
+      namespace,
+      ownerDirectory,
+      `${String(index + 1)}${imageExtension(mediaType)}`,
+    ),
+  }
+}
+
+function stagingOwnerDirectory(
+  root: string,
+  sessionId: string,
+  ownerDirectory: string,
+): string {
+  return join(
+    root,
+    sessionId,
+    "files",
+    "attachments",
+    "staging",
+    ownerDirectory,
+  )
+}
+
+async function inspectStoredImage(path: string) {
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+  try {
+    const file = await handle.stat()
+    if (!file.isFile() || file.size === 0) {
+      throw new Error("Draft image must be a non-empty regular file.")
+    }
+    requireImageSize(file.size)
+    const header = Buffer.alloc(Math.min(file.size, MAX_IMAGE_METADATA_BYTES))
+    await handle.read(header, 0, header.byteLength, 0)
+    return {
+      mediaType: inspectImageBytes(header).mediaType,
+      sizeBytes: file.size,
+    }
+  } finally {
+    await handle.close()
+  }
+}
+
+async function inspectStoredImageIfPresent(path: string) {
+  try {
+    return await inspectStoredImage(path)
+  } catch (error) {
+    if (isNotFound(error)) return undefined
+    throw error
+  }
+}
+
+function requireMatchingImageMetadata(
+  stored: Awaited<ReturnType<typeof inspectStoredImage>>,
+  attachment: ImageAttachment,
+): void {
+  if (
+    stored.sizeBytes !== attachment.sizeBytes ||
+    stored.mediaType !== attachment.mediaType
+  ) {
+    throw new Error("Draft image metadata does not match its file.")
+  }
+}
+
+function requireAttachmentName(name: string): void {
+  if (
+    name.length === 0 ||
+    Buffer.byteLength(name, "utf8") > 255 ||
+    name.includes("\0")
+  ) {
+    throw new Error("Image attachment name is invalid.")
+  }
+}
+
+function requireDraftImageAttachment(
+  sessionId: string,
+  attachment: ImageAttachment,
+): void {
+  if (
+    attachment.file.sessionId !== sessionId ||
+    !isStagingImagePath(attachment.file.path)
+  ) {
+    throw new Error("Image attachment is not a draft owned by this Session.")
+  }
+  requireAttachmentName(attachment.name)
+}
+
+function isStagingImagePath(path: string): boolean {
+  const segments = path.split("/")
+  return (
+    segments.length === 4 &&
+    segments[0] === "attachments" &&
+    segments[1] === "staging" &&
+    segments[2] !== "" &&
+    segments[3] !== ""
+  )
+}
+
+function requireImageSize(sizeBytes: number): void {
+  if (sizeBytes <= 0 || sizeBytes > MAX_IMAGE_FILE_BYTES) {
+    throw new Error("Image must be a non-empty file no larger than 50 MB.")
+  }
+}
+
+async function copyImageSnapshot(input: {
+  readonly root: string
+  readonly sourcePath: string
+  readonly stagingDirectory: string
+}) {
+  await ensureDirectoryChain(input.root, input.stagingDirectory)
+  const temporaryPath = join(
+    input.stagingDirectory,
+    `.snapshot-${randomUUID()}.tmp`,
+  )
+  try {
+    await copyFile(input.sourcePath, temporaryPath, constants.COPYFILE_EXCL)
+    const handle = await open(temporaryPath, constants.O_RDONLY)
+    try {
+      await handle.sync()
+    } finally {
+      await handle.close()
+    }
+    const metadata = await inspectStoredImage(temporaryPath)
+    return { ...metadata, path: temporaryPath }
+  } catch (error) {
+    await rm(temporaryPath, { force: true })
+    throw error
+  }
+}
+
+async function linkOnce(
+  root: string,
+  sourcePath: string,
+  path: string,
+  sourceBytes: number,
+): Promise<void> {
+  const directory = dirname(path)
+  await ensureDirectoryChain(root, directory)
+  try {
+    await link(sourcePath, path)
+    await syncDirectory(directory)
+  } catch (error) {
+    if (!isAlreadyExists(error)) throw error
+    const existing = await stat(path)
+    if (!existing.isFile() || existing.size !== sourceBytes) {
+      throw new Error("A different Session file already exists at this path.")
+    }
+  }
+}
+
+async function linkTemporaryFile(
+  temporaryPath: string,
+  path: string,
+  directory: string,
+  sourceBytes: number,
+): Promise<void> {
+  try {
+    await link(temporaryPath, path)
+    await syncDirectory(directory)
+  } catch (error) {
+    if (!isAlreadyExists(error)) throw error
+    const existing = await stat(path)
+    if (!existing.isFile() || existing.size !== sourceBytes) {
+      throw new Error("A different Session file already exists at this path.")
+    }
   }
 }
 
@@ -292,4 +618,22 @@ function isAlreadyExists(error: unknown): boolean {
     "code" in error &&
     error.code === "EEXIST"
   )
+}
+
+function isNotFound(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "ENOENT"
+  )
+}
+
+async function readdirIfPresent(path: string) {
+  try {
+    return await readdir(path, { withFileTypes: true })
+  } catch (error) {
+    if (isNotFound(error)) return []
+    throw error
+  }
 }

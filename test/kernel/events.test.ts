@@ -144,7 +144,7 @@ describe("kernel facts", () => {
         sizeBytes: 5,
         file: {
           sessionId: "session_00000000-0000-4000-8000-000000000000",
-          path: "attachments/request-1/1.png",
+          path: "attachments/requests/request-1/1.png",
         },
       }),
     ).toBe(true)
@@ -156,7 +156,7 @@ describe("kernel facts", () => {
         sizeBytes: 5,
         file: {
           sessionId: "session_00000000-0000-4000-8000-000000000000",
-          path: "attachments/request-1/1.png",
+          path: "attachments/requests/request-1/1.png",
         },
       }),
     ).toBe(false)

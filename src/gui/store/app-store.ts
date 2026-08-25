@@ -3,7 +3,7 @@ import { create } from "zustand"
 import {
   COMPACT_DIRECTIVE,
   EventType,
-  type InlineImageAttachment,
+  type ImageAttachment,
   type ModelSelection,
   type StoredEventEnvelope,
 } from "../../kernel/events.ts"
@@ -61,8 +61,12 @@ export type AppStoreData = {
   modelSelectionReady: boolean
   modelSelections: Record<string, ModelSelection>
   nextCursor: string | undefined
+  // TODO(gui-session-state): Move composer text and staged attachments into
+  // Session-scoped UI state when the GUI shell is redesigned. The current
+  // single active draft is intentionally temporary; do not expand it into a
+  // persistence or attachment-lifecycle authority.
   promptDraft: string | undefined
-  promptAttachments: readonly InlineImageAttachment[]
+  promptAttachments: readonly ImageAttachment[]
   projects: string[]
   providers: ApiProviderSummary[]
   userPreference: ApiUserModelPreference | undefined
@@ -94,7 +98,7 @@ export type AppStoreActions = {
   selectSession(sessionId: string): Promise<void>
   admitInput(
     text: string,
-    attachments?: readonly InlineImageAttachment[],
+    attachments?: readonly ImageAttachment[],
   ): Promise<void>
   cancelTurn(turnId: string): Promise<void>
   cancelQueuedInput(inputId: string): Promise<void>
@@ -104,7 +108,7 @@ export type AppStoreActions = {
     behavior: "allow" | "deny",
   ): Promise<void>
   setPromptDraft(text: string): void
-  setPromptAttachments(attachments: readonly InlineImageAttachment[]): void
+  setPromptAttachments(attachments: readonly ImageAttachment[]): void
   setModelSelection(
     sessionId: string,
     selection: ModelSelection | undefined,
@@ -717,7 +721,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
             }
             if (!isCurrentSessionSelection(get().selection, selection)) return
             if (
-              get().promptDraft?.trim() === text &&
+              (get().promptDraft ?? "").trim() === text &&
               sameAttachments(get().promptAttachments, attachments)
             ) {
               set({ promptDraft: undefined, promptAttachments: [] })
@@ -780,7 +784,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
           await acknowledgeAdmission(window.localStorage, pendingAdmission)
           if (!isCurrentSessionSelection(get().selection, selection)) return
           if (
-            get().promptDraft?.trim() === text &&
+            (get().promptDraft ?? "").trim() === text &&
             sameAttachments(get().promptAttachments, attachments)
           ) {
             set({ promptDraft: undefined, promptAttachments: [] })
@@ -992,8 +996,8 @@ function initialApiBase(): string {
 }
 
 function sameAttachments(
-  left: readonly InlineImageAttachment[],
-  right: readonly InlineImageAttachment[],
+  left: readonly ImageAttachment[],
+  right: readonly ImageAttachment[],
 ): boolean {
   return (
     left.length === right.length &&
@@ -1002,7 +1006,9 @@ function sameAttachments(
         attachment.name === right[index]?.name &&
         attachment.mediaType === right[index]?.mediaType &&
         attachment.sizeBytes === right[index]?.sizeBytes &&
-        attachment.data === right[index]?.data,
+        attachment.detail === right[index]?.detail &&
+        attachment.file.sessionId === right[index]?.file.sessionId &&
+        attachment.file.path === right[index]?.file.path,
     )
   )
 }

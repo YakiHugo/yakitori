@@ -28,7 +28,7 @@ export function registerResourceOpener(
   })
 }
 
-function requireTrustedSender(
+export function requireTrustedSender(
   sender: Electron.WebContents,
   senderFrame: Electron.WebFrameMain | null,
   trustedWindow: BrowserWindow,

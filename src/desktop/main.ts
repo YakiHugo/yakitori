@@ -3,6 +3,7 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { app, BrowserWindow, dialog } from "electron"
 import { loadLocalEnvFile } from "../server/env-file.ts"
+import { registerAttachmentImporter } from "./attachment-importer.ts"
 import { registerResourceOpener } from "./resource-opener.ts"
 import { type ServerProcess, spawnServerProcess } from "./server-process.ts"
 
@@ -102,7 +103,7 @@ async function start(): Promise<void> {
     app.exit(1)
   })
   console.log(`yakitori: sidecar listening on ${child.url}`)
-  openMainWindow(windowTarget(child.url), workspace)
+  openMainWindow(windowTarget(child.url), workspace, child)
 }
 
 function windowTarget(serverUrl: string): string {
@@ -183,7 +184,11 @@ function workspaceConfigPath(): string {
   return path.join(app.getPath("userData"), "workspace.json")
 }
 
-function openMainWindow(targetUrl: string, workspace: string): void {
+function openMainWindow(
+  targetUrl: string,
+  workspace: string,
+  server: ServerProcess,
+): void {
   const window = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -203,6 +208,7 @@ function openMainWindow(targetUrl: string, workspace: string): void {
     },
   })
   registerResourceOpener(workspace, window)
+  registerAttachmentImporter(server, window)
   window.once("ready-to-show", () => {
     window.show()
   })
