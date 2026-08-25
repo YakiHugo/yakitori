@@ -167,6 +167,133 @@ describe("session runner", () => {
     })
   })
 
+  it("rehydrates provider usage calibration when the runner restarts", async () => {
+    await withRuntime(async (runtime) => {
+      const firstProvider = createFauxProvider([
+        {
+          content: [{ type: "text", text: "first" }],
+          usage: { inputTokens: 50_000, outputTokens: 10 },
+        },
+      ])
+      const firstRunner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: firstProvider.stream,
+      })
+      const session = await createAttributedSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "first request" },
+      })
+      await firstRunner.wake(session.sessionId)
+      await firstRunner.close()
+
+      const afterFirst = await runtime.kernel.replaySession({
+        sessionId: session.sessionId,
+      })
+      const baseline = afterFirst.session?.providerUsageBaseline?.baseline
+      expect(baseline).toMatchObject({
+        provider: "faux",
+        model: "scripted",
+        providerInputTokens: 50_000,
+      })
+
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "second request" },
+      })
+      const diagnostics: ContextPreparedDiagnostics[] = []
+      const secondProvider = createFauxProvider([
+        { content: [{ type: "text", text: "second" }] },
+      ])
+      const secondRunner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: secondProvider.stream,
+        onContextPrepared(value) {
+          diagnostics.push(value)
+        },
+      })
+      await secondRunner.wake(session.sessionId)
+
+      const prepared = diagnostics[0]
+      if (baseline === undefined || prepared === undefined) {
+        throw new Error("Expected durable usage calibration diagnostics.")
+      }
+      expect(prepared.effectiveInputTokens).toBe(
+        baseline.providerInputTokens +
+          prepared.estimatedInputTokens -
+          baseline.estimatedInputTokens,
+      )
+      expect(prepared.effectiveInputTokens).toBeGreaterThan(
+        prepared.estimatedInputTokens,
+      )
+      await secondRunner.close()
+    })
+  })
+
+  it("reuses a provable provider usage prefix after a Session fork", async () => {
+    await withRuntime(async (runtime) => {
+      const sourceProvider = createFauxProvider([
+        {
+          content: [{ type: "text", text: "source answer" }],
+          usage: { inputTokens: 40_000, outputTokens: 8 },
+        },
+      ])
+      const sourceRunner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: sourceProvider.stream,
+      })
+      const source = await createAttributedSession(runtime)
+      await runtime.kernel.admitInput({
+        sessionId: source.sessionId,
+        content: { kind: "text", text: "source request" },
+      })
+      await sourceRunner.wake(source.sessionId)
+      await sourceRunner.close()
+
+      const cut = await runtime.kernel.admitInput({
+        sessionId: source.sessionId,
+        content: { kind: "text", text: "replace this" },
+      })
+      const forked = await runtime.kernel.forkSession({
+        sessionId: source.sessionId,
+        atInputId: cut.inputId,
+        reason: "edit",
+        content: { kind: "text", text: "replacement request" },
+      })
+      const baseline = forked.session.providerUsageBaseline?.baseline
+      expect(baseline?.contextWindowId).toBe(source.sessionId)
+      expect(forked.session.conversationId).toBe(source.sessionId)
+
+      const diagnostics: ContextPreparedDiagnostics[] = []
+      const forkProvider = createFauxProvider([
+        { content: [{ type: "text", text: "fork answer" }] },
+      ])
+      const forkRunner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream: forkProvider.stream,
+        onContextPrepared(value) {
+          diagnostics.push(value)
+        },
+      })
+      await forkRunner.wake(forked.sessionId)
+
+      const prepared = diagnostics[0]
+      if (baseline === undefined || prepared === undefined) {
+        throw new Error("Expected fork usage calibration diagnostics.")
+      }
+      expect(prepared.effectiveInputTokens).toBe(
+        baseline.providerInputTokens +
+          prepared.estimatedInputTokens -
+          baseline.estimatedInputTokens,
+      )
+      await forkRunner.close()
+    })
+  })
+
   it("switches the next Turn target and inherits it for later Inputs", async () => {
     await withRuntime(async (runtime) => {
       const defaultProvider = createFauxProvider([

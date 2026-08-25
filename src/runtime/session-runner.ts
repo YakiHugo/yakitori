@@ -72,7 +72,6 @@ import {
   createModelUsageBaseline,
   effectiveRequestInputTokens,
   estimateModelRequestBudget,
-  type ModelUsageBaseline,
 } from "./model-request-budget.ts"
 import { createPermissionGate, type PermissionGate } from "./permission-gate.ts"
 import { loadProjectInstructions } from "./project-instructions.ts"
@@ -200,6 +199,9 @@ type ForkContext = {
   readonly messages: readonly ModelMessage[]
   readonly forkTurnStartIndexes: readonly number[]
   readonly worldState?: JsonObject
+  readonly providerUsageBaseline?: NonNullable<
+    SessionProjection["providerUsageBaseline"]
+  >
 }
 
 type TurnTelemetry = {
@@ -239,7 +241,6 @@ export function createSessionRunner(
   // Consecutive compaction failures per session; after the cap the lane
   // stops paying for doomed summary calls until one succeeds again.
   const compactionFailures = new Map<string, number>()
-  const usageBaselines = new Map<string, ModelUsageBaseline>()
   let closed = false
 
   const publishDurable = (events: readonly EventEnvelope[]) => {
@@ -629,6 +630,9 @@ export function createSessionRunner(
         ...(session.worldState === undefined
           ? {}
           : { worldState: session.worldState.state }),
+        ...(session.providerUsageBaseline === undefined
+          ? {}
+          : { providerUsageBaseline: session.providerUsageBaseline }),
       }
       const request: ModelRequest = {
         target: step.turn.configuration.target,
@@ -639,9 +643,11 @@ export function createSessionRunner(
         signal: input.signal,
       }
       const contextWindowId =
-        session.compaction?.replacement?.windowId ?? session.id
+        session.compaction?.replacement?.windowId ??
+        session.inheritedContext?.windowId ??
+        session.conversationId
       const requestBudget = estimateModelRequestBudget(request)
-      const usageBaseline = usageBaselines.get(input.sessionId)
+      const usageBaseline = session.providerUsageBaseline?.baseline
       const effectiveInputTokens = effectiveRequestInputTokens({
         request,
         contextWindowId,
@@ -767,8 +773,14 @@ export function createSessionRunner(
           budget: requestBudget,
           usage: response.usage,
         })
-        if (baseline !== undefined)
-          usageBaselines.set(input.sessionId, baseline)
+        if (baseline !== undefined) {
+          await options.kernel.recordProviderUsageBaseline({
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            modelCallId: streamId,
+            baseline,
+          })
+        }
       }
 
       if (
@@ -1707,8 +1719,13 @@ export function createSessionRunner(
         ...(input.forkedContext.worldState === undefined
           ? {}
           : { worldStateBaseline: input.forkedContext.worldState }),
+        ...(input.forkedContext.providerUsageBaseline === undefined
+          ? {}
+          : {
+              providerUsageBaseline: input.forkedContext.providerUsageBaseline,
+            }),
       })
-      publishDurable([seeded.event])
+      publishDurable(seeded.events)
     }
     const admitted = await options.kernel.admitInput({
       sessionId: created.sessionId,
@@ -1757,6 +1774,10 @@ export function createSessionRunner(
       messages,
       preserveWorldState: input.forkTurns === "all",
       ...(worldState === undefined ? {} : { worldState }),
+      ...(input.forkTurns !== "all" ||
+      context.providerUsageBaseline === undefined
+        ? {}
+        : { providerUsageBaseline: context.providerUsageBaseline }),
     })
   }
 
@@ -2172,7 +2193,6 @@ export function createSessionRunner(
           (worker): worker is Promise<void> => worker !== undefined,
         ),
       )
-      usageBaselines.clear()
     },
   }
 }

@@ -45,6 +45,20 @@ for (const implementation of ["memory", "jsonl"] as const) {
             },
           ],
           worldStateBaseline: { environment: { cwd: "/workspace" } },
+          providerUsageBaseline: {
+            turnId: "turn_parent",
+            modelCallId: "model_call_parent",
+            baseline: {
+              provider: "faux",
+              model: "scripted",
+              contextWindowId: "context_window_parent",
+              systemRevisions: ["base:1"],
+              toolContractDigest: "tools",
+              messagePrefixDigests: ["message"],
+              providerInputTokens: 1_000,
+              estimatedInputTokens: 800,
+            },
+          },
         })
         const replayed = await kernel.replaySession({
           sessionId: session.sessionId,
@@ -64,6 +78,18 @@ for (const implementation of ["memory", "jsonl"] as const) {
         expect(replayed.session?.worldState?.state).toEqual({
           environment: { cwd: "/workspace" },
         })
+        expect(replayed.session?.providerUsageBaseline).toMatchObject({
+          turnId: "turn_parent",
+          modelCallId: "model_call_parent",
+          baseline: {
+            contextWindowId: seeded.windowId,
+            providerInputTokens: 1_000,
+          },
+        })
+        expect(seeded.events.map((event) => event.type)).toEqual([
+          HistoryRecordType.InitialContext,
+          HistoryRecordType.ProviderUsageBaseline,
+        ])
         await expect(
           kernel.seedContextWindow({
             sessionId: session.sessionId,
@@ -421,6 +447,70 @@ for (const implementation of ["memory", "jsonl"] as const) {
         expect(
           (await store.readProjection(forked.sessionId))?.configuration,
         ).toEqual(configuration)
+      })
+    })
+
+    it("forks the last provable provider usage baseline and drops later calibration", async () => {
+      await withKernel(implementation, async ({ kernel }) => {
+        const source = await kernel.createSession()
+        const firstInput = await admit(kernel, source.sessionId, "first")
+        const firstTurn = await kernel.startTurn({
+          sessionId: source.sessionId,
+          inputId: firstInput.inputId,
+          executionContext: testTurnExecutionContext(),
+        })
+        const firstBaseline = {
+          provider: "faux",
+          model: "scripted",
+          contextWindowId: source.sessionId,
+          systemRevisions: ["base:1"],
+          toolContractDigest: "tool-contract",
+          messagePrefixDigests: ["first-prefix"],
+          providerInputTokens: 1_000,
+          estimatedInputTokens: 800,
+        }
+        await kernel.recordProviderUsageBaseline({
+          sessionId: source.sessionId,
+          turnId: firstTurn.turnId,
+          modelCallId: "model_call_first",
+          baseline: firstBaseline,
+        })
+        await kernel.completeTurn({
+          sessionId: source.sessionId,
+          turnId: firstTurn.turnId,
+        })
+
+        const cutInput = await admit(kernel, source.sessionId, "cut")
+        const cutTurn = await kernel.startTurn({
+          sessionId: source.sessionId,
+          inputId: cutInput.inputId,
+          executionContext: testTurnExecutionContext(),
+        })
+        await kernel.recordProviderUsageBaseline({
+          sessionId: source.sessionId,
+          turnId: cutTurn.turnId,
+          modelCallId: "model_call_after_cut",
+          baseline: {
+            ...firstBaseline,
+            messagePrefixDigests: ["later-prefix"],
+            providerInputTokens: 2_000,
+          },
+        })
+        await kernel.completeTurn({
+          sessionId: source.sessionId,
+          turnId: cutTurn.turnId,
+        })
+
+        const forked = await kernel.forkSession({
+          sessionId: source.sessionId,
+          atInputId: cutInput.inputId,
+          reason: "undo",
+        })
+
+        expect(forked.session.providerUsageBaseline).toMatchObject({
+          modelCallId: "model_call_first",
+          baseline: firstBaseline,
+        })
       })
     })
 

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto"
+import type { ProviderUsageBaseline } from "../kernel/events.ts"
 import { readImageDimensions } from "../kernel/image-metadata.ts"
 import {
   DEFAULT_MODEL_MAX_OUTPUT_TOKENS,
@@ -23,16 +24,7 @@ export type ModelRequestBudget = Readonly<{
   requiredContextTokens: number
 }>
 
-export type ModelUsageBaseline = Readonly<{
-  provider: string
-  model: string
-  contextWindowId: string
-  systemRevisions: readonly string[]
-  toolContract: string
-  messagePrefixDigests: readonly string[]
-  providerInputTokens: number
-  estimatedInputTokens: number
-}>
+export type ModelUsageBaseline = ProviderUsageBaseline
 
 export function estimateModelRequestBudget(
   request: ModelRequest,
@@ -111,7 +103,7 @@ export function createModelUsageBaseline(input: {
     model: input.request.target.model,
     contextWindowId: input.contextWindowId,
     systemRevisions: systemRevisions(input.request),
-    toolContract: JSON.stringify(input.request.tools),
+    toolContractDigest: digest(JSON.stringify(input.request.tools)),
     messagePrefixDigests: input.request.messages.map(messageDigest),
     providerInputTokens,
     estimatedInputTokens: input.budget.estimatedInputTokens,
@@ -128,7 +120,7 @@ function canReuseUsageBaseline(
     baseline.model === request.target.model &&
     baseline.contextWindowId === contextWindowId &&
     arraysEqual(baseline.systemRevisions, systemRevisions(request)) &&
-    baseline.toolContract === JSON.stringify(request.tools) &&
+    baseline.toolContractDigest === digest(JSON.stringify(request.tools)) &&
     baseline.messagePrefixDigests.length <= request.messages.length &&
     baseline.messagePrefixDigests.every(
       (digest, index) => digest === messageDigest(request.messages[index]),
@@ -137,7 +129,11 @@ function canReuseUsageBaseline(
 }
 
 function messageDigest(message: ModelRequest["messages"][number] | undefined) {
-  return createHash("sha256").update(JSON.stringify(message)).digest("hex")
+  return digest(JSON.stringify(message))
+}
+
+function digest(value: string): string {
+  return createHash("sha256").update(value).digest("hex")
 }
 
 function systemRevisions(request: ModelRequest): readonly string[] {

@@ -19,6 +19,7 @@ import {
   type ModelSelection,
   type PermissionBehavior,
   type PermissionDecisionReason,
+  type ProviderUsageBaseline,
   type SessionConfigurationSnapshot,
   type StoredEventEnvelope,
   type TextContent,
@@ -62,6 +63,7 @@ export type SessionProjection = {
   readonly metadata?: EventMetadata
   readonly configuration?: SessionConfigurationSnapshot
   readonly usage?: TokenUsage
+  readonly providerUsageBaseline?: ProviderUsageBaselineProjection
   readonly compaction?: CompactionProjection
   readonly inheritedContext?: InheritedContextProjection
   readonly worldState?: WorldStateProjection
@@ -160,6 +162,14 @@ export type WorldStateUpdateProjection = {
   readonly full: boolean
   readonly state: JsonObject
   readonly fragments: readonly WorldStateFragment[]
+  readonly seq: number
+  readonly createdAt: string
+}
+
+export type ProviderUsageBaselineProjection = {
+  readonly turnId: string
+  readonly modelCallId: string
+  readonly baseline: ProviderUsageBaseline
   readonly seq: number
   readonly createdAt: string
 }
@@ -374,6 +384,16 @@ export function applySessionFacts(
       turnContexts,
       stored,
     )
+    if (stored.type === HistoryRecordType.ProviderUsageBaseline) {
+      session.providerUsageBaseline = {
+        turnId: stored.data.turnId,
+        modelCallId: stored.data.modelCallId,
+        baseline: stored.data.baseline,
+        seq: stored.seq,
+        createdAt: stored.createdAt,
+      }
+      continue
+    }
   }
 
   if (!session) return undefined
@@ -481,6 +501,9 @@ function mutableSession(current: SessionProjection): MutableSession {
     ...(current.inheritedContext === undefined
       ? {}
       : { inheritedContext: current.inheritedContext }),
+    ...(current.providerUsageBaseline === undefined
+      ? {}
+      : { providerUsageBaseline: current.providerUsageBaseline }),
   }
 }
 
@@ -501,6 +524,7 @@ type MutableSession = {
   configuration?: SessionConfigurationSnapshot
   compaction?: CompactionProjection
   inheritedContext?: InheritedContextProjection
+  providerUsageBaseline?: ProviderUsageBaselineProjection
 }
 
 type Mutable<T> = { -readonly [K in keyof T]: T[K] }
@@ -645,6 +669,7 @@ function applyKnownEvent(
     }
     case HistoryRecordType.WorldState:
     case HistoryRecordType.InitialContext:
+    case HistoryRecordType.ProviderUsageBaseline:
     case EventType.ContextCompacted:
       return
   }

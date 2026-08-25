@@ -28,6 +28,7 @@ describe("kernel facts", () => {
       "turn.context",
       "history.initialized",
       "world_state",
+      "provider.usage_baseline",
     ])
   })
 

@@ -23,6 +23,7 @@ export const HistoryRecordType = {
   TurnContext: "turn.context",
   InitialContext: "history.initialized",
   WorldState: "world_state",
+  ProviderUsageBaseline: "provider.usage_baseline",
 } as const
 
 export const ForkReason = {
@@ -225,6 +226,20 @@ export type TokenUsage = {
   readonly outputTokens: number
   readonly cacheReadInputTokens?: number
   readonly cacheWriteInputTokens?: number
+}
+
+// Provider-reported input usage is authoritative only for the exact request
+// prefix that produced it. Persist the proof needed to reuse that calibration
+// without making request-budget diagnostics part of the GUI event protocol.
+export type ProviderUsageBaseline = {
+  readonly provider: string
+  readonly model: string
+  readonly contextWindowId: string
+  readonly systemRevisions: readonly string[]
+  readonly toolContractDigest: string
+  readonly messagePrefixDigests: readonly string[]
+  readonly providerInputTokens: number
+  readonly estimatedInputTokens: number
 }
 
 export type TurnMetrics = {
@@ -676,6 +691,15 @@ export type InitialContextRecord = {
   }
 }
 
+export type ProviderUsageBaselineRecord = {
+  readonly type: typeof HistoryRecordType.ProviderUsageBaseline
+  readonly data: {
+    readonly turnId: string
+    readonly modelCallId: string
+    readonly baseline: ProviderUsageBaseline
+  }
+}
+
 export type KernelEvent =
   | SessionCreatedEvent
   | InputAdmittedEvent
@@ -693,6 +717,7 @@ export type SessionHistoryRecord =
   | TurnContextRecord
   | WorldStateRecord
   | InitialContextRecord
+  | ProviderUsageBaselineRecord
 
 export type HistoryRecord = SessionHistoryRecord
 
@@ -926,6 +951,13 @@ function requireKernelFact(value: unknown): asserts value is KernelFact {
           Array.isArray(data.fragments) &&
           data.fragments.every(isWorldStateFragment)
         )
+      case HistoryRecordType.ProviderUsageBaseline:
+        return (
+          onlyKeys(data, ["turnId", "modelCallId", "baseline"]) &&
+          isString(data.turnId) &&
+          isString(data.modelCallId) &&
+          isProviderUsageBaseline(data.baseline)
+        )
       case EventType.ContextCompacted:
         return (
           onlyKeys(data, [
@@ -967,6 +999,34 @@ function requireKernelFact(value: unknown): asserts value is KernelFact {
   if (!valid || !optionalFieldsAreValid(value.type, data)) {
     throw new TypeError(`Invalid event data for ${value.type}.`)
   }
+}
+
+function isProviderUsageBaseline(
+  value: unknown,
+): value is ProviderUsageBaseline {
+  return (
+    isRecord(value) &&
+    onlyKeys(value, [
+      "provider",
+      "model",
+      "contextWindowId",
+      "systemRevisions",
+      "toolContractDigest",
+      "messagePrefixDigests",
+      "providerInputTokens",
+      "estimatedInputTokens",
+    ]) &&
+    isString(value.provider) &&
+    isString(value.model) &&
+    isString(value.contextWindowId) &&
+    Array.isArray(value.systemRevisions) &&
+    value.systemRevisions.every(isString) &&
+    isString(value.toolContractDigest) &&
+    Array.isArray(value.messagePrefixDigests) &&
+    value.messagePrefixDigests.every(isString) &&
+    isNonNegativeInteger(value.providerInputTokens) &&
+    isNonNegativeInteger(value.estimatedInputTokens)
+  )
 }
 
 function isWorldStateFragment(value: unknown): value is WorldStateFragment {

@@ -19,6 +19,7 @@ import {
   type ModelSelection,
   PermissionBehavior,
   type PermissionDecisionReason,
+  type ProviderUsageBaseline,
   type SessionConfigurationSnapshot,
   type StoredEventEnvelope,
   type TextContent,
@@ -88,6 +89,9 @@ export type SessionKernel = {
   recordToolResult(
     input: RecordToolResultInput,
   ): Promise<RecordToolResultResult>
+  recordProviderUsageBaseline(
+    input: RecordProviderUsageBaselineInput,
+  ): Promise<RecordProviderUsageBaselineResult>
   recordCompaction(
     input: RecordCompactionInput,
   ): Promise<RecordCompactionResult>
@@ -129,10 +133,16 @@ export type SeedContextWindowInput = {
   readonly sourceSessionId: string
   readonly history: readonly ModelMessage[]
   readonly worldStateBaseline?: JsonObject
+  readonly providerUsageBaseline?: {
+    readonly turnId: string
+    readonly modelCallId: string
+    readonly baseline: ProviderUsageBaseline
+  }
 }
 export type SeedContextWindowResult = {
   readonly windowId: string
   readonly event: EventEnvelope
+  readonly events: readonly EventEnvelope[]
 }
 export type ForkSessionInput = {
   readonly sessionId: string
@@ -275,6 +285,15 @@ export type RecordToolResultResult = {
   readonly itemId: string
   readonly event: EventEnvelope
   readonly events: readonly EventEnvelope[]
+}
+export type RecordProviderUsageBaselineInput = {
+  readonly sessionId: string
+  readonly turnId: string
+  readonly modelCallId: string
+  readonly baseline: ProviderUsageBaseline
+}
+export type RecordProviderUsageBaselineResult = {
+  readonly event: EventEnvelope
 }
 export type RecordCompactionInput = {
   readonly sessionId: string
@@ -420,16 +439,36 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
           )
         }
         const windowId = createContextWindowId()
-        const event = await append(eventStore, session, {
-          type: HistoryRecordType.InitialContext,
-          data: compact({
-            windowId,
-            sourceSessionId: input.sourceSessionId,
-            history: input.history,
-            worldStateBaseline: input.worldStateBaseline,
-          }),
-        })
-        return { windowId, event }
+        const events = await appendMany(eventStore, session, [
+          {
+            type: HistoryRecordType.InitialContext,
+            data: compact({
+              windowId,
+              sourceSessionId: input.sourceSessionId,
+              history: input.history,
+              worldStateBaseline: input.worldStateBaseline,
+            }),
+          },
+          ...(input.providerUsageBaseline === undefined
+            ? []
+            : [
+                {
+                  type: HistoryRecordType.ProviderUsageBaseline,
+                  data: {
+                    turnId: input.providerUsageBaseline.turnId,
+                    modelCallId: input.providerUsageBaseline.modelCallId,
+                    baseline: {
+                      ...input.providerUsageBaseline.baseline,
+                      contextWindowId: windowId,
+                    },
+                  },
+                } as const,
+              ]),
+        ])
+        const event = events[0]
+        if (event === undefined)
+          throw new Error("Expected initial context fact.")
+        return { windowId, event, events }
       })
     },
 
@@ -842,6 +881,22 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
           },
         })
         return { itemId, event, events: [event] }
+      })
+    },
+
+    recordProviderUsageBaseline(input) {
+      return command(input.sessionId, async () => {
+        const session = await requireSession(eventStore, input.sessionId)
+        requireActiveTurn(session, input.turnId)
+        const event = await append(eventStore, session, {
+          type: HistoryRecordType.ProviderUsageBaseline,
+          data: {
+            turnId: input.turnId,
+            modelCallId: input.modelCallId,
+            baseline: input.baseline,
+          },
+        })
+        return { event }
       })
     },
 
