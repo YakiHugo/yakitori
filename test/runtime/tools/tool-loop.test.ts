@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { EventType, PermissionBehavior } from "../../../src/kernel/events.ts"
+import { EventType } from "../../../src/kernel/events.ts"
 import { createJsonlEventStore } from "../../../src/kernel/jsonl-event-store.ts"
 import { createSessionKernel } from "../../../src/kernel/session-kernel.ts"
 import { createMateKernel } from "../../../src/mates/mate-kernel.ts"
@@ -393,20 +393,15 @@ describe("tool loop", () => {
 
       const wake = runner.wake(session.sessionId)
       const pending = await waitForPendingPermission(
-        runtime.kernel,
+        permissionGate,
         session.sessionId,
       )
       expect(launches).toEqual([])
-      await runtime.kernel.resolvePermission({
+      permissionGate.resolve({
         sessionId: session.sessionId,
         turnId: pending.turnId,
         permissionRequestId: pending.permissionRequestId,
-        behavior: PermissionBehavior.Allow,
-      })
-      permissionGate.notify({
-        sessionId: session.sessionId,
-        turnId: pending.turnId,
-        permissionRequestId: pending.permissionRequestId,
+        behavior: "allow",
       })
       await wake
 
@@ -1178,18 +1173,14 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number) {
 }
 
 async function waitForPendingPermission(
-  kernel: ReturnType<typeof createSessionKernel>,
+  gate: ReturnType<typeof createPermissionGate>,
   sessionId: string,
 ): Promise<{ readonly turnId: string; readonly permissionRequestId: string }> {
   for (let attempt = 0; attempt < 200; attempt += 1) {
-    const read = await kernel.readSession({ sessionId })
-    const permission = read.session?.permissions.find(
-      (candidate) => candidate.state === "pending",
-    )
-    const turnId = read.session?.activeTurn?.turnId
-    if (permission !== undefined && turnId !== undefined) {
+    const permission = gate.list(sessionId)[0]
+    if (permission !== undefined) {
       return {
-        turnId,
+        turnId: permission.turnId,
         permissionRequestId: permission.permissionRequestId,
       }
     }

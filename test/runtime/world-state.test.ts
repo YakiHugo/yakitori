@@ -147,7 +147,6 @@ function emptySession(): SessionProjection {
     cancelledTurns: [],
     interruptedTurns: [],
     items: [],
-    permissions: [],
     tools: [],
     turns: [],
   }

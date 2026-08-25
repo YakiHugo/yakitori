@@ -12,8 +12,6 @@ import {
   isRequestId,
   isYakitoriError,
   type ModelSelection,
-  PermissionBehavior,
-  type PermissionDecisionReason,
   type SessionFiles,
   type SessionKernel,
   type SessionProjection,
@@ -23,6 +21,10 @@ import {
   YakitoriErrorCode,
 } from "../kernel/index.ts"
 import { SessionExecutionPolicyDefaults } from "../runtime/limits.ts"
+import type {
+  RuntimePermissionReason,
+  RuntimePermissionRequest,
+} from "../runtime/permission-gate.ts"
 import {
   type ApiAdmitInputResponse,
   type ApiCancelInputResponse,
@@ -53,11 +55,16 @@ export type ServerHandlerOptions = {
   }
   readonly sessionDefaults?: SessionCreateDefaults
   readonly wakeSession?: (sessionId: string) => void
-  readonly onPermissionResolved?: (input: {
+  readonly resolvePermission?: (input: {
     readonly sessionId: string
     readonly turnId: string
     readonly permissionRequestId: string
-  }) => void
+    readonly behavior: "allow" | "deny"
+    readonly reason?: RuntimePermissionReason
+  }) => boolean
+  readonly listPendingPermissions?: (
+    sessionId: string,
+  ) => readonly RuntimePermissionRequest[]
   readonly interruptTurn?: (input: {
     readonly sessionId: string
     readonly turnId: string
@@ -206,7 +213,10 @@ export function createServerHandlers(
         }
 
         return ok(200, {
-          session: mapSessionDetail(result.session),
+          session: mapSessionDetail(
+            result.session,
+            options.listPendingPermissions?.(result.session.id),
+          ),
         })
       } catch (error) {
         return fail(error)
@@ -378,18 +388,17 @@ export function createServerHandlers(
     async resolvePermission(input) {
       try {
         const request = requireResolvePermissionRequest(input)
-        const resolved = await kernel.resolvePermission(request)
-        options.eventHub?.publish([resolved.event])
-        options.onPermissionResolved?.({
-          sessionId: request.sessionId,
-          turnId: request.turnId,
-          permissionRequestId: request.permissionRequestId,
-        })
+        if (!options.resolvePermission?.(request)) {
+          throw notFound(
+            `Active permission ${request.permissionRequestId} was not found.`,
+            { permissionRequestId: request.permissionRequestId },
+          )
+        }
         return ok(200, {
           sessionId: request.sessionId,
           turnId: request.turnId,
           permissionRequestId: request.permissionRequestId,
-          event: resolved.event,
+          behavior: request.behavior,
         })
       } catch (error) {
         return fail(error)
@@ -459,7 +468,10 @@ function mapSessionSummary(summary: SessionSummary): ApiSessionSummary {
   }
 }
 
-function mapSessionDetail(session: SessionProjection): ApiSessionDetail {
+function mapSessionDetail(
+  session: SessionProjection,
+  pendingPermissions: readonly RuntimePermissionRequest[] = [],
+): ApiSessionDetail {
   const currentModel = currentSessionModel(session)
   return {
     ...mapSessionSummary(summarizeSessionProjection(session)),
@@ -473,12 +485,15 @@ function mapSessionDetail(session: SessionProjection): ApiSessionDetail {
             ...currentModel,
           },
         }),
+    pendingPermissions: pendingPermissions.map(
+      ({ sessionId: _, ...permission }) => permission,
+    ),
     counts: {
       inputs: session.inputs.length,
       pendingInputs: session.pendingInputs.length,
       turns: session.turns.length,
       items: session.items.length,
-      permissions: session.permissions.length,
+      permissions: pendingPermissions.length,
       tools: session.tools.length,
     },
   }
@@ -769,14 +784,12 @@ function requireResolvePermissionRequest(input: unknown) {
     "Permission resolve request must be an object.",
   )
   const behavior = record.behavior
-  if (
-    behavior !== PermissionBehavior.Allow &&
-    behavior !== PermissionBehavior.Deny
-  ) {
+  if (behavior !== "allow" && behavior !== "deny") {
     throw invalidInput('behavior must be "allow" or "deny".', {
       field: "behavior",
     })
   }
+  const decision: "allow" | "deny" = behavior
   return {
     sessionId: requireSessionId(record.sessionId, "sessionId"),
     turnId: requireString(record.turnId, "turnId"),
@@ -784,14 +797,14 @@ function requireResolvePermissionRequest(input: unknown) {
       record.permissionRequestId,
       "permissionRequestId",
     ),
-    behavior,
+    behavior: decision,
     ...(record.reason === undefined
       ? {}
       : { reason: requireDecisionReason(record.reason) }),
   }
 }
 
-function requireDecisionReason(value: unknown): PermissionDecisionReason {
+function requireDecisionReason(value: unknown): RuntimePermissionReason {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw invalidInput("reason must be an object.")
   }

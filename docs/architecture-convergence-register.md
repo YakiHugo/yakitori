@@ -33,7 +33,7 @@ Reference baseline:
 | M1 | Durable event and execution-item protocol | P0 | None | Done |
 | M2 | Context manager, model capacity, and compaction | P0 | M1 lifecycle decisions | In progress |
 | M3 | Tool catalog, execution policy, and permissions | P0 | M1 item decisions | In progress |
-| M4 | Persistence, recovery, and keyed concurrency | P1 | M1, M3 permission terminal states | Planned |
+| M4 | Persistence, recovery, and keyed concurrency | P1 | M1 lifecycle states | Planned |
 | M5 | Provider transport, retry, and usage accounting | P1 | M2 capacity contract | In progress |
 | M6 | Server lifecycle, errors, and event delivery | P1 | M1, M4 | In progress |
 | M7 | GUI projections and transient state | P1 | M1 | In progress |
@@ -50,9 +50,8 @@ Current execution order:
 
 ## M2 — Context manager, model capacity, and compaction
 
-Status: in progress. Complete-request estimation and an in-memory
-provider-usage baseline have landed. Durable calibration and capacity-surface
-cleanup remain.
+Status: in progress. Complete-request estimation and durable provider-usage
+calibration have landed. Capacity-policy and capacity-surface cleanup remain.
 
 ### Remaining problems
 
@@ -63,9 +62,6 @@ cleanup remain.
 - A model without catalog token capacity still falls back to the fixed 256 KiB
   history-selection budget and cannot perform a real context-window admission
   check.
-- Provider usage corrects later requests only through an in-memory Session
-  baseline. Restart/resume cannot recover it from durable Turn usage, and
-  compaction requests use estimates alone.
 - `ResolvedModelCapacity` exposes default, configured, maximum, and percentage
   fields even though execution consumes only the effective token window.
 
@@ -133,8 +129,6 @@ These are required boundaries, not duplicate state:
 
 ### Remaining work
 
-- Persist or reconstruct the provider-usage prefix baseline used by final
-  admission and define when compaction/fork invalidates it.
 - Give uncataloged models an explicit token-capacity policy instead of silently
   substituting the byte-selection fallback.
 - Narrow resolved Turn capacity to the effective token window consumed by
@@ -162,8 +156,8 @@ Reference anchors:
 ## M3 — Tool catalog, execution policy, and permissions
 
 Status: in progress. The finalized per-Step router, shared file-path resolution,
-and explicit tool approval requirements have landed; limit ownership and
-PermissionGate timeout cleanup remain open. The product default remains YOLO
+explicit tool approval requirements, and Turn-scoped permission gate have
+landed; limit ownership remains open. The product default remains YOLO
 (`never`); approval requirements change no default execution behavior.
 
 ### Confirmed problems
@@ -171,8 +165,6 @@ PermissionGate timeout cleanup remain open. The product default remains YOLO
 - `RuntimeLimits` mixes Session semantics, per-call tool requests, and process
   safety caps. Eight tool-side keys are persisted and validated but tools read
   module constants instead.
-- Permission timeout defaults and abort detection are duplicated; `now/sleep`
-  dependency injection has no production caller.
 
 ### Target boundary
 
@@ -192,18 +184,24 @@ The effective value is bounded by the most restrictive applicable layer:
 effective = min(call request, Session policy, hard safety cap)
 ```
 
+Permission is active-Turn runtime state, not a recoverable Session fact. The
+gate owns pending waiters, timeout, abort, and allow/deny decisions; the GUI
+receives transient lifecycle notifications and can restore an active request
+from the server's runtime snapshot. Durable history records only the tool call
+and its eventual result, including denial or timeout. Interrupting a Turn drops
+its waiter, so startup recovery has no Permission state to reconcile.
+
 ### Remaining work
 
 - Remove tool-side keys from persisted `runtimeLimits` through a clean schema
   break.
-- Remove unused PermissionGate clock injection and duplicated timeout defaults.
 
 ### Done when
 
 - Changing Session policy changes only documented Session behavior; changing a
   safety cap cannot be serialized as a Session preference.
-- Permission timeout and abort use one runtime timing owner; recovery expiry is
-  closed under M4 startup reconciliation.
+- Permission timeout and abort use one runtime timing owner, and a late
+  decision cannot revive a waiter after its Turn ends.
 
 Reference anchors:
 
@@ -212,6 +210,7 @@ Reference anchors:
 - `.references/public/codex/codex-rs/core/src/tools/orchestrator.rs`
 - `.references/public/codex/codex-rs/core/src/tools/sandboxing.rs`
 - `.references/public/codex/codex-rs/core/src/tools/approvals.rs`
+- `.references/public/codex/codex-rs/core/src/state/turn.rs`
 - `.references/public/codex/codex-rs/core/src/exec.rs`
 - `.references/public/grok-build/crates/codegen/xai-grok-workspace/src/permission/types.rs`
 
@@ -221,8 +220,6 @@ Reference anchors:
 
 - Session kernel, Mate kernel, and JSONL event store separately implement the
   same per-key Promise-tail serialization primitive.
-- Recovery returns reports no production caller consumes.
-- Recovery detects stale permission requests but does not terminalize them.
 - Session summary fields are explicitly expanded at projection, cache, and API
   boundaries. Some repetition is necessary, but exact same-domain conversion
   should have one owner.
@@ -240,7 +237,6 @@ Recovery is an effectful startup reconciliation, not a report generator:
 ```text
 started Turn without terminal event -> append interrupted terminal event
 pending Input                      -> wake owning Session runner
-stale Permission                   -> append expired resolution
 ```
 
 It may emit one structured operational log summary, but should not return data
@@ -259,8 +255,6 @@ Keep boundary mappings explicit:
 
 - Introduce and test KeyedSequencer FIFO, failure continuation, cleanup, and
   cross-key concurrency.
-- Make recovery close every discovered nonterminal lifecycle.
-- Simplify `recoverSessions()` to an effect-oriented return type.
 - Remove development-only persistence compatibility in the same deliberate
   schema break as M1/M3.
 
@@ -275,23 +269,21 @@ Keep boundary mappings explicit:
 ### Done when
 
 - Concurrent same-key writes are FIFO and different keys remain concurrent.
-- Restart leaves no active Turn or stale pending Permission without a terminal
-  durable fact.
+- Restart leaves no active Turn; pending Permission cannot survive because it
+  is not representable outside the active runtime.
 - Cache corruption falls back to journal reconstruction.
 - Internal-only summary fields cannot enter the public API accidentally.
 
 ## M5 — Provider transport, retry, and usage accounting
 
-Status: in progress. Provider usage now anchors later requests within one
-process; shared transport policy and durable baseline recovery remain.
+Status: in progress. Provider usage now durably anchors later provable request
+prefixes across restart and fork; shared transport policy remains.
 
 ### Confirmed problems
 
 - Anthropic and OpenAI adapters duplicate retryable status sets, status detail
   extraction, and terminal error conversion.
 - Retry policy is therefore maintained by manual provider synchronization.
-- Provider usage corrects later request admission only through an in-memory
-  baseline; restart/resume and compaction do not recover that evidence.
 - The Codex provider is the only production provider without a focused
   contract test.
 

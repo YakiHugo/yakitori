@@ -11,7 +11,7 @@ import {
   createInitialAppState,
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
-import { createEventEnvelope, EventType } from "../../src/kernel/events.ts"
+import type { LiveSessionEvent } from "../../src/runtime/live-events.ts"
 
 const sessionId = "session_1"
 
@@ -41,16 +41,15 @@ describe("approval bar", () => {
     useAppStore.setState({
       execution: seedExecution([
         {
-          type: EventType.PermissionRequested,
-          data: {
-            permissionRequestId: "permission_1",
-            turnId: "turn_1",
-            toolCallId: "tool_1",
-            action: "read_file",
-            subject: "/tmp/result.log",
-            reason:
-              "This tool will read a path outside the selected workspace.",
-          },
+          type: "permission.requested",
+          sessionId,
+          permissionRequestId: "permission_1",
+          turnId: "turn_1",
+          toolCallId: "tool_1",
+          action: "read_file",
+          subject: "/tmp/result.log",
+          reason: "This tool will read a path outside the selected workspace.",
+          createdAt: "2026-08-25T00:00:00.000Z",
         },
       ]),
       resolvePermission,
@@ -82,21 +81,21 @@ describe("approval bar", () => {
     useAppStore.setState({
       execution: seedExecution([
         {
-          type: EventType.PermissionRequested,
-          data: {
-            permissionRequestId: "permission_1",
-            turnId: "turn_1",
-            toolCallId: "tool_1",
-            action: "run_command",
-          },
+          type: "permission.requested",
+          sessionId,
+          permissionRequestId: "permission_1",
+          turnId: "turn_1",
+          toolCallId: "tool_1",
+          action: "run_command",
+          createdAt: "2026-08-25T00:00:00.000Z",
         },
         {
-          type: EventType.PermissionResolved,
-          data: {
-            permissionRequestId: "permission_1",
-            turnId: "turn_1",
-            behavior: "allow" as const,
-          },
+          type: "permission.resolved",
+          sessionId,
+          permissionRequestId: "permission_1",
+          turnId: "turn_1",
+          outcome: "allow",
+          createdAt: "2026-08-25T00:00:01.000Z",
         },
       ]),
     })
@@ -105,14 +104,12 @@ describe("approval bar", () => {
   })
 })
 
-function seedExecution(
-  events: Parameters<typeof createEventEnvelope>[0]["event"][],
-) {
+function seedExecution(events: LiveSessionEvent[]) {
   return events.reduce(
-    (current, event, index) =>
+    (current, event) =>
       reduceExecutionView(current, {
-        type: "durable",
-        event: createEventEnvelope({ sessionId, seq: index + 1, event }),
+        type: "transient",
+        event,
       }),
     createExecutionViewState(),
   )

@@ -8,7 +8,10 @@ import {
   type TurnMetrics,
 } from "../kernel/events.ts"
 import type { LiveSessionEvent } from "../runtime/live-events.ts"
-import type { ApiSessionDetail } from "../server/protocol.ts"
+import type {
+  ApiPendingPermission,
+  ApiSessionDetail,
+} from "../server/protocol.ts"
 
 export type ExecutionEntry =
   | {
@@ -134,6 +137,8 @@ export type ExecutionViewState = {
   readonly durableEvents: readonly StoredEventEnvelope[]
   readonly snapshots: Readonly<Record<string, StreamSnapshot>>
   readonly reasoningSnapshots: Readonly<Record<string, StreamSnapshot>>
+  readonly pendingPermissions: Readonly<Record<string, ApiPendingPermission>>
+  readonly resolvedPermissionIds: Readonly<Record<string, string>>
 }
 
 type StreamSnapshot = {
@@ -147,6 +152,8 @@ export function createExecutionViewState(): ExecutionViewState {
     durableEvents: [],
     snapshots: {},
     reasoningSnapshots: {},
+    pendingPermissions: {},
+    resolvedPermissionIds: {},
   }
 }
 
@@ -160,6 +167,31 @@ export function reduceExecutionView(
     | { readonly type: "transient"; readonly event: LiveSessionEvent },
 ): ExecutionViewState {
   if (action.type === "transient") {
+    if (action.event.type === "permission.requested") {
+      const { type: _, sessionId: __, ...permission } = action.event
+      const { [permission.permissionRequestId]: ___, ...unresolved } =
+        state.resolvedPermissionIds
+      return {
+        ...state,
+        pendingPermissions: {
+          ...state.pendingPermissions,
+          [permission.permissionRequestId]: permission,
+        },
+        resolvedPermissionIds: unresolved,
+      }
+    }
+    if (action.event.type === "permission.resolved") {
+      const { [action.event.permissionRequestId]: _, ...pendingPermissions } =
+        state.pendingPermissions
+      return {
+        ...state,
+        pendingPermissions,
+        resolvedPermissionIds: {
+          ...state.resolvedPermissionIds,
+          [action.event.permissionRequestId]: action.event.turnId,
+        },
+      }
+    }
     const key =
       action.event.type === "assistant.snapshot"
         ? "snapshots"
@@ -184,6 +216,8 @@ export function reduceExecutionView(
   // Drop completed stream bubbles when the durable assistant fact arrives.
   let snapshots = state.snapshots
   let reasoningSnapshots = state.reasoningSnapshots
+  let pendingPermissions = state.pendingPermissions
+  let resolvedPermissionIds = state.resolvedPermissionIds
   const event = knownEvent(action.event)
   if (
     event?.type === "item.completed" &&
@@ -210,12 +244,25 @@ export function reduceExecutionView(
         ([, snapshot]) => snapshot.turnId !== event.data.turnId,
       ),
     )
+    pendingPermissions = Object.fromEntries(
+      Object.entries(pendingPermissions).filter(
+        ([, permission]) => permission.turnId !== event.data.turnId,
+      ),
+    )
+    resolvedPermissionIds = Object.fromEntries(
+      Object.entries(resolvedPermissionIds).filter(
+        ([, turnId]) => turnId !== event.data.turnId,
+      ),
+    )
   }
 
   return {
+    ...state,
     durableEvents,
     snapshots,
     reasoningSnapshots,
+    pendingPermissions,
+    resolvedPermissionIds,
   }
 }
 
@@ -298,7 +345,6 @@ export function projectExecutionView(
       }
       const outcome = event.data.outcome
       if (outcome.status !== "completed") {
-        markPendingPermissionsStale(permissions, entries, event.data.turnId)
         if (outcome.status === "interrupted") {
           for (const tool of tools.values()) {
             if (
@@ -397,32 +443,6 @@ export function projectExecutionView(
       })
       continue
     }
-    if (event.type === "permission.requested") {
-      const entry: Extract<ExecutionEntry, { readonly kind: "permission" }> = {
-        kind: "permission",
-        permissionRequestId: event.data.permissionRequestId,
-        turnId: event.data.turnId,
-        toolCallId: event.data.toolCallId,
-        action: event.data.action,
-        ...(event.data.subject === undefined
-          ? {}
-          : { subject: event.data.subject }),
-        ...(event.data.reason === undefined
-          ? {}
-          : { reason: event.data.reason }),
-        state: "requested",
-      }
-      permissions.set(event.data.permissionRequestId, entry)
-      entries.push(entry)
-      continue
-    }
-    if (event.type === "permission.resolved") {
-      updatePermission(permissions, entries, event.data.permissionRequestId, {
-        state: "resolved",
-        behavior: event.data.behavior,
-      })
-      continue
-    }
     if (event.type === "context.compacted") {
       entries.push({
         kind: "context_compacted",
@@ -431,6 +451,33 @@ export function projectExecutionView(
         createdAt: event.createdAt,
       })
     }
+  }
+
+  const pendingPermissions = [
+    ...(session?.pendingPermissions ?? []),
+    ...Object.values(state.pendingPermissions),
+  ]
+  for (const permission of new Map(
+    pendingPermissions.map((candidate) => [
+      candidate.permissionRequestId,
+      candidate,
+    ]),
+  ).values()) {
+    if (state.resolvedPermissionIds[permission.permissionRequestId]) continue
+    const entry: Extract<ExecutionEntry, { readonly kind: "permission" }> = {
+      kind: "permission",
+      permissionRequestId: permission.permissionRequestId,
+      turnId: permission.turnId,
+      toolCallId: permission.toolCallId,
+      action: permission.action,
+      ...(permission.subject === undefined
+        ? {}
+        : { subject: permission.subject }),
+      ...(permission.reason === undefined ? {} : { reason: permission.reason }),
+      state: "requested",
+    }
+    permissions.set(permission.permissionRequestId, entry)
+    entries.push(entry)
   }
 
   for (const [streamId, snapshot] of Object.entries(state.reasoningSnapshots)) {
@@ -551,24 +598,6 @@ function addTerminalTelemetry(
   }
 }
 
-function markPendingPermissionsStale(
-  permissions: Map<
-    string,
-    Extract<ExecutionEntry, { readonly kind: "permission" }>
-  >,
-  entries: ExecutionEntry[],
-  turnId: string,
-): void {
-  for (const permission of permissions.values()) {
-    if (permission.turnId !== turnId || permission.state !== "requested") {
-      continue
-    }
-    updatePermission(permissions, entries, permission.permissionRequestId, {
-      state: "stale",
-    })
-  }
-}
-
 function knownEvent(
   event: StoredEventEnvelope,
 ): RuntimeEventEnvelope | undefined {
@@ -588,27 +617,6 @@ function updateTool(
   tools.set(toolCallId, next)
   const index = entries.findIndex(
     (entry) => entry.kind === "tool" && entry.toolCallId === toolCallId,
-  )
-  if (index >= 0) entries[index] = next
-}
-
-function updatePermission(
-  permissions: Map<
-    string,
-    Extract<ExecutionEntry, { readonly kind: "permission" }>
-  >,
-  entries: ExecutionEntry[],
-  permissionRequestId: string,
-  patch: Partial<Extract<ExecutionEntry, { readonly kind: "permission" }>>,
-): void {
-  const current = permissions.get(permissionRequestId)
-  if (!current) return
-  const next = { ...current, ...patch }
-  permissions.set(permissionRequestId, next)
-  const index = entries.findIndex(
-    (entry) =>
-      entry.kind === "permission" &&
-      entry.permissionRequestId === permissionRequestId,
   )
   if (index >= 0) entries[index] = next
 }

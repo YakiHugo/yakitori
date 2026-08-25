@@ -894,6 +894,21 @@ export const useAppStore = create<AppStore>()((set, get) => {
               },
             },
           )
+          if (isCurrentSessionSelection(get().selection, selection)) {
+            set({
+              execution: reduceExecutionView(get().execution, {
+                type: "transient",
+                event: {
+                  type: "permission.resolved",
+                  sessionId: selection.sessionId,
+                  turnId,
+                  permissionRequestId,
+                  outcome: behavior,
+                  createdAt: new Date().toISOString(),
+                },
+              }),
+            })
+          }
           await refreshSelectedSession(selection)
         },
         () => isCurrentSessionSelection(get().selection, selection),

@@ -1,3 +1,5 @@
+import type { RuntimePermissionEvent } from "./permission-gate.ts"
+
 export type LiveAssistantSnapshot = {
   readonly type: "assistant.snapshot"
   readonly sessionId: string
@@ -16,7 +18,10 @@ export type LiveReasoningSnapshot = {
   readonly createdAt: string
 }
 
-export type LiveSessionEvent = LiveAssistantSnapshot | LiveReasoningSnapshot
+export type LiveSessionEvent =
+  | LiveAssistantSnapshot
+  | LiveReasoningSnapshot
+  | RuntimePermissionEvent
 
 export type LiveEventListener = (
   event: LiveSessionEvent,
@@ -84,7 +89,9 @@ export type SnapshotPublisher = {
 export function createCoalescingSnapshotPublisher(
   hub: TransientEventHub,
   publicationsPerSecond: number,
-  type: LiveSessionEvent["type"] = "assistant.snapshot",
+  type:
+    | LiveAssistantSnapshot["type"]
+    | LiveReasoningSnapshot["type"] = "assistant.snapshot",
 ): SnapshotPublisher {
   const minIntervalMs = Math.max(1, Math.floor(1000 / publicationsPerSecond))
   let pending:

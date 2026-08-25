@@ -12,11 +12,6 @@ export const TurnState = {
   Interrupted: "interrupted",
 } as const
 
-export const PermissionState = {
-  Pending: "pending",
-  Resolved: "resolved",
-} as const
-
 export const ToolState = {
   Requested: "requested",
   Completed: "completed",
@@ -25,6 +20,4 @@ export const ToolState = {
 
 export type InputState = (typeof InputState)[keyof typeof InputState]
 export type TurnState = (typeof TurnState)[keyof typeof TurnState]
-export type PermissionState =
-  (typeof PermissionState)[keyof typeof PermissionState]
 export type ToolState = (typeof ToolState)[keyof typeof ToolState]

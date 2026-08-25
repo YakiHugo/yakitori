@@ -20,8 +20,68 @@ import {
 } from "../../src/server/protocol.ts"
 import { createMemoryEventStore } from "../kernel/memory-event-store.ts"
 import { testTurnExecutionContext } from "../kernel/turn-context.ts"
+import { createPermissionGate } from "../../src/runtime/permission-gate.ts"
 
 describe("server handlers", () => {
+  it("exposes and resolves only active runtime permissions", async () => {
+    const kernel = createSessionKernel(createMemoryEventStore())
+    const gate = createPermissionGate()
+    const server = createServerHandlers(kernel, {
+      listPendingPermissions: (sessionId) => gate.list(sessionId),
+      resolvePermission: (input) => gate.resolve(input),
+    })
+    const created = await server.createSession()
+    expectOk(created)
+    const pendingOutcome = gate.request({
+      sessionId: created.body.session.id,
+      turnId: "turn_active",
+      toolCallId: "tool_guarded",
+      action: "command_execution",
+      subject: "pnpm test",
+      timeoutMs: 60_000,
+    })
+    const pending = gate.list(created.body.session.id)[0]
+    if (!pending) throw new Error("missing runtime permission")
+
+    const read = await server.readSession({
+      sessionId: created.body.session.id,
+    })
+    expectOk(read)
+    expect(read.body.session.pendingPermissions).toEqual([
+      expect.objectContaining({
+        permissionRequestId: pending.permissionRequestId,
+        action: "command_execution",
+      }),
+    ])
+    expect(read.body.session.counts.permissions).toBe(1)
+
+    const resolved = await server.resolvePermission({
+      sessionId: created.body.session.id,
+      turnId: pending.turnId,
+      permissionRequestId: pending.permissionRequestId,
+      behavior: "allow",
+    })
+    expectOk(resolved)
+    expect(resolved.body).toEqual({
+      sessionId: created.body.session.id,
+      turnId: pending.turnId,
+      permissionRequestId: pending.permissionRequestId,
+      behavior: "allow",
+    })
+    await expect(pendingOutcome).resolves.toEqual({ kind: "allow" })
+
+    expectError(
+      await server.resolvePermission({
+        sessionId: created.body.session.id,
+        turnId: pending.turnId,
+        permissionRequestId: pending.permissionRequestId,
+        behavior: "allow",
+      }),
+      404,
+      ApiErrorCode.NotFound,
+    )
+  })
+
   it("creates a session with a public detail shape", async () => {
     await withServer(async (server) => {
       const result = await server.createSession({

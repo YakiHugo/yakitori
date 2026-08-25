@@ -11,8 +11,6 @@ export const EventType = {
   TurnCompleted: "turn.completed",
   ItemStarted: "item.started",
   ItemCompleted: "item.completed",
-  PermissionRequested: "permission.requested",
-  PermissionResolved: "permission.resolved",
   ContextCompacted: "context.compacted",
 } as const
 
@@ -58,20 +56,12 @@ export const ItemStatus = {
   Failed: "failed",
 } as const
 
-export const PermissionBehavior = {
-  Allow: "allow",
-  Deny: "deny",
-  Expire: "expire",
-} as const
-
 export type EventType = (typeof EventType)[keyof typeof EventType]
 export type HistoryRecordType =
   (typeof HistoryRecordType)[keyof typeof HistoryRecordType]
 export type InputRole = (typeof InputRole)[keyof typeof InputRole]
 export type ItemKind = (typeof ItemKind)[keyof typeof ItemKind]
 export type ItemStatus = (typeof ItemStatus)[keyof typeof ItemStatus]
-export type PermissionBehavior =
-  (typeof PermissionBehavior)[keyof typeof PermissionBehavior]
 
 export type JsonValue =
   | string
@@ -248,12 +238,6 @@ export type TurnMetrics = {
   readonly modelDurationMs: number
   readonly toolDurationMs: number
   readonly averageTimeToFirstTokenMs?: number
-}
-
-export type PermissionDecisionReason = {
-  readonly kind: string
-  readonly message?: string
-  readonly metadata?: EventMetadata
 }
 
 export type TurnExecutionLimits = {
@@ -623,30 +607,6 @@ export type ItemCompletedEvent = Readonly<{
   }>
 }>
 
-export type PermissionRequestedEvent = {
-  readonly type: typeof EventType.PermissionRequested
-  readonly data: {
-    readonly permissionRequestId: string
-    readonly turnId: string
-    readonly toolCallId: string
-    readonly action: string
-    readonly subject?: string
-    readonly reason?: string
-    readonly metadata?: EventMetadata
-  }
-}
-
-export type PermissionResolvedEvent = {
-  readonly type: typeof EventType.PermissionResolved
-  readonly data: {
-    readonly permissionRequestId: string
-    readonly turnId: string
-    readonly behavior: PermissionBehavior
-    readonly reason?: PermissionDecisionReason
-    readonly metadata?: EventMetadata
-  }
-}
-
 export type WorldStateFragment = {
   readonly id: string
   readonly revision: string
@@ -708,8 +668,6 @@ export type KernelEvent =
   | TurnCompletedEvent
   | ItemStartedEvent
   | ItemCompletedEvent
-  | PermissionRequestedEvent
-  | PermissionResolvedEvent
   | ContextCompactedEvent
 
 export type SessionHistoryRecord =
@@ -906,35 +864,6 @@ function requireKernelFact(value: unknown): asserts value is KernelFact {
           isString(data.turnId) &&
           isCompletedExecutionItem(data.item)
         )
-      case EventType.PermissionRequested:
-        return (
-          onlyKeys(data, [
-            "permissionRequestId",
-            "turnId",
-            "toolCallId",
-            "action",
-            "subject",
-            "reason",
-            "metadata",
-          ]) &&
-          isString(data.permissionRequestId) &&
-          isString(data.turnId) &&
-          isString(data.toolCallId) &&
-          isString(data.action)
-        )
-      case EventType.PermissionResolved:
-        return (
-          onlyKeys(data, [
-            "permissionRequestId",
-            "turnId",
-            "behavior",
-            "reason",
-            "metadata",
-          ]) &&
-          isString(data.permissionRequestId) &&
-          isString(data.turnId) &&
-          isPermissionBehavior(data.behavior)
-        )
       case HistoryRecordType.WorldState:
         return (
           onlyKeys(data, [
@@ -996,7 +925,7 @@ function requireKernelFact(value: unknown): asserts value is KernelFact {
         )
     }
   })()
-  if (!valid || !optionalFieldsAreValid(value.type, data)) {
+  if (!valid || !optionalFieldsAreValid(data)) {
     throw new TypeError(`Invalid event data for ${value.type}.`)
   }
 }
@@ -1640,15 +1569,9 @@ const sessionExecutionPolicyKeys = [
   "assistantResponseBytes",
 ] as const
 
-function optionalFieldsAreValid(
-  type: EventType | HistoryRecordType,
-  data: Record<string, unknown>,
-): boolean {
-  if ("reason" in data && data.reason !== undefined) {
-    if (type === EventType.PermissionResolved) {
-      if (!isPermissionDecisionReason(data.reason)) return false
-    } else if (!isString(data.reason)) return false
-  }
+function optionalFieldsAreValid(data: Record<string, unknown>): boolean {
+  if ("reason" in data && data.reason !== undefined && !isString(data.reason))
+    return false
   if (
     "metadata" in data &&
     data.metadata !== undefined &&
@@ -1708,10 +1631,6 @@ function onlyKeys(
 
 function isInputRole(value: unknown): value is InputRole {
   return typeof value === "string" && inputRoles.has(value)
-}
-
-function isPermissionBehavior(value: unknown): value is PermissionBehavior {
-  return typeof value === "string" && permissionBehaviors.has(value)
 }
 
 function isTokenUsage(value: unknown): value is TokenUsage {
@@ -1849,17 +1768,6 @@ function isTurnOutcome(value: unknown): value is TurnOutcome {
   }
 }
 
-function isPermissionDecisionReason(
-  value: unknown,
-): value is PermissionDecisionReason {
-  return (
-    isRecord(value) &&
-    isString(value.kind) &&
-    (value.message === undefined || isString(value.message)) &&
-    (value.metadata === undefined || isJsonObject(value.metadata))
-  )
-}
-
 function isTurnExecutionContext(value: unknown): value is TurnExecutionContext {
   if (!isRecord(value) || !isRecord(value.executionPolicy)) return false
   const policy = value.executionPolicy
@@ -1947,4 +1855,3 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 const eventTypes = new Set<string>(Object.values(EventType))
 const historyRecordTypes = new Set<string>(Object.values(HistoryRecordType))
 const inputRoles = new Set<string>(Object.values(InputRole))
-const permissionBehaviors = new Set<string>(Object.values(PermissionBehavior))

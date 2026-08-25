@@ -389,6 +389,7 @@ describe("HTTP server", () => {
               seq: 1,
               createdAt: "2026-01-01T00:00:00.000Z",
               updatedAt: "2026-01-01T00:00:00.000Z",
+              pendingPermissions: [],
               counts: {
                 inputs: 0,
                 pendingInputs: 0,

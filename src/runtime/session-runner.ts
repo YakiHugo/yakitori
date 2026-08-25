@@ -12,8 +12,6 @@ import {
   type JsonObject,
   type KernelError,
   type ModelSelection,
-  PermissionBehavior,
-  PermissionState,
   type RuntimeEventEnvelope,
   type SessionFiles,
   type SessionKernel,
@@ -231,9 +229,8 @@ export function createSessionRunner(
   const toolRegistry = options.toolRegistry ?? createToolRegistry()
   const permissionGate = options.permissionGate ?? createPermissionGate()
   const enabledTools = toolRegistry.tools.map((tool) => tool.name)
-  // The current product runs in YOLO mode. Keep the permission protocol as a
-  // policy boundary, but do not introduce prompts until M3 exposes a real
-  // user-selectable mode.
+  // The current product runs in YOLO mode. Interactive requirements remain a
+  // Turn-scoped runtime boundary until a user-selectable mode is exposed.
   const approvalPolicy = options.approvalPolicy ?? "never"
   const projectInstructionLoader =
     options.loadProjectInstructions ?? loadProjectInstructions
@@ -1445,9 +1442,8 @@ export function createSessionRunner(
       }
       return disabled
     }
-    let permissionRequestId: string | undefined
     if (input.permissionRequest !== undefined) {
-      const permission = await options.kernel.requestPermission({
+      const outcome = await permissionGate.request({
         sessionId: input.sessionId,
         turnId: input.turnId,
         toolCallId: input.call.id,
@@ -1458,24 +1454,28 @@ export function createSessionRunner(
         ...(input.permissionRequest.reason === undefined
           ? {}
           : { reason: input.permissionRequest.reason }),
-      })
-      publishDurable([permission.event])
-      permissionRequestId = permission.permissionRequestId
-    }
-
-    if (permissionRequestId !== undefined) {
-      const allowed = await waitForPermissionAllow({
-        sessionId: input.sessionId,
-        turnId: input.turnId,
-        permissionRequestId,
         signal: input.signal,
+        timeoutMs: runtimeTiming.permissionWaitTimeoutMs,
       })
-      if (!allowed.ok) {
+      if (outcome.kind !== "allow") {
+        const code =
+          outcome.kind === "deny"
+            ? "permission_denied"
+            : outcome.kind === "timeout"
+              ? "permission_timeout"
+              : "aborted"
+        const message =
+          outcome.reason?.message ??
+          (outcome.kind === "deny"
+            ? "Permission denied. No process was started."
+            : outcome.kind === "timeout"
+              ? "Permission wait timed out. No process was started."
+              : "Permission wait aborted. No process was started.")
         const denied: ToolExecutionResult = {
           ok: false,
-          code: allowed.kind,
-          message: allowed.message,
-          content: allowed.message,
+          code,
+          message,
+          content: message,
         }
         if (input.record) {
           const recorded = await recordExecutedTool({
@@ -1493,32 +1493,22 @@ export function createSessionRunner(
       }
     }
 
-    await options.kernel.requireToolExecutionAllowed({
-      sessionId: input.sessionId,
-      turnId: input.turnId,
-      toolCallId: input.call.id,
-    })
-
     let result: ToolExecutionResult
     try {
-      result = await input.toolPlan.execute(
-        input.call.name,
-        input.call.input,
-        {
-          workspaceRoot: input.workspaceRoot,
-          sessionId: input.sessionId,
-          toolCallId: input.call.id,
-          ...(options.sessionFiles === undefined
-            ? {}
-            : { sessionFiles: options.sessionFiles }),
-          signal: input.signal,
-          visibleFileObservations: input.observations,
-          agentControl: agentControl.bind(
-            input.sessionId,
-            turnTarget(input.executionContext),
-          ),
-        },
-      )
+      result = await input.toolPlan.execute(input.call.name, input.call.input, {
+        workspaceRoot: input.workspaceRoot,
+        sessionId: input.sessionId,
+        toolCallId: input.call.id,
+        ...(options.sessionFiles === undefined
+          ? {}
+          : { sessionFiles: options.sessionFiles }),
+        signal: input.signal,
+        visibleFileObservations: input.observations,
+        agentControl: agentControl.bind(
+          input.sessionId,
+          turnTarget(input.executionContext),
+        ),
+      })
     } catch (error) {
       if (input.signal.aborted || isAbortError(error)) throw error
       options.onRuntimeError?.(error)
@@ -1840,113 +1830,6 @@ export function createSessionRunner(
     return {
       type: "errored",
       error: `Agent turn ${lastTurn?.state ?? "missing"}${detail === undefined ? "." : `: ${detail}`}`,
-    }
-  }
-
-  async function waitForPermissionAllow(input: {
-    readonly sessionId: string
-    readonly turnId: string
-    readonly permissionRequestId: string
-    readonly signal: AbortSignal
-  }): Promise<
-    | { readonly ok: true }
-    | {
-        readonly ok: false
-        readonly kind: "permission_denied" | "permission_timeout" | "aborted"
-        readonly message: string
-      }
-  > {
-    const deadline = Date.now() + runtimeTiming.permissionWaitTimeoutMs
-    for (;;) {
-      const outcome = await readPermissionOutcome(input)
-      if (outcome !== undefined) return outcome
-      const remaining = deadline - Date.now()
-      const wake = await permissionGate.wait({
-        sessionId: input.sessionId,
-        turnId: input.turnId,
-        permissionRequestId: input.permissionRequestId,
-        signal: input.signal,
-        timeoutMs: remaining,
-      })
-      if (wake === "aborted") {
-        return {
-          ok: false,
-          kind: "aborted",
-          message: "Permission wait aborted. No process was started.",
-        }
-      }
-      if (wake === "timeout") {
-        const raced = await readPermissionOutcome(input)
-        if (raced !== undefined) return raced
-        try {
-          const timedOut = await options.kernel.resolvePermission({
-            sessionId: input.sessionId,
-            turnId: input.turnId,
-            permissionRequestId: input.permissionRequestId,
-            behavior: PermissionBehavior.Expire,
-            reason: {
-              kind: "timeout",
-              message: "Permission wait timed out.",
-            },
-          })
-          publishDurable([timedOut.event])
-        } catch (error) {
-          if (!isInvalidState(error)) throw error
-          const resolved = await readPermissionOutcome(input)
-          if (resolved !== undefined) return resolved
-          throw error
-        }
-        return {
-          ok: false,
-          kind: "permission_timeout",
-          message: "Permission wait timed out. No process was started.",
-        }
-      }
-    }
-  }
-
-  async function readPermissionOutcome(input: {
-    readonly sessionId: string
-    readonly turnId: string
-    readonly permissionRequestId: string
-  }): Promise<
-    | { readonly ok: true }
-    | {
-        readonly ok: false
-        readonly kind: "permission_denied" | "permission_timeout"
-        readonly message: string
-      }
-    | undefined
-  > {
-    const session = await requireSession(input.sessionId)
-    const permission = session.permissions.find(
-      (candidate) =>
-        candidate.permissionRequestId === input.permissionRequestId,
-    )
-    if (!permission) {
-      return {
-        ok: false,
-        kind: "permission_denied",
-        message: "Permission request was not found. No process was started.",
-      }
-    }
-    if (permission.state === PermissionState.Pending) return undefined
-    if (permission.behavior === PermissionBehavior.Allow) return { ok: true }
-    if (permission.behavior === PermissionBehavior.Expire) {
-      return {
-        ok: false,
-        kind: "permission_timeout",
-        message:
-          permission.decisionReason?.message ??
-          "Permission wait timed out. No process was started.",
-      }
-    }
-    return {
-      ok: false,
-      kind: "permission_denied",
-      message:
-        permission.decisionReason?.message ??
-        "Permission denied. No process was started.",
     }
   }
 

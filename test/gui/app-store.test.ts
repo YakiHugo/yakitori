@@ -54,6 +54,7 @@ const sessionDetail: ApiSessionDetail = {
   seq: 1,
   createdAt: "2026-07-24T00:00:00.000Z",
   updatedAt: "2026-07-24T00:00:00.000Z",
+  pendingPermissions: [],
   counts: {
     inputs: 0,
     pendingInputs: 0,

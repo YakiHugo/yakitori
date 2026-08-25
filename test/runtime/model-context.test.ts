@@ -198,11 +198,6 @@ describe("model context", () => {
             },
           ],
         })
-        await kernel.requireToolExecutionAllowed({
-          sessionId,
-          turnId: turn.turnId,
-          toolCallId: "tool_1",
-        })
         await kernel.recordToolResult({
           sessionId,
           turnId: turn.turnId,
@@ -986,11 +981,6 @@ describe("model context", () => {
         })
         let firstResultItemId = ""
         for (const toolCallId of calls) {
-          await kernel.requireToolExecutionAllowed({
-            sessionId,
-            turnId: active.turnId,
-            toolCallId,
-          })
           const result = await kernel.recordToolResult({
             sessionId,
             turnId: active.turnId,
@@ -1056,11 +1046,6 @@ describe("model context", () => {
               requiresPermission: false,
             },
           ],
-        })
-        await kernel.requireToolExecutionAllowed({
-          sessionId,
-          turnId: active.turnId,
-          toolCallId: "tool_read_truncated",
         })
         const result = await kernel.recordToolResult({
           sessionId,

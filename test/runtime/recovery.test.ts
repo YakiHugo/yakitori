@@ -7,12 +7,7 @@ import { createJsonlEventStore } from "../../src/kernel/jsonl-event-store.ts"
 import { createSessionKernel } from "../../src/kernel/session-kernel.ts"
 import { createMateKernel } from "../../src/mates/mate-kernel.ts"
 import { createSqliteMateStore } from "../../src/mates/sqlite-mate-store.ts"
-import {
-  discoverRecoveryState,
-  reconcileSessionHistory,
-  recoverSessions,
-  scheduleRecoveryExecution,
-} from "../../src/runtime/recovery.ts"
+import { recoverSessions } from "../../src/runtime/recovery.ts"
 import { acquireRuntimeLock } from "../../src/runtime/runtime-lock.ts"
 import { testTurnExecutionContext } from "../kernel/turn-context.ts"
 
@@ -35,19 +30,21 @@ describe("runtime recovery", () => {
         }),
       })
 
-      const first = await recoverSessions({ kernel: runtime.kernel })
-      expect(first.recoveredSessionIds).toEqual([session.sessionId])
+      await recoverSessions({ kernel: runtime.kernel })
+      const firstEvents = await runtime.kernel.readEvents({
+        sessionId: session.sessionId,
+      })
       expect(
-        first.events.some(
-          (event) =>
-            event.type === EventType.TurnCompleted &&
-            event.data.outcome.status === "interrupted",
+        firstEvents.events.filter(
+          (event) => event.type === EventType.TurnCompleted,
         ),
-      ).toBe(true)
+      ).toMatchObject([{ data: { outcome: { status: "interrupted" } } }])
 
-      const second = await recoverSessions({ kernel: runtime.kernel })
-      expect(second.recoveredSessionIds).toEqual([])
-      expect(second.events).toEqual([])
+      await recoverSessions({ kernel: runtime.kernel })
+      const secondEvents = await runtime.kernel.readEvents({
+        sessionId: session.sessionId,
+      })
+      expect(secondEvents.events).toHaveLength(firstEvents.events.length)
 
       const read = await runtime.kernel.readSession({
         sessionId: session.sessionId,
@@ -82,16 +79,7 @@ describe("runtime recovery", () => {
 
       eventStore = createJsonlEventStore({ sessionsDir })
       const recoveredKernel = createSessionKernel(eventStore)
-      const recovered = await recoverSessions({ kernel: recoveredKernel })
-
-      expect(recovered.recoveredSessionIds).toEqual([session.sessionId])
-      expect(recovered.events).toMatchObject([
-        {
-          sessionId: session.sessionId,
-          type: EventType.TurnCompleted,
-          data: { outcome: { status: "interrupted" } },
-        },
-      ])
+      await recoverSessions({ kernel: recoveredKernel })
       const read = await recoveredKernel.readSession({
         sessionId: session.sessionId,
       })
@@ -113,41 +101,13 @@ describe("runtime recovery", () => {
         content: { kind: "text", text: "pending" },
       })
       const woken: string[] = []
-      const result = await recoverSessions({
+      await recoverSessions({
         kernel: runtime.kernel,
         wake: async (sessionId) => {
           woken.push(sessionId)
         },
       })
-      expect(result.wokenSessionIds).toEqual([session.sessionId])
       expect(woken).toEqual([session.sessionId])
-    })
-  })
-
-  it("keeps history reconciliation, state discovery, and execution scheduling separate", async () => {
-    await withStore(async (runtime) => {
-      const session = await createAttributedSession(runtime)
-      await runtime.kernel.admitInput({
-        sessionId: session.sessionId,
-        content: { kind: "text", text: "pending" },
-      })
-
-      expect(await reconcileSessionHistory({ kernel: runtime.kernel })).toEqual(
-        { recoveredSessionIds: [], events: [] },
-      )
-      const state = await discoverRecoveryState({ kernel: runtime.kernel })
-      expect(state.pendingInputSessionIds).toEqual([session.sessionId])
-
-      let release: (() => void) | undefined
-      const blocked = new Promise<void>((resolve) => {
-        release = resolve
-      })
-      const woken = scheduleRecoveryExecution({
-        sessionIds: state.pendingInputSessionIds,
-        wake: () => blocked,
-      })
-      expect(woken).toEqual([session.sessionId])
-      release?.()
     })
   })
 
@@ -176,10 +136,7 @@ describe("runtime recovery", () => {
         },
       }
 
-      await expect(reconcileSessionHistory({ kernel })).resolves.toEqual({
-        recoveredSessionIds: [],
-        events: [],
-      })
+      await expect(recoverSessions({ kernel })).resolves.toBeUndefined()
       const read = await runtime.kernel.readSession({
         sessionId: session.sessionId,
       })
@@ -204,15 +161,87 @@ describe("runtime recovery", () => {
         })
       }
 
-      const recovered = await reconcileSessionHistory({
-        kernel: runtime.kernel,
-      })
-      expect(new Set(recovered.recoveredSessionIds)).toEqual(
-        new Set(sessionIds),
+      await recoverSessions({ kernel: runtime.kernel })
+      const reads = await Promise.all(
+        sessionIds.map((sessionId) =>
+          runtime.kernel.readSession({ sessionId }),
+        ),
       )
-      expect(recovered.events).toHaveLength(101)
+      expect(
+        reads.every((read) => read.session?.activeTurn === undefined),
+      ).toBe(true)
     })
   }, 15_000)
+
+  it("interrupts the active Turn before waking queued work after a cold restart", async () => {
+    const rootDir = await mkdtemp(
+      join(tmpdir(), "yakitori-permission-recovery-"),
+    )
+    const sessionsDir = join(rootDir, "sessions")
+    let eventStore = createJsonlEventStore({ sessionsDir })
+    try {
+      const firstKernel = createSessionKernel(eventStore)
+      const session = await firstKernel.createSession({
+        workingDirectory: rootDir,
+      })
+      const admitted = await firstKernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "guarded tool" },
+      })
+      const turn = await firstKernel.startTurn({
+        sessionId: session.sessionId,
+        inputId: admitted.inputId,
+        executionContext: testTurnExecutionContext(),
+      })
+      await firstKernel.recordAssistantOutput({
+        sessionId: session.sessionId,
+        turnId: turn.turnId,
+        toolCalls: [
+          {
+            id: "tool_recovery",
+            name: "run_command",
+            input: { command: "pwd" },
+            requiresPermission: true,
+          },
+        ],
+      })
+      await firstKernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "queued after crash" },
+      })
+      await eventStore.close()
+
+      eventStore = createJsonlEventStore({ sessionsDir })
+      const recoveredKernel = createSessionKernel(eventStore)
+      let wakeObserved: Promise<void> | undefined
+      await recoverSessions({
+        kernel: recoveredKernel,
+        wake: (sessionId) => {
+          wakeObserved = (async () => {
+            const read = await recoveredKernel.readSession({ sessionId })
+            expect(read.session?.activeTurn).toBeUndefined()
+          })()
+          return wakeObserved
+        },
+      })
+      await wakeObserved
+
+      const events = await recoveredKernel.readEvents({
+        sessionId: session.sessionId,
+      })
+      expect(events.events).toContainEqual(
+        expect.objectContaining({
+          type: EventType.TurnCompleted,
+          data: expect.objectContaining({
+            outcome: expect.objectContaining({ status: "interrupted" }),
+          }),
+        }),
+      )
+    } finally {
+      await eventStore.close()
+      await rm(rootDir, { recursive: true, force: true })
+    }
+  })
 
   it("acquires an exclusive runtime lock and reclaims a stale one", async () => {
     const rootDir = await mkdtemp(join(tmpdir(), "yakitori-lock-"))

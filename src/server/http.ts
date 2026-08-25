@@ -612,9 +612,18 @@ async function streamSessionEvents(
   const liveSubscription = transientHub?.subscribe(sessionId, (event) => {
     if (responseClosed) return
     if (!live) {
-      // Coalesce by stream id for slow subscribers during replay.
+      if (
+        event.type === "permission.requested" ||
+        event.type === "permission.resolved"
+      ) {
+        pendingLive.push(event)
+        return
+      }
+      // Coalesce snapshots by stream id for slow subscribers during replay.
       const index = pendingLive.findIndex(
         (candidate) =>
+          (candidate.type === "assistant.snapshot" ||
+            candidate.type === "reasoning.snapshot") &&
           candidate.type === event.type &&
           candidate.streamId === event.streamId,
       )

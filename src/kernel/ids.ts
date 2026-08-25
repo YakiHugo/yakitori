@@ -4,7 +4,6 @@ export const IdPrefix = {
   Event: "event",
   Input: "input",
   Item: "item",
-  PermissionRequest: "permission",
   Request: "request",
   Session: "session",
   Turn: "turn",
@@ -30,10 +29,6 @@ export function createInputId(): string {
 
 export function createItemId(): string {
   return createPrefixedId(IdPrefix.Item)
-}
-
-export function createPermissionRequestId(): string {
-  return createPrefixedId(IdPrefix.PermissionRequest)
 }
 
 export function createRequestId(): string {
