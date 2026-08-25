@@ -2,8 +2,8 @@
 
 Status: living register of confirmed architecture convergence work. This is
 not an implementation specification: code, public types, and focused tests
-remain authoritative. Update module status here as work lands, and move any
-non-obvious surviving contract beside its owning module.
+remain authoritative. This register keeps only unfinished convergence work;
+completed behavior belongs in code, focused tests, and module-local comments.
 
 Yakitori has no production users or durable compatibility obligation yet.
 Schema-breaking changes and deletion of development-only compatibility paths
@@ -31,118 +31,57 @@ Reference baseline:
 | ID | Module | Priority | Depends on | Status |
 | --- | --- | --- | --- | --- |
 | M1 | Durable event and execution-item protocol | P0 | None | Done |
-| M2 | Context manager, model capacity, and compaction | P0 | M1 lifecycle decisions | Planned |
+| M2 | Context manager, model capacity, and compaction | P0 | M1 lifecycle decisions | In progress |
 | M3 | Tool catalog, execution policy, and permissions | P0 | M1 item decisions | In progress |
 | M4 | Persistence, recovery, and keyed concurrency | P1 | M1, M3 permission terminal states | Planned |
-| M5 | Provider transport, retry, and usage accounting | P1 | M2 capacity contract | Planned |
-| M6 | Server lifecycle, errors, and event delivery | P1 | M1, M4 | Planned |
+| M5 | Provider transport, retry, and usage accounting | P1 | M2 capacity contract | In progress |
+| M6 | Server lifecycle, errors, and event delivery | P1 | M1, M4 | In progress |
 | M7 | GUI projections and transient state | P1 | M1 | In progress |
 | M8 | Instructions, environment context, and shell discovery | P2 | M2 StepContext boundary | Done |
 | M9 | Agent collaboration and Mate lifecycle | P2 | M1, M3 | In progress |
 | M10 | Public module surface and test support | P3, cross-cutting | Owning modules stabilized | Planned |
 
-Recommended execution order:
+Current execution order:
 
-1. Establish M1's durable event and item vocabulary.
-2. Rebuild M2 context capacity and M3 tool/permission ownership against it.
-3. Close M4 persistence/recovery and M6 process/error lifecycles.
-4. Adapt providers, GUI, instructions, and collaboration in M5/M7/M8/M9.
-5. Perform M10 export and dead-surface cleanup after callers have moved.
-
-## M1 — Durable event and execution-item protocol
-
-Status: completed 2026-08-24.
-
-The landed boundary follows Codex's stable item lifecycle:
-
-```text
-provider stream and stop reason (internal)
-                  |
-                runner
-                  |
-        turn lifecycle + item lifecycle
-                  |
-            durable event log
-                  |
-    history / session / GUI / API projections
-```
-
-Provider adapters keep stop reasons internal. The runner converts execution
-into provider-neutral `item.started` and `item.completed` facts. Tool producers
-attach semantic descriptors at the execution boundary; the kernel validates,
-orders, persists, and broadcasts them without classifying raw tool names.
-Reasoning has its own durable item identity. Collaboration items persist child
-Session identity paired with its task path, and unknown tools use the dynamic
-item variant.
-
-The durable item union stays flat, following Codex's `TurnItem` shape. Stable
-product semantics are represented directly as `command_execution`,
-`file_read`, `file_search`, `file_change`, `web_fetch`, `web_search`,
-`collaboration_tool_call`, and `mcp_tool_call`; runtime-defined tools use
-`dynamic_tool_call`. There is deliberately no `builtin_tool_call` layer:
-whether a tool is bundled is runtime provenance, not a durable domain fact.
-`file_search` groups grep and glob through its operation field, while
-collaboration groups spawn/message/follow-up/wait/interrupt/list through its
-action field because those families share stable result and navigation data.
-
-`file_change` records both the requested edit/write/patch operation and the
-actual add/delete/update changes. An update may include a destination path to
-represent a move, matching Codex's structured patch shape. Changes carry
-structured unified diffs and are completed by the tool producer; GUI replay
-does not recover a change by inspecting a tool name or reparsing raw output.
-
-Completed built-in executions carry typed command, file, search, web, and MCP
-results. Each runtime tool owns the mapping from its raw model-facing output
-to that durable result through the finalized router; the runner only forwards
-the descriptor. MCP results preserve protocol content, structured content,
-error indication, and metadata instead of storing an arbitrary JSON value.
-
-Execution items are the single durable conversation representation. The
-context manager projects them into the provider-neutral, model-visible IR in
-memory; GUI and API project the same items for product use. Durable history
-records remain only for configuration, inherited context, and world state,
-which are not execution items.
-
-All Turn endings use `turn.completed { outcome }`; the Turn does not duplicate
-a pointer to a final message because its ordered items already establish that
-fact. Usage and metrics remain on the terminal event. GUI event-ID/sequence
-deduplication occurs once at store ingestion, and one typed-item presenter owns
-summary, detail, links, and child Session navigation.
-
-Reference anchors:
-
-- `.references/public/codex/codex-rs/protocol/src/items.rs`
-- `.references/public/codex/codex-rs/app-server-protocol/src/protocol/v2/item.rs`
-- `.references/public/grok-build/crates/codegen/xai-grok-pager/src/scrollback/blocks/tool/mod.rs`
+1. Close M2 context capacity and M3 tool/permission ownership.
+2. Close M4 persistence/recovery and M6 process/error lifecycles.
+3. Adapt provider and GUI boundaries in M5/M7, then finish M9 lifecycle cleanup.
+4. Perform M10 export and dead-surface cleanup after callers have moved.
 
 ## M2 — Context manager, model capacity, and compaction
 
-### Confirmed problems
+Status: in progress. Complete-request estimation and an in-memory
+provider-usage baseline have landed. Durable calibration and capacity-surface
+cleanup remain.
 
-- `prunedToolResultCount` and related context metadata are constructed in more
-  than one runner branch and have already drifted.
-- The current cap measures `context.messages` before the complete model request
-  exists. It omits or undercounts:
-  - base/system instructions;
-  - serialized tool definitions and JSON Schema;
-  - transient inter-agent messages appended after context construction;
-  - realistic image/vision cost;
-  - output-token headroom.
-- Text capacity uses one `4 bytes/token` approximation across models, languages,
-  code, and JSON.
-- A model without catalog capacity can fall back to a fixed 256 KiB budget.
-- Images are replaced by small byte descriptors for local accounting even
-  though provider vision-token cost can be materially larger.
-- Provider-reported usage is persisted, but it is not the primary authority
-  for subsequent compaction decisions.
-- `ResolvedModelCapacity` exposes intermediate fields with no runtime consumer.
+### Remaining problems
+
+- History selection intentionally uses cheap message/byte caps before the
+  complete request exists, while final admission uses token and image
+  estimates. These are valid separate policies, but their diagnostics and
+  fallback behavior are not named clearly enough.
+- A model without catalog token capacity still falls back to the fixed 256 KiB
+  history-selection budget and cannot perform a real context-window admission
+  check.
+- Provider usage corrects later requests only through an in-memory Session
+  baseline. Restart/resume cannot recover it from durable Turn usage, and
+  compaction requests use estimates alone.
+- `ResolvedModelCapacity` exposes default, configured, maximum, and percentage
+  fields even though execution consumes only the effective token window.
 
 ### Target boundary
 
-Create one `ContextManager` that owns history normalization, selection,
-tool-result truncation/pruning, compaction, fork/rollback baselines, and request
-capacity accounting. A model call must obtain one immutable prepared context
-from this owner.
+Keep the two capacity stages explicit:
+
+```text
+history selection: message blocks + serialized bytes
+final admission:   complete request tokens + output reserve
+```
+
+`ContextManager` owns history normalization, selection, tool-result
+truncation/pruning, compaction, and fork/rollback baselines. Complete-request
+assembly owns final admission; it must run after every system, history, agent,
+tool-schema, and image addition.
 
 Capacity must be computed over the complete request:
 
@@ -156,14 +95,15 @@ base/system instructions
 = estimated request capacity
 ```
 
-Use two authorities:
+The final admission stage uses two authorities:
 
-- Before sending: a conservative estimator selected by model family and
-  modality. It must count the exact serialized structures that the provider
-  adapter will receive.
+- Before sending: one transparent `4 UTF-8 bytes/token` text heuristic without
+  a hidden safety multiplier, plus modality/detail-aware image estimates. It
+  must count the exact serialized structures that the provider adapter will
+  receive.
 - After sending: provider-reported input/output/cache usage is authoritative
-  evidence. Persist it and use it to calibrate or anchor the next compaction
-  decision instead of continuing from byte estimates alone.
+  evidence. Persist and rehydrate the last provable request-prefix baseline so
+  restart/resume does not silently return to estimates.
 
 Image accounting must follow the Codex direction: a conservative fixed cost
 for ordinary images, dimension/patch-aware estimation for original detail when
@@ -191,57 +131,39 @@ These are required boundaries, not duplicate state:
 - Compaction atomically replaces covered history and establishes the new
   baselines.
 
-### Work absorbed here
+### Remaining work
 
-- Remove duplicate context metadata builders and `prunedToolResultCount` from
-  durable assistant/provider metadata.
-- Make complete-request capacity a named result of ContextManager/Step request
-  assembly rather than `messages` byte count.
-- Replace the single byte/token ratio with model/modality-aware conservative
-  policies without introducing a harness dependency solely for tokenization.
-- Feed normalized provider usage from M5 into later compaction decisions.
-- Narrow resolved Turn capacity to values actually consumed by execution;
-  keep catalog maxima at catalog/validation boundaries.
+- Persist or reconstruct the provider-usage prefix baseline used by final
+  admission and define when compaction/fork invalidates it.
+- Give uncataloged models an explicit token-capacity policy instead of silently
+  substituting the byte-selection fallback.
+- Narrow resolved Turn capacity to the effective token window consumed by
+  execution; keep catalog maxima at catalog/validation boundaries.
+- Label selection-byte diagnostics separately from final request-token
+  diagnostics so neither is presented as the other.
 
 ### Done when
 
-- No provider request can append unbudgeted system, tool-schema, agent, or
-  image content after the capacity decision.
+- No provider request can append system, tool-schema, agent, or image content
+  after final admission.
 - Compaction tests cover text, JSON schema, multilingual/code content, images,
-  output reserve, and provider-usage correction.
+  output reserve, provider-usage correction, and restart/resume calibration.
 - Fork, rollback, resume, and compaction tests prove baseline invalidation and
   replacement semantics.
-- One model call has exactly one context-selection result regardless of its
-  stop reason.
 
 Reference anchors:
 
 - `.references/public/codex/codex-rs/core/src/context_manager/history.rs`
 - `.references/public/codex/codex-rs/core/src/session/step_context.rs`
 - `.references/public/codex/codex-rs/protocol/src/openai_models.rs`
+- `.references/public/grok-build/crates/codegen/xai-token-estimation/src/lib.rs`
+- `.references/public/grok-build/crates/codegen/xai-chat-state/src/image_budget.rs`
 
 ## M3 — Tool catalog, execution policy, and permissions
 
 Status: in progress. The finalized per-Step router and shared file-path
 resolution boundary have landed; limit ownership and the remaining command /
 mutation approval-policy cleanup are still open.
-
-### Landed boundary
-
-`ToolRegistry.finalize(enabled)` now creates the one immutable Step router.
-The same selected tools produce model-visible definitions, execution
-descriptors, completed-result projection, permission requirements, and
-dispatch. Duplicate tool names fail when the catalog is constructed, and
-disabled or unknown tools share one failure contract.
-
-File tools accept workspace-relative paths, parent traversal, absolute paths,
-and paths through symlinks. They do not receive or branch on a
-workspace-boundary permission flag. One resolver canonicalizes existing
-targets and the parent of new targets, supplies an execution path plus a
-display path, rejects unsupported file kinds, and is re-run immediately before
-compare-and-write. The current YOLO product policy relies on host-user access;
-file locks, read-before-write, revision checks, bounded I/O, and symlink
-revalidation remain hard safety rules.
 
 ### Confirmed problems
 
@@ -254,20 +176,6 @@ revalidation remain hard safety rules.
   dependency injection has no production caller.
 
 ### Target boundary
-
-Follow Codex's finalized per-Step router:
-
-```text
-ToolCatalog + enabled tools + Step policy
-                    |
-          finalized ToolRouter
-          /                  \
- model-visible specs      dispatch
-```
-
-The same finalized router must advertise and execute tools. It owns duplicate
-name validation, enabled/disabled checks, argument dispatch, and the one
-unknown-tool failure shape.
 
 Split limits into:
 
@@ -297,10 +205,8 @@ safety policy and do not disappear in YOLO mode. A future interactive mode
 changes only approval policy; it must not change tool schemas or path
 resolution.
 
-### Work absorbed here
+### Remaining work
 
-- Replace `ToolRegistry` plus `StepToolPlan` with ToolCatalog plus finalized
-  ToolRouter.
 - Remove tool-side keys from persisted `runtimeLimits` through a clean schema
   break.
 - Wire real approval requirements; do not delete the permission system merely
@@ -309,9 +215,6 @@ resolution.
 
 ### Done when
 
-- The exact specs sent to the model and the exact executable tools come from
-  one immutable router instance.
-- A disabled or unknown tool has one tested error contract.
 - Changing Session policy changes only documented Session behavior; changing a
   safety cap cannot be serialized as a Session preference.
 - Permission allow, deny, expire, abort, recovery, and policy bypass have
@@ -363,7 +266,7 @@ Keep boundary mappings explicit:
 - Do not create a universal field list that automatically leaks new internal
   fields into cache and API representations.
 
-### Work absorbed here
+### Remaining work
 
 - Introduce and test KeyedSequencer FIFO, failure continuation, cleanup, and
   cross-key concurrency.
@@ -390,13 +293,16 @@ Keep boundary mappings explicit:
 
 ## M5 — Provider transport, retry, and usage accounting
 
+Status: in progress. Provider usage now anchors later requests within one
+process; shared transport policy and durable baseline recovery remain.
+
 ### Confirmed problems
 
 - Anthropic and OpenAI adapters duplicate retryable status sets, status detail
   extraction, and terminal error conversion.
 - Retry policy is therefore maintained by manual provider synchronization.
-- Provider usage is normalized and persisted but is not yet an input to M2's
-  next context/compaction decision.
+- Provider usage corrects later request admission only through an in-memory
+  baseline; restart/resume and compaction do not recover that evidence.
 - The Codex provider is the only production provider without a focused
   contract test.
 
@@ -426,6 +332,8 @@ Reference anchors:
 - `.references/public/codex/codex-rs/core/src/responses_retry.rs`
 
 ## M6 — Server lifecycle, errors, and event delivery
+
+Status: in progress.
 
 ### Confirmed problems
 
@@ -474,16 +382,14 @@ broken subscriber without affecting others.
 - HTTP, runner, provider, tool, and storage errors preserve one stable code and
   cause chain through their owning boundary.
 
-Reference anchor:
+Reference anchors:
 
 - `.references/public/codex/codex-rs/app-server/src/lib.rs`
 
 ## M7 — GUI projections and transient state
 
-Status: in progress. Live and replay execution now share one event reducer,
-event identity is deduplicated at ingestion, and one typed presenter owns tool
-summary, details, file links, web links, and collaboration navigation. The
-remaining model-selection and transient-state cleanup below is still open.
+Status: in progress. Model-selection restoration and transient-state cleanup
+remain.
 
 ### Confirmed problems
 
@@ -509,90 +415,18 @@ reconnection logic consumes it.
 - Session switching cannot expose a stale model selection.
 - Usage/metrics replay identically after restart.
 
-## M8 — Instructions, environment context, and shell discovery
-
-Status: completed 2026-08-24.
-
-### Landed boundary for models and instructions
-
-The bundled model catalog is the only production model-directory source.
-Yakitori does not fetch models.dev at runtime: the supported Codex, Grok, and
-Kimi coding-agent models have explicit capabilities and instruction-profile
-assignments in the catalog. An uncataloged custom model receives the generic
-`default` profile; it never inherits a profile from its name or provider.
-
-Instruction profiles describe coding-agent behavior rather than model
-families. Codex, Grok, and Kimi have explicit profiles; Grok follows the Grok
-Build work-policy/tool-calling direction while naming only Yakitori
-capabilities. Static profiles do not advertise optional collaboration tools.
-The world-state collaboration section names `spawn_agent` only when the
-finalized Step exposes it.
-
-Profiles load through packaged files only. Their content hash remains the
-revision used by Session configuration and model-switch detection; the
-unreachable `data:` and generic URL protocol branches are gone.
-
-`ProjectInstructions` contains only the applicable directory and rendered
-text. The world-state section owns diffing and revision fingerprints over that
-model-visible representation. Source lists, duplicate revisions, and exposed
-truncation metadata were removed; provenance can return when a real watcher,
-trust, inspection, or multi-environment consumer exists.
-
-### Landed macOS shell boundary
-
-Yakitori currently targets macOS and does not maintain speculative Windows or
-Linux shell-selection branches. Shell discovery ignores the parent process
-`$SHELL` and resolves in this order:
-
-```text
-supported account-default path
--> zsh in PATH
--> bash in PATH
--> /bin/zsh
--> /bin/bash
--> /bin/sh
-```
-
-The existing login-shell environment probe, secret filtering, PATH merge, and
-bounded process cleanup remain unchanged.
-
-### Verified invariants
-
-- Cataloged models use explicit instruction profiles and capabilities.
-- Unknown custom models use `default` without family inference.
-- Every profile is readable, cached, non-empty, and revisioned.
-- Static profiles cannot mention `spawn_agent`; the dynamic world-state section
-  can mention it only when the Step router exposes it.
-- Project-instruction world-state compares only directory and rendered text.
-- Shell tests cover account lookup, unsupported account shells, PATH lookup,
-  and fixed fallbacks without reading the test process `$SHELL`.
-
-Reference anchors:
-
-- `.references/public/codex/codex-rs/core/src/session/multi_agents.rs`
-- `.references/public/codex/codex-rs/core/src/agents_md.rs`
-- `.references/public/codex/codex-rs/core/src/context/world_state/agents_md.rs`
-- `.references/public/codex/codex-rs/shell-command/src/shell_detect.rs`
-
 ## M9 — Agent collaboration and Mate lifecycle
 
-Status: in progress. Typed collaboration execution items and child Session
-navigation have landed; speculative Mate lifecycle surfaces remain open.
+Status: in progress. Speculative Mate and Agent lifecycle surfaces remain.
 
 ### Confirmed problems
 
 - Agent `pending_init` is assigned and then synchronously overwritten by
   `running` before any await, event, or caller observation.
-- Collaboration tool calls now have a typed durable/UI representation; the
-  remaining work is Mate lifecycle cleanup.
 - `reviseMate` and `setMateLifecycle` have no production write consumer while
   Mate/Room collaboration is explicitly a later product stage.
 
 ### Target boundary
-
-Use M1's typed collaboration item for spawn, message/follow-up, wait,
-interrupt, and list activity. Child Session identity is a domain field, not a
-value parsed from tool output text.
 
 Delete `pending_init` while initialization is synchronous. Reintroduce it only
 when a child Session is registered and externally visible before asynchronous
@@ -606,7 +440,6 @@ owners and consumers.
 ### Done when
 
 - Every exposed Agent state is observable and has a tested transition.
-- Historical and live collaboration activity use the same typed item.
 - Current coding-agent behavior has no dependency on speculative Room/Mate
   lifecycle APIs.
 
@@ -644,49 +477,3 @@ not obscure the architectural move.
   deliberate public contract.
 - Generic object checks occur at untrusted wire/storage/config boundaries, not
   throughout domain logic.
-
-## Original finding traceability
-
-| Original finding | Owning module |
-| --- | --- |
-| 1. Removed `task` still in prompts/GUI | M1, M8, M9 |
-| 2. Duplicate/drifted context metadata | M2 |
-| 3. Duplicated server entry/shutdown | M6 |
-| 4. Three keyed Promise queues | M4 |
-| 5. Falsely configurable RuntimeLimits | M3 |
-| 6. SessionSummary field expansion | M4 |
-| 7. Provider retry mirrors | M5 |
-| 8. GUI formatting/tool maps | M1, M7 |
-| 9. Repeated invalid-state checks | M6 |
-| 10. Production `autoAllow` always true | M3 |
-| 11. Duplicate ToolRegistry/Step dispatch | M3 |
-| 12. Recovery result/stale permission gap | M4 |
-| 13. Unreachable prompt URL branches | M8 |
-| 14. Unconsumed resolved capacity fields | M2 |
-| 15. Speculative PermissionGate clock/defaults | M3 |
-| 16. GUI usage/metrics/transient fields | M7 |
-| 17. Unconsumed project-instruction metadata | M8 |
-| 18. Unobservable `pending_init` | M9 |
-| 19. Silent EventHub listener errors | M6 |
-| 20. Production-exported faux provider | M10 |
-| 21. Over-broad barrels | M10 |
-| 22. Dead exports/repeated generic record checks | M10 |
-| GUI double sentinel | M7 |
-| HTTP handlers/kernel/eventStore union | M6 |
-| Speculative Mate write paths | M9 |
-| Incomplete/model-insensitive context budget | M2, M5 |
-| Shell discovery divergence | M8 |
-
-## Findings deliberately not reopened
-
-- `runCompaction` and model-stream drain have different error and telemetry
-  ownership; do not extract a shared helper without a new common contract.
-- EventStore defensive cloning remains valid at its public ownership boundary.
-- The validated journal-backed summary cache remains valid.
-- PermissionGate's wake-and-reread loop is semantically valid; M3 may simplify
-  its timer ownership without changing that loop invariant.
-- Session ordering and recovery's `order: "created"` branch have real
-  consumers.
-- Persistence compatibility shims used only by development data may be removed
-  during the planned schema break; this does not justify weakening validation
-  of the new format.
