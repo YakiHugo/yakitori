@@ -1,4 +1,5 @@
 import { ToolLimitDefaults } from "../limits.ts"
+import { fileChangeApprovalRequirement } from "./approval-requirements.ts"
 import { resolveWritePath } from "./path-policy.ts"
 import { compareAndWriteTextFile } from "./text-file-write.ts"
 import {
@@ -14,7 +15,7 @@ export function createWriteFileTool(
     name: "write_file",
     description:
       "Create or intentionally replace a complete UTF-8 text file using compare-and-write. Accepts paths relative to the workspace and absolute paths. New files are created without a prior read. Before replacing an existing file, read the complete current file; write_file rejects missing, partial, or stale observations. Prefer edit_file for focused modifications.",
-    autoAllow: true,
+    approvalRequirement: fileChangeApprovalRequirement,
     effect: "mutate",
     describeExecution: fileChangeExecution("write"),
     completeExecution: completeFileChangeExecution,

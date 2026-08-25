@@ -9,6 +9,7 @@ import { createReadFileTool } from "./read-file.ts"
 import { createRunCommandTool } from "./run-command.ts"
 import type {
   RuntimeTool,
+  ToolApprovalRequirement,
   ToolExecutionContext,
   ToolExecutionResult,
 } from "./types.ts"
@@ -16,7 +17,6 @@ import { createWebFetchTool } from "./web-fetch.ts"
 import { createWebSearchTool } from "./web-search.ts"
 import { createWriteFileTool } from "./write-file.ts"
 import { dynamicToolExecution } from "./execution-descriptors.ts"
-import type { ToolPermissionRequest } from "./types.ts"
 
 export type ToolRouter = Readonly<{
   definitions: ReadonlyArray<ModelToolDefinition>
@@ -28,11 +28,11 @@ export type ToolRouter = Readonly<{
     output: JsonValue,
     succeeded: boolean,
   ): ToolExecutionDescriptor
-  permissionRequest(
+  approvalRequirement(
     name: string,
     input: unknown,
     context: Readonly<{ workspaceRoot: string }>,
-  ): Promise<ToolPermissionRequest | undefined>
+  ): Promise<ToolApprovalRequirement>
   execute(
     name: string,
     input: unknown,
@@ -82,26 +82,12 @@ export function createToolRegistry(
               ?.completeExecution?.(started, output, succeeded) ?? started
           )
         },
-        async permissionRequest(name, input, context) {
+        async approvalRequirement(name, input, context) {
           const tool = selectedByName.get(name)
-          if (tool === undefined) return undefined
-          const dynamic = await tool.permission?.(input, context)
-          if (dynamic !== undefined) return dynamic
-          if (tool.autoAllow) return undefined
-          const command =
-            typeof input === "object" &&
-            input !== null &&
-            "command" in input &&
-            typeof (input as { command: unknown }).command === "string"
-              ? (input as { command: string }).command
-              : name
-          return {
-            kind: "tool",
-            action: name,
-            subject: command,
-            reason:
-              "This tool runs with the host user's filesystem, process, environment, and network authority.",
-          }
+          if (tool === undefined) return { kind: "none" }
+          return typeof tool.approvalRequirement === "function"
+            ? tool.approvalRequirement(input, context)
+            : tool.approvalRequirement
         },
         async execute(name, input, context) {
           const tool = selectedByName.get(name)

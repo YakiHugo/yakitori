@@ -1,4 +1,5 @@
 import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
+import { noToolApprovalRequired } from "./approval-requirements.ts"
 import {
   completeWebSearchExecution,
   webSearchExecution,
@@ -154,7 +155,7 @@ export function createWebSearchTool(
     name: "web_search",
     description:
       "Search the web for current information beyond the model's knowledge cutoff. Returns a digest of relevant results with URLs. Include the current year in the query for time-sensitive topics. Follow up with web_fetch to read the full content of a result URL. Read-only.",
-    autoAllow: true,
+    approvalRequirement: noToolApprovalRequired,
     effect: "observe",
     describeExecution: webSearchExecution,
     completeExecution: completeWebSearchExecution,

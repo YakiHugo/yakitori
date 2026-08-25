@@ -73,13 +73,13 @@ async function search(
 }
 
 describe("web_search contract", () => {
-  it("is auto-allowed, read-only, and part of the default tool set", () => {
+  it("requires no approval, is read-only, and is in the default tool set", () => {
     const tool = createWebSearchTool({
       provider: async () => ({ ok: true, text: "" }),
     })
     expect(tool).toMatchObject({
       name: "web_search",
-      autoAllow: true,
+      approvalRequirement: { kind: "none" },
       effect: "observe",
       inputSchema: {
         additionalProperties: false,

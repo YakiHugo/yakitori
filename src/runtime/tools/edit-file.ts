@@ -2,6 +2,7 @@ import { createHash } from "node:crypto"
 import { readFile } from "node:fs/promises"
 import type { JsonObject } from "../../kernel/index.ts"
 import { ToolLimitDefaults } from "../limits.ts"
+import { fileChangeApprovalRequirement } from "./approval-requirements.ts"
 import {
   closestEditCandidates,
   matchedEditLocations,
@@ -34,7 +35,7 @@ export function createEditFileTool(
     name: "edit_file",
     description:
       "Replace text in an existing UTF-8 file, or create a new file by setting oldString to an empty string. Accepts paths relative to the workspace and absolute paths. An empty oldString never overwrites an existing file. Read existing files before editing them. Supply the smallest unique non-empty oldString, usually 2-4 lines, and exclude read_file's {N}\\t line prefixes. A ranged read requires an exact unique oldString; replaceAll requires a complete read. For a complete unchanged revision, matching is exact first, followed only by deterministic line-ending, curly-quote, and trailing-whitespace equivalence. No similarity edit is ever applied.",
-    autoAllow: true,
+    approvalRequirement: fileChangeApprovalRequirement,
     effect: "mutate",
     describeExecution: fileChangeExecution("edit"),
     completeExecution: completeFileChangeExecution,

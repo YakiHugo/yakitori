@@ -25,7 +25,13 @@ describe("multi-agent tools", () => {
       "interrupt_agent",
       "list_agents",
     ])
-    expect(tools.every((tool) => tool.autoAllow)).toBe(true)
+    expect(
+      tools.every(
+        (tool) =>
+          typeof tool.approvalRequirement !== "function" &&
+          tool.approvalRequirement.kind === "none",
+      ),
+    ).toBe(true)
     expect(tools.find((tool) => tool.name === "spawn_agent")).toMatchObject({
       effect: "observe",
       inputSchema: {

@@ -31,11 +31,11 @@ afterEach(async () => {
 })
 
 describe("run_command contract", () => {
-  it("is auto-allowed and exposes cwd and description without aliases", () => {
+  it("declares command approval and exposes cwd and description without aliases", () => {
     const tool = createRunCommandTool()
     expect(tool).toMatchObject({
       name: "run_command",
-      autoAllow: true,
+      approvalRequirement: expect.any(Function),
       effect: "opaque",
       inputSchema: {
         additionalProperties: false,
