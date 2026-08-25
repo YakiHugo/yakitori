@@ -115,10 +115,8 @@ export async function createYakitoriApplication(
   const rootDir = options.rootDir ?? ".yakitori"
   const configuredSessionStoreRoot =
     options.sessionStoreRoot ?? join(rootDir, "sessions")
-  const mateDatabasePath = await resolveMateDatabasePath(
-    rootDir,
-    options.mateDatabasePath,
-  )
+  const mateDatabasePath =
+    options.mateDatabasePath ?? join(rootDir, "mates.sqlite")
   const workspace = await resolveWorkspaceDirectory(
     options.workspace ?? process.env.YAKITORI_WORKSPACE ?? process.cwd(),
   )
@@ -549,34 +547,6 @@ async function closeApplicationResources(
   }
   if (errors.length > 0) {
     throw new AggregateError(errors, "Failed to close Yakitori application.")
-  }
-}
-
-async function resolveMateDatabasePath(
-  rootDir: string,
-  configuredPath: string | undefined,
-): Promise<string> {
-  if (configuredPath !== undefined) return configuredPath
-  const current = join(rootDir, "mates.sqlite")
-  if (await pathExists(current)) return current
-  const legacy = join(rootDir, "events.sqlite")
-  if (await pathExists(legacy)) return legacy
-  return current
-}
-
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    await stat(path)
-    return true
-  } catch (error) {
-    if (
-      error instanceof Error &&
-      "code" in error &&
-      (error as NodeJS.ErrnoException).code === "ENOENT"
-    ) {
-      return false
-    }
-    throw error
   }
 }
 

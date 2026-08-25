@@ -86,7 +86,7 @@ export function buildModelContext(input: {
   const turnGroups = buildTurnGroups(input.session, coveredTurnIds)
   const compactionGroup = buildCompactionGroup(input.session)
   const inheritedGroup = buildInheritedGroup(
-    input.session.compaction?.replacement?.replacesInheritedContext
+    input.session.compaction?.replacement.replacesInheritedContext
       ? undefined
       : input.session.inheritedContext === undefined
         ? input.forkedContext
@@ -462,7 +462,7 @@ export function collectUncoveredTurns(
   const readResultKeys = buildReadResultKeys(session)
   const inherited = buildInheritedGroup(
     session.inheritedContext === undefined ||
-      session.compaction?.replacement?.replacesInheritedContext
+      session.compaction?.replacement.replacesInheritedContext
       ? undefined
       : {
           sourceSessionId: session.inheritedContext.sourceSessionId,
@@ -546,9 +546,7 @@ function buildCompactionGroup(
   if (compaction === undefined) return undefined
   return {
     kind: "compaction",
-    messages:
-      compaction.replacement?.history ??
-      createCompactionReplacementHistory({ summary: compaction.summary }),
+    messages: compaction.replacement.history,
     itemIds: [],
   }
 }
@@ -609,7 +607,7 @@ function buildTurnGroup(
   const worldStateUpdates = session.worldStateUpdates.filter(
     (update) =>
       update.turnId === turn.turnId &&
-      (session.compaction?.replacement === undefined ||
+      (session.compaction === undefined ||
         update.seq > session.compaction.throughSeq),
   )
   const messages: ModelMessage[] = [

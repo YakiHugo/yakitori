@@ -573,7 +573,7 @@ describe("execution view", () => {
         id: "event_future",
         sessionId,
         seq: 1,
-        version: 4,
+        version: 5,
         createdAt: "2026-07-24T00:00:00.000Z",
         type: "provider.future_fact",
         data: { payload: true },
@@ -603,6 +603,14 @@ describe("execution view", () => {
           throughSeq: 5,
           coveredTurnIds: ["turn_1"],
           summary: "Goal: ship the feature.",
+          replacement: {
+            windowId: "context_window_2",
+            firstWindowId: "context_window_1",
+            previousWindowId: "context_window_1",
+            windowNumber: 2,
+            history: [],
+            worldStateBaseline: {},
+          },
         },
       },
       agentCompleted({

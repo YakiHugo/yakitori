@@ -214,23 +214,15 @@ Reference anchors:
 - `.references/public/codex/codex-rs/core/src/exec.rs`
 - `.references/public/grok-build/crates/codegen/xai-grok-workspace/src/permission/types.rs`
 
-## M4 — Persistence, recovery, and keyed concurrency
+## M4 — Persistence, recovery, and summary boundaries
 
 ### Confirmed problems
 
-- Session kernel, Mate kernel, and JSONL event store separately implement the
-  same per-key Promise-tail serialization primitive.
 - Session summary fields are explicitly expanded at projection, cache, and API
   boundaries. Some repetition is necessary, but exact same-domain conversion
   should have one owner.
-- Several development-era legacy event fields and SQLite path fallbacks carry
-  compatibility cost without real users.
 
 ### Target boundary
-
-Provide one small `KeyedSequencer` implementation. Session, Mate, and EventStore
-each own a separate instance and choose their own key; sharing the algorithm
-must not merge their queues or lifecycle ownership.
 
 Recovery is an effectful startup reconciliation, not a report generator:
 
@@ -250,13 +242,6 @@ Keep boundary mappings explicit:
   contract.
 - Do not create a universal field list that automatically leaks new internal
   fields into cache and API representations.
-
-### Remaining work
-
-- Introduce and test KeyedSequencer FIFO, failure continuation, cleanup, and
-  cross-key concurrency.
-- Remove development-only persistence compatibility in the same deliberate
-  schema break as M1/M3.
 
 ### Deliberately retained
 

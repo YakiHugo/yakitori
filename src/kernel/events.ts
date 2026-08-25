@@ -1,7 +1,7 @@
 import { createEventId } from "./ids.ts"
 import { jsonValuesEqual } from "./json-equality.ts"
 
-export const EVENT_SCHEMA_VERSION = 4
+export const EVENT_SCHEMA_VERSION = 5
 
 export const EventType = {
   SessionCreated: "session.created",
@@ -636,8 +636,7 @@ export type ContextCompactedEvent = {
     readonly coveredTurnIds: readonly string[]
     readonly summary: string
     readonly usage?: TokenUsage
-    /** Missing on checkpoints written before exact window replacement existed. */
-    readonly replacement?: ContextWindowReplacement
+    readonly replacement: ContextWindowReplacement
   }
 }
 
@@ -905,8 +904,7 @@ function requireKernelFact(value: unknown): asserts value is KernelFact {
           data.coveredTurnIds.every(isString) &&
           isString(data.summary) &&
           (data.usage === undefined || isTokenUsage(data.usage)) &&
-          (data.replacement === undefined ||
-            isContextWindowReplacement(data.replacement))
+          isContextWindowReplacement(data.replacement)
         )
       case HistoryRecordType.InitialContext:
         return (

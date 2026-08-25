@@ -184,7 +184,7 @@ describe("session fact projection", () => {
         id: "event_unknown",
         sessionId: events[0]?.sessionId,
         seq: 6,
-        version: 4,
+        version: 5,
         createdAt: "2026-07-24T00:00:00.000Z",
         type: "provider.future_fact",
         data: { value: "opaque" },
@@ -208,7 +208,7 @@ describe("session fact projection", () => {
         id: "event_future_payload",
         sessionId: events[0]?.sessionId,
         seq: 6,
-        version: 4,
+        version: 5,
         createdAt: "2026-07-24T00:00:00.000Z",
         type: "provider.future",
         data: {
@@ -233,7 +233,7 @@ describe("session fact projection", () => {
         id: "event_unknown_incremental",
         sessionId: events[0]?.sessionId,
         seq: 6,
-        version: 4,
+        version: 5,
         createdAt: "2026-07-24T00:00:00.000Z",
         type: "provider.future_fact",
         data: { value: "opaque" },
@@ -258,6 +258,7 @@ describe("session fact projection", () => {
       coveredTurnIds: ["turn_0", "turn_1"],
       summary: "second checkpoint",
       usage: { inputTokens: 12, outputTokens: 4 },
+      replacement: testCompactionReplacement(2),
       createdAt: "2026-07-24T00:00:02.000Z",
     })
   })
@@ -368,6 +369,7 @@ function baseWithCompactions() {
           throughSeq: 1,
           coveredTurnIds: ["turn_0"],
           summary: "first checkpoint",
+          replacement: testCompactionReplacement(1),
         },
       },
     }),
@@ -384,10 +386,24 @@ function baseWithCompactions() {
           coveredTurnIds: ["turn_0", "turn_1"],
           summary: "second checkpoint",
           usage: { inputTokens: 12, outputTokens: 4 },
+          replacement: testCompactionReplacement(2),
         },
       },
     }),
   ]
+}
+
+function testCompactionReplacement(windowNumber: number) {
+  return {
+    windowId: `context_window_${windowNumber}`,
+    firstWindowId: "context_window_1",
+    ...(windowNumber === 1
+      ? {}
+      : { previousWindowId: `context_window_${windowNumber - 1}` }),
+    windowNumber,
+    history: [],
+    worldStateBaseline: {},
+  }
 }
 
 function baseWithInterruptedTool() {

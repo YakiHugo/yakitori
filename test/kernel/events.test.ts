@@ -40,7 +40,7 @@ describe("kernel facts", () => {
     expect(envelope).toMatchObject({
       sessionId: "session_00000000-0000-4000-8000-000000000000",
       seq: 1,
-      version: 4,
+      version: 5,
       type: EventType.SessionCreated,
       data: { title: "Witness" },
     })
@@ -556,6 +556,7 @@ describe("kernel facts", () => {
         throughSeq: 7,
         coveredTurnIds: ["turn_0"],
         summary: "Goal: ship it.",
+        replacement: testCompactionReplacement(),
         model: "faux-1",
       },
     },
@@ -566,6 +567,7 @@ describe("kernel facts", () => {
         turnId: "turn_1",
         coveredTurnIds: ["turn_0"],
         summary: "Goal: ship it.",
+        replacement: testCompactionReplacement(),
       },
     },
     {
@@ -576,6 +578,7 @@ describe("kernel facts", () => {
         throughSeq: 0,
         coveredTurnIds: ["turn_0"],
         summary: "Goal: ship it.",
+        replacement: testCompactionReplacement(),
       },
     },
     {
@@ -585,6 +588,17 @@ describe("kernel facts", () => {
         turnId: "turn_1",
         throughSeq: 7,
         coveredTurnIds: ["turn_0", 42],
+        summary: "Goal: ship it.",
+        replacement: testCompactionReplacement(),
+      },
+    },
+    {
+      name: "a missing replacement",
+      data: {
+        compactionId: "compaction_1",
+        turnId: "turn_1",
+        throughSeq: 7,
+        coveredTurnIds: ["turn_0"],
         summary: "Goal: ship it.",
       },
     },
@@ -597,3 +611,14 @@ describe("kernel facts", () => {
     ).toBe(false)
   })
 })
+
+function testCompactionReplacement() {
+  return {
+    windowId: "context_window_2",
+    firstWindowId: "context_window_1",
+    previousWindowId: "context_window_1",
+    windowNumber: 2,
+    history: [],
+    worldStateBaseline: {},
+  }
+}
