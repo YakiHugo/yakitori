@@ -9,7 +9,7 @@ import {
 import type { Server as HttpServer } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { EventType } from "../../src/kernel/events.ts"
 import { InputState } from "../../src/kernel/session-states.ts"
 import { MateLifecycle } from "../../src/mates/events.ts"
@@ -86,20 +86,19 @@ describe("application composition", () => {
         const created = await application.handlers.createSession({})
         expectOk(created)
         const sessionId = created.body.session.id
+        const imageBytes = pngBuffer(128)
+        const attachments = await application.sessionFiles.importImageBytes(
+          sessionId,
+          "draft_application_test",
+          [{ name: "screen.png", data: imageBytes }],
+        )
         const admitted = await application.handlers.admitInput({
           sessionId,
           requestId: "request_image",
           content: {
             kind: "text",
             text: "inspect",
-            attachments: [
-              {
-                name: "screen.png",
-                mediaType: "image/png",
-                data: Buffer.from("image-bytes").toString("base64"),
-                sizeBytes: 11,
-              },
-            ],
+            attachments,
           },
         })
         expectOk(admitted)
@@ -113,7 +112,7 @@ describe("application composition", () => {
                   detail: "high",
                   file: {
                     sessionId,
-                    path: "attachments/request_image/1.png",
+                    path: "attachments/requests/request_image/1.png",
                   },
                 },
               ],
@@ -121,7 +120,7 @@ describe("application composition", () => {
           },
         })
         expect(JSON.stringify(admitted.body.event)).not.toContain(
-          Buffer.from("image-bytes").toString("base64"),
+          imageBytes.toString("base64"),
         )
         expect(
           await readFile(
@@ -130,12 +129,12 @@ describe("application composition", () => {
               sessionId,
               "files",
               "attachments",
+              "requests",
               "request_image",
               "1.png",
             ),
-            "utf8",
           ),
-        ).toBe("image-bytes")
+        ).toEqual(imageBytes)
         expect(captured?.messages).toContainEqual({
           role: "user",
           content: [{ type: "text", text: "inspect" }],
@@ -144,19 +143,17 @@ describe("application composition", () => {
               type: "image",
               mediaType: "image/png",
               detail: "high",
-              data: Buffer.from("image-bytes").toString("base64"),
+              data: imageBytes.toString("base64"),
             },
           ],
         })
 
         const image = await fetch(
-          `${baseUrl}/sessions/${sessionId}/files/attachments/request_image/1.png`,
+          `${baseUrl}/sessions/${sessionId}/files/attachments/requests/request_image/1.png`,
         )
         expect(image.status).toBe(200)
         expect(image.headers.get("content-type")).toBe("image/png")
-        expect(Buffer.from(await image.arrayBuffer()).toString()).toBe(
-          "image-bytes",
-        )
+        expect(Buffer.from(await image.arrayBuffer())).toEqual(imageBytes)
         const logRoute = await fetch(
           `${baseUrl}/sessions/${sessionId}/files/tools/call_1/stdout.log`,
         )
@@ -189,6 +186,96 @@ describe("application composition", () => {
       }
     })
   })
+
+  it("does not materialize stored images for text-only models", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      let captured: ModelRequest | undefined
+      const application = await createYakitoriApplication({
+        ...testApplicationOptions({ rootDir, workspace }),
+        model: "text-only",
+        stream: async function* (request) {
+          captured = request
+          yield {
+            type: "response",
+            response: {
+              stopReason: ModelStopReason.EndTurn,
+              content: [{ type: "text", text: "seen" }],
+            },
+          }
+        },
+      })
+      try {
+        const created = await application.handlers.createSession({})
+        expectOk(created)
+        const sessionId = created.body.session.id
+        const attachments = await application.sessionFiles.importImageBytes(
+          sessionId,
+          "text_only_draft",
+          [{ name: "screen.png", data: pngBuffer(128) }],
+        )
+        const read = vi.spyOn(application.sessionFiles, "read")
+        const admitted = await application.handlers.admitInput({
+          sessionId,
+          requestId: "text_only_request",
+          content: {
+            kind: "text",
+            text: "inspect",
+            attachments,
+          },
+        })
+        expectOk(admitted)
+
+        await application.runner.wake(sessionId)
+
+        expect(read).not.toHaveBeenCalled()
+        expect(captured?.messages).toContainEqual({
+          role: "user",
+          content: [
+            { type: "text", text: "inspect" },
+            {
+              type: "text",
+              text: expect.stringContaining("does not support image input"),
+            },
+          ],
+        })
+      } finally {
+        await application.close()
+      }
+    })
+  })
+
+  it("streams native image files from Session storage", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const application = await createYakitoriApplication(
+        testApplicationOptions({ rootDir, workspace }),
+      )
+      const server = application.createHttpServer()
+      try {
+        const baseUrl = await listen(server)
+        const created = await application.handlers.createSession({})
+        expectOk(created)
+        const imageBytes = pngBuffer(128 * 1024 + 17)
+        const sourcePath = join(rootDir, "large.png")
+        await writeFile(sourcePath, imageBytes)
+        const [attachment] = await application.sessionFiles.importImagePaths(
+          created.body.session.id,
+          "draft_large_http",
+          [sourcePath],
+        )
+        if (attachment === undefined) throw new Error("missing imported image")
+
+        const response = await fetch(
+          `${baseUrl}/sessions/${attachment.file.sessionId}/files/${attachment.file.path}`,
+        )
+
+        expect(response.status).toBe(200)
+        expect(Buffer.from(await response.arrayBuffer())).toEqual(imageBytes)
+      } finally {
+        await closeServer(server)
+        await application.close()
+      }
+    })
+  }, 15_000)
 
   it("binds the runtime lock to the canonical Session store", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
@@ -1266,6 +1353,14 @@ async function closeServer(server: HttpServer): Promise<void> {
     })
     server.closeAllConnections()
   })
+}
+
+function pngBuffer(size: number): Buffer {
+  const bytes = Buffer.alloc(Math.max(size, 24))
+  Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(bytes)
+  bytes.writeUInt32BE(1, 16)
+  bytes.writeUInt32BE(1, 20)
+  return bytes
 }
 
 function expectOk<T>(

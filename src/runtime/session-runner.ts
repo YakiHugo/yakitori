@@ -597,15 +597,14 @@ export function createSessionRunner(
         ...pendingAgentMessages,
         ...agentControl.takeMessages(input.sessionId),
       ]
-      const resolvedRequestMessages = await resolveSessionFileImages(
-        [...context.messages, ...pendingAgentMessages],
-        options.sessionFiles,
-      )
       const imageAdaptation = adaptImagesForModel(
-        resolvedRequestMessages,
+        [...context.messages, ...pendingAgentMessages],
         step.turn.configuration.target,
       )
-      const requestMessages = imageAdaptation.messages
+      const requestMessages = await resolveSessionFileImages(
+        imageAdaptation.messages,
+        options.sessionFiles,
+      )
       const activeTurn = activeTurnRuntime(input.sessionId, input.turnId)
       if (activeTurn === undefined) {
         throw new Error(`Turn runtime for ${input.turnId} is no longer active.`)
@@ -1494,48 +1493,57 @@ export function createSessionRunner(
     messages: readonly ModelMessage[],
     sessionFiles: SessionFiles | undefined,
   ): Promise<readonly ModelMessage[]> {
-    return Promise.all(
-      messages.map(async (message): Promise<ModelMessage> => {
-        if (message.role !== "user" || message.images === undefined)
-          return message
-        const images = await Promise.all(
-          message.images.map(async (image) => {
-            if ("data" in image && image.data !== undefined) return image
-            if (sessionFiles === undefined) {
-              throw new Error("Session image storage is unavailable.")
-            }
-            const bytes = await sessionFiles.read(image.file)
-            if (bytes.byteLength !== image.sizeBytes) {
-              throw new Error(
-                "Session image size does not match its recorded size.",
-              )
-            }
-            return {
-              type: "image" as const,
-              mediaType: image.mediaType,
-              detail: image.detail ?? "high",
-              data: bytes.toString("base64"),
-            }
-          }),
-        )
-        return { ...message, images }
-      }),
-    )
+    const resolved: ModelMessage[] = []
+    for (const message of messages) {
+      if (message.role !== "user" || message.images === undefined) {
+        resolved.push(message)
+        continue
+      }
+      const images: NonNullable<
+        Extract<ModelMessage, { role: "user" }>["images"]
+      >[number][] = []
+      for (const image of message.images) {
+        if ("data" in image && image.data !== undefined) {
+          images.push(image)
+          continue
+        }
+        if (sessionFiles === undefined) {
+          throw new Error("Session image storage is unavailable.")
+        }
+        const bytes = await sessionFiles.read(image.file)
+        if (bytes.byteLength !== image.sizeBytes) {
+          throw new Error(
+            "Session image size does not match its recorded size.",
+          )
+        }
+        images.push({
+          type: "image",
+          mediaType: image.mediaType,
+          detail: image.detail ?? "high",
+          data: bytes.toString("base64"),
+        })
+      }
+      resolved.push({ ...message, images })
+    }
+    return resolved
   }
 
   async function resolveCompactionSourceImages(
     source: readonly CompactionSourceGroup[],
     target: ModelRequest["target"],
   ): Promise<readonly CompactionSourceGroup[]> {
-    return Promise.all(
-      source.map(async (group) => ({
+    const resolved: CompactionSourceGroup[] = []
+    for (const group of source) {
+      const adapted = adaptImagesForModel(group.messages, target)
+      resolved.push({
         ...group,
-        messages: adaptImagesForModel(
-          await resolveSessionFileImages(group.messages, options.sessionFiles),
-          target,
-        ).messages,
-      })),
-    )
+        messages: await resolveSessionFileImages(
+          adapted.messages,
+          options.sessionFiles,
+        ),
+      })
+    }
+    return resolved
   }
 
   async function recordExecutedTool(input: {

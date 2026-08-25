@@ -95,6 +95,7 @@ export type YakitoriApplication = {
   readonly mateDatabasePath: string
   readonly runner: SessionRunner
   readonly sessionKernel: SessionKernel
+  readonly sessionFiles: ReturnType<typeof createSessionFiles>
   readonly sessionStoreRoot: string
   readonly workspace: string
   readonly activeMate: {
@@ -138,6 +139,7 @@ export async function createYakitoriApplication(
       sessionsDir: sessionStoreRoot,
     })
     const sessionFiles = createSessionFiles(sessionStoreRoot)
+    await sessionFiles.cleanupStagingImageAttachments()
     eventStore = ownedEventStore
     const ownedMateStore = createSqliteMateStore({
       databasePath: mateDatabasePath,
@@ -272,6 +274,7 @@ export async function createYakitoriApplication(
       mateDatabasePath,
       runner,
       sessionKernel,
+      sessionFiles,
       sessionStoreRoot,
       workspace,
       activeMate: {

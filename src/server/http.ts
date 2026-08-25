@@ -5,6 +5,7 @@ import {
   type ServerResponse,
 } from "node:http"
 import { extname, join, resolve, sep } from "node:path"
+import { pipeline } from "node:stream/promises"
 import {
   createSessionKernel,
   type EventEnvelope,
@@ -44,8 +45,6 @@ type YakitoriHttpServerCommonOptions = {
   readonly availableProviders?: readonly string[]
   readonly sessionFiles?: SessionFiles
 }
-
-const maxServedSessionImageBytes = 4 * 1024 * 1024
 
 export type YakitoriHttpServerOptions = YakitoriHttpServerCommonOptions &
   (
@@ -276,27 +275,22 @@ async function handleRequest(
       return
     }
     try {
-      const file = await sessionFiles.readRange(
-        { sessionId: route.sessionId, path: route.path },
-        0,
-        maxServedSessionImageBytes + 1,
-      )
-      if (file.totalBytes > maxServedSessionImageBytes) {
-        writeResult(
-          response,
-          errorResult(413, ApiErrorCode.InvalidInput, "Image is too large."),
-        )
-        return
-      }
-      const bytes = file.bytes
+      const file = await sessionFiles.openRead({
+        sessionId: route.sessionId,
+        path: route.path,
+      })
       response.writeHead(200, {
         "Cache-Control": "private, no-store",
-        "Content-Length": bytes.byteLength,
+        "Content-Length": file.totalBytes,
         "Content-Type": sessionFileContentType(route.path),
         "X-Content-Type-Options": "nosniff",
       })
-      response.end(bytes)
+      await pipeline(file.stream, response)
     } catch {
+      if (response.headersSent) {
+        response.destroy()
+        return
+      }
       writeResult(
         response,
         errorResult(404, ApiErrorCode.NotFound, "Session file was not found."),
@@ -787,7 +781,7 @@ async function readJson(request: IncomingMessage): Promise<JsonReadResult> {
 async function readRequestBody(
   request: IncomingMessage,
 ): Promise<string | undefined> {
-  // Four 4 MiB decoded images expand under base64; leave room for JSON and text.
+  // JSON remains bounded independently of binary Session attachments.
   const maxRequestBodyBytes = 24 * 1024 * 1024
   const chunks: Buffer[] = []
   let size = 0

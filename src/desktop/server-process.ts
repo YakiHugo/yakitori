@@ -1,8 +1,15 @@
 import { spawn, type ChildProcess } from "node:child_process"
+import { randomUUID } from "node:crypto"
+import {
+  isServerControlResponse,
+  type ServerControlCommand,
+  type ServerControlResponse,
+} from "./server-control.ts"
 
 export type ServerProcess = {
   readonly child: ChildProcess
   readonly url: string
+  request(command: ServerControlCommand): Promise<ServerControlResponse>
   stop(): Promise<void>
 }
 
@@ -35,7 +42,22 @@ export function spawnServerProcess(
   const child = spawn(input.command, [...input.args], {
     ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
     env: input.env ?? process.env,
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["ignore", "pipe", "pipe", "ipc"],
+  })
+
+  const pending = new Map<
+    string,
+    {
+      readonly resolve: (response: ServerControlResponse) => void
+      readonly reject: (error: Error) => void
+    }
+  >()
+  child.on("message", (message) => {
+    if (!isServerControlResponse(message)) return
+    const request = pending.get(message.requestId)
+    if (request === undefined) return
+    pending.delete(message.requestId)
+    request.resolve(message)
   })
 
   let exited:
@@ -43,6 +65,12 @@ export function spawnServerProcess(
     | undefined
   child.once("exit", (code, signal) => {
     exited = { code, signal }
+    for (const request of pending.values()) {
+      request.reject(
+        new Error("Sidecar server exited during a control request."),
+      )
+    }
+    pending.clear()
   })
 
   // stderr is forwarded line-wise so child errors reach the desktop log.
@@ -81,11 +109,34 @@ export function spawnServerProcess(
         resolve({
           child,
           url: line.slice(LISTENING_PREFIX.length).trim(),
+          request: (command) => requestChild(child, pending, command),
           stop: () => stopChild(child, () => exited, termToKillMs),
         })
         return
       }
       onStdout(line)
+    })
+  })
+}
+
+function requestChild(
+  child: ChildProcess,
+  pending: Map<
+    string,
+    {
+      readonly resolve: (response: ServerControlResponse) => void
+      readonly reject: (error: Error) => void
+    }
+  >,
+  command: ServerControlCommand,
+): Promise<ServerControlResponse> {
+  const requestId = randomUUID()
+  return new Promise((resolve, reject) => {
+    pending.set(requestId, { resolve, reject })
+    child.send({ ...command, requestId }, (error) => {
+      if (error === null) return
+      pending.delete(requestId)
+      reject(error)
     })
   })
 }

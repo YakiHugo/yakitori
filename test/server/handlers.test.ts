@@ -1,3 +1,6 @@
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import {
   COMPACT_DIRECTIVE,
@@ -5,6 +8,7 @@ import {
   InputRole,
 } from "../../src/kernel/events.ts"
 import { createSessionId } from "../../src/kernel/ids.ts"
+import { createSessionFiles } from "../../src/kernel/session-files.ts"
 import { createSessionKernel } from "../../src/kernel/session-kernel.ts"
 import {
   createServerHandlers,
@@ -221,8 +225,11 @@ describe("server handlers", () => {
             {
               name: "screen.png",
               mediaType: "image/png",
-              data: "eA==",
-              sizeBytes: 1,
+              sizeBytes: 9,
+              file: {
+                sessionId: created.body.session.id,
+                path: "attachments/staging/draft_1/1.png",
+              },
             },
           ],
         },
@@ -230,6 +237,61 @@ describe("server handlers", () => {
 
       expectError(admitted, 400, ApiErrorCode.InvalidInput)
     })
+  })
+
+  it("admits a batch of reference-backed images", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yakitori-handler-images-"))
+    try {
+      const sessionFiles = createSessionFiles(root)
+      const server = createServerHandlers(
+        createSessionKernel(createMemoryEventStore()),
+        { sessionFiles },
+      )
+      const created = await server.createSession()
+      expectOk(created)
+      const image = pngBuffer(4096)
+      const attachments = await sessionFiles.importImageBytes(
+        created.body.session.id,
+        "draft_many_images",
+        [image, image, image].map((data, index) => ({
+          name: `screen-${String(index + 1)}.png`,
+          data,
+        })),
+      )
+
+      const admitted = await server.admitInput({
+        sessionId: created.body.session.id,
+        requestId: "request_many_images",
+        content: { kind: "text", text: "inspect", attachments },
+      })
+
+      expectOk(admitted)
+      const event = admitted.body.event
+      expect(event.type).toBe(EventType.InputAdmitted)
+      if (event.type !== EventType.InputAdmitted) {
+        throw new Error("expected input admission")
+      }
+      expect(event.data.content).toMatchObject({
+        kind: "text",
+        attachments: expect.arrayContaining([
+          expect.objectContaining({ name: "screen-3.png" }),
+        ]),
+      })
+      if (event.data.content.kind !== "text") {
+        throw new Error("expected text content")
+      }
+      expect(event.data.content.attachments).toHaveLength(3)
+
+      const replayed = await server.admitInput({
+        sessionId: created.body.session.id,
+        requestId: "request_many_images",
+        content: { kind: "text", text: "inspect", attachments },
+      })
+      expectOk(replayed)
+      expect(replayed.status).toBe(200)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
   })
 
   it("admits the compact directive as a runtime-role input", async () => {
@@ -509,4 +571,12 @@ function expectError<T>(
   if (result.ok) throw new Error("Expected error response.")
   expect(result.status).toBe(status)
   expect(result.body.error.code).toBe(code)
+}
+
+function pngBuffer(size: number): Buffer {
+  const bytes = Buffer.alloc(size)
+  Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(bytes)
+  bytes.writeUInt32BE(1, 16)
+  bytes.writeUInt32BE(1, 20)
+  return bytes
 }

@@ -5,7 +5,7 @@ import {
   type EventMetadata,
   ForkReason,
   IdPrefix,
-  type InlineImageAttachment,
+  type ImageAttachment,
   InputRole,
   isIdWithPrefix,
   isJsonValue,
@@ -96,14 +96,11 @@ export type ServerHandlers = {
 
 const sessionListOrder = "updated_at_desc"
 const maxCancelReasonLength = 512
-const maxImageAttachments = 4
-const maxImageAttachmentBytes = 4 * 1024 * 1024
-const maxImageAttachmentsBytes = 10 * 1024 * 1024
 
 type AdmissionTextContent = {
   readonly kind: "text"
   readonly text: string
-  readonly attachments?: readonly InlineImageAttachment[]
+  readonly attachments?: readonly ImageAttachment[]
 }
 
 export function createServerHandlers(
@@ -276,14 +273,32 @@ export function createServerHandlers(
           }
           content = {
             ...content,
-            attachments: await options.sessionFiles.persistImageAttachments(
-              request.sessionId,
-              request.requestId,
-              request.content.attachments,
-            ),
+            attachments: await options.sessionFiles
+              .promoteImageAttachments(
+                request.sessionId,
+                request.requestId,
+                request.content.attachments,
+              )
+              .catch((error: unknown) => {
+                throw invalidInput(
+                  error instanceof Error
+                    ? error.message
+                    : "Image attachment is invalid.",
+                )
+              }),
           }
         }
         const admitted = await kernel.admitInput({ ...request, content })
+        if (request.content.attachments !== undefined) {
+          await options.sessionFiles
+            ?.discardDraftImageAttachments(request.content.attachments)
+            .catch((error: unknown) => {
+              console.warn(
+                "Could not remove admitted draft attachments.",
+                error,
+              )
+            })
+        }
         if (admitted.created) options.eventHub?.publish([admitted.event])
         // Wake even on idempotent replay: original process may have crashed
         // after commit and before scheduling.
@@ -932,40 +947,20 @@ function requireAdmissionTextContent(
   throw invalidInput("content must include kind text and a string text value.")
 }
 
-function requireImageAttachments(
-  value: unknown,
-): readonly InlineImageAttachment[] {
+function requireImageAttachments(value: unknown): readonly ImageAttachment[] {
   if (value === undefined) return []
-  if (!Array.isArray(value) || value.length > maxImageAttachments) {
-    throw invalidInput(
-      `content.attachments must contain at most ${maxImageAttachments} images.`,
-      { field: "content.attachments", maxItems: maxImageAttachments },
-    )
+  if (!Array.isArray(value)) {
+    throw invalidInput("content.attachments must be an array.", {
+      field: "content.attachments",
+    })
   }
-
-  const attachments = value.map((item, index) =>
-    requireImageAttachment(item, index),
-  )
-  const totalBytes = attachments.reduce(
-    (total, attachment) => total + attachment.sizeBytes,
-    0,
-  )
-  if (totalBytes > maxImageAttachmentsBytes) {
-    throw invalidInput(
-      `content.attachments must not exceed ${maxImageAttachmentsBytes} decoded bytes in total.`,
-      {
-        field: "content.attachments",
-        maxBytes: maxImageAttachmentsBytes,
-      },
-    )
-  }
-  return attachments
+  return value.map((item, index) => requireImageAttachment(item, index))
 }
 
 function requireImageAttachment(
   value: unknown,
   index: number,
-): InlineImageAttachment {
+): ImageAttachment {
   if (!isRecord(value)) {
     throw invalidInput(`content.attachments[${index}] must be an image object.`)
   }
@@ -985,23 +980,11 @@ function requireImageAttachment(
     )
   }
   if (
-    typeof value.data !== "string" ||
-    value.data.length === 0 ||
-    !/^[A-Za-z0-9+/]+={0,2}$/.test(value.data)
+    !Number.isSafeInteger(value.sizeBytes) ||
+    (value.sizeBytes as number) <= 0
   ) {
     throw invalidInput(
-      `content.attachments[${index}].data must be base64 image data.`,
-    )
-  }
-  const decoded = Buffer.from(value.data, "base64")
-  if (decoded.length === 0 || decoded.length > maxImageAttachmentBytes) {
-    throw invalidInput(
-      `content.attachments[${index}] must not exceed ${maxImageAttachmentBytes} decoded bytes.`,
-    )
-  }
-  if (value.sizeBytes !== decoded.length) {
-    throw invalidInput(
-      `content.attachments[${index}].sizeBytes does not match its data.`,
+      `content.attachments[${index}].sizeBytes must be positive.`,
     )
   }
   const detail = value.detail ?? "high"
@@ -1014,9 +997,25 @@ function requireImageAttachment(
     name,
     mediaType,
     detail,
-    data: value.data,
-    sizeBytes: decoded.length,
+    sizeBytes: value.sizeBytes as number,
+    file: requireSessionFileReference(value.file, index),
   }
+}
+
+function requireSessionFileReference(
+  value: unknown,
+  index: number,
+): ImageAttachment["file"] {
+  if (
+    !isRecord(value) ||
+    typeof value.sessionId !== "string" ||
+    typeof value.path !== "string"
+  ) {
+    throw invalidInput(
+      `content.attachments[${index}].file must be a Session file reference.`,
+    )
+  }
+  return { sessionId: value.sessionId, path: value.path }
 }
 
 function optionalStringField(

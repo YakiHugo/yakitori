@@ -107,10 +107,6 @@ export type ImageAttachment = ImageAttachmentMetadata & {
   readonly file: SessionFileReference
 }
 
-export type InlineImageAttachment = ImageAttachmentMetadata & {
-  readonly data: string
-}
-
 export type JsonContent = {
   readonly kind: "json"
   readonly value: JsonValue

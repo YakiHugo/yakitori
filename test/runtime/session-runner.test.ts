@@ -1329,19 +1329,20 @@ describe("session runner", () => {
       Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(png)
       png.writeUInt32BE(6_400, 16)
       png.writeUInt32BE(3_200, 20)
-      const attachments = await sessionFiles.persistImageAttachments(
+      const imported = await sessionFiles.importImageBytes(
         session.sessionId,
         "request_image_compaction",
         [
           {
             name: "large.png",
-            mediaType: "image/png",
-            detail: "original",
-            data: png.toString("base64"),
-            sizeBytes: png.byteLength,
+            data: png,
           },
         ],
       )
+      const attachments = imported.map((attachment) => ({
+        ...attachment,
+        detail: "original" as const,
+      }))
       await runtime.kernel.admitInput({
         sessionId: session.sessionId,
         content: { kind: "text", text: "inspect", attachments },

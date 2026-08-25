@@ -895,6 +895,29 @@ describe("model selection", () => {
     expect(useAppStore.getState().message).toBeUndefined()
   })
 
+  it("clears an attachment-only draft after admission", async () => {
+    window.localStorage.clear()
+    vi.stubGlobal("fetch", admissionFetchMock())
+    const attachment = {
+      name: "screen.png",
+      mediaType: "image/png" as const,
+      detail: "high" as const,
+      sizeBytes: 9,
+      file: {
+        sessionId: "session_1",
+        path: "attachments/staging/draft_1/1.png",
+      },
+    }
+    useAppStore.setState({
+      selection: { revision: 1, sessionId: "session_1" },
+      promptAttachments: [attachment],
+    })
+
+    await useAppStore.getState().admitInput("", [attachment])
+
+    expect(useAppStore.getState().promptAttachments).toEqual([])
+  })
+
   it("uses a picker choice immediately for the pill, admission, and user preference", async () => {
     window.localStorage.clear()
     const fetchMock = admissionFetchMock()
