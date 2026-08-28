@@ -102,6 +102,7 @@ export type ApiProviderModel = {
   // back to the id.
   readonly displayName?: string
   readonly instructionProfileId: string
+  readonly effortStyle?: "none" | "levels"
   readonly efforts?: readonly string[]
   readonly speeds?: readonly string[]
   readonly inputModalities?: readonly ("image" | "text" | "video")[]

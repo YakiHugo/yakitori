@@ -339,6 +339,9 @@ async function providerSummary(
       id: entry.id,
       displayName: entry.displayName,
       instructionProfileId: entry.instructionProfileId as string,
+      ...(entry.effortStyle === undefined
+        ? {}
+        : { effortStyle: entry.effortStyle }),
       ...(entry.efforts === undefined ? {} : { efforts: entry.efforts }),
       ...(entry.speeds === undefined ? {} : { speeds: entry.speeds }),
       ...(entry.inputModalities === undefined

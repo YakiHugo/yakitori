@@ -48,6 +48,7 @@ export function ModelSelector() {
       defaultProvider,
       defaultModel,
     }),
+    providers,
   )
   const label =
     effective === undefined

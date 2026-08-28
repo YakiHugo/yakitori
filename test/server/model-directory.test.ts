@@ -81,7 +81,14 @@ describe("model directory", () => {
   it("is case-insensitive and returns no speculative unknown models", async () => {
     const directory = createModelDirectory()
 
-    expect(await directory.listModels("KIMI")).toHaveLength(4)
+    const kimi = await directory.listModels("KIMI")
+    expect(kimi).toHaveLength(4)
+    expect(kimi.map((model) => model.effortStyle)).toEqual([
+      "none",
+      "none",
+      "levels",
+      "levels",
+    ])
     expect(await directory.listModels("unknown")).toEqual([])
   })
 })

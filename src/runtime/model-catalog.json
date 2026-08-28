@@ -41,6 +41,7 @@
       "model": "kimi-for-coding",
       "instructionProfileId": "kimi",
       "displayName": "K2.7 Coding",
+      "effortStyle": "none",
       "inputModalities": ["text", "image", "video"],
       "contextWindowTokens": 262144
     },
@@ -49,6 +50,7 @@
       "model": "kimi-for-coding-highspeed",
       "instructionProfileId": "kimi",
       "displayName": "K2.7 Coding Highspeed",
+      "effortStyle": "none",
       "inputModalities": ["text", "image", "video"],
       "contextWindowTokens": 262144
     },
@@ -57,6 +59,7 @@
       "model": "k3",
       "instructionProfileId": "kimi",
       "displayName": "K3",
+      "effortStyle": "levels",
       "inputModalities": ["text", "image", "video"],
       "efforts": ["low", "high", "max"],
       "contextWindowTokens": 1048576
@@ -66,6 +69,7 @@
       "model": "k3-256k",
       "instructionProfileId": "kimi",
       "displayName": "K3-256k",
+      "effortStyle": "levels",
       "inputModalities": ["text", "image"],
       "efforts": ["low", "high", "max"],
       "contextWindowTokens": 262144
