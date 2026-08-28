@@ -140,6 +140,7 @@ function emptySession(): SessionProjection {
     updatedAt: "2026-08-21T00:00:00.000Z",
     conversationId: "session_1",
     worldStateUpdates: [],
+    turnAbortedContexts: [],
     inputs: [],
     pendingInputs: [],
     completedTurns: [],

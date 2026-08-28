@@ -23,10 +23,7 @@ import { createMateKernel } from "../../src/mates/mate-kernel.ts"
 import { createSqliteMateStore } from "../../src/mates/sqlite-mate-store.ts"
 import { createFauxProvider } from "../../src/runtime/faux-provider.ts"
 import { createSessionExecutionPolicy } from "../../src/runtime/limits.ts"
-import {
-  createTransientEventHub,
-  type LiveSessionEvent,
-} from "../../src/runtime/live-events.ts"
+import type { LiveSessionEvent } from "../../src/runtime/live-events.ts"
 import {
   type ModelRequest,
   ModelStopReason,
@@ -39,7 +36,7 @@ import {
   type ContextPreparedDiagnostics,
   createSessionRunner,
 } from "../../src/runtime/session-runner.ts"
-import { createDurableEventHub } from "../../src/server/event-hub.ts"
+import { createSessionEventHub } from "../../src/server/event-hub.ts"
 
 describe("session runner", () => {
   it("runs a text-only turn with exact durable journal sequence and replay", async () => {
@@ -56,7 +53,7 @@ describe("session runner", () => {
         kernel: runtime.kernel,
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
-        durableHub: runtime.durableHub,
+        eventSink: runtime.eventHub,
         onContextPrepared(diagnostics) {
           contextDiagnostics.push(diagnostics)
         },
@@ -970,37 +967,33 @@ describe("session runner", () => {
     })
   })
 
-  it("publishes snapshots to the transient hub but not to durable replay", async () => {
+  it("publishes streamed suffix deltas transiently while completions remain durable", async () => {
     await withRuntime(async (runtime) => {
       const live: LiveSessionEvent[] = []
       const durable: EventEnvelope[] = []
-      runtime.durableHub.subscribe("unused", () => undefined)
-      const transientHub = createTransientEventHub()
       const provider = createFauxProvider([
         {
           providerRequestId: "provider_internal",
-          snapshots: ["partial", "final text"],
+          snapshots: ["final", "final text"],
           reasoningSnapshots: ["inspect", "inspect files"],
           content: [
             { type: "reasoning", text: "inspect files" },
             { type: "text", text: "final text" },
           ],
+          usage: { inputTokens: 12, outputTokens: 4 },
         },
       ])
       const session = await createAttributedSession(runtime)
-      transientHub.subscribe(session.sessionId, (event) => {
-        live.push(event)
-      })
-      runtime.durableHub.subscribe(session.sessionId, (events) => {
-        durable.push(...events)
+      runtime.eventHub.subscribe(session.sessionId, (delivery) => {
+        if (delivery.kind === "transient") live.push(delivery.event)
+        else durable.push(...delivery.events)
       })
 
       const runner = createSessionRunner({
         kernel: runtime.kernel,
         mateKernel: runtime.mateKernel,
         stream: provider.stream,
-        durableHub: runtime.durableHub,
-        transientHub,
+        eventSink: runtime.eventHub,
       })
       await runtime.kernel.admitInput({
         sessionId: session.sessionId,
@@ -1009,15 +1002,18 @@ describe("session runner", () => {
       await runner.wake(session.sessionId)
 
       expect(live.length).toBeGreaterThan(0)
-      expect(live.some((event) => event.type === "assistant.snapshot")).toBe(
-        true,
-      )
-      expect(live.some((event) => event.type === "reasoning.snapshot")).toBe(
-        true,
-      )
+      expect(
+        live.filter((event) => event.type === "session.usage").at(-1),
+      ).toMatchObject({
+        usage: { inputTokens: 12, outputTokens: 4 },
+      })
       expect(
         durable.some((event) => event.type === EventType.ItemCompleted),
       ).toBe(true)
+      const started = live.filter(
+        (event): event is Extract<LiveSessionEvent, { type: "item.started" }> =>
+          event.type === "item.started",
+      )
       const completed = durable.filter(
         (
           event,
@@ -1026,24 +1022,60 @@ describe("session runner", () => {
           { type: typeof EventType.ItemCompleted }
         > => event.type === EventType.ItemCompleted,
       )
+      expect(started.map((event) => event.item.type)).toEqual([
+        "reasoning",
+        "agent_message",
+      ])
+      expect(
+        live
+          .filter(
+            (event) =>
+              event.type === "reasoning.delta" &&
+              event.itemId === started[0]?.item.itemId,
+          )
+          .map((event) => (event.type === "reasoning.delta" ? event.delta : ""))
+          .join(""),
+      ).toBe("inspect files")
+      expect(
+        live
+          .filter(
+            (event) =>
+              event.type === "assistant.delta" &&
+              event.itemId === started[1]?.item.itemId,
+          )
+          .map((event) => (event.type === "assistant.delta" ? event.delta : ""))
+          .join(""),
+      ).toBe("final text")
       expect(completed.map((event) => event.data.item)).toEqual([
-        expect.objectContaining({ type: "reasoning", text: "inspect files" }),
+        expect.objectContaining({
+          type: "reasoning",
+          itemId: started[0]?.item.itemId,
+          text: "inspect files",
+        }),
         expect.objectContaining({
           type: "agent_message",
+          itemId: started[1]?.item.itemId,
           content: [{ type: "text", text: "final text" }],
         }),
       ])
+      expect(
+        durable.find((event) => event.type === EventType.TurnCompleted),
+      ).toMatchObject({
+        data: {
+          usage: { inputTokens: 12, outputTokens: 4 },
+          sessionUsage: { inputTokens: 12, outputTokens: 4 },
+        },
+      })
       const replayed = await runtime.kernel.replaySession({
         sessionId: session.sessionId,
       })
+      expect(replayed.session?.usage).toEqual({
+        inputTokens: 12,
+        outputTokens: 4,
+      })
       expect(JSON.stringify(replayed.events)).not.toContain("provider_internal")
-      expect(
-        replayed.events.every(
-          (event) =>
-            event.type !== ("assistant.snapshot" as typeof event.type) &&
-            event.type !== ("reasoning.snapshot" as typeof event.type),
-        ),
-      ).toBe(true)
+      expect(JSON.stringify(replayed.events)).not.toContain("assistant.delta")
+      expect(JSON.stringify(replayed.events)).not.toContain("reasoning.delta")
     })
   })
 
@@ -1108,7 +1140,76 @@ describe("session runner", () => {
       const final = await runtime.kernel.readSession({
         sessionId: session.sessionId,
       })
-      expect(final.session?.cancelledTurns).toHaveLength(1)
+      expect(final.session?.interruptedTurns).toHaveLength(1)
+    })
+  })
+
+  it("publishes interrupted text live without recording it for replay", async () => {
+    await withRuntime(async (runtime) => {
+      const live: LiveSessionEvent[] = []
+      const stream: StreamFn = async function* (request) {
+        yield { type: "snapshot", text: "partial answer" }
+        if (request.signal === undefined) {
+          throw new Error("Expected the runner to provide an abort signal.")
+        }
+        if (!request.signal.aborted) {
+          await new Promise<void>((resolve) => {
+            request.signal?.addEventListener("abort", () => resolve(), {
+              once: true,
+            })
+          })
+        }
+        yield response([], ModelStopReason.Aborted)
+      }
+      const runner = createSessionRunner({
+        kernel: runtime.kernel,
+        mateKernel: runtime.mateKernel,
+        stream,
+        eventSink: runtime.eventHub,
+      })
+      const session = await createAttributedSession(runtime)
+      runtime.eventHub.subscribe(session.sessionId, (delivery) => {
+        if (delivery.kind === "transient") live.push(delivery.event)
+      })
+      await runtime.kernel.admitInput({
+        sessionId: session.sessionId,
+        content: { kind: "text", text: "start then stop" },
+      })
+      const wake = runner.wake(session.sessionId)
+
+      let turnId: string | undefined
+      for (;;) {
+        const read = await runtime.kernel.readSession({
+          sessionId: session.sessionId,
+        })
+        const partial = live.find(
+          (event) =>
+            event.type === "assistant.delta" &&
+            event.delta === "partial answer",
+        )
+        if (read.session?.activeTurn !== undefined && partial !== undefined) {
+          turnId = read.session.activeTurn.turnId
+          break
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1))
+      }
+
+      await runner.interrupt({
+        sessionId: session.sessionId,
+        turnId,
+        reason: "user_cancel",
+      })
+      await wake
+
+      const replay = await runtime.kernel.replaySession({
+        sessionId: session.sessionId,
+      })
+      expect(replay.session?.interruptedTurns).toHaveLength(1)
+      expect(replay.session?.items).toEqual([])
+      expect(replay.session?.turnAbortedContexts).toEqual([
+        expect.objectContaining({ turnId }),
+      ])
+      expect(JSON.stringify(replay.events)).not.toContain("partial answer")
     })
   })
 
@@ -1299,16 +1400,24 @@ describe("session runner", () => {
         throw new Error("expected compaction facts")
       }
 
-      // throughSeq is the high-water seq observed before the summary call:
-      // nothing is appended between turn.started and the first context build.
-      const secondTurnStarted = replayed.events.find(
+      // throughSeq is the high-water seq observed before the summary call;
+      // the compaction item's own start is the last fact appended by then.
+      const itemStarts = replayed.events.filter(
+        (
+          event,
+        ): event is Extract<
+          EventEnvelope,
+          { type: typeof EventType.ItemStarted }
+        > => event.type === EventType.ItemStarted,
+      )
+      const compactionStarted = itemStarts.find(
         (event) =>
-          event.type === EventType.TurnStarted &&
-          event.data.turnId === secondTurn?.turnId,
+          event.data.turnId === secondTurn?.turnId &&
+          event.data.item.type === "context_compaction",
       )
       expect(first.data).toMatchObject({
         turnId: secondTurn?.turnId,
-        throughSeq: secondTurnStarted?.seq,
+        throughSeq: compactionStarted?.seq,
         coveredTurnIds: [firstTurn?.turnId],
         summary: "Goal: checkpoint one.",
         usage: { inputTokens: 10, outputTokens: 5 },
@@ -1684,7 +1793,7 @@ describe("session runner", () => {
       const final = await runtime.kernel.readSession({
         sessionId: session.sessionId,
       })
-      expect(final.session?.cancelledTurns).toHaveLength(1)
+      expect(final.session?.interruptedTurns).toHaveLength(1)
     })
   })
 
@@ -1981,6 +2090,39 @@ describe("session runner", () => {
         coveredTurnIds: [turns[0]?.turnId, turns[1]?.turnId],
         summary: "Goal: manual checkpoint.",
       })
+      // The compaction runs as an ordinary item lifecycle on the same stream:
+      // started before the summary call, completed with the checkpoint.
+      const itemLifecycle = replayed.events.filter(
+        (
+          event,
+        ): event is
+          | Extract<EventEnvelope, { type: typeof EventType.ItemStarted }>
+          | Extract<EventEnvelope, { type: typeof EventType.ItemCompleted }> =>
+          event.type === EventType.ItemStarted ||
+          event.type === EventType.ItemCompleted,
+      )
+      const compactionLifecycle = itemLifecycle.filter(
+        (event) => event.data.item.type === "context_compaction",
+      )
+      expect(
+        compactionLifecycle.map((event) => [
+          event.type,
+          event.type === EventType.ItemCompleted &&
+          event.data.item.type === "context_compaction"
+            ? event.data.item.status
+            : undefined,
+        ]),
+      ).toEqual([
+        [EventType.ItemStarted, undefined],
+        [EventType.ItemCompleted, "completed"],
+      ])
+      expect(compactionLifecycle[0]?.data.item.itemId).toBeDefined()
+      expect(compactionLifecycle[0]?.data.item.itemId).toBe(
+        compactionLifecycle[1]?.data.item.itemId,
+      )
+      expect(compacted[0]?.seq).toBeGreaterThan(
+        compactionLifecycle[0]?.seq ?? 0,
+      )
       expect(replayed.session?.completedTurns).toHaveLength(3)
 
       // The follow-up turn sees the checkpoint; neither the directive nor
@@ -2434,7 +2576,7 @@ async function expectTerminal(
 type RuntimeContext = {
   readonly kernel: ReturnType<typeof createSessionKernel>
   readonly mateKernel: ReturnType<typeof createMateKernel>
-  readonly durableHub: ReturnType<typeof createDurableEventHub>
+  readonly eventHub: ReturnType<typeof createSessionEventHub>
   readonly rootDir: string
 }
 
@@ -2463,7 +2605,7 @@ async function withRuntime(run: (runtime: RuntimeContext) => Promise<void>) {
   const runtime: RuntimeContext = {
     kernel: createSessionKernel(eventStore),
     mateKernel: createMateKernel(mateStore),
-    durableHub: createDurableEventHub(),
+    eventHub: createSessionEventHub(),
     rootDir,
   }
   try {

@@ -114,7 +114,7 @@ describe("session fact projection", () => {
     })
     expect(() =>
       projectSession([...baseWithInterruptedTool(), duplicateAssistantItem]),
-    ).toThrow("Item ID item_call is not unique.")
+    ).toThrow("Item item_call completion does not match its start.")
 
     const duplicateToolCall = createEventEnvelope({
       sessionId,

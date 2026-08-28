@@ -1,14 +1,17 @@
 import {
   type AssistantContentBlock,
   COMPACT_DIRECTIVE,
+  createItemId,
   createYakitoriError,
   type EventEnvelope,
   type EventMetadata,
   type InputProjection,
   InputRole,
-  ItemKind,
   isJsonValue,
   isKernelEvent,
+  isYakitoriError,
+  ItemKind,
+  ItemStatus,
   type JsonObject,
   type KernelError,
   type ModelSelection,
@@ -16,6 +19,8 @@ import {
   type SessionFiles,
   type SessionKernel,
   type SessionProjection,
+  effectiveSessionModel,
+  type StreamedItemIds,
   type TokenUsage,
   type ToolExecutionDescriptor,
   type TurnExecutionContext,
@@ -44,8 +49,8 @@ import {
   type SessionExecutionPolicy,
 } from "./limits.ts"
 import {
-  createCoalescingSnapshotPublisher,
-  type TransientEventHub,
+  createCoalescingDeltaPublisher,
+  type LiveSessionEvent,
 } from "./live-events.ts"
 import {
   type ModelContentBlock,
@@ -104,10 +109,10 @@ export type SessionRunnerOptions = {
   readonly kernel: SessionKernel
   readonly mateKernel: MateKernel
   readonly stream: StreamFn
-  readonly durableHub?: {
-    publish(events: readonly RuntimeEventEnvelope[]): void
+  readonly eventSink?: {
+    publishDurable(events: readonly RuntimeEventEnvelope[]): void
+    publishTransient(event: LiveSessionEvent): void
   }
-  readonly transientHub?: TransientEventHub
   readonly toolRegistry?: ToolRegistry
   readonly permissionGate?: PermissionGate
   readonly provider?: string
@@ -190,6 +195,7 @@ type ActiveTurnRuntime = {
   readonly turnId: string
   readonly abort: AbortController
   readonly telemetry: TurnTelemetry
+  flushStreamingOutput?: (() => void) | undefined
   forkContext?: ForkContext | undefined
 }
 
@@ -216,6 +222,8 @@ type ConsumedModelResponse = {
   readonly response: ModelResponse
   readonly durationMs: number
   readonly timeToFirstTokenMs: number
+  /** Items opened with the kernel while streaming; completion must reuse them. */
+  readonly startedItemIds: StreamedItemIds
 }
 
 export function createSessionRunner(
@@ -245,7 +253,25 @@ export function createSessionRunner(
       (event): event is RuntimeEventEnvelope => isKernelEvent(event),
     )
     if (runtimeEvents.length === 0) return
-    options.durableHub?.publish(runtimeEvents)
+    options.eventSink?.publishDurable(runtimeEvents)
+  }
+
+  const publishSessionUsage = async (
+    sessionId: string,
+    turnId: string,
+    turnUsage: TokenUsage | undefined,
+  ): Promise<void> => {
+    if (options.eventSink === undefined || turnUsage === undefined) return
+    const read = await options.kernel.readSession({ sessionId })
+    const usage = addTokenUsage(read.session?.usage, turnUsage)
+    if (usage === undefined) return
+    options.eventSink.publishTransient({
+      type: "session.usage",
+      sessionId,
+      turnId,
+      usage,
+      createdAt: new Date().toISOString(),
+    })
   }
 
   const agentControl = createAgentControl({
@@ -455,25 +481,16 @@ export function createSessionRunner(
       })
     }
 
-    const previousTarget = session.turns.at(-1)?.executionContext
-    const defaultTarget = session.configuration?.defaultTarget ?? {
+    const selectedTarget: ModelSelection = effectiveSessionModel({
+      pendingInputs: [queuedInput],
+      turns: session.turns,
+      ...(session.configuration === undefined
+        ? {}
+        : { configuration: session.configuration }),
+    }) ?? {
       provider,
       model,
     }
-    const selectedTarget: ModelSelection =
-      queuedInput.modelSelection ??
-      (previousTarget === undefined
-        ? defaultTarget
-        : {
-            provider: previousTarget.provider,
-            model: previousTarget.model,
-            ...(previousTarget.effort === undefined
-              ? {}
-              : { effort: previousTarget.effort }),
-            ...(previousTarget.speed === undefined
-              ? {}
-              : { speed: previousTarget.speed }),
-          })
     let sessionConfiguration =
       session.configuration === undefined
         ? SessionConfiguration.create({
@@ -748,7 +765,6 @@ export function createSessionRunner(
         consumed = await consumeModelStream({
           sessionId: input.sessionId,
           turnId: input.turnId,
-          streamId,
           request,
           assistantResponseBytes:
             executionContext.executionPolicy.assistantResponseBytes,
@@ -763,6 +779,11 @@ export function createSessionRunner(
       const response = consumed.response
       modelCallIndex += 1
       if (response.usage !== undefined) usages.push(response.usage)
+      await publishSessionUsage(
+        input.sessionId,
+        input.turnId,
+        aggregateTokenUsage(usages),
+      )
       if (response.usage !== undefined) {
         const baseline = createModelUsageBaseline({
           request,
@@ -856,6 +877,7 @@ export function createSessionRunner(
             content,
             toolCalls,
             streamId,
+            streamedItemIds: consumed.startedItemIds,
             modelCallIndex,
             executionContext,
             toolPlan: step.tools,
@@ -917,6 +939,7 @@ export function createSessionRunner(
           callIndex: modelCallIndex,
           streamId,
         },
+        streamedItemIds: consumed.startedItemIds,
         ...(usage === undefined ? {} : { usage }),
         metrics: turnMetrics(telemetry),
       })
@@ -977,13 +1000,61 @@ export function createSessionRunner(
     ) {
       return "failed"
     }
+    const compactionItemId = createItemId()
+    let compactionItemStarted = false
+    const settleCompactionItem = async (
+      status: "completed" | "failed",
+      errorMessage?: string,
+    ): Promise<void> => {
+      if (!compactionItemStarted) return
+      try {
+        const settled = await options.kernel.completeItem({
+          sessionId,
+          turnId: input.turnId,
+          item: {
+            type: "context_compaction",
+            itemId: compactionItemId,
+            status,
+            ...(errorMessage === undefined
+              ? {}
+              : { error: { message: errorMessage } }),
+          },
+        })
+        publishDurable([settled.event])
+      } catch (error) {
+        // The turn closed while compaction settled; its terminal path is
+        // authoritative and the open item expires with it.
+        if (
+          isYakitoriError(error) &&
+          error.code === YakitoriErrorCode.InvalidState
+        ) {
+          return
+        }
+        throw error
+      }
+    }
     try {
+      const startedItem = await options.kernel.startItem({
+        sessionId,
+        turnId: input.turnId,
+        item: { type: "context_compaction", itemId: compactionItemId },
+      })
+      compactionItemStarted = true
+      publishDurable([startedItem.event])
       let source = selectCompactionSource(
         input.candidateHistory,
         input.configuration.executionPolicy.modelVisibleContextBytes,
       )
-      if (source.length === 0) return "failed"
-      const throughSeq = input.session.seq
+      if (source.length === 0) {
+        await settleCompactionItem(
+          "failed",
+          "No completed history is eligible for compaction.",
+        )
+        return "failed"
+      }
+      // The checkpoint covers history through the item start we just
+      // appended; nothing else may land while the summary runs.
+      const throughSeq = startedItem.event.seq
       let result: Awaited<ReturnType<typeof runCompaction>> | undefined
       let attempts = 0
       const compact = async (request: ModelRequest) => {
@@ -994,6 +1065,11 @@ export function createSessionRunner(
             request,
           })
           if (compacted.usage !== undefined) input.usages.push(compacted.usage)
+          await publishSessionUsage(
+            sessionId,
+            input.turnId,
+            aggregateTokenUsage(input.usages),
+          )
           return compacted
         } finally {
           input.telemetry.modelCalls += 1
@@ -1109,6 +1185,7 @@ export function createSessionRunner(
         messages: replacementMessages,
       }).estimatedInputTokens
       if (replacementTokens >= sourceTokens) {
+        await settleCompactionItem("completed")
         return "not_smaller"
       }
       if (
@@ -1131,11 +1208,18 @@ export function createSessionRunner(
         summary: result.summary,
         replacement,
         ...(result.usage === undefined ? {} : { usage: result.usage }),
+        compactionItemId,
       })
-      publishDurable([recorded.event])
+      publishDurable(recorded.events)
       compactionFailures.delete(sessionId)
       return "compacted"
     } catch (error) {
+      await settleCompactionItem(
+        "failed",
+        input.signal.aborted
+          ? "Compaction interrupted."
+          : "Context compaction failed.",
+      )
       // A user interrupt mid-summary surfaces here as an AbortError; that is
       // the normal abort path, not a compaction failure worth logging.
       if (!input.signal.aborted) {
@@ -1230,6 +1314,7 @@ export function createSessionRunner(
     readonly content: readonly AssistantContentBlock[]
     readonly toolCalls: readonly ModelToolCallBlock[]
     readonly streamId: string
+    readonly streamedItemIds: StreamedItemIds
     readonly modelCallIndex: number
     readonly executionContext: TurnExecutionContext
     readonly toolPlan: StepToolPlan
@@ -1277,6 +1362,7 @@ export function createSessionRunner(
         callIndex: input.modelCallIndex,
         streamId: input.streamId,
       },
+      streamedItemIds: input.streamedItemIds,
       toolCalls: input.toolCalls.map((call) => {
         return {
           id: call.id,
@@ -1765,7 +1851,9 @@ export function createSessionRunner(
   // Keyed off durable state rather than lane state: an interrupt can race a
   // terminal child, in which case there is nothing left to cancel.
   async function interruptAgentTurn(sessionId: string): Promise<void> {
-    lanes.get(sessionId)?.activeTurn?.abort.abort()
+    const running = lanes.get(sessionId)?.activeTurn
+    running?.abort.abort()
+    running?.flushStreamingOutput?.()
     const read = await options.kernel.readSession({ sessionId })
     const session = read.session
     if (!session) return
@@ -1788,15 +1876,21 @@ export function createSessionRunner(
     const active = (await options.kernel.readSession({ sessionId })).session
       ?.activeTurn
     if (!active) return
-    lanes.get(sessionId)?.activeTurn?.abort.abort()
-    await cancelActiveTurn(sessionId, active.turnId, "agent_interrupted")
+    const activeRuntime = lanes.get(sessionId)?.activeTurn
+    activeRuntime?.abort.abort()
+    activeRuntime?.flushStreamingOutput?.()
+    await interruptActiveTurn(sessionId, active.turnId, "agent_interrupted")
   }
 
   async function readAgentOutcome(sessionId: string): Promise<AgentRunOutcome> {
     const session = await requireSession(sessionId)
     const assistantItem = [...session.items]
       .reverse()
-      .find((item) => item.kind === ItemKind.AssistantMessage)
+      .find(
+        (item) =>
+          item.kind === ItemKind.AssistantMessage &&
+          item.status === ItemStatus.Completed,
+      )
     const text =
       assistantItem?.content.kind === "text"
         ? assistantItem.content.text
@@ -1827,27 +1921,72 @@ export function createSessionRunner(
   async function consumeModelStream(input: {
     readonly sessionId: string
     readonly turnId: string
-    readonly streamId: string
     readonly request: ModelRequest
     readonly assistantResponseBytes: number
   }): Promise<ConsumedModelResponse> {
     const startedAt = Date.now()
     let firstEventAt: number | undefined
+    // Live starts and deltas let the GUI assemble unfinished output without
+    // adding it to durable model history. A final completion reuses the id.
+    const messageItemId = createItemId()
+    const reasoningItemId = createItemId()
+    let messageItemStarted = false
+    let reasoningItemStarted = false
     const publisher =
-      options.transientHub === undefined
+      options.eventSink === undefined
         ? undefined
-        : createCoalescingSnapshotPublisher(
-            options.transientHub,
+        : createCoalescingDeltaPublisher(
+            options.eventSink,
             runtimeTiming.assistantSnapshotPublicationsPerSecond,
           )
     const reasoningPublisher =
-      options.transientHub === undefined
+      options.eventSink === undefined
         ? undefined
-        : createCoalescingSnapshotPublisher(
-            options.transientHub,
+        : createCoalescingDeltaPublisher(
+            options.eventSink,
             runtimeTiming.assistantSnapshotPublicationsPerSecond,
-            "reasoning.snapshot",
+            "reasoning.delta",
           )
+    const flushStreamingOutput = (): void => {
+      publisher?.flush()
+      reasoningPublisher?.flush()
+    }
+    const activeRuntime = activeTurnRuntime(input.sessionId, input.turnId)
+    if (activeRuntime !== undefined) {
+      activeRuntime.flushStreamingOutput = flushStreamingOutput
+    }
+    const clearStreamingOutputBarrier = (): void => {
+      if (activeRuntime?.flushStreamingOutput === flushStreamingOutput) {
+        activeRuntime.flushStreamingOutput = undefined
+      }
+    }
+
+    const ensureItemStarted = (kind: "agent_message" | "reasoning"): string => {
+      const itemId = kind === "agent_message" ? messageItemId : reasoningItemId
+      if (
+        kind === "agent_message" ? messageItemStarted : reasoningItemStarted
+      ) {
+        return itemId
+      }
+      options.eventSink?.publishTransient({
+        type: "item.started",
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        item:
+          kind === "agent_message"
+            ? { type: "agent_message", itemId }
+            : { type: "reasoning", itemId },
+        createdAt: new Date().toISOString(),
+      })
+      if (kind === "agent_message") messageItemStarted = true
+      else reasoningItemStarted = true
+      return itemId
+    }
+
+    const startedItemIds = (): StreamedItemIds => ({
+      ...(messageItemStarted ? { messageItemId } : {}),
+      ...(reasoningItemStarted ? { reasoningItemId } : {}),
+    })
 
     let terminal: ModelResponse | undefined
     try {
@@ -1861,10 +2000,11 @@ export function createSessionRunner(
               details: { code: "assistant_output_too_large" },
             })
           }
+          const itemId = ensureItemStarted("reasoning")
           reasoningPublisher?.publish({
             sessionId: input.sessionId,
             turnId: input.turnId,
-            streamId: input.streamId,
+            itemId,
             text: event.text,
           })
           continue
@@ -1877,10 +2017,11 @@ export function createSessionRunner(
               details: { code: "assistant_output_too_large" },
             })
           }
+          const itemId = ensureItemStarted("agent_message")
           publisher?.publish({
             sessionId: input.sessionId,
             turnId: input.turnId,
-            streamId: input.streamId,
+            itemId,
             text: event.text,
           })
           continue
@@ -1896,21 +2037,22 @@ export function createSessionRunner(
         terminal = event.response
       }
     } catch (error) {
-      publisher?.flush()
-      reasoningPublisher?.flush()
+      flushStreamingOutput()
+      clearStreamingOutputBarrier()
       if (isAbortError(error) || input.request.signal?.aborted) {
         const completedAt = Date.now()
         return {
           response: { stopReason: ModelStopReason.Aborted, content: [] },
           durationMs: completedAt - startedAt,
           timeToFirstTokenMs: (firstEventAt ?? completedAt) - startedAt,
+          startedItemIds: startedItemIds(),
         }
       }
       throw normalizeStreamError(error)
     }
 
-    publisher?.flush()
-    reasoningPublisher?.flush()
+    flushStreamingOutput()
+    clearStreamingOutputBarrier()
     if (terminal === undefined) {
       throw createYakitoriError({
         code: YakitoriErrorCode.InvalidState,
@@ -1923,6 +2065,7 @@ export function createSessionRunner(
       response: terminal,
       durationMs: completedAt - startedAt,
       timeToFirstTokenMs: (firstEventAt ?? completedAt) - startedAt,
+      startedItemIds: startedItemIds(),
     }
   }
 
@@ -1971,7 +2114,7 @@ export function createSessionRunner(
     publishDurable(failed.events)
   }
 
-  async function cancelActiveTurn(
+  async function interruptActiveTurn(
     sessionId: string,
     turnId: string,
     reason: string,
@@ -1984,14 +2127,15 @@ export function createSessionRunner(
       telemetry === undefined
         ? undefined
         : aggregateTokenUsage(telemetry.usages)
-    const cancelled = await options.kernel.cancelTurn({
+    const interrupted = await options.kernel.interruptTurn({
       sessionId,
       turnId,
       reason,
+      recordModelMarker: true,
       ...(usage === undefined ? {} : { usage }),
       ...(telemetry === undefined ? {} : { metrics: turnMetrics(telemetry) }),
     })
-    publishDurable(cancelled.events)
+    publishDurable(interrupted.events)
   }
 
   function isInvalidStateError(error: unknown): boolean {
@@ -2008,7 +2152,7 @@ export function createSessionRunner(
     turnId: string,
   ): Promise<void> {
     if (closed) return
-    await cancelActiveTurn(sessionId, turnId, "aborted")
+    await interruptActiveTurn(sessionId, turnId, "aborted")
   }
 
   async function requireSession(sessionId: string): Promise<SessionProjection> {
@@ -2043,9 +2187,11 @@ export function createSessionRunner(
           })
         }
       }
-      lane?.activeTurn?.abort.abort()
+      const activeRuntime = lane?.activeTurn
+      activeRuntime?.abort.abort()
+      activeRuntime?.flushStreamingOutput?.()
       try {
-        await cancelActiveTurn(
+        await interruptActiveTurn(
           input.sessionId,
           input.turnId,
           input.reason ?? "interrupted",
@@ -2173,6 +2319,24 @@ function aggregateTokenUsage(
     ...(totals.cacheWriteInputTokens === 0
       ? {}
       : { cacheWriteInputTokens: totals.cacheWriteInputTokens }),
+  }
+}
+
+function addTokenUsage(
+  previous: TokenUsage | undefined,
+  current: TokenUsage | undefined,
+): TokenUsage | undefined {
+  if (previous === undefined && current === undefined) return undefined
+  const cacheReadInputTokens =
+    (previous?.cacheReadInputTokens ?? 0) + (current?.cacheReadInputTokens ?? 0)
+  const cacheWriteInputTokens =
+    (previous?.cacheWriteInputTokens ?? 0) +
+    (current?.cacheWriteInputTokens ?? 0)
+  return {
+    inputTokens: (previous?.inputTokens ?? 0) + (current?.inputTokens ?? 0),
+    outputTokens: (previous?.outputTokens ?? 0) + (current?.outputTokens ?? 0),
+    ...(cacheReadInputTokens === 0 ? {} : { cacheReadInputTokens }),
+    ...(cacheWriteInputTokens === 0 ? {} : { cacheWriteInputTokens }),
   }
 }
 

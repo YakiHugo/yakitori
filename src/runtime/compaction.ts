@@ -145,8 +145,9 @@ export function buildCompactionRequest(input: {
   }
 }
 
-// Compaction is housekeeping: drain the stream locally without publishing
-// snapshots, and fail loudly so the caller can fall back to dropped history.
+// Compaction is housekeeping: the summary stream is drained locally because
+// clients learn progress from the context_compaction item lifecycle, not from
+// text snapshots. Fail loudly so the caller can fall back to dropped history.
 export async function runCompaction(input: {
   readonly stream: StreamFn
   readonly request: ModelRequest

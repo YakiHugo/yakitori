@@ -22,6 +22,7 @@ export const HistoryRecordType = {
   InitialContext: "history.initialized",
   WorldState: "world_state",
   ProviderUsageBaseline: "provider.usage_baseline",
+  TurnAborted: "turn.aborted",
 } as const
 
 export const ForkReason = {
@@ -47,14 +48,21 @@ export const COMPACT_DIRECTIVE = "/compact"
 export const ItemKind = {
   AssistantMessage: "assistant_message",
   Reasoning: "reasoning",
+  ContextCompaction: "context_compaction",
   ToolCall: "tool_call",
   ToolResult: "tool_result",
 } as const
 
 export const ItemStatus = {
+  InProgress: "in_progress",
   Completed: "completed",
   Failed: "failed",
 } as const
+
+// Recorded on tools left open at a terminal Turn so GUI and model context
+// render one fact instead of synthesizing different missing-result text.
+export const MISSING_TOOL_RESULT_TEXT =
+  "No tool result was recorded. Execution status and side effects are unknown. Inspect the current state before retrying."
 
 export type EventType = (typeof EventType)[keyof typeof EventType]
 export type HistoryRecordType =
@@ -348,6 +356,14 @@ export type TurnContextRecord = {
   }
 }
 
+export type TurnAbortedRecord = {
+  readonly type: typeof HistoryRecordType.TurnAborted
+  readonly data: {
+    readonly turnId: string
+    readonly message: ModelUserMessage
+  }
+}
+
 export type SessionHistoryPosition = {
   readonly sessionId: string
   readonly endSeqExclusive: number
@@ -391,6 +407,8 @@ export type TurnCompletedEvent = {
     readonly turnId: string
     readonly outcome: TurnOutcome
     readonly usage?: TokenUsage
+    /** Cumulative Session usage at this durable Turn boundary. */
+    readonly sessionUsage?: TokenUsage
     readonly metrics?: TurnMetrics
     readonly metadata?: EventMetadata
   }
@@ -504,7 +522,6 @@ export type AgentMessageExecutionItem = Readonly<{
   type: "agent_message"
   itemId: string
   content: ReadonlyArray<ModelTextBlock>
-  streamId?: string
   providerMetadata?: EventMetadata
 }>
 
@@ -512,8 +529,22 @@ export type ReasoningExecutionItem = Readonly<{
   type: "reasoning"
   itemId: string
   text: string
-  streamId?: string
   providerMetadata?: EventMetadata
+}>
+
+// Compaction is housekeeping inside a Turn: the durable checkpoint is the
+// context.compacted event, and this item only gives clients a started →
+// completed lifecycle to render progress.
+export type ContextCompactionStartedItem = Readonly<{
+  type: "context_compaction"
+  itemId: string
+}>
+
+export type ContextCompactionCompletedItem = Readonly<{
+  type: "context_compaction"
+  itemId: string
+  status: typeof ItemStatus.Completed | typeof ItemStatus.Failed
+  error?: KernelError
 }>
 
 type ToolExecutionItemBase = Readonly<{
@@ -585,25 +616,35 @@ export type ToolExecutionDescriptor =
 
 export type ToolExecutionItem = ToolExecutionItemBase & ToolExecutionDescriptor
 
+// Compaction is the only housekeeping item opened durably before completion.
+// Assistant and reasoning starts belong to live delivery; their durable final
+// items are self-contained ItemCompleted facts.
+export type StreamedStartedItem = ContextCompactionStartedItem
+
+export type StartedExecutionItem = StreamedStartedItem | ToolExecutionItem
+
 export type ItemStartedEvent = Readonly<{
   type: typeof EventType.ItemStarted
-  data: Readonly<{ turnId: string; item: ToolExecutionItem }>
+  data: Readonly<{ turnId: string; item: StartedExecutionItem }>
 }>
+
+export type CompletedExecutionItem =
+  | AgentMessageExecutionItem
+  | ReasoningExecutionItem
+  | ContextCompactionCompletedItem
+  | (ToolExecutionItem &
+      Readonly<{
+        resultItemId: string
+        content: ItemContent
+        output?: JsonValue
+        error?: KernelError
+      }>)
 
 export type ItemCompletedEvent = Readonly<{
   type: typeof EventType.ItemCompleted
   data: Readonly<{
     turnId: string
-    item:
-      | AgentMessageExecutionItem
-      | ReasoningExecutionItem
-      | (ToolExecutionItem &
-          Readonly<{
-            resultItemId: string
-            content: ItemContent
-            output?: JsonValue
-            error?: KernelError
-          }>)
+    item: CompletedExecutionItem
   }>
 }>
 
@@ -672,6 +713,7 @@ export type KernelEvent =
 export type SessionHistoryRecord =
   | SessionMetadataRecord
   | TurnContextRecord
+  | TurnAbortedRecord
   | WorldStateRecord
   | InitialContextRecord
   | ProviderUsageBaselineRecord
@@ -837,25 +879,35 @@ function requireKernelFact(value: unknown): asserts value is KernelFact {
           isString(data.turnId) &&
           isTurnExecutionContext(data.context)
         )
+      case HistoryRecordType.TurnAborted:
+        return (
+          onlyKeys(data, ["turnId", "message"]) &&
+          isString(data.turnId) &&
+          isModelMessage(data.message) &&
+          data.message.role === "user"
+        )
       case EventType.TurnCompleted:
         return (
           onlyKeys(data, [
             "turnId",
             "outcome",
             "usage",
+            "sessionUsage",
             "metrics",
             "metadata",
           ]) &&
           isString(data.turnId) &&
           isTurnOutcome(data.outcome) &&
           (data.usage === undefined || isTokenUsage(data.usage)) &&
+          (data.sessionUsage === undefined ||
+            isTokenUsage(data.sessionUsage)) &&
           (data.metrics === undefined || isTurnMetrics(data.metrics))
         )
       case EventType.ItemStarted:
         return (
           onlyKeys(data, ["turnId", "item"]) &&
           isString(data.turnId) &&
-          isToolExecutionItem(data.item)
+          isStartedExecutionItem(data.item)
         )
       case EventType.ItemCompleted:
         return (
@@ -971,47 +1023,59 @@ function isToolExecutionItem(value: unknown): value is ToolExecutionItem {
   return isRecord(value) && isToolExecutionItemWithLifecycle(value, false)
 }
 
+function isAgentMessageItem(
+  value: Record<string, unknown>,
+): value is AgentMessageExecutionItem {
+  return (
+    onlyKeys(value, ["type", "itemId", "content", "providerMetadata"]) &&
+    isString(value.itemId) &&
+    Array.isArray(value.content) &&
+    value.content.every(
+      (block) =>
+        isRecord(block) &&
+        onlyKeys(block, ["type", "text"]) &&
+        block.type === "text" &&
+        isString(block.text),
+    ) &&
+    (value.providerMetadata === undefined ||
+      isJsonObject(value.providerMetadata))
+  )
+}
+
+function isReasoningItem(
+  value: Record<string, unknown>,
+): value is ReasoningExecutionItem {
+  return (
+    onlyKeys(value, ["type", "itemId", "text", "providerMetadata"]) &&
+    isString(value.itemId) &&
+    isString(value.text) &&
+    (value.providerMetadata === undefined ||
+      isJsonObject(value.providerMetadata))
+  )
+}
+
+function isStartedExecutionItem(value: unknown): value is StartedExecutionItem {
+  if (!isRecord(value)) return false
+  if (value.type === "agent_message") return isAgentMessageItem(value)
+  if (value.type === "reasoning") return isReasoningItem(value)
+  if (value.type === "context_compaction") {
+    return onlyKeys(value, ["type", "itemId"]) && isString(value.itemId)
+  }
+  return isToolExecutionItem(value)
+}
+
 function isCompletedExecutionItem(
   value: unknown,
 ): value is ItemCompletedEvent["data"]["item"] {
   if (!isRecord(value)) return false
-  if (value.type === "agent_message") {
+  if (value.type === "agent_message") return isAgentMessageItem(value)
+  if (value.type === "reasoning") return isReasoningItem(value)
+  if (value.type === "context_compaction") {
     return (
-      onlyKeys(value, [
-        "type",
-        "itemId",
-        "content",
-        "streamId",
-        "providerMetadata",
-      ]) &&
+      onlyKeys(value, ["type", "itemId", "status", "error"]) &&
       isString(value.itemId) &&
-      Array.isArray(value.content) &&
-      value.content.every(
-        (block) =>
-          isRecord(block) &&
-          onlyKeys(block, ["type", "text"]) &&
-          block.type === "text" &&
-          isString(block.text),
-      ) &&
-      (value.streamId === undefined || isString(value.streamId)) &&
-      (value.providerMetadata === undefined ||
-        isJsonObject(value.providerMetadata))
-    )
-  }
-  if (value.type === "reasoning") {
-    return (
-      onlyKeys(value, [
-        "type",
-        "itemId",
-        "text",
-        "streamId",
-        "providerMetadata",
-      ]) &&
-      isString(value.itemId) &&
-      isString(value.text) &&
-      (value.streamId === undefined || isString(value.streamId)) &&
-      (value.providerMetadata === undefined ||
-        isJsonObject(value.providerMetadata))
+      isItemStatus(value.status) &&
+      (value.error === undefined || isKernelError(value.error))
     )
   }
   return (
@@ -1021,6 +1085,10 @@ function isCompletedExecutionItem(
     (value.output === undefined || isJsonValue(value.output)) &&
     (value.error === undefined || isKernelError(value.error))
   )
+}
+
+function isItemStatus(value: unknown): value is ItemStatus {
+  return value === ItemStatus.Completed || value === ItemStatus.Failed
 }
 
 function isToolExecutionItemWithLifecycle(

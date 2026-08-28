@@ -47,7 +47,8 @@ export const ToolLimitDefaults = {
 
 export const RunnerTimingDefaults = {
   permissionWaitTimeoutMs: 10 * 60 * 1000,
-  assistantSnapshotPublicationsPerSecond: 20,
+  // This bounds transient SSE/renderer churn, not model sampling or fsync.
+  assistantSnapshotPublicationsPerSecond: 10,
 } as const satisfies RunnerTimingPolicy
 
 export function createRunnerTimingPolicy(

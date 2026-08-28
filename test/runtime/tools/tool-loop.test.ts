@@ -865,7 +865,7 @@ describe("tool loop", () => {
           }),
           expect.objectContaining({
             toolCallId: "tool_hang",
-            state: "requested",
+            state: "failed",
           }),
         ]),
       )

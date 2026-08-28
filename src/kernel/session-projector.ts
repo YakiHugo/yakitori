@@ -16,10 +16,12 @@ import {
   type JsonValue,
   type KernelError,
   type ModelMessage,
+  type ModelUserMessage,
   type ModelSelection,
   type ProviderUsageBaseline,
   type SessionConfigurationSnapshot,
   type StoredEventEnvelope,
+  type StreamedStartedItem,
   type TextContent,
   type TokenUsage,
   type ToolExecutionItem,
@@ -58,12 +60,14 @@ export type SessionProjection = {
   readonly forkReason?: ForkReason
   readonly metadata?: EventMetadata
   readonly configuration?: SessionConfigurationSnapshot
+  readonly modelSelection?: ModelSelection
   readonly usage?: TokenUsage
   readonly providerUsageBaseline?: ProviderUsageBaselineProjection
   readonly compaction?: CompactionProjection
   readonly inheritedContext?: InheritedContextProjection
   readonly worldState?: WorldStateProjection
   readonly worldStateUpdates: readonly WorldStateUpdateProjection[]
+  readonly turnAbortedContexts: readonly TurnAbortedContextProjection[]
   readonly inputs: readonly InputProjection[]
   readonly pendingInputs: readonly InputProjection[]
   readonly activeTurn?: TurnProjection
@@ -124,6 +128,36 @@ export function summarizeSessionProjection(
   }
 }
 
+function selectionFromExecution(
+  execution: TurnExecutionContext,
+): ModelSelection {
+  return {
+    provider: execution.provider,
+    model: execution.model,
+    ...(execution.effort === undefined ? {} : { effort: execution.effort }),
+    ...(execution.speed === undefined ? {} : { speed: execution.speed }),
+  }
+}
+
+// Next execution target: the active Turn's model, else the first pending
+// input's admit-time selection, else the last terminal Turn, else default.
+export function effectiveSessionModel(session: {
+  readonly activeTurn?: TurnProjection
+  readonly pendingInputs: readonly InputProjection[]
+  readonly turns: readonly TurnProjection[]
+  readonly configuration?: SessionConfigurationSnapshot
+}): ModelSelection | undefined {
+  const active = session.activeTurn?.executionContext
+  if (active !== undefined) return selectionFromExecution(active)
+  const pending = session.pendingInputs[0]?.modelSelection
+  if (pending !== undefined) return pending
+  const previous = [...session.turns]
+    .reverse()
+    .find((turn) => turn.state !== TurnState.Started)?.executionContext
+  if (previous !== undefined) return selectionFromExecution(previous)
+  return session.configuration?.defaultTarget
+}
+
 // The latest checkpoint replaces the previous one; coverage is cumulative by
 // construction, so one field is enough.
 export type CompactionProjection = {
@@ -165,6 +199,13 @@ export type ProviderUsageBaselineProjection = {
   readonly turnId: string
   readonly modelCallId: string
   readonly baseline: ProviderUsageBaseline
+  readonly seq: number
+  readonly createdAt: string
+}
+
+export type TurnAbortedContextProjection = {
+  readonly turnId: string
+  readonly message: ModelUserMessage
   readonly seq: number
   readonly createdAt: string
 }
@@ -267,6 +308,7 @@ export function applySessionFacts(
   let session = current === undefined ? undefined : mutableSession(current)
   let worldState = current?.worldState
   const worldStateUpdates = [...(current?.worldStateUpdates ?? [])]
+  const turnAbortedContexts = [...(current?.turnAbortedContexts ?? [])]
 
   for (const stored of events) {
     if (!session && stored.type === EventType.SessionCreated) {
@@ -356,6 +398,20 @@ export function applySessionFacts(
       }
       continue
     }
+    if (stored.type === HistoryRecordType.TurnAborted) {
+      turnAbortedContexts.push({
+        turnId: stored.data.turnId,
+        message: stored.data.message,
+        seq: stored.seq,
+        createdAt: stored.createdAt,
+      })
+      continue
+    }
+    if (stored.type === EventType.TurnCompleted) {
+      if (stored.data.sessionUsage !== undefined) {
+        session.usage = stored.data.sessionUsage
+      }
+    }
     applyKnownEvent(inputs, turns, items, tools, turnContexts, stored)
   }
 
@@ -366,16 +422,26 @@ export function applySessionFacts(
   const activeTurn = projectedTurns.find(
     (turn) => turn.state === TurnState.Started,
   )
-  const usage = aggregateTokenUsage(projectedTurns)
+  const pendingInputs = projectedInputs.filter(
+    (input) => input.state === InputState.Admitted,
+  )
+  const modelSelection = effectiveSessionModel({
+    ...(activeTurn === undefined ? {} : { activeTurn }),
+    pendingInputs,
+    turns: projectedTurns,
+    ...(session.configuration === undefined
+      ? {}
+      : { configuration: session.configuration }),
+  })
   return {
     ...session,
-    ...(usage === undefined ? {} : { usage }),
+    ...(modelSelection === undefined ? {} : { modelSelection }),
+    ...(session.usage === undefined ? {} : { usage: session.usage }),
     ...(worldState === undefined ? {} : { worldState }),
     worldStateUpdates,
+    turnAbortedContexts,
     inputs: projectedInputs,
-    pendingInputs: projectedInputs.filter(
-      (input) => input.state === InputState.Admitted,
-    ),
+    pendingInputs,
     ...(activeTurn === undefined ? {} : { activeTurn }),
     completedTurns: projectedTurns.filter(
       (turn) => turn.state === TurnState.Completed,
@@ -457,6 +523,7 @@ function mutableSession(current: SessionProjection): MutableSession {
     ...(current.configuration === undefined
       ? {}
       : { configuration: current.configuration }),
+    ...(current.usage === undefined ? {} : { usage: current.usage }),
     ...(current.compaction === undefined
       ? {}
       : { compaction: current.compaction }),
@@ -484,6 +551,7 @@ type MutableSession = {
   forkReason?: ForkReason
   metadata?: EventMetadata
   configuration?: SessionConfigurationSnapshot
+  usage?: TokenUsage
   compaction?: CompactionProjection
   inheritedContext?: InheritedContextProjection
   providerUsageBaseline?: ProviderUsageBaselineProjection
@@ -511,6 +579,7 @@ function applyKnownEvent(
     case EventType.SessionCreated:
     case HistoryRecordType.SessionMetadata:
     case HistoryRecordType.TurnContext:
+    case HistoryRecordType.TurnAborted:
       return
     case EventType.InputAdmitted:
       inputs.set(event.data.inputId, {
@@ -595,24 +664,48 @@ function applyKnownEvent(
       }
       return
     }
-    case EventType.ItemStarted:
-      applyToolStarted(turns, items, tools, event)
-      return
-    case EventType.ItemCompleted:
-      if (
-        event.data.item.type === "agent_message" ||
-        event.data.item.type === "reasoning"
-      ) {
-        applyAssistantItem(turns, items, event)
-      } else {
-        applyToolCompleted(turns, items, tools, event)
+    case EventType.ItemStarted: {
+      const item = event.data.item
+      if (item.type === "context_compaction") {
+        applyDisplayItemStarted(
+          turns,
+          items,
+          event.data.turnId,
+          item,
+          event.createdAt,
+        )
+        return
       }
+      applyToolStarted(
+        turns,
+        items,
+        tools,
+        event.data.turnId,
+        item,
+        event.createdAt,
+      )
       return
+    }
+    case EventType.ItemCompleted: {
+      const item = event.data.item
+      if (item.type === "agent_message" || item.type === "reasoning") {
+        applyAssistantItem(turns, items, event)
+        return
+      }
+      if (item.type === "context_compaction") {
+        applyCompactionItemCompleted(items, event)
+        return
+      }
+      applyToolCompleted(turns, items, tools, event)
+      return
+    }
     case HistoryRecordType.WorldState:
     case HistoryRecordType.InitialContext:
     case HistoryRecordType.ProviderUsageBaseline:
     case EventType.ContextCompacted:
       return
+    default:
+      assertNever(event)
   }
 }
 
@@ -636,42 +729,6 @@ function isJsonRecord(value: JsonValue | undefined): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
-function aggregateTokenUsage(
-  turns: readonly TurnProjection[],
-): TokenUsage | undefined {
-  const recorded = turns.filter(
-    (turn): turn is TurnProjection & { readonly usage: TokenUsage } =>
-      turn.usage !== undefined,
-  )
-  if (recorded.length === 0) return undefined
-  const totals = recorded.reduce(
-    (total, turn) => ({
-      inputTokens: total.inputTokens + turn.usage.inputTokens,
-      outputTokens: total.outputTokens + turn.usage.outputTokens,
-      cacheReadInputTokens:
-        total.cacheReadInputTokens + (turn.usage.cacheReadInputTokens ?? 0),
-      cacheWriteInputTokens:
-        total.cacheWriteInputTokens + (turn.usage.cacheWriteInputTokens ?? 0),
-    }),
-    {
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheReadInputTokens: 0,
-      cacheWriteInputTokens: 0,
-    },
-  )
-  return {
-    inputTokens: totals.inputTokens,
-    outputTokens: totals.outputTokens,
-    ...(totals.cacheReadInputTokens === 0
-      ? {}
-      : { cacheReadInputTokens: totals.cacheReadInputTokens }),
-    ...(totals.cacheWriteInputTokens === 0
-      ? {}
-      : { cacheWriteInputTokens: totals.cacheWriteInputTokens }),
-  }
-}
-
 function compactionProjection(
   event: Extract<EventEnvelope, { type: typeof EventType.ContextCompacted }>,
 ): CompactionProjection {
@@ -687,6 +744,56 @@ function compactionProjection(
   }
 }
 
+function applyDisplayItemStarted(
+  turns: Map<string, MutableTurn>,
+  items: Map<string, ItemProjection>,
+  turnId: string,
+  item: StreamedStartedItem,
+  createdAt: string,
+): void {
+  const turn = turns.get(turnId)
+  if (!turn) {
+    invalidReplay(`Item ${item.itemId} has no matching Turn.`)
+  }
+  requireNewItemId(items, item.itemId)
+  items.set(item.itemId, {
+    itemId: item.itemId,
+    turnId,
+    kind: ItemKind.ContextCompaction,
+    content: { kind: "text", text: "" },
+    status: ItemStatus.InProgress,
+    appendedAt: createdAt,
+    updatedAt: createdAt,
+  })
+  turn.itemIds.push(item.itemId)
+}
+
+function applyCompactionItemCompleted(
+  items: Map<string, ItemProjection>,
+  event: Extract<EventEnvelope, { type: typeof EventType.ItemCompleted }>,
+): void {
+  const execution = event.data.item
+  if (execution.type !== "context_compaction") return
+  const existing = items.get(execution.itemId)
+  if (
+    existing === undefined ||
+    existing.kind !== ItemKind.ContextCompaction ||
+    existing.status !== ItemStatus.InProgress
+  ) {
+    invalidReplay(
+      `Compaction item ${execution.itemId} has no matching in-progress start.`,
+    )
+  }
+  items.set(execution.itemId, {
+    ...existing,
+    status:
+      execution.status === ItemStatus.Failed
+        ? ItemStatus.Failed
+        : ItemStatus.Completed,
+    updatedAt: event.createdAt,
+  })
+}
+
 function applyAssistantItem(
   turns: Map<string, MutableTurn>,
   items: Map<string, ItemProjection>,
@@ -700,18 +807,41 @@ function applyAssistantItem(
   if (!turn) {
     invalidReplay(`Item ${execution.itemId} has no matching Turn.`)
   }
-  requireNewItemId(items, execution.itemId)
+  const kind =
+    execution.type === "reasoning"
+      ? ItemKind.Reasoning
+      : ItemKind.AssistantMessage
   const text =
     execution.type === "reasoning"
       ? execution.text
       : execution.content.map((block) => block.text).join("")
+  const existing = items.get(execution.itemId)
+  if (existing !== undefined) {
+    if (
+      existing.status !== ItemStatus.InProgress ||
+      existing.kind !== kind ||
+      existing.turnId !== event.data.turnId
+    ) {
+      invalidReplay(
+        `Item ${execution.itemId} completion does not match its start.`,
+      )
+    }
+    items.set(execution.itemId, {
+      ...existing,
+      content: { kind: "text", text },
+      status: ItemStatus.Completed,
+      updatedAt: event.createdAt,
+      ...(execution.providerMetadata === undefined
+        ? {}
+        : { providerMetadata: execution.providerMetadata }),
+    })
+    return
+  }
+  requireNewItemId(items, execution.itemId)
   const item: ItemProjection = {
     itemId: execution.itemId,
     turnId: event.data.turnId,
-    kind:
-      execution.type === "reasoning"
-        ? ItemKind.Reasoning
-        : ItemKind.AssistantMessage,
+    kind,
     content: { kind: "text", text },
     status: ItemStatus.Completed,
     appendedAt: event.createdAt,
@@ -728,10 +858,11 @@ function applyToolStarted(
   turns: Map<string, MutableTurn>,
   items: Map<string, ItemProjection>,
   tools: Map<string, MutableTool>,
-  event: Extract<EventEnvelope, { type: typeof EventType.ItemStarted }>,
+  turnId: string,
+  execution: ToolExecutionItem,
+  createdAt: string,
 ): void {
-  const execution = event.data.item
-  const turn = turns.get(event.data.turnId)
+  const turn = turns.get(turnId)
   if (!turn) {
     invalidReplay(`Tool start ${execution.toolCallId} has no matching Turn.`)
   }
@@ -741,7 +872,7 @@ function applyToolStarted(
   }
   items.set(execution.itemId, {
     itemId: execution.itemId,
-    turnId: event.data.turnId,
+    turnId,
     kind: ItemKind.ToolCall,
     content: {
       kind: "json",
@@ -752,18 +883,18 @@ function applyToolStarted(
       },
     },
     status: ItemStatus.Completed,
-    appendedAt: event.createdAt,
-    updatedAt: event.createdAt,
+    appendedAt: createdAt,
+    updatedAt: createdAt,
   })
   tools.set(execution.toolCallId, {
     toolCallId: execution.toolCallId,
-    turnId: event.data.turnId,
+    turnId,
     name: execution.name,
     input: execution.input,
     execution,
     state: ToolState.Requested,
-    requestedAt: event.createdAt,
-    updatedAt: event.createdAt,
+    requestedAt: createdAt,
+    updatedAt: createdAt,
     requestItemId: execution.itemId,
     requiresPermission: execution.requiresPermission,
   })
@@ -777,7 +908,11 @@ function applyToolCompleted(
   event: Extract<EventEnvelope, { type: typeof EventType.ItemCompleted }>,
 ): void {
   const execution = event.data.item
-  if (execution.type === "agent_message" || execution.type === "reasoning") {
+  if (
+    execution.type === "agent_message" ||
+    execution.type === "reasoning" ||
+    execution.type === "context_compaction"
+  ) {
     return
   }
   const tool = tools.get(execution.toolCallId)
@@ -838,6 +973,14 @@ function applyToolCompleted(
 
 function invalidReplay(message: string): never {
   throw new Error(`Invalid Session replay: ${message}`)
+}
+
+// The projection fails closed: adding a kernel fact type without a case here
+// is a compile error, not a silently dropped event.
+function assertNever(value: never): never {
+  throw new Error(
+    `Unhandled kernel fact in Session projection: ${String((value as { type?: unknown })?.type)}`,
+  )
 }
 
 function requireNewItemId(
