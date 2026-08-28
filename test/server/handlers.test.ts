@@ -470,6 +470,28 @@ describe("server handlers", () => {
       speed: "fast",
     })
 
+    const queued = await server.admitInput({
+      sessionId: created.body.session.id,
+      requestId: "request_second-queued",
+      content: { kind: "text", text: "run later" },
+      modelSelection: {
+        provider: "openai",
+        model: "gpt-5.6-sol",
+        effort: "low",
+      },
+    })
+    expectOk(queued)
+    const queuedRead = await server.readSession({
+      sessionId: created.body.session.id,
+    })
+    expectOk(queuedRead)
+    expect(queuedRead.body.session.currentModel).toEqual({
+      provider: "openai",
+      model: "gpt-5.6-sol",
+      effort: "high",
+      speed: "fast",
+    })
+
     const badSpeed = await server.admitInput({
       sessionId: created.body.session.id,
       requestId: "request_bad-speed",

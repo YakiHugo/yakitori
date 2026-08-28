@@ -8,6 +8,7 @@ import {
   type ImageAttachment,
   InputRole,
   isIdWithPrefix,
+  isKernelEvent,
   isJsonValue,
   isRequestId,
   isYakitoriError,
@@ -51,7 +52,7 @@ export type SessionCreateDefaults = {
 
 export type ServerHandlerOptions = {
   readonly eventHub?: {
-    publish(events: readonly EventEnvelope[]): void
+    publishDurable(events: readonly EventEnvelope[]): void
   }
   readonly sessionDefaults?: SessionCreateDefaults
   readonly wakeSession?: (sessionId: string) => void
@@ -152,7 +153,7 @@ export function createServerHandlers(
             options.sessionDefaults,
           ),
         )
-        options.eventHub?.publish([created.event])
+        options.eventHub?.publishDurable([created.event])
         const read = await kernel.readSession({ sessionId: created.sessionId })
         return ok(201, {
           session: mapRequiredSession(created.sessionId, read.session),
@@ -245,7 +246,7 @@ export function createServerHandlers(
           options.availableProviders,
         )
         const forked = await forkAfterSettlingActiveTurn(request)
-        options.eventHub?.publish(forked.sourceEvents)
+        options.eventHub?.publishDurable(forked.sourceEvents)
         if (request.content !== undefined) {
           options.wakeSession?.(forked.sessionId)
         }
@@ -253,7 +254,7 @@ export function createServerHandlers(
         return ok(201, {
           session: mapRequiredSession(forked.sessionId, read.session),
           historyEndSeqExclusive: forked.historyEndSeqExclusive,
-          events: forked.localEvents,
+          events: forked.events,
         })
       } catch (error) {
         return fail(error)
@@ -309,7 +310,7 @@ export function createServerHandlers(
               )
             })
         }
-        if (admitted.created) options.eventHub?.publish([admitted.event])
+        if (admitted.created) options.eventHub?.publishDurable([admitted.event])
         // Wake even on idempotent replay: original process may have crashed
         // after commit and before scheduling.
         options.wakeSession?.(request.sessionId)
@@ -340,7 +341,7 @@ export function createServerHandlers(
             ? {}
             : { requestId: request.requestId }),
         })
-        if (admitted.created) options.eventHub?.publish([admitted.event])
+        if (admitted.created) options.eventHub?.publishDurable([admitted.event])
         options.wakeSession?.(request.sessionId)
         return ok(admitted.created ? 201 : 200, {
           requestId: admitted.requestId,
@@ -356,7 +357,7 @@ export function createServerHandlers(
       try {
         const request = requireCancelInputRequest(input)
         const cancelled = await kernel.cancelInput(request)
-        options.eventHub?.publish([cancelled.event])
+        options.eventHub?.publishDurable([cancelled.event])
         return ok(200, {
           sessionId: request.sessionId,
           inputId: request.inputId,
@@ -373,8 +374,13 @@ export function createServerHandlers(
         if (options.interruptTurn) {
           await options.interruptTurn(request)
         } else {
-          const cancelled = await kernel.cancelTurn(request)
-          options.eventHub?.publish(cancelled.events)
+          const interrupted = await kernel.interruptTurn({
+            ...request,
+            recordModelMarker: true,
+          })
+          options.eventHub?.publishDurable(
+            interrupted.events.filter((event) => isKernelEvent(event)),
+          )
         }
         return ok(200, {
           sessionId: request.sessionId,
@@ -485,6 +491,12 @@ function mapSessionDetail(
             ...currentModel,
           },
         }),
+    ...(session.usage === undefined ? {} : { usage: session.usage }),
+    pendingInputs: session.pendingInputs.map((input) => ({
+      id: input.inputId,
+      text: input.content.text,
+      admittedAt: input.admittedAt,
+    })),
     pendingPermissions: pendingPermissions.map(
       ({ sessionId: _, ...permission }) => permission,
     ),
@@ -502,22 +514,7 @@ function mapSessionDetail(
 function currentSessionModel(
   session: SessionProjection,
 ): ModelSelection | undefined {
-  const execution = session.turns.at(-1)?.executionContext
-  let current: ModelSelection | undefined =
-    execution === undefined
-      ? session.configuration?.defaultTarget
-      : {
-          provider: execution.provider,
-          model: execution.model,
-          ...(execution.effort === undefined
-            ? {}
-            : { effort: execution.effort }),
-          ...(execution.speed === undefined ? {} : { speed: execution.speed }),
-        }
-  for (const pending of session.pendingInputs) {
-    current = pending.modelSelection ?? current
-  }
-  return current
+  return session.modelSelection
 }
 
 function mapRequiredSession(

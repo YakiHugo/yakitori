@@ -8,7 +8,6 @@ import { extname, join, resolve, sep } from "node:path"
 import { pipeline } from "node:stream/promises"
 import {
   createSessionKernel,
-  type EventEnvelope,
   type EventStore,
   isKernelEvent,
   isYakitoriError,
@@ -16,11 +15,12 @@ import {
   type SessionFiles,
   type StoredEventEnvelope,
 } from "../kernel/index.ts"
-import type {
-  LiveSessionEvent,
-  TransientEventHub,
-} from "../runtime/live-events.ts"
-import { createDurableEventHub, type DurableEventHub } from "./event-hub.ts"
+import type { LiveSessionEvent } from "../runtime/live-events.ts"
+import {
+  createSessionEventHub,
+  type SessionDelivery,
+  type SessionEventHub,
+} from "./event-hub.ts"
 import { createServerHandlers, type ServerHandlers } from "./handlers.ts"
 import type { ProjectRegistry } from "./project-registry.ts"
 import {
@@ -36,8 +36,7 @@ export type YakitoriStaticAssets = {
 }
 
 type YakitoriHttpServerCommonOptions = {
-  readonly eventHub?: DurableEventHub
-  readonly transientHub?: TransientEventHub
+  readonly eventHub?: SessionEventHub
   readonly staticAssets?: YakitoriStaticAssets
   readonly projectRegistry?: ProjectRegistry
   readonly providers?: () => Promise<ApiListProvidersResponse>
@@ -66,8 +65,7 @@ export type YakitoriHttpServerOptions = YakitoriHttpServerCommonOptions &
   )
 
 export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
-  const eventHub = options.eventHub ?? createDurableEventHub()
-  const transientHub = options.transientHub
+  const eventHub = options.eventHub ?? createSessionEventHub()
   const handlers =
     options.handlers ??
     createServerHandlers(resolveServerKernel(options), { eventHub })
@@ -88,7 +86,6 @@ export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
       response,
       handlers,
       eventHub,
-      transientHub,
       projectRegistry,
       providers,
       userConfig,
@@ -118,8 +115,7 @@ async function handleRequest(
   request: IncomingMessage,
   response: ServerResponse,
   handlers: ServerHandlers,
-  eventHub: DurableEventHub,
-  transientHub: TransientEventHub | undefined,
+  eventHub: SessionEventHub,
   projectRegistry: ProjectRegistry | undefined,
   providers: (() => Promise<ApiListProvidersResponse>) | undefined,
   userConfig: UserConfigStore | undefined,
@@ -420,7 +416,6 @@ async function handleRequest(
       response,
       handlers,
       eventHub,
-      transientHub,
       route.sessionId,
       cursor.after,
     )
@@ -590,53 +585,26 @@ function routeRequest(method: string, url: URL): Route {
 async function streamSessionEvents(
   response: ServerResponse,
   handlers: ServerHandlers,
-  eventHub: DurableEventHub,
-  transientHub: TransientEventHub | undefined,
+  eventHub: SessionEventHub,
   sessionId: string,
   after: number,
 ): Promise<void> {
-  const pendingEvents: EventEnvelope[] = []
-  const pendingLive: LiveSessionEvent[] = []
+  const pendingDeliveries: SessionDelivery[] = []
   let heartbeat: ReturnType<typeof setInterval> | undefined
   let live = false
   let lastSequence = 0
   let responseClosed = false
-  const subscription = eventHub.subscribe(sessionId, (events) => {
+  const subscription = eventHub.subscribe(sessionId, (delivery) => {
     if (responseClosed) return
     if (!live) {
-      pendingEvents.push(...events)
+      pendingDeliveries.push(delivery)
       return
     }
-    lastSequence = writeSseEvents(response, events, lastSequence)
-  })
-  const liveSubscription = transientHub?.subscribe(sessionId, (event) => {
-    if (responseClosed) return
-    if (!live) {
-      if (
-        event.type === "permission.requested" ||
-        event.type === "permission.resolved"
-      ) {
-        pendingLive.push(event)
-        return
-      }
-      // Coalesce snapshots by stream id for slow subscribers during replay.
-      const index = pendingLive.findIndex(
-        (candidate) =>
-          (candidate.type === "assistant.snapshot" ||
-            candidate.type === "reasoning.snapshot") &&
-          candidate.type === event.type &&
-          candidate.streamId === event.streamId,
-      )
-      if (index >= 0) pendingLive[index] = event
-      else pendingLive.push(event)
-      return
-    }
-    writeTransientSseEvent(response, event)
+    lastSequence = writeSessionDelivery(response, delivery, lastSequence)
   })
   const cleanup = () => {
     if (heartbeat) clearInterval(heartbeat)
     subscription.close()
-    liveSubscription?.close()
   }
 
   response.once("close", () => {
@@ -674,6 +642,8 @@ async function streamSessionEvents(
 
   writeSseHead(response)
   response.write(": connected\n\n")
+  response.write("event: session.snapshot\n")
+  response.write(`data: ${JSON.stringify(snapshot.body)}\n\n`)
   lastSequence = after
   for (;;) {
     if (responseClosed) {
@@ -695,19 +665,81 @@ async function streamSessionEvents(
       return
     }
   }
-  pendingEvents.sort((left, right) => left.seq - right.seq)
-  lastSequence = writeSseEvents(response, pendingEvents, lastSequence)
-  pendingEvents.length = 0
   response.write("event: session.replay-complete\n")
   response.write("data: {}\n\n")
+  // Re-send still-pending permission requests so a (re)connecting client can
+  // resolve them without a separate fetch. Requests already buffered live
+  // during replay win over the older snapshot read.
+  const bufferedRequestIds = new Set(
+    pendingDeliveries.flatMap((delivery) => {
+      const event = delivery.kind === "transient" ? delivery.event : undefined
+      return event?.type === "permission.requested"
+        ? [event.permissionRequestId]
+        : []
+    }),
+  )
+  for (const permission of snapshot.body.session.pendingPermissions) {
+    if (bufferedRequestIds.has(permission.permissionRequestId)) continue
+    writeTransientSseEvent(response, {
+      type: "permission.requested",
+      sessionId,
+      ...permission,
+    })
+  }
+  // Reconcile client-only display events against the snapshot and the durable
+  // lifecycle facts that arrived after it. This closes the commit→publish
+  // window where a terminal Turn is already in the snapshot but an older
+  // buffered delta reaches the connection afterward.
+  let liveTurnId = snapshot.body.session.activeTurnId
+  for (const delivery of pendingDeliveries) {
+    if (delivery.kind === "transient" && isLiveDisplayEvent(delivery.event)) {
+      if (delivery.event.turnId !== liveTurnId) continue
+    }
+    lastSequence = writeSessionDelivery(response, delivery, lastSequence)
+    if (delivery.kind === "durable") {
+      for (const event of delivery.events) {
+        if (event.type === "turn.started") liveTurnId = event.data.turnId
+        if (
+          event.type === "turn.completed" &&
+          event.data.turnId === liveTurnId
+        ) {
+          liveTurnId = undefined
+        }
+      }
+    }
+  }
+  pendingDeliveries.length = 0
   live = true
-  for (const event of pendingLive) writeTransientSseEvent(response, event)
-  pendingLive.length = 0
 
   heartbeat = setInterval(() => {
     if (responseClosed) return
     response.write(": heartbeat\n\n")
   }, 15_000)
+}
+
+function isLiveDisplayEvent(
+  event: LiveSessionEvent,
+): event is Extract<
+  LiveSessionEvent,
+  { readonly type: "item.started" | "assistant.delta" | "reasoning.delta" }
+> {
+  return (
+    event.type === "item.started" ||
+    event.type === "assistant.delta" ||
+    event.type === "reasoning.delta"
+  )
+}
+
+function writeSessionDelivery(
+  response: ServerResponse,
+  delivery: SessionDelivery,
+  lastSequence: number,
+): number {
+  if (delivery.kind === "durable") {
+    return writeSseEvents(response, delivery.events, lastSequence)
+  }
+  writeTransientSseEvent(response, delivery.event)
+  return lastSequence
 }
 
 function writeSseHead(response: ServerResponse): void {
