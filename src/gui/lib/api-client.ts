@@ -4,6 +4,7 @@ import type {
   ApiCancelInputResponse,
   ApiErrorCode,
   ApiErrorResponse,
+  ApiReadSessionResponse,
 } from "../../server/protocol.ts"
 
 export class ApiRequestError extends Error {
@@ -67,11 +68,10 @@ export function cancelSessionInput(
 }
 
 export type SessionEventStreamHandlers = {
-  readonly onOpen: () => void
+  readonly onSnapshot: (snapshot: ApiReadSessionResponse) => void
   readonly onReplayComplete: () => void
   readonly onEvent: (event: StoredEventEnvelope) => void
   readonly onTransient: (event: LiveSessionEvent) => void
-  readonly onError: () => void
 }
 
 export function openSessionEventStream(
@@ -86,7 +86,13 @@ export function openSessionEventStream(
       `/sessions/${encodeURIComponent(sessionId)}/events?after=${after}`,
     ),
   )
-  source.addEventListener("open", () => handlers.onOpen())
+  source.addEventListener("session.snapshot", (message) => {
+    handlers.onSnapshot(
+      JSON.parse(
+        (message as MessageEvent<string>).data,
+      ) as ApiReadSessionResponse,
+    )
+  })
   source.addEventListener("session.replay-complete", () =>
     handlers.onReplayComplete(),
   )
@@ -100,7 +106,6 @@ export function openSessionEventStream(
       JSON.parse((message as MessageEvent<string>).data) as LiveSessionEvent,
     )
   })
-  source.addEventListener("error", () => handlers.onError())
   return source
 }
 

@@ -22,7 +22,9 @@ export function Composer() {
   const apiBase = useAppStore((state) => state.apiBase)
   const busy = useAppStore((state) => state.busy)
   const focusRevision = useAppStore((state) => state.composerFocusRevision)
-  const modelSelectionReady = useAppStore((state) => state.modelSelectionReady)
+  const restoringModelSelectionFor = useAppStore(
+    (state) => state.restoringModelSelectionFor,
+  )
   const providers = useAppStore((state) => state.providers)
   const defaultProvider = useAppStore((state) => state.defaultProvider)
   const defaultModel = useAppStore((state) => state.defaultModel)
@@ -54,6 +56,7 @@ export function Composer() {
       defaultProvider,
       defaultModel,
     }),
+    providers,
   )
   const modelEntry = providers
     .find((provider) => provider.name === effectiveModel?.provider)
@@ -87,7 +90,7 @@ export function Composer() {
   const canSend =
     containsInput &&
     sessionId !== undefined &&
-    modelSelectionReady &&
+    restoringModelSelectionFor !== sessionId &&
     !busy &&
     !sending &&
     !readingImages &&

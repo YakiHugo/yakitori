@@ -46,14 +46,14 @@ export function Transcript() {
               case "assistant":
                 return (
                   <AssistantMessageCell
-                    key={`assistant:${entry.itemId ?? entry.streamId ?? entry.at}`}
+                    key={`assistant:${entry.itemId}`}
                     entry={entry}
                   />
                 )
               case "reasoning":
                 return (
                   <ReasoningCell
-                    key={`reasoning:${entry.itemId ?? entry.streamId ?? entry.at}`}
+                    key={`reasoning:${entry.itemId}`}
                     entry={entry}
                   />
                 )
