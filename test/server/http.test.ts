@@ -18,7 +18,7 @@ import {
 import { createInputId, createSessionId } from "../../src/kernel/ids.ts"
 import { createJsonlEventStore } from "../../src/kernel/jsonl-event-store.ts"
 import { createSessionKernel } from "../../src/kernel/session-kernel.ts"
-import { createDurableEventHub } from "../../src/server/event-hub.ts"
+import { createSessionEventHub } from "../../src/server/event-hub.ts"
 import { createServerHandlers } from "../../src/server/handlers.ts"
 import {
   createYakitoriHttpServer,
@@ -342,18 +342,23 @@ describe("HTTP server", () => {
       )
 
       expect(stream.status).toBe(200)
-      const event = await readNextSessionEvent(stream)
+      const text = await readSseUntilReplayComplete(stream)
       abort.abort()
 
-      expect(event).toMatchObject({
-        seq: 1,
-        type: EventType.SessionCreated,
-      })
+      expect(text).toContain("event: session.snapshot")
+      expect(text).toContain('"pendingInputs":[]')
+      expect(text).toContain('"type":"session.created"')
+      expect(text.indexOf("event: session.snapshot")).toBeLessThan(
+        text.indexOf("event: session.event"),
+      )
+      expect(text.indexOf("event: session.event")).toBeLessThan(
+        text.indexOf("event: session.replay-complete"),
+      )
     })
   })
 
-  it("flushes events buffered during replay before replay-complete", async () => {
-    const eventHub = createDurableEventHub()
+  it("drains post-snapshot durable backlog after replay-complete", async () => {
+    const eventHub = createSessionEventHub()
     let resolveReplayStarted: (() => void) | undefined
     let resolveFinishReplay: (() => void) | undefined
     const replayStarted = new Promise<void>((resolve) => {
@@ -389,6 +394,7 @@ describe("HTTP server", () => {
               seq: 1,
               createdAt: "2026-01-01T00:00:00.000Z",
               updatedAt: "2026-01-01T00:00:00.000Z",
+              pendingInputs: [],
               pendingPermissions: [],
               counts: {
                 inputs: 0,
@@ -419,18 +425,300 @@ describe("HTTP server", () => {
           { signal: abort.signal },
         )
         await replayStarted
-        eventHub.publish([buffered])
+        eventHub.publishDurable([buffered])
         resolveFinishReplay?.()
         const response = await responsePromise
-        const text = await readSseUntilReplayComplete(response)
+        const text = await readSseUntil(response, JSON.stringify(buffered))
         abort.abort()
 
-        expect(text.indexOf(`data: ${JSON.stringify(buffered)}`)).toBeLessThan(
-          text.indexOf("event: session.replay-complete"),
+        expect(text.indexOf("event: session.replay-complete")).toBeLessThan(
+          text.indexOf(`data: ${JSON.stringify(buffered)}`),
         )
         expect(replayRequests).toEqual([
           { sessionId: "session_1", after: 0, through: 1, limit: 500 },
         ])
+      },
+    )
+  })
+
+  it("preserves transient-before-terminal order across replay handoff", async () => {
+    const eventHub = createSessionEventHub()
+    let resolveReplayStarted: (() => void) | undefined
+    let resolveFinishReplay: (() => void) | undefined
+    const replayStarted = new Promise<void>((resolve) => {
+      resolveReplayStarted = resolve
+    })
+    const finishReplay = new Promise<void>((resolve) => {
+      resolveFinishReplay = resolve
+    })
+    const itemCompleted = createEventEnvelope({
+      sessionId: "session_1",
+      seq: 2,
+      event: {
+        type: EventType.ItemCompleted,
+        data: {
+          turnId: "turn_1",
+          item: { type: "agent_message", itemId: "item_1", content: [] },
+        },
+      },
+    })
+    const turnCompleted = createEventEnvelope({
+      sessionId: "session_1",
+      seq: 3,
+      event: {
+        type: EventType.TurnCompleted,
+        data: {
+          turnId: "turn_1",
+          outcome: { status: "interrupted", reason: "user stop" },
+        },
+      },
+    })
+    const handlers = {
+      ...createServerHandlers(createSessionKernel(createMemoryEventStore())),
+      async readSession() {
+        return {
+          ok: true as const,
+          status: 200,
+          body: {
+            session: {
+              id: "session_1",
+              conversationId: "session_1",
+              seq: 1,
+              createdAt: "2026-01-01T00:00:00.000Z",
+              updatedAt: "2026-01-01T00:00:00.000Z",
+              activeTurnId: "turn_1",
+              pendingInputs: [],
+              pendingPermissions: [],
+              counts: {
+                inputs: 1,
+                pendingInputs: 0,
+                turns: 1,
+                items: 1,
+                permissions: 0,
+                tools: 0,
+              },
+            },
+          },
+        }
+      },
+      async readSessionEvents() {
+        resolveReplayStarted?.()
+        await finishReplay
+        return { ok: true as const, status: 200, body: { events: [] } }
+      },
+    }
+
+    await withListeningServer(
+      createYakitoriHttpServer({ handlers, eventHub }),
+      async (baseUrl) => {
+        const abort = new AbortController()
+        const responsePromise = fetch(
+          `${baseUrl}/sessions/session_1/events?after=0`,
+          { signal: abort.signal },
+        )
+        await replayStarted
+        eventHub.publishTransient({
+          type: "assistant.delta",
+          sessionId: "session_1",
+          turnId: "turn_1",
+          itemId: "item_1",
+          delta: "partial",
+          createdAt: "2026-08-28T00:00:00.000Z",
+        })
+        eventHub.publishDurable([itemCompleted, turnCompleted])
+        resolveFinishReplay?.()
+
+        const response = await responsePromise
+        const text = await readSseUntil(response, JSON.stringify(turnCompleted))
+        abort.abort()
+        const replayCompleteAt = text.indexOf("event: session.replay-complete")
+        const deltaAt = text.indexOf('"type":"assistant.delta"')
+        const itemCompletedAt = text.indexOf(JSON.stringify(itemCompleted))
+        const turnCompletedAt = text.indexOf(JSON.stringify(turnCompleted))
+        expect(replayCompleteAt).toBeLessThan(deltaAt)
+        expect(deltaAt).toBeLessThan(itemCompletedAt)
+        expect(itemCompletedAt).toBeLessThan(turnCompletedAt)
+      },
+    )
+  })
+
+  it("drops buffered display events for a Turn already terminal in the snapshot", async () => {
+    const eventHub = createSessionEventHub()
+    let resolveReplayStarted: (() => void) | undefined
+    let resolveFinishReplay: (() => void) | undefined
+    const replayStarted = new Promise<void>((resolve) => {
+      resolveReplayStarted = resolve
+    })
+    const finishReplay = new Promise<void>((resolve) => {
+      resolveFinishReplay = resolve
+    })
+    const terminal = createEventEnvelope({
+      sessionId: "session_1",
+      seq: 3,
+      event: {
+        type: EventType.TurnCompleted,
+        data: {
+          turnId: "turn_1",
+          outcome: { status: "interrupted", reason: "user stop" },
+        },
+      },
+    })
+    const handlers = {
+      ...createServerHandlers(createSessionKernel(createMemoryEventStore())),
+      async readSession() {
+        return {
+          ok: true as const,
+          status: 200,
+          body: {
+            session: {
+              id: "session_1",
+              conversationId: "session_1",
+              seq: 3,
+              createdAt: "2026-01-01T00:00:00.000Z",
+              updatedAt: "2026-01-01T00:00:00.000Z",
+              pendingInputs: [],
+              pendingPermissions: [],
+              counts: {
+                inputs: 1,
+                pendingInputs: 0,
+                turns: 1,
+                items: 0,
+                permissions: 0,
+                tools: 0,
+              },
+            },
+          },
+        }
+      },
+      async readSessionEvents() {
+        resolveReplayStarted?.()
+        await finishReplay
+        return {
+          ok: true as const,
+          status: 200,
+          body: { events: [terminal] },
+        }
+      },
+    }
+
+    await withListeningServer(
+      createYakitoriHttpServer({ handlers, eventHub }),
+      async (baseUrl) => {
+        const abort = new AbortController()
+        const responsePromise = fetch(
+          `${baseUrl}/sessions/session_1/events?after=0`,
+          { signal: abort.signal },
+        )
+        await replayStarted
+        eventHub.publishTransient({
+          type: "item.started",
+          sessionId: "session_1",
+          turnId: "turn_1",
+          item: { type: "agent_message", itemId: "item_1" },
+          createdAt: "2026-08-28T00:00:00.000Z",
+        })
+        eventHub.publishTransient({
+          type: "assistant.delta",
+          sessionId: "session_1",
+          turnId: "turn_1",
+          itemId: "item_1",
+          delta: "stale partial",
+          createdAt: "2026-08-28T00:00:00.001Z",
+        })
+        eventHub.publishTransient({
+          type: "session.usage",
+          sessionId: "session_1",
+          turnId: "turn_1",
+          usage: { inputTokens: 10, outputTokens: 2 },
+          createdAt: "2026-08-28T00:00:00.002Z",
+        })
+        resolveFinishReplay?.()
+
+        const response = await responsePromise
+        const text = await readSseUntil(response, '"type":"session.usage"')
+        abort.abort()
+        expect(text).toContain(JSON.stringify(terminal))
+        expect(text).not.toContain('"type":"item.started"')
+        expect(text).not.toContain('"type":"assistant.delta"')
+      },
+    )
+  })
+
+  it("replays pending permission requests after replay-complete", async () => {
+    const pendingPermission = {
+      permissionRequestId: "permission_pending_1",
+      turnId: "turn_1",
+      toolCallId: "call_1",
+      action: "run_command",
+      subject: "pnpm test",
+      createdAt: "2026-08-27T00:00:00.000Z",
+    }
+    const handlers = {
+      ...createServerHandlers(createSessionKernel(createMemoryEventStore())),
+      async readSession() {
+        return {
+          ok: true as const,
+          status: 200,
+          body: {
+            session: {
+              id: "session_1",
+              conversationId: "session_1",
+              seq: 1,
+              createdAt: "2026-01-01T00:00:00.000Z",
+              updatedAt: "2026-01-01T00:00:00.000Z",
+              pendingInputs: [],
+              pendingPermissions: [pendingPermission],
+              counts: {
+                inputs: 0,
+                pendingInputs: 0,
+                turns: 0,
+                items: 0,
+                permissions: 1,
+                tools: 0,
+              },
+            },
+          },
+        }
+      },
+      async readSessionEvents() {
+        return { ok: true as const, status: 200, body: { events: [] } }
+      },
+    }
+
+    await withListeningServer(
+      createYakitoriHttpServer({ handlers }),
+      async (baseUrl) => {
+        const abort = new AbortController()
+        const response = await fetch(
+          `${baseUrl}/sessions/session_1/events?after=0`,
+          { signal: abort.signal },
+        )
+        if (!response.body) throw new Error("Expected a streaming body.")
+        const reader = response.body.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ""
+        await withTimeout(async () => {
+          while (!buffer.includes("permission.requested")) {
+            const chunk = await reader.read()
+            if (chunk.done) throw new Error("SSE stream ended before replay.")
+            buffer += decoder.decode(chunk.value, { stream: true })
+          }
+        })
+        abort.abort()
+
+        const replayCompleteAt = buffer.indexOf(
+          "event: session.replay-complete",
+        )
+        const requestedAt = buffer.indexOf("event: session.transient")
+        expect(replayCompleteAt).toBeGreaterThanOrEqual(0)
+        expect(requestedAt).toBeGreaterThan(replayCompleteAt)
+        expect(buffer).toContain(
+          JSON.stringify({
+            type: "permission.requested",
+            sessionId: "session_1",
+            ...pendingPermission,
+          }),
+        )
       },
     )
   })
@@ -1216,13 +1504,20 @@ async function readNextSessionEvent(
 }
 
 async function readSseUntilReplayComplete(response: Response): Promise<string> {
+  return readSseUntil(response, "event: session.replay-complete")
+}
+
+async function readSseUntil(
+  response: Response,
+  marker: string,
+): Promise<string> {
   if (!response.body) throw new Error("Expected a streaming response body.")
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ""
 
   return await withTimeout(async () => {
-    while (!buffer.includes("event: session.replay-complete")) {
+    while (!buffer.includes(marker)) {
       const chunk = await reader.read()
       if (chunk.done) throw new Error("SSE stream ended during replay.")
       buffer += decoder.decode(chunk.value, { stream: true })
@@ -1233,10 +1528,7 @@ async function readSseUntilReplayComplete(response: Response): Promise<string> {
 
 function parseSseEvent(buffer: string): EventEnvelope | undefined {
   const block = buffer.split("\n\n").find((candidate) => {
-    return (
-      (candidate.includes("\ndata: ") || candidate.startsWith("data: ")) &&
-      !candidate.includes("event: session.replay-complete")
-    )
+    return candidate.includes("event: session.event")
   })
   const data = block
     ?.split("\n")

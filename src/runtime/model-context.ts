@@ -5,6 +5,7 @@ import {
   ItemKind,
   type ItemProjection,
   ItemStatus,
+  MISSING_TOOL_RESULT_TEXT,
   type JsonObject,
   type SessionProjection,
   type TextContent,
@@ -662,10 +663,15 @@ function buildTurnGroup(
   }
 
   for (const item of turnItems) {
+    if (item.kind === ItemKind.ContextCompaction) {
+      appendWorldStateAfter(item.itemId)
+      continue
+    }
     if (
       item.kind === ItemKind.Reasoning &&
       item.status === ItemStatus.Completed &&
-      item.content.kind === "text"
+      item.content.kind === "text" &&
+      item.content.text.length > 0
     ) {
       pendingAssistant.push({
         type: "reasoning",
@@ -712,8 +718,7 @@ function buildTurnGroup(
         messages.push({
           role: "tool",
           toolCallId: tool.toolCallId,
-          content:
-            "No tool result was recorded. Execution status and side effects are unknown. Inspect the current state before retrying.",
+          content: MISSING_TOOL_RESULT_TEXT,
           isError: true,
         })
       }
@@ -744,8 +749,14 @@ function buildTurnGroup(
   }
 
   flushAssistant()
-  const notice = terminalTurnNotice(turn)
-  if (notice !== undefined) {
+  const abortedContext = session.turnAbortedContexts.find(
+    (context) => context.turnId === turn.turnId,
+  )
+  const notice =
+    abortedContext === undefined ? terminalTurnNotice(turn) : undefined
+  if (abortedContext !== undefined) {
+    messages.push(abortedContext.message)
+  } else if (notice !== undefined) {
     messages.push({
       role: "user",
       content: [{ type: "text", text: notice }],

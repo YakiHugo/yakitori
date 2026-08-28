@@ -17,6 +17,7 @@ export type CatalogModel = {
   readonly model: string
   readonly instructionProfileId: InstructionProfileId
   readonly displayName?: string
+  readonly effortStyle?: "none" | "levels"
   readonly efforts?: readonly string[]
   readonly speeds?: readonly string[]
   readonly inputModalities: readonly ModelInputModality[]
@@ -48,6 +49,10 @@ export function listCatalogModels(provider: string): CatalogModel[] {
       ),
       ...("displayName" in entry && entry.displayName !== undefined
         ? { displayName: entry.displayName }
+        : {}),
+      ...("effortStyle" in entry &&
+      (entry.effortStyle === "none" || entry.effortStyle === "levels")
+        ? { effortStyle: entry.effortStyle }
         : {}),
       ...("efforts" in entry && entry.efforts !== undefined
         ? { efforts: entry.efforts }

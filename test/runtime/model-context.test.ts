@@ -557,6 +557,45 @@ describe("model context", () => {
     expect(notice.content[0]?.text).toContain(detail)
   })
 
+  it("uses the persisted user-abort marker for an intentional interrupt", async () => {
+    const context = await withAttributedSession(
+      async ({ kernel, sessionId }) => {
+        const admitted = await kernel.admitInput({
+          sessionId,
+          content: { kind: "text", text: "start" },
+        })
+        const turn = await kernel.startTurn({
+          sessionId,
+          inputId: admitted.inputId,
+          executionContext: testTurnExecutionContext(),
+        })
+        await kernel.interruptTurn({
+          sessionId,
+          turnId: turn.turnId,
+          reason: "user stop",
+          recordModelMarker: true,
+        })
+        const next = await kernel.admitInput({
+          sessionId,
+          content: { kind: "text", text: "continue" },
+        })
+        const read = await kernel.readSession({ sessionId })
+        if (!read.session) throw new Error("missing session")
+        return buildModelContext({
+          session: read.session,
+          currentInputId: next.inputId,
+          limits: generousLimits(),
+        })
+      },
+    )
+
+    const marker = context.messages.at(-2)
+    expect(marker).toMatchObject({ role: "user" })
+    if (marker?.role !== "user") throw new Error("missing abort marker")
+    expect(marker.content[0]?.text).toContain("<turn_aborted>")
+    expect(marker.content[0]?.text).not.toContain("<turn_interrupted>")
+  })
+
   it("never returns a current Turn context above the hard cap", async () => {
     await withAttributedSession(async ({ kernel, sessionId }) => {
       const current = await kernel.admitInput({

@@ -45,7 +45,7 @@ describe("composer", () => {
     const admitInput = vi.fn((_text: string) => Promise.resolve())
     useAppStore.setState({
       admitInput,
-      selection: { revision: 1, sessionId: "session_1" },
+      selection: { sessionId: "session_1" },
       promptDraft: "  hello mate  ",
     })
     render(<Composer />)
@@ -63,7 +63,7 @@ describe("composer", () => {
     const admitInput = vi.fn((_text: string) => Promise.resolve())
     useAppStore.setState({
       admitInput,
-      selection: { revision: 1, sessionId: "session_1" },
+      selection: { sessionId: "session_1" },
       promptDraft: "hello",
     })
     render(<Composer />)
@@ -77,7 +77,7 @@ describe("composer", () => {
 
   it("keeps the send button disabled for an empty draft", () => {
     useAppStore.setState({
-      selection: { revision: 1, sessionId: "session_1" },
+      selection: { sessionId: "session_1" },
       promptDraft: "   ",
     })
     render(<Composer />)
@@ -90,9 +90,9 @@ describe("composer", () => {
 
   it("keeps sending disabled until an old Session model is restored", () => {
     useAppStore.setState({
-      selection: { revision: 1, sessionId: "session_1" },
+      selection: { sessionId: "session_1" },
       promptDraft: "hello",
-      modelSelectionReady: false,
+      restoringModelSelectionFor: "session_1",
     })
     render(<Composer />)
 
@@ -104,7 +104,7 @@ describe("composer", () => {
 
   it("shows an explicit sending state while admission is in flight", () => {
     useAppStore.setState({
-      selection: { revision: 1, sessionId: "session_1" },
+      selection: { sessionId: "session_1" },
       promptDraft: "hello",
       inFlightActions: new Set(["admit:session_1"]),
     })
@@ -120,7 +120,7 @@ describe("composer", () => {
     const admitInput = vi.fn(() => Promise.resolve())
     useAppStore.setState({
       admitInput,
-      selection: { revision: 1, sessionId: "session_1" },
+      selection: { sessionId: "session_1" },
     })
     render(<Composer />)
     await user.click(screen.getByRole("button", { name: "Attach images" }))
@@ -153,7 +153,7 @@ describe("composer", () => {
     const admitInput = vi.fn(() => Promise.resolve())
     useAppStore.setState({
       admitInput,
-      selection: { revision: 1, sessionId: "session_1" },
+      selection: { sessionId: "session_1" },
       defaultProvider: "kimi",
       defaultModel: "k3",
       providers: [
@@ -214,7 +214,7 @@ function draftImage(detail: "high" | "original") {
 describe("model selector", () => {
   function selectModelState() {
     return {
-      selection: { revision: 1, sessionId: "session_1" },
+      selection: { sessionId: "session_1" },
       providers: [
         {
           name: "openai",

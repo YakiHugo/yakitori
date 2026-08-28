@@ -803,10 +803,20 @@ for (const implementation of ["memory", "jsonl"] as const) {
         })
         const read = await kernel.readSession({ sessionId: active.sessionId })
 
-        expect(output.events.map((event) => event.type)).toEqual([
-          EventType.ItemCompleted,
-          EventType.ItemCompleted,
-          EventType.ItemStarted,
+        // Display completions are self-contained; only executable work opens
+        // a durable started item.
+        expect(
+          output.events.map((event) => [
+            event.type,
+            event.type === EventType.ItemStarted ||
+            event.type === EventType.ItemCompleted
+              ? event.data.item.type
+              : undefined,
+          ]),
+        ).toEqual([
+          [EventType.ItemCompleted, "reasoning"],
+          [EventType.ItemCompleted, "agent_message"],
+          [EventType.ItemStarted, "dynamic_tool_call"],
         ])
         expect(read.session?.tools[0]).toMatchObject({
           toolCallId: "tool_read",
@@ -819,6 +829,194 @@ for (const implementation of ["memory", "jsonl"] as const) {
           "tool_call",
           "tool_result",
         ])
+      })
+    })
+
+    it("reuses a live streamed id in its self-contained completion", async () => {
+      await withKernel(implementation, async ({ kernel }) => {
+        const active = await activeTurn(kernel)
+        const output = await kernel.recordAssistantOutput({
+          ...active,
+          content: [{ type: "text", text: "streamed hello" }],
+          streamedItemIds: { messageItemId: "item_streamed" },
+        })
+        // Completion reuses the live id without a durable start fact.
+        expect(output.events.map((event) => event.type)).toEqual([
+          EventType.ItemCompleted,
+        ])
+        expect(output.events[0]).toMatchObject({
+          data: {
+            item: {
+              type: "agent_message",
+              itemId: "item_streamed",
+              content: [{ type: "text", text: "streamed hello" }],
+            },
+          },
+        })
+        const read = await kernel.readSession({ sessionId: active.sessionId })
+        expect(read.session?.items).toHaveLength(1)
+        expect(read.session?.items[0]).toMatchObject({
+          itemId: "item_streamed",
+          kind: "assistant_message",
+        })
+      })
+    })
+
+    it("does not persist a live reasoning item absent from the final response", async () => {
+      await withKernel(implementation, async ({ kernel }) => {
+        const active = await activeTurn(kernel)
+        const output = await kernel.completeTurnWithAssistantOutput({
+          ...active,
+          content: [{ type: "text", text: "answer" }],
+          streamedItemIds: { reasoningItemId: "item_reasoning" },
+        })
+        const reasoningClosed = output.events.filter(
+          (event) =>
+            event.type === EventType.ItemCompleted &&
+            event.data.item.type === "reasoning" &&
+            event.data.item.itemId === "item_reasoning",
+        )
+        expect(reasoningClosed).toHaveLength(0)
+      })
+    })
+
+    it("rejects compaction item opens without an active Turn", async () => {
+      await withKernel(implementation, async ({ kernel }) => {
+        const created = await kernel.createSession()
+        await expect(
+          kernel.startItem({
+            sessionId: created.sessionId,
+            turnId: "turn_missing",
+            item: { type: "context_compaction", itemId: "item_1" },
+          }),
+        ).rejects.toMatchObject({ code: "not_found" })
+      })
+    })
+
+    it("closes a compaction item atomically with its checkpoint", async () => {
+      await withKernel(implementation, async ({ kernel }) => {
+        const active = await activeTurn(kernel)
+        await kernel.startItem({
+          ...active,
+          item: { type: "context_compaction", itemId: "item_compact" },
+        })
+        const read = await kernel.readSession({ sessionId: active.sessionId })
+        const throughSeq = read.session?.seq
+        if (throughSeq === undefined) throw new Error("missing session")
+        const recorded = await kernel.recordCompaction({
+          ...active,
+          expectedCompactionId: null,
+          throughSeq,
+          coveredTurnIds: [],
+          summary: "Goal: ship the feature.",
+          replacement: checkpointReplacement("Goal: ship the feature."),
+          compactionItemId: "item_compact",
+        })
+
+        expect(recorded.events.map((event) => event.type)).toEqual([
+          EventType.ContextCompacted,
+          EventType.ItemCompleted,
+        ])
+        expect(recorded.events[1]).toMatchObject({
+          data: {
+            item: {
+              type: "context_compaction",
+              itemId: "item_compact",
+              status: "completed",
+            },
+          },
+        })
+      })
+    })
+
+    it("rejects completing a compaction item that was never started", async () => {
+      await withKernel(implementation, async ({ kernel }) => {
+        const active = await activeTurn(kernel)
+        await expect(
+          kernel.completeItem({
+            ...active,
+            item: {
+              type: "context_compaction",
+              itemId: "item_missing",
+              status: "completed",
+            },
+          }),
+        ).rejects.toMatchObject({ code: "invalid_state" })
+      })
+    })
+
+    it("rejects a second completion of the same compaction item", async () => {
+      await withKernel(implementation, async ({ kernel }) => {
+        const active = await activeTurn(kernel)
+        await kernel.startItem({
+          ...active,
+          item: { type: "context_compaction", itemId: "item_compact" },
+        })
+        await kernel.completeItem({
+          ...active,
+          item: {
+            type: "context_compaction",
+            itemId: "item_compact",
+            status: "failed",
+            error: { message: "stopped" },
+          },
+        })
+        await expect(
+          kernel.completeItem({
+            ...active,
+            item: {
+              type: "context_compaction",
+              itemId: "item_compact",
+              status: "completed",
+            },
+          }),
+        ).rejects.toMatchObject({ code: "invalid_state" })
+      })
+    })
+
+    it("interrupts without fabricating a durable display item", async () => {
+      await withKernel(implementation, async ({ kernel }) => {
+        const active = await activeTurn(kernel)
+        await kernel.interruptTurn({
+          ...active,
+          reason: "user stop",
+          recordModelMarker: true,
+        })
+        const read = await kernel.readSession({ sessionId: active.sessionId })
+        expect(read.session?.items).toEqual([])
+        expect(read.session?.turnAbortedContexts).toEqual([
+          expect.objectContaining({ turnId: active.turnId }),
+        ])
+        const replay = await kernel.replaySession({
+          sessionId: active.sessionId,
+        })
+        expect(JSON.stringify(replay.events)).not.toContain("partial answer")
+        expect(replay.events.map((event) => event.type)).toContain(
+          HistoryRecordType.TurnAborted,
+        )
+      })
+    })
+
+    it("rejects a duplicate streamed item id", async () => {
+      await withKernel(implementation, async ({ kernel }) => {
+        const active = await activeTurn(kernel)
+        await kernel.recordAssistantOutput({
+          ...active,
+          content: [{ type: "text", text: "taken" }],
+        })
+        const taken = (
+          await kernel.readSession({
+            sessionId: active.sessionId,
+          })
+        ).session?.items[0]?.itemId
+        if (taken === undefined) throw new Error("missing recorded item")
+        await expect(
+          kernel.recordAssistantOutput({
+            ...active,
+            content: [{ type: "text", text: "duplicate" }],
+            streamedItemIds: { messageItemId: taken },
+          }),
+        ).rejects.toMatchObject({ code: "invalid_state" })
       })
     })
 
@@ -1048,7 +1246,11 @@ for (const implementation of ["memory", "jsonl"] as const) {
           state: TurnState.Interrupted,
           interruptedReason: "restart",
         })
-        expect(replay.session?.tools[0]?.state).toBe(ToolState.Requested)
+        expect(replay.session?.tools[0]?.state).toBe(ToolState.Failed)
+        expect(replay.session?.tools[0]?.error).toMatchObject({
+          message:
+            "No tool result was recorded. Execution status and side effects are unknown. Inspect the current state before retrying.",
+        })
       })
     })
 
@@ -1108,6 +1310,11 @@ for (const implementation of ["memory", "jsonl"] as const) {
               outputTokens: 8,
               cacheReadInputTokens: 75,
             },
+            sessionUsage: {
+              inputTokens: 100,
+              outputTokens: 8,
+              cacheReadInputTokens: 75,
+            },
             metrics: {
               modelCalls: 1,
               toolCalls: 0,
@@ -1123,6 +1330,11 @@ for (const implementation of ["memory", "jsonl"] as const) {
           data: {
             turnId: cancelledTurn.turnId,
             outcome: { status: "cancelled", reason: "user stopped" },
+            sessionUsage: {
+              inputTokens: 100,
+              outputTokens: 8,
+              cacheReadInputTokens: 75,
+            },
           },
         })
         const read = await kernel.readSession({ sessionId: session.sessionId })
@@ -1146,6 +1358,11 @@ for (const implementation of ["memory", "jsonl"] as const) {
           }),
         ])
         expect(read.session?.activeTurn).toBeUndefined()
+        expect(read.session?.usage).toEqual({
+          inputTokens: 100,
+          outputTokens: 8,
+          cacheReadInputTokens: 75,
+        })
       })
     })
 

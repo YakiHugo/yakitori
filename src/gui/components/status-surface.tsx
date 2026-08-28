@@ -120,6 +120,11 @@ function ActivityIcon({
   if (activity?.kind === "running_tool") {
     return <Wrench className="size-4 text-emerald-600" />
   }
+  if (activity?.kind === "compacting") {
+    return (
+      <LoaderCircle className="size-4 animate-spin text-muted-foreground" />
+    )
+  }
   return <ReasoningPulse />
 }
 
@@ -144,5 +149,6 @@ function activityLabel(
   if (activity?.kind === "running_tool") {
     return `Running · ${activity.name}`
   }
+  if (activity?.kind === "compacting") return "Compacting context"
   return "Reasoning"
 }

@@ -26,7 +26,6 @@ import {
   createProviderRegistry,
   createSessionRunner,
   createToolRegistry,
-  createTransientEventHub,
   createUserShellEnv,
   GROK_API_BASE_URL,
   ModelStopReason,
@@ -40,7 +39,7 @@ import {
   type UserShellEnv,
 } from "../runtime/index.ts"
 import { withRetries } from "../runtime/retrying-stream.ts"
-import { createDurableEventHub } from "./event-hub.ts"
+import { createSessionEventHub } from "./event-hub.ts"
 import {
   createServerHandlers,
   type ServerHandlers,
@@ -145,10 +144,9 @@ export async function createYakitoriApplication(
     mateStore = ownedMateStore
     const sessionKernel = createSessionKernel(ownedEventStore)
     const mateKernel = createMateKernel(ownedMateStore)
-    const eventHub = createDurableEventHub()
-    const transientHub = createTransientEventHub()
+    const eventHub = createSessionEventHub()
     const permissionGate = createPermissionGate({
-      publish: (event) => transientHub.publish(event),
+      publish: (event) => eventHub.publishTransient(event),
     })
     const projectRegistry = createProjectRegistry({
       defaultProject: workspace,
@@ -223,8 +221,7 @@ export async function createYakitoriApplication(
       ...(modelContextWindowTokens === undefined
         ? {}
         : { modelContextWindowTokens }),
-      durableHub: eventHub,
-      transientHub,
+      eventSink: eventHub,
       permissionGate,
       toolRegistry,
       sessionFiles,
@@ -258,7 +255,7 @@ export async function createYakitoriApplication(
     if (shouldRecover) {
       await recoverSessions({
         kernel: sessionKernel,
-        publish: (events) => eventHub.publish(events),
+        publish: (events) => eventHub.publishDurable(events),
         wake: (sessionId) => runner.wake(sessionId),
         onWakeError: (error, sessionId) => {
           console.error(`Recovered Session wake failed: ${sessionId}`, error)
@@ -285,7 +282,6 @@ export async function createYakitoriApplication(
       createHttpServer() {
         return createYakitoriHttpServer({
           eventHub,
-          transientHub,
           handlers,
           projectRegistry,
           providers,
@@ -339,6 +335,9 @@ async function providerSummary(
       id: entry.id,
       displayName: entry.displayName,
       instructionProfileId: entry.instructionProfileId as string,
+      ...(entry.effortStyle === undefined
+        ? {}
+        : { effortStyle: entry.effortStyle }),
       ...(entry.efforts === undefined ? {} : { efforts: entry.efforts }),
       ...(entry.speeds === undefined ? {} : { speeds: entry.speeds }),
       ...(entry.inputModalities === undefined

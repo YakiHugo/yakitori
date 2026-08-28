@@ -7,6 +7,7 @@ export type DirectoryModel = {
   readonly id: string
   readonly displayName: string
   readonly instructionProfileId: InstructionProfileId
+  readonly effortStyle?: "none" | "levels"
   readonly efforts?: readonly string[]
   readonly speeds?: readonly string[]
   readonly inputModalities?: readonly ("image" | "text" | "video")[]
@@ -24,6 +25,9 @@ export function createModelDirectory(): ModelDirectory {
         id: entry.model,
         displayName: entry.displayName ?? entry.model,
         instructionProfileId: entry.instructionProfileId,
+        ...(entry.effortStyle === undefined
+          ? {}
+          : { effortStyle: entry.effortStyle }),
         ...(entry.efforts === undefined ? {} : { efforts: entry.efforts }),
         ...(entry.speeds === undefined ? {} : { speeds: entry.speeds }),
         inputModalities: entry.inputModalities,

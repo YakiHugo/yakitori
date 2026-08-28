@@ -2,12 +2,13 @@ import { useMemo } from "react"
 import { create } from "zustand"
 import {
   COMPACT_DIRECTIVE,
-  EventType,
   type ImageAttachment,
+  isKernelEvent,
   type ModelSelection,
   type StoredEventEnvelope,
 } from "../../kernel/events.ts"
 import { createRequestId } from "../../kernel/ids.ts"
+import type { LiveSessionEvent } from "../../runtime/live-events.ts"
 import type {
   ApiAdmitInputResponse,
   ApiCompactSessionResponse,
@@ -16,8 +17,8 @@ import type {
   ApiListProjectsResponse,
   ApiListProvidersResponse,
   ApiListSessionsResponse,
+  ApiPendingPermission,
   ApiProviderSummary,
-  ApiReadSessionResponse,
   ApiSessionDetail,
   ApiSessionSummary,
   ApiUpdateUserModelPreferenceResponse,
@@ -37,17 +38,11 @@ import {
   openSessionEventStream,
   requestJson,
 } from "../lib/api-client.ts"
-import {
-  beginSessionSelection,
-  clearSessionSelection,
-  createSessionSelectionState,
-  currentSessionSelection,
-  isCurrentSessionSelection,
-  type SessionSelection,
-  type SessionSelectionState,
-} from "../session-selection.ts"
 
-export type StreamStatus = "connected" | "connecting" | "disconnected" | "idle"
+type SessionSelection = {
+  readonly revision: number
+  readonly sessionId: string
+}
 
 export type AppStoreData = {
   apiBase: string
@@ -58,8 +53,8 @@ export type AppStoreData = {
   execution: ExecutionViewState
   inFlightActions: ReadonlySet<string>
   message: string | undefined
-  modelSelectionReady: boolean
   modelSelections: Record<string, ModelSelection>
+  restoringModelSelectionFor: string | undefined
   nextCursor: string | undefined
   // TODO(gui-session-state): Move composer text and staged attachments into
   // Session-scoped UI state when the GUI shell is redesigned. The current
@@ -70,14 +65,11 @@ export type AppStoreData = {
   projects: string[]
   providers: ApiProviderSummary[]
   userPreference: ApiUserModelPreference | undefined
-  selection: SessionSelectionState
-  sessionDetailRevision: number
-  sessionListRevision: number
+  selection: { readonly sessionId?: string }
   sessionSelectionIntentRevision: number
   selectedSession: ApiSessionDetail | undefined
   sessions: ApiSessionSummary[]
   stream: EventSource | undefined
-  streamStatus: StreamStatus
   currentProject: string | undefined
 }
 
@@ -127,22 +119,19 @@ export function createInitialAppState(): AppStoreData {
     execution: createExecutionViewState(),
     inFlightActions: new Set(),
     message: undefined,
-    modelSelectionReady: true,
     modelSelections: initialModelSelections(),
+    restoringModelSelectionFor: undefined,
     nextCursor: undefined,
     promptDraft: undefined,
     promptAttachments: [],
     projects: [],
     providers: [],
     userPreference: undefined,
-    selection: createSessionSelectionState(),
-    sessionDetailRevision: 0,
-    sessionListRevision: 0,
+    selection: {},
     sessionSelectionIntentRevision: 0,
     selectedSession: undefined,
     sessions: [],
     stream: undefined,
-    streamStatus: "idle",
     currentProject: undefined,
   }
 }
@@ -150,8 +139,7 @@ export function createInitialAppState(): AppStoreData {
 let activeTaskCount = 0
 
 export const useAppStore = create<AppStore>()((set, get) => {
-  const restoringModelSelections = new Set<string>()
-  let userPreferenceRevision = 0
+  let sessionListRevision = 0
   const runTask = async (
     task: () => Promise<void>,
     isCurrent: () => boolean = () => true,
@@ -171,172 +159,119 @@ export const useAppStore = create<AppStore>()((set, get) => {
     }
   }
 
-  const syncSelection = (): void => {
-    set({ selection: { ...get().selection } })
+  const activateSession = (sessionId: string): SessionSelection => {
+    set({ selection: { sessionId } })
+    return {
+      revision: get().sessionSelectionIntentRevision,
+      sessionId,
+    }
   }
 
-  const activateSession = (sessionId: string): SessionSelection => {
-    set((state) => ({
-      sessionDetailRevision: state.sessionDetailRevision + 1,
-    }))
-    const selection = beginSessionSelection(get().selection, sessionId)
-    syncSelection()
-    return selection
+  const currentSelection = (): SessionSelection | undefined => {
+    const sessionId = get().selection.sessionId
+    if (sessionId === undefined) return
+    return {
+      revision: get().sessionSelectionIntentRevision,
+      sessionId,
+    }
   }
+
+  const isCurrentSelection = (selection: SessionSelection): boolean =>
+    get().sessionSelectionIntentRevision === selection.revision &&
+    get().selection.sessionId === selection.sessionId
 
   const closeStream = (): void => {
     get().stream?.close()
-    set({ stream: undefined, streamStatus: "idle" })
-  }
-
-  const mergeEvent = (event: StoredEventEnvelope): void => {
-    const state = get()
-    if (
-      state.execution.durableEvents.some(
-        (candidate) =>
-          candidate.id === event.id ||
-          (candidate.sessionId === event.sessionId &&
-            candidate.seq === event.seq),
-      )
-    ) {
-      return
-    }
-    set({
-      execution: reduceExecutionView(state.execution, {
-        type: "durable",
-        event,
-      }),
-    })
-  }
-
-  const refreshSelectedSession = async (
-    selection: SessionSelection,
-  ): Promise<boolean> => {
-    const requestRevision = get().sessionDetailRevision + 1
-    set({ sessionDetailRevision: requestRevision })
-    let response: ApiReadSessionResponse
-    try {
-      response = await requestJson<ApiReadSessionResponse>(
-        get().apiBase,
-        `/sessions/${encodeURIComponent(selection.sessionId)}`,
-      )
-    } catch (error) {
-      if (
-        !isCurrentSessionSelection(get().selection, selection) ||
-        get().sessionDetailRevision !== requestRevision
-      ) {
-        return false
-      }
-      throw error
-    }
-    if (
-      !isCurrentSessionSelection(get().selection, selection) ||
-      get().sessionDetailRevision !== requestRevision
-    ) {
-      return false
-    }
-    if (
-      restoringModelSelections.has(selection.sessionId) &&
-      response.session.currentModel !== undefined
-    ) {
-      restoringModelSelections.delete(selection.sessionId)
-      const modelSelections = {
-        ...get().modelSelections,
-        [selection.sessionId]: response.session.currentModel,
-      }
-      persistModelSelections(modelSelections)
-      set({
-        selectedSession: response.session,
-        modelSelections,
-        modelSelectionReady: true,
-      })
-    } else {
-      set({ selectedSession: response.session })
-    }
-    return true
+    set({ stream: undefined })
   }
 
   const connectEvents = (selection: SessionSelection, after: number): void => {
-    if (!isCurrentSessionSelection(get().selection, selection)) return
+    if (!isCurrentSelection(selection)) return
     closeStream()
 
     try {
-      set({ streamStatus: "connecting" })
       const source = openSessionEventStream(
         get().apiBase,
         selection.sessionId,
         after,
         {
-          onOpen: () => {
-            if (
-              get().stream !== source ||
-              !isCurrentSessionSelection(get().selection, selection)
-            ) {
+          onSnapshot: (response) => {
+            if (get().stream !== source || !isCurrentSelection(selection)) {
               return
             }
-            set({ streamStatus: "connected" })
-          },
-          onReplayComplete: () => {
+            let modelSelections = get().modelSelections
+            let restoringModelSelectionFor = get().restoringModelSelectionFor
             if (
-              get().stream !== source ||
-              !isCurrentSessionSelection(get().selection, selection)
+              restoringModelSelectionFor === selection.sessionId &&
+              response.session.currentModel !== undefined
             ) {
-              return
+              modelSelections = {
+                ...modelSelections,
+                [selection.sessionId]: response.session.currentModel,
+              }
+              persistModelSelections(modelSelections)
+              restoringModelSelectionFor = undefined
             }
-            restoringModelSelections.delete(selection.sessionId)
-            set({ modelSelectionReady: true })
-          },
-          onEvent: (event) => {
-            if (
-              get().stream !== source ||
-              !isCurrentSessionSelection(get().selection, selection)
-            ) {
-              return
-            }
-            if (event.sessionId !== selection.sessionId) return
-            mergeEvent(event)
-            void refreshSelectedSession(selection).then(
-              () => {},
-              (error: unknown) => {
-                if (!isCurrentSessionSelection(get().selection, selection)) {
-                  return
-                }
-                set({
-                  message: errorMessage(error, "Could not refresh session."),
-                })
-              },
-            )
-          },
-          onTransient: (event) => {
-            if (
-              get().stream !== source ||
-              !isCurrentSessionSelection(get().selection, selection)
-            ) {
-              return
-            }
-            if (event.sessionId !== selection.sessionId) return
             set({
+              selectedSession: response.session,
+              modelSelections,
+              restoringModelSelectionFor,
               execution: reduceExecutionView(get().execution, {
-                type: "transient",
-                event,
+                type: "snapshot",
+                session: response.session,
               }),
             })
           },
-          onError: () => {
-            if (
-              get().stream !== source ||
-              !isCurrentSessionSelection(get().selection, selection)
-            ) {
+          onReplayComplete: () => {
+            if (get().stream !== source || !isCurrentSelection(selection)) {
               return
             }
-            set({ streamStatus: "disconnected" })
+            if (get().restoringModelSelectionFor === selection.sessionId) {
+              set({ restoringModelSelectionFor: undefined })
+            }
+          },
+          onEvent: (event) => {
+            if (get().stream !== source || !isCurrentSelection(selection)) {
+              return
+            }
+            if (event.sessionId !== selection.sessionId) return
+            set((state) => {
+              const selectedSession = applyDurableSessionDetail(
+                state.selectedSession,
+                event,
+              )
+              return {
+                selectedSession,
+                sessions: updateSessionSummary(state.sessions, selectedSession),
+                execution: reduceExecutionView(state.execution, {
+                  type: "durable",
+                  event,
+                }),
+              }
+            })
+          },
+          onTransient: (event) => {
+            if (get().stream !== source || !isCurrentSelection(selection)) {
+              return
+            }
+            if (event.sessionId !== selection.sessionId) return
+            set((state) => ({
+              selectedSession: applyTransientSessionDetail(
+                state.selectedSession,
+                event,
+              ),
+              execution: reduceExecutionView(state.execution, {
+                type: "transient",
+                event,
+              }),
+            }))
           },
         },
       )
       set({ stream: source })
     } catch (error) {
       closeStream()
-      if (!isCurrentSessionSelection(get().selection, selection)) return
+      if (!isCurrentSelection(selection)) return
       set({ message: errorMessage(error, "Could not open event stream.") })
     }
   }
@@ -358,18 +293,15 @@ export const useAppStore = create<AppStore>()((set, get) => {
         return
       }
       closeStream()
-      clearSessionSelection(get().selection)
-      set((state) => ({
-        selection: { ...state.selection },
-        sessionDetailRevision: state.sessionDetailRevision + 1,
+      set({
+        selection: {},
         selectedSession: undefined,
         execution: createExecutionViewState(),
-      }))
+      })
     },
 
     loadSessions: async (input = {}) => {
-      const requestRevision = get().sessionListRevision + 1
-      set({ sessionListRevision: requestRevision })
+      const requestRevision = ++sessionListRevision
       const existingSessions = get().sessions
       const cursor = input.append ? get().nextCursor : undefined
       const workingDirectory = get().currentProject
@@ -380,7 +312,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
             get().apiBase,
             `/sessions?limit=30${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}${workingDirectory === undefined ? "" : `&workingDirectory=${encodeURIComponent(workingDirectory)}`}`,
           )
-          if (get().sessionListRevision !== requestRevision) {
+          if (
+            get().currentProject !== workingDirectory ||
+            sessionListRevision !== requestRevision
+          ) {
             return
           }
           set({
@@ -391,7 +326,9 @@ export const useAppStore = create<AppStore>()((set, get) => {
           })
           applied = true
         },
-        () => get().sessionListRevision === requestRevision,
+        () =>
+          get().currentProject === workingDirectory &&
+          sessionListRevision === requestRevision,
       )
       return completed && applied
     },
@@ -481,13 +418,13 @@ export const useAppStore = create<AppStore>()((set, get) => {
     },
 
     forkSession: async (atInputId, reason, content) => {
-      const sourceSelection = currentSessionSelection(get().selection)
-      if (!sourceSelection) return
-      const key = `fork:${sourceSelection.sessionId}:${atInputId}`
+      const current = currentSelection()
+      if (!current) return
+      const key = `fork:${current.sessionId}:${atInputId}`
       if (get().inFlightActions.has(key)) return
       const intentRevision = get().sessionSelectionIntentRevision + 1
+      const sourceSelection = { ...current, revision: intentRevision }
       const state = get()
-      const sourceEvents = [...state.execution.durableEvents]
       const sourceModelSelection = normalizeKimiModelSelection(
         resolveEffectiveModel({
           sessionCurrent: state.modelSelections[sourceSelection.sessionId],
@@ -495,6 +432,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
           defaultProvider: state.defaultProvider,
           defaultModel: state.defaultModel,
         }),
+        state.providers,
       )
       set((state) => ({
         inFlightActions: new Set(state.inFlightActions).add(key),
@@ -527,7 +465,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
           )
           if (
             get().sessionSelectionIntentRevision !== intentRevision ||
-            !isCurrentSessionSelection(get().selection, sourceSelection)
+            !isCurrentSelection(sourceSelection)
           ) {
             return
           }
@@ -535,46 +473,26 @@ export const useAppStore = create<AppStore>()((set, get) => {
             get().setModelSelection(response.session.id, sourceModelSelection)
           }
 
-          const cutIndex = sourceEvents.findIndex(
-            (event) =>
-              event.type === EventType.InputAdmitted &&
-              event.data.inputId === atInputId,
-          )
-          const created = response.events[0]
-          if (
-            cutIndex < 0 ||
-            created?.type !== EventType.SessionCreated ||
-            sourceEvents[cutIndex]?.seq !== response.historyEndSeqExclusive
-          ) {
-            throw new Error(
-              "Fork response could not be joined to source history.",
-            )
-          }
-          const events = [
-            created,
-            ...sourceEvents.slice(1, cutIndex).map((event) => ({
-              ...event,
-              sessionId: response.session.id,
-            })),
-            ...response.events.slice(1),
-          ]
           const selection = activateSession(response.session.id)
           closeStream()
           set((state) => ({
             selectedSession: response.session,
-            execution: events.reduce(
+            execution: response.events.reduce(
               (execution, event) =>
                 reduceExecutionView(execution, {
                   type: "durable",
                   event,
                 }),
-              createExecutionViewState(),
+              createExecutionViewState(response.session),
             ),
             promptDraft: undefined,
             promptAttachments: [],
             composerFocusRevision: state.composerFocusRevision + 1,
           }))
-          connectEvents(selection, events.at(-1)?.seq ?? response.session.seq)
+          connectEvents(
+            selection,
+            response.events.at(-1)?.seq ?? response.session.seq,
+          )
           await get().loadSessions()
         },
         () => get().sessionSelectionIntentRevision === intentRevision,
@@ -601,10 +519,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
         )
         if (get().selection.sessionId === sessionId) {
           closeStream()
-          clearSessionSelection(get().selection)
           set((state) => ({
-            selection: { ...state.selection },
-            sessionDetailRevision: state.sessionDetailRevision + 1,
+            selection: {},
             sessionSelectionIntentRevision:
               state.sessionSelectionIntentRevision + 1,
             selectedSession: undefined,
@@ -625,11 +541,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
       set({ currentProject: path })
       window.localStorage.setItem("yakitori.project", path)
       closeStream()
-      clearSessionSelection(get().selection)
       set((state) => ({
-        selection: { ...state.selection },
-        sessionDetailRevision: state.sessionDetailRevision + 1,
-        sessionListRevision: state.sessionListRevision + 1,
+        selection: {},
         sessionSelectionIntentRevision:
           state.sessionSelectionIntentRevision + 1,
         selectedSession: undefined,
@@ -667,13 +580,12 @@ export const useAppStore = create<AppStore>()((set, get) => {
         sessionSelectionIntentRevision:
           state.sessionSelectionIntentRevision + 1,
       }))
-      if (get().modelSelections[sessionId] === undefined) {
-        restoringModelSelections.add(sessionId)
-        set({ modelSelectionReady: false })
-      } else {
-        restoringModelSelections.delete(sessionId)
-        set({ modelSelectionReady: true })
-      }
+      set({
+        restoringModelSelectionFor:
+          get().modelSelections[sessionId] === undefined
+            ? sessionId
+            : undefined,
+      })
       const selection = activateSession(sessionId)
       closeStream()
       set({
@@ -682,19 +594,16 @@ export const useAppStore = create<AppStore>()((set, get) => {
         promptAttachments: [],
         selectedSession: undefined,
       })
-      await runTask(
-        async () => {
-          const applied = await refreshSelectedSession(selection)
-          if (!applied) return
-          connectEvents(selection, 0)
-        },
-        () => isCurrentSessionSelection(get().selection, selection),
-      )
+      connectEvents(selection, 0)
     },
 
     admitInput: async (text, attachments = []) => {
-      const selection = currentSessionSelection(get().selection)
-      if (!selection || !get().modelSelectionReady) return
+      const selection = currentSelection()
+      if (
+        !selection ||
+        get().restoringModelSelectionFor === selection.sessionId
+      )
+        return
       const key = `admit:${selection.sessionId}`
       if (get().inFlightActions.has(key)) return
       set((state) => ({
@@ -719,17 +628,15 @@ export const useAppStore = create<AppStore>()((set, get) => {
             if (response.event.sessionId !== selection.sessionId) {
               throw new Error("Compact response did not match the request.")
             }
-            if (!isCurrentSessionSelection(get().selection, selection)) return
+            if (!isCurrentSelection(selection)) return
             if (
               (get().promptDraft ?? "").trim() === text &&
               sameAttachments(get().promptAttachments, attachments)
             ) {
               set({ promptDraft: undefined, promptAttachments: [] })
             }
-            mergeEvent(response.event)
-            await refreshSelectedSession(selection)
           },
-          () => isCurrentSessionSelection(get().selection, selection),
+          () => isCurrentSelection(selection),
         )
         set((state) => {
           const inFlightActions = new Set(state.inFlightActions)
@@ -748,15 +655,17 @@ export const useAppStore = create<AppStore>()((set, get) => {
             defaultProvider: state.defaultProvider,
             defaultModel: state.defaultModel,
           })
-          const admittedModelSelection =
-            normalizeKimiModelSelection(modelSelection)
+          const admittedModelSelection = normalizeKimiModelSelection(
+            modelSelection,
+            state.providers,
+          )
           const pendingAdmission = await reserveAdmission(window.localStorage, {
             apiBase: get().apiBase,
             sessionId: selection.sessionId,
             text,
             ...(attachments.length === 0 ? {} : { attachments }),
           })
-          if (!isCurrentSessionSelection(get().selection, selection)) return
+          if (!isCurrentSelection(selection)) return
           const response = await requestJson<ApiAdmitInputResponse>(
             get().apiBase,
             `/sessions/${encodeURIComponent(selection.sessionId)}/inputs`,
@@ -782,24 +691,22 @@ export const useAppStore = create<AppStore>()((set, get) => {
             throw new Error("Admission response did not match the request.")
           }
           await acknowledgeAdmission(window.localStorage, pendingAdmission)
-          if (!isCurrentSessionSelection(get().selection, selection)) return
+          if (!isCurrentSelection(selection)) return
           if (
             (get().promptDraft ?? "").trim() === text &&
             sameAttachments(get().promptAttachments, attachments)
           ) {
             set({ promptDraft: undefined, promptAttachments: [] })
           }
-          mergeEvent(response.event)
           set((state) => {
             const inFlightActions = new Set(state.inFlightActions)
             inFlightActions.delete(key)
             return { inFlightActions }
           })
-          await refreshSelectedSession(selection)
-          if (!isCurrentSessionSelection(get().selection, selection)) return
+          if (!isCurrentSelection(selection)) return
           await get().loadSessions()
         },
-        () => isCurrentSessionSelection(get().selection, selection),
+        () => isCurrentSelection(selection),
       )
       set((state) => {
         const inFlightActions = new Set(state.inFlightActions)
@@ -809,7 +716,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
     },
 
     cancelTurn: async (turnId) => {
-      const selection = currentSessionSelection(get().selection)
+      const selection = currentSelection()
       if (!selection) return
       const key = `cancel:${turnId}`
       if (get().inFlightActions.has(key)) return
@@ -823,9 +730,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
             `/sessions/${encodeURIComponent(selection.sessionId)}/turns/${encodeURIComponent(turnId)}/cancel`,
             { method: "POST", body: { reason: "user_cancel" } },
           )
-          await refreshSelectedSession(selection)
         },
-        () => isCurrentSessionSelection(get().selection, selection),
+        () => isCurrentSelection(selection),
       )
       set((state) => {
         const inFlightActions = new Set(state.inFlightActions)
@@ -835,7 +741,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
     },
 
     cancelQueuedInput: async (inputId) => {
-      const selection = currentSessionSelection(get().selection)
+      const selection = currentSelection()
       if (!selection) return
       const key = `cancel-input:${inputId}`
       if (get().inFlightActions.has(key)) return
@@ -845,24 +751,18 @@ export const useAppStore = create<AppStore>()((set, get) => {
       await runTask(
         async () => {
           try {
-            const response = await cancelSessionInput(
+            await cancelSessionInput(
               get().apiBase,
               selection.sessionId,
               inputId,
             )
-            if (!isCurrentSessionSelection(get().selection, selection)) return
-            // Merge the recorded fact now; the SSE replay dedups by event id.
-            mergeEvent(response.event)
           } catch (error) {
-            // 409 means the input already left the pending queue (usually it
-            // just started); the detail refresh below reconciles the view.
             if (!(error instanceof ApiRequestError && error.status === 409)) {
               throw error
             }
           }
-          await refreshSelectedSession(selection)
         },
-        () => isCurrentSessionSelection(get().selection, selection),
+        () => isCurrentSelection(selection),
       )
       set((state) => {
         const inFlightActions = new Set(state.inFlightActions)
@@ -872,14 +772,19 @@ export const useAppStore = create<AppStore>()((set, get) => {
     },
 
     resolvePermission: async (turnId, permissionRequestId, behavior) => {
-      const selection = currentSessionSelection(get().selection)
+      const selection = currentSelection()
       if (!selection) return
       const key = `permission:${permissionRequestId}`
       if (get().inFlightActions.has(key)) return
       set((state) => ({
         inFlightActions: new Set(state.inFlightActions).add(key),
+        execution: reduceExecutionView(state.execution, {
+          type: "permission_resolving",
+          permissionRequestId,
+          behavior,
+        }),
       }))
-      await runTask(
+      const completed = await runTask(
         async () => {
           await requestJson(
             get().apiBase,
@@ -894,29 +799,26 @@ export const useAppStore = create<AppStore>()((set, get) => {
               },
             },
           )
-          if (isCurrentSessionSelection(get().selection, selection)) {
-            set({
-              execution: reduceExecutionView(get().execution, {
-                type: "transient",
-                event: {
-                  type: "permission.resolved",
-                  sessionId: selection.sessionId,
-                  turnId,
-                  permissionRequestId,
-                  outcome: behavior,
-                  createdAt: new Date().toISOString(),
-                },
-              }),
-            })
-          }
-          await refreshSelectedSession(selection)
         },
-        () => isCurrentSessionSelection(get().selection, selection),
+        () => isCurrentSelection(selection),
       )
       set((state) => {
         const inFlightActions = new Set(state.inFlightActions)
         inFlightActions.delete(key)
-        return { inFlightActions }
+        return {
+          inFlightActions,
+          ...(!completed &&
+          state.sessionSelectionIntentRevision === selection.revision &&
+          state.selection.sessionId === selection.sessionId
+            ? {
+                execution: reduceExecutionView(state.execution, {
+                  type: "permission_retry",
+                  permissionRequestId,
+                  behavior,
+                }),
+              }
+            : {}),
+        }
       })
     },
 
@@ -929,14 +831,16 @@ export const useAppStore = create<AppStore>()((set, get) => {
     },
 
     setModelSelection: (sessionId, selection) => {
-      userPreferenceRevision += 1
-      const preferenceRevision = userPreferenceRevision
       const apiBase = get().apiBase
-      restoringModelSelections.delete(sessionId)
       const modelSelections = { ...get().modelSelections }
       if (selection === undefined) delete modelSelections[sessionId]
       else modelSelections[sessionId] = selection
-      set({ modelSelections, modelSelectionReady: true })
+      set({
+        modelSelections,
+        ...(get().restoringModelSelectionFor === sessionId
+          ? { restoringModelSelectionFor: undefined }
+          : {}),
+      })
       persistModelSelections(modelSelections)
       if (selection === undefined) return
       void runTask(
@@ -947,17 +851,14 @@ export const useAppStore = create<AppStore>()((set, get) => {
               "/user-preference",
               { method: "PUT", body: selection },
             )
-          if (
-            preferenceRevision !== userPreferenceRevision ||
-            apiBase !== get().apiBase
-          ) {
+          if (apiBase !== get().apiBase) return
+          if (!sameModelSelection(get().modelSelections[sessionId], selection))
             return
-          }
           set({ userPreference: response.userPreference })
         },
         () =>
-          preferenceRevision === userPreferenceRevision &&
-          apiBase === get().apiBase,
+          apiBase === get().apiBase &&
+          sameModelSelection(get().modelSelections[sessionId], selection),
       )
     },
   }
@@ -979,11 +880,14 @@ export function resolveEffectiveModel(input: {
 
 export function normalizeKimiModelSelection(
   selection: ModelSelection | undefined,
+  providers: readonly ApiProviderSummary[],
 ): ModelSelection | undefined {
+  const effortStyle = providers
+    .find((provider) => provider.name === selection?.provider)
+    ?.models.find((model) => model.id === selection?.model)?.effortStyle
   if (
     selection?.provider !== "kimi" ||
-    (selection.model !== "kimi-for-coding" &&
-      selection.model !== "kimi-for-coding-highspeed") ||
+    effortStyle !== "none" ||
     (selection.effort !== "on" && selection.effort !== "off")
   ) {
     return selection
@@ -997,10 +901,155 @@ export function normalizeKimiModelSelection(
 
 export function useExecutionView(): ExecutionView {
   const execution = useAppStore((state) => state.execution)
-  const selectedSession = useAppStore((state) => state.selectedSession)
-  return useMemo(
-    () => projectExecutionView(execution, selectedSession),
-    [execution, selectedSession],
+  return useMemo(() => projectExecutionView(execution), [execution])
+}
+
+function applyDurableSessionDetail(
+  session: ApiSessionDetail | undefined,
+  event: StoredEventEnvelope,
+): ApiSessionDetail | undefined {
+  if (
+    session === undefined ||
+    event.sessionId !== session.id ||
+    event.seq <= session.seq ||
+    !isKernelEvent(event)
+  ) {
+    return session
+  }
+
+  const counts = { ...session.counts }
+  let pendingInputs = [...session.pendingInputs]
+  const next: ApiSessionDetail = {
+    ...session,
+    seq: event.seq,
+    updatedAt: event.createdAt,
+  }
+  switch (event.type) {
+    case "input.admitted":
+      pendingInputs.push({
+        id: event.data.inputId,
+        text: event.data.content.text,
+        admittedAt: event.createdAt,
+      })
+      return {
+        ...next,
+        pendingInputs,
+        counts: {
+          ...counts,
+          inputs: counts.inputs + 1,
+          pendingInputs: pendingInputs.length,
+        },
+      }
+    case "input.cancelled":
+      pendingInputs = pendingInputs.filter(
+        (input) => input.id !== event.data.inputId,
+      )
+      return {
+        ...next,
+        pendingInputs,
+        counts: { ...counts, pendingInputs: pendingInputs.length },
+      }
+    case "turn.started":
+      pendingInputs = pendingInputs.filter(
+        (input) => input.id !== event.data.inputId,
+      )
+      return {
+        ...next,
+        activeTurnId: event.data.turnId,
+        pendingInputs,
+        counts: {
+          ...counts,
+          pendingInputs: pendingInputs.length,
+          turns: counts.turns + 1,
+        },
+      }
+    case "turn.completed": {
+      const { activeTurnId: _, ...withoutActiveTurn } = next
+      return {
+        ...withoutActiveTurn,
+        ...(event.data.sessionUsage === undefined
+          ? {}
+          : { usage: event.data.sessionUsage }),
+      }
+    }
+    case "item.started":
+      return {
+        ...next,
+        counts: {
+          ...counts,
+          items: counts.items + 1,
+          tools:
+            counts.tools +
+            (event.data.item.type === "context_compaction" ? 0 : 1),
+        },
+      }
+    default:
+      return next
+  }
+}
+
+function applyTransientSessionDetail(
+  session: ApiSessionDetail | undefined,
+  event: LiveSessionEvent,
+): ApiSessionDetail | undefined {
+  if (session === undefined || event.sessionId !== session.id) return session
+  if (event.type === "session.usage") return { ...session, usage: event.usage }
+  if (event.type === "permission.requested") {
+    if (
+      session.pendingPermissions.some(
+        (permission) =>
+          permission.permissionRequestId === event.permissionRequestId,
+      )
+    ) {
+      return session
+    }
+    const { type: _, sessionId: __, ...permission } = event
+    const pendingPermissions: ApiPendingPermission[] = [
+      ...session.pendingPermissions,
+      permission,
+    ]
+    return {
+      ...session,
+      pendingPermissions,
+      counts: {
+        ...session.counts,
+        permissions: pendingPermissions.length,
+      },
+    }
+  }
+  if (event.type === "permission.resolved") {
+    const pendingPermissions = session.pendingPermissions.filter(
+      (permission) =>
+        permission.permissionRequestId !== event.permissionRequestId,
+    )
+    if (pendingPermissions.length === session.pendingPermissions.length) {
+      return session
+    }
+    return {
+      ...session,
+      pendingPermissions,
+      counts: {
+        ...session.counts,
+        permissions: pendingPermissions.length,
+      },
+    }
+  }
+  return session
+}
+
+function updateSessionSummary(
+  sessions: readonly ApiSessionSummary[],
+  selectedSession: ApiSessionDetail | undefined,
+): ApiSessionSummary[] {
+  if (selectedSession === undefined) return [...sessions]
+  return sessions.map((session) =>
+    session.id === selectedSession.id
+      ? {
+          ...session,
+          seq: selectedSession.seq,
+          updatedAt: selectedSession.updatedAt,
+        }
+      : session,
   )
 }
 
@@ -1025,6 +1074,18 @@ function sameAttachments(
         attachment.file.sessionId === right[index]?.file.sessionId &&
         attachment.file.path === right[index]?.file.path,
     )
+  )
+}
+
+function sameModelSelection(
+  left: ModelSelection | undefined,
+  right: ModelSelection | undefined,
+): boolean {
+  return (
+    left?.provider === right?.provider &&
+    left?.model === right?.model &&
+    left?.effort === right?.effort &&
+    left?.speed === right?.speed
   )
 }
 

@@ -6,6 +6,7 @@ import type {
   ModelSelection,
   StoredEventEnvelope,
   TextContent,
+  TokenUsage,
 } from "../kernel/index.ts"
 
 export const ApiErrorCode = {
@@ -102,6 +103,7 @@ export type ApiProviderModel = {
   // back to the id.
   readonly displayName?: string
   readonly instructionProfileId: string
+  readonly effortStyle?: "none" | "levels"
   readonly efforts?: readonly string[]
   readonly speeds?: readonly string[]
   readonly inputModalities?: readonly ("image" | "text" | "video")[]
@@ -226,6 +228,8 @@ export type ApiSessionSummary = {
 export type ApiSessionDetail = ApiSessionSummary & {
   readonly activeTurnId?: string
   readonly currentModel?: ModelSelection
+  readonly usage?: TokenUsage
+  readonly pendingInputs: readonly ApiPendingInput[]
   readonly pendingPermissions: readonly ApiPendingPermission[]
   readonly counts: {
     readonly inputs: number
@@ -235,6 +239,12 @@ export type ApiSessionDetail = ApiSessionSummary & {
     readonly permissions: number
     readonly tools: number
   }
+}
+
+export type ApiPendingInput = {
+  readonly id: string
+  readonly text: string
+  readonly admittedAt: string
 }
 
 export type ApiPendingPermission = {

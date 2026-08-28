@@ -10,7 +10,7 @@ import type { Server as HttpServer } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { EventType } from "../../src/kernel/events.ts"
+import { EventType, HistoryRecordType } from "../../src/kernel/events.ts"
 import { InputState } from "../../src/kernel/session-states.ts"
 import { MateLifecycle } from "../../src/mates/events.ts"
 import { createMateKernel } from "../../src/mates/mate-kernel.ts"
@@ -893,6 +893,10 @@ describe("application composition", () => {
         })
         expect(forked.body.events.map((event) => event.type)).toEqual([
           EventType.SessionCreated,
+          EventType.InputAdmitted,
+          HistoryRecordType.TurnContext,
+          EventType.TurnStarted,
+          EventType.InputAdmitted,
           EventType.TurnCompleted,
           EventType.InputCancelled,
         ])

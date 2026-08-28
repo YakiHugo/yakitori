@@ -2,6 +2,7 @@ import { createYakitoriError, YakitoriErrorCode } from "./errors.ts"
 import type { EventStore } from "./event-store.ts"
 import {
   type AssistantContentBlock,
+  type ContextCompactionCompletedItem,
   type ContextWindowReplacement,
   type EventEnvelope,
   type EventMetadata,
@@ -10,6 +11,9 @@ import {
   type ForkReason,
   InputRole,
   type ItemContent,
+  ItemKind,
+  ItemStatus,
+  MISSING_TOOL_RESULT_TEXT,
   type JsonObject,
   type JsonValue,
   type KernelError,
@@ -20,6 +24,7 @@ import {
   type ProviderUsageBaseline,
   type SessionConfigurationSnapshot,
   type StoredEventEnvelope,
+  type StreamedStartedItem,
   type TextContent,
   type TokenUsage,
   type ToolExecutionDescriptor,
@@ -41,6 +46,7 @@ import { fingerprintInputAdmission } from "./operation.ts"
 import {
   type InputProjection,
   InputState,
+  type ItemProjection,
   type SessionProjection,
   type SessionSummary,
   type ToolProjection,
@@ -76,6 +82,8 @@ export type SessionKernel = {
   recordToolResult(
     input: RecordToolResultInput,
   ): Promise<RecordToolResultResult>
+  startItem(input: StartItemInput): Promise<StartItemResult>
+  completeItem(input: CompleteItemInput): Promise<CompleteItemResult>
   recordProviderUsageBaseline(
     input: RecordProviderUsageBaselineInput,
   ): Promise<RecordProviderUsageBaselineResult>
@@ -221,6 +229,7 @@ export type RecordAssistantOutputInput = {
   readonly content?: readonly AssistantContentBlock[]
   readonly providerMetadata?: EventMetadata
   readonly toolCalls?: readonly AssistantToolCallInput[]
+  readonly streamedItemIds?: StreamedItemIds
 }
 export type RecordedToolCall = {
   readonly toolCallId: string
@@ -246,6 +255,24 @@ export type RecordToolResultResult = {
   readonly event: EventEnvelope
   readonly events: readonly EventEnvelope[]
 }
+// Ids assigned to live display items while the model streamed. A matching
+// durable completion reuses the id, but does not require a durable start.
+export type StreamedItemIds = {
+  readonly messageItemId?: string
+  readonly reasoningItemId?: string
+}
+export type StartItemInput = {
+  readonly sessionId: string
+  readonly turnId: string
+  readonly item: StreamedStartedItem
+}
+export type StartItemResult = { readonly event: EventEnvelope }
+export type CompleteItemInput = {
+  readonly sessionId: string
+  readonly turnId: string
+  readonly item: ContextCompactionCompletedItem
+}
+export type CompleteItemResult = { readonly event: EventEnvelope }
 export type RecordProviderUsageBaselineInput = {
   readonly sessionId: string
   readonly turnId: string
@@ -267,10 +294,13 @@ export type RecordCompactionInput = {
     ContextWindowReplacement,
     "windowId" | "firstWindowId" | "previousWindowId" | "windowNumber"
   >
+  /** Opened via startItem; closes atomically with the checkpoint. */
+  readonly compactionItemId?: string
 }
 export type RecordCompactionResult = {
   readonly compactionId: string
   readonly event: EventEnvelope
+  readonly events: readonly EventEnvelope[]
 }
 export type RecordWorldStateUpdateInput = {
   readonly sessionId: string
@@ -302,6 +332,7 @@ export type CompleteTurnWithAssistantOutputInput = {
   readonly usage?: TokenUsage
   readonly metrics?: TurnMetrics
   readonly metadata?: EventMetadata
+  readonly streamedItemIds?: StreamedItemIds
 }
 export type CompleteTurnWithAssistantOutputResult = {
   readonly itemId: string
@@ -336,6 +367,8 @@ export type InterruptTurnInput = {
   readonly reason?: string
   readonly usage?: TokenUsage
   readonly metrics?: TurnMetrics
+  /** Persist an exact user-role context marker for an intentional abort. */
+  readonly recordModelMarker?: boolean
 }
 export type InterruptTurnResult = {
   readonly event?: EventEnvelope
@@ -689,8 +722,13 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
       return command(input.sessionId, async () => {
         const session = await requireSession(eventStore, input.sessionId)
         requireActiveTurn(session, input.turnId)
+        requireUnusedStreamedItemIds(session, input.streamedItemIds)
         const content = input.content ?? []
-        const messageId = content.length === 0 ? undefined : createItemId()
+        const messageId =
+          input.streamedItemIds?.messageItemId ??
+          (content.some((block) => block.type === "text")
+            ? createItemId()
+            : undefined)
         const callRows = (input.toolCalls ?? []).map((call) => ({
           call,
           itemId: createItemId(),
@@ -700,17 +738,23 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
             invalidState(`Tool call ${row.call.id} already exists.`)
           }
         }
-        const assistantEvents =
-          messageId === undefined
-            ? []
-            : assistantExecutionEvents({
-                turnId: input.turnId,
-                messageId,
-                content,
-                ...(input.providerMetadata === undefined
-                  ? {}
-                  : { providerMetadata: input.providerMetadata }),
-              })
+        const assistantEvents = assistantExecutionEvents({
+          turnId: input.turnId,
+          content,
+          ...(input.providerMetadata === undefined
+            ? {}
+            : { providerMetadata: input.providerMetadata }),
+          ...(messageId === undefined
+            ? {}
+            : {
+                messageItemId: messageId,
+              }),
+          ...(input.streamedItemIds?.reasoningItemId === undefined
+            ? {}
+            : {
+                reasoningItemId: input.streamedItemIds.reasoningItemId,
+              }),
+        })
         const events: KernelFact[] = [
           ...assistantEvents,
           ...callRows.map(
@@ -775,6 +819,39 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
           },
         })
         return { itemId, event, events: [event] }
+      })
+    },
+
+    startItem(input) {
+      return command(input.sessionId, async () => {
+        const session = await requireSession(eventStore, input.sessionId)
+        requireActiveTurn(session, input.turnId)
+        if (session.items.some((item) => item.itemId === input.item.itemId)) {
+          invalidState(`Item ${input.item.itemId} already exists.`)
+        }
+        const event = await append(eventStore, session, {
+          type: EventType.ItemStarted,
+          data: { turnId: input.turnId, item: input.item },
+        })
+        return { event }
+      })
+    },
+
+    completeItem(input) {
+      return command(input.sessionId, async () => {
+        const session = await requireSession(eventStore, input.sessionId)
+        requireActiveTurn(session, input.turnId)
+        requireOpenDisplayItem(
+          session,
+          input.turnId,
+          input.item.itemId,
+          ItemKind.ContextCompaction,
+        )
+        const event = await append(eventStore, session, {
+          type: EventType.ItemCompleted,
+          data: { turnId: input.turnId, item: input.item },
+        })
+        return { event }
       })
     },
 
@@ -851,19 +928,41 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
           history: input.replacement.history,
           worldStateBaseline: input.replacement.worldStateBaseline,
         }
-        const event = await append(eventStore, session, {
-          type: EventType.ContextCompacted,
-          data: compact({
-            compactionId,
-            turnId: input.turnId,
-            throughSeq: input.throughSeq,
-            coveredTurnIds: [...input.coveredTurnIds],
-            summary: input.summary,
-            usage: input.usage,
-            replacement,
-          }),
-        })
-        return { compactionId, event }
+        const facts: KernelFact[] = [
+          {
+            type: EventType.ContextCompacted,
+            data: compact({
+              compactionId,
+              turnId: input.turnId,
+              throughSeq: input.throughSeq,
+              coveredTurnIds: [...input.coveredTurnIds],
+              summary: input.summary,
+              usage: input.usage,
+              replacement,
+            }),
+          },
+          ...(input.compactionItemId === undefined
+            ? []
+            : [
+                {
+                  type: EventType.ItemCompleted,
+                  data: {
+                    turnId: input.turnId,
+                    item: {
+                      type: "context_compaction" as const,
+                      itemId: input.compactionItemId,
+                      status: ItemStatus.Completed,
+                    },
+                  },
+                } satisfies KernelFact,
+              ]),
+        ]
+        const envelopes = await appendMany(eventStore, session, facts)
+        return {
+          compactionId,
+          event: requireEnvelope(envelopes[0]),
+          events: envelopes,
+        }
       })
     },
 
@@ -910,11 +1009,17 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
       return command(input.sessionId, async () => {
         const session = await requireSession(eventStore, input.sessionId)
         requireActiveTurn(session, input.turnId)
-        const itemId = createItemId()
+        requireUnusedStreamedItemIds(session, input.streamedItemIds)
+        const itemId = input.streamedItemIds?.messageItemId ?? createItemId()
         const events = await appendMany(eventStore, session, [
           ...assistantExecutionEvents({
             turnId: input.turnId,
-            messageId: itemId,
+            messageItemId: itemId,
+            ...(input.streamedItemIds?.reasoningItemId === undefined
+              ? {}
+              : {
+                  reasoningItemId: input.streamedItemIds.reasoningItemId,
+                }),
             content: input.content,
             ...(input.providerMetadata === undefined
               ? {}
@@ -922,13 +1027,16 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
           }),
           {
             type: EventType.TurnCompleted,
-            data: compact({
-              turnId: input.turnId,
-              outcome: { status: "completed" as const },
-              usage: input.usage,
-              metrics: input.metrics,
-              metadata: input.metadata,
-            }),
+            data: withSessionUsage(
+              session,
+              compact({
+                turnId: input.turnId,
+                outcome: { status: "completed" as const },
+                usage: input.usage,
+                metrics: input.metrics,
+                metadata: input.metadata,
+              }),
+            ),
           },
         ])
         return { itemId, event: requireLast(events), events }
@@ -970,19 +1078,49 @@ export function createSessionKernel(eventStore: EventStore): SessionKernel {
           return { events: [], created: false }
         if (turn.state !== TurnState.Started)
           invalidState(`Turn ${input.turnId} is already ${turn.state}.`)
-        const event = await append(eventStore, session, {
-          type: EventType.TurnCompleted,
-          data: compact({
-            turnId: input.turnId,
-            outcome: compact({
-              status: "interrupted" as const,
-              reason: input.reason,
-            }),
-            usage: input.usage,
-            metrics: input.metrics,
-          }),
-        })
-        return { event, events: [event], created: true }
+        const facts: KernelFact[] = [
+          ...(input.recordModelMarker === true
+            ? [
+                {
+                  type: HistoryRecordType.TurnAborted,
+                  data: {
+                    turnId: input.turnId,
+                    message: {
+                      role: "user" as const,
+                      content: [
+                        {
+                          type: "text" as const,
+                          text: "<turn_aborted>\nThe user interrupted the previous turn on purpose. In-progress tool calls may have partially executed; inspect the current state before retrying.\n</turn_aborted>",
+                        },
+                      ],
+                    },
+                  },
+                } satisfies KernelFact,
+              ]
+            : []),
+          ...openItemDispositionFacts(session, input.turnId, true),
+          {
+            type: EventType.TurnCompleted,
+            data: withSessionUsage(
+              session,
+              compact({
+                turnId: input.turnId,
+                outcome: compact({
+                  status: "interrupted" as const,
+                  reason: input.reason,
+                }),
+                usage: input.usage,
+                metrics: input.metrics,
+              }),
+            ),
+          },
+        ]
+        const events = await appendMany(eventStore, session, facts)
+        return {
+          event: requireLast(events),
+          events,
+          created: true,
+        }
       })
     },
   }
@@ -1014,9 +1152,57 @@ function terminal<
   return command(sessionId, async () => {
     const session = await requireSession(eventStore, sessionId)
     requireActiveTurn(session, turnId)
-    const event = await append(eventStore, session, fact)
-    return { event, events: [event] } as unknown as T
+    const facts: KernelFact[] = [
+      ...openItemDispositionFacts(
+        session,
+        turnId,
+        fact.type === EventType.TurnCompleted &&
+          fact.data.outcome.status !== "completed",
+      ),
+      fact.type === EventType.TurnCompleted
+        ? { ...fact, data: withSessionUsage(session, fact.data) }
+        : fact,
+    ]
+    const events = await appendMany(eventStore, session, facts)
+    return { event: requireLast(events), events } as unknown as T
   })
+}
+
+function withSessionUsage(
+  session: SessionProjection,
+  data: Extract<KernelEvent, { type: "turn.completed" }>["data"],
+): Extract<KernelEvent, { type: "turn.completed" }>["data"] {
+  const sessionUsage = addTokenUsage(session.usage, data.usage)
+  return compact({ ...data, sessionUsage })
+}
+
+function addTokenUsage(
+  previous: TokenUsage | undefined,
+  current: TokenUsage | undefined,
+): TokenUsage | undefined {
+  if (previous === undefined && current === undefined) return undefined
+  return {
+    inputTokens: (previous?.inputTokens ?? 0) + (current?.inputTokens ?? 0),
+    outputTokens: (previous?.outputTokens ?? 0) + (current?.outputTokens ?? 0),
+    ...((previous?.cacheReadInputTokens ?? 0) +
+      (current?.cacheReadInputTokens ?? 0) ===
+    0
+      ? {}
+      : {
+          cacheReadInputTokens:
+            (previous?.cacheReadInputTokens ?? 0) +
+            (current?.cacheReadInputTokens ?? 0),
+        }),
+    ...((previous?.cacheWriteInputTokens ?? 0) +
+      (current?.cacheWriteInputTokens ?? 0) ===
+    0
+      ? {}
+      : {
+          cacheWriteInputTokens:
+            (previous?.cacheWriteInputTokens ?? 0) +
+            (current?.cacheWriteInputTokens ?? 0),
+        }),
+  }
 }
 
 function append(
@@ -1112,6 +1298,97 @@ function requireContinuousCompactionCoverage(
   }
 }
 
+function requireOpenDisplayItem(
+  session: SessionProjection,
+  turnId: string,
+  itemId: string,
+  kind: ItemProjection["kind"],
+): ItemProjection {
+  const item = session.items.find((candidate) => candidate.itemId === itemId)
+  if (
+    item === undefined ||
+    item.turnId !== turnId ||
+    item.kind !== kind ||
+    item.status !== ItemStatus.InProgress
+  ) {
+    invalidState(`Item ${itemId} has no matching in-progress start.`, {
+      itemId,
+      turnId,
+      kind,
+    })
+  }
+  return item
+}
+
+function openItemDispositionFacts(
+  session: SessionProjection,
+  turnId: string,
+  closeTools: boolean,
+): KernelFact[] {
+  const facts: KernelFact[] = []
+  for (const item of session.items) {
+    if (item.turnId !== turnId || item.status !== ItemStatus.InProgress) {
+      continue
+    }
+    if (item.kind === ItemKind.ContextCompaction) {
+      facts.push({
+        type: EventType.ItemCompleted,
+        data: {
+          turnId,
+          item: {
+            type: "context_compaction",
+            itemId: item.itemId,
+            status: ItemStatus.Failed,
+            error: { message: "Turn ended before compaction finished." },
+          },
+        },
+      })
+    }
+  }
+  if (!closeTools) return facts
+  for (const tool of session.tools) {
+    if (tool.turnId !== turnId || tool.state !== ToolState.Requested) continue
+    const execution = executionDescriptor(tool.execution)
+    facts.push({
+      type: EventType.ItemCompleted,
+      data: {
+        turnId,
+        item: {
+          ...execution,
+          itemId: tool.requestItemId,
+          toolCallId: tool.toolCallId,
+          name: tool.name,
+          input: tool.input,
+          requiresPermission: tool.requiresPermission,
+          resultItemId: createItemId(),
+          content: { kind: "text", text: MISSING_TOOL_RESULT_TEXT },
+          error: { message: MISSING_TOOL_RESULT_TEXT },
+        },
+      },
+    })
+  }
+  return facts
+}
+
+function requireUnusedStreamedItemIds(
+  session: SessionProjection,
+  streamedItemIds: StreamedItemIds | undefined,
+): void {
+  const ids = [
+    streamedItemIds?.messageItemId,
+    streamedItemIds?.reasoningItemId,
+  ].filter((itemId): itemId is string => itemId !== undefined)
+  if (new Set(ids).size !== ids.length) {
+    invalidState("Live display item ids must be distinct.")
+  }
+  const reused = ids.find((itemId) =>
+    session.items.some((item) => item.itemId === itemId),
+  )
+  if (reused !== undefined) {
+    invalidState(`Item ${reused} is already recorded.`)
+  }
+}
+
 function requireTool(
   session: SessionProjection,
   turnId: string,
@@ -1145,16 +1422,15 @@ function serializeSessionCommand<T>(
   return current
 }
 
+// Assistant and reasoning completions are self-contained durable facts. Their
+// ids may correlate with transient display items, but no durable start exists.
 function assistantExecutionEvents(input: {
   readonly turnId: string
-  readonly messageId: string
+  readonly messageItemId?: string
+  readonly reasoningItemId?: string
   readonly content: readonly AssistantContentBlock[]
   readonly providerMetadata?: EventMetadata
 }): KernelFact[] {
-  const streamId =
-    typeof input.providerMetadata?.streamId === "string"
-      ? input.providerMetadata.streamId
-      : undefined
   const reasoning = input.content.filter(
     (block): block is Extract<AssistantContentBlock, { type: "reasoning" }> =>
       block.type === "reasoning",
@@ -1163,44 +1439,43 @@ function assistantExecutionEvents(input: {
     (block): block is Extract<AssistantContentBlock, { type: "text" }> =>
       block.type === "text",
   )
-  return [
-    ...reasoning.map(
-      (block): KernelFact => ({
-        type: EventType.ItemCompleted,
-        data: {
-          turnId: input.turnId,
-          item: {
-            type: "reasoning",
-            itemId: createItemId(),
-            text: block.text,
-            ...(streamId === undefined ? {} : { streamId }),
-            ...(block.providerMetadata === undefined
-              ? {}
-              : { providerMetadata: block.providerMetadata }),
-          },
+  const events: KernelFact[] = []
+  reasoning.forEach((block, index) => {
+    const reused = index === 0 ? input.reasoningItemId : undefined
+    const itemId = reused ?? createItemId()
+    events.push({
+      type: EventType.ItemCompleted,
+      data: {
+        turnId: input.turnId,
+        item: {
+          type: "reasoning",
+          itemId,
+          text: block.text,
+          ...(block.providerMetadata === undefined
+            ? {}
+            : { providerMetadata: block.providerMetadata }),
         },
-      }),
-    ),
-    ...(text.length === 0
-      ? []
-      : [
-          {
-            type: EventType.ItemCompleted,
-            data: {
-              turnId: input.turnId,
-              item: {
-                type: "agent_message" as const,
-                itemId: input.messageId,
-                content: text,
-                ...(streamId === undefined ? {} : { streamId }),
-                ...(input.providerMetadata === undefined
-                  ? {}
-                  : { providerMetadata: input.providerMetadata }),
-              },
-            },
-          } satisfies KernelFact,
-        ]),
-  ]
+      },
+    })
+  })
+  if (text.length > 0) {
+    const itemId = input.messageItemId ?? createItemId()
+    events.push({
+      type: EventType.ItemCompleted,
+      data: {
+        turnId: input.turnId,
+        item: {
+          type: "agent_message",
+          itemId,
+          content: text,
+          ...(input.providerMetadata === undefined
+            ? {}
+            : { providerMetadata: input.providerMetadata }),
+        },
+      },
+    })
+  }
+  return events
 }
 
 type Compact<T extends Record<string, unknown>> = {

@@ -27,6 +27,7 @@ describe("kernel facts", () => {
       "history.initialized",
       "world_state",
       "provider.usage_baseline",
+      "turn.aborted",
     ])
   })
 

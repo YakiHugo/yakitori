@@ -54,6 +54,7 @@ const sessionDetail: ApiSessionDetail = {
   seq: 1,
   createdAt: "2026-07-24T00:00:00.000Z",
   updatedAt: "2026-07-24T00:00:00.000Z",
+  pendingInputs: [],
   pendingPermissions: [],
   counts: {
     inputs: 0,
@@ -63,6 +64,13 @@ const sessionDetail: ApiSessionDetail = {
     permissions: 0,
     tools: 0,
   },
+}
+
+function emitSnapshot(
+  source: FakeEventSource | undefined,
+  session: ApiSessionDetail = sessionDetail,
+): void {
+  source?.emit("session.snapshot", { session })
 }
 
 beforeEach(() => {
@@ -91,7 +99,7 @@ afterEach(() => {
 })
 
 describe("app store event stream", () => {
-  it("streams durable and transient events into the store", async () => {
+  it("streams durable execution events into the store", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: unknown) => {
@@ -102,18 +110,17 @@ describe("app store event stream", () => {
       }),
     )
 
+    useAppStore.setState({ sessions: [sessionDetail] })
     await useAppStore.getState().selectSession("session_1")
 
     const source = FakeEventSource.instances[0]
+    emitSnapshot(source)
+    expect(detailCallCount(vi.mocked(fetch))).toBe(0)
     expect(source?.url).toBe(
       "http://api.test/sessions/session_1/events?after=0",
     )
     expect(useAppStore.getState().selectedSession?.id).toBe("session_1")
-    expect(useAppStore.getState().streamStatus).toBe("connecting")
-
-    source?.emit("open")
-    expect(useAppStore.getState().streamStatus).toBe("connected")
-    expect(useAppStore.getState().modelSelectionReady).toBe(false)
+    expect(useAppStore.getState().restoringModelSelectionFor).toBe("session_1")
 
     const admitted = createEventEnvelope({
       sessionId: "session_1",
@@ -129,21 +136,42 @@ describe("app store event stream", () => {
       },
     })
     source?.emit("session.event", admitted)
-    await vi.waitFor(() => {
-      expect(
-        useAppStore.getState().execution.durableEvents.map((event) => event.id),
-      ).toContain(admitted.id)
+    expect(
+      projectExecutionView(useAppStore.getState().execution).entries,
+    ).toEqual([expect.objectContaining({ kind: "user_input", text: "hello" })])
+    expect(useAppStore.getState().selectedSession?.counts).toMatchObject({
+      inputs: 1,
+      pendingInputs: 1,
+      turns: 0,
     })
     source?.emit("session.replay-complete")
-    expect(useAppStore.getState().modelSelectionReady).toBe(true)
+    expect(useAppStore.getState().restoringModelSelectionFor).toBeUndefined()
 
+    source?.emit(
+      "session.event",
+      createEventEnvelope({
+        sessionId: "session_1",
+        seq: 3,
+        event: {
+          type: EventType.TurnStarted,
+          data: { turnId: "turn_1", inputId: "input_1" },
+        },
+      }),
+    )
     source?.emit("session.transient", {
-      type: "assistant.snapshot",
+      type: "item.started",
       sessionId: "session_1",
       turnId: "turn_1",
-      streamId: "stream_1",
-      text: "Hi there",
-      createdAt: "2026-07-24T00:00:01.000Z",
+      item: { type: "agent_message", itemId: "item_1" },
+      createdAt: "2026-07-24T00:00:00.000Z",
+    })
+    source?.emit("session.transient", {
+      type: "assistant.delta",
+      sessionId: "session_1",
+      turnId: "turn_1",
+      itemId: "item_1",
+      delta: "Hi there",
+      createdAt: "2026-07-24T00:00:00.000Z",
     })
     const view = projectExecutionView(useAppStore.getState().execution)
     expect(view.entries).toEqual([
@@ -154,9 +182,72 @@ describe("app store event stream", () => {
         status: "streaming",
       }),
     ])
+    expect(useAppStore.getState().selectedSession?.counts).toMatchObject({
+      inputs: 1,
+      pendingInputs: 0,
+      turns: 1,
+      items: 0,
+    })
+    expect(useAppStore.getState().sessions[0]?.seq).toBe(3)
+  })
 
-    source?.emit("error")
-    expect(useAppStore.getState().streamStatus).toBe("disconnected")
+  it("does not revive a permission resolved before its POST failure returns", async () => {
+    let rejectResolution: ((error: Error) => void) | undefined
+    const resolution = new Promise<Response>((_, reject) => {
+      rejectResolution = reject
+    })
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: unknown) => {
+        if (String(input).includes("/permissions/permission_1/resolve")) {
+          return resolution
+        }
+        return errorResponse(404)
+      }),
+    )
+
+    await useAppStore.getState().selectSession("session_1")
+    const source = FakeEventSource.instances[0]
+    emitSnapshot(source, {
+      ...sessionDetail,
+      activeTurnId: "turn_1",
+      pendingPermissions: [
+        {
+          permissionRequestId: "permission_1",
+          turnId: "turn_1",
+          toolCallId: "call_1",
+          action: "run_command",
+          createdAt: "2026-07-24T00:00:00.000Z",
+        },
+      ],
+      counts: { ...sessionDetail.counts, permissions: 1 },
+    })
+
+    const resolving = useAppStore
+      .getState()
+      .resolvePermission("turn_1", "permission_1", "allow")
+    source?.emit("session.transient", {
+      type: "permission.resolved",
+      sessionId: "session_1",
+      turnId: "turn_1",
+      permissionRequestId: "permission_1",
+      outcome: "allow",
+      createdAt: "2026-07-24T00:00:01.000Z",
+    })
+    rejectResolution?.(new Error("response lost"))
+    await resolving
+
+    expect(
+      projectExecutionView(useAppStore.getState().execution).entries,
+    ).toEqual([
+      expect.objectContaining({
+        kind: "permission",
+        permissionRequestId: "permission_1",
+        state: "resolved",
+        behavior: "allow",
+      }),
+    ])
+    expect(useAppStore.getState().selectedSession?.counts.permissions).toBe(0)
   })
 
   it("ignores events from a stale stream after switching sessions", async () => {
@@ -183,12 +274,12 @@ describe("app store event stream", () => {
 
     const stale = FakeEventSource.instances[0]
     const current = FakeEventSource.instances[1]
+    emitSnapshot(current, { ...sessionDetail, id: "session_b" })
     expect(stale?.closed).toBe(true)
     expect(current?.url).toBe(
       "http://api.test/sessions/session_b/events?after=0",
     )
 
-    stale?.emit("open")
     stale?.emit(
       "session.event",
       createEventEnvelope({
@@ -206,9 +297,10 @@ describe("app store event stream", () => {
       }),
     )
 
-    expect(useAppStore.getState().execution.durableEvents).toEqual([])
+    expect(
+      projectExecutionView(useAppStore.getState().execution).entries,
+    ).toEqual([])
     expect(useAppStore.getState().selectedSession?.id).toBe("session_b")
-    expect(useAppStore.getState().streamStatus).toBe("connecting")
   })
 })
 
@@ -243,6 +335,7 @@ describe("cancel queued input", () => {
 
     await useAppStore.getState().selectSession("session_1")
     const source = FakeEventSource.instances[0]
+    emitSnapshot(source)
     source?.emit(
       "session.event",
       createEventEnvelope({
@@ -275,21 +368,12 @@ describe("cancel queued input", () => {
       }),
     )
     expect(useAppStore.getState().inFlightActions.size).toBe(0)
-    // The recorded event from the response clears the row immediately.
-    await vi.waitFor(() => {
-      expect(
-        projectExecutionView(useAppStore.getState().execution).queuedInputIds,
-      ).not.toContain("input_1")
-    })
+    expect(
+      projectExecutionView(useAppStore.getState().execution).queuedInputIds,
+    ).toContain("input_1")
 
-    // The same fact streaming in later is deduplicated by event id.
+    // The ordered stream owns the queue transition.
     source?.emit("session.event", cancelled)
-    await vi.waitFor(() => {
-      const durableEvents = useAppStore.getState().execution.durableEvents
-      expect(
-        durableEvents.filter((event) => event.id === cancelled.id),
-      ).toHaveLength(1)
-    })
     expect(
       projectExecutionView(useAppStore.getState().execution).queuedInputIds,
     ).not.toContain("input_1")
@@ -312,12 +396,12 @@ describe("cancel queued input", () => {
     vi.stubGlobal("fetch", fetchMock)
 
     await useAppStore.getState().selectSession("session_1")
-    expect(detailCallCount(fetchMock)).toBe(1)
+    emitSnapshot(FakeEventSource.instances[0])
 
     await useAppStore.getState().cancelQueuedInput("input_1")
 
     expect(useAppStore.getState().message).toBeUndefined()
-    expect(detailCallCount(fetchMock)).toBe(2)
+    expect(detailCallCount(fetchMock)).toBe(0)
     expect(useAppStore.getState().inFlightActions.size).toBe(0)
   })
 
@@ -401,6 +485,7 @@ describe("delete session", () => {
     vi.stubGlobal("fetch", stubDeleteFetch([]))
 
     await useAppStore.getState().selectSession("session_1")
+    emitSnapshot(FakeEventSource.instances[0])
     expect(useAppStore.getState().selectedSession?.id).toBe("session_1")
     const source = FakeEventSource.instances[0]
 
@@ -408,7 +493,9 @@ describe("delete session", () => {
 
     expect(useAppStore.getState().selectedSession).toBeUndefined()
     expect(useAppStore.getState().selection.sessionId).toBeUndefined()
-    expect(useAppStore.getState().execution.durableEvents).toEqual([])
+    expect(
+      projectExecutionView(useAppStore.getState().execution).entries,
+    ).toEqual([])
     expect(useAppStore.getState().sessions).toEqual([])
     expect(source?.closed).toBe(true)
   })
@@ -417,6 +504,7 @@ describe("delete session", () => {
     vi.stubGlobal("fetch", stubDeleteFetch([summary("session_1")]))
 
     await useAppStore.getState().selectSession("session_1")
+    emitSnapshot(FakeEventSource.instances[0])
     await useAppStore.getState().deleteSession("session_2")
 
     expect(useAppStore.getState().selectedSession?.id).toBe("session_1")
@@ -504,6 +592,7 @@ describe("fork session", () => {
 
     await useAppStore.getState().selectSession("session_1")
     const source = FakeEventSource.instances[0]
+    emitSnapshot(source, activeSession)
     source?.emit(
       "session.event",
       createEventEnvelope({
@@ -646,6 +735,48 @@ describe("project state", () => {
     expect(useAppStore.getState().sessions).toEqual([])
   })
 
+  it("keeps the latest same-project session list response", async () => {
+    let resolveFirst: ((response: Response) => void) | undefined
+    let resolveSecond: ((response: Response) => void) | undefined
+    const first = new Promise<Response>((resolve) => {
+      resolveFirst = resolve
+    })
+    const second = new Promise<Response>((resolve) => {
+      resolveSecond = resolve
+    })
+    let requestCount = 0
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: unknown) => {
+        if (!String(input).startsWith("http://api.test/sessions?")) {
+          return errorResponse(404)
+        }
+        requestCount += 1
+        return requestCount === 1 ? first : second
+      }),
+    )
+    useAppStore.setState({ currentProject: "/p/a" })
+
+    const slow = useAppStore.getState().loadSessions()
+    const fast = useAppStore.getState().loadSessions()
+    resolveSecond?.(
+      jsonResponse({
+        sessions: [{ ...sessionDetail, id: "session_new" }],
+      }),
+    )
+    await fast
+    resolveFirst?.(
+      jsonResponse({
+        sessions: [{ ...sessionDetail, id: "session_old" }],
+      }),
+    )
+    await slow
+
+    expect(
+      useAppStore.getState().sessions.map((session) => session.id),
+    ).toEqual(["session_new"])
+  })
+
   it("addProject updates the list and selects the resolved path", async () => {
     window.localStorage.clear()
     vi.stubGlobal(
@@ -705,18 +836,46 @@ describe("project state", () => {
 describe("model selection", () => {
   it("drops obsolete boolean thinking values from K2.7 selections", () => {
     expect(
-      normalizeKimiModelSelection({
-        provider: "kimi",
-        model: "kimi-for-coding-highspeed",
-        effort: "off",
-      }),
+      normalizeKimiModelSelection(
+        {
+          provider: "kimi",
+          model: "kimi-for-coding-highspeed",
+          effort: "off",
+        },
+        [
+          {
+            name: "kimi",
+            models: [
+              {
+                id: "kimi-for-coding-highspeed",
+                instructionProfileId: "kimi",
+                effortStyle: "none",
+              },
+            ],
+          },
+        ],
+      ),
     ).toEqual({ provider: "kimi", model: "kimi-for-coding-highspeed" })
     expect(
-      normalizeKimiModelSelection({
-        provider: "kimi",
-        model: "k3",
-        effort: "max",
-      }),
+      normalizeKimiModelSelection(
+        {
+          provider: "kimi",
+          model: "k3",
+          effort: "max",
+        },
+        [
+          {
+            name: "kimi",
+            models: [
+              {
+                id: "k3",
+                instructionProfileId: "kimi",
+                effortStyle: "levels",
+              },
+            ],
+          },
+        ],
+      ),
     ).toEqual({ provider: "kimi", model: "k3", effort: "max" })
   })
 
@@ -869,7 +1028,7 @@ describe("model selection", () => {
     })
     vi.stubGlobal("fetch", fetchMock)
     useAppStore.setState({
-      selection: { revision: 1, sessionId: "session_1" },
+      selection: { sessionId: "session_1" },
       modelSelections: {
         session_1: {
           provider: "openai",
@@ -910,7 +1069,7 @@ describe("model selection", () => {
       },
     }
     useAppStore.setState({
-      selection: { revision: 1, sessionId: "session_1" },
+      selection: { sessionId: "session_1" },
       promptAttachments: [attachment],
     })
 
@@ -924,7 +1083,7 @@ describe("model selection", () => {
     const fetchMock = admissionFetchMock()
     vi.stubGlobal("fetch", fetchMock)
     useAppStore.setState({
-      selection: { revision: 1, sessionId: "session_1" },
+      selection: { sessionId: "session_1" },
       defaultProvider: "openai",
       defaultModel: "gpt-5.6-sol",
       modelSelections: {
@@ -994,6 +1153,14 @@ describe("model selection", () => {
     })
 
     await useAppStore.getState().selectSession("session_1")
+    emitSnapshot(FakeEventSource.instances[0], {
+      ...sessionDetail,
+      currentModel: {
+        provider: "codex",
+        model: "gpt-5.6-sol",
+        effort: "high",
+      },
+    })
     await vi.waitFor(() => {
       expect(useAppStore.getState().modelSelections.session_1).toEqual({
         provider: "codex",
@@ -1056,6 +1223,14 @@ describe("model selection", () => {
     })
 
     await useAppStore.getState().selectSession("session_1")
+    emitSnapshot(FakeEventSource.instances[0], {
+      ...sessionDetail,
+      currentModel: {
+        provider: "codex",
+        model: "gpt-5.6-sol",
+        effort: "high",
+      },
+    })
     await useAppStore.getState().admitInput("restored")
 
     const admitCall = fetchMock.mock.calls.find(([input]) =>
@@ -1077,7 +1252,7 @@ describe("model selection", () => {
       vi.fn(async () => errorResponse(500)),
     )
     useAppStore.setState({
-      selection: { revision: 1, sessionId: "session_1" },
+      selection: { sessionId: "session_1" },
       userPreference: { provider: "faux", model: "scripted" },
       modelSelections: {},
     })
@@ -1106,14 +1281,14 @@ describe("model selection", () => {
     useAppStore.setState({ modelSelections: {} })
 
     await useAppStore.getState().selectSession("session_1")
-    expect(useAppStore.getState().modelSelectionReady).toBe(false)
+    expect(useAppStore.getState().restoringModelSelectionFor).toBe("session_1")
 
     useAppStore.getState().setModelSelection("session_1", {
       provider: "codex",
       model: "gpt-5.6-sol",
     })
 
-    expect(useAppStore.getState().modelSelectionReady).toBe(true)
+    expect(useAppStore.getState().restoringModelSelectionFor).toBeUndefined()
   })
 
   it("ignores a stale preference write failure after a newer choice", async () => {
@@ -1130,7 +1305,7 @@ describe("model selection", () => {
       }),
     )
     useAppStore.setState({
-      selection: { revision: 1, sessionId: "session_1" },
+      selection: { sessionId: "session_1" },
       modelSelections: {},
     })
 
@@ -1194,7 +1369,7 @@ describe("model selection", () => {
     })
     vi.stubGlobal("fetch", fetchMock)
     useAppStore.setState({
-      selection: { revision: 1, sessionId: "session_1" },
+      selection: { sessionId: "session_1" },
       modelSelections: {},
       defaultProvider: "faux",
       defaultModel: "scripted",

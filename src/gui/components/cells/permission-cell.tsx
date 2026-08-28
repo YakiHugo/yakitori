@@ -19,7 +19,9 @@ export function PermissionCell({
       <Badge variant={entry.state === "requested" ? "outline" : "secondary"}>
         {entry.state === "requested"
           ? "awaiting approval"
-          : (entry.behavior ?? entry.state)}
+          : entry.state === "resolving"
+            ? `${entry.behavior ?? "resolving"}…`
+            : (entry.behavior ?? entry.state)}
       </Badge>
     </div>
   )

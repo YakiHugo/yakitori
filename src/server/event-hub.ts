@@ -1,54 +1,100 @@
 import type { RuntimeEventEnvelope } from "../kernel/index.ts"
+import type { LiveSessionEvent } from "../runtime/live-events.ts"
 
-export type DurableEventListener = (
-  events: readonly RuntimeEventEnvelope[],
+export type SessionDelivery =
+  | {
+      readonly kind: "durable"
+      readonly events: readonly RuntimeEventEnvelope[]
+    }
+  | { readonly kind: "transient"; readonly event: LiveSessionEvent }
+
+export type SessionDeliveryListener = (
+  delivery: SessionDelivery,
 ) => void | Promise<void>
 
-export type DurableEventSubscription = {
+export type SessionEventSubscription = {
   close(): void
 }
 
-export type DurableEventHub = {
-  publish(events: readonly RuntimeEventEnvelope[]): void
+export type SessionEventHub = {
+  publishDurable(events: readonly RuntimeEventEnvelope[]): void
+  publishTransient(event: LiveSessionEvent): void
   subscribe(
     sessionId: string,
-    listener: DurableEventListener,
-  ): DurableEventSubscription
+    listener: SessionDeliveryListener,
+  ): SessionEventSubscription
 }
 
-export type DurableEventHubOptions = {
+export type SessionEventHubOptions = {
   readonly onListenerError?: (error: unknown) => void
 }
 
-export function createDurableEventHub(
-  options: DurableEventHubOptions = {},
-): DurableEventHub {
-  const listeners = new Map<string, Set<DurableEventListener>>()
+type Subscriber = {
+  readonly listener: SessionDeliveryListener
+  readonly pending: SessionDelivery[]
+  delivering: boolean
+  closed: boolean
+}
+
+export function createSessionEventHub(
+  options: SessionEventHubOptions = {},
+): SessionEventHub {
+  const subscribers = new Map<string, Set<Subscriber>>()
+
+  const drain = (subscriber: Subscriber): void => {
+    if (subscriber.closed || subscriber.delivering) return
+    for (;;) {
+      const delivery = subscriber.pending.shift()
+      if (delivery === undefined) return
+      try {
+        const result = subscriber.listener(delivery)
+        if (result === undefined) continue
+        subscriber.delivering = true
+        void Promise.resolve(result)
+          .catch((error) => options.onListenerError?.(error))
+          .finally(() => {
+            subscriber.delivering = false
+            drain(subscriber)
+          })
+        return
+      } catch (error) {
+        options.onListenerError?.(error)
+      }
+    }
+  }
+
+  const publish = (sessionId: string, delivery: SessionDelivery): void => {
+    for (const subscriber of Array.from(subscribers.get(sessionId) ?? [])) {
+      subscriber.pending.push(delivery)
+      drain(subscriber)
+    }
+  }
 
   return {
-    publish(events) {
+    publishDurable(events) {
       for (const [sessionId, sessionEvents] of groupEventsBySession(events)) {
-        for (const listener of Array.from(listeners.get(sessionId) ?? [])) {
-          try {
-            void Promise.resolve(listener(sessionEvents)).catch((error) => {
-              options.onListenerError?.(error)
-            })
-          } catch (error) {
-            options.onListenerError?.(error)
-          }
-        }
+        publish(sessionId, { kind: "durable", events: sessionEvents })
       }
     },
-
+    publishTransient(event) {
+      publish(event.sessionId, { kind: "transient", event })
+    },
     subscribe(sessionId, listener) {
-      const sessionListeners = listeners.get(sessionId) ?? new Set()
-      sessionListeners.add(listener)
-      listeners.set(sessionId, sessionListeners)
-
+      const sessionSubscribers = subscribers.get(sessionId) ?? new Set()
+      const subscriber: Subscriber = {
+        listener,
+        pending: [],
+        delivering: false,
+        closed: false,
+      }
+      sessionSubscribers.add(subscriber)
+      subscribers.set(sessionId, sessionSubscribers)
       return {
         close() {
-          sessionListeners.delete(listener)
-          if (sessionListeners.size === 0) listeners.delete(sessionId)
+          subscriber.closed = true
+          subscriber.pending.length = 0
+          sessionSubscribers.delete(subscriber)
+          if (sessionSubscribers.size === 0) subscribers.delete(sessionId)
         },
       }
     },
