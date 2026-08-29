@@ -166,6 +166,8 @@ describe("JSONL persistence", () => {
     await vi.waitFor(async () => {
       expect((await stat(fixture.summary(sourceId))).size).toBeGreaterThan(0)
     })
+    await fixture.store.close()
+    fixture.reopen()
     const sync = await spyOnFileHandleSync(fixture.journal(sourceId))
     sync.mockRejectedValueOnce(new Error("simulated staging fsync failure"))
 
@@ -198,6 +200,8 @@ describe("JSONL persistence", () => {
     await vi.waitFor(async () => {
       expect((await stat(fixture.summary(sourceId))).size).toBeGreaterThan(0)
     })
+    await fixture.store.close()
+    fixture.reopen()
     const sync = await spyOnFileHandleSync(fixture.journal(sourceId))
     sync
       .mockResolvedValueOnce(undefined)

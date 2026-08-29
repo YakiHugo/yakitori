@@ -7,8 +7,15 @@ import type {
   TokenUsage,
 } from "../kernel/events.ts"
 
+export type HistoryPosition = {
+  readonly rolloutId: string
+  readonly endSeqExclusive: number
+  readonly endByteOffset: number
+}
+
 export type ThreadMetadata = {
   readonly id: string
+  readonly rolloutId?: string
   readonly conversationId: string
   readonly createdAt: string
   readonly updatedAt: string
@@ -18,6 +25,7 @@ export type ThreadMetadata = {
   readonly mateRevisionId?: string
   readonly parentThreadId?: string
   readonly forkedFromTurnId?: string
+  readonly historyBase?: HistoryPosition
   readonly metadata?: EventMetadata
 }
 
@@ -65,6 +73,7 @@ export type RolloutItem =
 
 export type StoredRolloutItem = {
   readonly threadId: string
+  readonly rolloutId: string
   readonly seq: number
   readonly createdAt: string
   readonly item: RolloutItem

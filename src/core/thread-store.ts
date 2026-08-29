@@ -1,4 +1,5 @@
 import type {
+  HistoryPosition,
   RolloutItem,
   StoredThread,
   ThreadMetadata,
@@ -26,21 +27,23 @@ export type PrepareForkInput = {
 export type PreparedFork = {
   readonly reservationId: string
   readonly sourceThreadId: string
-  readonly historyPosition: {
-    readonly threadId: string
-    readonly endSeqExclusive: number
-  }
+  readonly historyPosition?: HistoryPosition
   readonly modelContext: readonly import("./rollout.ts").ResponseItemEnvelope[]
 }
 
+export type CreateThreadMetadata = Omit<
+  ThreadMetadata,
+  "rolloutId" | "historyBase"
+>
+
 export type CreateForkInput = {
   readonly prepared: PreparedFork
-  readonly target: ThreadMetadata
+  readonly target: CreateThreadMetadata
 }
 
 export type ThreadStoreForkResult = {
   readonly thread: StoredThread
-  readonly historyEndSeqExclusive: number
+  readonly historyEndSeqExclusive?: number
 }
 
 export type ThreadStoreListInput = {
@@ -57,7 +60,7 @@ export type ThreadStoreListResult = {
 // Storage-neutral rollout boundary. Implementations own their live single
 // writer, retry buffer, reference-backed fork positions, and projections.
 export type ThreadStore = {
-  createThread(metadata: ThreadMetadata): Promise<StoredThread>
+  createThread(metadata: CreateThreadMetadata): Promise<StoredThread>
   resumeThread(threadId: string): Promise<StoredThread | undefined>
   appendItems(threadId: string, items: readonly RolloutItem[]): Promise<void>
   persistThread(threadId: string, context: PersistContext): Promise<void>

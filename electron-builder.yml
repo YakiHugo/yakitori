@@ -1,16 +1,20 @@
 appId: com.yakitori.app
 productName: Yakitori
 asar: true
+# Native dependencies are force-rebuilt before packaging by the package script.
+npmRebuild: false
 # The sidecar server entry runs under plain Node (ELECTRON_RUN_AS_NODE),
 # which cannot read inside the asar archive — unpack the desktop bundle.
 asarUnpack:
   - dist/desktop/**
-# The desktop bundle inlines all npm dependencies, so node_modules must not
-# be packaged.
+  - node_modules/fs-ext/**
+# JavaScript dependencies are inlined. fs-ext remains external because its
+# native addon must be rebuilt against and loaded by Electron's Node runtime.
 files:
   - dist/desktop/**
   - package.json
   - "!node_modules/**"
+  - node_modules/fs-ext/**
 extraResources:
   - from: dist/gui
     to: gui

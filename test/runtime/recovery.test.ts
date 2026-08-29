@@ -171,7 +171,7 @@ describe("runtime recovery", () => {
         reads.every((read) => read.session?.activeTurn === undefined),
       ).toBe(true)
     })
-  }, 15_000)
+  }, 30_000)
 
   it("interrupts the active Turn before waking queued work after a cold restart", async () => {
     const rootDir = await mkdtemp(

@@ -1460,7 +1460,7 @@ function isContextWindowReplacement(
   )
 }
 
-function isModelMessage(value: unknown): value is ModelMessage {
+export function isModelMessage(value: unknown): value is ModelMessage {
   if (!isRecord(value) || !isString(value.role)) return false
   if (value.role === "tool") {
     return (
@@ -1540,7 +1540,7 @@ function isModelHistoryContext(value: unknown): boolean {
   )
 }
 
-function isSessionConfigurationSnapshot(
+export function isSessionConfigurationSnapshot(
   value: unknown,
 ): value is SessionConfigurationSnapshot {
   if (!isRecord(value)) return false
@@ -1699,7 +1699,7 @@ function isInputRole(value: unknown): value is InputRole {
   return typeof value === "string" && inputRoles.has(value)
 }
 
-function isTokenUsage(value: unknown): value is TokenUsage {
+export function isTokenUsage(value: unknown): value is TokenUsage {
   return (
     isRecord(value) &&
     onlyKeys(value, [
@@ -1784,7 +1784,7 @@ function isImageDetail(value: unknown): value is ImageDetail {
   return value === "high" || value === "original"
 }
 
-function isModelSelection(value: unknown): value is ModelSelection {
+export function isModelSelection(value: unknown): value is ModelSelection {
   return (
     isRecord(value) &&
     onlyKeys(value, ["provider", "model", "effort", "speed"]) &&

@@ -1,9 +1,10 @@
 import type { EventMetadata } from "../kernel/events.ts"
 import { createSessionId } from "../kernel/ids.ts"
 import { CodexThread } from "./codex-thread.ts"
-import type { StoredThread, ThreadMetadata } from "./rollout.ts"
+import type { StoredThread } from "./rollout.ts"
 import { Session, type TurnProcessor } from "./session.ts"
 import type {
+  CreateThreadMetadata,
   ThreadStore,
   ThreadStoreForkResult,
   ThreadStoreListInput,
@@ -60,7 +61,7 @@ export class ThreadManager {
     return this.#trackStarting(async () => {
       const now = new Date().toISOString()
       const threadId = createSessionId()
-      const metadata: ThreadMetadata = {
+      const metadata: CreateThreadMetadata = {
         id: threadId,
         conversationId: threadId,
         createdAt: now,
@@ -125,9 +126,14 @@ export class ThreadManager {
         throw new Error(`Thread ${input.sourceThreadId} was not found.`)
       }
       const sourceMetadata = source.snapshot().metadata
+      const {
+        rolloutId: _rolloutId,
+        historyBase: _historyBase,
+        ...forkableMetadata
+      } = sourceMetadata
       const now = new Date().toISOString()
-      const target: ThreadMetadata = {
-        ...sourceMetadata,
+      const target: CreateThreadMetadata = {
+        ...forkableMetadata,
         id: createSessionId(),
         createdAt: now,
         updatedAt: now,

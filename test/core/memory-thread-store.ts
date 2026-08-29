@@ -2,11 +2,11 @@ import type {
   RolloutItem,
   StoredRolloutItem,
   StoredThread,
-  ThreadMetadata,
   ThreadSummary,
 } from "../../src/core/rollout.ts"
 import type {
   CreateForkInput,
+  CreateThreadMetadata,
   PersistContext,
   PreparedFork,
   PrepareForkInput,
@@ -16,7 +16,9 @@ import type {
 
 type Writer = {
   readonly pending: RolloutItem[]
+  readonly rolloutId: string
   tail: Promise<void>
+  nextSeq: number
 }
 
 export class MemoryThreadStore implements ThreadStore {
@@ -37,15 +39,29 @@ export class MemoryThreadStore implements ThreadStore {
   prepareForkStarted: (() => void) | undefined
   createForkBarrier: Promise<void> | undefined
 
-  async createThread(metadata: ThreadMetadata): Promise<StoredThread> {
+  async createThread(metadata: CreateThreadMetadata): Promise<StoredThread> {
     if (this.#threads.has(metadata.id))
       throw new Error("Thread already exists.")
+    const storedMetadata = {
+      ...structuredClone(metadata),
+      rolloutId: metadata.id,
+    }
     const thread: StoredThread = {
-      metadata: structuredClone(metadata),
-      rollout: [record(metadata.id, 1, { type: "session_meta", metadata })],
+      metadata: storedMetadata,
+      rollout: [
+        record(metadata.id, metadata.id, 0, {
+          type: "session_meta",
+          metadata: storedMetadata,
+        }),
+      ],
     }
     this.#threads.set(metadata.id, thread)
-    this.#writers.set(metadata.id, { pending: [], tail: Promise.resolve() })
+    this.#writers.set(metadata.id, {
+      pending: [],
+      rolloutId: metadata.id,
+      tail: Promise.resolve(),
+      nextSeq: 1,
+    })
     return structuredClone(thread)
   }
 
@@ -53,7 +69,13 @@ export class MemoryThreadStore implements ThreadStore {
     await this.resumeBarrier
     const thread = this.#threads.get(threadId)
     if (thread === undefined) return undefined
-    this.#writers.set(threadId, { pending: [], tail: Promise.resolve() })
+    const last = thread.rollout.at(-1)
+    this.#writers.set(threadId, {
+      pending: [],
+      rolloutId: thread.metadata.rolloutId ?? threadId,
+      tail: Promise.resolve(),
+      nextSeq: last === undefined ? 1 : last.seq + 1,
+    })
     return structuredClone(thread)
   }
 
@@ -75,13 +97,8 @@ export class MemoryThreadStore implements ThreadStore {
 
   async shutdownThread(threadId: string): Promise<void> {
     const writer = this.#requireWriter(threadId)
-    try {
-      await this.#enqueue(writer, () =>
-        this.#drain(threadId, writer, "shutdown"),
-      )
-    } finally {
-      this.#writers.delete(threadId)
-    }
+    await this.#enqueue(writer, () => this.#drain(threadId, writer, "shutdown"))
+    this.#writers.delete(threadId)
   }
 
   async discardThread(threadId: string): Promise<void> {
@@ -95,6 +112,7 @@ export class MemoryThreadStore implements ThreadStore {
     if (boundary === -1) throw new Error("Fork boundary was not found.")
     const reservationId = `fork_${globalThis.crypto.randomUUID()}`
     const prefix = structuredClone(source.rollout.slice(1, boundary))
+    const last = prefix.at(-1)
     this.#forks.set(reservationId, {
       sourceThreadId: input.sourceThreadId,
       prefix,
@@ -102,11 +120,15 @@ export class MemoryThreadStore implements ThreadStore {
     return {
       reservationId,
       sourceThreadId: input.sourceThreadId,
-      historyPosition: {
-        threadId: input.sourceThreadId,
-        endSeqExclusive:
-          source.rollout[boundary]?.seq ?? source.rollout.length + 1,
-      },
+      ...(last === undefined
+        ? {}
+        : {
+            historyPosition: {
+              rolloutId: last.rolloutId,
+              endSeqExclusive: last.seq + 1,
+              endByteOffset: last.seq + 1,
+            },
+          }),
       modelContext: modelContextAt(prefix),
     }
   }
@@ -120,27 +142,46 @@ export class MemoryThreadStore implements ThreadStore {
     const reservation = this.#forks.get(input.prepared.reservationId)
     if (reservation === undefined)
       throw new Error("Fork reservation was not found.")
-    const inherited = reservation.prefix.map((entry, index) => ({
-      ...structuredClone(entry),
-      threadId: input.target.id,
-      seq: index + 2,
-    }))
+    const inherited = structuredClone(reservation.prefix)
+    const target = structuredClone(input.target)
+    if ("rolloutId" in target || "historyBase" in target) {
+      throw new Error(
+        "Fork targets cannot provide physical rollout or inherited history.",
+      )
+    }
+    const metadata = {
+      ...target,
+      rolloutId: input.target.id,
+      ...(input.prepared.historyPosition === undefined
+        ? {}
+        : { historyBase: input.prepared.historyPosition }),
+    }
     const thread: StoredThread = {
-      metadata: structuredClone(input.target),
+      metadata,
       rollout: [
-        record(input.target.id, 1, {
+        record(input.target.id, input.target.id, 0, {
           type: "session_meta",
-          metadata: input.target,
+          metadata,
         }),
         ...inherited,
       ],
     }
     this.#threads.set(input.target.id, thread)
-    this.#writers.set(input.target.id, { pending: [], tail: Promise.resolve() })
+    this.#writers.set(input.target.id, {
+      pending: [],
+      rolloutId: input.target.id,
+      tail: Promise.resolve(),
+      nextSeq: input.prepared.historyPosition?.endSeqExclusive ?? 1,
+    })
     this.#forks.delete(input.prepared.reservationId)
     return {
       thread: structuredClone(thread),
-      historyEndSeqExclusive: input.prepared.historyPosition.endSeqExclusive,
+      ...(input.prepared.historyPosition === undefined
+        ? {}
+        : {
+            historyEndSeqExclusive:
+              input.prepared.historyPosition.endSeqExclusive,
+          }),
     }
   }
 
@@ -223,7 +264,8 @@ export class MemoryThreadStore implements ThreadStore {
     const pending = writer.pending.splice(0)
     const rollout = [...thread.rollout]
     for (const item of pending) {
-      rollout.push(record(threadId, rollout.length + 1, item))
+      rollout.push(record(threadId, writer.rolloutId, writer.nextSeq, item))
+      writer.nextSeq += 1
     }
     this.#threads.set(threadId, {
       metadata: {
@@ -276,7 +318,8 @@ function forkBoundaryIndex(
         entry.item.item.item.role === "user",
     )
   }
-  const terminal = source.rollout.findIndex(
+  const terminal = findLastIndex(
+    source.rollout,
     (entry) =>
       entry.item.type === "turn_completed" && entry.item.turnId === turnId,
   )
@@ -285,13 +328,26 @@ function forkBoundaryIndex(
 
 function record(
   threadId: string,
+  rolloutId: string,
   seq: number,
   item: RolloutItem,
 ): StoredRolloutItem {
   return {
     threadId,
+    rolloutId,
     seq,
     createdAt: new Date().toISOString(),
     item: structuredClone(item),
   }
+}
+
+function findLastIndex<T>(
+  values: readonly T[],
+  predicate: (value: T) => boolean,
+): number {
+  for (let index = values.length - 1; index >= 0; index -= 1) {
+    const value = values[index]
+    if (value !== undefined && predicate(value)) return index
+  }
+  return -1
 }

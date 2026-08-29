@@ -1,5 +1,6 @@
 export * from "./codex-thread.ts"
 export * from "./context-manager.ts"
+export * from "./jsonl-thread-store.ts"
 export * from "./rollout.ts"
 export * from "./session.ts"
 export * from "./session-io.ts"
