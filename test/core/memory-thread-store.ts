@@ -35,6 +35,8 @@ export class MemoryThreadStore implements ThreadStore {
   failNextFlush = false
   failNextShutdown = false
   failNextCreateFork = false
+  flushBarrier: Promise<void> | undefined
+  flushStarted: (() => void) | undefined
   resumeBarrier: Promise<void> | undefined
   prepareForkStarted: (() => void) | undefined
   createForkBarrier: Promise<void> | undefined
@@ -247,6 +249,10 @@ export class MemoryThreadStore implements ThreadStore {
     writer: Writer,
     operation: "append" | "flush" | "shutdown",
   ): Promise<void> {
+    if (operation === "flush") {
+      this.flushStarted?.()
+      await this.flushBarrier
+    }
     if (operation === "append" && this.failNextAppend) {
       this.failNextAppend = false
       throw new Error("append failed")

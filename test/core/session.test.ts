@@ -58,6 +58,71 @@ describe("Codex-style live Session", () => {
     await manager.shutdown()
   })
 
+  it("rejects steering once the active task has atomically closed its input", async () => {
+    const closed = deferred<void>()
+    const mayFinish = deferred<void>()
+    const manager = createManager({
+      async run(_runtime, _input, control) {
+        expect(control.takeSteeringOrComplete()).toEqual({ type: "complete" })
+        closed.resolve()
+        await mayFinish.promise
+      },
+    })
+    const thread = await manager.createThread()
+    await thread.startIfIdle({
+      submissionId: "turn_closing",
+      content: { kind: "text", text: "run" },
+    })
+    await closed.promise
+
+    await expect(
+      thread.startOrSteer({ content: { kind: "text", text: "too late" } }),
+    ).resolves.toEqual({ type: "not_submitted", reason: "not_idle" })
+    await expect(
+      thread.steer(
+        { content: { kind: "text", text: "too late" } },
+        "turn_closing",
+      ),
+    ).resolves.toEqual({ type: "not_submitted", reason: "no_active_turn" })
+
+    mayFinish.resolve()
+    await nextEventOfType(thread, "turn.completed")
+    await manager.shutdown()
+  })
+
+  it("does not admit or mutate a Turn when preparation fails", async () => {
+    const store = new MemoryThreadStore()
+    const manager = new ThreadManager({
+      store,
+      createTurnProcessor: () => ({
+        prepare() {
+          throw new Error("configuration unavailable")
+        },
+        start() {
+          throw new Error("unreachable")
+        },
+      }),
+    })
+    const thread = await manager.createThread()
+
+    await expect(
+      thread.startIfIdle({
+        content: { kind: "text", text: "must not persist" },
+      }),
+    ).rejects.toThrow("configuration unavailable")
+    expect(thread.status).toBe(SessionStatus.Idle)
+    expect(thread.snapshot()).toMatchObject({
+      context: { history: [] },
+    })
+    expect(thread.snapshot().configuration).toBeUndefined()
+    expect(
+      (await store.readThread(thread.id))?.rollout.map(
+        (entry) => entry.item.type,
+      ),
+    ).toEqual(["session_meta"])
+    await manager.shutdown()
+  })
+
   it("survives synchronous processor failures and reports aborts as interruption", async () => {
     let call = 0
     const manager = createManager({
@@ -252,6 +317,33 @@ describe("Codex-style live Session", () => {
       outcome: "completed",
     })
     expect(persistenceErrors).toEqual([expect.any(Error)])
+    await manager.shutdown()
+  })
+
+  it("keeps the Turn active until its terminal rollout and event are published", async () => {
+    const store = new MemoryThreadStore()
+    const mayFinish = deferred<void>()
+    const terminalFlushStarted = deferred<void>()
+    const terminalMayFlush = deferred<void>()
+    const manager = createManager({ run: async () => mayFinish.promise }, store)
+    const thread = await manager.createThread()
+    await thread.startIfIdle({
+      submissionId: "turn_terminal_fence",
+      content: { kind: "text", text: "finish" },
+    })
+    store.flushStarted = () => terminalFlushStarted.resolve()
+    store.flushBarrier = terminalMayFlush.promise
+
+    mayFinish.resolve()
+    await terminalFlushStarted.promise
+    expect(thread.status).toBe(SessionStatus.Active)
+    await expect(
+      thread.startIfIdle({ content: { kind: "text", text: "too early" } }),
+    ).resolves.toEqual({ type: "not_submitted", reason: "not_idle" })
+
+    terminalMayFlush.resolve()
+    await nextEventOfType(thread, "turn.completed")
+    expect(thread.status).toBe(SessionStatus.Idle)
     await manager.shutdown()
   })
 
@@ -510,7 +602,7 @@ function withPreparation(processor: TestProcessor): TurnProcessor {
         }).snapshot,
       }
     },
-    start(runtime, input, control) {
+    start(runtime, input, _context, control) {
       let completion: Promise<void>
       try {
         completion = Promise.resolve(processor.run(runtime, input, control))

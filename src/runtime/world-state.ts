@@ -5,11 +5,11 @@ import type {
   SessionProjection,
   WorldStateFragment,
 } from "../kernel/index.ts"
+import type { AgentRuntimeContext } from "./agent-control.ts"
 import {
   type EnvironmentSnapshot,
   renderEnvironmentContext,
 } from "./environment-context.ts"
-import type { AgentRuntimeContext } from "./agent-control.ts"
 import type { ProjectInstructions } from "./project-instructions.ts"
 import type { ResolvedTurnConfiguration } from "./session-configuration.ts"
 
@@ -48,9 +48,33 @@ export function buildWorldState(input: {
   readonly projectInstructions?: ProjectInstructions
   readonly multiAgent?: AgentRuntimeContext
 }): WorldState {
+  return buildWorldStateFromSnapshot({
+    configuration: input.configuration,
+    ...(previousModel(input.session) === undefined
+      ? {}
+      : { previousModelId: previousModel(input.session) }),
+    environment: input.environment,
+    ...(input.projectInstructions === undefined
+      ? {}
+      : { projectInstructions: input.projectInstructions }),
+    ...(input.multiAgent === undefined ? {} : { multiAgent: input.multiAgent }),
+  })
+}
+
+export function buildWorldStateFromSnapshot(input: {
+  readonly configuration: ResolvedTurnConfiguration
+  readonly baseModelId?: string | undefined
+  readonly previousModelId?: string | undefined
+  readonly environment: EnvironmentSnapshot
+  readonly projectInstructions?: ProjectInstructions
+  readonly multiAgent?: AgentRuntimeContext
+}): WorldState {
   return {
     sections: [
-      modelSection(input.configuration, previousModel(input.session)),
+      modelSection(
+        input.configuration,
+        input.baseModelId ?? input.previousModelId,
+      ),
       ...(input.multiAgent === undefined
         ? []
         : [

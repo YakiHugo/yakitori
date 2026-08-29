@@ -1,4 +1,8 @@
-import type { JsonObject } from "../kernel/events.ts"
+import type {
+  JsonObject,
+  SessionConfigurationSnapshot,
+  TokenUsage,
+} from "../kernel/events.ts"
 import { ContextManager, type ContextSnapshot } from "./context-manager.ts"
 import type {
   ResponseItemEnvelope,
@@ -27,16 +31,25 @@ const gracefulInterruptionTimeoutMs = 100
 export type SessionSnapshot = {
   readonly metadata: ThreadMetadata
   readonly context: ContextSnapshot
+  readonly configuration?: SessionConfigurationSnapshot
 }
 
 export type TurnControl = {
   readonly signal: AbortSignal
   takeSteering(): readonly TurnInput[]
+  takeSteeringOrComplete():
+    | { readonly type: "steering"; readonly inputs: readonly TurnInput[] }
+    | { readonly type: "complete" }
 }
 
 export type TurnRuntime = {
   snapshot(): SessionSnapshot
+  recordUsage(usage: TokenUsage): void
   recordConversationItems(items: readonly ResponseItemEnvelope[]): Promise<void>
+  recordWorldStateUpdate(
+    items: readonly ResponseItemEnvelope[],
+    state: JsonObject,
+  ): Promise<void>
   replaceConversationHistory(input: {
     readonly replacement: readonly ResponseItemEnvelope[]
     readonly summary: string
@@ -46,7 +59,16 @@ export type TurnRuntime = {
 
 export type TurnProcessor = {
   prepare(snapshot: SessionSnapshot, input: TurnInput): TurnContextItem
-  start(runtime: TurnRuntime, input: TurnInput, control: TurnControl): TurnTask
+  prepareSteering?(
+    snapshot: SessionSnapshot,
+    input: TurnInput,
+  ): SessionConfigurationSnapshot | undefined
+  start(
+    runtime: TurnRuntime,
+    input: TurnInput,
+    context: TurnContextItem,
+    control: TurnControl,
+  ): TurnTask
 }
 
 // The processor owns effects outside Session state, so cancellation must stop
@@ -61,6 +83,8 @@ type ActiveTurn = {
   readonly context: TurnContextItem
   readonly abort: AbortController
   readonly steering: TurnInput[]
+  acceptingSteering: boolean
+  usage: TokenUsage | undefined
   readonly resolveAbort: () => void
   taskHandle: TurnTask | undefined
   task: Promise<void>
@@ -81,6 +105,7 @@ export class Session {
   readonly io: SessionIo
   readonly #metadata: ThreadMetadata
   readonly #contextManager: ContextManager
+  #configuration: SessionConfigurationSnapshot | undefined
   readonly #store: ThreadStore
   readonly #processor: TurnProcessor
   readonly #submissions = new BoundedQueue<SessionCommand>(submissionCapacity)
@@ -101,6 +126,7 @@ export class Session {
     this.id = input.stored.metadata.id
     this.#metadata = structuredClone(input.stored.metadata)
     this.#contextManager = ContextManager.fromStoredThread(input.stored)
+    this.#configuration = latestConfiguration(input.stored)
     this.#store = input.store
     this.#processor = input.processor
     this.#onPersistenceError = input.onPersistenceError
@@ -124,6 +150,9 @@ export class Session {
     return {
       metadata: structuredClone(this.#metadata),
       context: this.#contextManager.snapshot(),
+      ...(this.#configuration === undefined
+        ? {}
+        : { configuration: structuredClone(this.#configuration) }),
     }
   }
 
@@ -200,15 +229,45 @@ export class Session {
     }
     if (mode.type === "start_or_steer") {
       if (active === undefined) return this.#startTurn(input)
-      active.steering.push(input)
+      if (!active.acceptingSteering) return notSubmitted(Reason.NotIdle)
+      await this.#acceptSteering(active, input)
       return { type: "steered", turnId: active.input.submissionId }
     }
-    if (active === undefined) return notSubmitted(Reason.NoActiveTurn)
+    if (active === undefined || !active.acceptingSteering) {
+      return notSubmitted(Reason.NoActiveTurn)
+    }
     if (active.input.submissionId !== mode.expectedTurnId) {
       return notSubmitted(Reason.TurnMismatch)
     }
-    active.steering.push(input)
+    await this.#acceptSteering(active, input)
     return { type: "steered", turnId: active.input.submissionId }
+  }
+
+  async #acceptSteering(active: ActiveTurn, input: TurnInput): Promise<void> {
+    const configuration =
+      input.modelSelection === undefined
+        ? undefined
+        : this.#processor.prepareSteering?.(this.snapshot(), input)
+    if (input.modelSelection !== undefined && configuration === undefined) {
+      throw new Error("Turn processor does not support steering settings.")
+    }
+    active.steering.push(input)
+    if (configuration === undefined) return
+    const selection = input.modelSelection
+    if (selection === undefined) {
+      throw new Error("Steering configuration requires a model selection.")
+    }
+    this.#configuration = structuredClone(configuration)
+    await this.#appendRollout([
+      {
+        type: "turn_context",
+        context: {
+          turnId: input.submissionId,
+          configuration,
+          selection,
+        },
+      },
+    ])
   }
 
   async #startTurn(input: TurnInput): Promise<TurnInputSubmission> {
@@ -216,6 +275,7 @@ export class Session {
     if (context.turnId !== input.submissionId) {
       throw new Error("Turn processor prepared a mismatched Turn id.")
     }
+    this.#configuration = structuredClone(context.configuration)
     const inputItem: ResponseItemEnvelope = {
       id: `message_${globalThis.crypto.randomUUID()}`,
       turnId: input.submissionId,
@@ -259,6 +319,8 @@ export class Session {
       context,
       abort,
       steering: [],
+      acceptingSteering: true,
+      usage: undefined,
       resolveAbort: () => aborted.resolve(),
       taskHandle: undefined,
       task: Promise.resolve(),
@@ -270,10 +332,21 @@ export class Session {
 
     let taskHandle: TurnTask
     try {
-      taskHandle = this.#processor.start(this.#turnRuntime(active), input, {
-        signal: abort.signal,
-        takeSteering: () => active.steering.splice(0),
-      })
+      taskHandle = this.#processor.start(
+        this.#turnRuntime(active),
+        input,
+        context,
+        {
+          signal: abort.signal,
+          takeSteering: () => active.steering.splice(0),
+          takeSteeringOrComplete: () => {
+            const inputs = active.steering.splice(0)
+            if (inputs.length > 0) return { type: "steering", inputs }
+            active.acceptingSteering = false
+            return { type: "complete" }
+          },
+        },
+      )
     } catch (error) {
       taskHandle = {
         completion: Promise.reject(error),
@@ -335,8 +408,7 @@ export class Session {
       | { readonly type: "failed"; readonly error: unknown },
   ): Promise<void> {
     if (this.#activeTurn !== active) return
-    this.#activeTurn = undefined
-    if (!this.#closing) this.#setStatus(SessionStatus.Idle)
+    active.acceptingSteering = false
 
     if (outcome.type === "interrupted") {
       await this.#appendRollout([
@@ -344,6 +416,7 @@ export class Session {
           type: "turn_completed",
           turnId: active.input.submissionId,
           outcome: "interrupted",
+          ...(active.usage === undefined ? {} : { usage: active.usage }),
         },
       ])
       await this.#flushRollout()
@@ -355,6 +428,7 @@ export class Session {
           ? {}
           : { reason: active.interruptReason }),
       })
+      this.#releaseTurn(active)
       return
     }
 
@@ -368,6 +442,7 @@ export class Session {
           type: "turn_completed",
           turnId: active.input.submissionId,
           outcome: "failed",
+          ...(active.usage === undefined ? {} : { usage: active.usage }),
           error: { message },
         },
       ])
@@ -378,6 +453,7 @@ export class Session {
         operation: "turn_input",
         message,
       })
+      this.#releaseTurn(active)
       return
     }
 
@@ -386,6 +462,7 @@ export class Session {
         type: "turn_completed",
         turnId: active.input.submissionId,
         outcome: "completed",
+        ...(active.usage === undefined ? {} : { usage: active.usage }),
       },
     ])
     await this.#flushRollout()
@@ -394,18 +471,32 @@ export class Session {
       threadId: this.id,
       input: active.input,
     })
+    this.#releaseTurn(active)
+  }
+
+  #releaseTurn(active: ActiveTurn): void {
+    if (this.#activeTurn !== active) return
+    this.#activeTurn = undefined
+    if (!this.#closing) this.#setStatus(SessionStatus.Idle)
   }
 
   #interruptActiveTurn(reason: string): void {
     if (this.#activeTurn === undefined) return
     this.#activeTurn.interruptReason = reason
+    this.#activeTurn.acceptingSteering = false
     this.#activeTurn.abort.abort()
     this.#activeTurn.resolveAbort()
   }
 
   #turnRuntime(active: ActiveTurn): TurnRuntime {
+    const requireActive = () => {
+      if (this.#activeTurn !== active) {
+        throw new Error("Turn is no longer active.")
+      }
+    }
     const requireLease = () => {
-      if (this.#activeTurn !== active || active.abort.signal.aborted) {
+      requireActive()
+      if (active.abort.signal.aborted) {
         throw new Error("Turn is no longer active.")
       }
     }
@@ -414,6 +505,10 @@ export class Session {
         requireLease()
         return this.snapshot()
       },
+      recordUsage: (usage) => {
+        requireActive()
+        active.usage = structuredClone(usage)
+      },
       recordConversationItems: async (items) => {
         requireLease()
         if (items.length === 0) return
@@ -421,6 +516,21 @@ export class Session {
         await this.#appendRollout(
           items.map((item): RolloutItem => ({ type: "response_item", item })),
         )
+      },
+      recordWorldStateUpdate: async (items, state) => {
+        requireLease()
+        if (items.length > 0) this.#contextManager.record(items)
+        this.#contextManager.setWorldStateBaseline(state)
+        await this.#appendRollout([
+          ...items.map(
+            (item): RolloutItem => ({ type: "response_item", item }),
+          ),
+          {
+            type: "world_state",
+            turnId: active.input.submissionId,
+            state,
+          },
+        ])
       },
       replaceConversationHistory: async (input) => {
         requireLease()
@@ -527,6 +637,18 @@ export class Session {
 
 function notSubmitted(reason: NotSubmittedReason): TurnInputSubmission {
   return { type: "not_submitted", reason }
+}
+
+function latestConfiguration(
+  stored: StoredThread,
+): SessionConfigurationSnapshot | undefined {
+  for (let index = stored.rollout.length - 1; index >= 0; index -= 1) {
+    const item = stored.rollout[index]?.item
+    if (item?.type === "turn_context") {
+      return structuredClone(item.context.configuration)
+    }
+  }
+  return undefined
 }
 
 function deferred<T>() {
