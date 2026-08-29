@@ -1,7 +1,9 @@
-export type RuntimePermissionReason = {
-  readonly kind: string
-  readonly message?: string
-}
+import type {
+  SessionPermissionEvent,
+  SessionPermissionReason,
+} from "../core/session-io.ts"
+
+export type RuntimePermissionReason = SessionPermissionReason
 
 export type RuntimePermissionRequest = {
   readonly permissionRequestId: string
@@ -20,17 +22,7 @@ export type RuntimePermissionOutcome =
   | { readonly kind: "timeout"; readonly reason: RuntimePermissionReason }
   | { readonly kind: "aborted"; readonly reason: RuntimePermissionReason }
 
-export type RuntimePermissionEvent =
-  | ({ readonly type: "permission.requested" } & RuntimePermissionRequest)
-  | {
-      readonly type: "permission.resolved"
-      readonly permissionRequestId: string
-      readonly sessionId: string
-      readonly turnId: string
-      readonly outcome: RuntimePermissionOutcome["kind"]
-      readonly reason?: RuntimePermissionReason
-      readonly createdAt: string
-    }
+export type RuntimePermissionEvent = SessionPermissionEvent
 
 export type PermissionGate = {
   request(input: {
@@ -42,6 +34,7 @@ export type PermissionGate = {
     readonly reason?: string
     readonly signal?: AbortSignal
     readonly timeoutMs: number
+    readonly publish?: (event: RuntimePermissionEvent) => void
   }): Promise<RuntimePermissionOutcome>
   resolve(input: {
     readonly sessionId: string
@@ -95,7 +88,7 @@ export function createPermissionGate(
           if (!pending.delete(permissionRequestId)) return
           if (timer !== undefined) clearTimeout(timer)
           input.signal?.removeEventListener("abort", onAbort)
-          options.publish?.({
+          const event: RuntimePermissionEvent = {
             type: "permission.resolved",
             permissionRequestId,
             sessionId: input.sessionId,
@@ -103,12 +96,19 @@ export function createPermissionGate(
             outcome: outcome.kind,
             ...(outcome.reason === undefined ? {} : { reason: outcome.reason }),
             createdAt: new Date().toISOString(),
-          })
+          }
+          options.publish?.(event)
+          input.publish?.(event)
           resolve(outcome)
         }
 
         pending.set(permissionRequestId, { ...request, settle })
-        options.publish?.({ type: "permission.requested", ...request })
+        const event: RuntimePermissionEvent = {
+          type: "permission.requested",
+          ...request,
+        }
+        options.publish?.(event)
+        input.publish?.(event)
         // A synchronous observer may decide immediately while handling the
         // requested notification. Do not install an orphaned timer afterward.
         if (!pending.has(permissionRequestId)) return

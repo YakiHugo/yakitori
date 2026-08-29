@@ -24,6 +24,8 @@ export type ForkThreadInput = {
   readonly beforeTurnId: string
   readonly title?: string
   readonly metadata?: EventMetadata
+  readonly forkedFromInputId?: string
+  readonly forkReason?: import("../kernel/events.ts").ForkReason
 }
 
 export type ThreadManagerOptions = {
@@ -139,6 +141,12 @@ export class ThreadManager {
         updatedAt: now,
         parentThreadId: source.id,
         forkedFromTurnId: input.beforeTurnId,
+        ...(input.forkedFromInputId === undefined
+          ? {}
+          : { forkedFromInputId: input.forkedFromInputId }),
+        ...(input.forkReason === undefined
+          ? {}
+          : { forkReason: input.forkReason }),
         ...(input.title === undefined ? {} : { title: input.title }),
         ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
       }

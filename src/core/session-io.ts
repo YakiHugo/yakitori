@@ -4,6 +4,7 @@ import type {
   TextContent,
 } from "../kernel/events.ts"
 import { createRequestId } from "../kernel/ids.ts"
+import type { RolloutItem } from "./rollout.ts"
 
 export const SessionStatus = {
   Idle: "idle",
@@ -18,6 +19,7 @@ export type TurnInput = {
   readonly content: TextContent
   readonly modelSelection?: ModelSelection
   readonly metadata?: EventMetadata
+  readonly parentInputId?: string
 }
 
 export type SubmitTurnInput = Omit<TurnInput, "submissionId"> & {
@@ -28,6 +30,7 @@ export const NotSubmittedReason = {
   NoActiveTurn: "no_active_turn",
   NotIdle: "not_idle",
   TurnMismatch: "turn_mismatch",
+  RequestConflict: "request_conflict",
 } as const
 
 export type NotSubmittedReason =
@@ -37,8 +40,40 @@ export type TurnInputSubmission =
   | { readonly type: "started"; readonly turnId: string }
   | { readonly type: "steered"; readonly turnId: string }
   | {
+      readonly type: "replayed"
+      readonly turnId: string
+      readonly inputItemId: string
+    }
+  | {
       readonly type: "not_submitted"
       readonly reason: NotSubmittedReason
+    }
+
+export type SessionPermissionReason = {
+  readonly kind: string
+  readonly message?: string
+}
+
+export type SessionPermissionEvent =
+  | {
+      readonly type: "permission.requested"
+      readonly permissionRequestId: string
+      readonly sessionId: string
+      readonly turnId: string
+      readonly toolCallId: string
+      readonly action: string
+      readonly subject?: string
+      readonly reason?: string
+      readonly createdAt: string
+    }
+  | {
+      readonly type: "permission.resolved"
+      readonly permissionRequestId: string
+      readonly sessionId: string
+      readonly turnId: string
+      readonly outcome: "allow" | "deny" | "timeout" | "aborted"
+      readonly reason?: SessionPermissionReason
+      readonly createdAt: string
     }
 
 export type TurnInputMode =
@@ -58,10 +93,37 @@ export type SessionOp =
       readonly mode: TurnInputMode
       readonly reply: TurnInputReply
     }
-  | { readonly type: "interrupt"; readonly reason?: string }
+  | {
+      readonly type: "interrupt"
+      readonly reason?: string
+      readonly expectedTurnId?: string
+      readonly reply?: {
+        readonly resolve: (interrupted: boolean) => void
+        readonly reject: (error: unknown) => void
+      }
+    }
   | { readonly type: "shutdown" }
 
 export type SessionEvent =
+  | {
+      readonly type: "rollout.appended"
+      readonly threadId: string
+      readonly throughSeq: number
+      readonly items: readonly RolloutItem[]
+    }
+  | {
+      readonly type: "model.stream"
+      readonly threadId: string
+      readonly turnId: string
+      readonly itemId: string
+      readonly kind: "assistant" | "reasoning"
+      readonly text: string
+    }
+  | {
+      readonly type: "permission"
+      readonly threadId: string
+      readonly event: SessionPermissionEvent
+    }
   | {
       readonly type: "turn.started"
       readonly threadId: string
@@ -143,6 +205,21 @@ export class SessionIo {
     })
   }
 
+  async interruptTurn(
+    expectedTurnId: string,
+    reason?: string,
+  ): Promise<boolean> {
+    this.#requireOpen()
+    return new Promise((resolve, reject) => {
+      void this.#send({
+        type: "interrupt",
+        expectedTurnId,
+        ...(reason === undefined ? {} : { reason }),
+        reply: { resolve, reject },
+      }).catch(reject)
+    })
+  }
+
   async shutdownAndWait(): Promise<void> {
     if (!this.#accepting) {
       await this.termination
@@ -170,6 +247,9 @@ export class SessionIo {
         ? {}
         : { modelSelection: input.modelSelection }),
       ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
+      ...(input.parentInputId === undefined
+        ? {}
+        : { parentInputId: input.parentInputId }),
     }
     return new Promise((resolve, reject) => {
       void this.#send({

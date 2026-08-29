@@ -81,10 +81,17 @@ export class MemoryThreadStore implements ThreadStore {
     return structuredClone(thread)
   }
 
-  appendItems(threadId: string, items: readonly RolloutItem[]): Promise<void> {
+  appendItems(
+    threadId: string,
+    items: readonly RolloutItem[],
+  ): Promise<number> {
     const writer = this.#requireWriter(threadId)
-    writer.pending.push(...structuredClone([...items]))
-    return this.#enqueue(writer, () => this.#drain(threadId, writer, "append"))
+    const pending = structuredClone([...items])
+    return this.#enqueue(writer, async () => {
+      writer.pending.push(...pending)
+      await this.#drain(threadId, writer, "append")
+      return writer.nextSeq
+    })
   }
 
   persistThread(threadId: string, _context: PersistContext): Promise<void> {
@@ -238,9 +245,12 @@ export class MemoryThreadStore implements ThreadStore {
     this.#threads.delete(threadId)
   }
 
-  #enqueue(writer: Writer, operation: () => Promise<void>): Promise<void> {
+  #enqueue<T>(writer: Writer, operation: () => Promise<T>): Promise<T> {
     const result = writer.tail.then(operation)
-    writer.tail = result.catch(() => undefined)
+    writer.tail = result.then(
+      () => undefined,
+      () => undefined,
+    )
     return result
   }
 

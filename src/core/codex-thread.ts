@@ -44,6 +44,10 @@ export class CodexThread {
     return this.#session.io.interrupt(reason)
   }
 
+  interruptTurn(expectedTurnId: string, reason?: string): Promise<boolean> {
+    return this.#session.io.interruptTurn(expectedTurnId, reason)
+  }
+
   shutdownAndWait(): Promise<void> {
     return this.#session.io.shutdownAndWait()
   }

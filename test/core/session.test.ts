@@ -90,6 +90,56 @@ describe("Codex-style live Session", () => {
     await manager.shutdown()
   })
 
+  it("deduplicates durable submissions and compares cancellation inside the actor", async () => {
+    const mayFinish = deferred<void>()
+    const store = new MemoryThreadStore()
+    const manager = createManager(
+      {
+        async run() {
+          await mayFinish.promise
+        },
+      },
+      store,
+    )
+    const thread = await manager.createThread()
+    const input = {
+      submissionId: "turn_idempotent",
+      content: { kind: "text" as const, text: "once" },
+    }
+    expect(await thread.startIfIdle(input)).toEqual({
+      type: "started",
+      turnId: "turn_idempotent",
+    })
+    const inputItemId = thread.snapshot().context.history[0]?.id
+    expect(await thread.startIfIdle(input)).toEqual({
+      type: "replayed",
+      turnId: "turn_idempotent",
+      inputItemId,
+    })
+    expect(
+      await thread.startIfIdle({
+        ...input,
+        content: { kind: "text", text: "different" },
+      }),
+    ).toEqual({ type: "not_submitted", reason: "request_conflict" })
+    expect(await thread.interruptTurn("turn_other")).toBe(false)
+    expect(await thread.interruptTurn("turn_idempotent", "cancelled")).toBe(
+      true,
+    )
+    await nextEventOfType(thread, "turn.interrupted")
+    await manager.shutdown()
+
+    const resumedManager = createManager({ run: async () => undefined }, store)
+    const resumed = await resumedManager.resumeThread(thread.id)
+    expect(await resumed?.startIfIdle(input)).toEqual({
+      type: "replayed",
+      turnId: "turn_idempotent",
+      inputItemId,
+    })
+    await resumedManager.shutdown()
+    mayFinish.resolve()
+  })
+
   it("does not admit or mutate a Turn when preparation fails", async () => {
     const store = new MemoryThreadStore()
     const manager = new ThreadManager({

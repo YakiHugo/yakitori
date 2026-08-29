@@ -74,11 +74,6 @@ export type LiveTurnProcessorOptions = {
   readonly now?: () => Date
   readonly sessionFiles?: SessionFiles
   readonly onRuntimeError?: (error: unknown) => void
-  readonly onStreamEvent?: (input: {
-    readonly threadId: string
-    readonly turnId: string
-    readonly event: Exclude<ModelStreamEvent, { readonly type: "response" }>
-  }) => void
 }
 
 type CompactionState = {
@@ -325,12 +320,14 @@ async function executeTurn(input: {
     if (admission.exceedsHardLimit) {
       throw new Error("The complete model request exceeds the context window.")
     }
+    const responseItemId = `message_${globalThis.crypto.randomUUID()}`
     const response = await consumeModelStream({
       request,
       stream: input.options.stream,
       threadId: metadata.id,
       turnId: input.input.submissionId,
-      onStreamEvent: input.options.onStreamEvent,
+      itemId: responseItemId,
+      emitModelStream: (event) => input.runtime.emitModelStream(event),
       assistantResponseBytes:
         turn.execution.executionPolicy.assistantResponseBytes,
       onRuntimeError: input.options.onRuntimeError,
@@ -382,6 +379,7 @@ async function executeTurn(input: {
             model: turn.execution.model,
             callIndex: modelCalls,
           },
+          responseItemId,
         ),
       ])
     }
@@ -402,6 +400,8 @@ async function executeTurn(input: {
         signal: input.signal,
         toolPlan,
         permissionGate: input.permissionGate,
+        publishPermissionEvent: (event) =>
+          input.runtime.emitPermissionEvent(event),
         permissionTimeoutMs: input.runtimeTiming.permissionWaitTimeoutMs,
         approvalPolicy: turn.configuration.approvalPolicy,
         sessionFiles: input.options.sessionFiles,
@@ -435,7 +435,8 @@ async function consumeModelStream(input: {
   readonly stream: StreamFn
   readonly threadId: string
   readonly turnId: string
-  readonly onStreamEvent?: LiveTurnProcessorOptions["onStreamEvent"]
+  readonly itemId?: string
+  readonly emitModelStream?: TurnRuntime["emitModelStream"]
   readonly assistantResponseBytes: number
   readonly onRuntimeError: ((error: unknown) => void) | undefined
   readonly onUsage: (usage: ModelUsage) => void
@@ -463,14 +464,13 @@ async function consumeModelStream(input: {
             "Model stream update exceeded the configured byte limit.",
           )
         }
-        try {
-          input.onStreamEvent?.({
-            threadId: input.threadId,
-            turnId: input.turnId,
-            event,
+        if (input.itemId !== undefined) {
+          input.emitModelStream?.({
+            itemId: input.itemId,
+            kind:
+              event.type === "reasoning_snapshot" ? "reasoning" : "assistant",
+            text: event.text,
           })
-        } catch (error) {
-          reportRuntimeError(input.onRuntimeError, error)
         }
         continue
       }
@@ -737,6 +737,7 @@ type ToolExecutionScope = {
   readonly signal: AbortSignal
   readonly toolPlan: ReturnType<ToolRegistry["finalize"]>
   readonly permissionGate: PermissionGate
+  readonly publishPermissionEvent: TurnRuntime["emitPermissionEvent"]
   readonly permissionTimeoutMs: number
   readonly approvalPolicy: ApprovalPolicy
   readonly sessionFiles: SessionFiles | undefined
@@ -835,6 +836,7 @@ async function executePreparedTool(
           : { reason: prepared.permission.reason }),
         signal: input.signal,
         timeoutMs: input.permissionTimeoutMs,
+        publish: input.publishPermissionEvent,
       })
       if (outcome.kind !== "allow") {
         const message =
@@ -884,34 +886,54 @@ async function recordSteering(
 }
 
 function inputEnvelope(input: TurnInput, turnId: string): ResponseItemEnvelope {
-  return envelope(turnId, {
-    role: "user",
-    content:
-      input.content.text.length === 0
-        ? []
-        : [{ type: "text", text: input.content.text }],
-    ...(input.content.attachments === undefined ||
-    input.content.attachments.length === 0
+  return {
+    ...envelope(turnId, {
+      role: "user",
+      content:
+        input.content.text.length === 0
+          ? []
+          : [{ type: "text", text: input.content.text }],
+      ...(input.content.attachments === undefined ||
+      input.content.attachments.length === 0
+        ? {}
+        : {
+            images: input.content.attachments.map((attachment) => ({
+              type: "image" as const,
+              mediaType: attachment.mediaType,
+              detail: attachment.detail ?? "high",
+              file: attachment.file,
+              sizeBytes: attachment.sizeBytes,
+            })),
+          }),
+    }),
+    ...(input.modelSelection === undefined &&
+    input.parentInputId === undefined &&
+    input.metadata === undefined
       ? {}
       : {
-          images: input.content.attachments.map((attachment) => ({
-            type: "image" as const,
-            mediaType: attachment.mediaType,
-            detail: attachment.detail ?? "high",
-            file: attachment.file,
-            sizeBytes: attachment.sizeBytes,
-          })),
+          submissionMetadata: {
+            ...(input.modelSelection === undefined
+              ? {}
+              : { modelSelection: input.modelSelection }),
+            ...(input.parentInputId === undefined
+              ? {}
+              : { parentInputId: input.parentInputId }),
+            ...(input.metadata === undefined
+              ? {}
+              : { metadata: input.metadata }),
+          },
         }),
-  })
+  }
 }
 
 function envelope(
   turnId: string,
   item: ModelMessage,
   providerMetadata?: JsonObject,
+  id = `message_${globalThis.crypto.randomUUID()}`,
 ): ResponseItemEnvelope {
   return {
-    id: `message_${globalThis.crypto.randomUUID()}`,
+    id,
     turnId,
     createdAt: new Date().toISOString(),
     item,

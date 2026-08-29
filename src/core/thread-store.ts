@@ -62,7 +62,7 @@ export type ThreadStoreListResult = {
 export type ThreadStore = {
   createThread(metadata: CreateThreadMetadata): Promise<StoredThread>
   resumeThread(threadId: string): Promise<StoredThread | undefined>
-  appendItems(threadId: string, items: readonly RolloutItem[]): Promise<void>
+  appendItems(threadId: string, items: readonly RolloutItem[]): Promise<number>
   persistThread(threadId: string, context: PersistContext): Promise<void>
   flushThread(threadId: string): Promise<void>
   shutdownThread(threadId: string): Promise<void>

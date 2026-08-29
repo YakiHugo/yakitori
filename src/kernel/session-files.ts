@@ -37,6 +37,15 @@ export type PreparedCommandFiles = {
   }
 }
 
+export class ImageAttachmentConflictError extends Error {
+  override readonly name = "ImageAttachmentConflictError"
+}
+
+export type PreparedImageAttachments = {
+  readonly attachments: readonly ImageAttachment[]
+  rollback(): Promise<void>
+}
+
 export type SessionFiles = {
   importImagePaths(
     sessionId: string,
@@ -52,7 +61,16 @@ export type SessionFiles = {
     sessionId: string,
     ownerId: string,
     attachments: readonly ImageAttachment[],
+  ): Promise<PreparedImageAttachments>
+  copyImageAttachments(
+    sessionId: string,
+    ownerId: string,
+    attachments: readonly ImageAttachment[],
   ): Promise<readonly ImageAttachment[]>
+  discardRequestImageAttachments(
+    sessionId: string,
+    ownerId: string,
+  ): Promise<void>
   discardDraftImageAttachments(
     attachments: readonly ImageAttachment[],
   ): Promise<void>
@@ -194,29 +212,109 @@ export function createSessionFiles(sessionsDir: string): SessionFiles {
       requirePathSegment(ownerId, "attachment owner")
       const ownerDirectory = fileNameForId(ownerId)
       const promoted: ImageAttachment[] = []
-      for (const [index, attachment] of attachments.entries()) {
-        requireDraftImageAttachment(sessionId, attachment)
-        const file = imageReference(
-          sessionId,
-          "requests",
-          ownerDirectory,
-          index,
-          attachment.mediaType,
+      const createdPaths: string[] = []
+      const rollback = () =>
+        Promise.all(createdPaths.map((path) => rm(path, { force: true }))).then(
+          () => undefined,
         )
-        const targetPath = resolveReference(file)
-        const existing = await inspectStoredImageIfPresent(targetPath)
-        if (existing !== undefined) {
-          requireMatchingImageMetadata(existing, attachment)
+      try {
+        for (const [index, attachment] of attachments.entries()) {
+          requireDraftImageAttachment(sessionId, attachment)
+          const file = imageReference(
+            sessionId,
+            "requests",
+            ownerDirectory,
+            index,
+            attachment.mediaType,
+          )
+          const targetPath = resolveReference(file)
+          const existing = await inspectStoredImageIfPresent(targetPath)
+          if (existing !== undefined) {
+            requireMatchingImageMetadata(existing, attachment)
+            const sourcePath = resolveReference(attachment.file)
+            const source = await inspectStoredImageIfPresent(sourcePath)
+            if (source !== undefined) {
+              requireMatchingImageMetadata(source, attachment)
+              const [sourceBytes, existingBytes] = await Promise.all([
+                readFile(sourcePath),
+                readFile(targetPath),
+              ])
+              if (!sourceBytes.equals(existingBytes)) {
+                throw new ImageAttachmentConflictError(
+                  "A different image already exists for this request.",
+                )
+              }
+            }
+            promoted.push({ ...attachment, file })
+            continue
+          }
+          const sourcePath = resolveReference(attachment.file)
+          const source = await inspectStoredImage(sourcePath)
+          requireMatchingImageMetadata(source, attachment)
+          if (await linkOnce(root, sourcePath, targetPath, source.sizeBytes)) {
+            createdPaths.push(targetPath)
+          }
           promoted.push({ ...attachment, file })
-          continue
         }
-        const sourcePath = resolveReference(attachment.file)
-        const source = await inspectStoredImage(sourcePath)
-        requireMatchingImageMetadata(source, attachment)
-        await linkOnce(root, sourcePath, targetPath, source.sizeBytes)
-        promoted.push({ ...attachment, file })
+        return { attachments: promoted, rollback }
+      } catch (error) {
+        await rollback()
+        throw error
       }
-      return promoted
+    },
+
+    async copyImageAttachments(sessionId, ownerId, attachments) {
+      assertEventStoreSessionId(sessionId)
+      requirePathSegment(ownerId, "attachment owner")
+      const ownerDirectory = fileNameForId(ownerId)
+      const copied: ImageAttachment[] = []
+      const createdPaths: string[] = []
+      try {
+        for (const [index, attachment] of attachments.entries()) {
+          const sourcePath = resolveReference(attachment.file)
+          const source = await inspectStoredImage(sourcePath)
+          requireMatchingImageMetadata(source, attachment)
+          const file = imageReference(
+            sessionId,
+            "requests",
+            ownerDirectory,
+            index,
+            attachment.mediaType,
+          )
+          const targetPath = resolveReference(file)
+          const existing = await inspectStoredImageIfPresent(targetPath)
+          if (existing === undefined) {
+            if (
+              await linkOnce(root, sourcePath, targetPath, source.sizeBytes)
+            ) {
+              createdPaths.push(targetPath)
+            }
+          } else {
+            requireMatchingImageMetadata(existing, attachment)
+          }
+          copied.push({ ...attachment, file })
+        }
+        return copied
+      } catch (error) {
+        await Promise.all(createdPaths.map((path) => rm(path, { force: true })))
+        throw error
+      }
+    },
+
+    async discardRequestImageAttachments(sessionId, ownerId) {
+      assertEventStoreSessionId(sessionId)
+      requirePathSegment(ownerId, "attachment owner")
+      await rm(
+        join(
+          root,
+          sessionId,
+          "files",
+          "attachments",
+          "requests",
+          fileNameForId(ownerId),
+        ),
+        { recursive: true, force: true },
+      )
     },
 
     async discardDraftImageAttachments(attachments) {
@@ -467,18 +565,29 @@ async function linkOnce(
   sourcePath: string,
   path: string,
   sourceBytes: number,
-): Promise<void> {
+): Promise<boolean> {
   const directory = dirname(path)
   await ensureDirectoryChain(root, directory)
   try {
     await link(sourcePath, path)
     await syncDirectory(directory)
+    return true
   } catch (error) {
     if (!isAlreadyExists(error)) throw error
     const existing = await stat(path)
     if (!existing.isFile() || existing.size !== sourceBytes) {
       throw new Error("A different Session file already exists at this path.")
     }
+    const [source, target] = await Promise.all([
+      readFile(sourcePath),
+      readFile(path),
+    ])
+    if (!source.equals(target)) {
+      throw new ImageAttachmentConflictError(
+        "A different image already exists for this request.",
+      )
+    }
+    return false
   }
 }
 

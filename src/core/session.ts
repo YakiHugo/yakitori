@@ -3,6 +3,8 @@ import type {
   SessionConfigurationSnapshot,
   TokenUsage,
 } from "../kernel/events.ts"
+import { fingerprintInputAdmission } from "../kernel/operation.ts"
+import { InputRole } from "../kernel/events.ts"
 import { ContextManager, type ContextSnapshot } from "./context-manager.ts"
 import type {
   ResponseItemEnvelope,
@@ -17,6 +19,7 @@ import {
   type NotSubmittedReason,
   NotSubmittedReason as Reason,
   type SessionEvent,
+  type SessionPermissionEvent,
   SessionIo,
   type SessionOp,
   SessionStatus,
@@ -32,6 +35,7 @@ export type SessionSnapshot = {
   readonly metadata: ThreadMetadata
   readonly context: ContextSnapshot
   readonly configuration?: SessionConfigurationSnapshot
+  readonly activeTurnId?: string
 }
 
 export type TurnControl = {
@@ -45,6 +49,12 @@ export type TurnControl = {
 export type TurnRuntime = {
   snapshot(): SessionSnapshot
   recordUsage(usage: TokenUsage): void
+  emitModelStream(input: {
+    readonly itemId: string
+    readonly kind: "assistant" | "reasoning"
+    readonly text: string
+  }): void
+  emitPermissionEvent(event: SessionPermissionEvent): void
   recordConversationItems(items: readonly ResponseItemEnvelope[]): Promise<void>
   recordWorldStateUpdate(
     items: readonly ResponseItemEnvelope[],
@@ -106,6 +116,10 @@ export class Session {
   readonly #metadata: ThreadMetadata
   readonly #contextManager: ContextManager
   #configuration: SessionConfigurationSnapshot | undefined
+  readonly #submittedTurns = new Map<
+    string,
+    { readonly fingerprint: string; readonly inputItemId: string }
+  >()
   readonly #store: ThreadStore
   readonly #processor: TurnProcessor
   readonly #submissions = new BoundedQueue<SessionCommand>(submissionCapacity)
@@ -127,6 +141,17 @@ export class Session {
     this.#metadata = structuredClone(input.stored.metadata)
     this.#contextManager = ContextManager.fromStoredThread(input.stored)
     this.#configuration = latestConfiguration(input.stored)
+    for (const record of input.stored.rollout) {
+      if (
+        record.item.type === "turn_started" &&
+        record.item.requestFingerprint !== undefined
+      ) {
+        this.#submittedTurns.set(record.item.turnId, {
+          fingerprint: record.item.requestFingerprint,
+          inputItemId: record.item.inputItemId,
+        })
+      }
+    }
     this.#store = input.store
     this.#processor = input.processor
     this.#onPersistenceError = input.onPersistenceError
@@ -153,6 +178,9 @@ export class Session {
       ...(this.#configuration === undefined
         ? {}
         : { configuration: structuredClone(this.#configuration) }),
+      ...(this.#activeTurn === undefined
+        ? {}
+        : { activeTurnId: this.#activeTurn.input.submissionId }),
     }
   }
 
@@ -205,7 +233,15 @@ export class Session {
     operation: Exclude<SessionOp, { readonly type: "shutdown" }>,
   ): Promise<void> {
     if (operation.type === "interrupt") {
+      if (
+        operation.expectedTurnId !== undefined &&
+        this.#activeTurn?.input.submissionId !== operation.expectedTurnId
+      ) {
+        operation.reply?.resolve(false)
+        return
+      }
       this.#interruptActiveTurn(operation.reason ?? "interrupted")
+      operation.reply?.resolve(true)
       return
     }
     try {
@@ -221,6 +257,18 @@ export class Session {
     input: TurnInput,
     mode: Extract<SessionOp, { readonly type: "turn_input" }>["mode"],
   ): Promise<TurnInputSubmission> {
+    const fingerprint = turnInputFingerprint(input)
+    const submitted = this.#submittedTurns.get(input.submissionId)
+    if (submitted !== undefined) {
+      if (submitted.fingerprint !== fingerprint) {
+        return notSubmitted(Reason.RequestConflict)
+      }
+      return {
+        type: "replayed",
+        turnId: input.submissionId,
+        inputItemId: submitted.inputItemId,
+      }
+    }
     const active = this.#activeTurn
     if (mode.type === "start_if_idle") {
       return active === undefined
@@ -277,7 +325,7 @@ export class Session {
     }
     this.#configuration = structuredClone(context.configuration)
     const inputItem: ResponseItemEnvelope = {
-      id: `message_${globalThis.crypto.randomUUID()}`,
+      id: `input_${globalThis.crypto.randomUUID()}`,
       turnId: input.submissionId,
       createdAt: new Date().toISOString(),
       item: {
@@ -299,18 +347,30 @@ export class Session {
               })),
             }),
       },
+      ...turnInputSubmissionMetadata(input),
     }
+    const requestFingerprint = turnInputFingerprint(input)
+    this.#submittedTurns.set(input.submissionId, {
+      fingerprint: requestFingerprint,
+      inputItemId: inputItem.id,
+    })
     this.#contextManager.record([inputItem])
-    await this.#appendRollout([
-      { type: "response_item", item: inputItem },
-      { type: "turn_context", context },
-      {
-        type: "turn_started",
-        turnId: input.submissionId,
-        inputItemId: inputItem.id,
-      },
-    ])
-    await this.#persist(PersistContext.TurnStart)
+    try {
+      await this.#appendRollout([
+        { type: "response_item", item: inputItem },
+        { type: "turn_context", context },
+        {
+          type: "turn_started",
+          turnId: input.submissionId,
+          inputItemId: inputItem.id,
+          requestFingerprint,
+        },
+      ])
+      await this.#persist(PersistContext.TurnStart)
+    } catch (error) {
+      this.#submittedTurns.delete(input.submissionId)
+      throw error
+    }
 
     const abort = new AbortController()
     const aborted = deferred<void>()
@@ -509,6 +569,31 @@ export class Session {
         requireActive()
         active.usage = structuredClone(usage)
       },
+      emitModelStream: (input) => {
+        requireLease()
+        this.#events.send({
+          type: "model.stream",
+          threadId: this.id,
+          turnId: active.input.submissionId,
+          ...input,
+        })
+      },
+      emitPermissionEvent: (event) => {
+        requireActive()
+        if (
+          event.sessionId !== this.id ||
+          event.turnId !== active.input.submissionId
+        ) {
+          throw new Error(
+            "Permission event does not belong to the active Turn.",
+          )
+        }
+        this.#events.send({
+          type: "permission",
+          threadId: this.id,
+          event: structuredClone(event),
+        })
+      },
       recordConversationItems: async (items) => {
         requireLease()
         if (items.length === 0) return
@@ -570,7 +655,13 @@ export class Session {
 
   async #appendRollout(items: readonly RolloutItem[]): Promise<void> {
     try {
-      await this.#store.appendItems(this.id, items)
+      const throughSeq = await this.#store.appendItems(this.id, items)
+      this.#events.send({
+        type: "rollout.appended",
+        threadId: this.id,
+        throughSeq,
+        items: structuredClone(items),
+      })
     } catch (error) {
       this.#reportPersistenceError(error)
     }
@@ -632,6 +723,43 @@ export class Session {
         }
       })
     }
+  }
+}
+
+function turnInputFingerprint(input: TurnInput): string {
+  return fingerprintInputAdmission({
+    role: InputRole.User,
+    content: input.content,
+    ...(input.modelSelection === undefined
+      ? {}
+      : { modelSelection: input.modelSelection }),
+    ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
+    ...(input.parentInputId === undefined
+      ? {}
+      : { parentInputId: input.parentInputId }),
+  })
+}
+
+function turnInputSubmissionMetadata(
+  input: TurnInput,
+): Pick<ResponseItemEnvelope, "submissionMetadata"> | undefined {
+  if (
+    input.modelSelection === undefined &&
+    input.parentInputId === undefined &&
+    input.metadata === undefined
+  ) {
+    return undefined
+  }
+  return {
+    submissionMetadata: {
+      ...(input.modelSelection === undefined
+        ? {}
+        : { modelSelection: input.modelSelection }),
+      ...(input.parentInputId === undefined
+        ? {}
+        : { parentInputId: input.parentInputId }),
+      ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
+    },
   }
 }
 

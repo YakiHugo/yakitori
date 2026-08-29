@@ -25,6 +25,8 @@ export type ThreadMetadata = {
   readonly mateRevisionId?: string
   readonly parentThreadId?: string
   readonly forkedFromTurnId?: string
+  readonly forkedFromInputId?: string
+  readonly forkReason?: import("../kernel/events.ts").ForkReason
   readonly historyBase?: HistoryPosition
   readonly metadata?: EventMetadata
 }
@@ -35,6 +37,11 @@ export type ResponseItemEnvelope = {
   readonly createdAt: string
   readonly item: ModelMessage
   readonly providerMetadata?: JsonObject
+  readonly submissionMetadata?: {
+    readonly modelSelection?: ModelSelection
+    readonly parentInputId?: string
+    readonly metadata?: EventMetadata
+  }
 }
 
 export type TurnContextItem = {
@@ -51,6 +58,7 @@ export type RolloutItem =
       readonly type: "turn_started"
       readonly turnId: string
       readonly inputItemId: string
+      readonly requestFingerprint?: string
     }
   | {
       readonly type: "turn_completed"

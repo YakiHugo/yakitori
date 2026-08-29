@@ -42,8 +42,8 @@ describe("Session files", () => {
       detailed,
     )
 
-    expect(first).toEqual(second)
-    expect(first).toEqual([
+    expect(first.attachments).toEqual(second.attachments)
+    expect(first.attachments).toEqual([
       {
         name: "screen.png",
         mediaType: "image/png",
@@ -55,7 +55,7 @@ describe("Session files", () => {
         },
       },
     ])
-    const stored = first[0]
+    const stored = first.attachments[0]
     if (stored === undefined || !("file" in stored)) {
       throw new Error("missing stored attachment")
     }
@@ -73,9 +73,120 @@ describe("Session files", () => {
         ),
       ),
     ).toEqual(data)
-    await expect(files.discardDraftImageAttachments(first)).rejects.toThrow(
-      "not a draft",
+    await expect(
+      files.discardDraftImageAttachments(first.attachments),
+    ).rejects.toThrow("not a draft")
+  })
+
+  it("rejects a reused request owner when a new draft has different bytes", async () => {
+    const root = await makeRoot()
+    const sessionId = createSessionId()
+    const files = createSessionFiles(root)
+    const original = pngBytes()
+    const replacement = Buffer.from(original)
+    replacement[12] = 1
+
+    const firstDraft = await files.importImageBytes(sessionId, "draft_first", [
+      { name: "screen.png", data: original },
+    ])
+    await files.promoteImageAttachments(sessionId, "request_same", firstDraft)
+    await files.discardDraftImageAttachments(firstDraft)
+    const replacementDraft = await files.importImageBytes(
+      sessionId,
+      "draft_replacement",
+      [{ name: "screen.png", data: replacement }],
     )
+
+    await expect(
+      files.promoteImageAttachments(
+        sessionId,
+        "request_same",
+        replacementDraft,
+      ),
+    ).rejects.toThrow("different image")
+  })
+
+  it("gives a concurrent promotion exclusive rollback ownership", async () => {
+    const root = await makeRoot()
+    const sessionId = createSessionId()
+    const files = createSessionFiles(root)
+    const firstBytes = pngBytes()
+    const secondBytes = Buffer.from(firstBytes)
+    secondBytes[12] = 1
+    const [firstDraft, secondDraft] = await Promise.all([
+      files.importImageBytes(sessionId, "draft_concurrent_first", [
+        { name: "screen.png", data: firstBytes },
+      ]),
+      files.importImageBytes(sessionId, "draft_concurrent_second", [
+        { name: "screen.png", data: secondBytes },
+      ]),
+    ])
+
+    const results = await Promise.allSettled([
+      files.promoteImageAttachments(
+        sessionId,
+        "request_concurrent",
+        firstDraft,
+      ),
+      files.promoteImageAttachments(
+        sessionId,
+        "request_concurrent",
+        secondDraft,
+      ),
+    ])
+
+    expect(
+      results.filter((result) => result.status === "fulfilled"),
+    ).toHaveLength(1)
+    expect(
+      results.filter((result) => result.status === "rejected"),
+    ).toHaveLength(1)
+    const winner = results.find((result) => result.status === "fulfilled")
+    if (winner?.status !== "fulfilled") throw new Error("missing winner")
+    const attachment = winner.value.attachments[0]
+    if (attachment === undefined) throw new Error("missing promoted image")
+    const stored = await files.read(attachment.file)
+    expect(stored.equals(firstBytes) || stored.equals(secondBytes)).toBe(true)
+  })
+
+  it("rolls back files copied before a later attachment fails", async () => {
+    const root = await makeRoot()
+    const sourceSessionId = createSessionId()
+    const targetSessionId = createSessionId()
+    const files = createSessionFiles(root)
+    const [source] = await files.importImageBytes(
+      sourceSessionId,
+      "draft_source",
+      [{ name: "screen.png", data: pngBytes() }],
+    )
+    if (source === undefined) throw new Error("missing source attachment")
+    const missing = {
+      ...source,
+      file: {
+        sessionId: sourceSessionId,
+        path: "attachments/requests/missing/2.png",
+      },
+    }
+
+    await expect(
+      files.copyImageAttachments(targetSessionId, "request_copy", [
+        source,
+        missing,
+      ]),
+    ).rejects.toMatchObject({ code: "ENOENT" })
+    await expect(
+      readFile(
+        join(
+          root,
+          targetSessionId,
+          "files",
+          "attachments",
+          "requests",
+          "request_copy",
+          "1.png",
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "ENOENT" })
   })
 
   it("imports a native path as a snapshot and cleans abandoned staging", async () => {

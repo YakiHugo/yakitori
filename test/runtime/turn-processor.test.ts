@@ -3,10 +3,12 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
+import type { SessionEvent } from "../../src/core/session-io.ts"
 import { createFauxProvider } from "../../src/runtime/faux-provider.ts"
 import { createSessionExecutionPolicy } from "../../src/runtime/limits.ts"
 import type { ModelStreamEvent, StreamFn } from "../../src/runtime/model.ts"
 import { ModelStopReason } from "../../src/runtime/model.ts"
+import { createPermissionGate } from "../../src/runtime/permission-gate.ts"
 import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
 import {
   createLiveTurnProcessor,
@@ -37,8 +39,8 @@ describe("live Turn processor", () => {
     await expect(
       thread.startIfIdle({ content: { kind: "text", text: "hi" } }),
     ).resolves.toMatchObject({ type: "started" })
-    expect((await thread.nextEvent())?.type).toBe("turn.started")
-    expect((await thread.nextEvent())?.type).toBe("turn.completed")
+    expect((await nextLifecycleEvent(thread))?.type).toBe("turn.started")
+    expect((await nextLifecycleEvent(thread))?.type).toBe("turn.completed")
 
     expect(
       thread.snapshot().context.history.map((item) => item.item.role),
@@ -97,12 +99,162 @@ describe("live Turn processor", () => {
     const thread = await runtime.createThread()
 
     await thread.startIfIdle({ content: { kind: "text", text: "use echo" } })
-    await thread.nextEvent()
-    expect((await thread.nextEvent())?.type).toBe("turn.completed")
+    await nextLifecycleEvent(thread)
+    expect((await nextLifecycleEvent(thread))?.type).toBe("turn.completed")
     expect(provider.callCount).toBe(2)
     expect(
       thread.snapshot().context.history.map((item) => item.item.role),
     ).toEqual(["user", "user", "assistant", "tool", "assistant"])
+  })
+
+  it("delivers committed tool history before the next model stream", async () => {
+    const provider = createFauxProvider([
+      {
+        snapshots: ["calling tool"],
+        stopReason: ModelStopReason.ToolUse,
+        content: [
+          {
+            type: "tool_call",
+            id: "tool_order",
+            name: "echo",
+            input: { text: "hello" },
+          },
+        ],
+      },
+      {
+        snapshots: ["final answer"],
+        content: [{ type: "text", text: "final answer" }],
+      },
+    ])
+    const runtime = await createRuntime(
+      provider.stream,
+      createToolRegistry([
+        {
+          name: "echo",
+          description: "Echo text",
+          inputSchema: { type: "object" },
+          effect: "observe",
+          approvalRequirement: { kind: "none" },
+          async execute(value) {
+            return { ok: true, output: value as never, content: "hello" }
+          },
+        },
+      ]),
+    )
+    const thread = await runtime.createThread()
+
+    await thread.startIfIdle({ content: { kind: "text", text: "use echo" } })
+    const events: SessionEvent[] = []
+    for (;;) {
+      const event = await thread.nextEvent()
+      if (event === undefined) throw new Error("Session ended before the Turn.")
+      events.push(event)
+      if (event.type === "turn.completed") break
+    }
+
+    const toolResultAt = events.findIndex(
+      (event) =>
+        event.type === "rollout.appended" &&
+        event.items.some(
+          (item) =>
+            item.type === "response_item" && item.item.item.role === "tool",
+        ),
+    )
+    const finalStreamAt = events.findIndex(
+      (event) => event.type === "model.stream" && event.text === "final answer",
+    )
+    expect(toolResultAt).toBeGreaterThan(-1)
+    expect(finalStreamAt).toBeGreaterThan(toolResultAt)
+  })
+
+  it("delivers permission events between the tool call and its result", async () => {
+    const provider = createFauxProvider([
+      {
+        stopReason: ModelStopReason.ToolUse,
+        content: [
+          {
+            type: "tool_call",
+            id: "tool_permission_order",
+            name: "approved",
+            input: {},
+          },
+        ],
+      },
+      { content: [{ type: "text", text: "done" }] },
+    ])
+    const permissionGate = createPermissionGate()
+    const runtime = await createRuntime(
+      provider.stream,
+      createToolRegistry([
+        {
+          name: "approved",
+          description: "Requires approval",
+          inputSchema: { type: "object" },
+          effect: "mutate",
+          approvalRequirement: {
+            kind: "approval",
+            action: "command_execution",
+          },
+          async execute() {
+            return { ok: true, output: {}, content: "approved" }
+          },
+        },
+      ]),
+      { permissionGate, approvalPolicy: "auto_file_tools" },
+    )
+    const thread = await runtime.createThread()
+    await thread.startIfIdle({ content: { kind: "text", text: "run" } })
+    const pending = await waitForValue(() => permissionGate.list(thread.id)[0])
+    permissionGate.resolve({
+      sessionId: thread.id,
+      turnId: pending.turnId,
+      permissionRequestId: pending.permissionRequestId,
+      behavior: "allow",
+    })
+
+    const events: SessionEvent[] = []
+    for (;;) {
+      const event = await thread.nextEvent()
+      if (event === undefined) throw new Error("Session ended before the Turn.")
+      events.push(event)
+      if (event.type === "turn.completed") break
+    }
+    const toolCallAt = events.findIndex(
+      (event) =>
+        event.type === "rollout.appended" &&
+        event.items.some(
+          (item) =>
+            item.type === "response_item" &&
+            item.item.item.role === "assistant" &&
+            item.item.item.content.some(
+              (block) =>
+                block.type === "tool_call" &&
+                block.id === "tool_permission_order",
+            ),
+        ),
+    )
+    const requestedAt = events.findIndex(
+      (event) =>
+        event.type === "permission" &&
+        event.event.type === "permission.requested",
+    )
+    const resolvedAt = events.findIndex(
+      (event) =>
+        event.type === "permission" &&
+        event.event.type === "permission.resolved",
+    )
+    const toolResultAt = events.findIndex(
+      (event) =>
+        event.type === "rollout.appended" &&
+        event.items.some(
+          (item) =>
+            item.type === "response_item" && item.item.item.role === "tool",
+        ),
+    )
+    expect(toolCallAt).toBeGreaterThan(-1)
+    expect(requestedAt).toBeGreaterThan(toolCallAt)
+    expect(resolvedAt).toBeGreaterThan(requestedAt)
+    expect(toolResultAt).toBeGreaterThan(resolvedAt)
   })
 
   it("executes the permission-free observe prefix concurrently", async () => {
@@ -159,8 +311,8 @@ describe("live Turn processor", () => {
     await firstEntered.promise
     await secondEntered.promise
     releaseFirst.resolve()
-    await thread.nextEvent()
-    await thread.nextEvent()
+    await nextLifecycleEvent(thread)
+    await nextLifecycleEvent(thread)
     expect(provider.callCount).toBe(2)
   })
 
@@ -201,8 +353,8 @@ describe("live Turn processor", () => {
       ),
     ).resolves.toMatchObject({ type: "steered" })
     releaseFirst.resolve()
-    await thread.nextEvent()
-    expect((await thread.nextEvent())?.type).toBe("turn.completed")
+    await nextLifecycleEvent(thread)
+    expect((await nextLifecycleEvent(thread))?.type).toBe("turn.completed")
     expect(calls).toBe(2)
 
     const aborting = createFauxProvider([{ waitForAbort: true }])
@@ -212,8 +364,10 @@ describe("live Turn processor", () => {
       content: { kind: "text", text: "wait" },
     })
     await abortThread.interrupt("test")
-    expect((await abortThread.nextEvent())?.type).toBe("turn.started")
-    expect((await abortThread.nextEvent())?.type).toBe("turn.interrupted")
+    expect((await nextLifecycleEvent(abortThread))?.type).toBe("turn.started")
+    expect((await nextLifecycleEvent(abortThread))?.type).toBe(
+      "turn.interrupted",
+    )
     expect(
       (await abortRuntime.store.readThread(abortThread.id))?.rollout.some(
         (entry) =>
@@ -259,20 +413,20 @@ describe("live Turn processor", () => {
       ),
     ).resolves.toMatchObject({ type: "steered" })
     releaseFirst.resolve()
-    await thread.nextEvent()
-    await thread.nextEvent()
+    await nextLifecycleEvent(thread)
+    await nextLifecycleEvent(thread)
 
     await thread.startIfIdle({ content: { kind: "text", text: "next" } })
-    await thread.nextEvent()
-    await thread.nextEvent()
+    await nextLifecycleEvent(thread)
+    await nextLifecycleEvent(thread)
     expect(thread.snapshot().configuration?.defaultTarget.model).toBe("model-b")
 
     await thread.shutdownAndWait()
     const resumed = await runtime.manager.resumeThread(thread.id)
     if (resumed === undefined) throw new Error("Thread did not resume.")
     await resumed.startIfIdle({ content: { kind: "text", text: "resumed" } })
-    await resumed.nextEvent()
-    await resumed.nextEvent()
+    await nextLifecycleEvent(resumed)
+    await nextLifecycleEvent(resumed)
     expect(call).toBe(4)
   })
 
@@ -339,8 +493,8 @@ describe("live Turn processor", () => {
     await thread.startIfIdle({ content: { kind: "text", text: "wait" } })
     await toolEntered.promise
     await thread.interrupt("stop tool")
-    await thread.nextEvent()
-    await thread.nextEvent()
+    await nextLifecycleEvent(thread)
+    await nextLifecycleEvent(thread)
 
     let stored = await runtime.store.readThread(thread.id)
     expect(
@@ -352,11 +506,11 @@ describe("live Turn processor", () => {
     ).toMatchObject({ usage: { inputTokens: 9, outputTokens: 2 } })
 
     await thread.startIfIdle({ content: { kind: "text", text: "continue" } })
-    await thread.nextEvent()
-    await thread.nextEvent()
+    await nextLifecycleEvent(thread)
+    await nextLifecycleEvent(thread)
     await thread.startIfIdle({ content: { kind: "text", text: "fail" } })
-    await thread.nextEvent()
-    expect((await thread.nextEvent())?.type).toBe("session.error")
+    await nextLifecycleEvent(thread)
+    expect((await nextLifecycleEvent(thread))?.type).toBe("session.error")
     stored = await runtime.store.readThread(thread.id)
     expect(
       stored?.rollout.find(
@@ -387,8 +541,8 @@ describe("live Turn processor", () => {
     await thread.startIfIdle({ content: { kind: "text", text: "run" } })
     await terminalYielded.promise
     await thread.interrupt("after terminal")
-    await thread.nextEvent()
-    await thread.nextEvent()
+    await nextLifecycleEvent(thread)
+    await nextLifecycleEvent(thread)
 
     expect(
       (await runtime.store.readThread(thread.id))?.rollout.find(
@@ -403,7 +557,6 @@ describe("live Turn processor", () => {
   it("stops late stream publications and observes iterator cleanup failures", async () => {
     const entered = deferred<void>()
     const release = deferred<void>()
-    const streamEvents: ModelStreamEvent[] = []
     const runtimeErrors: unknown[] = []
     let nextCalls = 0
     const iterator: AsyncIterableIterator<ModelStreamEvent> = {
@@ -425,19 +578,17 @@ describe("live Turn processor", () => {
     }
     const stream: StreamFn = () => iterator
     const runtime = await createRuntime(stream, createToolRegistry([]), {
-      onStreamEvent: ({ event }) => streamEvents.push(event),
       onRuntimeError: (error) => runtimeErrors.push(error),
     })
     const thread = await runtime.createThread()
     await thread.startIfIdle({ content: { kind: "text", text: "start" } })
     await entered.promise
     await thread.interrupt("hard stop")
-    await thread.nextEvent()
-    await thread.nextEvent()
+    await nextLifecycleEvent(thread)
+    await nextLifecycleEvent(thread)
     release.resolve()
     await new Promise((resolve) => setTimeout(resolve, 0))
 
-    expect(streamEvents).toEqual([])
     expect(runtimeErrors).toEqual([
       expect.objectContaining({ message: "iterator cleanup failed" }),
       expect.objectContaining({ message: "iterator cleanup failed" }),
@@ -491,18 +642,18 @@ describe("live Turn processor", () => {
     )
     const thread = await runtime.createThread()
     await thread.startIfIdle({ content: { kind: "text", text: "first" } })
-    await thread.nextEvent()
-    await thread.nextEvent()
+    await nextLifecycleEvent(thread)
+    await nextLifecycleEvent(thread)
 
     await thread.startIfIdle({
       content: { kind: "text", text: "second" },
       modelSelection: { provider: "faux", model: "model-b" },
     })
-    await thread.nextEvent()
-    await thread.nextEvent()
+    await nextLifecycleEvent(thread)
+    await nextLifecycleEvent(thread)
     await thread.startIfIdle({ content: { kind: "text", text: "third" } })
-    await thread.nextEvent()
-    await thread.nextEvent()
+    await nextLifecycleEvent(thread)
+    await nextLifecycleEvent(thread)
     expect(provider.callCount).toBe(4)
     expect(
       (await runtime.store.readThread(thread.id))?.rollout.some(
@@ -522,8 +673,8 @@ describe("live Turn processor", () => {
     )
     const thread = await runtime.createThread()
     await thread.startIfIdle({ content: { kind: "text", text: "too large" } })
-    await thread.nextEvent()
-    expect((await thread.nextEvent())?.type).toBe("session.error")
+    await nextLifecycleEvent(thread)
+    expect((await nextLifecycleEvent(thread))?.type).toBe("session.error")
     expect(provider.callCount).toBe(0)
   })
 
@@ -556,8 +707,8 @@ describe("live Turn processor", () => {
     const thread = await runtime.createThread()
     for (const text of ["one", "two", "three", "four"]) {
       await thread.startIfIdle({ content: { kind: "text", text } })
-      await thread.nextEvent()
-      await thread.nextEvent()
+      await nextLifecycleEvent(thread)
+      await nextLifecycleEvent(thread)
     }
 
     expect(compactionCalls).toBe(2)
@@ -624,13 +775,13 @@ describe("live Turn processor", () => {
     })
     const thread = await runtime.createThread()
     await thread.startIfIdle({ content: { kind: "text", text: "first" } })
-    await thread.nextEvent()
-    await thread.nextEvent()
+    await nextLifecycleEvent(thread)
+    await nextLifecycleEvent(thread)
     await thread.startIfIdle({ content: { kind: "text", text: "second" } })
     await compactionStalled.promise
     await thread.interrupt("stop compaction")
-    await thread.nextEvent()
-    await thread.nextEvent()
+    await nextLifecycleEvent(thread)
+    await nextLifecycleEvent(thread)
 
     expect(returnCalls).toBeGreaterThanOrEqual(1)
     expect(normalCalls).toBe(1)
@@ -680,6 +831,22 @@ async function createRuntime(
   }
 }
 
+async function nextLifecycleEvent(thread: {
+  nextEvent(): Promise<SessionEvent | undefined>
+}): Promise<SessionEvent | undefined> {
+  for (;;) {
+    const event = await thread.nextEvent()
+    if (
+      event === undefined ||
+      (event.type !== "rollout.appended" &&
+        event.type !== "model.stream" &&
+        event.type !== "permission")
+    ) {
+      return event
+    }
+  }
+}
+
 function responseEvent(text: string): ModelStreamEvent {
   return {
     type: "response",
@@ -688,6 +855,15 @@ function responseEvent(text: string): ModelStreamEvent {
       content: [{ type: "text", text }],
     },
   }
+}
+
+async function waitForValue<T>(read: () => T | undefined): Promise<T> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const value = read()
+    if (value !== undefined) return value
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  }
+  throw new Error("Timed out waiting for a value.")
 }
 
 function deferred<T>() {

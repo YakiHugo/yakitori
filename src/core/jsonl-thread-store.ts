@@ -103,6 +103,10 @@ export class JsonlThreadStore implements ThreadStore {
       .then(() => undefined)
   }
 
+  async initialize(): Promise<void> {
+    await this.#ready
+  }
+
   async createThread(metadata: CreateThreadMetadata): Promise<StoredThread> {
     await this.#ready
     requireThreadId(metadata.id)
@@ -143,7 +147,10 @@ export class JsonlThreadStore implements ThreadStore {
     }
   }
 
-  appendItems(threadId: string, items: readonly RolloutItem[]): Promise<void> {
+  appendItems(
+    threadId: string,
+    items: readonly RolloutItem[],
+  ): Promise<number> {
     const writer = this.#requireWriter(threadId)
     for (const item of structuredClone([...items])) {
       const entry: StoredRolloutItem = {
@@ -163,6 +170,7 @@ export class JsonlThreadStore implements ThreadStore {
     const endSeqExclusive = writer.nextSeq
     return this.#enqueue(writer, async () => {
       await this.#drain(threadId, writer, endSeqExclusive)
+      return endSeqExclusive
     })
   }
 
@@ -1188,6 +1196,8 @@ function isThreadMetadata(value: unknown): value is ThreadMetadata {
       "mateRevisionId",
       "parentThreadId",
       "forkedFromTurnId",
+      "forkedFromInputId",
+      "forkReason",
       "historyBase",
       "metadata",
     ]) &&
@@ -1202,6 +1212,10 @@ function isThreadMetadata(value: unknown): value is ThreadMetadata {
     optionalString(value.mateRevisionId) &&
     optionalString(value.parentThreadId) &&
     optionalString(value.forkedFromTurnId) &&
+    optionalString(value.forkedFromInputId) &&
+    (value.forkReason === undefined ||
+      value.forkReason === "undo" ||
+      value.forkReason === "edit") &&
     (value.historyBase === undefined || isHistoryPosition(value.historyBase)) &&
     (value.metadata === undefined || isJsonObject(value.metadata))
   )
@@ -1244,9 +1258,16 @@ function isRolloutItem(value: unknown): value is RolloutItem {
   }
   if (value.type === "turn_started") {
     return (
-      hasOnlyKeys(value, ["type", "turnId", "inputItemId"]) &&
+      hasOnlyKeys(value, [
+        "type",
+        "turnId",
+        "inputItemId",
+        "requestFingerprint",
+      ]) &&
       typeof value.turnId === "string" &&
-      typeof value.inputItemId === "string"
+      typeof value.inputItemId === "string" &&
+      (value.requestFingerprint === undefined ||
+        typeof value.requestFingerprint === "string")
     )
   }
   if (value.type === "turn_completed") {
@@ -1288,13 +1309,27 @@ function isResponseItem(value: unknown): value is ResponseItemEnvelope {
       "createdAt",
       "item",
       "providerMetadata",
+      "submissionMetadata",
     ]) &&
     typeof value.id === "string" &&
     typeof value.turnId === "string" &&
     typeof value.createdAt === "string" &&
     isModelMessage(value.item) &&
     (value.providerMetadata === undefined ||
-      isJsonObject(value.providerMetadata))
+      isJsonObject(value.providerMetadata)) &&
+    (value.submissionMetadata === undefined ||
+      isSubmissionMetadata(value.submissionMetadata))
+  )
+}
+
+function isSubmissionMetadata(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ["modelSelection", "parentInputId", "metadata"]) &&
+    (value.modelSelection === undefined ||
+      isModelSelection(value.modelSelection)) &&
+    optionalString(value.parentInputId) &&
+    (value.metadata === undefined || isJsonObject(value.metadata))
   )
 }
 
