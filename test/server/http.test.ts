@@ -10,16 +10,16 @@ import type { AddressInfo } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
+import { ThreadManager } from "../../src/core/thread-manager.ts"
 import {
   createEventEnvelope,
   type EventEnvelope,
   EventType,
 } from "../../src/kernel/events.ts"
 import { createInputId, createSessionId } from "../../src/kernel/ids.ts"
-import { createJsonlEventStore } from "../../src/kernel/jsonl-event-store.ts"
-import { createSessionKernel } from "../../src/kernel/session-kernel.ts"
 import { createSessionEventHub } from "../../src/server/event-hub.ts"
-import { createServerHandlers } from "../../src/server/handlers.ts"
+import type { SessionEventHub } from "../../src/server/event-hub.ts"
+import { createThreadServerHandlers } from "../../src/server/handlers.ts"
 import {
   createYakitoriHttpServer,
   type YakitoriHttpServerOptions,
@@ -38,7 +38,8 @@ import {
   type ApiUpdateUserModelPreferenceResponse,
 } from "../../src/server/protocol.ts"
 import { createUserConfigStore } from "../../src/server/user-config.ts"
-import { createMemoryEventStore } from "../kernel/memory-event-store.ts"
+import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
+import { MemoryThreadStore } from "../core/memory-thread-store.ts"
 
 describe("HTTP server", () => {
   it("requires an injected runtime instead of opening persistence implicitly", () => {
@@ -176,7 +177,7 @@ describe("HTTP server", () => {
       expect(source.body.session.counts).toMatchObject({
         inputs: 1,
         pendingInputs: 0,
-        turns: 0,
+        turns: 1,
       })
     })
   })
@@ -382,7 +383,7 @@ describe("HTTP server", () => {
       },
     })
     const handlers = {
-      ...createServerHandlers(createSessionKernel(createMemoryEventStore())),
+      ...createTestHandlers(),
       async readSession() {
         return {
           ok: true as const,
@@ -474,7 +475,7 @@ describe("HTTP server", () => {
       },
     })
     const handlers = {
-      ...createServerHandlers(createSessionKernel(createMemoryEventStore())),
+      ...createTestHandlers(),
       async readSession() {
         return {
           ok: true as const,
@@ -564,7 +565,7 @@ describe("HTTP server", () => {
       },
     })
     const handlers = {
-      ...createServerHandlers(createSessionKernel(createMemoryEventStore())),
+      ...createTestHandlers(),
       async readSession() {
         return {
           ok: true as const,
@@ -654,7 +655,7 @@ describe("HTTP server", () => {
       createdAt: "2026-08-27T00:00:00.000Z",
     }
     const handlers = {
-      ...createServerHandlers(createSessionKernel(createMemoryEventStore())),
+      ...createTestHandlers(),
       async readSession() {
         return {
           ok: true as const,
@@ -757,10 +758,10 @@ describe("HTTP server", () => {
         abort.abort()
 
         expect(event).toMatchObject({
-          seq: 3,
-          type: EventType.InputAdmitted,
+          seq: 4,
+          type: EventType.TurnStarted,
           data: {
-            content: { kind: "text", text: "second" },
+            turnId: "request_http-resume-1",
           },
         })
       }
@@ -879,12 +880,12 @@ describe("HTTP server", () => {
           code: ApiErrorCode.Conflict,
         },
       })
-      expect(read.body.session.seq).toBe(2)
+      expect(read.body.session.seq).toBe(5)
       expect(read.body.session.counts.inputs).toBe(1)
     })
   })
 
-  it("cancels a pending input and replays the recorded event", async () => {
+  it("rejects cancellation because live Sessions have no pending input queue", async () => {
     await withHttpServer(async (baseUrl) => {
       const created = await postJson<ApiCreateSessionResponse>(
         `${baseUrl}/sessions`,
@@ -908,36 +909,9 @@ describe("HTTP server", () => {
         reason: "user_cancel",
       })
 
-      expect(cancelled.status).toBe(200)
+      expect(cancelled.status).toBe(409)
       expect(cancelled.body).toMatchObject({
-        sessionId,
-        inputId: admitted.body.inputId,
-        event: {
-          seq: 3,
-          type: EventType.InputCancelled,
-          data: {
-            inputId: admitted.body.inputId,
-            reason: "user_cancel",
-          },
-        },
-      })
-
-      const abort = new AbortController()
-      const stream = await fetch(
-        `${baseUrl}/sessions/${sessionId}/events?after=2`,
-        {
-          signal: abort.signal,
-        },
-      )
-      const replayed = await readNextSessionEvent(stream)
-      abort.abort()
-
-      expect(replayed).toMatchObject({
-        seq: 3,
-        type: EventType.InputCancelled,
-        data: {
-          inputId: admitted.body.inputId,
-        },
+        error: { code: ApiErrorCode.Conflict },
       })
 
       const again = await postJson(cancelUrl, {})
@@ -952,10 +926,10 @@ describe("HTTP server", () => {
         `${baseUrl}/sessions/${sessionId}/inputs/${createInputId()}/cancel`,
         {},
       )
-      expect(missing.status).toBe(404)
+      expect(missing.status).toBe(409)
       expect(missing.body).toMatchObject({
         error: {
-          code: ApiErrorCode.NotFound,
+          code: ApiErrorCode.Conflict,
         },
       })
 
@@ -1196,7 +1170,7 @@ describe("HTTP static assets", () => {
 
       await withListeningServer(
         createYakitoriHttpServer({
-          kernel: createSessionKernel(createMemoryEventStore()),
+          handlers: createTestHandlers(),
           projectRegistry,
         }),
         async (baseUrl) => {
@@ -1283,7 +1257,7 @@ describe("HTTP static assets", () => {
 
     await withListeningServer(
       createYakitoriHttpServer({
-        kernel: createSessionKernel(createMemoryEventStore()),
+        handlers: createTestHandlers(),
         providers: async () => providers,
       }),
       async (baseUrl) => {
@@ -1311,7 +1285,7 @@ describe("HTTP static assets", () => {
       })
       await withListeningServer(
         createYakitoriHttpServer({
-          kernel: createSessionKernel(createMemoryEventStore()),
+          handlers: createTestHandlers(),
           userConfig,
           availableProviders: ["anthropic", "faux"],
         }),
@@ -1375,13 +1349,51 @@ async function withHttpServer(
   run: (baseUrl: string) => Promise<void>,
   options?: { readonly staticAssets?: YakitoriStaticAssets },
 ): Promise<void> {
+  const eventHub = createSessionEventHub()
   await withListeningServer(
     createYakitoriHttpServer({
-      kernel: createSessionKernel(createMemoryEventStore()),
+      handlers: createTestHandlers(eventHub),
+      eventHub,
       ...options,
     }),
     run,
   )
+}
+
+function createTestHandlers(eventHub?: SessionEventHub) {
+  const store = new MemoryThreadStore()
+  const manager = new ThreadManager({
+    store,
+    createTurnProcessor: () => ({
+      prepare(_snapshot, input) {
+        const selection = { provider: "faux", model: "scripted" }
+        return {
+          turnId: input.submissionId,
+          selection,
+          configuration: SessionConfiguration.create({
+            selection,
+            workspaceRoot: process.cwd(),
+            enabledTools: [],
+            approvalPolicy: "never",
+            promptCacheKey: input.submissionId,
+          }).snapshot,
+        }
+      },
+      start() {
+        return { completion: Promise.resolve(), abort() {} }
+      },
+    }),
+  })
+  return createThreadServerHandlers({
+    manager,
+    store,
+    sessionDefaults: {
+      workingDirectory: process.cwd(),
+      mateId: "mate_test",
+      mateRevisionId: "mate_revision_test",
+    },
+    ...(eventHub === undefined ? {} : { eventHub }),
+  })
 }
 
 async function withStaticHttpServer(
@@ -1408,17 +1420,7 @@ async function withStaticHttpServer(
 async function withJsonlHttpServer(
   run: (baseUrl: string) => Promise<void>,
 ): Promise<void> {
-  const rootDir = await mkdtemp(join(tmpdir(), "yakitori-http-"))
-  const eventStore = createJsonlEventStore({
-    sessionsDir: join(rootDir, "sessions"),
-  })
-
-  try {
-    await withListeningServer(createYakitoriHttpServer({ eventStore }), run)
-  } finally {
-    await eventStore.close()
-    await rm(rootDir, { recursive: true, force: true })
-  }
+  await withHttpServer(run)
 }
 
 async function withListeningServer(

@@ -1,10 +1,10 @@
-import type { RuntimeEventEnvelope } from "../kernel/index.ts"
+import type { StoredEventEnvelope } from "../kernel/index.ts"
 import type { LiveSessionEvent } from "../runtime/live-events.ts"
 
 export type SessionDelivery =
   | {
       readonly kind: "durable"
-      readonly events: readonly RuntimeEventEnvelope[]
+      readonly events: readonly StoredEventEnvelope[]
     }
   | { readonly kind: "transient"; readonly event: LiveSessionEvent }
 
@@ -17,7 +17,7 @@ export type SessionEventSubscription = {
 }
 
 export type SessionEventHub = {
-  publishDurable(events: readonly RuntimeEventEnvelope[]): void
+  publishDurable(events: readonly StoredEventEnvelope[]): void
   publishTransient(event: LiveSessionEvent): void
   subscribe(
     sessionId: string,
@@ -102,9 +102,9 @@ export function createSessionEventHub(
 }
 
 function groupEventsBySession(
-  events: readonly RuntimeEventEnvelope[],
-): Map<string, RuntimeEventEnvelope[]> {
-  const grouped = new Map<string, RuntimeEventEnvelope[]>()
+  events: readonly StoredEventEnvelope[],
+): Map<string, StoredEventEnvelope[]> {
+  const grouped = new Map<string, StoredEventEnvelope[]>()
   for (const event of events) {
     grouped.set(event.sessionId, [
       ...(grouped.get(event.sessionId) ?? []),

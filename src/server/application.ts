@@ -1,12 +1,11 @@
 import { mkdir, realpath, stat } from "node:fs/promises"
 import { join } from "node:path"
 import {
-  createJsonlEventStore,
-  createSessionFiles,
-  createSessionKernel,
-  type JsonlEventStore,
-  type SessionKernel,
-} from "../kernel/index.ts"
+  JsonlThreadStore,
+  ThreadManager,
+  type ThreadStore,
+} from "../core/index.ts"
+import { createSessionFiles } from "../kernel/index.ts"
 import {
   createMateKernel,
   createSqliteMateStore,
@@ -24,24 +23,22 @@ import {
   createOpenAIProvider,
   createPermissionGate,
   createProviderRegistry,
-  createSessionRunner,
+  createLiveTurnProcessor,
   createToolRegistry,
   createUserShellEnv,
   GROK_API_BASE_URL,
   ModelStopReason,
   type RuntimeLock,
   readCodexLogin,
-  recoverSessions,
   resolveGrokAccessToken,
   resolveModel,
-  type SessionRunner,
   type StreamFn,
   type UserShellEnv,
 } from "../runtime/index.ts"
 import { withRetries } from "../runtime/retrying-stream.ts"
 import { createSessionEventHub } from "./event-hub.ts"
 import {
-  createServerHandlers,
+  createThreadServerHandlers,
   type ServerHandlers,
   type SessionCreateDefaults,
 } from "./handlers.ts"
@@ -84,7 +81,6 @@ export type YakitoriApplicationOptions = {
   readonly provider?: string
   readonly model?: string
   readonly fauxScenario?: string
-  readonly recoverOnStart?: boolean
   readonly userShellEnv?: UserShellEnv
 }
 
@@ -92,8 +88,8 @@ export type YakitoriApplication = {
   readonly handlers: ServerHandlers
   readonly mateKernel: MateKernel
   readonly mateDatabasePath: string
-  readonly runner: SessionRunner
-  readonly sessionKernel: SessionKernel
+  readonly threadManager: ThreadManager
+  readonly threadStore: ThreadStore
   readonly sessionFiles: ReturnType<typeof createSessionFiles>
   readonly sessionStoreRoot: string
   readonly workspace: string
@@ -121,33 +117,23 @@ export async function createYakitoriApplication(
   )
   const activeMateId =
     options.activeMateId ?? process.env.YAKITORI_MATE_ID ?? undefined
-  const shouldRecover = options.recoverOnStart ?? true
-
   let runtimeLock: RuntimeLock | undefined
-  let eventStore: JsonlEventStore | undefined
+  let threadManagerForCleanup: ThreadManager | undefined
   let mateStore: SqliteMateStore | undefined
-  let runnerForCleanup: SessionRunner | undefined
 
   try {
     await mkdir(configuredSessionStoreRoot, { recursive: true })
     const sessionStoreRoot = await realpath(configuredSessionStoreRoot)
     runtimeLock = await acquireRuntimeLock(sessionStoreRoot)
-    const ownedEventStore = createJsonlEventStore({
-      sessionsDir: sessionStoreRoot,
-    })
     const sessionFiles = createSessionFiles(sessionStoreRoot)
     await sessionFiles.cleanupStagingImageAttachments()
-    eventStore = ownedEventStore
     const ownedMateStore = createSqliteMateStore({
       databasePath: mateDatabasePath,
     })
     mateStore = ownedMateStore
-    const sessionKernel = createSessionKernel(ownedEventStore)
     const mateKernel = createMateKernel(ownedMateStore)
     const eventHub = createSessionEventHub()
-    const permissionGate = createPermissionGate({
-      publish: (event) => eventHub.publishTransient(event),
-    })
+    const permissionGate = createPermissionGate()
     const projectRegistry = createProjectRegistry({
       defaultProject: workspace,
     })
@@ -211,65 +197,54 @@ export async function createYakitoriApplication(
     const baseInstructions =
       options.baseInstructions ?? userConfiguration.baseInstructions
 
-    const runner = createSessionRunner({
-      kernel: sessionKernel,
-      mateKernel,
-      stream: providerRegistry.stream,
-      provider: provider.provider,
-      model: provider.model,
-      ...(baseInstructions === undefined ? {} : { baseInstructions }),
-      ...(modelContextWindowTokens === undefined
-        ? {}
-        : { modelContextWindowTokens }),
-      eventSink: eventHub,
-      permissionGate,
-      toolRegistry,
-      sessionFiles,
-      approvalPolicy:
-        process.env.YAKITORI_APPROVAL_POLICY === "auto_file_tools"
-          ? "auto_file_tools"
-          : "never",
-      onRuntimeError: (error) => {
-        console.error("Session lane failed", error)
+    const threadStore = new JsonlThreadStore({ root: sessionStoreRoot })
+    await threadStore.initialize()
+    const threadManager = new ThreadManager({
+      store: threadStore,
+      createTurnProcessor: () =>
+        createLiveTurnProcessor({
+          stream: providerRegistry.stream,
+          provider: provider.provider,
+          model: provider.model,
+          ...(baseInstructions === undefined ? {} : { baseInstructions }),
+          ...(modelContextWindowTokens === undefined
+            ? {}
+            : { modelContextWindowTokens }),
+          permissionGate,
+          toolRegistry,
+          sessionFiles,
+          approvalPolicy:
+            process.env.YAKITORI_APPROVAL_POLICY === "auto_file_tools"
+              ? "auto_file_tools"
+              : "never",
+          onRuntimeError: (error) => {
+            console.error("Session execution failed", error)
+          },
+        }),
+      onPersistenceError: (error, threadId) => {
+        console.error(`Thread persistence failed: ${threadId}`, error)
       },
     })
-    runnerForCleanup = runner
+    threadManagerForCleanup = threadManager
 
-    const handlers = createServerHandlers(sessionKernel, {
+    const handlers = createThreadServerHandlers({
+      manager: threadManager,
+      store: threadStore,
       eventHub,
       sessionDefaults,
-      wakeSession: (sessionId) => {
-        void runner.wake(sessionId).catch((error) => {
-          console.error("Session wake failed", error)
-        })
-      },
       resolvePermission: (input) => permissionGate.resolve(input),
       listPendingPermissions: (sessionId) => permissionGate.list(sessionId),
-      interruptTurn: async (input) => {
-        await runner.interrupt(input)
-      },
       availableProviders: providerRegistry.providers,
       sessionFiles,
     })
-
-    if (shouldRecover) {
-      await recoverSessions({
-        kernel: sessionKernel,
-        publish: (events) => eventHub.publishDurable(events),
-        wake: (sessionId) => runner.wake(sessionId),
-        onWakeError: (error, sessionId) => {
-          console.error(`Recovered Session wake failed: ${sessionId}`, error)
-        },
-      })
-    }
 
     let closePromise: Promise<void> | undefined
     return {
       handlers,
       mateKernel,
       mateDatabasePath,
-      runner,
-      sessionKernel,
+      threadManager,
+      threadStore,
       sessionFiles,
       sessionStoreRoot,
       workspace,
@@ -298,8 +273,8 @@ export async function createYakitoriApplication(
       },
       async close() {
         closePromise ??= closeApplicationResources(
-          runner,
-          ownedEventStore.close,
+          threadManager,
+          handlers.close,
           ownedMateStore.close,
           runtimeLock,
         )
@@ -309,8 +284,8 @@ export async function createYakitoriApplication(
   } catch (error) {
     try {
       await closeApplicationResources(
-        runnerForCleanup,
-        eventStore?.close,
+        threadManagerForCleanup,
+        undefined,
         mateStore?.close,
         runtimeLock,
       )
@@ -518,19 +493,19 @@ async function registerCodexLogin(
 }
 
 async function closeApplicationResources(
-  runner: SessionRunner | undefined,
-  closeEventStore: (() => Promise<void>) | undefined,
+  threadManager: ThreadManager | undefined,
+  closeHandlers: (() => Promise<void>) | undefined,
   closeMateStore: (() => void) | undefined,
   runtimeLock: RuntimeLock | undefined,
 ): Promise<void> {
   const errors: unknown[] = []
   try {
-    await runner?.close()
+    await threadManager?.shutdown()
   } catch (error) {
     errors.push(error)
   }
   try {
-    await closeEventStore?.()
+    await closeHandlers?.()
   } catch (error) {
     errors.push(error)
   }

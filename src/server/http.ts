@@ -7,11 +7,8 @@ import {
 import { extname, join, resolve, sep } from "node:path"
 import { pipeline } from "node:stream/promises"
 import {
-  createSessionKernel,
-  type EventStore,
   isKernelEvent,
   isYakitoriError,
-  type SessionKernel,
   type SessionFiles,
   type StoredEventEnvelope,
 } from "../kernel/index.ts"
@@ -21,7 +18,7 @@ import {
   type SessionDelivery,
   type SessionEventHub,
 } from "./event-hub.ts"
-import { createServerHandlers, type ServerHandlers } from "./handlers.ts"
+import type { ServerHandlers } from "./handlers.ts"
 import type { ProjectRegistry } from "./project-registry.ts"
 import {
   ApiErrorCode,
@@ -45,30 +42,18 @@ type YakitoriHttpServerCommonOptions = {
   readonly sessionFiles?: SessionFiles
 }
 
-export type YakitoriHttpServerOptions = YakitoriHttpServerCommonOptions &
-  (
-    | {
-        readonly handlers: ServerHandlers
-        readonly kernel?: never
-        readonly eventStore?: never
-      }
-    | {
-        readonly kernel: SessionKernel
-        readonly handlers?: never
-        readonly eventStore?: never
-      }
-    | {
-        readonly eventStore: EventStore
-        readonly handlers?: never
-        readonly kernel?: never
-      }
-  )
+export type YakitoriHttpServerOptions = YakitoriHttpServerCommonOptions & {
+  readonly handlers: ServerHandlers
+}
 
 export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
+  if (options.handlers === undefined) {
+    throw new Error(
+      "Injected handlers are required. Use createYakitoriApplication() for an owned runtime.",
+    )
+  }
   const eventHub = options.eventHub ?? createSessionEventHub()
-  const handlers =
-    options.handlers ??
-    createServerHandlers(resolveServerKernel(options), { eventHub })
+  const handlers = options.handlers
   const projectRegistry = options.projectRegistry
   const providers = options.providers
   const userConfig = options.userConfig
@@ -97,18 +82,6 @@ export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
     })
   })
   return server
-}
-
-function resolveServerKernel(
-  options: YakitoriHttpServerOptions,
-): SessionKernel {
-  if (options.kernel !== undefined) return options.kernel
-  if (options.eventStore !== undefined) {
-    return createSessionKernel(options.eventStore)
-  }
-  throw new Error(
-    "An injected kernel, eventStore, or handlers is required. Use createYakitoriApplication() for an owned persistent runtime.",
-  )
 }
 
 async function handleRequest(
@@ -698,6 +671,7 @@ async function streamSessionEvents(
     lastSequence = writeSessionDelivery(response, delivery, lastSequence)
     if (delivery.kind === "durable") {
       for (const event of delivery.events) {
+        if (!isKernelEvent(event)) continue
         if (event.type === "turn.started") liveTurnId = event.data.turnId
         if (
           event.type === "turn.completed" &&
@@ -759,9 +733,12 @@ function writeSseEvents(
   let lastRuntimeSequence = lastSequence
   const sequence = events.reduce((sequence, event) => {
     if (event.seq <= sequence) return sequence
-    if (!isKernelEvent(event)) return event.seq
     response.write(`id: ${event.seq}\n`)
-    response.write("event: session.event\n")
+    response.write(
+      isKernelEvent(event)
+        ? "event: session.event\n"
+        : "event: session.rollout\n",
+    )
     response.write(`data: ${JSON.stringify(event)}\n\n`)
     lastRuntimeSequence = event.seq
     return event.seq

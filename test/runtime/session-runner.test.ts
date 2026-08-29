@@ -986,7 +986,13 @@ describe("session runner", () => {
       const session = await createAttributedSession(runtime)
       runtime.eventHub.subscribe(session.sessionId, (delivery) => {
         if (delivery.kind === "transient") live.push(delivery.event)
-        else durable.push(...delivery.events)
+        else {
+          durable.push(
+            ...delivery.events.filter((event): event is EventEnvelope =>
+              isKernelEvent(event),
+            ),
+          )
+        }
       })
 
       const runner = createSessionRunner({
