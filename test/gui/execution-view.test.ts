@@ -8,7 +8,6 @@ import { presentTool } from "../../src/gui/tool-presentation.ts"
 import {
   createEventEnvelope,
   EventType,
-  HistoryRecordType,
   InputRole,
   type ItemContent,
   type JsonValue,
@@ -386,6 +385,7 @@ describe("execution view", () => {
           inputId: "input_1",
           role: InputRole.User,
           content: { kind: "text" as const, text: "run" },
+          modelSelection: { provider: "faux", model: "faux-1" },
         },
       },
       toolStarted({
@@ -874,35 +874,6 @@ describe("execution view", () => {
           inputId: "input_2",
           role: InputRole.User,
           content: { kind: "text" as const, text: "queued" },
-        },
-      },
-      {
-        type: HistoryRecordType.TurnContext,
-        data: {
-          turnId: "turn_1",
-          context: {
-            mateId: "mate_1",
-            mateRevisionId: "revision_1",
-            provider: "faux",
-            model: "faux-1",
-            instructionProfileId: "default",
-            baseInstructionsRevision: "base_test",
-            modelInstructionsRevision: "model_test",
-            workingDirectory: "/workspace",
-            enabledTools: ["run_command"],
-            approvalPolicy: "host",
-            executionPolicy: {
-              modelCallsPerTurn: 4,
-              toolCallsPerTurn: 8,
-              modelVisibleMessageBlocks: 16,
-              modelVisibleContextBytes: 1024,
-              compactionTriggerContextBytes: 800,
-              compactionRetainContextBytes: 160,
-              modelVisibleToolResultBytes: 512,
-              modelVisibleToolResultLines: 32,
-              assistantResponseBytes: 2048,
-            },
-          },
         },
       },
       {

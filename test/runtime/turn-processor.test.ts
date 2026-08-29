@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
@@ -105,6 +105,247 @@ describe("live Turn processor", () => {
     expect(
       thread.snapshot().context.history.map((item) => item.item.role),
     ).toEqual(["user", "user", "assistant", "tool", "assistant"])
+  })
+
+  it("persists a visible read so a later model call can edit the file", async () => {
+    const provider = createFauxProvider([
+      {
+        stopReason: ModelStopReason.ToolUse,
+        content: [
+          {
+            type: "tool_call",
+            id: "tool_read_value",
+            name: "read_file",
+            input: { path: "value.txt" },
+          },
+        ],
+      },
+      {
+        stopReason: ModelStopReason.ToolUse,
+        content: [
+          {
+            type: "tool_call",
+            id: "tool_edit_value",
+            name: "edit_file",
+            input: {
+              path: "value.txt",
+              oldString: "value = 1",
+              newString: "value = 2",
+            },
+          },
+        ],
+      },
+      { content: [{ type: "text", text: "done" }] },
+    ])
+    const runtime = await createRuntime(provider.stream, createToolRegistry())
+    const thread = await runtime.createThread()
+    const path = join(runtime.root, "value.txt")
+    await writeFile(path, "value = 1\n")
+
+    await thread.startIfIdle({ content: { kind: "text", text: "update" } })
+    await nextLifecycleEvent(thread)
+    await nextLifecycleEvent(thread)
+
+    expect(await readFile(path, "utf8")).toBe("value = 2\n")
+    expect(
+      thread.snapshot().context.history.find(
+        (item) =>
+          item.item.role === "tool" &&
+          item.item.toolCallId === "tool_read_value",
+      )?.item,
+    ).toMatchObject({
+      fileObservation: {
+        path: "value.txt",
+        kind: "whole_file_read",
+        complete: true,
+      },
+    })
+  })
+
+  it("restores file observations after resume and rejects a stale edit", async () => {
+    const provider = createFauxProvider([
+      {
+        stopReason: ModelStopReason.ToolUse,
+        content: [
+          {
+            type: "tool_call",
+            id: "tool_read_before_resume",
+            name: "read_file",
+            input: { path: "resume.txt" },
+          },
+        ],
+      },
+      { content: [{ type: "text", text: "read" }] },
+      {
+        stopReason: ModelStopReason.ToolUse,
+        content: [
+          {
+            type: "tool_call",
+            id: "tool_stale_edit",
+            name: "edit_file",
+            input: {
+              path: "resume.txt",
+              oldString: "before",
+              newString: "after",
+            },
+          },
+        ],
+      },
+      {
+        assertRequest(request) {
+          expect(request.messages).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                role: "tool",
+                toolCallId: "tool_stale_edit",
+                isError: true,
+                content: expect.stringContaining(
+                  "file_changed_since_observation",
+                ),
+              }),
+            ]),
+          )
+        },
+        content: [{ type: "text", text: "stale" }],
+      },
+    ])
+    const tools = createToolRegistry()
+    const runtime = await createRuntime(provider.stream, tools)
+    const thread = await runtime.createThread()
+    const path = join(runtime.root, "resume.txt")
+    await writeFile(path, "before\n")
+    await thread.startIfIdle({ content: { kind: "text", text: "read" } })
+    await nextLifecycleEvent(thread)
+    await nextLifecycleEvent(thread)
+    await runtime.manager.shutdown()
+    await writeFile(path, "changed externally\n")
+
+    const resumedManager = new ThreadManager({
+      store: runtime.store,
+      createTurnProcessor: () =>
+        createLiveTurnProcessor({
+          stream: provider.stream,
+          toolRegistry: tools,
+          loadProjectInstructions: async () => undefined,
+        }),
+    })
+    cleanups.push(() => resumedManager.shutdown())
+    const resumed = await resumedManager.resumeThread(thread.id)
+    if (resumed === undefined) throw new Error("Thread was not resumed.")
+    await resumed.startIfIdle({ content: { kind: "text", text: "edit" } })
+    await nextLifecycleEvent(resumed)
+    await nextLifecycleEvent(resumed)
+
+    expect(await readFile(path, "utf8")).toBe("changed externally\n")
+  })
+
+  it("does not let a read authorize an edit from the same model call", async () => {
+    const provider = createFauxProvider([
+      {
+        stopReason: ModelStopReason.ToolUse,
+        content: [
+          {
+            type: "tool_call",
+            id: "tool_same_read",
+            name: "read_file",
+            input: { path: "same-call.txt" },
+          },
+          {
+            type: "tool_call",
+            id: "tool_same_edit",
+            name: "edit_file",
+            input: {
+              path: "same-call.txt",
+              oldString: "one",
+              newString: "two",
+            },
+          },
+        ],
+      },
+      {
+        assertRequest(request) {
+          expect(request.messages).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                role: "tool",
+                toolCallId: "tool_same_edit",
+                isError: true,
+                content: expect.stringContaining("file_not_observed"),
+              }),
+            ]),
+          )
+        },
+        content: [{ type: "text", text: "done" }],
+      },
+    ])
+    const runtime = await createRuntime(provider.stream, createToolRegistry())
+    const thread = await runtime.createThread()
+    const path = join(runtime.root, "same-call.txt")
+    await writeFile(path, "one\n")
+
+    await thread.startIfIdle({ content: { kind: "text", text: "update" } })
+    await nextLifecycleEvent(thread)
+    await nextLifecycleEvent(thread)
+
+    expect(await readFile(path, "utf8")).toBe("one\n")
+  })
+
+  it("removes observation grants when a tool result is context-truncated", async () => {
+    const provider = createFauxProvider([
+      {
+        stopReason: ModelStopReason.ToolUse,
+        content: [
+          {
+            type: "tool_call",
+            id: "tool_truncated_read",
+            name: "read_file",
+            input: { path: "truncated.txt" },
+          },
+        ],
+      },
+      {
+        assertRequest(request) {
+          expect(request.messages).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                role: "tool",
+                toolCallId: "tool_truncated_read",
+                content: expect.stringContaining("...[truncated"),
+                fileObservation: undefined,
+              }),
+            ]),
+          )
+        },
+        stopReason: ModelStopReason.ToolUse,
+        content: [
+          {
+            type: "tool_call",
+            id: "tool_edit_after_truncation",
+            name: "edit_file",
+            input: {
+              path: "truncated.txt",
+              oldString: "one",
+              newString: "changed",
+            },
+          },
+        ],
+      },
+      { content: [{ type: "text", text: "done" }] },
+    ])
+    const runtime = await createRuntime(provider.stream, createToolRegistry(), {
+      executionPolicy: createSessionExecutionPolicy({
+        modelVisibleToolResultLines: 1,
+      }),
+    })
+    const thread = await runtime.createThread()
+    const path = join(runtime.root, "truncated.txt")
+    await writeFile(path, "one\ntwo\n")
+
+    await thread.startIfIdle({ content: { kind: "text", text: "update" } })
+    await nextLifecycleEvent(thread)
+    await nextLifecycleEvent(thread)
+
+    expect(await readFile(path, "utf8")).toBe("one\ntwo\n")
   })
 
   it("delivers committed tool history before the next model stream", async () => {
@@ -662,6 +903,83 @@ describe("live Turn processor", () => {
     ).toBe(true)
   })
 
+  it("applies tool-result visibility limits to compaction sources", async () => {
+    const hiddenTail = "hidden tool output ".repeat(2_000)
+    const oldText = "old context ".repeat(3_000)
+    const provider = createFauxProvider([
+      {
+        stopReason: ModelStopReason.ToolUse,
+        content: [
+          {
+            type: "tool_call",
+            id: "tool_large_result",
+            name: "large_result",
+            input: {},
+          },
+        ],
+      },
+      {
+        assertRequest(request) {
+          const result = request.messages.find(
+            (message) =>
+              message.role === "tool" &&
+              message.toolCallId === "tool_large_result",
+          )
+          expect(result?.content).toContain("...[truncated")
+          expect(result?.content).not.toContain(hiddenTail)
+        },
+        content: [{ type: "text", text: oldText }],
+      },
+      {
+        assertRequest(request) {
+          expect(
+            request.system.some(
+              (section) => section.id === "compaction.instructions",
+            ),
+          ).toBe(true)
+          const serialized = JSON.stringify(request.messages)
+          expect(serialized).toContain("...[truncated")
+          expect(serialized).not.toContain(hiddenTail)
+        },
+        content: [{ type: "text", text: "summary" }],
+      },
+      { content: [{ type: "text", text: "after compaction" }] },
+    ])
+    const tools = createToolRegistry([
+      {
+        name: "large_result",
+        description: "Return a large result",
+        inputSchema: { type: "object" },
+        effect: "observe",
+        approvalRequirement: { kind: "none" },
+        async execute() {
+          return {
+            ok: true,
+            output: {},
+            content: `visible first line\n${hiddenTail}`,
+          }
+        },
+      },
+    ])
+    const runtime = await createRuntime(provider.stream, tools, {
+      executionPolicy: createSessionExecutionPolicy({
+        modelVisibleContextBytes: 60_000,
+        compactionTriggerRatio: 0.5,
+        compactionRetainRatio: 0,
+        modelVisibleToolResultLines: 1,
+      }),
+    })
+    const thread = await runtime.createThread()
+    await thread.startIfIdle({ content: { kind: "text", text: "first" } })
+    await nextLifecycleEvent(thread)
+    await nextLifecycleEvent(thread)
+    await thread.startIfIdle({ content: { kind: "text", text: "second" } })
+    await nextLifecycleEvent(thread)
+    await nextLifecycleEvent(thread)
+
+    expect(provider.callCount).toBe(4)
+  })
+
   it("rejects a complete request that cannot fit before calling the provider", async () => {
     const provider = createFauxProvider([])
     const runtime = await createRuntime(
@@ -821,6 +1139,7 @@ async function createRuntime(
   })
   return {
     manager,
+    root,
     store,
     createThread: () =>
       manager.createThread({

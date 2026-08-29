@@ -11,7 +11,6 @@ import type { ThreadStore } from "../core/thread-store.ts"
 import {
   createEventEnvelope,
   EVENT_SCHEMA_VERSION,
-  type EventEnvelope,
   type EventMetadata,
   ForkReason,
   IdPrefix,
@@ -60,12 +59,16 @@ export type SessionCreateDefaults = {
   readonly mateRevisionId: string
 }
 
-export type ServerHandlerOptions = {
+export type ThreadServerHandlerOptions = {
+  readonly manager: ThreadManager
+  readonly store: ThreadStore
   readonly eventHub?: {
-    publishDurable(events: readonly EventEnvelope[]): void
+    publishDurable(events: readonly StoredEventEnvelope[]): void
+    publishTransient(
+      event: import("../runtime/live-events.ts").LiveSessionEvent,
+    ): void
   }
   readonly sessionDefaults?: SessionCreateDefaults
-  readonly wakeSession?: (sessionId: string) => void
   readonly resolvePermission?: (input: {
     readonly sessionId: string
     readonly turnId: string
@@ -76,11 +79,6 @@ export type ServerHandlerOptions = {
   readonly listPendingPermissions?: (
     sessionId: string,
   ) => readonly RuntimePermissionRequest[]
-  readonly interruptTurn?: (input: {
-    readonly sessionId: string
-    readonly turnId: string
-    readonly reason?: string
-  }) => Promise<void>
   readonly maxInputBytes?: number
   readonly availableProviders?: readonly string[]
   readonly sessionFiles?: SessionFiles
@@ -123,20 +121,6 @@ type AdmissionTextContent = {
   readonly kind: "text"
   readonly text: string
   readonly attachments?: readonly ImageAttachment[]
-}
-
-export type ThreadServerHandlerOptions = Omit<
-  ServerHandlerOptions,
-  "eventHub" | "interruptTurn" | "wakeSession"
-> & {
-  readonly manager: ThreadManager
-  readonly store: ThreadStore
-  readonly eventHub?: {
-    publishDurable(events: readonly StoredEventEnvelope[]): void
-    publishTransient(
-      event: import("../runtime/live-events.ts").LiveSessionEvent,
-    ): void
-  }
 }
 
 // App-server projection over the live Session actor and canonical rollout.
@@ -481,22 +465,13 @@ export function createThreadServerHandlers(
             }
           }
         } catch (error) {
-          const cleanup = await Promise.allSettled([
-            submissionId === undefined
-              ? Promise.resolve()
-              : (options.sessionFiles?.discardRequestImageAttachments(
-                  forked.thread.id,
-                  submissionId,
-                ) ?? Promise.resolve()),
-            options.manager.discardThread(forked.thread.id),
-          ])
-          for (const result of cleanup) {
-            if (result.status === "rejected") {
-              console.error(
-                "Failed to roll back a forked Session.",
-                result.reason,
-              )
-            }
+          try {
+            await options.manager.discardThread(forked.thread.id)
+          } catch (cleanupError) {
+            console.error(
+              "Failed to roll back a forked Session.",
+              cleanupError,
+            )
           }
           throw error
         }

@@ -53,6 +53,11 @@ import type {
   ToolPermissionRequest,
 } from "./tools/types.ts"
 import {
+  createVisibleFileObservationsFromMessages,
+  grantFromToolOutput,
+  type VisibleFileObservations,
+} from "./tools/visible-file-observations.ts"
+import {
   buildWorldStateFromSnapshot,
   diffWorldState,
   snapshotWorldState,
@@ -270,9 +275,16 @@ async function executeTurn(input: {
     const toolPlan = input.toolRegistry.finalize(
       new Set(turn.configuration.enabledTools),
     )
-    const messages = completeToolCallHistory(
+    const durableMessages = completeToolCallHistory(
       input.runtime.snapshot().context.history.map((entry) => entry.item),
     )
+    const messages = limitToolResults(
+      durableMessages,
+      turn.execution.executionPolicy.modelVisibleToolResultBytes,
+      turn.execution.executionPolicy.modelVisibleToolResultLines,
+    )
+    const visibleFileObservations =
+      createVisibleFileObservationsFromMessages(messages)
     const adapted = adaptImagesForModel(messages, turn.configuration.target)
     const request: ModelRequest = {
       target: turn.configuration.target,
@@ -405,15 +417,18 @@ async function executeTurn(input: {
         permissionTimeoutMs: input.runtimeTiming.permissionWaitTimeoutMs,
         approvalPolicy: turn.configuration.approvalPolicy,
         sessionFiles: input.options.sessionFiles,
+        visibleFileObservations,
         onRuntimeError: input.options.onRuntimeError,
       })
       for (const { call, result } of results) {
+        const fileObservation = toolFileObservation(call.name, result)
         await input.runtime.recordConversationItems([
           envelope(input.input.submissionId, {
             role: "tool",
             toolCallId: call.id,
             content: result.content,
             ...(!result.ok ? { isError: true } : {}),
+            ...(fileObservation === undefined ? {} : { fileObservation }),
           }),
         ])
       }
@@ -636,7 +651,15 @@ async function compactLiveHistory(input: {
         sourceGroups.map(async (group) => ({
           messages: await resolveSessionFileImages(
             adaptImagesForModel(
-              completeToolCallHistory(group.items.map((item) => item.item)),
+              limitToolResults(
+                completeToolCallHistory(
+                  group.items.map((item) => item.item),
+                ),
+                input.turn.execution.executionPolicy
+                  .modelVisibleToolResultBytes,
+                input.turn.execution.executionPolicy
+                  .modelVisibleToolResultLines,
+              ),
               input.turn.configuration.target,
             ).messages,
             input.sessionFiles,
@@ -741,6 +764,7 @@ type ToolExecutionScope = {
   readonly permissionTimeoutMs: number
   readonly approvalPolicy: ApprovalPolicy
   readonly sessionFiles: SessionFiles | undefined
+  readonly visibleFileObservations: VisibleFileObservations
   readonly onRuntimeError: ((error: unknown) => void) | undefined
 }
 
@@ -806,10 +830,17 @@ async function executeToolCalls(
 
   for (const item of rest) {
     throwIfAborted(input.signal)
-    results.push({
+    const executed = {
       call: item.call,
       result: await executePreparedTool(input, item),
-    })
+    }
+    results.push(executed)
+    if (input.toolPlan.get(item.call.name)?.effect !== "observe") {
+      const observation = toolFileObservation(item.call.name, executed.result)
+      if (observation !== undefined) {
+        input.visibleFileObservations.apply(observation)
+      }
+    }
   }
   return results
 }
@@ -860,6 +891,7 @@ async function executePreparedTool(
         ...(input.sessionFiles === undefined
           ? {}
           : { sessionFiles: input.sessionFiles }),
+        visibleFileObservations: input.visibleFileObservations,
       },
     )
   } catch (error) {
@@ -873,6 +905,48 @@ async function executePreparedTool(
       content: `tool_execution_failed: ${message}`,
     }
   }
+}
+
+function toolFileObservation(
+  name: string,
+  result: ToolExecutionResult,
+) {
+  return result.ok ? grantFromToolOutput(name, result.output) : undefined
+}
+
+function limitToolResults(
+  messages: readonly ModelMessage[],
+  maxBytes: number,
+  maxLines: number,
+): readonly ModelMessage[] {
+  return messages.map((message) => {
+    if (message.role !== "tool") return message
+    const lines = message.content.split("\n")
+    let content = message.content
+    let truncated = false
+    if (lines.length > maxLines) {
+      content = `${lines.slice(0, maxLines).join("\n")}\n...[truncated ${String(lines.length - maxLines)} lines]`
+      truncated = true
+    }
+    if (utf8Bytes(content) > maxBytes) {
+      const suffix = "\n...[truncated bytes]"
+      const visibleSuffix = truncateUtf8(suffix, maxBytes)
+      const targetBytes = Math.max(0, maxBytes - utf8Bytes(visibleSuffix))
+      content = `${truncateUtf8(content, targetBytes)}${visibleSuffix}`
+      truncated = true
+    }
+    if (!truncated) return message
+    const { fileObservation: _fileObservation, ...visible } = message
+    return { ...visible, content }
+  })
+}
+
+function truncateUtf8(value: string, maxBytes: number): string {
+  const bytes = Buffer.from(value)
+  if (bytes.byteLength <= maxBytes) return value
+  let end = maxBytes
+  while (end > 0 && (bytes[end] ?? 0) >> 6 === 0b10) end -= 1
+  return bytes.subarray(0, end).toString("utf8")
 }
 
 async function recordSteering(

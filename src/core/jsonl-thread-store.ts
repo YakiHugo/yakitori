@@ -373,6 +373,15 @@ export class JsonlThreadStore implements ThreadStore {
     return this.#readRequiredThread(threadId)
   }
 
+  async listThreadIds(): Promise<readonly string[]> {
+    await this.#ready
+    return (await readdir(this.#threadsDirectory))
+      .filter((file) => file.endsWith(".json"))
+      .map((file) => basename(file, ".json"))
+      .filter(isSupportedThreadId)
+      .sort()
+  }
+
   async listThreads(
     input: ThreadStoreListInput = {},
   ): Promise<ThreadStoreListResult> {

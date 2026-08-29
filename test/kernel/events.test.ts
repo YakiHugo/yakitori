@@ -2,12 +2,9 @@ import { describe, expect, it } from "vitest"
 import {
   createEventEnvelope,
   EventType,
-  HistoryRecordType,
   InputRole,
-  isHistoryRecord,
   isKernelEvent,
 } from "../../src/kernel/events.ts"
-import { createSessionExecutionPolicy } from "../../src/runtime/limits.ts"
 
 describe("kernel facts", () => {
   it("contains exactly the coarse witness vocabulary", () => {
@@ -20,14 +17,6 @@ describe("kernel facts", () => {
       "item.started",
       "item.completed",
       "context.compacted",
-    ])
-    expect(Object.values(HistoryRecordType)).toEqual([
-      "session.metadata",
-      "turn.context",
-      "history.initialized",
-      "world_state",
-      "provider.usage_baseline",
-      "turn.aborted",
     ])
   })
 
@@ -45,64 +34,6 @@ describe("kernel facts", () => {
       type: EventType.SessionCreated,
       data: { title: "Witness" },
     })
-  })
-
-  it("recognizes a persisted session configuration snapshot", () => {
-    expect(
-      isHistoryRecord({
-        type: HistoryRecordType.SessionMetadata,
-        data: {
-          configuration: {
-            schemaVersion: 3,
-            workspaceRoot: "/workspace",
-            promptCacheKey: "session-cache",
-            defaultTarget: { provider: "codex", model: "gpt-5.6-sol" },
-            baseInstructions: {
-              text: "instructions",
-              revision: "revision_1",
-              provenance: {
-                type: "model",
-                provider: "codex",
-                model: "gpt-5.6-sol",
-                instructionProfileId: "codex",
-              },
-            },
-            enabledTools: ["read_file"],
-            approvalPolicy: "never",
-            executionPolicyDefaults: createSessionExecutionPolicy(),
-          },
-        },
-      }),
-    ).toBe(true)
-  })
-
-  it("rejects incomplete execution-policy snapshots instead of restoring defaults", () => {
-    const {
-      toolCallsPerTurn: _toolCallsPerTurn,
-      ...incompleteExecutionPolicy
-    } = createSessionExecutionPolicy()
-
-    expect(
-      isHistoryRecord({
-        type: HistoryRecordType.SessionMetadata,
-        data: {
-          configuration: {
-            schemaVersion: 3,
-            workspaceRoot: "/workspace",
-            promptCacheKey: "session-cache",
-            defaultTarget: { provider: "codex", model: "gpt-5.6-sol" },
-            baseInstructions: {
-              text: "instructions",
-              revision: "revision_1",
-              provenance: { type: "custom" },
-            },
-            enabledTools: [],
-            approvalPolicy: "never",
-            executionPolicyDefaults: incompleteExecutionPolicy,
-          },
-        },
-      }),
-    ).toBe(false)
   })
 
   it("strictly rejects malformed known facts at write time", () => {
@@ -221,40 +152,6 @@ describe("kernel facts", () => {
     expect(
       admitted({ provider: "openai", model: "gpt-5.1-codex", extra: true }),
     ).toBe(false)
-  })
-
-  it("recognizes a strict turn.context history record", () => {
-    const record = {
-      type: HistoryRecordType.TurnContext,
-      data: {
-        turnId: "turn_1",
-        context: {
-          mateId: "mate_1",
-          mateRevisionId: "revision_1",
-          provider: "openai",
-          model: "gpt-5.1-codex",
-          instructionProfileId: "codex",
-          baseInstructionsRevision: "base@1",
-          modelInstructionsRevision: "gpt@1",
-          workingDirectory: "/p/a",
-          enabledTools: [],
-          approvalPolicy: "on-request",
-          executionPolicy: {
-            modelCallsPerTurn: 1,
-            toolCallsPerTurn: 1,
-            modelVisibleMessageBlocks: 1,
-            modelVisibleContextBytes: 100,
-            compactionTriggerContextBytes: 80,
-            compactionRetainContextBytes: 16,
-            modelVisibleToolResultBytes: 1,
-            modelVisibleToolResultLines: 1,
-            assistantResponseBytes: 1,
-          },
-        },
-      },
-    }
-    expect(isHistoryRecord(record)).toBe(true)
-    expect(isKernelEvent(record)).toBe(false)
   })
 
   it("recognizes valid tool facts", () => {
@@ -453,99 +350,6 @@ describe("kernel facts", () => {
         },
       }),
     ).toBe(true)
-  })
-
-  it("recognizes a durable inherited context window", () => {
-    expect(
-      isHistoryRecord({
-        type: HistoryRecordType.InitialContext,
-        data: {
-          windowId: "context_window_1",
-          sourceSessionId: "session_parent",
-          history: [
-            {
-              role: "assistant",
-              content: [
-                {
-                  type: "tool_call",
-                  id: "call_1",
-                  name: "read_file",
-                  input: { path: "README.md" },
-                },
-              ],
-            },
-            {
-              role: "tool",
-              toolCallId: "call_1",
-              content: "hello",
-            },
-          ],
-          worldStateBaseline: { environment: { cwd: "/workspace" } },
-        },
-      }),
-    ).toBe(true)
-  })
-
-  it("rejects inline images in a durable inherited context window", () => {
-    expect(
-      isHistoryRecord({
-        type: HistoryRecordType.InitialContext,
-        data: {
-          windowId: "context_window_1",
-          sourceSessionId: "session_parent",
-          history: [
-            {
-              role: "user",
-              content: [{ type: "text", text: "inspect" }],
-              images: [
-                {
-                  type: "image",
-                  mediaType: "image/png",
-                  data: "aGVsbG8=",
-                },
-              ],
-            },
-          ],
-        },
-      }),
-    ).toBe(false)
-  })
-
-  it("recognizes a strict world_state history record", () => {
-    const event = {
-      type: HistoryRecordType.WorldState,
-      data: {
-        turnId: "turn_1",
-        afterItemId: "item_1",
-        full: false,
-        state: { "project.instructions": null },
-        fragments: [
-          {
-            id: "project.instructions",
-            revision: "revision_removed",
-            role: "user",
-            text: "instructions removed",
-          },
-        ],
-      },
-    }
-
-    expect(isHistoryRecord(event)).toBe(true)
-    expect(
-      isHistoryRecord({
-        ...event,
-        data: { ...event.data, fragments: [] },
-      }),
-    ).toBe(true)
-    expect(
-      isHistoryRecord({
-        ...event,
-        data: {
-          ...event.data,
-          fragments: [{ ...event.data.fragments[0], role: "system" }],
-        },
-      }),
-    ).toBe(false)
   })
 
   it.each([

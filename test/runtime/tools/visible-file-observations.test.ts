@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest"
-import type { ToolProjection } from "../../../src/kernel/session-projector.ts"
-import { ToolState } from "../../../src/kernel/session-states.ts"
-import { createVisibleFileObservations } from "../../../src/runtime/tools/visible-file-observations.ts"
+import {
+  createVisibleFileObservations,
+  type StoredToolObservation,
+} from "../../../src/runtime/tools/visible-file-observations.ts"
 
 describe("visible file observations", () => {
   it("projects only the successful tool results supplied for one model request", () => {
@@ -155,31 +156,13 @@ describe("visible file observations", () => {
   })
 })
 
-let toolIndex = 0
-
 function toolProjection(
   name: string,
-  output: Exclude<ToolProjection["output"], undefined>,
-): ToolProjection {
-  toolIndex += 1
+  output: Exclude<StoredToolObservation["output"], undefined>,
+): StoredToolObservation {
   return {
-    toolCallId: `tool_${toolIndex}`,
-    turnId: "turn_1",
     name,
-    input: {},
-    execution: {
-      type: "dynamic_tool_call",
-      itemId: `item_${toolIndex}`,
-      toolCallId: `tool_${toolIndex}`,
-      name,
-      input: {},
-      requiresPermission: false,
-    },
-    state: ToolState.Completed,
-    requestedAt: "2026-08-02T00:00:00.000Z",
-    updatedAt: "2026-08-02T00:00:01.000Z",
-    requestItemId: `item_${toolIndex}`,
-    requiresPermission: false,
+    state: "completed",
     output,
   }
 }

@@ -2,9 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
-import { EventType } from "../../src/kernel/events.ts"
 import { createSessionId } from "../../src/kernel/ids.ts"
-import { createJsonlEventStore } from "../../src/kernel/jsonl-event-store.ts"
 import { createSessionFiles } from "../../src/kernel/session-files.ts"
 
 const roots: string[] = []
@@ -275,28 +273,17 @@ describe("Session files", () => {
 
   it("is deleted with the owning Session directory", async () => {
     const root = await makeRoot()
-    const store = createJsonlEventStore({ sessionsDir: root })
     const files = createSessionFiles(root)
     const sessionId = createSessionId()
-    try {
-      await store.createSession(sessionId, {
-        type: EventType.SessionCreated,
-        data: {},
-      })
-      const prepared = await files.prepareCommandFiles(sessionId, "call_1")
-      await expect(files.read(prepared.stdout.reference)).resolves.toEqual(
-        Buffer.alloc(0),
-      )
+    const prepared = await files.prepareCommandFiles(sessionId, "call_1")
+    await expect(files.read(prepared.stdout.reference)).resolves.toEqual(
+      Buffer.alloc(0),
+    )
 
-      await store.deleteSession(sessionId)
-      await expect(files.read(prepared.stdout.reference)).rejects.toMatchObject(
-        {
-          code: "ENOENT",
-        },
-      )
-    } finally {
-      await store.close()
-    }
+    await files.discardSessionFiles(sessionId)
+    await expect(files.read(prepared.stdout.reference)).rejects.toMatchObject({
+      code: "ENOENT",
+    })
   })
 })
 

@@ -71,6 +71,7 @@ export type ThreadStore = {
   createFork(input: CreateForkInput): Promise<ThreadStoreForkResult>
   releasePreparedFork(prepared: PreparedFork): Promise<void>
   readThread(threadId: string): Promise<StoredThread | undefined>
+  listThreadIds(): Promise<readonly string[]>
   listThreads(input?: ThreadStoreListInput): Promise<ThreadStoreListResult>
   deleteThread(threadId: string): Promise<void>
 }

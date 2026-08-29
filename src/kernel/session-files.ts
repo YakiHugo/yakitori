@@ -12,8 +12,8 @@ import {
   stat,
 } from "node:fs/promises"
 import { basename, dirname, join, posix, resolve, sep } from "node:path"
-import { assertEventStoreSessionId } from "./event-store.ts"
 import type { ImageAttachment, SessionFileReference } from "./events.ts"
+import { isGeneratedSessionId } from "./ids.ts"
 import { inspectImageBytes } from "./image-metadata.ts"
 
 // Grok Build applies the same per-image send boundary. This is a transport
@@ -71,6 +71,10 @@ export type SessionFiles = {
     sessionId: string,
     ownerId: string,
   ): Promise<void>
+  discardSessionFiles(sessionId: string): Promise<void>
+  collectUnreferencedSessionFiles(
+    referencedSessionIds: ReadonlySet<string>,
+  ): Promise<void>
   discardDraftImageAttachments(
     attachments: readonly ImageAttachment[],
   ): Promise<void>
@@ -95,7 +99,7 @@ export function createSessionFiles(sessionsDir: string): SessionFiles {
   const root = resolve(sessionsDir)
 
   function resolveReference(reference: SessionFileReference): string {
-    assertEventStoreSessionId(reference.sessionId)
+    requireSessionId(reference.sessionId)
     requireRelativeFilePath(reference.path)
     const filesDir = join(root, reference.sessionId, "files")
     const path = resolve(filesDir, reference.path)
@@ -121,7 +125,7 @@ export function createSessionFiles(sessionsDir: string): SessionFiles {
 
   return {
     async importImagePaths(sessionId, ownerId, paths) {
-      assertEventStoreSessionId(sessionId)
+      requireSessionId(sessionId)
       requirePathSegment(ownerId, "attachment owner")
       const ownerDirectory = fileNameForId(ownerId)
       const attachments: ImageAttachment[] = []
@@ -171,7 +175,7 @@ export function createSessionFiles(sessionsDir: string): SessionFiles {
     },
 
     async importImageBytes(sessionId, ownerId, images) {
-      assertEventStoreSessionId(sessionId)
+      requireSessionId(sessionId)
       requirePathSegment(ownerId, "attachment owner")
       const ownerDirectory = fileNameForId(ownerId)
       const attachments: ImageAttachment[] = []
@@ -208,7 +212,7 @@ export function createSessionFiles(sessionsDir: string): SessionFiles {
     },
 
     async promoteImageAttachments(sessionId, ownerId, attachments) {
-      assertEventStoreSessionId(sessionId)
+      requireSessionId(sessionId)
       requirePathSegment(ownerId, "attachment owner")
       const ownerDirectory = fileNameForId(ownerId)
       const promoted: ImageAttachment[] = []
@@ -264,7 +268,7 @@ export function createSessionFiles(sessionsDir: string): SessionFiles {
     },
 
     async copyImageAttachments(sessionId, ownerId, attachments) {
-      assertEventStoreSessionId(sessionId)
+      requireSessionId(sessionId)
       requirePathSegment(ownerId, "attachment owner")
       const ownerDirectory = fileNameForId(ownerId)
       const copied: ImageAttachment[] = []
@@ -302,7 +306,7 @@ export function createSessionFiles(sessionsDir: string): SessionFiles {
     },
 
     async discardRequestImageAttachments(sessionId, ownerId) {
-      assertEventStoreSessionId(sessionId)
+      requireSessionId(sessionId)
       requirePathSegment(ownerId, "attachment owner")
       await rm(
         join(
@@ -314,6 +318,27 @@ export function createSessionFiles(sessionsDir: string): SessionFiles {
           fileNameForId(ownerId),
         ),
         { recursive: true, force: true },
+      )
+    },
+
+    async discardSessionFiles(sessionId) {
+      requireSessionId(sessionId)
+      await rm(join(root, sessionId), { recursive: true, force: true })
+    },
+
+    async collectUnreferencedSessionFiles(referencedSessionIds) {
+      const entries = await readdirIfPresent(root)
+      await Promise.all(
+        entries
+          .filter(
+            (entry) =>
+              entry.isDirectory() &&
+              isGeneratedSessionId(entry.name) &&
+              !referencedSessionIds.has(entry.name),
+          )
+          .map((entry) =>
+            rm(join(root, entry.name), { recursive: true, force: true }),
+          ),
       )
     },
 
@@ -341,7 +366,7 @@ export function createSessionFiles(sessionsDir: string): SessionFiles {
     },
 
     async prepareCommandFiles(sessionId, toolCallId) {
-      assertEventStoreSessionId(sessionId)
+      requireSessionId(sessionId)
       requirePathSegment(toolCallId, "tool call id")
       const toolDirectory = fileNameForId(toolCallId)
       const stdout = {
@@ -419,6 +444,11 @@ export function createSessionFiles(sessionsDir: string): SessionFiles {
 
     resolve: resolveReference,
   }
+}
+
+function requireSessionId(sessionId: string): void {
+  if (isGeneratedSessionId(sessionId)) return
+  throw new Error(`Invalid session id ${sessionId}.`)
 }
 
 function imageReference(

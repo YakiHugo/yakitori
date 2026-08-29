@@ -206,6 +206,10 @@ export class MemoryThreadStore implements ThreadStore {
     return thread === undefined ? undefined : structuredClone(thread)
   }
 
+  async listThreadIds(): Promise<readonly string[]> {
+    return [...this.#threads.keys()].sort()
+  }
+
   async listThreads(input: ThreadStoreListInput = {}) {
     const limit = input.limit ?? 50
     const threads: ThreadSummary[] = [...this.#threads.values()]

@@ -51,6 +51,12 @@ export function isRequestId(value: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value)
 }
 
+export function isGeneratedSessionId(value: string): boolean {
+  return /^session_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
+    value,
+  )
+}
+
 function createPrefixedId(prefix: IdPrefix): string {
   return `${prefix}_${globalThis.crypto.randomUUID()}`
 }
