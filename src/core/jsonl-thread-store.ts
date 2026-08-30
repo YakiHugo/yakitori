@@ -21,6 +21,7 @@ import {
   isSessionConfigurationSnapshot,
   isTokenUsage,
 } from "../kernel/events.ts"
+import { createYakitoriError, YakitoriErrorCode } from "../kernel/errors.ts"
 import { isStorageKey } from "../kernel/ids.ts"
 import type {
   HistoryPosition,
@@ -106,6 +107,60 @@ export class JsonlThreadStore implements ThreadStore {
 
   async initialize(): Promise<void> {
     await this.#ready
+  }
+
+  async withRolloutAssetMutation<T>(
+    rolloutId: string,
+    mutate: () => Promise<T>,
+  ): Promise<T> {
+    await this.#ready
+    requireThreadId(rolloutId)
+    const coordinationLock = await acquireOwnedLock(
+      this.#coordinationLockPath,
+      "Thread storage is being updated.",
+      false,
+      true,
+    )
+    try {
+      const metadataFiles = (await readdir(this.#threadsDirectory)).filter(
+        (file) => file.endsWith(".json"),
+      )
+      let owned = false
+      for (const file of metadataFiles) {
+        try {
+          const metadata = await this.#readMetadata(basename(file, ".json"))
+          if (metadata.rolloutId === rolloutId) {
+            owned = true
+            break
+          }
+        } catch {
+          // A corrupt unrelated index cannot grant ownership of this bundle.
+        }
+      }
+      if (!owned) {
+        throw createYakitoriError({
+          code: YakitoriErrorCode.NotFound,
+          message: `Physical rollout ${rolloutId} is not owned by a Thread.`,
+          details: { rolloutId },
+        })
+      }
+      const journal = await open(
+        this.#rolloutPath(rolloutId),
+        constants.O_RDONLY | constants.O_NOFOLLOW,
+      )
+      try {
+        if (!(await journal.stat()).isFile()) {
+          throw new Error(
+            `Physical rollout ${rolloutId} has no regular journal.`,
+          )
+        }
+      } finally {
+        await journal.close()
+      }
+      return await mutate()
+    } finally {
+      await releaseOwnedLock(coordinationLock)
+    }
   }
 
   async createThread(metadata: CreateThreadMetadata): Promise<StoredThread> {
@@ -489,6 +544,7 @@ export class JsonlThreadStore implements ThreadStore {
       `Thread ${normalized.id} already has an active writer.`,
     )
     const rolloutId = normalized.rolloutId
+    const rolloutDirectory = this.#rolloutDirectory(rolloutId)
     const rolloutPath = this.#rolloutPath(rolloutId)
     const metadataPath = this.#metadataPath(normalized.id)
     const sessionMeta: StoredRolloutItem = {
@@ -508,10 +564,15 @@ export class JsonlThreadStore implements ThreadStore {
         false,
         true,
       )
-      if ((await pathExists(rolloutPath)) || (await pathExists(metadataPath))) {
+      if (
+        (await pathExists(rolloutDirectory)) ||
+        (await pathExists(metadataPath))
+      ) {
         throw new Error(`Thread ${normalized.id} already exists.`)
       }
       ownsCreationPaths = true
+      await mkdir(rolloutDirectory)
+      await syncDirectory(this.#rolloutsDirectory)
       await atomicWrite(rolloutPath, `${JSON.stringify(sessionMeta)}\n`)
       await atomicWrite(metadataPath, `${JSON.stringify(normalized)}\n`)
       await this.#openClaimedWriter(normalized, false, writerLock)
@@ -522,7 +583,7 @@ export class JsonlThreadStore implements ThreadStore {
       // cannot remove another creator's state.
       if (ownsCreationPaths) {
         await durableRemove(metadataPath)
-        await durableRemove(rolloutPath)
+        await durableRemoveTree(rolloutDirectory)
       }
       throw error
     } finally {
@@ -793,8 +854,10 @@ export class JsonlThreadStore implements ThreadStore {
     )
     try {
       await durableRemove(this.#metadataPath(threadId))
-      await durableRemove(
-        this.#rolloutPath(writer?.rolloutId ?? metadata?.rolloutId ?? threadId),
+      await durableRemoveTree(
+        this.#rolloutDirectory(
+          writer?.rolloutId ?? metadata?.rolloutId ?? threadId,
+        ),
       )
     } finally {
       await releaseOwnedLock(coordinationLock)
@@ -881,13 +944,19 @@ export class JsonlThreadStore implements ThreadStore {
         pending.push(base.rolloutId)
       }
     }
-    const rolloutFiles = await readdir(this.#rolloutsDirectory)
-    const unreferenced = rolloutFiles
-      .filter((file) => file.endsWith(".jsonl"))
-      .filter((file) => !retained.has(basename(file, ".jsonl")))
+    const rolloutDirectories = await readdir(this.#rolloutsDirectory, {
+      withFileTypes: true,
+    })
+    const unreferenced = rolloutDirectories
+      .filter((entry) => entry.isDirectory() && isStorageKey(entry.name))
+      .map((entry) => entry.name)
+      .filter((rolloutId) => !retained.has(rolloutId))
     await Promise.all(
-      unreferenced.map((file) =>
-        rm(join(this.#rolloutsDirectory, file), { force: true }),
+      unreferenced.map((rolloutId) =>
+        rm(join(this.#rolloutsDirectory, rolloutId), {
+          recursive: true,
+          force: true,
+        }),
       ),
     )
     if (unreferenced.length > 0) await syncDirectory(this.#rolloutsDirectory)
@@ -906,8 +975,12 @@ export class JsonlThreadStore implements ThreadStore {
     return join(this.#threadsDirectory, `${threadId}.json`)
   }
 
-  #rolloutPath(threadId: string): string {
-    return join(this.#rolloutsDirectory, `${threadId}.jsonl`)
+  #rolloutDirectory(rolloutId: string): string {
+    return join(this.#rolloutsDirectory, rolloutId)
+  }
+
+  #rolloutPath(rolloutId: string): string {
+    return join(this.#rolloutDirectory(rolloutId), "rollout.jsonl")
   }
 
   #writerLockPath(threadId: string): string {
@@ -1129,6 +1202,16 @@ async function atomicWrite(path: string, contents: string): Promise<void> {
 async function durableRemove(path: string): Promise<void> {
   try {
     await rm(path)
+  } catch (error) {
+    if (isMissing(error)) return
+    throw error
+  }
+  await syncDirectory(dirname(path))
+}
+
+async function durableRemoveTree(path: string): Promise<void> {
+  try {
+    await rm(path, { recursive: true })
   } catch (error) {
     if (isMissing(error)) return
     throw error

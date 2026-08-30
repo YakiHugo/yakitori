@@ -1,8 +1,12 @@
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
+import {
+  createYakitoriError,
+  YakitoriErrorCode,
+} from "../../src/kernel/errors.ts"
 import { createRolloutAssets } from "../../src/kernel/rollout-assets.ts"
 import { createFauxProvider } from "../../src/runtime/faux-provider.ts"
 import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
@@ -115,7 +119,18 @@ describe("thread server handlers", () => {
     })
     await store.shutdownThread(threadId)
     store.reidentifyRollout(threadId, rolloutId)
-    const rolloutAssets = createRolloutAssets(workspace)
+    const rolloutDirectory = join(workspace, "rollouts", rolloutId)
+    await mkdir(rolloutDirectory, { recursive: true })
+    await writeFile(join(rolloutDirectory, "rollout.jsonl"), "fixture\n")
+    const rolloutAssets = createRolloutAssets(workspace, {
+      async withMutationLease(candidate, mutate) {
+        const owned = (await store.readThread(threadId))?.metadata.rolloutId
+        if (owned !== candidate) {
+          throw new Error(`Physical rollout ${candidate} is not owned.`)
+        }
+        return mutate()
+      },
+    })
     const attachments = await rolloutAssets.importImageBytes(
       rolloutId,
       "draft_physical",
@@ -183,6 +198,72 @@ describe("thread server handlers", () => {
     )[0]
 
     expect(image).toMatchObject({ file: { rolloutId } })
+  })
+
+  it("maps attachment ownership lost to concurrent deletion as not found", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "yakitori-handler-race-"))
+    const store = new MemoryThreadStore()
+    const manager = new ThreadManager({
+      store,
+      createTurnProcessor: () =>
+        createTurnProcessor({
+          stream: createFauxProvider([]).stream,
+          toolRegistry: createToolRegistry([]),
+          loadProjectInstructions: async () => undefined,
+        }),
+    })
+    const rolloutAssets = createRolloutAssets(workspace, {
+      async withMutationLease(rolloutId) {
+        throw createYakitoriError({
+          code: YakitoriErrorCode.NotFound,
+          message: `Physical rollout ${rolloutId} is not owned by a Thread.`,
+          details: { rolloutId },
+        })
+      },
+    })
+    const handlers = createThreadServerHandlers({
+      manager,
+      store,
+      rolloutAssets,
+    })
+    cleanups.push(async () => {
+      await manager.shutdown()
+      await handlers.close()
+      await rm(workspace, { recursive: true, force: true })
+    })
+    const created = await handlers.createSession({
+      workingDirectory: workspace,
+      mateId: "mate_test",
+      mateRevisionId: "mate_revision_test",
+    })
+    if (!created.ok) throw new Error(created.body.error.message)
+    const rolloutId = created.body.session.id
+
+    const admitted = await handlers.admitInput({
+      sessionId: rolloutId,
+      requestId: "request_deleted_during_promotion",
+      content: {
+        kind: "text",
+        text: "inspect",
+        attachments: [
+          {
+            name: "screen.png",
+            mediaType: "image/png",
+            sizeBytes: 24,
+            file: {
+              rolloutId,
+              path: "attachments/staging/draft_deleted/1.png",
+            },
+          },
+        ],
+      },
+    })
+
+    expect(admitted).toMatchObject({
+      ok: false,
+      status: 404,
+      body: { error: { code: "not_found" } },
+    })
   })
 })
 

@@ -249,7 +249,7 @@ describe("run_command contract", () => {
   it("retains complete stdout and stderr as readable rollout assets", async () => {
     const workspace = await makeWorkspace()
     const sessionId = createSessionId()
-    const rolloutAssets = createRolloutAssets(join(workspace, ".sessions"))
+    const rolloutAssets = await createCommandRolloutAssets(workspace, sessionId)
     const script = [
       'process.stdout.write("head\\n" + "x".repeat(4096) + "\\ntail\\n")',
       'process.stderr.write("warning\\n")',
@@ -301,7 +301,7 @@ describe("run_command contract", () => {
   it("caps retained output and reports that the rollout asset is incomplete", async () => {
     const workspace = await makeWorkspace()
     const sessionId = createSessionId()
-    const rolloutAssets = createRolloutAssets(join(workspace, ".sessions"))
+    const rolloutAssets = await createCommandRolloutAssets(workspace, sessionId)
     const result = await createRunCommandTool({
       maxOutputBytes: 32,
       maxPersistedOutputBytes: 64,
@@ -430,7 +430,10 @@ describe("run_command process lifecycle", () => {
     async () => {
       const workspace = await makeWorkspace()
       const sessionId = createSessionId()
-      const rolloutAssets = createRolloutAssets(join(workspace, ".sessions"))
+      const rolloutAssets = await createCommandRolloutAssets(
+        workspace,
+        sessionId,
+      )
       const descendant = "setTimeout(() => undefined, 4000)"
       const script = [
         'const { spawn } = require("node:child_process")',
@@ -533,6 +536,24 @@ async function makeWorkspace(): Promise<string> {
   )
   workspaces.push(workspace)
   return workspace
+}
+
+async function createCommandRolloutAssets(
+  workspace: string,
+  rolloutId: string,
+) {
+  const storageRoot = join(workspace, ".sessions")
+  const rolloutDirectory = join(storageRoot, "rollouts", rolloutId)
+  await mkdir(rolloutDirectory, { recursive: true })
+  await writeFile(join(rolloutDirectory, "rollout.jsonl"), "fixture\n")
+  return createRolloutAssets(storageRoot, {
+    async withMutationLease(candidate, mutate) {
+      if (candidate !== rolloutId) {
+        throw new Error(`Physical rollout ${candidate} is not owned.`)
+      }
+      return mutate()
+    },
+  })
 }
 
 async function waitForFile(path: string): Promise<void> {

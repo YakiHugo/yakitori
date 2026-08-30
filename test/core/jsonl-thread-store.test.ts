@@ -13,6 +13,8 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
+import { createRolloutAssets } from "../../src/kernel/rollout-assets.ts"
+import { YakitoriErrorCode } from "../../src/kernel/errors.ts"
 import type {
   ResponseItemEnvelope,
   RolloutItem,
@@ -97,7 +99,10 @@ describe("JsonlThreadStore", () => {
     })
 
     const childLines = (
-      await readFile(join(root, "rollouts", "thread_child.jsonl"), "utf8")
+      await readFile(
+        join(root, "rollouts", "thread_child", "rollout.jsonl"),
+        "utf8",
+      )
     )
       .trim()
       .split("\n")
@@ -187,13 +192,47 @@ describe("JsonlThreadStore", () => {
       ),
     ).toBe(true)
     await expect(
-      access(join(root, "rollouts", "thread_source.jsonl")),
+      access(join(root, "rollouts", "thread_source", "rollout.jsonl")),
     ).resolves.toBeUndefined()
 
     await store.shutdownThread("thread_child")
     await store.deleteThread("thread_child")
     await expect(
-      access(join(root, "rollouts", "thread_source.jsonl")),
+      access(join(root, "rollouts", "thread_source", "rollout.jsonl")),
+    ).rejects.toMatchObject({ code: "ENOENT" })
+  })
+
+  it("serializes asset creation with deletion and cannot revive a bundle", async () => {
+    const { root, store } = await createStore()
+    const rolloutId = "thread_asset_race"
+    await store.createThread(metadata(rolloutId))
+    await store.shutdownThread(rolloutId)
+    const entered = deferred<void>()
+    const release = deferred<void>()
+    const assets = createRolloutAssets(root, {
+      withMutationLease: (candidate, mutate) =>
+        store.withRolloutAssetMutation(candidate, async () => {
+          entered.resolve()
+          await release.promise
+          return mutate()
+        }),
+    })
+
+    const preparing = assets.prepareCommandFiles(rolloutId, "call_race")
+    await entered.promise
+    const deleting = store.deleteThread(rolloutId)
+    release.resolve()
+    const prepared = await preparing
+    await deleting
+
+    await expect(assets.read(prepared.stdout.reference)).rejects.toMatchObject({
+      code: "ENOENT",
+    })
+    await expect(
+      assets.prepareCommandFiles(rolloutId, "call_after_delete"),
+    ).rejects.toMatchObject({ code: YakitoriErrorCode.NotFound })
+    await expect(
+      access(join(root, "rollouts", rolloutId)),
     ).rejects.toMatchObject({ code: "ENOENT" })
   })
 
@@ -247,7 +286,12 @@ describe("JsonlThreadStore", () => {
     await store.createThread(metadata("thread_recover"))
     await store.appendItems("thread_recover", [response("turn_one", "one")])
     await store.shutdownThread("thread_recover")
-    const rolloutPath = join(root, "rollouts", "thread_recover.jsonl")
+    const rolloutPath = join(
+      root,
+      "rollouts",
+      "thread_recover",
+      "rollout.jsonl",
+    )
     await appendFile(rolloutPath, '{"threadId":"partial')
 
     const resumed = await store.resumeThread("thread_recover")
@@ -465,7 +509,12 @@ describe("JsonlThreadStore", () => {
     await store.createThread(metadata("thread_valid_tail"))
     await store.appendItems("thread_valid_tail", [response("turn_one", "one")])
     await store.shutdownThread("thread_valid_tail")
-    const rolloutPath = join(root, "rollouts", "thread_valid_tail.jsonl")
+    const rolloutPath = join(
+      root,
+      "rollouts",
+      "thread_valid_tail",
+      "rollout.jsonl",
+    )
     const bytes = await readFile(rolloutPath)
     await writeFile(rolloutPath, bytes.subarray(0, bytes.length - 1))
 
@@ -482,7 +531,12 @@ describe("JsonlThreadStore", () => {
     await store.createThread(metadata("thread_corrupt"))
     await store.appendItems("thread_corrupt", [response("turn_one", "one")])
     await store.shutdownThread("thread_corrupt")
-    const rolloutPath = join(root, "rollouts", "thread_corrupt.jsonl")
+    const rolloutPath = join(
+      root,
+      "rollouts",
+      "thread_corrupt",
+      "rollout.jsonl",
+    )
     const lines = (await readFile(rolloutPath, "utf8")).trim().split("\n")
     const duplicate = JSON.parse(lines[1] ?? "null") as Record<string, unknown>
     duplicate.seq = 3
@@ -498,7 +552,7 @@ describe("JsonlThreadStore", () => {
     await store.createThread(metadata("thread_malformed_message"))
     await store.shutdownThread("thread_malformed_message")
     await appendFile(
-      join(root, "rollouts", "thread_malformed_message.jsonl"),
+      join(root, "rollouts", "thread_malformed_message", "rollout.jsonl"),
       `${JSON.stringify({
         threadId: "thread_malformed_message",
         rolloutId: "thread_malformed_message",
@@ -610,7 +664,12 @@ describe("JsonlThreadStore", () => {
     await store.createThread(metadata("thread_broken_rollout"))
     await store.shutdownThread("thread_healthy_rollout")
     await store.shutdownThread("thread_broken_rollout")
-    const brokenPath = join(root, "rollouts", "thread_broken_rollout.jsonl")
+    const brokenPath = join(
+      root,
+      "rollouts",
+      "thread_broken_rollout",
+      "rollout.jsonl",
+    )
     await appendFile(
       brokenPath,
       `${JSON.stringify({
@@ -685,7 +744,7 @@ describe("JsonlThreadStore", () => {
       target: metadata("thread_child", { parentThreadId: "thread_source" }),
     })
     await store.shutdownThread("thread_child")
-    const childPath = join(root, "rollouts", "thread_child.jsonl")
+    const childPath = join(root, "rollouts", "thread_child", "rollout.jsonl")
     const childMeta = JSON.parse(
       (await readFile(childPath, "utf8")).trim(),
     ) as {
@@ -710,6 +769,14 @@ async function createRoot() {
   const root = await mkdtemp(join(tmpdir(), "yakitori-thread-store-"))
   roots.push(root)
   return root
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  const promise = new Promise<T>((accept) => {
+    resolve = accept
+  })
+  return { promise, resolve }
 }
 
 async function runStoreProbe(

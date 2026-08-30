@@ -123,7 +123,7 @@ describe("application composition", () => {
           await readFile(
             join(
               application.sessionStoreRoot,
-              "assets",
+              "rollouts",
               sessionId,
               "files",
               "attachments",
@@ -182,7 +182,7 @@ describe("application composition", () => {
           await readFile(
             join(
               application.sessionStoreRoot,
-              "assets",
+              "rollouts",
               sessionId,
               "files",
               "attachments",
@@ -268,7 +268,7 @@ describe("application composition", () => {
           await readFile(
             join(
               application.sessionStoreRoot,
-              "assets",
+              "rollouts",
               forked.body.session.id,
               "files",
               childImagePath,

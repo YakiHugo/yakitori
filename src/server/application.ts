@@ -2,7 +2,6 @@ import { mkdir, realpath, stat } from "node:fs/promises"
 import { join } from "node:path"
 import {
   JsonlThreadStore,
-  type StoredThread,
   ThreadManager,
   type ThreadStore,
 } from "../core/index.ts"
@@ -126,7 +125,6 @@ export async function createYakitoriApplication(
     await mkdir(configuredSessionStoreRoot, { recursive: true })
     const sessionStoreRoot = await realpath(configuredSessionStoreRoot)
     runtimeLock = await acquireRuntimeLock(sessionStoreRoot)
-    const rolloutAssets = createRolloutAssets(sessionStoreRoot)
     const ownedMateStore = createSqliteMateStore({
       databasePath: mateDatabasePath,
     })
@@ -199,12 +197,10 @@ export async function createYakitoriApplication(
 
     const threadStore = new JsonlThreadStore({ root: sessionStoreRoot })
     await threadStore.initialize()
-    const referencedRolloutAssets = await collectReferencedRolloutAssets(
-      threadStore,
-    )
-    await rolloutAssets.collectUnreferencedRolloutAssets(
-      referencedRolloutAssets,
-    )
+    const rolloutAssets = createRolloutAssets(sessionStoreRoot, {
+      withMutationLease: (rolloutId, mutate) =>
+        threadStore.withRolloutAssetMutation(rolloutId, mutate),
+    })
     await rolloutAssets.cleanupStagingImageAttachments()
     const threadManager = new ThreadManager({
       store: threadStore,
@@ -304,49 +300,6 @@ export async function createYakitoriApplication(
       )
     }
     throw error
-  }
-}
-
-async function collectReferencedRolloutAssets(
-  store: ThreadStore,
-): Promise<ReadonlySet<string>> {
-  const referenced = new Set<string>()
-  const threadIds = await store.listThreadIds()
-  for (const threadId of threadIds) {
-    const thread = await store.readThread(threadId)
-    if (thread === undefined) {
-      throw new Error(`Thread ${threadId} disappeared during file recovery.`)
-    }
-    referenced.add(thread.metadata.rolloutId)
-    collectThreadFileReferences(thread, referenced)
-  }
-  return referenced
-}
-
-function collectThreadFileReferences(
-  thread: StoredThread,
-  referenced: Set<string>,
-): void {
-  const collectMessage = (
-    message: import("../kernel/events.ts").ModelMessage,
-  ) => {
-    if (message.role !== "user") return
-    for (const image of message.images ?? []) {
-      if ("file" in image && image.file !== undefined) {
-        referenced.add(image.file.rolloutId)
-      }
-    }
-  }
-  for (const record of thread.rollout) {
-    // A reference-backed fork inherits the whole asset namespace owned by each
-    // physical rollout, including command stdout/stderr that are intentionally
-    // not embedded into model history as file references.
-    referenced.add(record.rolloutId)
-    if (record.item.type === "response_item") {
-      collectMessage(record.item.item.item)
-    } else if (record.item.type === "compacted") {
-      for (const item of record.item.replacement) collectMessage(item.item)
-    }
   }
 }
 

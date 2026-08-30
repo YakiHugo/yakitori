@@ -46,6 +46,11 @@ export type PreparedImageAttachments = {
   rollback(): Promise<void>
 }
 
+export type RolloutAssetMutationLease = <T>(
+  rolloutId: string,
+  mutate: () => Promise<T>,
+) => Promise<T>
+
 export type RolloutAssets = {
   importImagePaths(
     rolloutId: string,
@@ -71,10 +76,6 @@ export type RolloutAssets = {
     rolloutId: string,
     ownerId: string,
   ): Promise<void>
-  discardRolloutAssets(rolloutId: string): Promise<void>
-  collectUnreferencedRolloutAssets(
-    referencedRolloutIds: ReadonlySet<string>,
-  ): Promise<void>
   discardDraftImageAttachments(
     attachments: readonly ImageAttachment[],
   ): Promise<void>
@@ -95,9 +96,12 @@ export type RolloutAssets = {
   resolve(reference: RolloutAssetReference): string
 }
 
-export function createRolloutAssets(storageRoot: string): RolloutAssets {
+export function createRolloutAssets(
+  storageRoot: string,
+  options: { readonly withMutationLease: RolloutAssetMutationLease },
+): RolloutAssets {
   const storageRootPath = resolve(storageRoot)
-  const root = join(storageRootPath, "assets")
+  const root = join(storageRootPath, "rollouts")
 
   function resolveReference(reference: RolloutAssetReference): string {
     requireRolloutId(reference.rolloutId)
@@ -114,7 +118,7 @@ export function createRolloutAssets(storageRoot: string): RolloutAssets {
     reference: RolloutAssetReference,
   ): Promise<string> {
     const path = resolveReference(reference)
-    await ensureDirectoryChain(storageRootPath, dirname(path))
+    await ensureDirectoryChain(join(root, reference.rolloutId), dirname(path))
     const handle = await open(path, "w", 0o600)
     try {
       await handle.sync()
@@ -128,177 +132,146 @@ export function createRolloutAssets(storageRoot: string): RolloutAssets {
     async importImagePaths(rolloutId, ownerId, paths) {
       requireRolloutId(rolloutId)
       requirePathSegment(ownerId, "attachment owner")
-      const ownerDirectory = fileNameForId(ownerId)
-      const attachments: ImageAttachment[] = []
-      try {
-        for (const [index, sourcePath] of paths.entries()) {
-          const name = basename(sourcePath)
-          requireAttachmentName(name)
-          const snapshot = await copyImageSnapshot({
-            root: storageRootPath,
-            sourcePath,
-            stagingDirectory: stagingOwnerDirectory(
-              root,
+      return options.withMutationLease(rolloutId, async () => {
+        const ownerDirectory = fileNameForId(ownerId)
+        const attachments: ImageAttachment[] = []
+        try {
+          for (const [index, sourcePath] of paths.entries()) {
+            const name = basename(sourcePath)
+            requireAttachmentName(name)
+            const snapshot = await copyImageSnapshot({
+              root: join(root, rolloutId),
+              sourcePath,
+              stagingDirectory: stagingOwnerDirectory(
+                root,
+                rolloutId,
+                ownerDirectory,
+              ),
+            })
+            const reference = imageReference(
               rolloutId,
+              "staging",
               ownerDirectory,
-            ),
+              index,
+              snapshot.mediaType,
+            )
+            await linkTemporaryFile(
+              snapshot.path,
+              resolveReference(reference),
+              dirname(resolveReference(reference)),
+              snapshot.sizeBytes,
+            )
+            await rm(snapshot.path, { force: true })
+            attachments.push({
+              name,
+              mediaType: snapshot.mediaType,
+              sizeBytes: snapshot.sizeBytes,
+              detail: "high",
+              file: reference,
+            })
+          }
+          return attachments
+        } catch (error) {
+          await rm(stagingOwnerDirectory(root, rolloutId, ownerDirectory), {
+            recursive: true,
+            force: true,
           })
-          const reference = imageReference(
-            rolloutId,
-            "staging",
-            ownerDirectory,
-            index,
-            snapshot.mediaType,
-          )
-          await linkTemporaryFile(
-            snapshot.path,
-            resolveReference(reference),
-            dirname(resolveReference(reference)),
-            snapshot.sizeBytes,
-          )
-          await rm(snapshot.path, { force: true })
-          attachments.push({
-            name,
-            mediaType: snapshot.mediaType,
-            sizeBytes: snapshot.sizeBytes,
-            detail: "high",
-            file: reference,
-          })
+          throw error
         }
-        return attachments
-      } catch (error) {
-        await rm(stagingOwnerDirectory(root, rolloutId, ownerDirectory), {
-          recursive: true,
-          force: true,
-        })
-        throw error
-      }
+      })
     },
 
     async importImageBytes(rolloutId, ownerId, images) {
       requireRolloutId(rolloutId)
       requirePathSegment(ownerId, "attachment owner")
-      const ownerDirectory = fileNameForId(ownerId)
-      const attachments: ImageAttachment[] = []
-      try {
-        for (const [index, image] of images.entries()) {
-          requireAttachmentName(image.name)
-          const bytes = Buffer.from(image.data)
-          requireImageSize(bytes.byteLength)
-          const { mediaType } = inspectImageBytes(bytes)
-          const reference = imageReference(
-            rolloutId,
-            "staging",
-            ownerDirectory,
-            index,
-            mediaType,
-          )
-          await writeOnce(storageRootPath, resolveReference(reference), bytes)
-          attachments.push({
-            name: image.name,
-            mediaType,
-            sizeBytes: bytes.byteLength,
-            detail: "high",
-            file: reference,
+      return options.withMutationLease(rolloutId, async () => {
+        const ownerDirectory = fileNameForId(ownerId)
+        const attachments: ImageAttachment[] = []
+        try {
+          for (const [index, image] of images.entries()) {
+            requireAttachmentName(image.name)
+            const bytes = Buffer.from(image.data)
+            requireImageSize(bytes.byteLength)
+            const { mediaType } = inspectImageBytes(bytes)
+            const reference = imageReference(
+              rolloutId,
+              "staging",
+              ownerDirectory,
+              index,
+              mediaType,
+            )
+            await writeOnce(
+              join(root, rolloutId),
+              resolveReference(reference),
+              bytes,
+            )
+            attachments.push({
+              name: image.name,
+              mediaType,
+              sizeBytes: bytes.byteLength,
+              detail: "high",
+              file: reference,
+            })
+          }
+          return attachments
+        } catch (error) {
+          await rm(stagingOwnerDirectory(root, rolloutId, ownerDirectory), {
+            recursive: true,
+            force: true,
           })
+          throw error
         }
-        return attachments
-      } catch (error) {
-        await rm(stagingOwnerDirectory(root, rolloutId, ownerDirectory), {
-          recursive: true,
-          force: true,
-        })
-        throw error
-      }
+      })
     },
 
     async promoteImageAttachments(rolloutId, ownerId, attachments) {
       requireRolloutId(rolloutId)
       requirePathSegment(ownerId, "attachment owner")
-      const ownerDirectory = fileNameForId(ownerId)
-      const promoted: ImageAttachment[] = []
-      const createdPaths: string[] = []
-      const rollback = () =>
-        Promise.all(createdPaths.map((path) => rm(path, { force: true }))).then(
-          () => undefined,
-        )
-      try {
-        for (const [index, attachment] of attachments.entries()) {
-          requireDraftImageAttachment(rolloutId, attachment)
-          const file = imageReference(
-            rolloutId,
-            "requests",
-            ownerDirectory,
-            index,
-            attachment.mediaType,
-          )
-          const targetPath = resolveReference(file)
-          const existing = await inspectStoredImageIfPresent(targetPath)
-          if (existing !== undefined) {
-            requireMatchingImageMetadata(existing, attachment)
-            const sourcePath = resolveReference(attachment.file)
-            const source = await inspectStoredImageIfPresent(sourcePath)
-            if (source !== undefined) {
-              requireMatchingImageMetadata(source, attachment)
-              const [sourceBytes, existingBytes] = await Promise.all([
-                readFile(sourcePath),
-                readFile(targetPath),
-              ])
-              if (!sourceBytes.equals(existingBytes)) {
-                throw new ImageAttachmentConflictError(
-                  "A different image already exists for this request.",
-                )
-              }
-            }
-            promoted.push({ ...attachment, file })
-            continue
-          }
-          const sourcePath = resolveReference(attachment.file)
-          const source = await inspectStoredImage(sourcePath)
-          requireMatchingImageMetadata(source, attachment)
-          if (
-            await linkOnce(
-              storageRootPath,
-              sourcePath,
-              targetPath,
-              source.sizeBytes,
+      return options.withMutationLease(rolloutId, async () => {
+        const ownerDirectory = fileNameForId(ownerId)
+        const promoted: ImageAttachment[] = []
+        const createdPaths: string[] = []
+        const rollback = () =>
+          Promise.all(
+            createdPaths.map((path) => rm(path, { force: true })),
+          ).then(() => undefined)
+        try {
+          for (const [index, attachment] of attachments.entries()) {
+            requireDraftImageAttachment(rolloutId, attachment)
+            const file = imageReference(
+              rolloutId,
+              "requests",
+              ownerDirectory,
+              index,
+              attachment.mediaType,
             )
-          ) {
-            createdPaths.push(targetPath)
-          }
-          promoted.push({ ...attachment, file })
-        }
-        return { attachments: promoted, rollback }
-      } catch (error) {
-        await rollback()
-        throw error
-      }
-    },
-
-    async copyImageAttachments(rolloutId, ownerId, attachments) {
-      requireRolloutId(rolloutId)
-      requirePathSegment(ownerId, "attachment owner")
-      const ownerDirectory = fileNameForId(ownerId)
-      const copied: ImageAttachment[] = []
-      const createdPaths: string[] = []
-      try {
-        for (const [index, attachment] of attachments.entries()) {
-          const sourcePath = resolveReference(attachment.file)
-          const source = await inspectStoredImage(sourcePath)
-          requireMatchingImageMetadata(source, attachment)
-          const file = imageReference(
-            rolloutId,
-            "requests",
-            ownerDirectory,
-            index,
-            attachment.mediaType,
-          )
-          const targetPath = resolveReference(file)
-          const existing = await inspectStoredImageIfPresent(targetPath)
-          if (existing === undefined) {
+            const targetPath = resolveReference(file)
+            const existing = await inspectStoredImageIfPresent(targetPath)
+            if (existing !== undefined) {
+              requireMatchingImageMetadata(existing, attachment)
+              const sourcePath = resolveReference(attachment.file)
+              const source = await inspectStoredImageIfPresent(sourcePath)
+              if (source !== undefined) {
+                requireMatchingImageMetadata(source, attachment)
+                const [sourceBytes, existingBytes] = await Promise.all([
+                  readFile(sourcePath),
+                  readFile(targetPath),
+                ])
+                if (!sourceBytes.equals(existingBytes)) {
+                  throw new ImageAttachmentConflictError(
+                    "A different image already exists for this request.",
+                  )
+                }
+              }
+              promoted.push({ ...attachment, file })
+              continue
+            }
+            const sourcePath = resolveReference(attachment.file)
+            const source = await inspectStoredImage(sourcePath)
+            requireMatchingImageMetadata(source, attachment)
             if (
               await linkOnce(
-                storageRootPath,
+                join(root, rolloutId),
                 sourcePath,
                 targetPath,
                 source.sizeBytes,
@@ -306,16 +279,61 @@ export function createRolloutAssets(storageRoot: string): RolloutAssets {
             ) {
               createdPaths.push(targetPath)
             }
-          } else {
-            requireMatchingImageMetadata(existing, attachment)
+            promoted.push({ ...attachment, file })
           }
-          copied.push({ ...attachment, file })
+          return { attachments: promoted, rollback }
+        } catch (error) {
+          await rollback()
+          throw error
         }
-        return copied
-      } catch (error) {
-        await Promise.all(createdPaths.map((path) => rm(path, { force: true })))
-        throw error
-      }
+      })
+    },
+
+    async copyImageAttachments(rolloutId, ownerId, attachments) {
+      requireRolloutId(rolloutId)
+      requirePathSegment(ownerId, "attachment owner")
+      return options.withMutationLease(rolloutId, async () => {
+        const ownerDirectory = fileNameForId(ownerId)
+        const copied: ImageAttachment[] = []
+        const createdPaths: string[] = []
+        try {
+          for (const [index, attachment] of attachments.entries()) {
+            const sourcePath = resolveReference(attachment.file)
+            const source = await inspectStoredImage(sourcePath)
+            requireMatchingImageMetadata(source, attachment)
+            const file = imageReference(
+              rolloutId,
+              "requests",
+              ownerDirectory,
+              index,
+              attachment.mediaType,
+            )
+            const targetPath = resolveReference(file)
+            const existing = await inspectStoredImageIfPresent(targetPath)
+            if (existing === undefined) {
+              if (
+                await linkOnce(
+                  join(root, rolloutId),
+                  sourcePath,
+                  targetPath,
+                  source.sizeBytes,
+                )
+              ) {
+                createdPaths.push(targetPath)
+              }
+            } else {
+              requireMatchingImageMetadata(existing, attachment)
+            }
+            copied.push({ ...attachment, file })
+          }
+          return copied
+        } catch (error) {
+          await Promise.all(
+            createdPaths.map((path) => rm(path, { force: true })),
+          )
+          throw error
+        }
+      })
     },
 
     async discardRequestImageAttachments(rolloutId, ownerId) {
@@ -331,27 +349,6 @@ export function createRolloutAssets(storageRoot: string): RolloutAssets {
           fileNameForId(ownerId),
         ),
         { recursive: true, force: true },
-      )
-    },
-
-    async discardRolloutAssets(rolloutId) {
-      requireRolloutId(rolloutId)
-      await rm(join(root, rolloutId), { recursive: true, force: true })
-    },
-
-    async collectUnreferencedRolloutAssets(referencedRolloutIds) {
-      const entries = await readdirIfPresent(root)
-      await Promise.all(
-        entries
-          .filter(
-            (entry) =>
-              entry.isDirectory() &&
-              isStorageKey(entry.name) &&
-              !referencedRolloutIds.has(entry.name),
-          )
-          .map((entry) =>
-            rm(join(root, entry.name), { recursive: true, force: true }),
-          ),
       )
     },
 
@@ -381,23 +378,25 @@ export function createRolloutAssets(storageRoot: string): RolloutAssets {
     async prepareCommandFiles(rolloutId, toolCallId) {
       requireRolloutId(rolloutId)
       requirePathSegment(toolCallId, "tool call id")
-      const toolDirectory = fileNameForId(toolCallId)
-      const stdout = {
-        rolloutId,
-        path: posix.join("tools", toolDirectory, "stdout.log"),
-      }
-      const stderr = {
-        rolloutId,
-        path: posix.join("tools", toolDirectory, "stderr.log"),
-      }
-      const [stdoutPath, stderrPath] = await Promise.all([
-        createEmptyFile(stdout),
-        createEmptyFile(stderr),
-      ])
-      return {
-        stdout: { reference: stdout, path: stdoutPath },
-        stderr: { reference: stderr, path: stderrPath },
-      }
+      return options.withMutationLease(rolloutId, async () => {
+        const toolDirectory = fileNameForId(toolCallId)
+        const stdout = {
+          rolloutId,
+          path: posix.join("tools", toolDirectory, "stdout.log"),
+        }
+        const stderr = {
+          rolloutId,
+          path: posix.join("tools", toolDirectory, "stderr.log"),
+        }
+        const [stdoutPath, stderrPath] = await Promise.all([
+          createEmptyFile(stdout),
+          createEmptyFile(stderr),
+        ])
+        return {
+          stdout: { reference: stdout, path: stdoutPath },
+          stderr: { reference: stderr, path: stderrPath },
+        }
+      })
     },
 
     async read(reference) {
@@ -691,11 +690,9 @@ async function writeOnce(
 }
 
 async function ensureDirectoryChain(root: string, target: string) {
-  try {
-    await mkdir(root)
-    await syncDirectory(dirname(root))
-  } catch (error) {
-    if (!isAlreadyExists(error)) throw error
+  const rootMetadata = await stat(root)
+  if (!rootMetadata.isDirectory()) {
+    throw new Error("Physical rollout bundle is not a directory.")
   }
   const relativePath = target.slice(root.length).replace(/^[/\\]/, "")
   const segments = relativePath

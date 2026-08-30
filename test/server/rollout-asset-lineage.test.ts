@@ -1,8 +1,17 @@
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises"
 import type { Server as HttpServer } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
+import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
 import { createRolloutAssets } from "../../src/kernel/rollout-assets.ts"
 import { createFauxProvider } from "../../src/runtime/faux-provider.ts"
 import {
@@ -44,17 +53,20 @@ describe("rollout asset lineage", () => {
 
     const rolloutId = "rollout_physical_integration"
     await reidentifyPhysicalRollout(sessionStoreRoot, threadId, rolloutId)
-    const assets = createRolloutAssets(sessionStoreRoot)
+    const assetStore = new JsonlThreadStore({ root: sessionStoreRoot })
+    await assetStore.initialize()
+    const assets = createRolloutAssets(sessionStoreRoot, {
+      withMutationLease: (candidate, mutate) =>
+        assetStore.withRolloutAssetMutation(candidate, mutate),
+    })
     const retainedCommand = await assets.prepareCommandFiles(
       rolloutId,
       "call_retained",
     )
     await writeFile(retainedCommand.stdout.path, "physical output")
-    const orphanCommand = await assets.prepareCommandFiles(
-      "rollout_orphan",
-      "call_orphan",
-    )
-    await writeFile(orphanCommand.stdout.path, "orphan output")
+    const orphanDirectory = join(sessionStoreRoot, "rollouts", "rollout_orphan")
+    await mkdir(join(orphanDirectory, "files"), { recursive: true })
+    await writeFile(join(orphanDirectory, "files", "orphan.tmp"), "orphan")
 
     const application = await createYakitoriApplication({
       ...options,
@@ -71,7 +83,7 @@ describe("rollout asset lineage", () => {
         application.rolloutAssets.read(retainedCommand.stdout.reference),
       ).resolves.toEqual(Buffer.from("physical output"))
       await expect(
-        stat(join(sessionStoreRoot, "assets", "rollout_orphan")),
+        stat(join(sessionStoreRoot, "rollouts", "rollout_orphan")),
       ).rejects.toMatchObject({ code: "ENOENT" })
 
       const imageBytes = pngBuffer(128)
@@ -226,7 +238,7 @@ describe("rollout asset lineage", () => {
     })
     try {
       await expect(
-        stat(join(restarted.sessionStoreRoot, "assets", sourceId)),
+        stat(join(restarted.sessionStoreRoot, "rollouts", sourceId)),
       ).rejects.toMatchObject({ code: "ENOENT" })
     } finally {
       await restarted.close()
@@ -307,7 +319,7 @@ describe("rollout asset lineage", () => {
     })
     try {
       await expect(
-        stat(join(collected.sessionStoreRoot, "assets", sourceId)),
+        stat(join(collected.sessionStoreRoot, "rollouts", sourceId)),
       ).rejects.toMatchObject({ code: "ENOENT" })
     } finally {
       await collected.close()
@@ -328,9 +340,11 @@ async function reidentifyPhysicalRollout(
   metadata.rolloutId = rolloutId
   await writeFile(metadataPath, JSON.stringify(metadata))
 
-  const sourcePath = join(sessionStoreRoot, "rollouts", `${threadId}.jsonl`)
-  const targetPath = join(sessionStoreRoot, "rollouts", `${rolloutId}.jsonl`)
-  const records = (await readFile(sourcePath, "utf8"))
+  const sourceDirectory = join(sessionStoreRoot, "rollouts", threadId)
+  const targetDirectory = join(sessionStoreRoot, "rollouts", rolloutId)
+  await rename(sourceDirectory, targetDirectory)
+  const rolloutPath = join(targetDirectory, "rollout.jsonl")
+  const records = (await readFile(rolloutPath, "utf8"))
     .trimEnd()
     .split("\n")
     .map((line) => JSON.parse(line) as Record<string, unknown>)
@@ -350,10 +364,9 @@ async function reidentifyPhysicalRollout(
     }
   }
   await writeFile(
-    targetPath,
+    rolloutPath,
     `${records.map((record) => JSON.stringify(record)).join("\n")}\n`,
   )
-  await rm(sourcePath)
 }
 
 async function listen(server: HttpServer): Promise<string> {
