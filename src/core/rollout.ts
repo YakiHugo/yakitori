@@ -69,6 +69,16 @@ export type RolloutItem =
       readonly error?: { readonly message: string; readonly code?: string }
     }
   | {
+      readonly type: "agent_status"
+      readonly status: "errored"
+      readonly error: string
+    }
+  | {
+      readonly type: "agent_message"
+      readonly messageId: string
+      readonly item: ResponseItemEnvelope
+    }
+  | {
       readonly type: "item_completed"
       readonly turnId: string
       readonly item: CompletedExecutionItem

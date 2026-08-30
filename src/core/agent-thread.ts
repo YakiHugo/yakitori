@@ -1,5 +1,6 @@
 import type { Session, SessionSnapshot } from "./session.ts"
 import type {
+  AgentStatus,
   SessionEvent,
   SessionStatus,
   SubmitTurnInput,
@@ -25,6 +26,10 @@ export class AgentThread {
     return this.#session.io.termination
   }
 
+  get agentStatus(): AgentStatus {
+    return this.#session.io.agentStatus
+  }
+
   startOrSteer(input: SubmitTurnInput): Promise<TurnInputSubmission> {
     return this.#session.io.startOrSteer(input)
   }
@@ -48,6 +53,14 @@ export class AgentThread {
     return this.#session.io.interruptTurn(expectedTurnId, reason)
   }
 
+  failAgent(message: string): Promise<AgentStatus> {
+    return this.#session.io.failAgent(message)
+  }
+
+  deliverAgentMessage(messageId: string, text: string): Promise<void> {
+    return this.#session.io.deliverAgentMessage(messageId, text)
+  }
+
   shutdownAndWait(): Promise<void> {
     return this.#session.io.shutdownAndWait()
   }
@@ -58,6 +71,10 @@ export class AgentThread {
 
   subscribeStatus(listener: (status: SessionStatus) => void): () => void {
     return this.#session.io.subscribeStatus(listener)
+  }
+
+  subscribeAgentStatus(listener: (status: AgentStatus) => void): () => void {
+    return this.#session.io.subscribeAgentStatus(listener)
   }
 
   snapshot(): SessionSnapshot {

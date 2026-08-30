@@ -178,7 +178,7 @@ function control(
       path: "/root/default",
       previousStatus: "running",
     }),
-    list: () => [],
+    list: async () => [],
     ...overrides,
   }
 }

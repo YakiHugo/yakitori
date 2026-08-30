@@ -15,6 +15,10 @@ import {
   type TurnProcessorOptions,
 } from "../../src/runtime/turn-processor.ts"
 import { MemoryThreadStore } from "../core/memory-thread-store.ts"
+import {
+  type AgentControl,
+  createAgentControl,
+} from "../../src/runtime/agent-control.ts"
 
 const cleanups: Array<() => Promise<void>> = []
 
@@ -23,6 +27,111 @@ afterEach(async () => {
 })
 
 describe("Turn processor", () => {
+  it("persists an acknowledged mailbox message exactly once after append failure", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yakitori-mailbox-"))
+    const store = new MemoryThreadStore()
+    const firstProvider = createFauxProvider([
+      {
+        assertRequest(request) {
+          expect(
+            JSON.stringify(request.messages).match(/durable mailbox/g),
+          ).toHaveLength(1)
+        },
+        content: [{ type: "text", text: "first done" }],
+      },
+    ])
+    let rootControl: AgentControl | undefined
+    let firstManager!: ThreadManager
+    firstManager = new ThreadManager({
+      store,
+      createTurnProcessor(stored) {
+        const control = rootOnlyAgentControl(
+          stored.metadata.id,
+          async (request) => {
+            const target = firstManager.getThread(request.sessionId)
+            if (target === undefined) throw new Error("missing target thread")
+            await target.deliverAgentMessage(request.messageId, request.text)
+          },
+        )
+        rootControl = control
+        return createTurnProcessor({
+          stream: firstProvider.stream,
+          toolRegistry: createToolRegistry([]),
+          loadProjectInstructions: async () => undefined,
+          agentControl: control,
+        })
+      },
+    })
+    const thread = await firstManager.createThread({
+      workingDirectory: root,
+      mateId: "mate_live",
+      mateRevisionId: "mate_revision_live",
+    })
+    if (rootControl === undefined) throw new Error("missing root control")
+    store.failNextAppend = true
+    await rootControl
+      .bind(thread.id, {
+        provider: "faux",
+        model: "scripted",
+      })
+      .sendMessage({ target: thread.id, message: "durable mailbox" })
+    await thread.startIfIdle({ content: { kind: "text", text: "run" } })
+    await nextLifecycleEvent(thread)
+    await nextLifecycleEvent(thread)
+    await firstManager.shutdown()
+
+    const stored = await store.readThread(thread.id)
+    expect(
+      stored?.rollout.filter(
+        (entry) =>
+          entry.item.type === "agent_message" &&
+          entry.item.item.item.role === "user" &&
+          entry.item.item.item.content.some((block) =>
+            block.text.includes("durable mailbox"),
+          ),
+      ),
+    ).toHaveLength(1)
+
+    const resumedProvider = createFauxProvider([
+      {
+        assertRequest(request) {
+          expect(
+            JSON.stringify(request.messages).match(/durable mailbox/g),
+          ).toHaveLength(1)
+        },
+        content: [{ type: "text", text: "resumed done" }],
+      },
+    ])
+    let resumedManager!: ThreadManager
+    resumedManager = new ThreadManager({
+      store,
+      createTurnProcessor: (storedThread) =>
+        createTurnProcessor({
+          stream: resumedProvider.stream,
+          toolRegistry: createToolRegistry([]),
+          loadProjectInstructions: async () => undefined,
+          agentControl: rootOnlyAgentControl(
+            storedThread.metadata.id,
+            async (request) => {
+              const target = resumedManager.getThread(request.sessionId)
+              if (target === undefined) throw new Error("missing target thread")
+              await target.deliverAgentMessage(request.messageId, request.text)
+            },
+          ),
+        }),
+    })
+    const resumed = await resumedManager.resumeThread(thread.id)
+    await resumed?.startIfIdle({
+      content: { kind: "text", text: "run after restart" },
+    })
+    if (resumed !== undefined) {
+      await nextLifecycleEvent(resumed)
+      await nextLifecycleEvent(resumed)
+    }
+    await resumedManager.shutdown()
+    await rm(root, { recursive: true, force: true })
+  })
+
   it("runs against actor-owned context and persists usage with the terminal Turn", async () => {
     const provider = createFauxProvider([
       {
@@ -947,6 +1056,16 @@ describe("Turn processor", () => {
 
   it("compacts actor-owned history before sending an over-budget request", async () => {
     const oldText = "old context ".repeat(3_000)
+    const compactionStarted = deferred<void>()
+    const releaseCompaction = deferred<void>()
+    let compactionAgentControl: AgentControl | undefined
+    let deliverCompactionMessage: (
+      request: Parameters<
+        import("../../src/runtime/agent-control.ts").AgentControlAdapter["deliverMessage"]
+      >[0],
+    ) => Promise<void> = async () => {
+      throw new Error("runtime is not ready")
+    }
     const provider = createFauxProvider([
       {
         assertRequest(request) {
@@ -972,13 +1091,24 @@ describe("Turn processor", () => {
           expect(request.target.model).toBe("model-b")
           expect(serialized).toContain("<context_compacted>")
           expect(serialized).toContain("<model_switch>")
+          expect(serialized).toContain("mailbox before compaction")
           expect(serialized).not.toContain(oldText)
         },
         content: [{ type: "text", text: "after compaction" }],
       },
     ])
+    const stream: StreamFn = (request) => {
+      const isCompaction = provider.callCount === 2
+      const source = provider.stream(request)
+      if (!isCompaction) return source
+      return (async function* () {
+        compactionStarted.resolve()
+        await releaseCompaction.promise
+        yield* source
+      })()
+    }
     const runtime = await createRuntime(
-      provider.stream,
+      stream,
       createToolRegistry([]),
       {
         executionPolicy: createSessionExecutionPolicy({
@@ -988,7 +1118,19 @@ describe("Turn processor", () => {
         }),
         model: "model-a",
       },
+      (threadId) => {
+        const control = rootOnlyAgentControl(threadId, (request) =>
+          deliverCompactionMessage(request),
+        )
+        compactionAgentControl = control
+        return control
+      },
     )
+    deliverCompactionMessage = async (request) => {
+      const target = runtime.manager.getThread(request.sessionId)
+      if (target === undefined) throw new Error("missing target thread")
+      await target.deliverAgentMessage(request.messageId, request.text)
+    }
     const thread = await runtime.createThread()
     await thread.startIfIdle({ content: { kind: "text", text: "first" } })
     await nextLifecycleEvent(thread)
@@ -1000,7 +1142,21 @@ describe("Turn processor", () => {
     })
     await nextLifecycleEvent(thread)
     await nextLifecycleEvent(thread)
+    if (compactionAgentControl === undefined) {
+      throw new Error("missing compaction agent control")
+    }
     await thread.startIfIdle({ content: { kind: "text", text: "third" } })
+    await compactionStarted.promise
+    await compactionAgentControl
+      .bind(thread.id, {
+        provider: "faux",
+        model: "model-b",
+      })
+      .sendMessage({
+        target: thread.id,
+        message: "mailbox before compaction",
+      })
+    releaseCompaction.resolve()
     await nextLifecycleEvent(thread)
     await nextLifecycleEvent(thread)
     expect(provider.callCount).toBe(4)
@@ -1233,17 +1389,21 @@ async function createRuntime(
   stream: StreamFn,
   toolRegistry = createToolRegistry([]),
   options: Omit<Partial<TurnProcessorOptions>, "stream" | "toolRegistry"> = {},
+  agentControlFactory?: (threadId: string) => AgentControl,
 ) {
   const root = await mkdtemp(join(tmpdir(), "yakitori-live-turn-"))
   const store = new MemoryThreadStore()
   const manager = new ThreadManager({
     store,
-    createTurnProcessor: () =>
+    createTurnProcessor: (stored) =>
       createTurnProcessor({
         stream,
         toolRegistry,
         loadProjectInstructions: async () => undefined,
         ...options,
+        ...(agentControlFactory === undefined
+          ? {}
+          : { agentControl: agentControlFactory(stored.metadata.id) }),
       }),
   })
   cleanups.push(async () => {
@@ -1288,6 +1448,39 @@ function responseEvent(text: string): ModelStreamEvent {
       content: [{ type: "text", text }],
     },
   }
+}
+
+function rootOnlyAgentControl(
+  rootSessionId: string,
+  deliverMessage: import("../../src/runtime/agent-control.ts").AgentControlAdapter["deliverMessage"] = async () => {},
+): AgentControl {
+  return createAgentControl({
+    rootSessionId,
+    adapter: {
+      async createChild() {
+        throw new Error("unused")
+      },
+      async runChild() {
+        throw new Error("unused")
+      },
+      async ensureLoaded() {},
+      async getStatus() {
+        return "running"
+      },
+      async failChild(_sessionId, message) {
+        return { errored: message }
+      },
+      async completionDeliveryId(sessionId) {
+        return `agent_completion_${sessionId}`
+      },
+      async interruptChild() {},
+      deliverMessage,
+      async rollbackChild() {},
+      captureForkContext() {
+        return undefined
+      },
+    },
+  })
 }
 
 async function waitForValue<T>(read: () => T | undefined): Promise<T> {

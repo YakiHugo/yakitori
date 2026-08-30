@@ -15,6 +15,15 @@ export const SessionStatus = {
 
 export type SessionStatus = (typeof SessionStatus)[keyof typeof SessionStatus]
 
+export type AgentStatus =
+  | "pending_init"
+  | "running"
+  | "interrupted"
+  | "shutdown"
+  | "not_found"
+  | { readonly completed: string | null }
+  | { readonly errored: string }
+
 export type TurnInput = {
   readonly submissionId: string
   readonly content: TextContent
@@ -103,6 +112,23 @@ export type SessionOp =
         readonly reject: (error: unknown) => void
       }
     }
+  | {
+      readonly type: "fail_agent"
+      readonly message: string
+      readonly reply: {
+        readonly resolve: (status: AgentStatus) => void
+        readonly reject: (error: unknown) => void
+      }
+    }
+  | {
+      readonly type: "agent_message"
+      readonly messageId: string
+      readonly text: string
+      readonly reply: {
+        readonly resolve: () => void
+        readonly reject: (error: unknown) => void
+      }
+    }
   | { readonly type: "shutdown" }
 
 export type SessionEvent =
@@ -162,6 +188,10 @@ export class SessionIo {
   readonly #subscribeStatus: (
     listener: (status: SessionStatus) => void,
   ) => () => void
+  readonly #readAgentStatus: () => AgentStatus
+  readonly #subscribeAgentStatus: (
+    listener: (status: AgentStatus) => void,
+  ) => () => void
   readonly termination: Promise<void>
   #accepting = true
 
@@ -171,6 +201,10 @@ export class SessionIo {
     events: AsyncQueue<SessionEvent>
     readStatus: () => SessionStatus
     subscribeStatus: (listener: (status: SessionStatus) => void) => () => void
+    readAgentStatus: () => AgentStatus
+    subscribeAgentStatus: (
+      listener: (status: AgentStatus) => void,
+    ) => () => void
     termination: Promise<void>
   }) {
     this.#send = input.send
@@ -178,6 +212,8 @@ export class SessionIo {
     this.#events = input.events
     this.#readStatus = input.readStatus
     this.#subscribeStatus = input.subscribeStatus
+    this.#readAgentStatus = input.readAgentStatus
+    this.#subscribeAgentStatus = input.subscribeAgentStatus
     this.termination = input.termination
   }
 
@@ -187,6 +223,14 @@ export class SessionIo {
 
   subscribeStatus(listener: (status: SessionStatus) => void): () => void {
     return this.#subscribeStatus(listener)
+  }
+
+  get agentStatus(): AgentStatus {
+    return this.#readAgentStatus()
+  }
+
+  subscribeAgentStatus(listener: (status: AgentStatus) => void): () => void {
+    return this.#subscribeAgentStatus(listener)
   }
 
   startOrSteer(input: SubmitTurnInput): Promise<TurnInputSubmission> {
@@ -222,6 +266,29 @@ export class SessionIo {
         type: "interrupt",
         expectedTurnId,
         ...(reason === undefined ? {} : { reason }),
+        reply: { resolve, reject },
+      }).catch(reject)
+    })
+  }
+
+  async failAgent(message: string): Promise<AgentStatus> {
+    this.#requireOpen()
+    return new Promise((resolve, reject) => {
+      void this.#send({
+        type: "fail_agent",
+        message,
+        reply: { resolve, reject },
+      }).catch(reject)
+    })
+  }
+
+  async deliverAgentMessage(messageId: string, text: string): Promise<void> {
+    this.#requireOpen()
+    return new Promise((resolve, reject) => {
+      void this.#send({
+        type: "agent_message",
+        messageId,
+        text,
         reply: { resolve, reject },
       }).catch(reject)
     })

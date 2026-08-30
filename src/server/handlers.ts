@@ -62,6 +62,7 @@ export type SessionCreateDefaults = {
 
 export type ThreadServerHandlerOptions = {
   readonly manager: ThreadManager
+  readonly discardThread?: (threadId: string) => Promise<void>
   readonly store: ThreadStore
   readonly eventHub?: {
     publishDurable(events: readonly StoredEventEnvelope[]): void
@@ -413,7 +414,8 @@ export function createThreadServerHandlers(
         if ((await options.store.readThread(sessionId)) === undefined) {
           throw notFound(`Session ${sessionId} was not found.`, { sessionId })
         }
-        await options.manager.discardThread(sessionId)
+        await (options.discardThread?.(sessionId) ??
+          options.manager.discardThread(sessionId))
         publishedThrough.delete(sessionId)
         return ok(200, { sessionId })
       } catch (error) {

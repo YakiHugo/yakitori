@@ -7,6 +7,7 @@ import type {
 } from "../kernel/events.ts"
 import { fingerprintInputAdmission } from "../kernel/operation.ts"
 import { InputRole } from "../kernel/events.ts"
+import { createTurnId } from "../kernel/ids.ts"
 import { ContextManager, type ContextSnapshot } from "./context-manager.ts"
 import type {
   ResponseItemEnvelope,
@@ -17,6 +18,7 @@ import type {
 } from "./rollout.ts"
 import {
   AsyncQueue,
+  type AgentStatus,
   BoundedQueue,
   type NotSubmittedReason,
   NotSubmittedReason as Reason,
@@ -36,6 +38,7 @@ const gracefulInterruptionTimeoutMs = 100
 export type SessionSnapshot = {
   readonly metadata: ThreadMetadata
   readonly context: ContextSnapshot
+  readonly contextRevision: number
   readonly configuration?: SessionConfigurationSnapshot
   readonly activeTurnId?: string
 }
@@ -71,6 +74,8 @@ export type TurnRuntime = {
   replaceConversationHistory(input: {
     readonly replacement: readonly ResponseItemEnvelope[]
     readonly summary: string
+    readonly baseContextRevision: number
+    readonly baseHistoryLength: number
   }): Promise<void>
 }
 
@@ -117,6 +122,12 @@ type ForkBarrierCommand = {
 
 type SessionCommand = SessionOp | ForkBarrierCommand
 
+type AcceptedAgentMessage = {
+  readonly envelope: ResponseItemEnvelope
+  readonly items: readonly RolloutItem[]
+  throughSeq?: number
+}
+
 export class Session {
   readonly id: string
   readonly io: SessionIo
@@ -132,8 +143,14 @@ export class Session {
   readonly #submissions = new BoundedQueue<SessionCommand>(submissionCapacity)
   readonly #events = new AsyncQueue<SessionEvent>()
   readonly #statusListeners = new Set<(status: SessionStatus) => void>()
+  readonly #agentStatusListeners = new Set<(status: AgentStatus) => void>()
+  readonly #receivedAgentMessageIds = new Set<string>()
+  readonly #acceptedAgentMessages = new Map<string, AcceptedAgentMessage>()
+  #contextMutationTail = Promise.resolve()
   readonly #onPersistenceError?: ((error: unknown) => void) | undefined
   #status: SessionStatus = SessionStatus.Idle
+  #agentStatus: AgentStatus
+  #contextRevision = 0
   #activeTurn: ActiveTurn | undefined
   #closing = false
   readonly #submissionLoop: Promise<void>
@@ -148,7 +165,11 @@ export class Session {
     this.#metadata = structuredClone(input.stored.metadata)
     this.#contextManager = ContextManager.fromStoredThread(input.stored)
     this.#configuration = latestConfiguration(input.stored)
+    this.#agentStatus = agentStatusFromStoredThread(input.stored)
     for (const record of input.stored.rollout) {
+      if (record.item.type === "agent_message") {
+        this.#receivedAgentMessageIds.add(record.item.messageId)
+      }
       if (
         record.item.type === "turn_started" &&
         record.item.requestFingerprint !== undefined
@@ -174,6 +195,11 @@ export class Session {
         this.#statusListeners.add(listener)
         return () => this.#statusListeners.delete(listener)
       },
+      readAgentStatus: () => this.#agentStatus,
+      subscribeAgentStatus: (listener) => {
+        this.#agentStatusListeners.add(listener)
+        return () => this.#agentStatusListeners.delete(listener)
+      },
       termination: this.#submissionLoop,
     })
   }
@@ -182,6 +208,7 @@ export class Session {
     return {
       metadata: structuredClone(this.#metadata),
       context: this.#contextManager.snapshot(),
+      contextRevision: this.#contextRevision,
       ...(this.#configuration === undefined
         ? {}
         : { configuration: structuredClone(this.#configuration) }),
@@ -230,6 +257,7 @@ export class Session {
         await this.#shutdownPersistence()
       } finally {
         this.#setStatus(SessionStatus.Shutdown)
+        this.#setAgentStatus("shutdown")
         this.#events.close()
         this.#submissions.close()
       }
@@ -249,6 +277,26 @@ export class Session {
       }
       this.#interruptActiveTurn(operation.reason ?? "interrupted")
       operation.reply?.resolve(true)
+      return
+    }
+    if (operation.type === "fail_agent") {
+      try {
+        if (this.#activeTurn === undefined) {
+          await this.#recordAgentFailure(operation.message)
+        }
+        operation.reply.resolve(this.#agentStatus)
+      } catch (error) {
+        operation.reply.reject(error)
+      }
+      return
+    }
+    if (operation.type === "agent_message") {
+      try {
+        await this.#recordAgentMessage(operation.messageId, operation.text)
+        operation.reply.resolve()
+      } catch (error) {
+        operation.reply.reject(error)
+      }
       return
     }
     try {
@@ -326,7 +374,15 @@ export class Session {
   }
 
   async #startTurn(input: TurnInput): Promise<TurnInputSubmission> {
-    const context = this.#processor.prepare(this.snapshot(), input)
+    let context: TurnContextItem
+    try {
+      context = this.#processor.prepare(this.snapshot(), input)
+    } catch (error) {
+      await this.#recordAgentFailure(
+        error instanceof Error ? error.message : "Turn preparation failed.",
+      )
+      throw error
+    }
     if (context.turnId !== input.submissionId) {
       throw new Error("Turn processor prepared a mismatched Turn id.")
     }
@@ -362,6 +418,7 @@ export class Session {
       inputItemId: inputItem.id,
     })
     this.#contextManager.record([inputItem])
+    this.#contextRevision += 1
     try {
       await this.#appendRollout([
         { type: "response_item", item: inputItem },
@@ -376,6 +433,9 @@ export class Session {
       await this.#persist(PersistContext.TurnStart)
     } catch (error) {
       this.#submittedTurns.delete(input.submissionId)
+      await this.#recordAgentFailure(
+        error instanceof Error ? error.message : "Turn persistence failed.",
+      )
       throw error
     }
 
@@ -395,6 +455,7 @@ export class Session {
     }
     this.#activeTurn = active
     this.#setStatus(SessionStatus.Active)
+    this.#setAgentStatus("running")
     this.#events.send({ type: "turn.started", threadId: this.id, input })
 
     let taskHandle: TurnTask
@@ -495,6 +556,7 @@ export class Session {
           ? {}
           : { reason: active.interruptReason }),
       })
+      this.#setAgentStatus("interrupted")
       this.#releaseTurn(active)
       return
     }
@@ -520,6 +582,7 @@ export class Session {
         operation: "turn_input",
         message,
       })
+      this.#setAgentStatus({ errored: message })
       this.#releaseTurn(active)
       return
     }
@@ -537,6 +600,9 @@ export class Session {
       type: "turn.completed",
       threadId: this.id,
       input: active.input,
+    })
+    this.#setAgentStatus({
+      completed: this.#latestAssistantText(active.input.submissionId),
     })
     this.#releaseTurn(active)
   }
@@ -613,10 +679,14 @@ export class Session {
       recordConversationItems: async (items) => {
         requireLease()
         if (items.length === 0) return
-        this.#contextManager.record(items)
-        await this.#appendRollout(
-          items.map((item): RolloutItem => ({ type: "response_item", item })),
-        )
+        await this.#withContextMutation(async () => {
+          requireLease()
+          await this.#appendRollout(
+            items.map((item): RolloutItem => ({ type: "response_item", item })),
+          )
+          this.#contextManager.record(items)
+          this.#contextRevision += 1
+        })
       },
       recordItemCompletions: async (items) => {
         requireLease()
@@ -633,30 +703,49 @@ export class Session {
       },
       recordWorldStateUpdate: async (items, update) => {
         requireLease()
-        if (items.length > 0) this.#contextManager.record(items)
-        this.#contextManager.setWorldStateBaseline(update.snapshot)
-        await this.#appendRollout([
-          ...items.map(
-            (item): RolloutItem => ({ type: "response_item", item }),
-          ),
-          {
-            type: "world_state",
-            turnId: active.input.submissionId,
-            full: update.full,
-            state: update.state,
-          },
-        ])
+        await this.#withContextMutation(async () => {
+          requireLease()
+          if (items.length > 0) {
+            this.#contextManager.record(items)
+            this.#contextRevision += 1
+          }
+          this.#contextManager.setWorldStateBaseline(update.snapshot)
+          await this.#appendRollout([
+            ...items.map(
+              (item): RolloutItem => ({ type: "response_item", item }),
+            ),
+            {
+              type: "world_state",
+              turnId: active.input.submissionId,
+              full: update.full,
+              state: update.state,
+            },
+          ])
+        })
       },
       replaceConversationHistory: async (input) => {
         requireLease()
-        this.#contextManager.replace(input.replacement)
-        await this.#appendRollout([
-          {
-            type: "compacted",
-            turnId: active.input.submissionId,
-            ...input,
-          },
-        ])
+        await this.#withContextMutation(async () => {
+          requireLease()
+          const current = this.#contextManager.snapshot().history
+          const concurrentTail =
+            this.#contextRevision === input.baseContextRevision
+              ? []
+              : current.slice(input.baseHistoryLength)
+          this.#contextManager.replace([
+            ...input.replacement,
+            ...concurrentTail,
+          ])
+          this.#contextRevision += 1
+          await this.#appendRollout([
+            {
+              type: "compacted",
+              turnId: active.input.submissionId,
+              replacement: [...input.replacement, ...concurrentTail],
+              summary: input.summary,
+            },
+          ])
+        })
       },
     }
   }
@@ -743,6 +832,165 @@ export class Session {
       })
     }
   }
+
+  #setAgentStatus(status: AgentStatus): void {
+    this.#agentStatus = status
+    for (const listener of this.#agentStatusListeners) {
+      queueMicrotask(() => {
+        try {
+          listener(status)
+        } catch {
+          // A watch subscriber cannot break Session lifecycle transitions.
+        }
+      })
+    }
+  }
+
+  #latestAssistantText(turnId: string): string | null {
+    const history = this.#contextManager.snapshot().history
+    for (let index = history.length - 1; index >= 0; index -= 1) {
+      const message = history[index]?.item
+      if (history[index]?.turnId !== turnId || message?.role !== "assistant") {
+        continue
+      }
+      const text = message.content
+        .filter((block) => block.type === "text")
+        .map((block) => block.text)
+        .join("")
+      return text.length === 0 ? null : text
+    }
+    return null
+  }
+
+  async #recordAgentFailure(message: string): Promise<void> {
+    if (
+      typeof this.#agentStatus === "object" &&
+      "errored" in this.#agentStatus &&
+      this.#agentStatus.errored === message
+    ) {
+      return
+    }
+    const items: readonly RolloutItem[] = [
+      { type: "agent_status", status: "errored", error: message },
+    ]
+    try {
+      const throughSeq = await this.#store.appendItems(this.id, items)
+      await this.#store.flushThread(this.id)
+      this.#events.send({
+        type: "rollout.appended",
+        threadId: this.id,
+        throughSeq,
+        items,
+      })
+    } catch (error) {
+      this.#reportPersistenceError(error)
+      throw error
+    }
+    this.#setAgentStatus({ errored: message })
+  }
+
+  async #recordAgentMessage(messageId: string, text: string): Promise<void> {
+    await this.#withContextMutation(async () => {
+      if (this.#receivedAgentMessageIds.has(messageId)) return
+      let accepted = this.#acceptedAgentMessages.get(messageId)
+      try {
+        if (accepted === undefined) {
+          const envelope: ResponseItemEnvelope = {
+            id: messageId,
+            turnId: this.#activeTurn?.input.submissionId ?? createTurnId(),
+            createdAt: new Date().toISOString(),
+            item: { role: "user", content: [{ type: "text", text }] },
+          }
+          const items: readonly RolloutItem[] = [
+            { type: "agent_message", messageId, item: envelope },
+          ]
+          const append = this.#store.appendItems(this.id, items)
+          accepted = { envelope, items }
+          this.#acceptedAgentMessages.set(messageId, accepted)
+          this.#contextManager.record([envelope])
+          this.#contextRevision += 1
+          try {
+            accepted.throughSeq = await append
+          } catch {
+            // Returning a Promise transfers the batch to ThreadStore's retry
+            // buffer. The flush below is the durable acknowledgement barrier.
+          }
+        }
+        await this.#store.flushThread(this.id)
+      } catch (error) {
+        this.#reportPersistenceError(error)
+        throw error
+      }
+      this.#acceptedAgentMessages.delete(messageId)
+      this.#receivedAgentMessageIds.add(messageId)
+      if (accepted.throughSeq !== undefined) {
+        this.#events.send({
+          type: "rollout.appended",
+          threadId: this.id,
+          throughSeq: accepted.throughSeq,
+          items: accepted.items,
+        })
+      }
+    })
+  }
+
+  #withContextMutation<T>(run: () => Promise<T>): Promise<T> {
+    const result = this.#contextMutationTail.then(run)
+    this.#contextMutationTail = result.then(
+      () => undefined,
+      () => undefined,
+    )
+    return result
+  }
+}
+
+export function agentStatusFromStoredThread(stored: StoredThread): AgentStatus {
+  let status: AgentStatus = "pending_init"
+  for (const record of stored.rollout) {
+    const item = record.item
+    if (item.type === "agent_status") {
+      status = { errored: item.error }
+      continue
+    }
+    if (item.type === "turn_started") {
+      // A reconstructed Session has no live task for an unmatched start.
+      status = "interrupted"
+      continue
+    }
+    if (item.type !== "turn_completed") continue
+    if (item.outcome === "interrupted") {
+      status = "interrupted"
+    } else if (item.outcome === "failed") {
+      status = { errored: item.error?.message ?? "Turn execution failed." }
+    } else {
+      status = {
+        completed: latestAssistantTextForTurn(stored, item.turnId),
+      }
+    }
+  }
+  return status
+}
+
+function latestAssistantTextForTurn(
+  stored: StoredThread,
+  turnId: string,
+): string | null {
+  for (let index = stored.rollout.length - 1; index >= 0; index -= 1) {
+    const item = stored.rollout[index]?.item
+    if (
+      item?.type !== "response_item" ||
+      item.item.turnId !== turnId ||
+      item.item.item.role !== "assistant"
+    ) {
+      continue
+    }
+    const text = item.item.item.content
+      .filter((block) => block.type === "text")
+      .map((block) => block.text)
+      .join("")
+    return text.length === 0 ? null : text
+  }
+  return null
 }
 
 function turnInputFingerprint(input: TurnInput): string {
