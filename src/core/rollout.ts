@@ -1,4 +1,5 @@
 import type {
+  CompletedExecutionItem,
   EventMetadata,
   JsonObject,
   ModelMessage,
@@ -68,8 +69,14 @@ export type RolloutItem =
       readonly error?: { readonly message: string; readonly code?: string }
     }
   | {
+      readonly type: "item_completed"
+      readonly turnId: string
+      readonly item: CompletedExecutionItem
+    }
+  | {
       readonly type: "world_state"
       readonly turnId: string
+      readonly full: boolean
       readonly state: JsonObject
     }
   | {

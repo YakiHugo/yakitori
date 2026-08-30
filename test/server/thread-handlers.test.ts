@@ -8,6 +8,7 @@ import {
   YakitoriErrorCode,
 } from "../../src/kernel/errors.ts"
 import { createRolloutAssets } from "../../src/kernel/rollout-assets.ts"
+import { isKernelEvent } from "../../src/kernel/events.ts"
 import { createFauxProvider } from "../../src/runtime/faux-provider.ts"
 import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
 import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
@@ -28,7 +29,10 @@ describe("thread server handlers", () => {
     const provider = createFauxProvider([
       {
         snapshots: ["final answer"],
-        content: [{ type: "text", text: "final answer" }],
+        content: [
+          { type: "reasoning", text: "considering" },
+          { type: "text", text: "final answer" },
+        ],
       },
     ])
     const manager = new ThreadManager({
@@ -98,8 +102,33 @@ describe("thread server handlers", () => {
       deliveries.indexOf("assistant.delta"),
     )
     expect(deliveries.indexOf("assistant.delta")).toBeLessThan(
+      deliveries.indexOf("item.completed"),
+    )
+    expect(deliveries.indexOf("item.completed")).toBeLessThan(
       deliveries.indexOf("turn.completed"),
     )
+
+    const replay = await handlers.readSessionEvents({ sessionId })
+    if (!replay.ok) throw new Error(replay.body.error.message)
+    expect(
+      replay.body.events.find(
+        (event) =>
+          isKernelEvent(event) &&
+          event.type === "item.completed" &&
+          event.data.item.type === "agent_message",
+      ),
+    ).toMatchObject({
+      type: "item.completed",
+      data: {
+        item: {
+          type: "agent_message",
+          content: [{ type: "text", text: "final answer" }],
+        },
+      },
+    })
+    const restored = await handlers.readSession({ sessionId })
+    if (!restored.ok) throw new Error(restored.body.error.message)
+    expect(restored.body.session.counts).toMatchObject({ items: 2, tools: 0 })
   })
 
   it("promotes attachments into the physical rollout asset namespace", async () => {

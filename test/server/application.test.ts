@@ -10,7 +10,7 @@ import type { Server as HttpServer } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { MateLifecycle } from "../../src/mates/events.ts"
+import { MateEventType, MateLifecycle } from "../../src/mates/events.ts"
 import { createMateKernel } from "../../src/mates/mate-kernel.ts"
 import { createSqliteMateStore } from "../../src/mates/sqlite-mate-store.ts"
 import { createFauxProvider } from "../../src/runtime/faux-provider.ts"
@@ -602,10 +602,14 @@ describe("application composition", () => {
         name: "SoonInactive",
         role: "Builder",
       })
-      await mateKernel.setMateLifecycle({
-        mateId: created.mate.id,
-        lifecycle: MateLifecycle.Inactive,
-      })
+      await mateStore.appendEvent(
+        created.mate.id,
+        {
+          type: MateEventType.LifecycleChanged,
+          data: { lifecycle: MateLifecycle.Inactive },
+        },
+        { expectedSeq: created.mate.seq },
+      )
       mateStore.close()
 
       await expect(

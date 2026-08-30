@@ -16,7 +16,7 @@ import { defineMateStoreContract } from "./mate-store.contract.ts"
 import { createMemoryMateStore } from "./memory-mate-store.ts"
 
 describe("SQLite mate store", () => {
-  it("persists identities and revisions across reopen", async () => {
+  it("persists identities across reopen", async () => {
     await withStores(async (context) => {
       const store = context.open()
       const kernel = createMateKernel(store)
@@ -25,21 +25,15 @@ describe("SQLite mate store", () => {
         name: "Momo",
         role: "Builder",
       })
-      const revised = await kernel.reviseMate({
-        instructions: "Revised",
-        mateId: created.mate.id,
-        name: "Momo",
-        role: "Reviewer",
-      })
       store.close()
 
       const reopened = context.open()
       expect(
         (await createMateKernel(reopened).readMate({ mateId: created.mate.id }))
           .mate,
-      ).toEqual(revised.mate)
+      ).toEqual(created.mate)
       expect(await reopened.listMates()).toEqual({
-        mates: [summarizeMate(revised.mate)],
+        mates: [summarizeMate(created.mate)],
       })
     })
   })

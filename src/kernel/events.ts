@@ -512,9 +512,8 @@ export type ReasoningExecutionItem = Readonly<{
   providerMetadata?: EventMetadata
 }>
 
-// Compaction is housekeeping inside a Turn: the durable checkpoint is the
-// context.compacted event, and this item only gives clients a started →
-// completed lifecycle to render progress.
+// Compaction is housekeeping inside a Turn: its start is live-only, while the
+// durable checkpoint and completed item let clients recover the final state.
 export type ContextCompactionStartedItem = Readonly<{
   type: "context_compaction"
   itemId: string
@@ -596,9 +595,8 @@ export type ToolExecutionDescriptor =
 
 export type ToolExecutionItem = ToolExecutionItemBase & ToolExecutionDescriptor
 
-// Compaction is the only housekeeping item opened durably before completion.
-// Assistant and reasoning starts belong to live delivery; their durable final
-// items are self-contained ItemCompleted facts.
+// All item starts belong to live delivery. Their durable final items are
+// self-contained ItemCompleted facts.
 export type StreamedStartedItem = ContextCompactionStartedItem
 
 export type StartedExecutionItem = StreamedStartedItem | ToolExecutionItem

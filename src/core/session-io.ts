@@ -1,4 +1,5 @@
 import type {
+  StartedExecutionItem,
   EventMetadata,
   ModelSelection,
   TextContent,
@@ -118,6 +119,12 @@ export type SessionEvent =
       readonly itemId: string
       readonly kind: "assistant" | "reasoning"
       readonly text: string
+    }
+  | {
+      readonly type: "item.started"
+      readonly threadId: string
+      readonly turnId: string
+      readonly item: StartedExecutionItem
     }
   | {
       readonly type: "permission"

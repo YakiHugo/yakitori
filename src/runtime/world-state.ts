@@ -4,6 +4,10 @@ import type {
   JsonValue,
   WorldStateFragment,
 } from "../kernel/index.ts"
+import {
+  createJsonMergePatch,
+  jsonValuesEqual,
+} from "../kernel/json-equality.ts"
 import type { AgentRuntimeContext } from "./agent-control.ts"
 import {
   type EnvironmentSnapshot,
@@ -31,6 +35,7 @@ export type WorldState = Readonly<{
 export type WorldStateDiff = Readonly<{
   full: boolean
   state: JsonObject
+  snapshot: JsonObject
   fragments: readonly WorldStateFragment[]
 }>
 
@@ -121,18 +126,19 @@ export function diffWorldState(
     return {
       full: true,
       state: currentState,
+      snapshot: currentState,
       fragments: current.sections.flatMap((section) =>
         section.renderDiff({ type: "absent" }),
       ),
     }
   }
 
-  const patch = createMergePatch(previous, currentState)
+  const patch = createJsonMergePatch(previous, currentState)
   if (patch === undefined) return undefined
   const fragments = current.sections.flatMap((section) =>
     section.renderDiff(previousSection(previous[section.id])),
   )
-  return { full: false, state: patch, fragments }
+  return { full: false, state: patch, snapshot: currentState, fragments }
 }
 
 export function snapshotWorldState(current: WorldState): JsonObject {
@@ -351,29 +357,8 @@ function environmentSnapshot(
   return value as EnvironmentSnapshot
 }
 
-function createMergePatch(
-  previous: JsonObject,
-  current: JsonObject,
-): JsonObject | undefined {
-  const patch: Record<string, JsonValue> = {}
-  for (const key of Object.keys(previous)) {
-    if (!Object.hasOwn(current, key)) patch[key] = null
-  }
-  for (const [key, currentValue] of Object.entries(current)) {
-    const previousValue = previous[key]
-    if (equalJson(previousValue, currentValue)) continue
-    if (isJsonRecord(previousValue) && isJsonRecord(currentValue)) {
-      const child = createMergePatch(previousValue, currentValue)
-      if (child !== undefined) patch[key] = child
-    } else {
-      patch[key] = currentValue
-    }
-  }
-  return Object.keys(patch).length === 0 ? undefined : patch
-}
-
 function equalJson(left: JsonValue | undefined, right: JsonValue): boolean {
-  return left !== undefined && JSON.stringify(left) === JSON.stringify(right)
+  return left !== undefined && jsonValuesEqual(left, right)
 }
 
 function isJsonRecord(value: JsonValue | undefined): value is JsonObject {

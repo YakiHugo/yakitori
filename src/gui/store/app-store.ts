@@ -972,7 +972,7 @@ function applyDurableSessionDetail(
           : { usage: event.data.sessionUsage }),
       }
     }
-    case "item.started":
+    case "item.completed":
       return {
         ...next,
         counts: {
@@ -980,7 +980,11 @@ function applyDurableSessionDetail(
           items: counts.items + 1,
           tools:
             counts.tools +
-            (event.data.item.type === "context_compaction" ? 0 : 1),
+            (event.data.item.type === "agent_message" ||
+            event.data.item.type === "reasoning" ||
+            event.data.item.type === "context_compaction"
+              ? 0
+              : 1),
         },
       }
     default:

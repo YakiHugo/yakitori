@@ -6,12 +6,17 @@ import type {
 } from "../core/session.ts"
 import type { TurnInput } from "../core/session-io.ts"
 import {
+  type CompletedExecutionItem,
+  type ContextCompactionCompletedItem,
   type JsonObject,
+  type KernelError,
   MISSING_TOOL_RESULT_TEXT,
   type ModelMessage,
   type ModelSelection,
   type RolloutAssets,
+  type StartedExecutionItem,
   type TokenUsage,
+  type ToolExecutionItem,
 } from "../kernel/index.ts"
 import {
   buildCompactionRequest,
@@ -60,7 +65,6 @@ import {
 import {
   buildWorldStateFromSnapshot,
   diffWorldState,
-  snapshotWorldState,
   type WorldState,
 } from "./world-state.ts"
 
@@ -268,7 +272,11 @@ async function executeTurn(input: {
             },
           }),
         ),
-        snapshotWorldState(worldState),
+        {
+          full: worldDiff.full,
+          state: worldDiff.state,
+          snapshot: worldDiff.snapshot,
+        },
       )
     }
 
@@ -382,18 +390,20 @@ async function executeTurn(input: {
       throw new Error("Assistant response exceeded the configured byte limit.")
     }
     if (response.content.length > 0) {
-      await input.runtime.recordConversationItems([
-        envelope(
-          input.input.submissionId,
-          { role: "assistant", content: response.content },
-          {
-            provider: turn.execution.provider,
-            model: turn.execution.model,
-            callIndex: modelCalls,
-          },
-          responseItemId,
-        ),
-      ])
+      const responseItem = envelope(
+        input.input.submissionId,
+        { role: "assistant", content: response.content },
+        {
+          provider: turn.execution.provider,
+          model: turn.execution.model,
+          callIndex: modelCalls,
+        },
+        responseItemId,
+      )
+      await input.runtime.recordConversationItems([responseItem])
+      await input.runtime.recordItemCompletions(
+        completedResponseItems(responseItem),
+      )
     }
 
     if (response.stopReason === ModelStopReason.ToolUse) {
@@ -413,6 +423,7 @@ async function executeTurn(input: {
         signal: input.signal,
         toolPlan,
         permissionGate: input.permissionGate,
+        emitItemStarted: input.runtime.emitItemStarted,
         publishPermissionEvent: (event) =>
           input.runtime.emitPermissionEvent(event),
         permissionTimeoutMs: input.runtimeTiming.permissionWaitTimeoutMs,
@@ -421,16 +432,18 @@ async function executeTurn(input: {
         visibleFileObservations,
         onRuntimeError: input.options.onRuntimeError,
       })
-      for (const { call, result } of results) {
+      for (const { call, item, result } of results) {
         const fileObservation = toolFileObservation(call.name, result)
-        await input.runtime.recordConversationItems([
-          envelope(input.input.submissionId, {
-            role: "tool",
-            toolCallId: call.id,
-            content: result.content,
-            ...(!result.ok ? { isError: true } : {}),
-            ...(fileObservation === undefined ? {} : { fileObservation }),
-          }),
+        const resultItem = envelope(input.input.submissionId, {
+          role: "tool",
+          toolCallId: call.id,
+          content: result.content,
+          ...(!result.ok ? { isError: true } : {}),
+          ...(fileObservation === undefined ? {} : { fileObservation }),
+        })
+        await input.runtime.recordConversationItems([resultItem])
+        await input.runtime.recordItemCompletions([
+          completeToolItem(toolPlan, item, resultItem.id, result),
         ])
       }
       continue
@@ -603,6 +616,12 @@ async function compactLiveHistory(input: {
     return false
   }
 
+  const compactionItem: StartedExecutionItem = {
+    type: "context_compaction",
+    itemId: `compaction_${globalThis.crypto.randomUUID()}`,
+  }
+  input.runtime.emitItemStarted(compactionItem)
+
   try {
     const compact = async (request: ModelRequest) => {
       const response = await consumeModelStream({
@@ -653,9 +672,7 @@ async function compactLiveHistory(input: {
           messages: await resolveRolloutAssetImages(
             adaptImagesForModel(
               limitToolResults(
-                completeToolCallHistory(
-                  group.items.map((item) => item.item),
-                ),
+                completeToolCallHistory(group.items.map((item) => item.item)),
                 input.turn.execution.executionPolicy
                   .modelVisibleToolResultBytes,
                 input.turn.execution.executionPolicy
@@ -733,6 +750,13 @@ async function compactLiveHistory(input: {
       JSON.stringify(sourceGroups.flatMap((group) => group.items)),
     )
     if (utf8Bytes(JSON.stringify(generated)) >= sourceBytes) {
+      await input.runtime.recordItemCompletions([
+        completeCompactionItem(
+          compactionItem,
+          "failed",
+          new Error("Compaction did not reduce the retained history."),
+        ),
+      ])
       input.compactionState.consecutiveFailures += 1
       input.compactionState.failedHistoryLength = input.history.length
       return false
@@ -741,11 +765,22 @@ async function compactLiveHistory(input: {
       replacement,
       summary: result.summary,
     })
+    await input.runtime.recordWorldStateUpdate([], {
+      full: true,
+      state: fullWorldState.state,
+      snapshot: fullWorldState.snapshot,
+    })
+    await input.runtime.recordItemCompletions([
+      completeCompactionItem(compactionItem, "completed"),
+    ])
     input.compactionState.consecutiveFailures = 0
     input.compactionState.failedHistoryLength = undefined
     return true
   } catch (error) {
     if (input.signal.aborted || isAbortError(error)) throw abortError()
+    await input.runtime.recordItemCompletions([
+      completeCompactionItem(compactionItem, "failed", error),
+    ])
     input.compactionState.consecutiveFailures += 1
     input.compactionState.failedHistoryLength = input.history.length
     reportRuntimeError(input.onRuntimeError, error)
@@ -762,6 +797,7 @@ type ToolExecutionScope = {
   readonly signal: AbortSignal
   readonly toolPlan: ReturnType<ToolRegistry["finalize"]>
   readonly permissionGate: PermissionGate
+  readonly emitItemStarted: TurnRuntime["emitItemStarted"]
   readonly publishPermissionEvent: TurnRuntime["emitPermissionEvent"]
   readonly permissionTimeoutMs: number
   readonly approvalPolicy: ApprovalPolicy
@@ -772,6 +808,7 @@ type ToolExecutionScope = {
 
 type PreparedToolCall = {
   readonly call: ModelToolCallBlock
+  readonly item: ToolExecutionItem
   readonly permission?: ToolPermissionRequest
   readonly preparationError?: unknown
 }
@@ -781,11 +818,13 @@ async function executeToolCalls(
 ): Promise<
   readonly {
     readonly call: ModelToolCallBlock
+    readonly item: ToolExecutionItem
     readonly result: ToolExecutionResult
   }[]
 > {
   const prepared = await Promise.all(
     input.calls.map(async (call): Promise<PreparedToolCall> => {
+      const descriptor = input.toolPlan.describeExecution(call.name, call.input)
       try {
         const requirement = await input.toolPlan.approvalRequirement(
           call.name,
@@ -796,12 +835,35 @@ async function executeToolCalls(
           requirement,
           input.approvalPolicy,
         )
-        return { call, ...(permission === undefined ? {} : { permission }) }
+        return {
+          call,
+          item: {
+            itemId: `tool_${globalThis.crypto.randomUUID()}`,
+            toolCallId: call.id,
+            name: call.name,
+            input: call.input,
+            requiresPermission: permission !== undefined,
+            ...descriptor,
+          },
+          ...(permission === undefined ? {} : { permission }),
+        }
       } catch (error) {
-        return { call, preparationError: error }
+        return {
+          call,
+          item: {
+            itemId: `tool_${globalThis.crypto.randomUUID()}`,
+            toolCallId: call.id,
+            name: call.name,
+            input: call.input,
+            requiresPermission: false,
+            ...descriptor,
+          },
+          preparationError: error,
+        }
       }
     }),
   )
+  for (const item of prepared) input.emitItemStarted(item.item)
   const firstBarrier = prepared.findIndex((item) => {
     const effect = input.toolPlan.get(item.call.name)?.effect ?? "opaque"
     return (
@@ -814,12 +876,14 @@ async function executeToolCalls(
   const rest = firstBarrier < 0 ? [] : prepared.slice(firstBarrier)
   const results: Array<{
     readonly call: ModelToolCallBlock
+    readonly item: ToolExecutionItem
     readonly result: ToolExecutionResult
   }> = []
 
   const settled = await Promise.allSettled(
     prefix.map(async (item) => ({
       call: item.call,
+      item: item.item,
       result: await executePreparedTool(input, item),
     })),
   )
@@ -834,6 +898,7 @@ async function executeToolCalls(
     throwIfAborted(input.signal)
     const executed = {
       call: item.call,
+      item: item.item,
       result: await executePreparedTool(input, item),
     }
     results.push(executed)
@@ -845,6 +910,104 @@ async function executeToolCalls(
     }
   }
   return results
+}
+
+function completedResponseItems(
+  response: ResponseItemEnvelope,
+): readonly CompletedExecutionItem[] {
+  if (response.item.role !== "assistant") return []
+  const providerMetadata = response.providerMetadata
+  const reasoning = response.item.content
+    .filter((block) => block.type === "reasoning")
+    .map((block) => block.text)
+    .join("")
+  const content = response.item.content.filter((block) => block.type === "text")
+  return [
+    ...(reasoning.length === 0
+      ? []
+      : [
+          {
+            type: "reasoning" as const,
+            itemId: `${response.id}_reasoning`,
+            text: reasoning,
+            ...(providerMetadata === undefined ? {} : { providerMetadata }),
+          },
+        ]),
+    ...(content.every((block) => block.text.length === 0)
+      ? []
+      : [
+          {
+            type: "agent_message" as const,
+            itemId: response.id,
+            content,
+            ...(providerMetadata === undefined ? {} : { providerMetadata }),
+          },
+        ]),
+  ]
+}
+
+function completeToolItem(
+  toolPlan: ReturnType<ToolRegistry["finalize"]>,
+  started: ToolExecutionItem,
+  resultItemId: string,
+  result: ToolExecutionResult,
+): CompletedExecutionItem {
+  const completed = completeToolExecution(toolPlan, started, result)
+  return {
+    ...completed,
+    resultItemId,
+    content: { kind: "text", text: result.content },
+    ...(result.output === undefined ? {} : { output: result.output }),
+    ...(result.ok
+      ? {}
+      : {
+          error: {
+            message: result.message,
+            code: result.code,
+          },
+        }),
+  }
+}
+
+function completeToolExecution(
+  toolPlan: ReturnType<ToolRegistry["finalize"]>,
+  started: ToolExecutionItem,
+  result: ToolExecutionResult,
+): ToolExecutionItem {
+  if (result.output === undefined) return started
+  const descriptor = toolPlan.completeExecution(
+    started.name,
+    started,
+    result.output,
+    result.ok,
+  )
+  if (descriptor.type !== started.type) {
+    throw new Error(
+      `Tool ${started.name} changed execution type from ${started.type} to ${descriptor.type}.`,
+    )
+  }
+  // The runtime check preserves the discriminated-union member while the
+  // registry's provider-neutral return type intentionally erases that link.
+  return { ...started, ...descriptor } as ToolExecutionItem
+}
+
+function completeCompactionItem(
+  started: Extract<
+    StartedExecutionItem,
+    { readonly type: "context_compaction" }
+  >,
+  status: ContextCompactionCompletedItem["status"],
+  error?: unknown,
+): ContextCompactionCompletedItem {
+  const kernelError: KernelError | undefined =
+    error === undefined
+      ? undefined
+      : { message: error instanceof Error ? error.message : String(error) }
+  return {
+    ...started,
+    status,
+    ...(kernelError === undefined ? {} : { error: kernelError }),
+  }
 }
 
 async function executePreparedTool(
@@ -909,10 +1072,7 @@ async function executePreparedTool(
   }
 }
 
-function toolFileObservation(
-  name: string,
-  result: ToolExecutionResult,
-) {
+function toolFileObservation(name: string, result: ToolExecutionResult) {
   return result.ok ? grantFromToolOutput(name, result.output) : undefined
 }
 

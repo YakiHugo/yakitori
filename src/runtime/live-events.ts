@@ -1,4 +1,4 @@
-import type { TokenUsage } from "../kernel/events.ts"
+import type { StartedExecutionItem, TokenUsage } from "../kernel/events.ts"
 import type { RuntimePermissionEvent } from "./permission-gate.ts"
 
 export type LiveAssistantDelta = {
@@ -32,6 +32,7 @@ export type LiveDisplayItemStarted = {
         readonly type: "reasoning"
         readonly itemId: string
       }
+    | StartedExecutionItem
   readonly createdAt: string
 }
 

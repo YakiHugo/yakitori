@@ -233,6 +233,16 @@ export function createThreadServerHandlers(
             })
             continue
           }
+          if (event.type === "item.started") {
+            options.eventHub?.publishTransient({
+              type: "item.started",
+              sessionId: event.threadId,
+              turnId: event.turnId,
+              item: event.item,
+              createdAt: new Date().toISOString(),
+            })
+            continue
+          }
           if (event.type === "permission") {
             options.eventHub?.publishTransient(event.event)
             continue
@@ -773,21 +783,17 @@ function mapStoredThread(
       item.item.item.context === undefined,
   ).length
   const turns = rollout.filter((item) => item.type === "turn_started").length
-  const items = rollout.filter(
-    (item) =>
-      item.type === "response_item" &&
-      item.item.item.role !== "user" &&
-      !("context" in item.item.item),
-  ).length
-  const tools = rollout.reduce(
-    (count, item) =>
-      item.type !== "response_item" || item.item.item.role !== "assistant"
-        ? count
-        : count +
-          item.item.item.content.filter((block) => block.type === "tool_call")
-            .length,
-    0,
+  const completedItems = rollout.filter(
+    (item): item is Extract<RolloutItem, { readonly type: "item_completed" }> =>
+      item.type === "item_completed",
   )
+  const items = completedItems.length
+  const tools = completedItems.filter(
+    ({ item }) =>
+      item.type !== "agent_message" &&
+      item.type !== "reasoning" &&
+      item.type !== "context_compaction",
+  ).length
   const usage = rollout.reduce<TokenUsage | undefined>((total, item) => {
     if (item.type !== "turn_completed" || item.usage === undefined) return total
     return addUsage(total, item.usage)
@@ -948,6 +954,15 @@ function mapRolloutEvent(
           outcome,
           ...(item.usage === undefined ? {} : { usage: item.usage }),
         },
+      },
+    })
+  }
+  if (item.type === "item_completed") {
+    return createEventEnvelope({
+      ...base,
+      event: {
+        type: "item.completed",
+        data: { turnId: item.turnId, item: item.item },
       },
     })
   }

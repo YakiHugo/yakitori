@@ -188,7 +188,52 @@ describe("app store event stream", () => {
       turns: 1,
       items: 0,
     })
-    expect(useAppStore.getState().sessions[0]?.seq).toBe(3)
+    source?.emit(
+      "session.event",
+      createEventEnvelope({
+        sessionId: "session_1",
+        seq: 4,
+        event: {
+          type: EventType.ItemCompleted,
+          data: {
+            turnId: "turn_1",
+            item: {
+              type: "agent_message",
+              itemId: "item_1",
+              content: [{ type: "text", text: "Hi there" }],
+            },
+          },
+        },
+      }),
+    )
+    source?.emit(
+      "session.event",
+      createEventEnvelope({
+        sessionId: "session_1",
+        seq: 5,
+        event: {
+          type: EventType.ItemCompleted,
+          data: {
+            turnId: "turn_1",
+            item: {
+              type: "dynamic_tool_call",
+              itemId: "item_2",
+              toolCallId: "tool_1",
+              name: "tool",
+              input: {},
+              requiresPermission: false,
+              resultItemId: "result_1",
+              content: { kind: "text", text: "done" },
+            },
+          },
+        },
+      }),
+    )
+    expect(useAppStore.getState().selectedSession?.counts).toMatchObject({
+      items: 2,
+      tools: 1,
+    })
+    expect(useAppStore.getState().sessions[0]?.seq).toBe(5)
   })
 
   it("does not revive a permission resolved before its POST failure returns", async () => {

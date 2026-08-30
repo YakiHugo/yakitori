@@ -1127,19 +1127,20 @@ describe("execution view", () => {
     })
 
     state = reduceExecutionView(state, {
-      type: "durable",
-      event: createExecutionEnvelope({
+      type: "transient",
+      event: {
+        type: "item.started",
         sessionId,
-        seq: 4,
-        event: toolStarted({
+        turnId: "turn_1",
+        item: toolStartedItem({
           toolCallId: "tool_1",
           itemId: "item_1",
-          turnId: "turn_1",
           name: "run_command",
           input: { command: "pnpm test" },
           requiresPermission: true,
         }),
-      }),
+        createdAt: "2026-07-24T00:00:00.200Z",
+      },
     })
     expect(projectExecutionView(state).activeActivity).toEqual({
       kind: "running_tool",
@@ -1279,18 +1280,17 @@ describe("execution view", () => {
       }),
     })
     state = reduceExecutionView(state, {
-      type: "durable",
-      event: createExecutionEnvelope({
+      type: "transient",
+      event: {
+        type: "item.started",
         sessionId,
-        seq: 2,
-        event: {
-          type: EventType.ItemStarted,
-          data: {
-            turnId: "turn_1",
-            item: { type: "context_compaction", itemId: "item_compaction" },
-          },
+        turnId: "turn_1",
+        item: {
+          type: "context_compaction",
+          itemId: "item_compaction",
         },
-      }),
+        createdAt: "2026-07-24T00:00:00.000Z",
+      },
     })
     expect(projectExecutionView(state).activeActivity).toEqual({
       kind: "compacting",
@@ -1379,15 +1379,21 @@ function toolStarted(input: {
     type: EventType.ItemStarted,
     data: {
       turnId: input.turnId,
-      item: {
-        ...executionDescriptor(input.name, input.input),
-        itemId: input.itemId,
-        toolCallId: input.toolCallId,
-        name: input.name,
-        input: input.input,
-        requiresPermission: input.requiresPermission,
-      },
+      item: toolStartedItem(input),
     },
+  }
+}
+
+function toolStartedItem(
+  input: Omit<Parameters<typeof toolStarted>[0], "turnId">,
+) {
+  return {
+    ...executionDescriptor(input.name, input.input),
+    itemId: input.itemId,
+    toolCallId: input.toolCallId,
+    name: input.name,
+    input: input.input,
+    requiresPermission: input.requiresPermission,
   }
 }
 

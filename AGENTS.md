@@ -28,6 +28,9 @@ Reference priority:
 - Primary references: `.references/public/codex` and
   `.references/public/grok-build`. Use these first for coding-agent behavior,
   architecture, and implementation decisions.
+- Ignore legacy compatibility paths in reference projects unless Yakitori has
+  the same explicit historical compatibility obligation. Prefer the current
+  clean architecture and product behavior when no such obligation exists.
 - Secondary references: `.references/public/opencode-v2`,
   `.references/public/claude-code-sourcemap`, and public Claude Code
   documentation and observable product behavior. Use these only when the
@@ -44,6 +47,12 @@ direction by default. When they materially differ, present the alternatives,
 their concrete differences, and their consequences for Yakitori, then ask the
 user to choose. Do not select or synthesize an architecture independently
 unless the user has already established the relevant preference.
+
+Once a reference project has been selected for a boundary, align both the
+architecture and the concrete implementation design with that project's
+current implementation by default. Deviate only when an explicit constraint,
+such as multi-provider support or a Yakitori-specific product requirement,
+requires it; identify the difference and its reason before implementing it.
 
 Design an independent approach only when an explicit reason makes it better
 for Yakitori's scenario. Record that reason in module-local notes or code
@@ -124,6 +133,9 @@ Examples: `feat(core): add event log`, `docs: update agent instructions`,
   immutability is a meaningful exported or cross-module contract; prefer
   ordinary inferred mutable types for local construction and implementation
   details.
+- When an object type touched by a change makes every property `readonly`, use
+  the `Readonly<T>` utility type instead of repeating `readonly` on each
+  property.
 - Keep IDs as plain `string` values. Use clear field names, prefixed ID
   generators, and boundary validation instead of branded ID types.
 - Prefer functional array methods such as `map`, `filter`, and `flatMap` when

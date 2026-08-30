@@ -320,14 +320,37 @@ function applyTransient(
   event: LiveSessionEvent,
 ): ExecutionViewState {
   if (event.type === "item.started") {
-    return appendItemEntry(state, event.item.itemId, {
-      kind: event.item.type === "agent_message" ? "assistant" : "reasoning",
-      itemId: event.item.itemId,
-      turnId: event.turnId,
-      text: "",
-      status: "streaming",
-      at: event.createdAt,
-    })
+    const item = event.item
+    if (item.type === "context_compaction") {
+      return {
+        ...state,
+        openCompactionItems: {
+          ...state.openCompactionItems,
+          [item.itemId]: event.turnId,
+        },
+      }
+    }
+    if (item.type === "agent_message" || item.type === "reasoning") {
+      return appendItemEntry(state, item.itemId, {
+        kind: item.type === "agent_message" ? "assistant" : "reasoning",
+        itemId: item.itemId,
+        turnId: event.turnId,
+        text: "",
+        status: "streaming",
+        at: event.createdAt,
+      })
+    }
+    return appendItemEntry(
+      settleStreamingEntries(state, event.turnId, false),
+      item.itemId,
+      {
+        kind: "tool",
+        toolCallId: item.toolCallId,
+        turnId: event.turnId,
+        execution: item,
+        state: "requested",
+      },
+    )
   }
   if (event.type === "assistant.delta" || event.type === "reasoning.delta") {
     const index = state.itemEntryIndexes[event.itemId]
