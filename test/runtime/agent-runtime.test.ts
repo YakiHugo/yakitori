@@ -8,6 +8,7 @@ import { ThreadManager } from "../../src/core/thread-manager.ts"
 import type { AgentControl } from "../../src/runtime/agent-control.ts"
 import { createAgentRuntime } from "../../src/runtime/agent-runtime.ts"
 import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
+import { createSessionId } from "../../src/kernel/ids.ts"
 import { MemoryThreadStore } from "../core/memory-thread-store.ts"
 
 const TARGET = { provider: "faux", model: "scripted" }
@@ -281,7 +282,183 @@ describe("agent runtime", () => {
     await runtime.close()
     await manager.shutdown()
   })
+
+  it("reconciles interrupted and pre-graph children after process loss", async () => {
+    const graph = memoryGraphStore()
+    const store = new MemoryThreadStore()
+    let firstManager: ThreadManager
+    const firstRuntime = createAgentRuntime({
+      graphStore: graph.store,
+      getThreadManager: () => firstManager,
+    })
+    firstManager = new ThreadManager({
+      store,
+      createTurnProcessor: (stored) => {
+        firstRuntime.registerThread(stored)
+        return immediateProcessor()
+      },
+    })
+    const root = await firstManager.createThread()
+    await firstRuntime.close()
+    await firstManager.shutdown()
+
+    const interruptedId = await createStoredChild({
+      store,
+      rootThreadId: root.id,
+      taskName: "interrupted",
+      path: "/root/interrupted",
+      withStartedTurn: true,
+    })
+    await graph.store.upsertThreadSpawnEdge({
+      parentThreadId: root.id,
+      childThreadId: interruptedId,
+      status: "open",
+    })
+    const provisionalId = await createStoredChild({
+      store,
+      rootThreadId: root.id,
+      taskName: "provisional",
+      path: "/root/provisional",
+      withStartedTurn: false,
+    })
+
+    let secondManager: ThreadManager
+    let control: AgentControl | undefined
+    const secondRuntime = createAgentRuntime({
+      graphStore: graph.store,
+      getThreadManager: () => secondManager,
+    })
+    secondManager = new ThreadManager({
+      store,
+      createTurnProcessor(stored) {
+        const registered = secondRuntime.registerThread(stored)
+        if (stored.metadata.id === root.id) control = registered
+        return immediateProcessor()
+      },
+    })
+    await secondManager.resumeThread(root.id)
+    if (control === undefined) throw new Error("missing restored control")
+    await expect(control.bind(root.id, TARGET).list()).resolves.toMatchObject([
+      { agentId: interruptedId, status: "interrupted" },
+      {
+        agentId: provisionalId,
+        status: {
+          errored:
+            "Agent spawn was interrupted before its initial task started.",
+        },
+      },
+    ])
+    const updates: import("../../src/runtime/agent-control.ts").AgentUpdate[] =
+      []
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      updates.push(...(await control.bind(root.id, TARGET).wait(250)))
+      if (new Set(updates.map((update) => update.agentId)).size === 2) break
+    }
+    expect(updates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          agentId: interruptedId,
+          status: "interrupted",
+        }),
+        expect.objectContaining({
+          agentId: provisionalId,
+          status: {
+            errored:
+              "Agent spawn was interrupted before its initial task started.",
+          },
+        }),
+      ]),
+    )
+
+    await expect(
+      graph.store.listThreadSpawnDescendants(root.id, "open"),
+    ).resolves.toEqual([interruptedId, provisionalId].sort())
+    const storedRoot = await store.readThread(root.id)
+    const notifications =
+      storedRoot?.rollout.filter(
+        (record) => record.item.type === "agent_message",
+      ) ?? []
+    const notificationText = notifications
+      .flatMap((record) =>
+        record.item.type === "agent_message" &&
+        record.item.item.item.role === "user"
+          ? record.item.item.item.content.map((block) => block.text)
+          : [],
+      )
+      .join("\n")
+    expect(notificationText).toContain('status="interrupted"')
+    expect(notificationText).toContain(
+      "Agent spawn was interrupted before its initial task started.",
+    )
+    const interruptedNotification = notifications.find(
+      (record) =>
+        record.item.type === "agent_message" &&
+        record.item.item.item.role === "user" &&
+        record.item.item.item.content.some((block) =>
+          block.text.includes('/root/interrupted"'),
+        ),
+    )
+    expect(
+      interruptedNotification?.item.type === "agent_message"
+        ? interruptedNotification.item.messageId
+        : undefined,
+    ).toMatch(/_3$/)
+
+    await secondRuntime.close()
+    await secondManager.shutdown()
+  })
 })
+
+async function createStoredChild(input: {
+  readonly store: MemoryThreadStore
+  readonly rootThreadId: string
+  readonly taskName: string
+  readonly path: string
+  readonly withStartedTurn: boolean
+}): Promise<string> {
+  const childId = createSessionId()
+  const now = new Date().toISOString()
+  await input.store.createThread({
+    id: childId,
+    conversationId: input.rootThreadId,
+    parentThreadId: input.rootThreadId,
+    createdAt: now,
+    updatedAt: now,
+    metadata: {
+      agent: {
+        version: 1,
+        kind: "subagent",
+        rootThreadId: input.rootThreadId,
+        parentThreadId: input.rootThreadId,
+        taskName: input.taskName,
+        path: input.path,
+        agentType: "general",
+        depth: 1,
+      },
+    },
+  })
+  if (input.withStartedTurn) {
+    await input.store.appendItems(childId, [
+      {
+        type: "turn_started",
+        turnId: "turn_completed_before_loss",
+        inputItemId: "input_completed_before_loss",
+      },
+      {
+        type: "turn_completed",
+        turnId: "turn_completed_before_loss",
+        outcome: "completed",
+      },
+      {
+        type: "turn_started",
+        turnId: "turn_interrupted",
+        inputItemId: "input_interrupted",
+      },
+    ])
+  }
+  await input.store.shutdownThread(childId)
+  return childId
+}
 
 async function notificationCount(
   store: MemoryThreadStore,

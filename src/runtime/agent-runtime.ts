@@ -186,6 +186,7 @@ export function createAgentRuntime(input: {
       adapter,
       restoreAgents: async () => {
         const manager = input.getThreadManager()
+        await reconcileUnlinkedThreads(rootThreadId)
         const descendantIds = await input.graphStore.listThreadSpawnDescendants(
           rootThreadId,
           ThreadSpawnEdgeStatus.Open,
@@ -194,13 +195,26 @@ export function createAgentRuntime(input: {
         const reconciled = new Set<string>()
         for (const threadId of descendantIds) {
           if (reconciled.has(threadId)) continue
-          const stored = await manager.readStoredThread(threadId)
+          let stored = await manager.readStoredThread(threadId)
           if (stored === undefined) {
             const removed = await discardStoredSubtree(threadId)
             removed.forEach((removedThreadId) => {
               reconciled.add(removedThreadId)
             })
             continue
+          }
+          if (agentStatusFromStoredThread(stored) === "pending_init") {
+            const thread = await requireThread(manager, threadId)
+            await thread.failAgent(
+              "Agent spawn was interrupted before its initial task started.",
+            )
+            stored =
+              (await manager.readStoredThread(threadId)) ??
+              (() => {
+                throw new Error(
+                  `Recovered Agent Thread ${threadId} disappeared.`,
+                )
+              })()
           }
           const registration = readAgentRegistration(stored.metadata)
           if (
@@ -304,6 +318,50 @@ export function createAgentRuntime(input: {
     return removed
   }
 
+  async function reconcileUnlinkedThreads(rootThreadId: string): Promise<void> {
+    const manager = input.getThreadManager()
+    const known = new Set(
+      await input.graphStore.listThreadSpawnDescendants(rootThreadId),
+    )
+    const candidates: AgentRegistration[] = []
+    let cursor: string | undefined
+    do {
+      const page = await manager.listThreads({
+        ...(cursor === undefined ? {} : { cursor }),
+        limit: 100,
+      })
+      for (const metadata of page.threads) {
+        const registration = readAgentRegistration(metadata)
+        if (registration?.rootSessionId === rootThreadId) {
+          candidates.push(registration)
+        }
+      }
+      cursor = page.nextCursor
+    } while (cursor !== undefined)
+
+    candidates.sort(
+      (left, right) =>
+        left.depth - right.depth || left.agentId.localeCompare(right.agentId),
+    )
+    for (const candidate of candidates) {
+      if (known.has(candidate.agentId)) continue
+      if (
+        candidate.parentSessionId !== rootThreadId &&
+        !known.has(candidate.parentSessionId)
+      ) {
+        await manager.discardThread(candidate.agentId)
+        threadRoots.delete(candidate.agentId)
+        continue
+      }
+      await input.graphStore.upsertThreadSpawnEdge({
+        parentThreadId: candidate.parentSessionId,
+        childThreadId: candidate.agentId,
+        status: ThreadSpawnEdgeStatus.Open,
+      })
+      known.add(candidate.agentId)
+    }
+  }
+
   function finalizeDeletion(threadId: string): void {
     const pending = pendingDeletions.get(threadId)
     if (pending === undefined) return
@@ -362,16 +420,27 @@ function restoredCompletion(
   const status = agentStatusFromStoredThread(stored)
   const outcome = outcomeFromTerminalStatus(status)
   if (outcome === undefined) return undefined
-  const terminal = [...stored.rollout]
+  const latestLifecycle = [...stored.rollout]
     .reverse()
     .find(
       (record) =>
+        record.item.type === "turn_started" ||
         record.item.type === "turn_completed" ||
         record.item.type === "agent_status",
     )
-  if (terminal === undefined) return undefined
+  const marker =
+    status === "interrupted" && latestLifecycle?.item.type === "turn_started"
+      ? latestLifecycle
+      : [...stored.rollout]
+          .reverse()
+          .find(
+            (record) =>
+              record.item.type === "turn_completed" ||
+              record.item.type === "agent_status",
+          )
+  if (marker === undefined) return undefined
   return {
-    messageId: terminalDeliveryId(stored),
+    messageId: `agent_completion_${stored.metadata.id}_${marker.rolloutId}_${String(marker.seq)}`,
     outcome,
   }
 }
