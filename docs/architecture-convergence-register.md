@@ -1,445 +1,221 @@
 # Architecture Convergence Register
 
-Status: living register of confirmed architecture convergence work. This is
-not an implementation specification: code, public types, and focused tests
-remain authoritative. This register keeps only unfinished convergence work;
-completed behavior belongs in code, focused tests, and module-local comments.
+This register contains only unfinished architecture work. Code, public types,
+and focused tests are authoritative for behavior that has already landed.
 
-Yakitori has no production users or durable compatibility obligation yet.
-Schema-breaking changes and deletion of development-only compatibility paths
-are allowed when they produce a clearer target architecture.
+Yakitori has no production users or compatibility obligation yet. Prefer a
+clean schema break or deletion over compatibility code unless a real
+requirement establishes otherwise.
 
-Reference baseline:
+Primary references are `.references/public/codex` and
+`.references/public/grok-build`. If they make materially different choices,
+record the alternatives and ask for a product decision instead of silently
+synthesizing a third architecture.
 
-- Primary: `.references/public/codex` and `.references/public/grok-build`.
-- Secondary references are consulted only when the primary references leave a
-  concrete gap.
+## Delivery order
 
-## How to use this register
+Stages are ordered by severity: user-visible correctness defects first, then
+recovery correctness, then failure observability, then contained contract
+fixes, then hygiene. Same-module problems are grouped into one stage so the
+owning boundary moves once.
 
-- Work one ownership module at a time instead of fixing individual symptoms.
-- Before deleting a surface, re-check its production, dynamic, persisted, and
-  test consumers.
-- Prefer one source of truth over synchronization helpers.
-- Preserve validation, authorization, recovery, and storage ownership
-  boundaries even when their implementations look repetitive.
-- After a module lands, remove resolved prose that merely duplicates the new
-  code and tests.
+| Order | Outcome | Owning areas | Severity driver |
+| --- | --- | --- | --- |
+| 1 | Agent lifecycle reads from durable session state | runtime agent-control, mates | Restart orphans running subagents |
+| 2 | Application and background failures observable | server application/start/desktop-entry | Silent failures, but no known incident |
+| 3 | Production exports narrowed, test support separated | runtime and server public surfaces | Hygiene; churns exports, so it runs last |
 
-## Module map and order
+The next piece of work is Stage 2. Stages 2–4 should follow in order; later
+stages do not block earlier ones.
 
-| ID | Module | Priority | Depends on | Status |
-| --- | --- | --- | --- | --- |
-| M1 | Durable event and execution-item protocol | P0 | None | Done |
-| M2 | Context manager, model capacity, and compaction | P0 | M1 lifecycle decisions | In progress |
-| M3 | Tool catalog, execution policy, and permissions | P0 | M1 item decisions | In progress |
-| M4 | Persistence, recovery, and keyed concurrency | P1 | M1 lifecycle states | Planned |
-| M5 | Provider transport, retry, and usage accounting | P1 | M2 capacity contract | In progress |
-| M6 | Server lifecycle, errors, and event delivery | P1 | M1, M4 | In progress |
-| M7 | GUI projections and transient state | P1 | M1 | In progress |
-| M8 | Instructions, environment context, and shell discovery | P2 | M2 StepContext boundary | Done |
-| M9 | Agent collaboration and Mate lifecycle | P2 | M1, M3 | In progress |
-| M10 | Public module surface and test support | P3, cross-cutting | Owning modules stabilized | Planned |
+## Stage 2 — Agent lifecycle durable authority
 
-Current execution order:
+Absorbs the former Stage 2B.
 
-1. Close M2 context capacity and M3 tool/permission ownership.
-2. Close M4 persistence/recovery and M6 process/error lifecycles.
-3. Adapt provider and GUI boundaries in M5/M7, then finish M9 lifecycle cleanup.
-4. Perform M10 export and dead-surface cleanup after callers have moved.
+### Current behavior
 
-## M2 — Context manager, model capacity, and compaction
+`AgentControl` tracks agents, statuses, and the path tree in process memory
+(agent-control.ts:135), but every child agent is a real kernel session whose
+state is durable: the runner's `readAgentOutcome` re-derives outcomes from
+the child projection (session-runner.ts:1792), and recovery reconciles
+kernel sessions without consulting AgentControl (recovery.ts:16). On process
+restart with a running child, recovery may interrupt and re-wake the child
+session while the parent's AgentControl map is empty — `wait`/`interrupt`/
+`followup` cannot see or stop the still-running child, and its completion
+enqueues no `subagent_notification`.
 
-Status: in progress. Complete-request estimation and durable provider-usage
-calibration have landed. Capacity-policy and capacity-surface cleanup remain.
-
-### Remaining problems
-
-- History selection intentionally uses cheap message/byte caps before the
-  complete request exists, while final admission uses token and image
-  estimates. These are valid separate policies, but their diagnostics and
-  fallback behavior are not named clearly enough.
-- A model without catalog token capacity still falls back to the fixed 256 KiB
-  history-selection budget and cannot perform a real context-window admission
-  check.
-- `ResolvedModelCapacity` exposes default, configured, maximum, and percentage
-  fields even though execution consumes only the effective token window.
+An Agent is also assigned `pending_init` and synchronously moved to
+`running` by the same start path, so the intermediate state is
+unobservable. Mate revision and lifecycle mutation APIs have test callers
+but no production writer; they preserve a future persistent-colleague design
+outside the current single-Mate product goal.
 
 ### Target boundary
 
-Keep the two capacity stages explicit:
-
-```text
-history selection: message blocks + serialized bytes
-final admission:   complete request tokens + output reserve
-```
-
-`ContextManager` owns history normalization, selection, tool-result
-truncation/pruning, compaction, and fork/rollback baselines. Complete-request
-assembly owns final admission; it must run after every system, history, agent,
-tool-schema, and image addition.
-
-Capacity must be computed over the complete request:
-
-```text
-base/system instructions
-+ model-visible history
-+ world-state and inter-agent additions
-+ serialized tool definitions/schemas
-+ modality estimates
-+ reserved output capacity
-= estimated request capacity
-```
-
-The final admission stage uses two authorities:
-
-- Before sending: one transparent `4 UTF-8 bytes/token` text heuristic without
-  a hidden safety multiplier, plus modality/detail-aware image estimates. It
-  must count the exact serialized structures that the provider adapter will
-  receive.
-- After sending: provider-reported input/output/cache usage is authoritative
-  evidence. Persist and rehydrate the last provable request-prefix baseline so
-  restart/resume does not silently return to estimates.
-
-Image accounting must follow the Codex direction: a conservative fixed cost
-for ordinary images, dimension/patch-aware estimation for original detail when
-dimensions are known, and provider usage after completion as the authority.
-
-Do not add a durable `ContextPrepared` event now. Codex exposes usage/context
-window and compaction facts while keeping detailed estimates in trace/metrics.
-Yakitori should likewise keep pruning/estimation diagnostics outside assistant
-events and outside the durable conversation protocol until a concrete product
-consumer exists.
-
-### Lifecycle invariants to preserve
-
-These are required boundaries, not duplicate state:
-
-- `TurnContext` is fixed for one user Turn.
-- `StepContext` is fixed for one model request; later Steps may observe new
-  world state and a newly finalized tool router.
-- `reference_context_item` is the Turn-configuration baseline needed by
-  resume/fork and contextual reinjection.
-- `world_state_baseline` is the dynamic state the model has already seen.
-- A full fork preserves the provable history prefix and its baselines.
-- A truncated fork clears any baseline that can no longer be proved by the
-  retained prefix.
-- Compaction atomically replaces covered history and establishes the new
-  baselines.
-
-### Remaining work
-
-- Give uncataloged models an explicit token-capacity policy instead of silently
-  substituting the byte-selection fallback.
-- Narrow resolved Turn capacity to the effective token window consumed by
-  execution; keep catalog maxima at catalog/validation boundaries.
-- Label selection-byte diagnostics separately from final request-token
-  diagnostics so neither is presented as the other.
+- Agent status is derived from child session projections; AgentControl holds
+  at most ephemeral handles for the running process, and restart
+  reattachment or explicit orphan reconciliation is part of recovery.
+- Remove `pending_init` unless initialization becomes an asynchronous,
+  externally observable phase with a real failure/retry contract.
+- Remove unused Mate revision and lifecycle mutation surfaces, their
+  exports, and tests that only exercise those unreachable paths.
+- Keep the current bounded subagent execution lifecycle; do not pull future
+  Room or persistent-memory design into this contraction.
 
 ### Done when
 
-- No provider request can append system, tool-schema, agent, or image content
-  after final admission.
-- Compaction tests cover text, JSON schema, multilingual/code content, images,
-  output reserve, provider-usage correction, and restart/resume calibration.
-- Fork, rollback, resume, and compaction tests prove baseline invalidation and
-  replacement semantics.
+- A restarted parent cannot lose track of a child session that is still
+  executing.
+- Every lifecycle state corresponds to a production-observable interval and
+  a valid transition owner.
+- Public mutation APIs have a real product caller rather than only fixtures.
 
-Reference anchors:
+## Stage 3 — Application lifecycle and background failures
 
-- `.references/public/codex/codex-rs/core/src/context_manager/history.rs`
-- `.references/public/codex/codex-rs/core/src/session/step_context.rs`
-- `.references/public/codex/codex-rs/protocol/src/openai_models.rs`
-- `.references/public/grok-build/crates/codegen/xai-token-estimation/src/lib.rs`
-- `.references/public/grok-build/crates/codegen/xai-chat-state/src/image_budget.rs`
+Sequenced after Stage 1 because its error-reporting hooks land on the event
+hubs. One Session delivery hub orders durable item/Turn batches with transient
+usage, permission, and streamed-display events. Persistence and domain types
+remain separate: all item starts, streamed deltas, and progress are live-only;
+complete item snapshots are durable.
 
-## M3 — Tool catalog, execution policy, and permissions
+### Current behavior
 
-Status: in progress. The finalized per-Step router, shared file-path resolution,
-explicit tool approval requirements, and Turn-scoped permission gate have
-landed; limit ownership remains open. The product default remains YOLO
-(`never`); approval requirements change no default execution behavior.
+`start.ts` and `desktop-entry.ts` separately assemble the application,
+listen, handle signals, and shut resources down. Their process semantics can
+drift. The production HTTP constructor also accepts handlers, a kernel, or
+an event store; the latter two exist for test convenience and widen the
+production contract.
 
-### Confirmed problems
-
-- `RuntimeLimits` mixes Session semantics, per-call tool requests, and process
-  safety caps. Eight tool-side keys are persisted and validated but tools read
-  module constants instead.
+The Session delivery hub accepts an optional listener-error hook, but production
+does not install one. A failed asynchronous listener can therefore be invisible
+even though the durable write succeeded. Runner and recovery code also repeat
+structural checks for selected kernel
+`InvalidState` failures; the concrete instance is the fork interrupt/retry
+loop matching `error.details?.operation` structurally
+(`forkAfterSettlingActiveTurn`, handlers.ts:117-144).
 
 ### Target boundary
 
-Split limits into:
+- One application owner assembles dependencies, listens, handles signals,
+  drains, and closes resources. CLI and desktop entry points derive options
+  and call it.
+- The production HTTP constructor accepts one handler/service boundary.
+  Tests get kernel/store convenience from test support.
+- Extend the existing kernel error guard with optional code matching instead
+  of repeating structural predicates.
+- Require an operational error reporter wherever background work or listener
+  delivery can fail. Subscriber failure must not roll back durable writes,
+  but it must identify the component, Session, event range, and cause.
 
-- `SessionExecutionPolicy`: model/tool calls per Turn, context and
-  model-visible result budgets, compaction and response budgets;
-- per-call tool input: requested timeout/output budget where the tool contract
-  genuinely supports it;
-- `RuntimeSafetyCaps`: file-write size, raw/persisted command output, maximum
-  timeout, kill grace, and streaming-frame caps. These are process constants
-  and are not persisted as Session configuration.
-
-The effective value is bounded by the most restrictive applicable layer:
-
-```text
-effective = min(call request, Session policy, hard safety cap)
-```
-
-Permission is active-Turn runtime state, not a recoverable Session fact. The
-gate owns pending waiters, timeout, abort, and allow/deny decisions; the GUI
-receives transient lifecycle notifications and can restore an active request
-from the server's runtime snapshot. Durable history records only the tool call
-and its eventual result, including denial or timeout. Interrupting a Turn drops
-its waiter, so startup recovery has no Permission state to reconcile.
-
-### Remaining work
-
-- Remove tool-side keys from persisted `runtimeLimits` through a clean schema
-  break.
+This does not require one global error hierarchy. Kernel, provider, tool,
+HTTP, and storage modules retain their own contracts; each owning boundary
+translates expected failures and reports unexpected ones.
 
 ### Done when
 
-- Changing Session policy changes only documented Session behavior; changing a
-  safety cap cannot be serialized as a Session preference.
-- Permission timeout and abort use one runtime timing owner, and a late
-  decision cannot revive a waiter after its Turn ends.
-
-Reference anchors:
-
-- `.references/public/codex/codex-rs/core/src/tools/router.rs`
-- `.references/public/codex/codex-rs/core/src/tools/context.rs`
-- `.references/public/codex/codex-rs/core/src/tools/orchestrator.rs`
-- `.references/public/codex/codex-rs/core/src/tools/sandboxing.rs`
-- `.references/public/codex/codex-rs/core/src/tools/approvals.rs`
-- `.references/public/codex/codex-rs/core/src/state/turn.rs`
-- `.references/public/codex/codex-rs/core/src/exec.rs`
-- `.references/public/grok-build/crates/codegen/xai-grok-workspace/src/permission/types.rs`
-
-## M4 — Persistence, recovery, and summary boundaries
-
-### Confirmed problems
-
-- Session summary fields are explicitly expanded at projection, cache, and API
-  boundaries. Some repetition is necessary, but exact same-domain conversion
-  should have one owner.
-
-### Target boundary
-
-Recovery is an effectful startup reconciliation, not a report generator:
-
-```text
-started Turn without terminal event -> append interrupted terminal event
-pending Input                      -> wake owning Session runner
-```
-
-It may emit one structured operational log summary, but should not return data
-that evaporates at the caller.
-
-Keep boundary mappings explicit:
-
-- Projection to domain `SessionSummary` may be shared.
-- Cache validation remains explicit because disk is a trust boundary.
-- API mapping remains explicit because field names and exposure are a wire
-  contract.
-- Do not create a universal field list that automatically leaks new internal
-  fields into cache and API representations.
-
-### Deliberately retained
-
-- EventStore `structuredClone` remains an ownership boundary.
-- The validated `session.json` summary cache remains a legitimate derived
-  cache.
-- `sessionListOrder` and event-store `order: "created"` remain because cursor
-  and recovery consumers are real.
-
-### Done when
-
-- Concurrent same-key writes are FIFO and different keys remain concurrent.
-- Restart leaves no active Turn; pending Permission cannot survive because it
-  is not representable outside the active runtime.
-- Cache corruption falls back to journal reconstruction.
-- Internal-only summary fields cannot enter the public API accidentally.
-
-## M5 — Provider transport, retry, and usage accounting
-
-Status: in progress. Provider usage now durably anchors later provable request
-prefixes across restart and fork; shared transport policy remains.
-
-### Confirmed problems
-
-- Anthropic and OpenAI adapters duplicate retryable status sets, status detail
-  extraction, and terminal error conversion.
-- Retry policy is therefore maintained by manual provider synchronization.
-- The Codex provider is the only production provider without a focused
-  contract test.
-
-### Target boundary
-
-Provider adapters translate request/stream protocols only. Shared transport
-policy owns retryable HTTP/transport classification, retry delay/backoff,
-attempt limits, terminal error shape, and retry observability. Streaming retry
-state may remain separate from unary transport retry when their lifecycle and
-telemetry differ, as in Codex.
-
-Normalize exact provider usage once and pass it to both durable Turn accounting
-and M2's capacity authority.
-
-### Done when
-
-- Providers cannot disagree on the same HTTP status solely because of copied
-  helpers.
-- Retryable, terminal, disconnect, and exhausted-retry behavior have shared
-  contract tests plus provider translation tests.
-- Codex/OpenAI/Anthropic stop reasons and usage normalize to the same runtime
-  contract.
-
-Reference anchors:
-
-- `.references/public/codex/codex-rs/codex-api/src/provider.rs`
-- `.references/public/codex/codex-rs/core/src/responses_retry.rs`
-
-## M6 — Server lifecycle, errors, and event delivery
-
-Status: in progress.
-
-### Confirmed problems
-
-- `start.ts` and `desktop-entry.ts` duplicate server startup, signal, and
-  shutdown behavior.
-- The public HTTP constructor accepts handlers, kernel, or event store even
-  though production uses handlers; test convenience widens the production
-  contract.
-- Error classification is repeated through local `isInvalidState`,
-  `isNotFound`, and `isAbortError` implementations.
-- Durable and transient EventHubs invoke arbitrary listener callbacks and send
-  errors to an optional `onListenerError` hook that production never sets.
-  Subscriber failure is therefore silent.
-
-### Target boundary
-
-One `serveYakitori` owner handles startup, listening, signal registration,
-graceful drain, forced shutdown, and resource closure. CLI and desktop entry
-points only parse/derive options and call it.
-
-The production HTTP server accepts one explicit handler/service boundary.
-Tests obtain kernel/store convenience through test-support constructors rather
-than a three-way production union.
-
-Establish a shared error taxonomy and boundary policy:
-
-- domain/kernel: invalid argument, invalid state, not found, corrupt log;
-- provider: authentication, rate limit, retryable transport, protocol;
-- tool: validation, permission denial, execution;
-- infrastructure: filesystem, storage, and background-task failure.
-
-Extend the kernel guard to support optional code matching, preserve causes,
-map expected errors once at HTTP/runner boundaries, and send unexpected or
-background failures to one mandatory reporter.
-
-Event delivery must not roll back durable writes when a subscriber fails, but
-failure must be observable. Give subscribers isolated asynchronous delivery;
-on failure log component, Session, event range, and error, then remove the
-broken subscriber without affecting others.
-
-### Done when
-
-- CLI and desktop cannot drift in shutdown semantics.
-- No production API accepts dependencies solely for test convenience.
+- CLI and desktop cannot drift in startup or shutdown semantics.
+- Production APIs do not accept dependencies solely for tests.
 - No fire-and-forget Promise or event listener can fail silently.
-- HTTP, runner, provider, tool, and storage errors preserve one stable code and
-  cause chain through their owning boundary.
+- Expected errors preserve their stable code and unexpected errors preserve
+  their cause through the reporting boundary.
 
-Reference anchors:
+Reference anchor:
 
 - `.references/public/codex/codex-rs/app-server/src/lib.rs`
 
-## M7 — GUI projections and transient state
+## Stage 4 — Production surface cleanup
 
-Status: in progress. Model-selection restoration and transient-state cleanup
-remain.
+Run this only after the preceding owners stabilize, so cleanup does not
+churn exports that are about to move again.
 
-### Confirmed problems
+### Current behavior
 
-- `formatDuration` and `truncateLine` have duplicate implementations.
-- `modelSelectionReady` and `restoringModelSelections` represent one restore
-  lifecycle through a global boolean plus a per-Session Set; the Set's extra
-  granularity is not currently observable.
-- Turn usage/metrics are durable and expected to gain product consumers, while
-  `streamStatus` is only connection state.
+Some runtime and server barrels expose test-oriented constructors and
+fixtures. `runtime/faux-provider.ts` is a test harness exported from the
+runtime surface. It is distinct from the application's production faux
+scenario stream, which currently supports the development default and must
+not be removed by name association alone.
 
-### Target boundary
+Several modules contain similar `isRecord`-style validation helpers. Most
+sit at different trust boundaries and do not justify a universal shared
+guard.
 
-Represent model-selection restoration with one explicit status owned by the
-current selection (`loading | ready | failed`) unless real concurrent
-per-Session restoration creates a second consumer.
+### Work
 
-Keep usage and metrics in durable Turn facts and derive GUI selectors from
-them. Keep streaming connection status transient and retain it only when UI or
-reconnection logic consumes it.
-
-### Done when
-
-- Session switching cannot expose a stale model selection.
-- Usage/metrics replay identically after restart.
-
-## M9 — Agent collaboration and Mate lifecycle
-
-Status: in progress. Speculative Mate and Agent lifecycle surfaces remain.
-
-### Confirmed problems
-
-- Agent `pending_init` is assigned and then synchronously overwritten by
-  `running` before any await, event, or caller observation.
-- `reviseMate` and `setMateLifecycle` have no production write consumer while
-  Mate/Room collaboration is explicitly a later product stage.
-
-### Target boundary
-
-Delete `pending_init` while initialization is synchronous. Reintroduce it only
-when a child Session is registered and externally visible before asynchronous
-initialization completes, which is why the state is real in Codex.
-
-Keep the smallest Mate surface required by the current single-Mate coding
-agent. Preserve production-consumed create/read behavior, but remove speculative
-revision/lifecycle writes and their dedicated events until Rooms supply real
-owners and consumers.
+- Move test-only providers, constructors, and fixtures to explicit
+  test-support entry points.
+- Remove unused barrel exports after checking production, dynamic-import,
+  persisted, and test consumers.
+- Keep validation local when schemas or trust boundaries differ; share a
+  guard only when more than one real caller enforces the same durable
+  contract.
+- Delete dead code and vacuous tests discovered by the export audit.
 
 ### Done when
 
-- Every exposed Agent state is observable and has a tested transition.
-- Current coding-agent behavior has no dependency on speculative Room/Mate
-  lifecycle APIs.
+- Production entry points expose only supported runtime contracts.
+- Test support is importable without widening production APIs.
+- No development feature is deleted merely because it resembles a test
+  fixture.
 
-## M10 — Public module surface and test support
+## Resolved work that must stay resolved
 
-### Confirmed problems
+The following are constraints, not future modules:
 
-- `faux-provider.ts` is exported from the production runtime despite having no
-  production consumer and overlaps naming with another test scenario stream.
-- Barrel files re-export internal tool helpers and duplicate exports across
-  registry/index boundaries.
-- Multiple dead exports expose internal environment, world-state, lock, and
-  prompt helpers.
-- Generic `isRecord` checks are repeated throughout typed internal code rather
-  than concentrated at input boundaries.
+- Assistant and reasoning display items start live, then receive transient
+  suffix deltas keyed by item id; providers emit cumulative snapshots
+  internally and the runtime converts them to bounded publications. A final,
+  non-empty `item.completed` is a self-contained durable host-history fact;
+  `response_item` remains authoritative for model history. Tool and compaction
+  starts and progress are likewise live-only; their final `item.completed`
+  snapshots are durable. There is no durable `item.started`, no fabricated
+  empty completion, and no separate UI update log. This follows Codex's current
+  paginated rollout behavior rather than its legacy compatibility paths or
+  grok-build's `updates.jsonl` design. On a live interrupted Turn, the GUI
+  retains a client-only non-empty prefix beside the terminal marker; reconnecting or
+  restarting cannot recover that prefix. An intentional Interrupt records a
+  hidden user-role `<turn_aborted>` context marker and the interrupted terminal
+  in one durable append batch; the partial display text is not model-visible.
+  Runtime-loss recovery uses the distinct interruption notice. The runtime
+  flushes pending transient publications before terminal Turn disposition.
+  Durable and transient publications share one per-Session delivery owner, so
+  subscribers observe their original publish order without assigning transient
+  sequence numbers. SSE replay-complete marks only the snapshot's durable
+  watermark; post-snapshot deliveries drain afterward in arrival order. During
+  that drain, display events are reconciled against the snapshot and later
+  durable Turn facts, so a terminal snapshot cannot be followed by its stale
+  buffered delta.
+  Active activity is derived from all open entries rather than transferred by
+  the latest event, so parallel tools and permissions remain accurate.
+- Effective session model, session usage totals (including compaction), and
+  terminal item disposition are derived by the kernel projection. The DTO
+  exposes them; the runner reads the same model selection the DTO shows.
+  Tool recovery uses durable model call/result items and terminal completion
+  snapshots, never a persisted display-start event.
+- Still-pending permission requests replay as `permission.requested` after
+  `session.replay-complete` on every SSE (re)connect; resolving stays a POST
+  whose confirmation arrives through the stream.
+- Durable Turn terminals, completed-item snapshots, approval resolutions, and
+  recovery facts are closed. Permission waiting is transient active-Turn
+  state; recovery cannot grant or deny a permission after the Turn.
+- Session execution policy, per-call tool requests, and process safety caps
+  have separate owners. Process caps are not persisted as Session preferences.
+- Development-only persistence compatibility has been removed. Do not add
+  migrations or fallback storage paths without a real compatibility obligation.
+- Session recovery is an effectful reconciliation: close interrupted Turns,
+  append required expiration resolutions, publish resulting events, then wake
+  pending input.
+- Event stores, Session kernels, and file writes retain owner-local sequencing.
+  Do not introduce a shared `KeyedSequencer`; the superficially similar queues
+  have different atomicity and lifecycle contracts.
+- EventStore clones and the validated Session-summary cache remain ownership
+  and trust boundaries.
+- Projection-to-domain mapping may have one owner. Cache decoding and API
+  mapping stay explicit because disk validation and wire exposure are different
+  contracts.
+- Small formatting helpers and similar local predicates are not architecture
+  work unless duplication causes a concrete ownership or behavior drift.
 
-### Target boundary
-
-Move fake providers and scenario helpers to test support. Public barrels expose
-only intentional cross-module contracts and construction entry points; module
-helpers remain local.
-
-Share at most a primitive JSON-object guard. HTTP, event-log, config, and
-provider boundaries retain named shape decoders because they validate
-different trust contracts. Once a value enters typed internal code, do not
-revalidate it through generic record checks.
-
-Run this cleanup after each owner module has stabilized so export deletion does
-not obscure the architectural move.
-
-### Done when
-
-- Production runtime exports contain no fake/test provider.
-- Every public export has a production cross-module consumer or names a
-  deliberate public contract.
-- Generic object checks occur at untrusted wire/storage/config boundaries, not
-  throughout domain logic.
+When a stage lands, delete its planning section from this register. Do not keep
+a second prose description of behavior already made authoritative by code and
+focused tests.
