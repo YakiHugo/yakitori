@@ -94,8 +94,8 @@ async function validateImportedImages(
 ): Promise<readonly ImageAttachment[]> {
   try {
     // The sidecar validates bounded metadata from the copied snapshot. The
-    // desktop boundary additionally performs Codex-style full decoding on
-    // that same stored snapshot before exposing it to the composer.
+    // desktop boundary additionally performs full decoding on that same
+    // stored snapshot before exposing it to the composer.
     for (const attachment of attachments) {
       const response = await fetch(attachmentUrl(server.url, attachment))
       if (!response.ok) throw new Error("Imported image could not be read.")
@@ -124,7 +124,7 @@ async function validateImportedImages(
 
 function attachmentUrl(serverUrl: string, attachment: ImageAttachment): string {
   const path = attachment.file.path.split("/").map(encodeURIComponent).join("/")
-  return `${serverUrl}/sessions/${encodeURIComponent(attachment.file.sessionId)}/files/${path}`
+  return `${serverUrl}/rollouts/${encodeURIComponent(attachment.file.rolloutId)}/assets/${path}`
 }
 
 function createDraftOwnerId(): string {

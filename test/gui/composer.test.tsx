@@ -141,7 +141,7 @@ describe("composer", () => {
         detail: "original",
         sizeBytes: 9,
         file: {
-          sessionId: "session_1",
+          rolloutId: "session_1",
           path: "attachments/staging/draft_1/1.png",
         },
       },
@@ -176,7 +176,7 @@ describe("composer", () => {
           detail: "original",
           sizeBytes: 9,
           file: {
-            sessionId: "session_1",
+            rolloutId: "session_1",
             path: "attachments/staging/draft_1/1.png",
           },
         },
@@ -205,7 +205,7 @@ function draftImage(detail: "high" | "original") {
     detail,
     sizeBytes: 9,
     file: {
-      sessionId: "session_1",
+      rolloutId: "session_1",
       path: "attachments/staging/draft_1/1.png",
     },
   }

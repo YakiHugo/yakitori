@@ -201,7 +201,7 @@ export function Composer() {
             <div className="flex gap-2 overflow-x-auto px-3 pt-3">
               {attachments.map((attachment, index) => (
                 <div
-                  key={`${attachment.file.sessionId}:${attachment.file.path}`}
+                  key={`${attachment.file.rolloutId}:${attachment.file.path}`}
                   className="group/image relative size-18 shrink-0 overflow-hidden rounded-xl border bg-muted"
                 >
                   <img

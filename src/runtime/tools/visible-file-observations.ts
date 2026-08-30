@@ -1,23 +1,17 @@
-import type { JsonValue, ToolProjection } from "../../kernel/index.ts"
+import type {
+  FileObservation,
+  JsonValue,
+  ModelMessage,
+} from "../../kernel/index.ts"
 
-export type FileObservationKind =
-  | "edit"
-  | "ranged_read"
-  | "whole_file_read"
-  | "write"
-
-export type FileObservationGrant = {
-  readonly path: string
-  readonly kind: FileObservationKind
-  readonly complete: boolean
-  readonly sha256?: string
-  readonly ranges?: readonly {
-    readonly startLine: number
-    readonly endLine: number
-  }[]
-  readonly created?: boolean
-  readonly optimisticRebase?: boolean
+export type StoredToolObservation = {
+  readonly name: string
+  readonly state: string
+  readonly output?: JsonValue
 }
+
+export type FileObservationKind = FileObservation["kind"]
+export type FileObservationGrant = FileObservation
 
 export type VisibleFileRevision = {
   readonly sha256?: string
@@ -35,7 +29,7 @@ export type VisibleFileObservations = {
 }
 
 export function createVisibleFileObservations(
-  tools: readonly ToolProjection[] = [],
+  tools: readonly StoredToolObservation[] = [],
 ): VisibleFileObservations {
   const revisions = new Map<string, VisibleFileRevision>()
   for (const tool of tools) {
@@ -52,6 +46,18 @@ export function createVisibleFileObservations(
       applyGrant(revisions, grant)
     },
   }
+}
+
+export function createVisibleFileObservationsFromMessages(
+  messages: readonly ModelMessage[],
+): VisibleFileObservations {
+  const observations = createVisibleFileObservations()
+  for (const message of messages) {
+    if (message.role === "tool" && message.fileObservation !== undefined) {
+      observations.apply(message.fileObservation)
+    }
+  }
+  return observations
 }
 
 export function grantFromToolOutput(

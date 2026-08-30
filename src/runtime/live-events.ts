@@ -44,11 +44,20 @@ export type LiveSessionUsage = {
   readonly createdAt: string
 }
 
+export type LiveSessionError = {
+  readonly type: "session.error"
+  readonly sessionId: string
+  readonly operation: "turn_input" | "interrupt" | "persistence"
+  readonly message: string
+  readonly createdAt: string
+}
+
 export type LiveSessionEvent =
   | LiveDisplayItemStarted
   | LiveAssistantDelta
   | LiveReasoningDelta
   | LiveSessionUsage
+  | LiveSessionError
   | RuntimePermissionEvent
 
 export type LiveEventPublisher = {

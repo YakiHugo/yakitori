@@ -52,14 +52,18 @@ async function handleControlRequest(
 ): Promise<ServerControlResponse> {
   try {
     if (request.type === "import_image_paths") {
-      const attachments = await application.sessionFiles.importImagePaths(
-        request.sessionId,
+      const thread = await application.threadStore.readThread(request.sessionId)
+      if (thread === undefined) {
+        throw new Error(`Session ${request.sessionId} was not found.`)
+      }
+      const attachments = await application.rolloutAssets.importImagePaths(
+        thread.metadata.rolloutId,
         request.ownerId,
         request.paths,
       )
       return { requestId: request.requestId, ok: true, attachments }
     }
-    await application.sessionFiles.discardDraftImageAttachments(
+    await application.rolloutAssets.discardDraftImageAttachments(
       request.attachments,
     )
     return { requestId: request.requestId, ok: true }

@@ -2,14 +2,13 @@ import { createHash } from "node:crypto"
 import type {
   JsonObject,
   JsonValue,
-  SessionProjection,
   WorldStateFragment,
 } from "../kernel/index.ts"
+import type { AgentRuntimeContext } from "./agent-control.ts"
 import {
   type EnvironmentSnapshot,
   renderEnvironmentContext,
 } from "./environment-context.ts"
-import type { AgentRuntimeContext } from "./agent-control.ts"
 import type { ProjectInstructions } from "./project-instructions.ts"
 import type { ResolvedTurnConfiguration } from "./session-configuration.ts"
 
@@ -41,16 +40,20 @@ type ErasedWorldStateSection = Readonly<{
   renderDiff(previous: PreviousSectionState<JsonValue>): WorldStateFragment[]
 }>
 
-export function buildWorldState(input: {
+export function buildWorldStateFromSnapshot(input: {
   readonly configuration: ResolvedTurnConfiguration
-  readonly session: SessionProjection
+  readonly baseModelId?: string | undefined
+  readonly previousModelId?: string | undefined
   readonly environment: EnvironmentSnapshot
   readonly projectInstructions?: ProjectInstructions
   readonly multiAgent?: AgentRuntimeContext
 }): WorldState {
   return {
     sections: [
-      modelSection(input.configuration, previousModel(input.session)),
+      modelSection(
+        input.configuration,
+        input.baseModelId ?? input.previousModelId,
+      ),
       ...(input.multiAgent === undefined
         ? []
         : [
@@ -246,17 +249,6 @@ function environmentSection(
       ]
     },
   })
-}
-
-function previousModel(session: SessionProjection): string | undefined {
-  const turns =
-    session.activeTurn === undefined
-      ? session.turns
-      : session.turns.slice(0, -1)
-  const execution = turns.at(-1)?.executionContext
-  return execution === undefined
-    ? undefined
-    : `${execution.provider}/${execution.model}`
 }
 
 function fragment(

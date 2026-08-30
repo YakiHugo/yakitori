@@ -1,27 +1,37 @@
 import { realpath, stat } from "node:fs/promises"
+import type { AgentThread } from "../core/agent-thread.ts"
+import type {
+  RolloutItem,
+  StoredRolloutItem,
+  StoredThread,
+  ThreadSummary,
+} from "../core/rollout.ts"
+import type { ThreadManager } from "../core/thread-manager.ts"
+import type { ThreadStore } from "../core/thread-store.ts"
 import {
-  COMPACT_DIRECTIVE,
-  type EventEnvelope,
+  createEventEnvelope,
+  EVENT_SCHEMA_VERSION,
   type EventMetadata,
   ForkReason,
   IdPrefix,
   type ImageAttachment,
+  ImageAttachmentConflictError,
   InputRole,
   isIdWithPrefix,
-  isKernelEvent,
   isJsonValue,
+  isKernelEvent,
   isRequestId,
+  isStorageKey,
   isYakitoriError,
   type ModelSelection,
-  type SessionFiles,
-  type SessionKernel,
-  type SessionProjection,
-  type SessionSummary,
-  summarizeSessionProjection,
+  type RolloutAssets,
+  type StoredEventEnvelope,
   type TextContent,
+  type TokenUsage,
   YakitoriErrorCode,
 } from "../kernel/index.ts"
 import { SessionExecutionPolicyDefaults } from "../runtime/limits.ts"
+import { createCoalescingDeltaPublisher } from "../runtime/live-events.ts"
 import type {
   RuntimePermissionReason,
   RuntimePermissionRequest,
@@ -50,12 +60,16 @@ export type SessionCreateDefaults = {
   readonly mateRevisionId: string
 }
 
-export type ServerHandlerOptions = {
+export type ThreadServerHandlerOptions = {
+  readonly manager: ThreadManager
+  readonly store: ThreadStore
   readonly eventHub?: {
-    publishDurable(events: readonly EventEnvelope[]): void
+    publishDurable(events: readonly StoredEventEnvelope[]): void
+    publishTransient(
+      event: import("../runtime/live-events.ts").LiveSessionEvent,
+    ): void
   }
   readonly sessionDefaults?: SessionCreateDefaults
-  readonly wakeSession?: (sessionId: string) => void
   readonly resolvePermission?: (input: {
     readonly sessionId: string
     readonly turnId: string
@@ -66,14 +80,9 @@ export type ServerHandlerOptions = {
   readonly listPendingPermissions?: (
     sessionId: string,
   ) => readonly RuntimePermissionRequest[]
-  readonly interruptTurn?: (input: {
-    readonly sessionId: string
-    readonly turnId: string
-    readonly reason?: string
-  }) => Promise<void>
   readonly maxInputBytes?: number
   readonly availableProviders?: readonly string[]
-  readonly sessionFiles?: SessionFiles
+  readonly rolloutAssets?: RolloutAssets
 }
 
 export type ServerHandlers = {
@@ -102,6 +111,10 @@ export type ServerHandlers = {
   ): Promise<ApiHandlerResult<ApiReadSessionEventsResponse>>
 }
 
+export type ThreadServerHandlers = ServerHandlers & {
+  close(): Promise<void>
+}
+
 const sessionListOrder = "updated_at_desc"
 const maxCancelReasonLength = 512
 
@@ -111,53 +124,219 @@ type AdmissionTextContent = {
   readonly attachments?: readonly ImageAttachment[]
 }
 
-export function createServerHandlers(
-  kernel: SessionKernel,
-  options: ServerHandlerOptions = {},
-): ServerHandlers {
-  async function forkAfterSettlingActiveTurn(
-    request: Parameters<SessionKernel["forkSession"]>[0],
-  ) {
-    for (let attempt = 0; attempt < 4; attempt += 1) {
-      const source = await kernel.readSession({ sessionId: request.sessionId })
-      if (source.session?.activeTurn !== undefined && options.interruptTurn) {
-        await options.interruptTurn({
-          sessionId: request.sessionId,
-          turnId: source.session.activeTurn.turnId,
-          reason: "conversation_fork",
-        })
-      }
-      try {
-        return await kernel.forkSession(request)
-      } catch (error) {
-        if (
-          options.interruptTurn === undefined ||
-          !isYakitoriError(error) ||
-          error.code !== YakitoriErrorCode.InvalidState ||
-          error.details?.operation !== "fork_session" ||
-          attempt === 3
-        ) {
-          throw error
-        }
-      }
+// App-server projection over the live Session actor and canonical rollout.
+// It translates host DTOs only; execution never reads this projection.
+export function createThreadServerHandlers(
+  options: ThreadServerHandlerOptions,
+): ThreadServerHandlers {
+  const pumps = new Map<string, Promise<void>>()
+  const pumpReady = new Map<string, Promise<void>>()
+  const publishedThrough = new Map<string, number>()
+  const admissionTails = new Map<string, Promise<void>>()
+  let closing = false
+  let stopPumps: (() => void) | undefined
+  const pumpsStopped = new Promise<void>((resolve) => {
+    stopPumps = resolve
+  })
+
+  async function publishNewRollout(
+    threadId: string,
+    throughSeq: number,
+  ): Promise<void> {
+    const stored = await options.store.readThread(threadId)
+    if (stored === undefined) return
+    const after = publishedThrough.get(threadId) ?? 0
+    const records = stored.rollout.filter((record) => {
+      const seq = hostSeq(record)
+      return seq > after && seq <= throughSeq
+    })
+    if (records.length === 0) return
+    options.eventHub?.publishDurable(
+      records.map((record) => mapRolloutEvent(record, threadId)),
+    )
+    const last = records.at(-1)
+    if (last !== undefined) publishedThrough.set(threadId, hostSeq(last))
+  }
+
+  async function ensureEventPump(thread: AgentThread): Promise<void> {
+    if (closing) throw new Error("Server handlers are shutting down.")
+    const existing = pumpReady.get(thread.id)
+    if (existing !== undefined) {
+      await existing
+      return
     }
-    throw new Error("Fork retry loop exited unexpectedly.")
+    const ready = (async () => {
+      const stored = await options.store.readThread(thread.id)
+      if (!publishedThrough.has(thread.id)) {
+        publishedThrough.set(
+          thread.id,
+          stored === undefined ? 0 : threadSeq(stored),
+        )
+      }
+      const pump = (async () => {
+        const streams = new Map<
+          string,
+          ReturnType<typeof createCoalescingDeltaPublisher>
+        >()
+        for (;;) {
+          const event = await Promise.race([
+            thread.nextEvent(),
+            pumpsStopped.then(() => undefined),
+          ])
+          if (event === undefined) break
+          if (event.type === "rollout.appended") {
+            for (const publisher of streams.values()) publisher.flush()
+            streams.clear()
+            for (;;) {
+              try {
+                await publishNewRollout(thread.id, event.throughSeq)
+                break
+              } catch (error) {
+                if (thread.status === "shutdown" || closing) throw error
+                console.error(`Thread event replay failed: ${thread.id}`, error)
+                await new Promise((resolve) => setTimeout(resolve, 100))
+              }
+            }
+            continue
+          }
+          if (event.type === "model.stream") {
+            const reasoning = event.kind === "reasoning"
+            const displayItemId = reasoning
+              ? `${event.itemId}_reasoning`
+              : event.itemId
+            const key = `${event.itemId}:${event.kind}`
+            let publisher = streams.get(key)
+            if (publisher === undefined) {
+              options.eventHub?.publishTransient({
+                type: "item.started",
+                sessionId: event.threadId,
+                turnId: event.turnId,
+                item: {
+                  type: reasoning ? "reasoning" : "agent_message",
+                  itemId: displayItemId,
+                },
+                createdAt: new Date().toISOString(),
+              })
+              if (options.eventHub === undefined) continue
+              publisher = createCoalescingDeltaPublisher(
+                options.eventHub,
+                30,
+                reasoning ? "reasoning.delta" : "assistant.delta",
+              )
+              streams.set(key, publisher)
+            }
+            publisher.publish({
+              sessionId: event.threadId,
+              turnId: event.turnId,
+              itemId: displayItemId,
+              text: event.text,
+            })
+            continue
+          }
+          if (event.type === "permission") {
+            options.eventHub?.publishTransient(event.event)
+            continue
+          }
+          if (event.type === "session.error") {
+            options.eventHub?.publishTransient({
+              type: "session.error",
+              sessionId: event.threadId,
+              operation: event.operation,
+              message: event.message,
+              createdAt: new Date().toISOString(),
+            })
+          }
+        }
+        for (const publisher of streams.values()) publisher.flush()
+      })()
+      pump
+        .catch((error) => {
+          console.error(`Thread event delivery failed: ${thread.id}`, error)
+        })
+        .finally(() => {
+          pumps.delete(thread.id)
+          pumpReady.delete(thread.id)
+        })
+      pumps.set(thread.id, pump)
+    })()
+    pumpReady.set(thread.id, ready)
+    try {
+      await ready
+    } catch (error) {
+      pumpReady.delete(thread.id)
+      throw error
+    }
+  }
+
+  async function resumeRequired(threadId: string): Promise<AgentThread> {
+    const thread = await options.manager.resumeThread(threadId)
+    if (thread === undefined) {
+      throw notFound(`Session ${threadId} was not found.`, {
+        sessionId: threadId,
+      })
+    }
+    await ensureEventPump(thread)
+    return thread
+  }
+
+  async function withAdmissionLock<T>(
+    sessionId: string,
+    requestId: string,
+    run: () => Promise<T>,
+  ): Promise<T> {
+    const key = `${sessionId}\0${requestId}`
+    const previous = admissionTails.get(key) ?? Promise.resolve()
+    let release!: () => void
+    const tail = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    admissionTails.set(key, tail)
+    await previous
+    try {
+      return await run()
+    } finally {
+      release()
+      if (admissionTails.get(key) === tail) admissionTails.delete(key)
+    }
   }
 
   return {
+    async close() {
+      closing = true
+      stopPumps?.()
+      await Promise.allSettled([...admissionTails.values()])
+      await Promise.allSettled([...pumpReady.values()])
+      await Promise.allSettled([...pumps.values()])
+    },
     async createSession(input = {}) {
       try {
-        const created = await kernel.createSession(
-          await applySessionCreateDefaults(
-            requireCreateSessionRequest(input),
-            options.sessionDefaults,
-          ),
+        const request = await applySessionCreateDefaults(
+          requireCreateSessionRequest(input),
+          options.sessionDefaults,
         )
-        options.eventHub?.publishDurable([created.event])
-        const read = await kernel.readSession({ sessionId: created.sessionId })
+        const thread = await options.manager.createThread({
+          ...request,
+          ...(request.parentSessionId === undefined
+            ? {}
+            : { parentThreadId: request.parentSessionId }),
+        })
+        await ensureEventPump(thread)
+        const stored = await requireStoredThread(options.store, thread.id)
+        const metadataRecord = stored.rollout[0]
+        if (metadataRecord === undefined) {
+          throw internalError("Created Thread contained an empty rollout.")
+        }
+        const event = mapRolloutEvent(metadataRecord, thread.id)
+        if (!isKernelEvent(event)) {
+          throw internalError(
+            "Created Thread did not contain Session metadata.",
+          )
+        }
+        publishedThrough.set(thread.id, event.seq)
+        options.eventHub?.publishDurable([event])
         return ok(201, {
-          session: mapRequiredSession(created.sessionId, read.session),
-          event: created.event,
+          session: mapStoredThread(stored, thread, options),
+          event,
         })
       } catch (error) {
         return fail(error)
@@ -167,7 +346,7 @@ export function createServerHandlers(
     async listSessions(input = {}) {
       try {
         const request = requireListSessionsRequest(input)
-        const result = await kernel.listSessions({
+        const result = await options.manager.listThreads({
           limit: request.limit,
           ...(request.workingDirectory === undefined
             ? {}
@@ -182,9 +361,8 @@ export function createServerHandlers(
                 ),
               }),
         })
-
         return ok(200, {
-          sessions: result.sessions.map(mapSessionSummary),
+          sessions: result.threads.map(mapThreadSummary),
           ...(result.nextCursor === undefined
             ? {}
             : {
@@ -202,21 +380,16 @@ export function createServerHandlers(
 
     async readSession(input) {
       try {
-        const request = requireReadSessionRequest(input)
-        const result = await kernel.readSession({
-          sessionId: request.sessionId,
-        })
-
-        if (!result.session) {
-          throw notFound(`Session ${request.sessionId} was not found.`, {
-            sessionId: request.sessionId,
-          })
+        const { sessionId } = requireReadSessionRequest(input)
+        const stored = await options.store.readThread(sessionId)
+        if (stored === undefined) {
+          throw notFound(`Session ${sessionId} was not found.`, { sessionId })
         }
-
         return ok(200, {
-          session: mapSessionDetail(
-            result.session,
-            options.listPendingPermissions?.(result.session.id),
+          session: mapStoredThread(
+            stored,
+            options.manager.getThread(sessionId),
+            options,
           ),
         })
       } catch (error) {
@@ -226,9 +399,13 @@ export function createServerHandlers(
 
     async deleteSession(input) {
       try {
-        const request = requireDeleteSessionRequest(input)
-        await kernel.deleteSession({ sessionId: request.sessionId })
-        return ok(200, { sessionId: request.sessionId })
+        const { sessionId } = requireDeleteSessionRequest(input)
+        if ((await options.store.readThread(sessionId)) === undefined) {
+          throw notFound(`Session ${sessionId} was not found.`, { sessionId })
+        }
+        await options.manager.discardThread(sessionId)
+        publishedThrough.delete(sessionId)
+        return ok(200, { sessionId })
       } catch (error) {
         return fail(error)
       }
@@ -245,16 +422,72 @@ export function createServerHandlers(
           request.modelSelection?.provider,
           options.availableProviders,
         )
-        const forked = await forkAfterSettlingActiveTurn(request)
-        options.eventHub?.publishDurable(forked.sourceEvents)
-        if (request.content !== undefined) {
-          options.wakeSession?.(forked.sessionId)
+        const source = await requireStoredThread(
+          options.store,
+          request.sessionId,
+        )
+        const beforeTurnId = turnIdForInput(source, request.atInputId)
+        const sourceAttachments = inputAttachments(source, request.atInputId)
+        const forked = await options.manager.forkThread({
+          sourceThreadId: request.sessionId,
+          beforeTurnId,
+          forkedFromInputId: request.atInputId,
+          forkReason: request.reason,
+        })
+        const forkRolloutId = forked.thread.snapshot().metadata.rolloutId
+        let submissionId: string | undefined
+        try {
+          await ensureEventPump(forked.thread)
+          if (request.content !== undefined) {
+            submissionId = `request_${globalThis.crypto.randomUUID()}`
+            const attachments =
+              sourceAttachments.length === 0
+                ? undefined
+                : await requireRolloutAssets(options).copyImageAttachments(
+                    forkRolloutId,
+                    submissionId,
+                    sourceAttachments,
+                  )
+            const submitted = await forked.thread.startIfIdle({
+              submissionId,
+              content: {
+                ...request.content,
+                ...(attachments === undefined ? {} : { attachments }),
+              },
+              ...(request.modelSelection === undefined
+                ? {}
+                : { modelSelection: request.modelSelection }),
+            })
+            if (submitted.type !== "started") {
+              await options.rolloutAssets?.discardRequestImageAttachments(
+                forkRolloutId,
+                submissionId,
+              )
+              throw conflict(`Fork input was not started: ${submitted.type}.`)
+            }
+          }
+        } catch (error) {
+          try {
+            await options.manager.discardThread(forked.thread.id)
+          } catch (cleanupError) {
+            console.error("Failed to roll back a forked Session.", cleanupError)
+          }
+          throw error
         }
-        const read = await kernel.readSession({ sessionId: forked.sessionId })
+        const stored = await requireStoredThread(
+          options.store,
+          forked.thread.id,
+        )
+        const events = stored.rollout.map((record) =>
+          mapRolloutEvent(record, forked.thread.id),
+        )
+        publishedThrough.set(forked.thread.id, threadSeq(stored))
+        options.eventHub?.publishDurable(events)
         return ok(201, {
-          session: mapRequiredSession(forked.sessionId, read.session),
-          historyEndSeqExclusive: forked.historyEndSeqExclusive,
-          events: forked.events,
+          session: mapStoredThread(stored, forked.thread, options),
+          historyEndSeqExclusive:
+            (forked.result.historyEndSeqExclusive ?? 1) + 1,
+          events,
         })
       } catch (error) {
         return fail(error)
@@ -272,53 +505,121 @@ export function createServerHandlers(
           request.modelSelection?.provider,
           options.availableProviders,
         )
-        let content: TextContent = {
-          kind: "text",
-          text: request.content.text,
+        if (request.role !== undefined && request.role !== InputRole.User) {
+          throw invalidInput(
+            "Only user input can be submitted to a live Session.",
+            {
+              field: "role",
+            },
+          )
         }
-        if (request.content.attachments !== undefined) {
-          if (options.sessionFiles === undefined) {
-            throw invalidInput(
-              "Image attachments require Session file storage.",
-            )
-          }
-          content = {
-            ...content,
-            attachments: await options.sessionFiles
-              .promoteImageAttachments(
-                request.sessionId,
-                request.requestId,
-                request.content.attachments,
-              )
-              .catch((error: unknown) => {
+        return await withAdmissionLock(
+          request.sessionId,
+          request.requestId,
+          async () => {
+            const thread = await resumeRequired(request.sessionId)
+            const rolloutId = thread.snapshot().metadata.rolloutId
+            let content: TextContent = request.content
+            let rollbackPromotion: (() => Promise<void>) | undefined
+            if (request.content.attachments !== undefined) {
+              if (options.rolloutAssets === undefined) {
                 throw invalidInput(
-                  error instanceof Error
-                    ? error.message
-                    : "Image attachment is invalid.",
+                  "Image attachments require rollout asset storage.",
                 )
-              }),
-          }
-        }
-        const admitted = await kernel.admitInput({ ...request, content })
-        if (request.content.attachments !== undefined) {
-          await options.sessionFiles
-            ?.discardDraftImageAttachments(request.content.attachments)
-            .catch((error: unknown) => {
-              console.warn(
-                "Could not remove admitted draft attachments.",
-                error,
+              }
+              try {
+                const promotion =
+                  await options.rolloutAssets.promoteImageAttachments(
+                    rolloutId,
+                    request.requestId,
+                    request.content.attachments,
+                  )
+                rollbackPromotion = promotion.rollback
+                content = {
+                  ...request.content,
+                  attachments: promotion.attachments,
+                }
+              } catch (error) {
+                if (error instanceof ImageAttachmentConflictError) {
+                  throw conflict("Input was not submitted: request_conflict.", {
+                    reason: "request_conflict",
+                  })
+                }
+                throw error
+              }
+            }
+            // The existing /inputs route has a durable input-event response
+            // shape, so it maps to Codex's start-if-idle operation. Steering
+            // remains a distinct live Session command and needs its own host
+            // protocol.
+            const submitted = await thread
+              .startIfIdle({
+                submissionId: request.requestId,
+                content,
+                ...(request.modelSelection === undefined
+                  ? {}
+                  : { modelSelection: request.modelSelection }),
+                ...(request.metadata === undefined
+                  ? {}
+                  : { metadata: request.metadata }),
+                ...(request.parentInputId === undefined
+                  ? {}
+                  : { parentInputId: request.parentInputId }),
+              })
+              .catch(async (error: unknown) => {
+                await rollbackPromotion?.()
+                throw error
+              })
+            if (submitted.type === "not_submitted") {
+              await rollbackPromotion?.()
+              throw conflict(`Input was not submitted: ${submitted.reason}.`, {
+                reason: submitted.reason,
+              })
+            }
+            rollbackPromotion = undefined
+            if (request.content.attachments !== undefined) {
+              await options.rolloutAssets
+                ?.discardDraftImageAttachments(request.content.attachments)
+                .catch((error: unknown) =>
+                  console.warn(
+                    "Could not remove admitted draft attachments.",
+                    error,
+                  ),
+                )
+            }
+            const stored = await requireStoredThread(
+              options.store,
+              request.sessionId,
+            )
+            const record = [...stored.rollout]
+              .reverse()
+              .find(
+                (entry) =>
+                  entry.item.type === "response_item" &&
+                  entry.item.item.turnId === request.requestId &&
+                  entry.item.item.id.startsWith("input_"),
               )
+            if (record === undefined) {
+              throw internalError(
+                "Submitted input was not present in the rollout.",
+              )
+            }
+            const event = mapRolloutEvent(record, request.sessionId)
+            if (!isKernelEvent(event)) {
+              throw internalError(
+                "Submitted input did not map to a host event.",
+              )
+            }
+            return ok(submitted.type === "replayed" ? 200 : 201, {
+              requestId: request.requestId,
+              inputId:
+                record.item.type === "response_item"
+                  ? record.item.item.id
+                  : request.requestId,
+              event,
             })
-        }
-        if (admitted.created) options.eventHub?.publishDurable([admitted.event])
-        // Wake even on idempotent replay: original process may have crashed
-        // after commit and before scheduling.
-        options.wakeSession?.(request.sessionId)
-        return ok(admitted.created ? 201 : 200, {
-          requestId: admitted.requestId,
-          inputId: admitted.inputId,
-          event: admitted.event,
-        })
+          },
+        )
       } catch (error) {
         return fail(error)
       }
@@ -327,27 +628,11 @@ export function createServerHandlers(
     async compactSession(input) {
       try {
         const request = requireCompactSessionRequest(input)
-        const read = await kernel.readSession({ sessionId: request.sessionId })
-        if (!read.session) {
-          throw notFound(`Session ${request.sessionId} was not found.`, {
-            sessionId: request.sessionId,
-          })
-        }
-        const admitted = await kernel.admitInput({
-          sessionId: request.sessionId,
-          role: InputRole.Runtime,
-          content: { kind: "text", text: COMPACT_DIRECTIVE },
-          ...(request.requestId === undefined
-            ? {}
-            : { requestId: request.requestId }),
-        })
-        if (admitted.created) options.eventHub?.publishDurable([admitted.event])
-        options.wakeSession?.(request.sessionId)
-        return ok(admitted.created ? 201 : 200, {
-          requestId: admitted.requestId,
-          inputId: admitted.inputId,
-          event: admitted.event,
-        })
+        await resumeRequired(request.sessionId)
+        throw conflict(
+          "Manual compaction is not exposed by the live Session boundary.",
+          { sessionId: request.sessionId },
+        )
       } catch (error) {
         return fail(error)
       }
@@ -356,13 +641,14 @@ export function createServerHandlers(
     async cancelInput(input) {
       try {
         const request = requireCancelInputRequest(input)
-        const cancelled = await kernel.cancelInput(request)
-        options.eventHub?.publishDurable([cancelled.event])
-        return ok(200, {
-          sessionId: request.sessionId,
-          inputId: request.inputId,
-          event: cancelled.event,
-        })
+        await resumeRequired(request.sessionId)
+        throw conflict(
+          "Live Sessions do not keep a durable pending-input queue.",
+          {
+            sessionId: request.sessionId,
+            inputId: request.inputId,
+          },
+        )
       } catch (error) {
         return fail(error)
       }
@@ -371,16 +657,18 @@ export function createServerHandlers(
     async cancelTurn(input) {
       try {
         const request = requireCancelTurnRequest(input)
-        if (options.interruptTurn) {
-          await options.interruptTurn(request)
-        } else {
-          const interrupted = await kernel.interruptTurn({
-            ...request,
-            recordModelMarker: true,
+        const thread = await resumeRequired(request.sessionId)
+        const interrupted = await thread.interruptTurn(
+          request.turnId,
+          "reason" in request && typeof request.reason === "string"
+            ? request.reason
+            : undefined,
+        )
+        if (!interrupted) {
+          throw notFound(`Active Turn ${request.turnId} was not found.`, {
+            sessionId: request.sessionId,
+            turnId: request.turnId,
           })
-          options.eventHub?.publishDurable(
-            interrupted.events.filter((event) => isKernelEvent(event)),
-          )
         }
         return ok(200, {
           sessionId: request.sessionId,
@@ -400,12 +688,7 @@ export function createServerHandlers(
             { permissionRequestId: request.permissionRequestId },
           )
         }
-        return ok(200, {
-          sessionId: request.sessionId,
-          turnId: request.turnId,
-          permissionRequestId: request.permissionRequestId,
-          behavior: request.behavior,
-        })
+        return ok(200, request)
       } catch (error) {
         return fail(error)
       }
@@ -414,30 +697,28 @@ export function createServerHandlers(
     async readSessionEvents(input) {
       try {
         const request = requireReadSessionEventsRequest(input)
-        const result = await kernel.readSession({
-          sessionId: request.sessionId,
-        })
-
-        if (!result.session) {
+        const stored = await options.store.readThread(request.sessionId)
+        if (stored === undefined) {
           throw notFound(`Session ${request.sessionId} was not found.`, {
             sessionId: request.sessionId,
           })
         }
-
-        const read = await kernel.readEvents({
-          sessionId: request.sessionId,
-          ...(request.after === undefined ? {} : { after: request.after }),
-          ...(request.through === undefined
-            ? {}
-            : { through: request.through }),
-          ...(request.limit === undefined ? {} : { limit: request.limit }),
+        const after = request.after ?? 0
+        const through = request.through ?? Number.MAX_SAFE_INTEGER
+        const limit = request.limit ?? 500
+        const matching = stored.rollout.filter((record) => {
+          const seq = hostSeq(record)
+          return seq > after && seq <= through
         })
-
+        const page = matching.slice(0, limit)
+        const last = page.at(-1)
         return ok(200, {
-          events: read.events,
-          ...(read.nextAfter === undefined
-            ? {}
-            : { nextAfter: read.nextAfter }),
+          events: page.map((record) =>
+            mapRolloutEvent(record, request.sessionId),
+          ),
+          ...(matching.length > page.length && last !== undefined
+            ? { nextAfter: hostSeq(last) }
+            : {}),
         })
       } catch (error) {
         return fail(error)
@@ -446,88 +727,325 @@ export function createServerHandlers(
   }
 }
 
-function mapSessionSummary(summary: SessionSummary): ApiSessionSummary {
+function mapThreadSummary(thread: ThreadSummary): ApiSessionSummary {
   return {
-    id: summary.sessionId,
-    conversationId: summary.conversationId,
-    seq: summary.seq,
-    createdAt: summary.createdAt,
-    updatedAt: summary.updatedAt,
-    ...(summary.title === undefined ? {} : { title: summary.title }),
-    ...(summary.workingDirectory === undefined
+    id: thread.id,
+    conversationId: thread.conversationId,
+    seq: thread.seq + 1,
+    createdAt: thread.createdAt,
+    updatedAt: thread.updatedAt,
+    ...(thread.title === undefined ? {} : { title: thread.title }),
+    ...(thread.workingDirectory === undefined
       ? {}
-      : { workingDirectory: summary.workingDirectory }),
-    ...(summary.mateId === undefined ? {} : { mateId: summary.mateId }),
-    ...(summary.mateRevisionId === undefined
+      : { workingDirectory: thread.workingDirectory }),
+    ...(thread.mateId === undefined ? {} : { mateId: thread.mateId }),
+    ...(thread.mateRevisionId === undefined
       ? {}
-      : { mateRevisionId: summary.mateRevisionId }),
-    ...(summary.parentSessionId === undefined
+      : { mateRevisionId: thread.mateRevisionId }),
+    ...(thread.parentThreadId === undefined
       ? {}
-      : { parentSessionId: summary.parentSessionId }),
-    ...(summary.forkedFromInputId === undefined
+      : { parentSessionId: thread.parentThreadId }),
+    ...(thread.forkedFromInputId === undefined
       ? {}
-      : { forkedFromInputId: summary.forkedFromInputId }),
-    ...(summary.forkReason === undefined
+      : { forkedFromInputId: thread.forkedFromInputId }),
+    ...(thread.forkReason === undefined
       ? {}
-      : { forkReason: summary.forkReason }),
-    ...(summary.metadata === undefined ? {} : { metadata: summary.metadata }),
+      : { forkReason: thread.forkReason }),
+    ...(thread.metadata === undefined ? {} : { metadata: thread.metadata }),
   }
 }
 
-function mapSessionDetail(
-  session: SessionProjection,
-  pendingPermissions: readonly RuntimePermissionRequest[] = [],
+function mapStoredThread(
+  stored: StoredThread,
+  live: AgentThread | undefined,
+  options: ThreadServerHandlerOptions,
 ): ApiSessionDetail {
-  const currentModel = currentSessionModel(session)
+  const rollout = stored.rollout.map((record) => record.item)
+  const contexts = rollout.filter(
+    (item): item is Extract<RolloutItem, { readonly type: "turn_context" }> =>
+      item.type === "turn_context",
+  )
+  const inputs = rollout.filter(
+    (item) =>
+      item.type === "response_item" &&
+      item.item.item.role === "user" &&
+      item.item.id.startsWith("input_") &&
+      item.item.item.context === undefined,
+  ).length
+  const turns = rollout.filter((item) => item.type === "turn_started").length
+  const items = rollout.filter(
+    (item) =>
+      item.type === "response_item" &&
+      item.item.item.role !== "user" &&
+      !("context" in item.item.item),
+  ).length
+  const tools = rollout.reduce(
+    (count, item) =>
+      item.type !== "response_item" || item.item.item.role !== "assistant"
+        ? count
+        : count +
+          item.item.item.content.filter((block) => block.type === "tool_call")
+            .length,
+    0,
+  )
+  const usage = rollout.reduce<TokenUsage | undefined>((total, item) => {
+    if (item.type !== "turn_completed" || item.usage === undefined) return total
+    return addUsage(total, item.usage)
+  }, undefined)
+  const pendingPermissions =
+    options.listPendingPermissions?.(stored.metadata.id) ?? []
+  const currentContext = contexts.at(-1)
+  const summary: ThreadSummary = {
+    ...stored.metadata,
+    seq: Math.max(0, threadSeq(stored) - 1),
+  }
   return {
-    ...mapSessionSummary(summarizeSessionProjection(session)),
-    ...(session.activeTurn === undefined
+    ...mapThreadSummary(summary),
+    ...(live?.snapshot().activeTurnId === undefined
       ? {}
-      : { activeTurnId: session.activeTurn.turnId }),
-    ...(currentModel === undefined
+      : { activeTurnId: live.snapshot().activeTurnId }),
+    ...(currentContext === undefined
       ? {}
-      : {
-          currentModel: {
-            ...currentModel,
-          },
-        }),
-    ...(session.usage === undefined ? {} : { usage: session.usage }),
-    pendingInputs: session.pendingInputs.map((input) => ({
-      id: input.inputId,
-      text: input.content.text,
-      admittedAt: input.admittedAt,
-    })),
+      : { currentModel: currentContext.context.selection }),
+    ...(usage === undefined ? {} : { usage }),
+    pendingInputs: [],
     pendingPermissions: pendingPermissions.map(
-      ({ sessionId: _, ...permission }) => permission,
+      ({ sessionId: _, ...entry }) => entry,
     ),
     counts: {
-      inputs: session.inputs.length,
-      pendingInputs: session.pendingInputs.length,
-      turns: session.turns.length,
-      items: session.items.length,
+      inputs,
+      pendingInputs: 0,
+      turns,
+      items,
       permissions: pendingPermissions.length,
-      tools: session.tools.length,
+      tools,
     },
   }
 }
 
-function currentSessionModel(
-  session: SessionProjection,
-): ModelSelection | undefined {
-  return session.modelSelection
+function mapRolloutEvent(
+  record: StoredRolloutItem,
+  threadId: string,
+): StoredEventEnvelope {
+  const item = record.item
+  const base = {
+    sessionId: threadId,
+    seq: hostSeq(record),
+    id: `event_${threadId}_${record.rolloutId}_${record.seq}`,
+    createdAt: record.createdAt,
+  }
+  if (item.type === "session_meta") {
+    const metadata = item.metadata
+    return createEventEnvelope({
+      ...base,
+      event: {
+        type: "session.created",
+        data: {
+          conversationId: metadata.conversationId,
+          ...(metadata.title === undefined ? {} : { title: metadata.title }),
+          ...(metadata.workingDirectory === undefined
+            ? {}
+            : { workingDirectory: metadata.workingDirectory }),
+          ...(metadata.mateId === undefined ? {} : { mateId: metadata.mateId }),
+          ...(metadata.mateRevisionId === undefined
+            ? {}
+            : { mateRevisionId: metadata.mateRevisionId }),
+          ...(metadata.parentThreadId === undefined
+            ? {}
+            : { parentSessionId: metadata.parentThreadId }),
+          ...(metadata.forkedFromInputId === undefined
+            ? {}
+            : { forkedFromInputId: metadata.forkedFromInputId }),
+          ...(metadata.forkReason === undefined
+            ? {}
+            : { forkReason: metadata.forkReason }),
+          ...(metadata.metadata === undefined
+            ? {}
+            : { metadata: metadata.metadata }),
+        },
+      },
+    })
+  }
+  if (
+    item.type === "response_item" &&
+    item.item.item.role === "user" &&
+    item.item.id.startsWith("input_") &&
+    item.item.item.context === undefined
+  ) {
+    const text = item.item.item.content
+      .filter((block) => block.type === "text")
+      .map((block) => block.text)
+      .join("")
+    return createEventEnvelope({
+      ...base,
+      event: {
+        type: "input.admitted",
+        data: {
+          requestId: item.item.turnId,
+          inputId: item.item.id,
+          role: InputRole.User,
+          content: {
+            kind: "text",
+            text,
+            ...(item.item.item.images === undefined
+              ? {}
+              : {
+                  attachments: item.item.item.images.flatMap((image) =>
+                    "file" in image && typeof image.sizeBytes === "number"
+                      ? [
+                          {
+                            name: image.file.path.split("/").at(-1) ?? "image",
+                            mediaType: image.mediaType,
+                            sizeBytes: image.sizeBytes,
+                            detail: image.detail ?? "high",
+                            file: image.file,
+                          },
+                        ]
+                      : [],
+                  ),
+                }),
+          },
+          ...(item.item.submissionMetadata?.modelSelection === undefined
+            ? {}
+            : {
+                modelSelection: item.item.submissionMetadata.modelSelection,
+              }),
+          ...(item.item.submissionMetadata?.parentInputId === undefined
+            ? {}
+            : { parentInputId: item.item.submissionMetadata.parentInputId }),
+          ...(item.item.submissionMetadata?.metadata === undefined
+            ? {}
+            : { metadata: item.item.submissionMetadata.metadata }),
+        },
+      },
+    })
+  }
+  if (item.type === "turn_started") {
+    return createEventEnvelope({
+      ...base,
+      event: {
+        type: "turn.started",
+        data: { turnId: item.turnId, inputId: item.inputItemId },
+      },
+    })
+  }
+  if (item.type === "turn_completed") {
+    const outcome =
+      item.outcome === "completed"
+        ? ({ status: "completed" } as const)
+        : item.outcome === "interrupted"
+          ? ({ status: "interrupted" } as const)
+          : ({
+              status: "failed",
+              error: item.error ?? { message: "Turn execution failed." },
+            } as const)
+    return createEventEnvelope({
+      ...base,
+      event: {
+        type: "turn.completed",
+        data: {
+          turnId: item.turnId,
+          outcome,
+          ...(item.usage === undefined ? {} : { usage: item.usage }),
+        },
+      },
+    })
+  }
+  return {
+    ...base,
+    version: EVENT_SCHEMA_VERSION,
+    type: "rollout.item",
+    data: { item: item as unknown as import("../kernel/events.ts").JsonValue },
+  }
 }
 
-function mapRequiredSession(
-  sessionId: string,
-  session: SessionProjection | undefined,
-): ApiSessionDetail {
-  if (session) return mapSessionDetail(session)
-  throw internalError(
-    `Session ${sessionId} was created but could not be read.`,
-    {
-      sessionId,
-    },
+function threadSeq(stored: StoredThread): number {
+  const last = stored.rollout.at(-1)
+  return last === undefined ? 0 : hostSeq(last)
+}
+
+function hostSeq(record: StoredRolloutItem): number {
+  return record.seq + 1
+}
+
+async function requireStoredThread(
+  store: ThreadStore,
+  threadId: string,
+): Promise<StoredThread> {
+  const stored = await store.readThread(threadId)
+  if (stored !== undefined) return stored
+  throw notFound(`Session ${threadId} was not found.`, { sessionId: threadId })
+}
+
+function turnIdForInput(stored: StoredThread, inputId: string): string {
+  const started = stored.rollout.find(
+    (record) =>
+      record.item.type === "turn_started" &&
+      record.item.inputItemId === inputId,
   )
+  if (started?.item.type === "turn_started") return started.item.turnId
+  throw notFound(`Input ${inputId} was not found.`, {
+    sessionId: stored.metadata.id,
+    inputId,
+  })
+}
+
+function inputAttachments(
+  stored: StoredThread,
+  inputId: string,
+): readonly ImageAttachment[] {
+  const input = stored.rollout.find(
+    (record) =>
+      record.item.type === "response_item" && record.item.item.id === inputId,
+  )
+  if (input?.item.type !== "response_item") return []
+  const message = input.item.item.item
+  if (message.role !== "user" || message.images === undefined) return []
+  return message.images.flatMap((image) =>
+    "file" in image && typeof image.sizeBytes === "number"
+      ? [
+          {
+            name: image.file.path.split("/").at(-1) ?? "image",
+            mediaType: image.mediaType,
+            sizeBytes: image.sizeBytes,
+            detail: image.detail ?? "high",
+            file: image.file,
+          },
+        ]
+      : [],
+  )
+}
+
+function requireRolloutAssets(
+  options: ThreadServerHandlerOptions,
+): RolloutAssets {
+  if (options.rolloutAssets !== undefined) return options.rolloutAssets
+  throw invalidInput("Forked image input requires rollout asset storage.")
+}
+
+function addUsage(left: TokenUsage | undefined, right: TokenUsage): TokenUsage {
+  return {
+    inputTokens: (left?.inputTokens ?? 0) + right.inputTokens,
+    outputTokens: (left?.outputTokens ?? 0) + right.outputTokens,
+    ...((left?.cacheReadInputTokens ?? 0) +
+      (right.cacheReadInputTokens ?? 0) ===
+    0
+      ? {}
+      : {
+          cacheReadInputTokens:
+            (left?.cacheReadInputTokens ?? 0) +
+            (right.cacheReadInputTokens ?? 0),
+        }),
+    ...((left?.cacheWriteInputTokens ?? 0) +
+      (right.cacheWriteInputTokens ?? 0) ===
+    0
+      ? {}
+      : {
+          cacheWriteInputTokens:
+            (left?.cacheWriteInputTokens ?? 0) +
+            (right.cacheWriteInputTokens ?? 0),
+        }),
+  }
 }
 
 function requireCreateSessionRequest(input: unknown) {
@@ -690,13 +1208,17 @@ function requireAdmitInputRequest(input: unknown, maxInputBytes: number) {
     input,
     "Input admission request must be an object.",
   )
+  const parentInputId = requireOptionalString(
+    record.parentInputId,
+    "parentInputId",
+  )
   return {
     sessionId: requireSessionId(record.sessionId, "sessionId"),
     requestId: requireRequestId(record.requestId),
     content: requireAdmissionTextContent(record.content, maxInputBytes),
     ...optionalModelSelectionField(record, "modelSelection"),
     ...optionalInputRoleField(record, "role"),
-    ...optionalStringField(record, "parentInputId"),
+    ...(parentInputId === undefined ? {} : { parentInputId }),
     ...optionalMetadataField(record, "metadata"),
   }
 }
@@ -1008,24 +1530,24 @@ function requireImageAttachment(
     mediaType,
     detail,
     sizeBytes: value.sizeBytes as number,
-    file: requireSessionFileReference(value.file, index),
+    file: requireRolloutAssetReference(value.file, index),
   }
 }
 
-function requireSessionFileReference(
+function requireRolloutAssetReference(
   value: unknown,
   index: number,
 ): ImageAttachment["file"] {
   if (
     !isRecord(value) ||
-    typeof value.sessionId !== "string" ||
+    !isStorageKey(value.rolloutId) ||
     typeof value.path !== "string"
   ) {
     throw invalidInput(
-      `content.attachments[${index}].file must be a Session file reference.`,
+      `content.attachments[${index}].file must be a rollout asset reference.`,
     )
   }
-  return { sessionId: value.sessionId, path: value.path }
+  return { rolloutId: value.rolloutId, path: value.path }
 }
 
 function optionalStringField(

@@ -11,7 +11,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { createSessionId } from "../../../src/kernel/ids.ts"
-import { createSessionFiles } from "../../../src/kernel/session-files.ts"
+import { createRolloutAssets } from "../../../src/kernel/rollout-assets.ts"
 import { createReadFileTool } from "../../../src/runtime/tools/read-file.ts"
 import {
   boundCommandContent,
@@ -246,19 +246,19 @@ describe("run_command contract", () => {
     expect(result.content).toContain("do not retry it unchanged")
   })
 
-  it("retains complete stdout and stderr as readable Session files", async () => {
+  it("retains complete stdout and stderr as readable rollout assets", async () => {
     const workspace = await makeWorkspace()
     const sessionId = createSessionId()
-    const sessionFiles = createSessionFiles(join(workspace, ".sessions"))
+    const rolloutAssets = await createCommandRolloutAssets(workspace, sessionId)
     const script = [
       'process.stdout.write("head\\n" + "x".repeat(4096) + "\\ntail\\n")',
       'process.stderr.write("warning\\n")',
     ].join(";")
     const context = {
       workspaceRoot: workspace,
-      sessionId,
+      rolloutId: sessionId,
       toolCallId: "call_output",
-      sessionFiles,
+      rolloutAssets,
     }
     const result = await createRunCommandTool({ maxOutputBytes: 64 }).execute(
       {
@@ -298,10 +298,10 @@ describe("run_command contract", () => {
     expect(read.content).toContain("tail")
   })
 
-  it("caps retained output and reports that the Session file is incomplete", async () => {
+  it("caps retained output and reports that the rollout asset is incomplete", async () => {
     const workspace = await makeWorkspace()
     const sessionId = createSessionId()
-    const sessionFiles = createSessionFiles(join(workspace, ".sessions"))
+    const rolloutAssets = await createCommandRolloutAssets(workspace, sessionId)
     const result = await createRunCommandTool({
       maxOutputBytes: 32,
       maxPersistedOutputBytes: 64,
@@ -311,9 +311,9 @@ describe("run_command contract", () => {
       },
       {
         workspaceRoot: workspace,
-        sessionId,
+        rolloutId: sessionId,
         toolCallId: "call_capped",
-        sessionFiles,
+        rolloutAssets,
       },
     )
 
@@ -326,8 +326,8 @@ describe("run_command contract", () => {
     })
     expect(result.content).toContain("64-byte limit")
     await expect(
-      sessionFiles.read({
-        sessionId,
+      rolloutAssets.read({
+        rolloutId: sessionId,
         path: "tools/call_capped/stdout.log",
       }),
     ).resolves.toEqual(Buffer.from("x".repeat(64)))
@@ -426,11 +426,14 @@ describe("run_command process lifecycle", () => {
   )
 
   it.skipIf(process.platform === "win32")(
-    "returns and finishes Session files when a detached descendant keeps stdout open",
+    "returns and finishes rollout assets when a detached descendant keeps stdout open",
     async () => {
       const workspace = await makeWorkspace()
       const sessionId = createSessionId()
-      const sessionFiles = createSessionFiles(join(workspace, ".sessions"))
+      const rolloutAssets = await createCommandRolloutAssets(
+        workspace,
+        sessionId,
+      )
       const descendant = "setTimeout(() => undefined, 4000)"
       const script = [
         'const { spawn } = require("node:child_process")',
@@ -445,9 +448,9 @@ describe("run_command process lifecycle", () => {
         },
         {
           workspaceRoot: workspace,
-          sessionId,
+          rolloutId: sessionId,
           toolCallId: "call_timeout",
-          sessionFiles,
+          rolloutAssets,
         },
       )
 
@@ -465,8 +468,8 @@ describe("run_command process lifecycle", () => {
       })
       expect(Date.now() - startedAt).toBeLessThan(2_000)
       await expect(
-        sessionFiles.read({
-          sessionId,
+        rolloutAssets.read({
+          rolloutId: sessionId,
           path: "tools/call_timeout/stdout.log",
         }),
       ).resolves.toBeInstanceOf(Buffer)
@@ -533,6 +536,24 @@ async function makeWorkspace(): Promise<string> {
   )
   workspaces.push(workspace)
   return workspace
+}
+
+async function createCommandRolloutAssets(
+  workspace: string,
+  rolloutId: string,
+) {
+  const storageRoot = join(workspace, ".sessions")
+  const rolloutDirectory = join(storageRoot, "rollouts", rolloutId)
+  await mkdir(rolloutDirectory, { recursive: true })
+  await writeFile(join(rolloutDirectory, "rollout.jsonl"), "fixture\n")
+  return createRolloutAssets(storageRoot, {
+    async withMutationLease(candidate, mutate) {
+      if (candidate !== rolloutId) {
+        throw new Error(`Physical rollout ${candidate} is not owned.`)
+      }
+      return mutate()
+    },
+  })
 }
 
 async function waitForFile(path: string): Promise<void> {

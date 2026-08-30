@@ -10,8 +10,6 @@ import type { Server as HttpServer } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { EventType, HistoryRecordType } from "../../src/kernel/events.ts"
-import { InputState } from "../../src/kernel/session-states.ts"
 import { MateLifecycle } from "../../src/mates/events.ts"
 import { createMateKernel } from "../../src/mates/mate-kernel.ts"
 import { createSqliteMateStore } from "../../src/mates/sqlite-mate-store.ts"
@@ -21,13 +19,13 @@ import { listCatalogModels } from "../../src/runtime/model-catalog.ts"
 import {
   createYakitoriApplication,
   resolveWorkspaceDirectory,
+  type YakitoriApplication,
 } from "../../src/server/application.ts"
 import {
   ApiErrorCode,
   type ApiHandlerResult,
   type ApiListProvidersResponse,
 } from "../../src/server/protocol.ts"
-import { testTurnExecutionContext } from "../kernel/turn-context.ts"
 
 async function listen(server: HttpServer): Promise<string> {
   await new Promise<void>((resolve) => {
@@ -47,7 +45,6 @@ function testApplicationOptions(input: {
 }) {
   return {
     ...input,
-    recoverOnStart: false,
     stream: createFauxProvider([]).stream,
     userConfigPath: join(input.rootDir, "config.toml"),
     modelDirectory: {
@@ -87,7 +84,7 @@ describe("application composition", () => {
         expectOk(created)
         const sessionId = created.body.session.id
         const imageBytes = pngBuffer(128)
-        const attachments = await application.sessionFiles.importImageBytes(
+        const attachments = await application.rolloutAssets.importImageBytes(
           sessionId,
           "draft_application_test",
           [{ name: "screen.png", data: imageBytes }],
@@ -102,7 +99,7 @@ describe("application composition", () => {
           },
         })
         expectOk(admitted)
-        await application.runner.wake(sessionId)
+        await waitForThreadIdle(application, sessionId)
 
         expect(admitted.body.event).toMatchObject({
           data: {
@@ -111,7 +108,7 @@ describe("application composition", () => {
                 {
                   detail: "high",
                   file: {
-                    sessionId,
+                    rolloutId: sessionId,
                     path: "attachments/requests/request_image/1.png",
                   },
                 },
@@ -126,6 +123,7 @@ describe("application composition", () => {
           await readFile(
             join(
               application.sessionStoreRoot,
+              "rollouts",
               sessionId,
               "files",
               "attachments",
@@ -149,15 +147,51 @@ describe("application composition", () => {
         })
 
         const image = await fetch(
-          `${baseUrl}/sessions/${sessionId}/files/attachments/requests/request_image/1.png`,
+          `${baseUrl}/rollouts/${sessionId}/assets/attachments/requests/request_image/1.png`,
         )
         expect(image.status).toBe(200)
         expect(image.headers.get("content-type")).toBe("image/png")
         expect(Buffer.from(await image.arrayBuffer())).toEqual(imageBytes)
         const logRoute = await fetch(
-          `${baseUrl}/sessions/${sessionId}/files/tools/call_1/stdout.log`,
+          `${baseUrl}/rollouts/${sessionId}/assets/tools/call_1/stdout.log`,
         )
         expect(logRoute.status).toBe(404)
+
+        const replacementBytes = Buffer.from(imageBytes)
+        replacementBytes[12] = 1
+        const replacementDraft =
+          await application.rolloutAssets.importImageBytes(
+            sessionId,
+            "draft_application_conflict",
+            [{ name: "screen.png", data: replacementBytes }],
+          )
+        const conflictingImage = await application.handlers.admitInput({
+          sessionId,
+          requestId: "request_image",
+          content: {
+            kind: "text",
+            text: "inspect",
+            attachments: replacementDraft,
+          },
+        })
+        expectError(conflictingImage, 409, ApiErrorCode.Conflict)
+        expect(conflictingImage.body.error.details).toMatchObject({
+          reason: "request_conflict",
+        })
+        expect(
+          await readFile(
+            join(
+              application.sessionStoreRoot,
+              "rollouts",
+              sessionId,
+              "files",
+              "attachments",
+              "requests",
+              "request_image",
+              "1.png",
+            ),
+          ),
+        ).toEqual(imageBytes)
 
         const rejectedFork = await application.handlers.forkSession({
           sessionId,
@@ -180,8 +214,137 @@ describe("application composition", () => {
           status: 400,
           body: { error: { code: ApiErrorCode.InvalidInput } },
         })
+
+        const forked = await application.handlers.forkSession({
+          sessionId,
+          atInputId: admitted.body.inputId,
+          reason: "edit",
+          content: {
+            kind: "text",
+            text: "inspect more closely",
+          },
+        })
+        expectOk(forked)
+        expect(forked.body.historyEndSeqExclusive).toBe(2)
+        await waitForThreadIdle(application, forked.body.session.id)
+
+        const child = await application.threadStore.readThread(
+          forked.body.session.id,
+        )
+        expect(child?.metadata).toMatchObject({
+          parentThreadId: sessionId,
+          forkedFromInputId: admitted.body.inputId,
+          forkReason: "edit",
+        })
+        const childInput = child?.rollout.find(
+          ({ item }) =>
+            item.type === "response_item" && item.item.id.startsWith("input_"),
+        )?.item
+        expect(childInput).toMatchObject({
+          item: {
+            item: {
+              images: [
+                {
+                  file: {
+                    rolloutId: forked.body.session.id,
+                    path: expect.stringMatching(
+                      /^attachments\/requests\/request_.+\/1\.png$/,
+                    ),
+                  },
+                },
+              ],
+            },
+          },
+        })
+        const childImagePath =
+          childInput?.type === "response_item" &&
+          childInput.item.item.role === "user"
+            ? childInput.item.item.images?.[0]?.file?.path
+            : undefined
+        if (childImagePath === undefined) {
+          throw new Error("Expected the forked input to retain its image.")
+        }
+        expect(
+          await readFile(
+            join(
+              application.sessionStoreRoot,
+              "rollouts",
+              forked.body.session.id,
+              "files",
+              childImagePath,
+            ),
+          ),
+        ).toEqual(imageBytes)
+
+        const concurrentSession = await application.handlers.createSession()
+        expectOk(concurrentSession)
+        const [draftA, draftB] = await Promise.all([
+          application.rolloutAssets.importImageBytes(
+            concurrentSession.body.session.id,
+            "draft_concurrent_a",
+            [{ name: "screen.png", data: imageBytes }],
+          ),
+          application.rolloutAssets.importImageBytes(
+            concurrentSession.body.session.id,
+            "draft_concurrent_b",
+            [{ name: "screen.png", data: imageBytes }],
+          ),
+        ])
+        const concurrent = await Promise.all([
+          application.handlers.admitInput({
+            sessionId: concurrentSession.body.session.id,
+            requestId: "request_concurrent_image",
+            content: { kind: "text", text: "A", attachments: draftA },
+          }),
+          application.handlers.admitInput({
+            sessionId: concurrentSession.body.session.id,
+            requestId: "request_concurrent_image",
+            content: { kind: "text", text: "B", attachments: draftB },
+          }),
+        ])
+        expect(concurrent.map((result) => result.status).sort()).toEqual([
+          201, 409,
+        ])
+        await expect(
+          application.rolloutAssets.read({
+            rolloutId: concurrentSession.body.session.id,
+            path: "attachments/requests/request_concurrent_image/1.png",
+          }),
+        ).resolves.toEqual(imageBytes)
       } finally {
         await closeServer(server)
+        await application.close()
+      }
+    })
+  })
+
+  it("drains live event listeners while closing an active Turn", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const provider = createFauxProvider([{ waitForAbort: true }])
+      const application = await createYakitoriApplication({
+        rootDir,
+        workspace,
+        stream: provider.stream,
+      })
+      try {
+        const created = await application.handlers.createSession()
+        expectOk(created)
+        const admitted = await application.handlers.admitInput({
+          sessionId: created.body.session.id,
+          requestId: "request_close_active",
+          content: { kind: "text", text: "wait" },
+        })
+        expectOk(admitted)
+        expect(
+          application.threadManager.getThread(created.body.session.id)?.status,
+        ).toBe("active")
+
+        await application.close()
+
+        expect(
+          application.threadManager.getThread(created.body.session.id)?.status,
+        ).toBeUndefined()
+      } finally {
         await application.close()
       }
     })
@@ -208,12 +371,12 @@ describe("application composition", () => {
         const created = await application.handlers.createSession({})
         expectOk(created)
         const sessionId = created.body.session.id
-        const attachments = await application.sessionFiles.importImageBytes(
+        const attachments = await application.rolloutAssets.importImageBytes(
           sessionId,
           "text_only_draft",
           [{ name: "screen.png", data: pngBuffer(128) }],
         )
-        const read = vi.spyOn(application.sessionFiles, "read")
+        const read = vi.spyOn(application.rolloutAssets, "read")
         const admitted = await application.handlers.admitInput({
           sessionId,
           requestId: "text_only_request",
@@ -225,7 +388,7 @@ describe("application composition", () => {
         })
         expectOk(admitted)
 
-        await application.runner.wake(sessionId)
+        await waitForThreadIdle(application, sessionId)
 
         expect(read).not.toHaveBeenCalled()
         expect(captured?.messages).toContainEqual({
@@ -244,7 +407,7 @@ describe("application composition", () => {
     })
   })
 
-  it("streams native image files from Session storage", async () => {
+  it("streams native images from rollout asset storage", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const application = await createYakitoriApplication(
         testApplicationOptions({ rootDir, workspace }),
@@ -257,7 +420,7 @@ describe("application composition", () => {
         const imageBytes = pngBuffer(128 * 1024 + 17)
         const sourcePath = join(rootDir, "large.png")
         await writeFile(sourcePath, imageBytes)
-        const [attachment] = await application.sessionFiles.importImagePaths(
+        const [attachment] = await application.rolloutAssets.importImagePaths(
           created.body.session.id,
           "draft_large_http",
           [sourcePath],
@@ -265,7 +428,7 @@ describe("application composition", () => {
         if (attachment === undefined) throw new Error("missing imported image")
 
         const response = await fetch(
-          `${baseUrl}/sessions/${attachment.file.sessionId}/files/${attachment.file.path}`,
+          `${baseUrl}/rollouts/${attachment.file.rolloutId}/assets/${attachment.file.path}`,
         )
 
         expect(response.status).toBe(200)
@@ -536,7 +699,6 @@ describe("application composition", () => {
         rootDir,
         workspace,
         userConfigPath: join(rootDir, "config.toml"),
-        recoverOnStart: false,
         stream: provider.stream,
         provider: "openai",
         model: "gpt-test",
@@ -550,17 +712,17 @@ describe("application composition", () => {
           content: { kind: "text", text: "hello" },
         })
         expectOk(admitted)
-        await application.runner.wake(created.body.session.id)
+        await waitForThreadIdle(application, created.body.session.id)
 
-        const read = await application.sessionKernel.readSession({
-          sessionId: created.body.session.id,
-        })
-        expect(read.session?.completedTurns[0]?.executionContext).toMatchObject(
-          {
-            provider: "openai",
-            model: "gpt-test",
-          },
+        const stored = await application.threadStore.readThread(
+          created.body.session.id,
         )
+        expect(
+          stored?.rollout.find((entry) => entry.item.type === "turn_context")
+            ?.item,
+        ).toMatchObject({
+          context: { selection: { provider: "openai", model: "gpt-test" } },
+        })
       } finally {
         await application.close()
       }
@@ -577,7 +739,6 @@ describe("application composition", () => {
           createYakitoriApplication({
             rootDir,
             workspace,
-            recoverOnStart: false,
             provider: "anthropic",
             model: "claude-test",
             providerStreams: { anthropic: injected.stream },
@@ -598,7 +759,6 @@ describe("application composition", () => {
         createYakitoriApplication({
           rootDir,
           workspace,
-          recoverOnStart: false,
           provider: "constructor",
           model: "unexpected",
         }),
@@ -617,7 +777,6 @@ describe("application composition", () => {
       const application = await createYakitoriApplication({
         rootDir,
         workspace,
-        recoverOnStart: false,
         stream: primary.stream,
         provider: "faux",
         model: "scripted",
@@ -633,7 +792,7 @@ describe("application composition", () => {
           modelSelection: { provider: "openai", model: "gpt-5.6-sol" },
         })
         expectOk(admitted)
-        await application.runner.wake(created.body.session.id)
+        await waitForThreadIdle(application, created.body.session.id)
 
         expect(primary.callCount).toBe(0)
         expect(selected.callCount).toBe(1)
@@ -657,7 +816,6 @@ describe("application composition", () => {
       const application = await createYakitoriApplication({
         rootDir,
         workspace,
-        recoverOnStart: false,
         provider: "faux",
         fauxScenario: "text",
       })
@@ -671,18 +829,28 @@ describe("application composition", () => {
           modelSelection: { provider: "grok", model: "grok-4.5" },
         })
         expectOk(admitted)
-        await application.runner.wake(created.body.session.id)
+        await waitForThreadIdle(application, created.body.session.id)
 
-        const read = await application.sessionKernel.readSession({
-          sessionId: created.body.session.id,
-        })
-        expect(read.session?.failedTurns[0]?.executionContext).toMatchObject({
-          provider: "grok",
-          model: "grok-4.5",
-        })
-        expect(read.session?.failedTurns[0]?.error?.message).toContain(
-          "Grok credentials not found",
+        const stored = await application.threadStore.readThread(
+          created.body.session.id,
         )
+        expect(
+          stored?.rollout.find((entry) => entry.item.type === "turn_context")
+            ?.item,
+        ).toMatchObject({
+          context: { selection: { provider: "grok", model: "grok-4.5" } },
+        })
+        expect(
+          stored?.rollout.find(
+            (entry) =>
+              entry.item.type === "turn_completed" &&
+              entry.item.outcome === "failed",
+          )?.item,
+        ).toMatchObject({
+          error: {
+            message: expect.stringContaining("Grok credentials not found"),
+          },
+        })
       } finally {
         await application.close()
         if (previousApiKey === undefined) delete process.env.XAI_API_KEY
@@ -699,7 +867,6 @@ describe("application composition", () => {
       const application = await createYakitoriApplication({
         rootDir,
         workspace,
-        recoverOnStart: false,
         provider: "faux",
         fauxScenario: "text",
       })
@@ -716,14 +883,84 @@ describe("application composition", () => {
             content: { kind: "text", text },
           })
           expectOk(admitted)
-          await application.runner.wake(created.body.session.id)
+          await waitForThreadIdle(application, created.body.session.id)
         }
 
-        const read = await application.sessionKernel.readSession({
+        const stored = await application.threadStore.readThread(
+          created.body.session.id,
+        )
+        const terminals = stored?.rollout.filter(
+          (entry) => entry.item.type === "turn_completed",
+        )
+        expect(terminals).toHaveLength(2)
+        expect(
+          terminals?.filter(
+            (entry) =>
+              entry.item.type === "turn_completed" &&
+              entry.item.outcome === "failed",
+          ),
+        ).toEqual([])
+      } finally {
+        await application.close()
+      }
+    })
+  })
+
+  it("replays idempotent admission with its durable host attributes", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const provider = createFauxProvider([
+        { content: [{ type: "text", text: "once" }] },
+      ])
+      const application = await createYakitoriApplication({
+        rootDir,
+        workspace,
+        stream: provider.stream,
+        userConfigPath: join(rootDir, "config.toml"),
+      })
+      try {
+        const created = await application.handlers.createSession()
+        expectOk(created)
+        const input = {
+          sessionId: created.body.session.id,
+          requestId: "request_idempotent_host",
+          content: { kind: "text", text: "only once" },
+          modelSelection: { provider: "faux", model: "scripted" },
+          parentInputId: "input_parent",
+          metadata: { source: "test" },
+        }
+        const admitted = await application.handlers.admitInput(input)
+        expectOk(admitted)
+        await waitForThreadIdle(application, created.body.session.id)
+        const replayed = await application.handlers.admitInput(input)
+        expectOk(replayed)
+        expect(replayed.status).toBe(200)
+        expect(replayed.body).toEqual(admitted.body)
+
+        const conflicting = await application.handlers.admitInput({
+          ...input,
+          content: { kind: "text", text: "different" },
+        })
+        expectError(conflicting, 409, ApiErrorCode.Conflict)
+        const read = await application.handlers.readSession({
           sessionId: created.body.session.id,
         })
-        expect(read.session?.completedTurns).toHaveLength(2)
-        expect(read.session?.failedTurns).toEqual([])
+        expectOk(read)
+        expect(read.body.session.counts.inputs).toBe(1)
+        const events = await application.handlers.readSessionEvents({
+          sessionId: created.body.session.id,
+        })
+        expectOk(events)
+        expect(
+          events.body.events.filter((event) => event.type === "input.admitted"),
+        ).toHaveLength(1)
+        expect(admitted.body.event).toMatchObject({
+          data: {
+            modelSelection: input.modelSelection,
+            parentInputId: input.parentInputId,
+            metadata: input.metadata,
+          },
+        })
+        expect(provider.callCount).toBe(1)
       } finally {
         await application.close()
       }
@@ -744,7 +981,6 @@ describe("application composition", () => {
       const application = await createYakitoriApplication({
         rootDir,
         workspace,
-        recoverOnStart: false,
         stream: provider.stream,
       })
       try {
@@ -758,14 +994,14 @@ describe("application composition", () => {
           content: { kind: "text", text: "first" },
         })
         expectOk(first)
-        await application.runner.wake(created.body.session.id)
+        await waitForThreadIdle(application, created.body.session.id)
         const second = await application.handlers.admitInput({
           sessionId: created.body.session.id,
           requestId: "request_fork_second",
           content: { kind: "text", text: "replace this" },
         })
         expectOk(second)
-        await application.runner.wake(created.body.session.id)
+        await waitForThreadIdle(application, created.body.session.id)
 
         const forked = await application.handlers.forkSession({
           sessionId: created.body.session.id,
@@ -775,39 +1011,30 @@ describe("application composition", () => {
           modelSelection: forkModelSelection,
         })
         expectOk(forked)
-        await application.runner.wake(forked.body.session.id)
+        await waitForThreadIdle(application, forked.body.session.id)
 
-        const source = await application.sessionKernel.readSession({
-          sessionId: created.body.session.id,
-        })
-        const target = await application.sessionKernel.readSession({
-          sessionId: forked.body.session.id,
-        })
-        expect(source.session?.completedTurns).toHaveLength(2)
-        expect(
-          source.session?.inputs.map((input) => input.content.text),
-        ).toEqual(["first", "replace this"])
-        expect(target.session?.completedTurns).toHaveLength(2)
-        expect(
-          target.session?.inputs.map((input) => input.content.text),
-        ).toEqual(["first", "replacement"])
-        expect(target.session?.inputs.at(-1)?.parentInputId).toBe(
-          second.body.inputId,
+        const source = await application.threadStore.readThread(
+          created.body.session.id,
         )
-        expect(target.session?.inputs.at(-1)?.modelSelection).toEqual(
-          forkModelSelection,
+        const target = await application.threadStore.readThread(
+          forked.body.session.id,
         )
-        expect(target.session).toMatchObject({
-          parentSessionId: created.body.session.id,
-          forkedFromInputId: second.body.inputId,
-          forkReason: "edit",
+        expect(completedTurnCount(source)).toBe(2)
+        expect(userTexts(source)).toEqual(["first", "replace this"])
+        expect(completedTurnCount(target)).toBe(2)
+        expect(userTexts(target)).toEqual(["first", "replacement"])
+        expect(target?.metadata).toMatchObject({
+          parentThreadId: created.body.session.id,
+          forkedFromTurnId: "request_fork_second",
           workingDirectory: application.workspace,
         })
-        expect(forked.body.events.at(-1)).toMatchObject({
-          sessionId: forked.body.session.id,
-          type: EventType.InputAdmitted,
-          data: { content: { kind: "text", text: "replacement" } },
-        })
+        expect(
+          target?.rollout.find(
+            (entry) =>
+              entry.item.type === "turn_context" &&
+              entry.item.context.turnId !== "request_fork_first",
+          )?.item,
+        ).toMatchObject({ context: { selection: forkModelSelection } })
         expect(provider.callCount).toBe(3)
       } finally {
         await application.close()
@@ -815,91 +1042,19 @@ describe("application composition", () => {
     })
   })
 
-  it("cancels queued Inputs inherited by a fork", async () => {
+  it("does not expose the removed durable pending-input queue", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
-      const application = await createYakitoriApplication({
-        ...testApplicationOptions({ rootDir, workspace }),
-        stream: createFauxProvider([]).stream,
-      })
+      const application = await createYakitoriApplication(
+        testApplicationOptions({ rootDir, workspace }),
+      )
       try {
-        const created = await application.handlers.createSession({
-          title: "Fork source",
-        })
+        const created = await application.handlers.createSession()
         expectOk(created)
-        const kernel = application.sessionKernel
-        const first = await application.handlers.admitInput({
+        const cancelled = await application.handlers.cancelInput({
           sessionId: created.body.session.id,
-          requestId: "request_inherited_first",
-          content: { kind: "text", text: "first" },
+          inputId: "input_00000000-0000-4000-8000-000000000000",
         })
-        expectOk(first)
-        const turn = await kernel.startTurn({
-          sessionId: created.body.session.id,
-          inputId: first.body.inputId,
-          executionContext: testTurnExecutionContext(),
-        })
-        // Admitted mid-Turn, so their admissions sit inside the Turn span.
-        const earlier = await application.handlers.admitInput({
-          sessionId: created.body.session.id,
-          requestId: "request_inherited_earlier",
-          content: { kind: "text", text: "earlier queued" },
-        })
-        expectOk(earlier)
-        const later = await application.handlers.admitInput({
-          sessionId: created.body.session.id,
-          requestId: "request_inherited_later",
-          content: { kind: "text", text: "later queued" },
-        })
-        expectOk(later)
-        await kernel.completeTurn({
-          sessionId: created.body.session.id,
-          turnId: turn.turnId,
-        })
-        // The user discards both queued Inputs on the source before undoing;
-        // those cancellations land after the fork boundary.
-        await kernel.cancelInput({
-          sessionId: created.body.session.id,
-          inputId: earlier.body.inputId,
-        })
-        await kernel.cancelInput({
-          sessionId: created.body.session.id,
-          inputId: later.body.inputId,
-        })
-
-        const forked = await application.handlers.forkSession({
-          sessionId: created.body.session.id,
-          atInputId: later.body.inputId,
-          reason: "undo",
-        })
-        expectOk(forked)
-
-        const target = await kernel.readSession({
-          sessionId: forked.body.session.id,
-        })
-        expect(target.session?.pendingInputs).toEqual([])
-        const inherited = target.session?.inputs.find(
-          (input) => input.content.text === "earlier queued",
-        )
-        expect(inherited).toMatchObject({ state: InputState.Cancelled })
-        const events = await kernel.readEvents({
-          sessionId: forked.body.session.id,
-        })
-        expect(events.events.at(-1)).toMatchObject({
-          type: EventType.InputCancelled,
-          data: {
-            inputId: earlier.body.inputId,
-            reason: "conversation_fork",
-          },
-        })
-        expect(forked.body.events.map((event) => event.type)).toEqual([
-          EventType.SessionCreated,
-          EventType.InputAdmitted,
-          HistoryRecordType.TurnContext,
-          EventType.TurnStarted,
-          EventType.InputAdmitted,
-          EventType.TurnCompleted,
-          EventType.InputCancelled,
-        ])
+        expectError(cancelled, 409, ApiErrorCode.Conflict)
       } finally {
         await application.close()
       }
@@ -912,7 +1067,6 @@ describe("application composition", () => {
         rootDir,
         workspace,
         userConfigPath: join(rootDir, "config.toml"),
-        recoverOnStart: false,
         stream: createFauxProvider([]).stream,
         provider: "openai",
         model: "gpt-custom-9",
@@ -1167,35 +1321,37 @@ describe("application composition", () => {
     })
   })
 
-  it("returns from startup after scheduling recovered pending work", async () => {
+  it("resumes stored Threads on demand without startup reconciliation", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const first = await createYakitoriApplication(
         testApplicationOptions({ rootDir, workspace }),
       )
       const created = await first.handlers.createSession()
       expectOk(created)
-      await first.sessionKernel.admitInput({
+      const admitted = await first.handlers.admitInput({
         sessionId: created.body.session.id,
+        requestId: "request_before_restart",
         content: { kind: "text", text: "resume after restart" },
       })
+      expectOk(admitted)
+      await waitForThreadIdle(first, created.body.session.id)
       await first.close()
 
-      const provider = createFauxProvider([{ waitForAbort: true }])
-      const started = await Promise.race([
-        createYakitoriApplication({
-          rootDir,
-          workspace,
-          stream: provider.stream,
-        }),
-        new Promise<never>((_, reject) => {
-          setTimeout(
-            () => reject(new Error("startup waited for execution")),
-            250,
-          )
-        }),
-      ])
+      const started = await createYakitoriApplication(
+        testApplicationOptions({ rootDir, workspace }),
+      )
       try {
-        expect(started).toBeDefined()
+        expect(started.threadManager.getThread(created.body.session.id)).toBe(
+          undefined,
+        )
+        const read = await started.handlers.readSession({
+          sessionId: created.body.session.id,
+        })
+        expectOk(read)
+        expect(read.body.session.counts.turns).toBe(1)
+        expect(started.threadManager.getThread(created.body.session.id)).toBe(
+          undefined,
+        )
       } finally {
         await started.close()
       }
@@ -1349,6 +1505,55 @@ async function withApplicationRoot(
   }
 }
 
+async function waitForThreadIdle(
+  application: YakitoriApplication,
+  threadId: string,
+): Promise<void> {
+  const thread = application.threadManager.getThread(threadId)
+  if (thread === undefined || thread.status === "idle") return
+  await new Promise<void>((resolve) => {
+    const unsubscribe = thread.subscribeStatus((status) => {
+      if (status !== "idle") return
+      unsubscribe()
+      resolve()
+    })
+  })
+}
+
+function completedTurnCount(
+  stored: Awaited<ReturnType<YakitoriApplication["threadStore"]["readThread"]>>,
+): number {
+  return (
+    stored?.rollout.filter(
+      (entry) =>
+        entry.item.type === "turn_completed" &&
+        entry.item.outcome === "completed",
+    ).length ?? 0
+  )
+}
+
+function userTexts(
+  stored: Awaited<ReturnType<YakitoriApplication["threadStore"]["readThread"]>>,
+): string[] {
+  return (
+    stored?.rollout.flatMap((entry) => {
+      if (
+        entry.item.type !== "response_item" ||
+        entry.item.item.item.role !== "user" ||
+        entry.item.item.item.context !== undefined
+      ) {
+        return []
+      }
+      return [
+        entry.item.item.item.content
+          .filter((block) => block.type === "text")
+          .map((block) => block.text)
+          .join(""),
+      ]
+    }) ?? []
+  )
+}
+
 async function closeServer(server: HttpServer): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     server.close((error) => {
@@ -1370,7 +1575,11 @@ function pngBuffer(size: number): Buffer {
 function expectOk<T>(
   result: ApiHandlerResult<T>,
 ): asserts result is Extract<ApiHandlerResult<T>, { readonly ok: true }> {
-  if (!result.ok) throw new Error(`Expected success: ${result.body.error.code}`)
+  if (!result.ok) {
+    throw new Error(
+      `Expected success: ${result.body.error.code}: ${result.body.error.message}`,
+    )
+  }
 }
 
 function expectError<T>(

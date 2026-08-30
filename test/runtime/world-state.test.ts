@@ -1,9 +1,8 @@
 import { describe, expect, it } from "vitest"
-import type { SessionProjection } from "../../src/kernel/index.ts"
 import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
 import type { ProjectInstructions } from "../../src/runtime/project-instructions.ts"
 import {
-  buildWorldState,
+  buildWorldStateFromSnapshot,
   diffWorldState,
 } from "../../src/runtime/world-state.ts"
 
@@ -104,7 +103,7 @@ function worldState(
   project?: ProjectInstructions,
   currentDate = "2026-08-21",
   enabledTools: readonly string[] = [],
-  multiAgent?: Parameters<typeof buildWorldState>[0]["multiAgent"],
+  multiAgent?: Parameters<typeof buildWorldStateFromSnapshot>[0]["multiAgent"],
 ) {
   const sessionConfiguration = SessionConfiguration.create({
     promptCacheKey: "session-cache",
@@ -113,11 +112,10 @@ function worldState(
     enabledTools,
     approvalPolicy: "never",
   })
-  return buildWorldState({
+  return buildWorldStateFromSnapshot({
     configuration: sessionConfiguration.resolveTurn(
       sessionConfiguration.snapshot.defaultTarget,
     ),
-    session: emptySession(),
     environment: {
       workspaceRoot: "/workspace",
       workingDirectory: "/workspace",
@@ -130,27 +128,6 @@ function worldState(
     ...(multiAgent === undefined ? {} : { multiAgent }),
     ...(project === undefined ? {} : { projectInstructions: project }),
   })
-}
-
-function emptySession(): SessionProjection {
-  return {
-    id: "session_1",
-    seq: 1,
-    createdAt: "2026-08-21T00:00:00.000Z",
-    updatedAt: "2026-08-21T00:00:00.000Z",
-    conversationId: "session_1",
-    worldStateUpdates: [],
-    turnAbortedContexts: [],
-    inputs: [],
-    pendingInputs: [],
-    completedTurns: [],
-    failedTurns: [],
-    cancelledTurns: [],
-    interruptedTurns: [],
-    items: [],
-    tools: [],
-    turns: [],
-  }
 }
 
 function projectInstructions(text: string): ProjectInstructions {

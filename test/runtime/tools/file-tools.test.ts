@@ -11,13 +11,14 @@ import {
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import type { ToolProjection } from "../../../src/kernel/session-projector.ts"
-import { ToolState } from "../../../src/kernel/session-states.ts"
 import { createEditFileTool } from "../../../src/runtime/tools/edit-file.ts"
 import { resolveWorkspaceRoot } from "../../../src/runtime/tools/path-policy.ts"
 import { createReadFileTool } from "../../../src/runtime/tools/read-file.ts"
 import { createToolRegistry } from "../../../src/runtime/tools/registry.ts"
-import { createVisibleFileObservations } from "../../../src/runtime/tools/visible-file-observations.ts"
+import {
+  createVisibleFileObservations,
+  type StoredToolObservation,
+} from "../../../src/runtime/tools/visible-file-observations.ts"
 import { createWriteFileTool } from "../../../src/runtime/tools/write-file.ts"
 
 describe("bounded file tools", () => {
@@ -1116,36 +1117,18 @@ function observedContext(workspaceRoot: string, path: string, content: string) {
 }
 
 function visibleReadObservation(
-  output: Exclude<ToolProjection["output"], undefined>,
+  output: Exclude<StoredToolObservation["output"], undefined>,
 ) {
   return createVisibleFileObservations([toolProjection("read_file", output)])
 }
 
-let toolProjectionIndex = 0
-
 function toolProjection(
   name: string,
-  output: Exclude<ToolProjection["output"], undefined>,
-): ToolProjection {
-  toolProjectionIndex += 1
+  output: Exclude<StoredToolObservation["output"], undefined>,
+): StoredToolObservation {
   return {
-    toolCallId: `tool_observation_${toolProjectionIndex}`,
-    turnId: "turn_observation",
     name,
-    input: {},
-    execution: {
-      type: "dynamic_tool_call",
-      itemId: `item_observation_${toolProjectionIndex}`,
-      toolCallId: `tool_observation_${toolProjectionIndex}`,
-      name,
-      input: {},
-      requiresPermission: false,
-    },
-    state: ToolState.Completed,
-    requestedAt: "2026-08-05T00:00:00.000Z",
-    updatedAt: "2026-08-05T00:00:01.000Z",
-    requestItemId: `item_observation_${toolProjectionIndex}`,
-    requiresPermission: false,
+    state: "completed",
     output,
   }
 }

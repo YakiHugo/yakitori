@@ -1,4 +1,4 @@
-import { createEventId } from "./ids.ts"
+import { createEventId, isStorageKey } from "./ids.ts"
 import { jsonValuesEqual } from "./json-equality.ts"
 
 export const EVENT_SCHEMA_VERSION = 5
@@ -12,17 +12,6 @@ export const EventType = {
   ItemStarted: "item.started",
   ItemCompleted: "item.completed",
   ContextCompacted: "context.compacted",
-} as const
-
-// Durable configuration and context records are separate from execution
-// events delivered to GUI subscribers.
-export const HistoryRecordType = {
-  SessionMetadata: "session.metadata",
-  TurnContext: "turn.context",
-  InitialContext: "history.initialized",
-  WorldState: "world_state",
-  ProviderUsageBaseline: "provider.usage_baseline",
-  TurnAborted: "turn.aborted",
 } as const
 
 export const ForkReason = {
@@ -65,8 +54,6 @@ export const MISSING_TOOL_RESULT_TEXT =
   "No tool result was recorded. Execution status and side effects are unknown. Inspect the current state before retrying."
 
 export type EventType = (typeof EventType)[keyof typeof EventType]
-export type HistoryRecordType =
-  (typeof HistoryRecordType)[keyof typeof HistoryRecordType]
 export type InputRole = (typeof InputRole)[keyof typeof InputRole]
 export type ItemKind = (typeof ItemKind)[keyof typeof ItemKind]
 export type ItemStatus = (typeof ItemStatus)[keyof typeof ItemStatus]
@@ -88,8 +75,8 @@ export type TextContent = {
   readonly attachments?: readonly ImageAttachment[]
 }
 
-export type SessionFileReference = {
-  readonly sessionId: string
+export type RolloutAssetReference = {
+  readonly rolloutId: string
   readonly path: string
 }
 
@@ -103,7 +90,7 @@ type ImageAttachmentMetadata = {
 export type ImageDetail = "high" | "original"
 
 export type ImageAttachment = ImageAttachmentMetadata & {
-  readonly file: SessionFileReference
+  readonly file: RolloutAssetReference
 }
 
 export type JsonContent = {
@@ -133,7 +120,7 @@ export type ModelImageBlock =
       readonly type: "image"
       readonly mediaType: ImageAttachment["mediaType"]
       readonly detail?: ImageDetail
-      readonly file: SessionFileReference
+      readonly file: RolloutAssetReference
       readonly sizeBytes: number
       readonly data?: never
     }
@@ -180,11 +167,27 @@ export type ModelAssistantMessage = {
   readonly content: readonly ModelContentBlock[]
 }
 
+export type FileObservation = {
+  readonly path: string
+  readonly kind: "edit" | "ranged_read" | "whole_file_read" | "write"
+  readonly complete: boolean
+  readonly sha256?: string
+  readonly ranges?: readonly {
+    readonly startLine: number
+    readonly endLine: number
+  }[]
+  readonly created?: boolean
+  readonly optimisticRebase?: boolean
+}
+
 export type ModelToolResultMessage = {
   readonly role: "tool"
   readonly toolCallId: string
   readonly content: string
   readonly isError?: boolean
+  // Execution-only metadata. Providers receive content; the actor retains this
+  // grant so later model-visible Turns can safely authorize file mutations.
+  readonly fileObservation?: FileObservation
 }
 
 export type ModelMessage =
@@ -338,29 +341,6 @@ export type SessionCreatedEvent = {
     readonly forkReason?: ForkReason
     readonly historyBase?: SessionHistoryPosition
     readonly metadata?: EventMetadata
-  }
-}
-
-export type SessionMetadataRecord = {
-  readonly type: typeof HistoryRecordType.SessionMetadata
-  readonly data: {
-    readonly configuration: SessionConfigurationSnapshot
-  }
-}
-
-export type TurnContextRecord = {
-  readonly type: typeof HistoryRecordType.TurnContext
-  readonly data: {
-    readonly turnId: string
-    readonly context: TurnExecutionContext
-  }
-}
-
-export type TurnAbortedRecord = {
-  readonly type: typeof HistoryRecordType.TurnAborted
-  readonly data: {
-    readonly turnId: string
-    readonly message: ModelUserMessage
   }
 }
 
@@ -655,19 +635,6 @@ export type WorldStateFragment = {
   readonly text: string
 }
 
-export type WorldStateRecord = {
-  readonly type: typeof HistoryRecordType.WorldState
-  readonly data: {
-    readonly turnId: string
-    readonly afterItemId?: string
-    readonly full: boolean
-    /** Complete state when full, otherwise an RFC 7386 merge patch. */
-    readonly state: JsonObject
-    /** Exact model-visible text is durable even if renderers later change. */
-    readonly fragments: readonly WorldStateFragment[]
-  }
-}
-
 export type ContextCompactedEvent = {
   readonly type: typeof EventType.ContextCompacted
   readonly data: {
@@ -681,25 +648,6 @@ export type ContextCompactedEvent = {
   }
 }
 
-export type InitialContextRecord = {
-  readonly type: typeof HistoryRecordType.InitialContext
-  readonly data: {
-    readonly windowId: string
-    readonly sourceSessionId: string
-    readonly history: readonly ModelMessage[]
-    readonly worldStateBaseline?: JsonObject
-  }
-}
-
-export type ProviderUsageBaselineRecord = {
-  readonly type: typeof HistoryRecordType.ProviderUsageBaseline
-  readonly data: {
-    readonly turnId: string
-    readonly modelCallId: string
-    readonly baseline: ProviderUsageBaseline
-  }
-}
-
 export type KernelEvent =
   | SessionCreatedEvent
   | InputAdmittedEvent
@@ -710,17 +658,7 @@ export type KernelEvent =
   | ItemCompletedEvent
   | ContextCompactedEvent
 
-export type SessionHistoryRecord =
-  | SessionMetadataRecord
-  | TurnContextRecord
-  | TurnAbortedRecord
-  | WorldStateRecord
-  | InitialContextRecord
-  | ProviderUsageBaselineRecord
-
-export type HistoryRecord = SessionHistoryRecord
-
-export type KernelFact = KernelEvent | HistoryRecord
+export type KernelFact = KernelEvent
 
 export type EventEnvelopeBase = {
   readonly id: string
@@ -730,9 +668,8 @@ export type EventEnvelopeBase = {
   readonly createdAt: string
 }
 
-export type EventEnvelope = EventEnvelopeBase & KernelFact
+export type EventEnvelope = EventEnvelopeBase & KernelEvent
 export type RuntimeEventEnvelope = EventEnvelopeBase & KernelEvent
-export type HistoryRecordEnvelope = EventEnvelopeBase & HistoryRecord
 
 export type OpaqueEventEnvelope = EventEnvelopeBase & {
   readonly type: string
@@ -741,7 +678,7 @@ export type OpaqueEventEnvelope = EventEnvelopeBase & {
 
 export type StoredEventEnvelope = EventEnvelope | OpaqueEventEnvelope
 
-export type EventEnvelopeInput<Fact extends KernelFact = KernelFact> = {
+export type EventEnvelopeInput<Fact extends KernelEvent = KernelEvent> = {
   readonly sessionId: string
   readonly seq: number
   readonly event: Fact
@@ -750,7 +687,7 @@ export type EventEnvelopeInput<Fact extends KernelFact = KernelFact> = {
   readonly createdAt?: string
 }
 
-export function createEventEnvelope<const Fact extends KernelFact>(
+export function createEventEnvelope<const Fact extends KernelEvent>(
   input: EventEnvelopeInput<Fact>,
 ): EventEnvelopeBase & Fact {
   if (!Number.isInteger(input.seq) || input.seq <= 0) {
@@ -762,7 +699,7 @@ export function createEventEnvelope<const Fact extends KernelFact>(
       `Event version must be ${String(EVENT_SCHEMA_VERSION)}.`,
     )
   }
-  requireKernelFact(input.event)
+  requireKernelEvent(input.event)
   return {
     id: input.id ?? createEventId(),
     sessionId: input.sessionId,
@@ -777,45 +714,20 @@ export function isKnownEventType(value: unknown): value is EventType {
   return typeof value === "string" && eventTypes.has(value)
 }
 
-export function isKnownHistoryRecordType(
-  value: unknown,
-): value is HistoryRecordType {
-  return typeof value === "string" && historyRecordTypes.has(value)
-}
-
 export function isKernelEvent(value: unknown): value is KernelEvent {
   if (!isRecord(value) || !isKnownEventType(value.type)) return false
   try {
-    requireKernelFact(value)
+    requireKernelEvent(value)
     return true
   } catch {
     return false
   }
 }
 
-export function isHistoryRecord(value: unknown): value is HistoryRecord {
-  if (!isRecord(value) || !isKnownHistoryRecordType(value.type)) return false
-  try {
-    requireKernelFact(value)
-    return true
-  } catch {
-    return false
-  }
-}
-
-export function isKernelFact(value: unknown): value is KernelFact {
-  try {
-    requireKernelFact(value)
-    return true
-  } catch {
-    return false
-  }
-}
-
-function requireKernelFact(value: unknown): asserts value is KernelFact {
+function requireKernelEvent(value: unknown): asserts value is KernelEvent {
   if (
     !isRecord(value) ||
-    (!isKnownEventType(value.type) && !isKnownHistoryRecordType(value.type)) ||
+    !isKnownEventType(value.type) ||
     !isRecord(value.data)
   ) {
     throw new TypeError("Invalid kernel event.")
@@ -840,11 +752,6 @@ function requireKernelFact(value: unknown): asserts value is KernelFact {
           (data.forkReason === undefined || isForkReason(data.forkReason)) &&
           (data.historyBase === undefined ||
             isSessionHistoryPosition(data.historyBase))
-        )
-      case HistoryRecordType.SessionMetadata:
-        return (
-          onlyKeys(data, ["configuration"]) &&
-          isSessionConfigurationSnapshot(data.configuration)
         )
       case EventType.InputAdmitted:
         return (
@@ -872,19 +779,6 @@ function requireKernelFact(value: unknown): asserts value is KernelFact {
           isString(data.turnId) &&
           isString(data.inputId) &&
           (data.parentTurnId === undefined || isString(data.parentTurnId))
-        )
-      case HistoryRecordType.TurnContext:
-        return (
-          onlyKeys(data, ["turnId", "context"]) &&
-          isString(data.turnId) &&
-          isTurnExecutionContext(data.context)
-        )
-      case HistoryRecordType.TurnAborted:
-        return (
-          onlyKeys(data, ["turnId", "message"]) &&
-          isString(data.turnId) &&
-          isModelMessage(data.message) &&
-          data.message.role === "user"
         )
       case EventType.TurnCompleted:
         return (
@@ -915,29 +809,6 @@ function requireKernelFact(value: unknown): asserts value is KernelFact {
           isString(data.turnId) &&
           isCompletedExecutionItem(data.item)
         )
-      case HistoryRecordType.WorldState:
-        return (
-          onlyKeys(data, [
-            "turnId",
-            "afterItemId",
-            "full",
-            "state",
-            "fragments",
-          ]) &&
-          isString(data.turnId) &&
-          (data.afterItemId === undefined || isString(data.afterItemId)) &&
-          typeof data.full === "boolean" &&
-          isJsonObject(data.state) &&
-          Array.isArray(data.fragments) &&
-          data.fragments.every(isWorldStateFragment)
-        )
-      case HistoryRecordType.ProviderUsageBaseline:
-        return (
-          onlyKeys(data, ["turnId", "modelCallId", "baseline"]) &&
-          isString(data.turnId) &&
-          isString(data.modelCallId) &&
-          isProviderUsageBaseline(data.baseline)
-        )
       case EventType.ContextCompacted:
         return (
           onlyKeys(data, [
@@ -958,65 +829,11 @@ function requireKernelFact(value: unknown): asserts value is KernelFact {
           (data.usage === undefined || isTokenUsage(data.usage)) &&
           isContextWindowReplacement(data.replacement)
         )
-      case HistoryRecordType.InitialContext:
-        return (
-          onlyKeys(data, [
-            "windowId",
-            "sourceSessionId",
-            "history",
-            "worldStateBaseline",
-          ]) &&
-          isString(data.windowId) &&
-          isString(data.sourceSessionId) &&
-          Array.isArray(data.history) &&
-          data.history.every(isModelMessage) &&
-          (data.worldStateBaseline === undefined ||
-            isJsonObject(data.worldStateBaseline))
-        )
     }
   })()
   if (!valid || !optionalFieldsAreValid(data)) {
     throw new TypeError(`Invalid event data for ${value.type}.`)
   }
-}
-
-function isProviderUsageBaseline(
-  value: unknown,
-): value is ProviderUsageBaseline {
-  return (
-    isRecord(value) &&
-    onlyKeys(value, [
-      "provider",
-      "model",
-      "contextWindowId",
-      "systemRevisions",
-      "toolContractDigest",
-      "messagePrefixDigests",
-      "providerInputTokens",
-      "estimatedInputTokens",
-    ]) &&
-    isString(value.provider) &&
-    isString(value.model) &&
-    isString(value.contextWindowId) &&
-    Array.isArray(value.systemRevisions) &&
-    value.systemRevisions.every(isString) &&
-    isString(value.toolContractDigest) &&
-    Array.isArray(value.messagePrefixDigests) &&
-    value.messagePrefixDigests.every(isString) &&
-    isNonNegativeInteger(value.providerInputTokens) &&
-    isNonNegativeInteger(value.estimatedInputTokens)
-  )
-}
-
-function isWorldStateFragment(value: unknown): value is WorldStateFragment {
-  return (
-    isRecord(value) &&
-    onlyKeys(value, ["id", "revision", "role", "text"]) &&
-    isString(value.id) &&
-    isString(value.revision) &&
-    (value.role === "user" || value.role === "developer") &&
-    isString(value.text)
-  )
 }
 
 function isToolExecutionItem(value: unknown): value is ToolExecutionItem {
@@ -1460,14 +1277,22 @@ function isContextWindowReplacement(
   )
 }
 
-function isModelMessage(value: unknown): value is ModelMessage {
+export function isModelMessage(value: unknown): value is ModelMessage {
   if (!isRecord(value) || !isString(value.role)) return false
   if (value.role === "tool") {
     return (
-      onlyKeys(value, ["role", "toolCallId", "content", "isError"]) &&
+      onlyKeys(value, [
+        "role",
+        "toolCallId",
+        "content",
+        "isError",
+        "fileObservation",
+      ]) &&
       isString(value.toolCallId) &&
       isString(value.content) &&
-      (value.isError === undefined || typeof value.isError === "boolean")
+      (value.isError === undefined || typeof value.isError === "boolean") &&
+      (value.fileObservation === undefined ||
+        isFileObservation(value.fileObservation))
     )
   }
   if (value.role === "assistant") {
@@ -1494,6 +1319,54 @@ function isModelMessage(value: unknown): value is ModelMessage {
         value.images.every(isModelImageBlock))) &&
     (value.context === undefined || isModelHistoryContext(value.context))
   )
+}
+
+function isFileObservation(value: unknown): value is FileObservation {
+  if (
+    !isRecord(value) ||
+    !onlyKeys(value, [
+      "path",
+      "kind",
+      "complete",
+      "sha256",
+      "ranges",
+      "created",
+      "optimisticRebase",
+    ]) ||
+    !isString(value.path) ||
+    (value.kind !== "edit" &&
+      value.kind !== "ranged_read" &&
+      value.kind !== "whole_file_read" &&
+      value.kind !== "write") ||
+    typeof value.complete !== "boolean" ||
+    (value.sha256 !== undefined &&
+      (!isString(value.sha256) || !/^[a-f0-9]{64}$/iu.test(value.sha256))) ||
+    (value.created !== undefined && typeof value.created !== "boolean") ||
+    (value.optimisticRebase !== undefined &&
+      typeof value.optimisticRebase !== "boolean")
+  ) {
+    return false
+  }
+  return (
+    value.ranges === undefined ||
+    (Array.isArray(value.ranges) && value.ranges.every(isFileObservationRange))
+  )
+}
+
+function isFileObservationRange(
+  value: unknown,
+): value is { readonly startLine: number; readonly endLine: number } {
+  if (
+    !isRecord(value) ||
+    !onlyKeys(value, ["startLine", "endLine"]) ||
+    typeof value.startLine !== "number" ||
+    typeof value.endLine !== "number" ||
+    !isPositiveInteger(value.startLine) ||
+    !isPositiveInteger(value.endLine)
+  ) {
+    return false
+  }
+  return value.endLine >= value.startLine
 }
 
 function isModelContentBlock(value: unknown): boolean {
@@ -1525,7 +1398,7 @@ function isModelImageBlock(value: unknown): boolean {
     onlyKeys(value, ["type", "mediaType", "detail", "file", "sizeBytes"]) &&
     isSupportedImageMediaType(value.mediaType) &&
     (value.detail === undefined || isImageDetail(value.detail)) &&
-    isSessionFileReference(value.file) &&
+    isRolloutAssetReference(value.file) &&
     isNonNegativeInteger(value.sizeBytes)
   )
 }
@@ -1540,7 +1413,7 @@ function isModelHistoryContext(value: unknown): boolean {
   )
 }
 
-function isSessionConfigurationSnapshot(
+export function isSessionConfigurationSnapshot(
   value: unknown,
 ): value is SessionConfigurationSnapshot {
   if (!isRecord(value)) return false
@@ -1699,7 +1572,7 @@ function isInputRole(value: unknown): value is InputRole {
   return typeof value === "string" && inputRoles.has(value)
 }
 
-function isTokenUsage(value: unknown): value is TokenUsage {
+export function isTokenUsage(value: unknown): value is TokenUsage {
   return (
     isRecord(value) &&
     onlyKeys(value, [
@@ -1756,15 +1629,17 @@ function isImageAttachment(value: unknown): value is ImageAttachment {
     isSupportedImageMediaType(value.mediaType) &&
     (value.detail === undefined || isImageDetail(value.detail)) &&
     isNonNegativeInteger(value.sizeBytes) &&
-    isSessionFileReference(value.file)
+    isRolloutAssetReference(value.file)
   )
 }
 
-function isSessionFileReference(value: unknown): value is SessionFileReference {
+function isRolloutAssetReference(
+  value: unknown,
+): value is RolloutAssetReference {
   return (
     isRecord(value) &&
-    onlyKeys(value, ["sessionId", "path"]) &&
-    isString(value.sessionId) &&
+    onlyKeys(value, ["rolloutId", "path"]) &&
+    isStorageKey(value.rolloutId) &&
     isString(value.path)
   )
 }
@@ -1784,7 +1659,7 @@ function isImageDetail(value: unknown): value is ImageDetail {
   return value === "high" || value === "original"
 }
 
-function isModelSelection(value: unknown): value is ModelSelection {
+export function isModelSelection(value: unknown): value is ModelSelection {
   return (
     isRecord(value) &&
     onlyKeys(value, ["provider", "model", "effort", "speed"]) &&
@@ -1834,51 +1709,6 @@ function isTurnOutcome(value: unknown): value is TurnOutcome {
   }
 }
 
-function isTurnExecutionContext(value: unknown): value is TurnExecutionContext {
-  if (!isRecord(value) || !isRecord(value.executionPolicy)) return false
-  const policy = value.executionPolicy
-  const compactionTriggerContextBytes = policy.compactionTriggerContextBytes
-  const compactionRetainContextBytes = policy.compactionRetainContextBytes
-  return (
-    isString(value.mateId) &&
-    isString(value.mateRevisionId) &&
-    isString(value.provider) &&
-    isString(value.model) &&
-    (value.effort === undefined || isString(value.effort)) &&
-    (value.speed === undefined || isString(value.speed)) &&
-    isString(value.instructionProfileId) &&
-    isString(value.baseInstructionsRevision) &&
-    isString(value.modelInstructionsRevision) &&
-    (value.modelContextWindowTokens === undefined ||
-      isPositiveInteger(value.modelContextWindowTokens)) &&
-    (value.effectiveModelContextWindowTokens === undefined ||
-      isPositiveInteger(value.effectiveModelContextWindowTokens)) &&
-    (typeof value.modelContextWindowTokens !== "number" ||
-      typeof value.effectiveModelContextWindowTokens !== "number" ||
-      value.effectiveModelContextWindowTokens <=
-        value.modelContextWindowTokens) &&
-    isString(value.workingDirectory) &&
-    isString(value.approvalPolicy) &&
-    Array.isArray(value.enabledTools) &&
-    value.enabledTools.every(isString) &&
-    isNonNegativeInteger(compactionTriggerContextBytes) &&
-    isNonNegativeInteger(compactionRetainContextBytes) &&
-    compactionRetainIsBelowTrigger(
-      compactionRetainContextBytes,
-      compactionTriggerContextBytes,
-    ) &&
-    [
-      "modelCallsPerTurn",
-      "toolCallsPerTurn",
-      "modelVisibleMessageBlocks",
-      "modelVisibleContextBytes",
-      "modelVisibleToolResultBytes",
-      "modelVisibleToolResultLines",
-      "assistantResponseBytes",
-    ].every((key) => isNonNegativeInteger(policy[key]))
-  )
-}
-
 export function isJsonObject(value: unknown): value is JsonObject {
   return isRecord(value) && Object.values(value).every(isJsonValue)
 }
@@ -1895,17 +1725,6 @@ function isNonNegativeInteger(value: unknown): boolean {
   return typeof value === "number" && Number.isInteger(value) && value >= 0
 }
 
-function compactionRetainIsBelowTrigger(
-  retain: unknown,
-  trigger: unknown,
-): boolean {
-  return (
-    typeof retain === "number" &&
-    typeof trigger === "number" &&
-    retain < trigger
-  )
-}
-
 function isPositiveInteger(value: unknown): boolean {
   return typeof value === "number" && Number.isInteger(value) && value >= 1
 }
@@ -1919,5 +1738,4 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 const eventTypes = new Set<string>(Object.values(EventType))
-const historyRecordTypes = new Set<string>(Object.values(HistoryRecordType))
 const inputRoles = new Set<string>(Object.values(InputRole))

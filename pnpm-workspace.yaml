@@ -7,3 +7,4 @@ allowBuilds:
   # Windows-only installer tool from electron-builder; unused for the mac dir
   # target, so its install script stays disabled.
   electron-winstaller: false
+  fs-ext: true

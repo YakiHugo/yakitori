@@ -3,7 +3,7 @@ import type {
   JsonValue,
   ToolExecutionDescriptor,
 } from "../../kernel/index.ts"
-import type { SessionFiles } from "../../kernel/session-files.ts"
+import type { RolloutAssets } from "../../kernel/rollout-assets.ts"
 import type { BoundAgentControl } from "../agent-control.ts"
 import type { VisibleFileObservations } from "./visible-file-observations.ts"
 
@@ -22,9 +22,9 @@ export type ToolApprovalRequirement =
 
 export type ToolExecutionContext = Readonly<{
   workspaceRoot: string
-  sessionId?: string
+  rolloutId?: string
   toolCallId?: string
-  sessionFiles?: SessionFiles
+  rolloutAssets?: RolloutAssets
   signal?: AbortSignal
   visibleFileObservations?: VisibleFileObservations
   agentControl?: BoundAgentControl

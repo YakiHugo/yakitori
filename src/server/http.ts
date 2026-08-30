@@ -7,12 +7,9 @@ import {
 import { extname, join, resolve, sep } from "node:path"
 import { pipeline } from "node:stream/promises"
 import {
-  createSessionKernel,
-  type EventStore,
   isKernelEvent,
   isYakitoriError,
-  type SessionKernel,
-  type SessionFiles,
+  type RolloutAssets,
   type StoredEventEnvelope,
 } from "../kernel/index.ts"
 import type { LiveSessionEvent } from "../runtime/live-events.ts"
@@ -21,7 +18,7 @@ import {
   type SessionDelivery,
   type SessionEventHub,
 } from "./event-hub.ts"
-import { createServerHandlers, type ServerHandlers } from "./handlers.ts"
+import type { ServerHandlers } from "./handlers.ts"
 import type { ProjectRegistry } from "./project-registry.ts"
 import {
   ApiErrorCode,
@@ -42,38 +39,26 @@ type YakitoriHttpServerCommonOptions = {
   readonly providers?: () => Promise<ApiListProvidersResponse>
   readonly userConfig?: UserConfigStore
   readonly availableProviders?: readonly string[]
-  readonly sessionFiles?: SessionFiles
+  readonly rolloutAssets?: RolloutAssets
 }
 
-export type YakitoriHttpServerOptions = YakitoriHttpServerCommonOptions &
-  (
-    | {
-        readonly handlers: ServerHandlers
-        readonly kernel?: never
-        readonly eventStore?: never
-      }
-    | {
-        readonly kernel: SessionKernel
-        readonly handlers?: never
-        readonly eventStore?: never
-      }
-    | {
-        readonly eventStore: EventStore
-        readonly handlers?: never
-        readonly kernel?: never
-      }
-  )
+export type YakitoriHttpServerOptions = YakitoriHttpServerCommonOptions & {
+  readonly handlers: ServerHandlers
+}
 
 export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
+  if (options.handlers === undefined) {
+    throw new Error(
+      "Injected handlers are required. Use createYakitoriApplication() for an owned runtime.",
+    )
+  }
   const eventHub = options.eventHub ?? createSessionEventHub()
-  const handlers =
-    options.handlers ??
-    createServerHandlers(resolveServerKernel(options), { eventHub })
+  const handlers = options.handlers
   const projectRegistry = options.projectRegistry
   const providers = options.providers
   const userConfig = options.userConfig
   const availableProviders = options.availableProviders
-  const sessionFiles = options.sessionFiles
+  const rolloutAssets = options.rolloutAssets
 
   const staticAssets =
     options.staticAssets === undefined
@@ -90,25 +75,13 @@ export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
       providers,
       userConfig,
       availableProviders,
-      sessionFiles,
+      rolloutAssets,
       staticAssets,
     ).catch((error) => {
       writeUnhandledError(response, error)
     })
   })
   return server
-}
-
-function resolveServerKernel(
-  options: YakitoriHttpServerOptions,
-): SessionKernel {
-  if (options.kernel !== undefined) return options.kernel
-  if (options.eventStore !== undefined) {
-    return createSessionKernel(options.eventStore)
-  }
-  throw new Error(
-    "An injected kernel, eventStore, or handlers is required. Use createYakitoriApplication() for an owned persistent runtime.",
-  )
 }
 
 async function handleRequest(
@@ -120,7 +93,7 @@ async function handleRequest(
   providers: (() => Promise<ApiListProvidersResponse>) | undefined,
   userConfig: UserConfigStore | undefined,
   availableProviders: readonly string[] | undefined,
-  sessionFiles: SessionFiles | undefined,
+  rolloutAssets: RolloutAssets | undefined,
   staticAssets: StaticAssetContext | undefined,
 ): Promise<void> {
   const origin = requestOrigin(request)
@@ -262,8 +235,8 @@ async function handleRequest(
     return
   }
 
-  if (route.kind === "readSessionFile") {
-    if (sessionFiles === undefined) {
+  if (route.kind === "readRolloutAsset") {
+    if (rolloutAssets === undefined) {
       writeResult(
         response,
         errorResult(404, ApiErrorCode.NotFound, "Route not found."),
@@ -271,14 +244,14 @@ async function handleRequest(
       return
     }
     try {
-      const file = await sessionFiles.openRead({
-        sessionId: route.sessionId,
+      const file = await rolloutAssets.openRead({
+        rolloutId: route.rolloutId,
         path: route.path,
       })
       response.writeHead(200, {
         "Cache-Control": "private, no-store",
         "Content-Length": file.totalBytes,
-        "Content-Type": sessionFileContentType(route.path),
+        "Content-Type": rolloutAssetContentType(route.path),
         "X-Content-Type-Options": "nosniff",
       })
       await pipeline(file.stream, response)
@@ -289,7 +262,7 @@ async function handleRequest(
       }
       writeResult(
         response,
-        errorResult(404, ApiErrorCode.NotFound, "Session file was not found."),
+        errorResult(404, ApiErrorCode.NotFound, "Rollout asset was not found."),
       )
     }
     return
@@ -490,25 +463,27 @@ function routeRequest(method: string, url: URL): Route {
     return { kind: "updateUserPreference" }
   }
 
+  if (
+    method === "GET" &&
+    segments.length > 4 &&
+    segments[0] === "rollouts" &&
+    typeof segments[1] === "string" &&
+    segments[2] === "assets" &&
+    segments[3] === "attachments"
+  ) {
+    return {
+      kind: "readRolloutAsset",
+      rolloutId: segments[1],
+      path: segments.slice(3).join("/"),
+    }
+  }
+
   if (segments[0] !== "sessions" || typeof segments[1] !== "string") {
     return { kind: "notFound", segments }
   }
 
   if (method === "GET" && segments.length === 2) {
     return { kind: "readSession", sessionId: segments[1] }
-  }
-
-  if (
-    method === "GET" &&
-    segments.length > 4 &&
-    segments[2] === "files" &&
-    segments[3] === "attachments"
-  ) {
-    return {
-      kind: "readSessionFile",
-      sessionId: segments[1],
-      path: segments.slice(3).join("/"),
-    }
   }
 
   if (method === "DELETE" && segments.length === 2) {
@@ -698,6 +673,7 @@ async function streamSessionEvents(
     lastSequence = writeSessionDelivery(response, delivery, lastSequence)
     if (delivery.kind === "durable") {
       for (const event of delivery.events) {
+        if (!isKernelEvent(event)) continue
         if (event.type === "turn.started") liveTurnId = event.data.turnId
         if (
           event.type === "turn.completed" &&
@@ -759,9 +735,12 @@ function writeSseEvents(
   let lastRuntimeSequence = lastSequence
   const sequence = events.reduce((sequence, event) => {
     if (event.seq <= sequence) return sequence
-    if (!isKernelEvent(event)) return event.seq
     response.write(`id: ${event.seq}\n`)
-    response.write("event: session.event\n")
+    response.write(
+      isKernelEvent(event)
+        ? "event: session.event\n"
+        : "event: session.rollout\n",
+    )
     response.write(`data: ${JSON.stringify(event)}\n\n`)
     lastRuntimeSequence = event.seq
     return event.seq
@@ -1252,8 +1231,8 @@ type Route =
   | { readonly kind: "notFound"; readonly segments: readonly string[] }
   | { readonly kind: "readSession"; readonly sessionId: string }
   | {
-      readonly kind: "readSessionFile"
-      readonly sessionId: string
+      readonly kind: "readRolloutAsset"
+      readonly rolloutId: string
       readonly path: string
     }
   | { readonly kind: "listProjects" }
@@ -1268,7 +1247,7 @@ type Route =
     }
   | { readonly kind: "streamSessionEvents"; readonly sessionId: string }
 
-function sessionFileContentType(path: string): string {
+function rolloutAssetContentType(path: string): string {
   const extension = extname(path).toLowerCase()
   if (extension === ".gif") return "image/gif"
   if (extension === ".jpg" || extension === ".jpeg") return "image/jpeg"
