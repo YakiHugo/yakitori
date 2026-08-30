@@ -671,11 +671,11 @@ async function nextEventOfType<
   Type extends NonNullable<
     Awaited<
       ReturnType<
-        import("../../src/core/live-thread.ts").LiveThread["nextEvent"]
+        import("../../src/core/agent-thread.ts").AgentThread["nextEvent"]
       >
     >
   >["type"],
->(thread: import("../../src/core/live-thread.ts").LiveThread, type: Type) {
+>(thread: import("../../src/core/agent-thread.ts").AgentThread, type: Type) {
   for (;;) {
     const event = await thread.nextEvent()
     if (event === undefined) throw new Error(`Session ended before ${type}.`)

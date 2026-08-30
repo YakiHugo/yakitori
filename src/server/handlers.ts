@@ -1,5 +1,5 @@
 import { realpath, stat } from "node:fs/promises"
-import type { LiveThread } from "../core/live-thread.ts"
+import type { AgentThread } from "../core/agent-thread.ts"
 import type {
   RolloutItem,
   StoredRolloutItem,
@@ -158,7 +158,7 @@ export function createThreadServerHandlers(
     if (last !== undefined) publishedThrough.set(threadId, hostSeq(last))
   }
 
-  async function ensureEventPump(thread: LiveThread): Promise<void> {
+  async function ensureEventPump(thread: AgentThread): Promise<void> {
     if (closing) throw new Error("Server handlers are shutting down.")
     const existing = pumpReady.get(thread.id)
     if (existing !== undefined) {
@@ -268,7 +268,7 @@ export function createThreadServerHandlers(
     }
   }
 
-  async function resumeRequired(threadId: string): Promise<LiveThread> {
+  async function resumeRequired(threadId: string): Promise<AgentThread> {
     const thread = await options.manager.resumeThread(threadId)
     if (thread === undefined) {
       throw notFound(`Session ${threadId} was not found.`, {
@@ -757,7 +757,7 @@ function mapThreadSummary(thread: ThreadSummary): ApiSessionSummary {
 
 function mapStoredThread(
   stored: StoredThread,
-  live: LiveThread | undefined,
+  live: AgentThread | undefined,
   options: ThreadServerHandlerOptions,
 ): ApiSessionDetail {
   const rollout = stored.rollout.map((record) => record.item)

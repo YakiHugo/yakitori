@@ -1,6 +1,6 @@
 import type { EventMetadata } from "../kernel/events.ts"
 import { createSessionId } from "../kernel/ids.ts"
-import { LiveThread } from "./live-thread.ts"
+import { AgentThread } from "./agent-thread.ts"
 import type { StoredThread } from "./rollout.ts"
 import { Session, type TurnProcessor } from "./session.ts"
 import type {
@@ -40,8 +40,8 @@ export class ThreadManager {
   readonly #onPersistenceError?:
     | ((error: unknown, threadId: string) => void)
     | undefined
-  readonly #threads = new Map<string, LiveThread>()
-  readonly #loads = new Map<string, Promise<LiveThread | undefined>>()
+  readonly #threads = new Map<string, AgentThread>()
+  readonly #loads = new Map<string, Promise<AgentThread | undefined>>()
   readonly #starting = new Set<Promise<unknown>>()
   readonly #discarding = new Set<string>()
   #closing = false
@@ -53,12 +53,12 @@ export class ThreadManager {
     this.#onPersistenceError = options.onPersistenceError
   }
 
-  getThread(threadId: string): LiveThread | undefined {
+  getThread(threadId: string): AgentThread | undefined {
     const thread = this.#threads.get(threadId)
     return thread?.status === "shutdown" ? undefined : thread
   }
 
-  createThread(input: CreateThreadInput = {}): Promise<LiveThread> {
+  createThread(input: CreateThreadInput = {}): Promise<AgentThread> {
     this.#requireOpen()
     return this.#trackStarting(async () => {
       const now = new Date().toISOString()
@@ -90,7 +90,7 @@ export class ThreadManager {
     })
   }
 
-  resumeThread(threadId: string): Promise<LiveThread | undefined> {
+  resumeThread(threadId: string): Promise<AgentThread | undefined> {
     this.#requireOpen()
     if (this.#discarding.has(threadId)) {
       return Promise.reject(new Error(`Thread ${threadId} is being discarded.`))
@@ -118,7 +118,7 @@ export class ThreadManager {
   }
 
   forkThread(input: ForkThreadInput): Promise<{
-    readonly thread: LiveThread
+    readonly thread: AgentThread
     readonly result: ThreadStoreForkResult
   }> {
     this.#requireOpen()
@@ -203,7 +203,7 @@ export class ThreadManager {
     this.#threads.clear()
   }
 
-  #installStored(stored: StoredThread): LiveThread {
+  #installStored(stored: StoredThread): AgentThread {
     this.#requireOpen()
     const threadId = stored.metadata.id
     if (this.#discarding.has(threadId)) {
@@ -211,9 +211,9 @@ export class ThreadManager {
     }
     const existing = this.getThread(threadId)
     if (existing !== undefined) return existing
-    let thread: LiveThread
+    let thread: AgentThread
     try {
-      thread = new LiveThread(
+      thread = new AgentThread(
         new Session({
           stored,
           store: this.#store,

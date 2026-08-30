@@ -6,9 +6,9 @@ import type {
   TurnInputSubmission,
 } from "./session-io.ts"
 
-// Public live-thread handle. Session remains the owner of state and execution;
+// Public agent-thread handle. Session remains the owner of state and execution;
 // SessionIo is the only ordinary command/event transport exposed to callers.
-export class LiveThread {
+export class AgentThread {
   readonly id: string
   readonly #session: Session
 
