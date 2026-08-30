@@ -21,54 +21,14 @@ owning boundary moves once.
 
 | Order | Outcome | Owning areas | Severity driver |
 | --- | --- | --- | --- |
-| 1 | Agent lifecycle reads from durable session state | runtime agent-control, mates | Restart orphans running subagents |
-| 2 | Application and background failures observable | server application/start/desktop-entry | Silent failures, but no known incident |
-| 3 | Production exports narrowed, test support separated | runtime and server public surfaces | Hygiene; churns exports, so it runs last |
+| 1 | Application and background failures observable | server application/start/desktop-entry | Silent failures, but no known incident |
+| 2 | Production exports narrowed, test support separated | runtime and server public surfaces | Hygiene; churns exports, so it runs last |
 
-The next piece of work is Stage 2. Stages 2–4 should follow in order; later
-stages do not block earlier ones.
-
-## Stage 2 — Agent lifecycle durable authority
-
-Absorbs the former Stage 2B.
-
-### Current behavior
-
-`AgentControl` tracks agents, statuses, and the path tree in process memory
-(agent-control.ts:135), but every child agent is a real kernel session whose
-state is durable: the runner's `readAgentOutcome` re-derives outcomes from
-the child projection (session-runner.ts:1792), and recovery reconciles
-kernel sessions without consulting AgentControl (recovery.ts:16). On process
-restart with a running child, recovery may interrupt and re-wake the child
-session while the parent's AgentControl map is empty — `wait`/`interrupt`/
-`followup` cannot see or stop the still-running child, and its completion
-enqueues no `subagent_notification`.
-
-An Agent is also assigned `pending_init` and synchronously moved to
-`running` by the same start path, so the intermediate state is
-unobservable. Mate revision and lifecycle mutation APIs have test callers
-but no production writer; they preserve a future persistent-colleague design
-outside the current single-Mate product goal.
-
-### Target boundary
-
-- Agent status is derived from child session projections; AgentControl holds
-  at most ephemeral handles for the running process, and restart
-  reattachment or explicit orphan reconciliation is part of recovery.
-- Remove `pending_init` unless initialization becomes an asynchronous,
-  externally observable phase with a real failure/retry contract.
-- Remove unused Mate revision and lifecycle mutation surfaces, their
-  exports, and tests that only exercise those unreachable paths.
-- Keep the current bounded subagent execution lifecycle; do not pull future
-  Room or persistent-memory design into this contraction.
-
-### Done when
-
-- A restarted parent cannot lose track of a child session that is still
-  executing.
-- Every lifecycle state corresponds to a production-observable interval and
-  a valid transition owner.
-- Public mutation APIs have a real product caller rather than only fixtures.
+The next piece of work is Stage 3. The former Agent-lifecycle stage is resolved
+by the Session-owned status, per-root AgentControl, durable spawn graph, lazy
+identity restoration, and retryable completion/message delivery. Mate's
+production mutation surface remains limited to create/list/read for the
+current single-Mate product.
 
 ## Stage 3 — Application lifecycle and background failures
 
