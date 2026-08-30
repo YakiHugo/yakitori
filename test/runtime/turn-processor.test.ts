@@ -29,7 +29,10 @@ describe("Turn processor", () => {
         assertRequest(request) {
           expect(request.system).toHaveLength(1)
         },
-        content: [{ type: "text", text: "Hello" }],
+        content: [
+          { type: "reasoning", text: "Think", providerMetadata: { id: "r" } },
+          { type: "text", text: "Hello" },
+        ],
         usage: { inputTokens: 12, outputTokens: 3 },
       },
     ])
@@ -59,6 +62,11 @@ describe("Turn processor", () => {
     ).toMatchObject({
       usage: { inputTokens: 12, outputTokens: 3 },
     })
+    expect(
+      stored?.rollout.flatMap((entry) =>
+        entry.item.type === "item_completed" ? [entry.item.item.type] : [],
+      ),
+    ).toEqual(["reasoning", "agent_message"])
   })
 
   it("records assistant tool calls and tool results before the next model call", async () => {
@@ -105,6 +113,15 @@ describe("Turn processor", () => {
     expect(
       thread.snapshot().context.history.map((item) => item.item.role),
     ).toEqual(["user", "user", "assistant", "tool", "assistant"])
+    const rollout = (await runtime.store.readThread(thread.id))?.rollout ?? []
+    expect(
+      rollout.flatMap((entry) =>
+        entry.item.type === "item_completed" ? [entry.item.item.type] : [],
+      ),
+    ).toEqual(["dynamic_tool_call", "agent_message"])
+    expect(rollout.map((entry) => String(entry.item.type))).not.toContain(
+      "item_started",
+    )
   })
 
   it("passes the physical rollout ID to tool asset storage", async () => {
@@ -217,17 +234,39 @@ describe("Turn processor", () => {
 
     expect(await readFile(path, "utf8")).toBe("value = 2\n")
     expect(
-      thread.snapshot().context.history.find(
-        (item) =>
-          item.item.role === "tool" &&
-          item.item.toolCallId === "tool_read_value",
-      )?.item,
+      thread
+        .snapshot()
+        .context.history.find(
+          (item) =>
+            item.item.role === "tool" &&
+            item.item.toolCallId === "tool_read_value",
+        )?.item,
     ).toMatchObject({
       fileObservation: {
         path: "value.txt",
         kind: "whole_file_read",
         complete: true,
       },
+    })
+    const completedItems =
+      (await runtime.store.readThread(thread.id))?.rollout.flatMap((entry) =>
+        entry.item.type === "item_completed" ? [entry.item.item] : [],
+      ) ?? []
+    expect(
+      completedItems.find(
+        (item) => "toolCallId" in item && item.toolCallId === "tool_read_value",
+      ),
+    ).toMatchObject({
+      type: "file_read",
+      result: { path: "value.txt", kind: "file" },
+    })
+    expect(
+      completedItems.find(
+        (item) => "toolCallId" in item && item.toolCallId === "tool_edit_value",
+      ),
+    ).toMatchObject({
+      type: "file_change",
+      changes: [{ path: "value.txt", kind: "update" }],
     })
   })
 
@@ -965,11 +1004,19 @@ describe("Turn processor", () => {
     await nextLifecycleEvent(thread)
     await nextLifecycleEvent(thread)
     expect(provider.callCount).toBe(4)
-    expect(
-      (await runtime.store.readThread(thread.id))?.rollout.some(
-        (entry) => entry.item.type === "compacted",
-      ),
-    ).toBe(true)
+    const stored = await runtime.store.readThread(thread.id)
+    const compactedAt =
+      stored?.rollout.findIndex((entry) => entry.item.type === "compacted") ??
+      -1
+    expect(compactedAt).toBeGreaterThan(-1)
+    expect(stored?.rollout[compactedAt + 1]?.item).toMatchObject({
+      type: "world_state",
+      full: true,
+    })
+    expect(stored?.rollout[compactedAt + 2]?.item).toMatchObject({
+      type: "item_completed",
+      item: { type: "context_compaction", status: "completed" },
+    })
   })
 
   it("applies tool-result visibility limits to compaction sources", async () => {
@@ -1185,10 +1232,7 @@ describe("Turn processor", () => {
 async function createRuntime(
   stream: StreamFn,
   toolRegistry = createToolRegistry([]),
-  options: Omit<
-    Partial<TurnProcessorOptions>,
-    "stream" | "toolRegistry"
-  > = {},
+  options: Omit<Partial<TurnProcessorOptions>, "stream" | "toolRegistry"> = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "yakitori-live-turn-"))
   const store = new MemoryThreadStore()
@@ -1228,6 +1272,7 @@ async function nextLifecycleEvent(thread: {
       event === undefined ||
       (event.type !== "rollout.appended" &&
         event.type !== "model.stream" &&
+        event.type !== "item.started" &&
         event.type !== "permission")
     ) {
       return event

@@ -5,6 +5,7 @@ import {
   buildWorldStateFromSnapshot,
   diffWorldState,
 } from "../../src/runtime/world-state.ts"
+import { applyJsonMergePatch } from "../../src/kernel/json-equality.ts"
 
 describe("world state", () => {
   it("emits one full baseline, no duplicate, then section patches", () => {
@@ -23,10 +24,10 @@ describe("world state", () => {
       "project.instructions",
       "environment",
     ])
-    expect(diffWorldState(full?.state, initial)).toBeUndefined()
+    expect(diffWorldState(full?.snapshot, initial)).toBeUndefined()
 
     const replacement = diffWorldState(
-      full?.state,
+      full?.snapshot,
       worldState(projectInstructions("rules b")),
     )
     expect(replacement).toMatchObject({
@@ -42,7 +43,7 @@ describe("world state", () => {
       ],
     })
 
-    const removed = diffWorldState(full?.state, worldState())
+    const removed = diffWorldState(full?.snapshot, worldState())
     expect(removed).toMatchObject({
       full: false,
       state: {
@@ -55,6 +56,54 @@ describe("world state", () => {
         },
       ],
     })
+  })
+
+  it("round-trips nested patches and ignores object key order", () => {
+    const previous = {
+      kept: { same: true, changed: "before", removed: true },
+      removedSection: { value: true },
+    }
+    const current = {
+      kept: { changed: "after", same: true },
+    }
+    const patch = diffWorldState(
+      { environment: previous },
+      {
+        sections: [
+          {
+            id: "environment",
+            snapshot: current,
+            renderDiff: () => [],
+          },
+        ],
+      },
+    )
+
+    expect(patch?.state).toEqual({
+      environment: {
+        kept: { changed: "after", removed: null },
+        removedSection: null,
+      },
+    })
+    expect(
+      applyJsonMergePatch({ environment: previous }, patch?.state ?? {}),
+    ).toEqual({ environment: current })
+    expect(
+      diffWorldState(
+        { environment: { kept: { same: true, changed: "after" } } },
+        {
+          sections: [
+            {
+              id: "environment",
+              snapshot: current,
+              renderDiff: () => {
+                throw new Error("logically equal state must not render")
+              },
+            },
+          ],
+        },
+      ),
+    ).toBeUndefined()
   })
 
   it("emits an environment replacement when the date changes", () => {

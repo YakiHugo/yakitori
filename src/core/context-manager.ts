@@ -1,4 +1,5 @@
 import type { JsonObject } from "../kernel/events.ts"
+import { applyJsonMergePatch } from "../kernel/json-equality.ts"
 import type { ResponseItemEnvelope, StoredThread } from "./rollout.ts"
 
 export type ContextSnapshot = {
@@ -28,8 +29,16 @@ export class ContextManager {
       if (item.type === "response_item") history.push(item.item)
       else if (item.type === "compacted") {
         history = structuredClone([...item.replacement])
+        worldStateBaseline = undefined
       } else if (item.type === "world_state") {
-        worldStateBaseline = structuredClone(item.state)
+        if (item.full) {
+          worldStateBaseline = structuredClone(item.state)
+        } else if (worldStateBaseline !== undefined) {
+          worldStateBaseline = applyJsonMergePatch(
+            worldStateBaseline,
+            item.state,
+          )
+        }
       }
     }
     return new ContextManager({
@@ -53,6 +62,7 @@ export class ContextManager {
 
   replace(items: readonly ResponseItemEnvelope[]): void {
     this.#history = structuredClone([...items])
+    this.#worldStateBaseline = undefined
   }
 
   setWorldStateBaseline(state: JsonObject): void {

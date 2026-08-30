@@ -15,7 +15,9 @@ import { basename, dirname, join, resolve } from "node:path"
 // ownership boundary that Codex uses for cross-process rollout writers.
 import { flock } from "fs-ext"
 import {
+  EventType,
   isJsonObject,
+  isKernelEvent,
   isModelMessage,
   isModelSelection,
   isSessionConfigurationSnapshot,
@@ -1359,10 +1361,21 @@ function isRolloutItem(value: unknown): value is RolloutItem {
       (value.error === undefined || isRolloutError(value.error))
     )
   }
+  if (value.type === "item_completed") {
+    return (
+      hasOnlyKeys(value, ["type", "turnId", "item"]) &&
+      typeof value.turnId === "string" &&
+      isKernelEvent({
+        type: EventType.ItemCompleted,
+        data: { turnId: value.turnId, item: value.item },
+      })
+    )
+  }
   if (value.type === "world_state") {
     return (
-      hasOnlyKeys(value, ["type", "turnId", "state"]) &&
+      hasOnlyKeys(value, ["type", "turnId", "full", "state"]) &&
       typeof value.turnId === "string" &&
+      typeof value.full === "boolean" &&
       isJsonObject(value.state)
     )
   }

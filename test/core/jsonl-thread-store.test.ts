@@ -62,6 +62,49 @@ describe("JsonlThreadStore", () => {
     ).toEqual([0, 1, 2, 3, 4])
   })
 
+  it("round-trips full world-state markers and completed host items", async () => {
+    const { store } = await createStore()
+    await store.createThread(metadata("thread_current_rollout"))
+    await store.appendItems("thread_current_rollout", [
+      {
+        type: "world_state",
+        turnId: "turn_one",
+        full: true,
+        state: { environment: { cwd: "/workspace" } },
+      },
+      {
+        type: "item_completed",
+        turnId: "turn_one",
+        item: {
+          type: "agent_message",
+          itemId: "message_one",
+          content: [{ type: "text", text: "done" }],
+        },
+      },
+    ])
+    await store.shutdownThread("thread_current_rollout")
+
+    const resumed = await store.resumeThread("thread_current_rollout")
+    expect(resumed?.rollout.slice(-2).map((entry) => entry.item)).toEqual([
+      {
+        type: "world_state",
+        turnId: "turn_one",
+        full: true,
+        state: { environment: { cwd: "/workspace" } },
+      },
+      {
+        type: "item_completed",
+        turnId: "turn_one",
+        item: {
+          type: "agent_message",
+          itemId: "message_one",
+          content: [{ type: "text", text: "done" }],
+        },
+      },
+    ])
+    await store.shutdownThread("thread_current_rollout")
+  })
+
   it("rejects a second writer opened by another store instance", async () => {
     const { root, store } = await createStore()
     await store.createThread(metadata("thread_shared"))

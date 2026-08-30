@@ -1,6 +1,8 @@
 import type {
+  CompletedExecutionItem,
   JsonObject,
   SessionConfigurationSnapshot,
+  StartedExecutionItem,
   TokenUsage,
 } from "../kernel/events.ts"
 import { fingerprintInputAdmission } from "../kernel/operation.ts"
@@ -54,17 +56,22 @@ export type TurnRuntime = {
     readonly kind: "assistant" | "reasoning"
     readonly text: string
   }): void
+  emitItemStarted(item: StartedExecutionItem): void
   emitPermissionEvent(event: SessionPermissionEvent): void
   recordConversationItems(items: readonly ResponseItemEnvelope[]): Promise<void>
+  recordItemCompletions(items: readonly CompletedExecutionItem[]): Promise<void>
   recordWorldStateUpdate(
     items: readonly ResponseItemEnvelope[],
-    state: JsonObject,
+    update: Readonly<{
+      full: boolean
+      state: JsonObject
+      snapshot: JsonObject
+    }>,
   ): Promise<void>
   replaceConversationHistory(input: {
     readonly replacement: readonly ResponseItemEnvelope[]
     readonly summary: string
   }): Promise<void>
-  recordWorldState(state: JsonObject): Promise<void>
 }
 
 export type TurnProcessor = {
@@ -578,6 +585,15 @@ export class Session {
           ...input,
         })
       },
+      emitItemStarted: (item) => {
+        requireLease()
+        this.#events.send({
+          type: "item.started",
+          threadId: this.id,
+          turnId: active.input.submissionId,
+          item: structuredClone(item),
+        })
+      },
       emitPermissionEvent: (event) => {
         requireActive()
         if (
@@ -602,10 +618,23 @@ export class Session {
           items.map((item): RolloutItem => ({ type: "response_item", item })),
         )
       },
-      recordWorldStateUpdate: async (items, state) => {
+      recordItemCompletions: async (items) => {
+        requireLease()
+        if (items.length === 0) return
+        await this.#appendRollout(
+          items.map(
+            (item): RolloutItem => ({
+              type: "item_completed",
+              turnId: active.input.submissionId,
+              item,
+            }),
+          ),
+        )
+      },
+      recordWorldStateUpdate: async (items, update) => {
         requireLease()
         if (items.length > 0) this.#contextManager.record(items)
-        this.#contextManager.setWorldStateBaseline(state)
+        this.#contextManager.setWorldStateBaseline(update.snapshot)
         await this.#appendRollout([
           ...items.map(
             (item): RolloutItem => ({ type: "response_item", item }),
@@ -613,7 +642,8 @@ export class Session {
           {
             type: "world_state",
             turnId: active.input.submissionId,
-            state,
+            full: update.full,
+            state: update.state,
           },
         ])
       },
@@ -625,17 +655,6 @@ export class Session {
             type: "compacted",
             turnId: active.input.submissionId,
             ...input,
-          },
-        ])
-      },
-      recordWorldState: async (state) => {
-        requireLease()
-        this.#contextManager.setWorldStateBaseline(state)
-        await this.#appendRollout([
-          {
-            type: "world_state",
-            turnId: active.input.submissionId,
-            state,
           },
         ])
       },
