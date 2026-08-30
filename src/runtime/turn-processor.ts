@@ -67,6 +67,7 @@ import {
   diffWorldState,
   type WorldState,
 } from "./world-state.ts"
+import type { AgentControl, BoundAgentControl } from "./agent-control.ts"
 
 export type TurnProcessorOptions = {
   readonly stream: StreamFn
@@ -83,6 +84,7 @@ export type TurnProcessorOptions = {
   readonly now?: () => Date
   readonly rolloutAssets?: RolloutAssets
   readonly onRuntimeError?: (error: unknown) => void
+  readonly agentControl?: AgentControl
 }
 
 type CompactionState = {
@@ -254,6 +256,11 @@ async function executeTurn(input: {
       ...(priorModelId === undefined ? {} : { previousModelId: priorModelId }),
       environment,
       ...(projectInstructions === undefined ? {} : { projectInstructions }),
+      ...(input.options.agentControl === undefined
+        ? {}
+        : {
+            multiAgent: input.options.agentControl.runtimeContext(metadata.id),
+          }),
     })
     const worldDiff = diffWorldState(
       beforeStep.context.worldStateBaseline,
@@ -327,6 +334,7 @@ async function executeTurn(input: {
         turn,
         worldState,
         history: beforeStep.context.history,
+        contextRevision: beforeStep.contextRevision,
         stream: input.options.stream,
         signal: input.signal,
         rolloutAssets: input.options.rolloutAssets,
@@ -431,6 +439,14 @@ async function executeTurn(input: {
         rolloutAssets: input.options.rolloutAssets,
         visibleFileObservations,
         onRuntimeError: input.options.onRuntimeError,
+        ...(input.options.agentControl === undefined
+          ? {}
+          : {
+              agentControl: input.options.agentControl.bind(
+                metadata.id,
+                turn.configuration.target,
+              ),
+            }),
       })
       for (const { call, item, result } of results) {
         const fileObservation = toolFileObservation(call.name, result)
@@ -576,6 +592,7 @@ async function compactLiveHistory(input: {
   readonly turn: ReturnType<typeof createTurnContext>
   readonly worldState: WorldState
   readonly history: readonly ResponseItemEnvelope[]
+  readonly contextRevision: number
   readonly stream: StreamFn
   readonly signal: AbortSignal
   readonly rolloutAssets: RolloutAssets | undefined
@@ -764,6 +781,8 @@ async function compactLiveHistory(input: {
     await input.runtime.replaceConversationHistory({
       replacement,
       summary: result.summary,
+      baseContextRevision: input.contextRevision,
+      baseHistoryLength: input.history.length,
     })
     await input.runtime.recordWorldStateUpdate([], {
       full: true,
@@ -804,6 +823,7 @@ type ToolExecutionScope = {
   readonly rolloutAssets: RolloutAssets | undefined
   readonly visibleFileObservations: VisibleFileObservations
   readonly onRuntimeError: ((error: unknown) => void) | undefined
+  readonly agentControl?: BoundAgentControl
 }
 
 type PreparedToolCall = {
@@ -1057,6 +1077,9 @@ async function executePreparedTool(
           ? {}
           : { rolloutAssets: input.rolloutAssets }),
         visibleFileObservations: input.visibleFileObservations,
+        ...(input.agentControl === undefined
+          ? {}
+          : { agentControl: input.agentControl }),
       },
     )
   } catch (error) {

@@ -110,7 +110,12 @@ function createSendMessageTool(): RuntimeTool {
       const parsed = parseTargetMessage(input)
       if (!parsed.ok) return failure("invalid_tool_input", parsed.message)
       return runControl(async () => {
-        const receiver = await control.value.sendMessage(parsed.value)
+        const receiver = await control.value.sendMessage({
+          ...parsed.value,
+          ...(context.toolCallId === undefined
+            ? {}
+            : { messageId: context.toolCallId }),
+        })
         return success(
           { delivered: true, ...receiver },
           "Message queued for delivery.",
@@ -237,7 +242,7 @@ function createListAgentsTool(): RuntimeTool {
       if (!control.ok) return control.error
       const parsed = parseListInput(input)
       if (!parsed.ok) return failure("invalid_tool_input", parsed.message)
-      const agents = control.value.list(parsed.pathPrefix)
+      const agents = await control.value.list(parsed.pathPrefix)
       return success({ agents }, JSON.stringify({ agents }))
     },
   }

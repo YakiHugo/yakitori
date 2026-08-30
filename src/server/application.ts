@@ -2,7 +2,9 @@ import { mkdir, realpath, stat } from "node:fs/promises"
 import { join } from "node:path"
 import {
   JsonlThreadStore,
+  createSqliteAgentGraphStore,
   ThreadManager,
+  type SqliteAgentGraphStore,
   type ThreadStore,
 } from "../core/index.ts"
 import { createRolloutAssets } from "../kernel/index.ts"
@@ -18,6 +20,8 @@ import {
   acquireRuntimeLock,
   type CodexLogin,
   createAnthropicProvider,
+  createAgentRuntime,
+  type AgentRuntime,
   createCodexProvider,
   createDefaultTools,
   createOpenAIProvider,
@@ -119,6 +123,8 @@ export async function createYakitoriApplication(
     options.activeMateId ?? process.env.YAKITORI_MATE_ID ?? undefined
   let runtimeLock: RuntimeLock | undefined
   let threadManagerForCleanup: ThreadManager | undefined
+  let agentRuntimeForCleanup: AgentRuntime | undefined
+  let agentGraphStoreForCleanup: SqliteAgentGraphStore | undefined
   let mateStore: SqliteMateStore | undefined
 
   try {
@@ -202,9 +208,19 @@ export async function createYakitoriApplication(
         threadStore.withRolloutAssetMutation(rolloutId, mutate),
     })
     await rolloutAssets.cleanupStagingImageAttachments()
-    const threadManager = new ThreadManager({
+    const agentGraphStore = createSqliteAgentGraphStore({
+      databasePath: join(sessionStoreRoot, "agent-graph.sqlite"),
+    })
+    agentGraphStoreForCleanup = agentGraphStore
+    let threadManager: ThreadManager
+    const agentRuntime = createAgentRuntime({
+      graphStore: agentGraphStore,
+      getThreadManager: () => threadManager,
+    })
+    agentRuntimeForCleanup = agentRuntime
+    threadManager = new ThreadManager({
       store: threadStore,
-      createTurnProcessor: () =>
+      createTurnProcessor: (stored) =>
         createTurnProcessor({
           stream: providerRegistry.stream,
           provider: provider.provider,
@@ -215,6 +231,7 @@ export async function createYakitoriApplication(
             : { modelContextWindowTokens }),
           permissionGate,
           toolRegistry,
+          agentControl: agentRuntime.registerThread(stored),
           rolloutAssets,
           approvalPolicy:
             process.env.YAKITORI_APPROVAL_POLICY === "auto_file_tools"
@@ -232,6 +249,7 @@ export async function createYakitoriApplication(
 
     const handlers = createThreadServerHandlers({
       manager: threadManager,
+      discardThread: (threadId) => agentRuntime.discardThread(threadId),
       store: threadStore,
       eventHub,
       sessionDefaults,
@@ -279,6 +297,8 @@ export async function createYakitoriApplication(
           threadManager,
           handlers.close,
           ownedMateStore.close,
+          agentRuntime.close,
+          agentGraphStore.close,
           runtimeLock,
         )
         await closePromise
@@ -290,6 +310,8 @@ export async function createYakitoriApplication(
         threadManagerForCleanup,
         undefined,
         mateStore?.close,
+        agentRuntimeForCleanup?.close,
+        agentGraphStoreForCleanup?.close,
         runtimeLock,
       )
     } catch (cleanupError) {
@@ -499,9 +521,16 @@ async function closeApplicationResources(
   threadManager: ThreadManager | undefined,
   closeHandlers: (() => Promise<void>) | undefined,
   closeMateStore: (() => void) | undefined,
+  closeAgentRuntime: (() => Promise<void>) | undefined,
+  closeAgentGraphStore: (() => void) | undefined,
   runtimeLock: RuntimeLock | undefined,
 ): Promise<void> {
   const errors: unknown[] = []
+  try {
+    await closeAgentRuntime?.()
+  } catch (error) {
+    errors.push(error)
+  }
   try {
     await threadManager?.shutdown()
   } catch (error) {
@@ -514,6 +543,11 @@ async function closeApplicationResources(
   }
   try {
     closeMateStore?.()
+  } catch (error) {
+    errors.push(error)
+  }
+  try {
+    closeAgentGraphStore?.()
   } catch (error) {
     errors.push(error)
   }

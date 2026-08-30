@@ -1,5 +1,9 @@
-import type { EventMetadata } from "../kernel/events.ts"
-import { createSessionId } from "../kernel/ids.ts"
+import type {
+  EventMetadata,
+  JsonObject,
+  ModelMessage,
+} from "../kernel/events.ts"
+import { createItemId, createSessionId, createTurnId } from "../kernel/ids.ts"
 import { AgentThread } from "./agent-thread.ts"
 import type { StoredThread } from "./rollout.ts"
 import { Session, type TurnProcessor } from "./session.ts"
@@ -11,12 +15,19 @@ import type {
 } from "./thread-store.ts"
 
 export type CreateThreadInput = {
+  readonly threadId?: string
   readonly title?: string
   readonly workingDirectory?: string
   readonly mateId?: string
   readonly mateRevisionId?: string
   readonly parentThreadId?: string
+  readonly conversationId?: string
   readonly metadata?: EventMetadata
+  readonly initialContext?: Readonly<{
+    sourceThreadId: string
+    messages: readonly ModelMessage[]
+    worldStateBaseline?: JsonObject
+  }>
 }
 
 export type ForkThreadInput = {
@@ -30,13 +41,13 @@ export type ForkThreadInput = {
 
 export type ThreadManagerOptions = {
   readonly store: ThreadStore
-  readonly createTurnProcessor: (threadId: string) => TurnProcessor
+  readonly createTurnProcessor: (stored: StoredThread) => TurnProcessor
   readonly onPersistenceError?: (error: unknown, threadId: string) => void
 }
 
 export class ThreadManager {
   readonly #store: ThreadStore
-  readonly #createTurnProcessor: (threadId: string) => TurnProcessor
+  readonly #createTurnProcessor: (stored: StoredThread) => TurnProcessor
   readonly #onPersistenceError?:
     | ((error: unknown, threadId: string) => void)
     | undefined
@@ -62,10 +73,10 @@ export class ThreadManager {
     this.#requireOpen()
     return this.#trackStarting(async () => {
       const now = new Date().toISOString()
-      const threadId = createSessionId()
+      const threadId = input.threadId ?? createSessionId()
       const metadata: CreateThreadMetadata = {
         id: threadId,
-        conversationId: threadId,
+        conversationId: input.conversationId ?? threadId,
         createdAt: now,
         updatedAt: now,
         ...(input.title === undefined ? {} : { title: input.title }),
@@ -81,7 +92,49 @@ export class ThreadManager {
           : { parentThreadId: input.parentThreadId }),
         ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
       }
-      const stored = await this.#store.createThread(metadata)
+      let stored = await this.#store.createThread(metadata)
+      try {
+        if (input.initialContext !== undefined) {
+          const initialContext = input.initialContext
+          const seedTurnId = createTurnId()
+          const createdAt = new Date().toISOString()
+          await this.#store.appendItems(threadId, [
+            ...initialContext.messages.map((message) => ({
+              type: "response_item" as const,
+              item: {
+                id: createItemId(),
+                turnId: seedTurnId,
+                createdAt,
+                item: message,
+                submissionMetadata: {
+                  metadata: {
+                    inheritedFromThreadId: initialContext.sourceThreadId,
+                  },
+                },
+              },
+            })),
+            ...(initialContext.worldStateBaseline === undefined
+              ? []
+              : [
+                  {
+                    type: "world_state" as const,
+                    turnId: seedTurnId,
+                    full: true,
+                    state: initialContext.worldStateBaseline,
+                  },
+                ]),
+          ])
+          await this.#store.flushThread(threadId)
+          stored =
+            (await this.#store.readThread(threadId)) ??
+            (() => {
+              throw new Error(`Thread ${threadId} disappeared while seeding.`)
+            })()
+        }
+      } catch (error) {
+        await this.#store.deleteThread(threadId)
+        throw error
+      }
       if (this.#closing) {
         await this.#store.deleteThread(threadId)
         throw new Error("ThreadManager shut down while creating a Thread.")
@@ -174,6 +227,10 @@ export class ThreadManager {
     return this.#store.listThreads(input)
   }
 
+  readStoredThread(threadId: string): Promise<StoredThread | undefined> {
+    return this.#store.readThread(threadId)
+  }
+
   async discardThread(threadId: string): Promise<void> {
     this.#discarding.add(threadId)
     try {
@@ -217,7 +274,7 @@ export class ThreadManager {
         new Session({
           stored,
           store: this.#store,
-          processor: this.#createTurnProcessor(threadId),
+          processor: this.#createTurnProcessor(stored),
           ...(this.#onPersistenceError === undefined
             ? {}
             : {

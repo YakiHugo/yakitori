@@ -26,8 +26,9 @@ export class ContextManager {
     let worldStateBaseline: JsonObject | undefined
     for (const record of thread.rollout) {
       const item = record.item
-      if (item.type === "response_item") history.push(item.item)
-      else if (item.type === "compacted") {
+      if (item.type === "response_item" || item.type === "agent_message") {
+        history.push(item.item)
+      } else if (item.type === "compacted") {
         history = structuredClone([...item.replacement])
         worldStateBaseline = undefined
       } else if (item.type === "world_state") {

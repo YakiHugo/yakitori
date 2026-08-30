@@ -61,6 +61,294 @@ function testApplicationOptions(input: {
 }
 
 describe("application composition", () => {
+  it("runs spawn_agent through a real child Thread", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      let notificationRequest: ModelRequest | undefined
+      const application = await createYakitoriApplication({
+        ...testApplicationOptions({ rootDir, workspace }),
+        stream: async function* (request) {
+          const lastTask = [...request.messages]
+            .reverse()
+            .find(
+              (message) =>
+                message.role === "user" && message.context === undefined,
+            )
+          const taskText =
+            lastTask?.role === "user"
+              ? lastTask.content.map((block) => block.text).join("")
+              : ""
+          if (
+            request.messages.some(
+              (message) =>
+                message.role === "user" &&
+                message.content.some((block) =>
+                  block.text.includes("use child result"),
+                ),
+            )
+          ) {
+            notificationRequest = request
+            yield {
+              type: "response",
+              response: {
+                stopReason: ModelStopReason.EndTurn,
+                content: [{ type: "text", text: "used child result" }],
+              },
+            }
+            return
+          }
+          if (taskText === "inspect child") {
+            yield {
+              type: "response",
+              response: {
+                stopReason: ModelStopReason.EndTurn,
+                content: [{ type: "text", text: "child findings" }],
+              },
+            }
+            return
+          }
+          const hasToolResult = request.messages.some(
+            (message) => message.role === "tool",
+          )
+          yield {
+            type: "response",
+            response: hasToolResult
+              ? {
+                  stopReason: ModelStopReason.EndTurn,
+                  content: [{ type: "text", text: "parent continues" }],
+                }
+              : {
+                  stopReason: ModelStopReason.ToolUse,
+                  content: [
+                    {
+                      type: "tool_call",
+                      id: "tool_spawn_child",
+                      name: "spawn_agent",
+                      input: {
+                        task_name: "survey",
+                        message: "inspect child",
+                      },
+                    },
+                  ],
+                },
+          }
+        },
+      })
+      try {
+        const created = await application.handlers.createSession()
+        expectOk(created)
+        const rootThreadId = created.body.session.id
+        const admitted = await application.handlers.admitInput({
+          sessionId: rootThreadId,
+          requestId: "request_spawn_child",
+          content: { kind: "text", text: "delegate" },
+        })
+        expectOk(admitted)
+        await waitForThreadIdle(application, rootThreadId)
+
+        let childThreadId: string | undefined
+        await vi.waitFor(async () => {
+          const threadIds = await application.threadStore.listThreadIds()
+          childThreadId = threadIds.find((id) => id !== rootThreadId)
+          expect(childThreadId).toBeDefined()
+          expect(
+            application.threadManager.getThread(childThreadId ?? "")
+              ?.agentStatus,
+          ).toEqual({ completed: "child findings" })
+        })
+        const child = await application.threadStore.readThread(
+          childThreadId ?? "",
+        )
+        expect(child?.metadata).toMatchObject({
+          conversationId: rootThreadId,
+          parentThreadId: rootThreadId,
+          metadata: {
+            agent: {
+              kind: "subagent",
+              rootThreadId,
+              path: "/root/survey",
+            },
+          },
+        })
+        const root = await application.threadStore.readThread(rootThreadId)
+        const toolResults = root?.rollout.flatMap((entry) =>
+          entry.item.type === "response_item" &&
+          entry.item.item.item.role === "tool"
+            ? [entry.item.item.item.content]
+            : [],
+        )
+        expect(toolResults?.join("\n")).toContain("/root/survey")
+        expect(toolResults?.join("\n")).not.toContain("agents_unavailable")
+
+        await Promise.resolve()
+        await Promise.resolve()
+        const followup = await application.handlers.admitInput({
+          sessionId: rootThreadId,
+          requestId: "request_use_child_result",
+          content: { kind: "text", text: "use child result" },
+        })
+        expectOk(followup)
+        await waitForThreadIdle(application, rootThreadId)
+        expect(JSON.stringify(notificationRequest?.messages)).toContain(
+          "<subagent_notification",
+        )
+        expect(JSON.stringify(notificationRequest?.messages)).toContain(
+          "child findings",
+        )
+        const updatedRoot =
+          await application.threadStore.readThread(rootThreadId)
+        expect(
+          updatedRoot?.rollout.some(
+            (entry) =>
+              entry.item.type === "agent_message" &&
+              entry.item.item.item.role === "user" &&
+              entry.item.item.item.content.some((block) =>
+                block.text.includes("<subagent_notification"),
+              ),
+          ),
+        ).toBe(true)
+        const deleted = await application.handlers.deleteSession({
+          sessionId: rootThreadId,
+        })
+        expectOk(deleted)
+        await expect(application.threadStore.listThreadIds()).resolves.toEqual(
+          [],
+        )
+        expect(
+          application.threadManager.getThread(childThreadId ?? ""),
+        ).toBeUndefined()
+      } finally {
+        await application.close()
+      }
+    })
+  })
+
+  it("restores open child identities before listing after restart", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const first = await createYakitoriApplication({
+        ...testApplicationOptions({ rootDir, workspace }),
+        stream: async function* (request) {
+          const isChild = request.messages.some(
+            (message) =>
+              message.role === "user" &&
+              message.content.some((block) => block.text === "child task"),
+          )
+          const hasToolResult = request.messages.some(
+            (message) => message.role === "tool",
+          )
+          yield {
+            type: "response",
+            response: isChild
+              ? {
+                  stopReason: ModelStopReason.EndTurn,
+                  content: [{ type: "text", text: "persisted result" }],
+                }
+              : hasToolResult
+                ? {
+                    stopReason: ModelStopReason.EndTurn,
+                    content: [{ type: "text", text: "spawned" }],
+                  }
+                : {
+                    stopReason: ModelStopReason.ToolUse,
+                    content: [
+                      {
+                        type: "tool_call",
+                        id: "tool_spawn_persisted",
+                        name: "spawn_agent",
+                        input: {
+                          task_name: "persisted",
+                          message: "child task",
+                        },
+                      },
+                    ],
+                  },
+          }
+        },
+      })
+      const created = await first.handlers.createSession()
+      expectOk(created)
+      const rootThreadId = created.body.session.id
+      const admitted = await first.handlers.admitInput({
+        sessionId: rootThreadId,
+        requestId: "request_spawn_persisted",
+        content: { kind: "text", text: "spawn persistent child" },
+      })
+      expectOk(admitted)
+      await waitForThreadIdle(first, rootThreadId)
+      let persistedChildId: string | undefined
+      await vi.waitFor(async () => {
+        const ids = await first.threadStore.listThreadIds()
+        persistedChildId = ids.find((id) => id !== rootThreadId)
+        expect(
+          first.threadManager.getThread(persistedChildId ?? "")?.agentStatus,
+        ).toEqual({ completed: "persisted result" })
+      })
+      await first.close()
+
+      const resumed = await createYakitoriApplication({
+        ...testApplicationOptions({ rootDir, workspace }),
+        stream: async function* (request) {
+          const toolResult = [...request.messages]
+            .reverse()
+            .find(
+              (message) =>
+                message.role === "tool" &&
+                message.toolCallId === "tool_list_restored",
+            )
+          yield {
+            type: "response",
+            response:
+              toolResult === undefined
+                ? {
+                    stopReason: ModelStopReason.ToolUse,
+                    content: [
+                      {
+                        type: "tool_call",
+                        id: "tool_list_restored",
+                        name: "list_agents",
+                        input: {},
+                      },
+                    ],
+                  }
+                : {
+                    stopReason: ModelStopReason.EndTurn,
+                    content: [{ type: "text", text: "listed" }],
+                  },
+          }
+        },
+      })
+      try {
+        expect(
+          resumed.threadManager.getThread(persistedChildId ?? ""),
+        ).toBeUndefined()
+        const afterRestart = await resumed.handlers.admitInput({
+          sessionId: rootThreadId,
+          requestId: "request_list_restored",
+          content: { kind: "text", text: "list children" },
+        })
+        expectOk(afterRestart)
+        await waitForThreadIdle(resumed, rootThreadId)
+        const storedRoot = await resumed.threadStore.readThread(rootThreadId)
+        const listResult =
+          storedRoot?.rollout
+            .flatMap((entry) =>
+              entry.item.type === "response_item" &&
+              entry.item.item.item.role === "tool" &&
+              entry.item.item.item.toolCallId === "tool_list_restored"
+                ? [entry.item.item.item.content]
+                : [],
+            )
+            .at(-1) ?? ""
+        expect(listResult).toContain("/root/persisted")
+        expect(listResult).toContain("persisted result")
+        expect(
+          resumed.threadManager.getThread(persistedChildId ?? ""),
+        ).toBeUndefined()
+      } finally {
+        await resumed.close()
+      }
+    })
+  })
+
   it("stores admitted images beside the Session and hydrates model requests", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
       let captured: ModelRequest | undefined

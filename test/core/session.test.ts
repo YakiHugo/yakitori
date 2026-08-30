@@ -22,12 +22,14 @@ describe("live Session actor", () => {
       },
     })
     const thread = await manager.createThread()
+    expect(thread.agentStatus).toBe("pending_init")
 
     const started = await thread.startIfIdle({
       submissionId: "turn_first",
       content: { kind: "text", text: "first" },
     })
     expect(started).toEqual({ type: "started", turnId: "turn_first" })
+    expect(thread.agentStatus).toBe("running")
     expect(
       await thread.startIfIdle({
         content: { kind: "text", text: "must not queue" },
@@ -55,6 +57,7 @@ describe("live Session actor", () => {
     await nextEventOfType(thread, "turn.completed")
     expect(steering).toEqual(["correction one", "correction two"])
     expect(thread.status).toBe(SessionStatus.Idle)
+    expect(thread.agentStatus).toEqual({ completed: null })
     await manager.shutdown()
   })
 
@@ -161,6 +164,9 @@ describe("live Session actor", () => {
       }),
     ).rejects.toThrow("configuration unavailable")
     expect(thread.status).toBe(SessionStatus.Idle)
+    expect(thread.agentStatus).toEqual({
+      errored: "configuration unavailable",
+    })
     expect(thread.snapshot()).toMatchObject({
       context: { history: [] },
     })
@@ -169,8 +175,15 @@ describe("live Session actor", () => {
       (await store.readThread(thread.id))?.rollout.map(
         (entry) => entry.item.type,
       ),
-    ).toEqual(["session_meta"])
+    ).toEqual(["session_meta", "agent_status"])
     await manager.shutdown()
+
+    const resumedManager = createManager({ run: async () => undefined }, store)
+    const resumed = await resumedManager.resumeThread(thread.id)
+    expect(resumed?.agentStatus).toEqual({
+      errored: "configuration unavailable",
+    })
+    await resumedManager.shutdown()
   })
 
   it("survives synchronous processor failures and reports aborts as interruption", async () => {
@@ -193,6 +206,7 @@ describe("live Session actor", () => {
       message: "sync failure",
     })
     expect(thread.status).toBe(SessionStatus.Idle)
+    expect(thread.agentStatus).toEqual({ errored: "sync failure" })
 
     await thread.startIfIdle({
       submissionId: "turn_abort",
@@ -203,6 +217,7 @@ describe("live Session actor", () => {
       reason: "user_cancelled",
     })
     expect(thread.status).toBe(SessionStatus.Idle)
+    expect(thread.agentStatus).toBe("interrupted")
     await manager.shutdown()
   })
 
@@ -614,6 +629,115 @@ describe("live Session actor", () => {
 
     expect(thread.status).toBe(SessionStatus.Idle)
     await manager.shutdown()
+  })
+
+  it("does not reuse a previous Turn answer when a follow-up has no assistant text", async () => {
+    let call = 0
+    const manager = createManager({
+      async run(runtime, input) {
+        call += 1
+        if (call !== 1) return
+        await runtime.recordConversationItems([
+          {
+            id: "message_first_answer",
+            turnId: input.submissionId,
+            createdAt: new Date().toISOString(),
+            item: {
+              role: "assistant",
+              content: [{ type: "text", text: "first answer" }],
+            },
+          },
+        ])
+      },
+    })
+    const thread = await manager.createThread()
+    await thread.startIfIdle({
+      submissionId: "turn_with_answer",
+      content: { kind: "text", text: "first" },
+    })
+    await nextEventOfType(thread, "turn.completed")
+    expect(thread.agentStatus).toEqual({ completed: "first answer" })
+
+    await thread.startIfIdle({
+      submissionId: "turn_without_answer",
+      content: { kind: "text", text: "second" },
+    })
+    await nextEventOfType(thread, "turn.completed")
+    expect(thread.agentStatus).toEqual({ completed: null })
+    await manager.shutdown()
+  })
+
+  it("deduplicates a stable agent message after its first flush fails", async () => {
+    const store = new MemoryThreadStore()
+    const manager = createManager({ run() {} }, store)
+    const thread = await manager.createThread()
+    store.failNextFlush = true
+
+    await expect(
+      thread.deliverAgentMessage("agent_message_stable", "retry-safe"),
+    ).rejects.toThrow("flush failed")
+    await thread.deliverAgentMessage("agent_message_stable", "retry-safe")
+
+    const stored = await store.readThread(thread.id)
+    expect(
+      stored?.rollout.filter(
+        (record) =>
+          record.item.type === "agent_message" &&
+          record.item.messageId === "agent_message_stable",
+      ),
+    ).toHaveLength(1)
+    expect(
+      stored?.rollout.filter(
+        (record) =>
+          record.item.type === "agent_message" &&
+          record.item.item.id === "agent_message_stable",
+      ),
+    ).toHaveLength(1)
+    await manager.shutdown()
+  })
+
+  it("preserves an accepted agent message when compaction follows a failed flush", async () => {
+    const snapshotTaken = deferred<void>()
+    const releaseCompaction = deferred<void>()
+    const store = new MemoryThreadStore()
+    const manager = createManager(
+      {
+        async run(runtime) {
+          const snapshot = runtime.snapshot()
+          snapshotTaken.resolve()
+          await releaseCompaction.promise
+          await runtime.replaceConversationHistory({
+            replacement: [],
+            summary: "checkpoint",
+            baseContextRevision: snapshot.contextRevision,
+            baseHistoryLength: snapshot.context.history.length,
+          })
+        },
+      },
+      store,
+    )
+    const thread = await manager.createThread()
+    await thread.startIfIdle({
+      submissionId: "turn_compaction_race",
+      content: { kind: "text", text: "compact" },
+    })
+    await snapshotTaken.promise
+    store.failNextFlush = true
+    await expect(
+      thread.deliverAgentMessage("agent_message_race", "must survive"),
+    ).rejects.toThrow("flush failed")
+    releaseCompaction.resolve()
+    await nextEventOfType(thread, "turn.completed")
+    await manager.shutdown()
+
+    const resumedManager = createManager({ run() {} }, store)
+    const resumed = await resumedManager.resumeThread(thread.id)
+    expect(
+      resumed
+        ?.snapshot()
+        .context.history.some((message) => message.id === "agent_message_race"),
+    ).toBe(true)
+    await resumedManager.shutdown()
   })
 })
 

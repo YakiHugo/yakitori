@@ -35,6 +35,7 @@ export class MemoryThreadStore implements ThreadStore {
   failNextFlush = false
   failNextShutdown = false
   failNextCreateFork = false
+  failNextDeleteThreadId: string | undefined
   flushBarrier: Promise<void> | undefined
   flushStarted: (() => void) | undefined
   resumeBarrier: Promise<void> | undefined
@@ -257,6 +258,10 @@ export class MemoryThreadStore implements ThreadStore {
   }
 
   async deleteThread(threadId: string): Promise<void> {
+    if (this.failNextDeleteThreadId === threadId) {
+      this.failNextDeleteThreadId = undefined
+      throw new Error("thread delete failed")
+    }
     if (
       [...this.#forks.values()].some(
         (reservation) => reservation.sourceThreadId === threadId,

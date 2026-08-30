@@ -10,12 +10,13 @@ tests remain authoritative for behavior that has already landed.
 
 ## Comparison baseline
 
-- Yakitori: working tree based on commit `141a9bf`. The audit includes the
-  uncommitted working-tree state present on 2026-08-29.
+- Yakitori: working tree based on commit `08c405c`, including the C6 recovery
+  and documentation changes recorded on 2026-08-31.
 - Codex: `.references/public/codex` commit `536f86e5` from 2026-08-21.
 - grok-build: `.references/public/grok-build` commit `19d42e35` from
-  2026-08-19. It is used here only to confirm the Session actor/persistence
-  boundary where the two primary references agree.
+  2026-08-19. It confirms the Session actor/persistence boundary and provides
+  the explicit alternative considered in C6: a unified task/subagent
+  coordinator rather than Codex's per-root AgentControl tree.
 - GUI and renderer behavior are out of scope. App-server and transport
   contracts remain in scope because they define the non-GUI host boundary.
 - Legacy Codex paths are evidence about compatibility obligations, not default
@@ -52,7 +53,7 @@ change that decision.
 | C3 | Tool catalog, execution, permissions, and sandboxing | `src/runtime/tools/*`, `permission-gate.ts`, `tool-permissions.ts` | `core/tools`, `tools`, `exec`, `execpolicy`, `sandboxing`, platform sandboxes | Unreviewed |
 | C4 | Provider transport, model catalog, credentials, retry, and usage | `src/runtime/*provider.ts`, catalog and credentials modules | `model-provider`, `model-provider-info`, `models-manager`, `codex-client`, `responses_retry` | Unreviewed |
 | C5 | Instructions, environment, shell, skills, plugins, MCP, and connectors | prompt, instruction, environment, and future extension owners | `agents_md_manager`, `context`, `skills`, `core-plugins`, `mcp`, `connectors`, `shell*` | Unreviewed |
-| C6 | Subagents, AgentControl, and Mate lifecycle | `src/runtime/agent-control.ts`, multi-agent tools, `src/mates/*` | `core/agent`, `agent-graph-store`, `agent-identity`, thread spawning | Unreviewed |
+| C6 | Subagents, AgentControl, and Mate lifecycle | `src/runtime/agent-control.ts`, `agent-runtime.ts`, multi-agent tools, `src/mates/*` | `core/agent`, `agent-graph-store`, `agent-identity`, thread spawning | Audited; core implemented |
 | C7 | Process recovery, concurrency, failure reporting, and shutdown | runtime recovery/locks, server application and event hubs | core task/session lifecycle, app-server lifecycle, rollout writer recovery | Unreviewed beyond C1 persistence semantics |
 | C8 | Host protocol, configuration, projects, and model discovery | `src/server/*` excluding GUI consumers | `app-server`, `app-server-protocol`, `config` | Unreviewed |
 | C9 | Observability, diagnostics, history search, and operational state | currently distributed | `otel`, `diagnostics`, `analytics`, `thread-store` search/projections | Unreviewed |
@@ -76,6 +77,12 @@ change that decision.
 | C2-D5 | Provider-neutral local prefix compaction versus provider-selected local/remote strategies | Open | C1-D2 and C4 provider capabilities |
 | C2-D6 | Fixed per-Turn call budgets versus an unbounded tool-follow-up loop with separate rollout budget | Open | Local safety policy; C6 rollout budget |
 | C2-D7 | Universal replay across model changes versus compatibility-aware pre-switch compaction | Open | C1-D2, C2-D1, and C4 model contracts |
+| C6-D1 | Process-local task registry versus one per-root AgentControl over real child Threads | Converge | Follow Codex; implemented 2026-08-31 |
+| C6-D2 | Ephemeral child registry versus durable spawn topology and lazy identity restoration | Converge | Follow Codex V2 graph boundary; implemented 2026-08-31 |
+| C6-D3 | Volatile mailbox completion versus retry-safe model-visible inter-agent delivery | Converge | Child Session and rollout contract; implemented 2026-08-31 |
+| C6-D4 | Fresh/forked child context and bounded tree execution | Converge | Follow Codex; implemented subset excludes roles/residency |
+| C6-D5 | Codex tree control versus grok-build's global task/subagent coordinator | Deliberate | Codex selected for the coding-agent harness |
+| C6-D6 | Coding subagents versus persistent colleague Mates | Deliberate | Current single-Mate product boundary |
 
 ---
 
@@ -852,7 +859,173 @@ Before changing the execution loop across module boundaries, decide:
    process-local runaway protection?
 6. Which model/provider changes require compaction rather than direct replay?
 
+---
+
+## C6 — Subagents, AgentControl, and Mate lifecycle
+
+Status: audited. The core coding-subagent boundary is implemented. Role
+catalogs, runtime residency/eviction, and model-facing close/resume remain
+separate follow-up capabilities rather than hidden requirements of the core
+tree.
+
+### First-principles problem
+
+A subagent is not merely a background Promise. It is another runnable
+conversation with four identities that must agree:
+
+1. durable Thread storage, which owns resumable model history;
+2. a durable parent/child edge, which makes the tree discoverable after process
+   loss;
+3. a process-local control identity and canonical path, which routes tools;
+4. live Session status, which owns whether work is pending, running, terminal,
+   interrupted, or shut down.
+
+The former Yakitori boundary kept the third identity in memory while child
+Sessions were durable. After restart, the child could still exist while
+`wait`, `followup`, `interrupt`, and completion notification had forgotten it.
+Trying to fix only the status map would leave the same split authority around
+spawn, message delivery, deletion, and recovery.
+
+### C6-D1 — AgentControl ownership
+
+Disposition: **Converge on Codex; implemented.**
+
+Codex creates at most one `AgentControl` for a root thread tree and shares it
+with every descendant. It owns the tree-scoped registry, path identity,
+execution admission, rollout budget, and a weak route back to
+`ThreadManagerState`. Each child is a real `CodexThread`/`Session`, so status
+and execution remain Session-owned rather than copied into the registry.
+
+Yakitori now has the same ownership shape:
+
+```text
+root Thread
+  -> one AgentControl shared by the tree
+       -> canonical path registry and bounded task workers
+       -> AgentRuntime adapter
+            -> ThreadManager creates/resumes real child Threads
+            -> AgentGraphStore persists parent/child topology
+```
+
+`AgentControl` is the process-local control plane. It is not a second Session
+state machine. Child status comes from the child Session or its stored rollout,
+and the child uses the ordinary Turn processor and tool boundary.
+
+grok-build makes a materially different choice. Its channel-owned
+`SubagentCoordinator` is a general background-task actor with queued,
+pending, active, completed, waiter, deadline, cancellation, and buffered
+completion state. Host-specific `ChildRunner` adapters launch child sessions,
+and nested spawns are reparented to the root coordinator. That design is a
+good fit for one task system spanning shell commands, foreground/background
+subagents, workflows, worktrees, and explicit output retrieval. It is not the
+selected topology for Yakitori's Thread-native coding-agent tree.
+
+### C6-D2 — Durable topology and restoration
+
+Disposition: **Converge on Codex V2; implemented.**
+
+Codex persists thread-spawn edges separately from rollout history. Open edges
+restore agent metadata without eagerly reopening every runtime; a later
+operation can load the selected Thread. Explicitly closed edges are excluded
+from open-tree restoration. The in-memory registry remains disposable.
+
+Yakitori now persists the same purpose-specific topology in
+`AgentGraphStore`. Child creation stays provisional until both Thread storage
+and the graph edge exist, so an uncommitted child is never routable. Resume
+loads open descendant identities lazily. If process loss occurs after Thread
+creation but before edge commit, stored subagent metadata backfills the missing
+edge; a recovered `pending_init` child is durably failed because its initial
+task was never admitted. Deletion is deepest-first and storage-first; an edge
+whose Thread is already absent is treated as a cleanup tombstone and
+reconciled on retry or resume. The graph contract therefore requires
+ancestor-before-descendant enumeration and makes partial deletion recoverable.
+
+This graph is not a scheduler or a projection of live status. grok-build's
+coordinator instead owns process-local child records and may persist output or
+resume snapshots for its task workflow; it does not establish the selected
+per-root Thread graph boundary.
+
+### C6-D3 — Inter-agent delivery and completion
+
+Disposition: **Converge on Session-owned model-visible delivery; implemented
+with a stronger Yakitori durability receipt.**
+
+Codex routes `InterAgentCommunication` through the target Session and
+distinguishes communication that triggers a Turn from input delivered at a
+sampling boundary. Agent status is a Session watch value, and completion
+watchers format notifications back to ancestors.
+
+Yakitori likewise delivers through the target Session rather than keeping an
+AgentControl mailbox. One atomic `agent_message` rollout item contains both a
+stable receipt id and the model-visible message. The Session accepts that item
+into its single-writer retry buffer, serializes it with context mutation, and
+flushes before acknowledging delivery. The same receipt survives compaction,
+flush retry, completion retry, and restart, so redelivery is idempotent without
+allowing a receipt to outlive its payload. Completion ids derive from the
+durable lifecycle marker that determines the reconstructed terminal outcome,
+including an unmatched `turn_started` after process loss; restoration can
+therefore reissue a missed notification without rerunning the child.
+
+This is a named Yakitori reliability requirement, not a claim that every
+Codex rollout append has a universal fsync barrier. It exists because the
+sender consumes a completed child task only after the parent has durably
+accepted its notification.
+
+grok-build instead supports foreground return values and buffered background
+completions retrieved through its task-output tools. That completion
+disposition belongs to its unified task coordinator and is not mixed into the
+selected Session mailbox contract.
+
+### C6-D4 — Context, depth, and execution bounds
+
+Disposition: **Converge on the Codex direction; core subset implemented.**
+
+Both systems give a child its own context window and bounded execution.
+Yakitori supports fresh context or an explicit all/last-N parent snapshot,
+inherits the current model target unless overridden, enforces canonical path
+uniqueness before asynchronous creation, and reserves concurrency before the
+first admission await. Children can delegate only within the configured tree
+depth.
+
+Codex additionally owns role definitions, nickname allocation, rollout
+budgets, environment inheritance, and V2 LRU runtime residency. grok-build
+adds agent definitions, personas, capability modes, foreground/background
+budgets, resume-from snapshots, and optional worktree isolation. Those are
+real product surfaces, not prerequisites for the core tree. Agent/role/tool
+catalog work belongs to C5, rollout-budget policy to C2-D6, and runtime
+residency plus explicit close/resume behavior to C7.
+
+### C6-D6 — Mate boundary
+
+Disposition: **Deliberate.**
+
+The current product has one configured Mate identity and immutable revision
+attribution. Child Threads inherit that attribution because they execute as
+delegates of the same coding agent. They are not persistent colleague Mates,
+do not own long-term memory, and do not create Rooms. The later Room/Mate
+direction must not be inferred from the subagent graph.
+
+Evidence anchors:
+
+- Yakitori: `src/runtime/agent-control.ts`, `agent-runtime.ts`,
+  `tools/multi-agent.ts`, `src/core/session.ts`, and
+  `src/core/agent-graph-store.ts`.
+- Codex: `core/src/agent/control.rs`, `control/spawn.rs`,
+  `control/residency.rs`, `agent/registry.rs`, and multi-agent tool handlers.
+- grok-build: `xai-grok-tools` task coordinator/admission modules,
+  `xai-grok-shell` subagent runner, and the subagent user guide.
+
 ## Progress log
+
+### 2026-08-31
+
+- Completed the C6 audit and selected Codex's per-root AgentControl over
+  grok-build's global task/subagent coordinator.
+- Added real child Threads, durable spawn topology, provisional spawn commit,
+  lazy identity restoration, Session-owned status, retry-safe inter-agent
+  delivery, restart-safe completion notification, and recoverable subtree
+  deletion.
+- Kept persistent colleague Mates and Rooms outside the coding-subagent tree.
 
 ### 2026-08-29
 

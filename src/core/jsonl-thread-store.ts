@@ -1037,7 +1037,10 @@ function modelContextAt(
 ): readonly ResponseItemEnvelope[] {
   let context: readonly ResponseItemEnvelope[] = []
   for (const entry of rollout) {
-    if (entry.item.type === "response_item") {
+    if (
+      entry.item.type === "response_item" ||
+      entry.item.type === "agent_message"
+    ) {
       context = [...context, entry.item.item]
     } else if (entry.item.type === "compacted") {
       context = entry.item.replacement
@@ -1359,6 +1362,20 @@ function isRolloutItem(value: unknown): value is RolloutItem {
         value.outcome === "interrupted") &&
       (value.usage === undefined || isTokenUsage(value.usage)) &&
       (value.error === undefined || isRolloutError(value.error))
+    )
+  }
+  if (value.type === "agent_status") {
+    return (
+      hasOnlyKeys(value, ["type", "status", "error"]) &&
+      value.status === "errored" &&
+      typeof value.error === "string"
+    )
+  }
+  if (value.type === "agent_message") {
+    return (
+      hasOnlyKeys(value, ["type", "messageId", "item"]) &&
+      typeof value.messageId === "string" &&
+      isResponseItem(value.item)
     )
   }
   if (value.type === "item_completed") {
