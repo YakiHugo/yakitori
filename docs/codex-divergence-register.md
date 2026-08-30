@@ -47,7 +47,7 @@ change that decision.
 
 | ID | Major module | Yakitori owners | Principal Codex owners | Status |
 | --- | --- | --- | --- | --- |
-| C1 | Session/Turn authority, durable protocol, persistence, and fork | `src/core/*`, legacy `src/kernel/*`, narrow recovery paths in `src/runtime/recovery.ts` | `core/session`, `core/codex_thread.rs`, `core/thread_manager.rs`, `history`, `rollout`, `thread-store` | Implementation started |
+| C1 | Session/Turn authority, durable protocol, persistence, and fork | `src/core/*`, legacy `src/kernel/*`, narrow recovery paths in `src/runtime/recovery.ts` | `core/session`, `core/codex_thread.rs`, `core/thread_manager.rs`, `history`, `rollout`, `thread-store` | Implemented |
 | C2 | Execution loop, model context, world state, and compaction | `src/runtime/session-runner.ts`, `compaction.ts`, `model-context.ts`, `world-state.ts` | `core/session/turn.rs`, `context_manager`, `compact*`, `session/world_state.rs` | Audited |
 | C3 | Tool catalog, execution, permissions, and sandboxing | `src/runtime/tools/*`, `permission-gate.ts`, `tool-permissions.ts` | `core/tools`, `tools`, `exec`, `execpolicy`, `sandboxing`, platform sandboxes | Unreviewed |
 | C4 | Provider transport, model catalog, credentials, retry, and usage | `src/runtime/*provider.ts`, catalog and credentials modules | `model-provider`, `model-provider-info`, `models-manager`, `codex-client`, `responses_retry` | Unreviewed |
@@ -81,9 +81,9 @@ change that decision.
 
 ## C1 — Session/Turn authority, durable protocol, persistence, and fork
 
-Status: implementation started. On 2026-08-29, the live Session actor,
-Codex's owning module topology, rollout representation direction, persistence,
-resume, steering, and fork semantics were selected as Yakitori's target.
+Status: implemented. The live Session actor, Codex's owning module topology,
+rollout representation, persistence, resume, steering, and fork semantics are
+now Yakitori's runtime boundary.
 
 ### Scope and terminology
 
@@ -525,13 +525,13 @@ the target by default. Adding one requires a concrete Yakitori reliability
 requirement and a review of how that deviation affects cancellation, crash
 recovery, and non-idempotent tool calls.
 
-### C1 remaining exception boundary
+### C1 downstream C4 boundary
 
 The authority, persistence, and fork architecture follows Codex. The remaining
 C1-linked decision is whether exact provider-native response history is
 required for retry/resume or Yakitori needs a provider-neutral rollout item
 algebra. C4 owns that decision because multi-provider support is the concrete
-reason a deviation may be necessary.
+reason a deviation may be necessary. It does not keep C1 open.
 
 New cross-module abstractions must assume live actor authority. They must not
 add new `KernelFact` variants for transient execution state or introduce a
@@ -870,7 +870,7 @@ Before changing the execution loop across module boundaries, decide:
 - Selected Codex rollout persistence, recovery, and fork semantics for the
   same boundary, including one Codex-style rollout item direction for all
   provider adapters.
-- Added the first live-runtime slice under `src/core`: `ThreadManager`,
+- Completed the live-runtime cutover under `src/core`: `ThreadManager`,
   `CodexThread`, bounded `SessionIo`, Session-owned `ContextManager`, explicit
   `PersistContext`, on-demand resume, `start` / `steer`, and flush/shutdown
-  barriers. The legacy server and runner cutover is not yet complete.
+  barriers now own the production path.
