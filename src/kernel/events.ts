@@ -1,4 +1,4 @@
-import { createEventId } from "./ids.ts"
+import { createEventId, isStorageKey } from "./ids.ts"
 import { jsonValuesEqual } from "./json-equality.ts"
 
 export const EVENT_SCHEMA_VERSION = 5
@@ -75,8 +75,8 @@ export type TextContent = {
   readonly attachments?: readonly ImageAttachment[]
 }
 
-export type SessionFileReference = {
-  readonly sessionId: string
+export type RolloutAssetReference = {
+  readonly rolloutId: string
   readonly path: string
 }
 
@@ -90,7 +90,7 @@ type ImageAttachmentMetadata = {
 export type ImageDetail = "high" | "original"
 
 export type ImageAttachment = ImageAttachmentMetadata & {
-  readonly file: SessionFileReference
+  readonly file: RolloutAssetReference
 }
 
 export type JsonContent = {
@@ -120,7 +120,7 @@ export type ModelImageBlock =
       readonly type: "image"
       readonly mediaType: ImageAttachment["mediaType"]
       readonly detail?: ImageDetail
-      readonly file: SessionFileReference
+      readonly file: RolloutAssetReference
       readonly sizeBytes: number
       readonly data?: never
     }
@@ -1349,8 +1349,7 @@ function isFileObservation(value: unknown): value is FileObservation {
   }
   return (
     value.ranges === undefined ||
-    (Array.isArray(value.ranges) &&
-      value.ranges.every(isFileObservationRange))
+    (Array.isArray(value.ranges) && value.ranges.every(isFileObservationRange))
   )
 }
 
@@ -1399,7 +1398,7 @@ function isModelImageBlock(value: unknown): boolean {
     onlyKeys(value, ["type", "mediaType", "detail", "file", "sizeBytes"]) &&
     isSupportedImageMediaType(value.mediaType) &&
     (value.detail === undefined || isImageDetail(value.detail)) &&
-    isSessionFileReference(value.file) &&
+    isRolloutAssetReference(value.file) &&
     isNonNegativeInteger(value.sizeBytes)
   )
 }
@@ -1630,15 +1629,17 @@ function isImageAttachment(value: unknown): value is ImageAttachment {
     isSupportedImageMediaType(value.mediaType) &&
     (value.detail === undefined || isImageDetail(value.detail)) &&
     isNonNegativeInteger(value.sizeBytes) &&
-    isSessionFileReference(value.file)
+    isRolloutAssetReference(value.file)
   )
 }
 
-function isSessionFileReference(value: unknown): value is SessionFileReference {
+function isRolloutAssetReference(
+  value: unknown,
+): value is RolloutAssetReference {
   return (
     isRecord(value) &&
-    onlyKeys(value, ["sessionId", "path"]) &&
-    isString(value.sessionId) &&
+    onlyKeys(value, ["rolloutId", "path"]) &&
+    isStorageKey(value.rolloutId) &&
     isString(value.path)
   )
 }

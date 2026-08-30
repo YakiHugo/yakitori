@@ -2,11 +2,11 @@ import { mkdir, realpath, stat } from "node:fs/promises"
 import { join } from "node:path"
 import {
   JsonlThreadStore,
-  ThreadManager,
   type StoredThread,
+  ThreadManager,
   type ThreadStore,
 } from "../core/index.ts"
-import { createSessionFiles } from "../kernel/index.ts"
+import { createRolloutAssets } from "../kernel/index.ts"
 import {
   createMateKernel,
   createSqliteMateStore,
@@ -24,8 +24,8 @@ import {
   createOpenAIProvider,
   createPermissionGate,
   createProviderRegistry,
-  createLiveTurnProcessor,
   createToolRegistry,
+  createTurnProcessor,
   createUserShellEnv,
   GROK_API_BASE_URL,
   ModelStopReason,
@@ -91,7 +91,7 @@ export type YakitoriApplication = {
   readonly mateDatabasePath: string
   readonly threadManager: ThreadManager
   readonly threadStore: ThreadStore
-  readonly sessionFiles: ReturnType<typeof createSessionFiles>
+  readonly rolloutAssets: ReturnType<typeof createRolloutAssets>
   readonly sessionStoreRoot: string
   readonly workspace: string
   readonly activeMate: {
@@ -126,7 +126,7 @@ export async function createYakitoriApplication(
     await mkdir(configuredSessionStoreRoot, { recursive: true })
     const sessionStoreRoot = await realpath(configuredSessionStoreRoot)
     runtimeLock = await acquireRuntimeLock(sessionStoreRoot)
-    const sessionFiles = createSessionFiles(sessionStoreRoot)
+    const rolloutAssets = createRolloutAssets(sessionStoreRoot)
     const ownedMateStore = createSqliteMateStore({
       databasePath: mateDatabasePath,
     })
@@ -199,15 +199,17 @@ export async function createYakitoriApplication(
 
     const threadStore = new JsonlThreadStore({ root: sessionStoreRoot })
     await threadStore.initialize()
-    const referencedSessionFiles = await collectReferencedSessionFiles(
+    const referencedRolloutAssets = await collectReferencedRolloutAssets(
       threadStore,
     )
-    await sessionFiles.collectUnreferencedSessionFiles(referencedSessionFiles)
-    await sessionFiles.cleanupStagingImageAttachments()
+    await rolloutAssets.collectUnreferencedRolloutAssets(
+      referencedRolloutAssets,
+    )
+    await rolloutAssets.cleanupStagingImageAttachments()
     const threadManager = new ThreadManager({
       store: threadStore,
       createTurnProcessor: () =>
-        createLiveTurnProcessor({
+        createTurnProcessor({
           stream: providerRegistry.stream,
           provider: provider.provider,
           model: provider.model,
@@ -217,7 +219,7 @@ export async function createYakitoriApplication(
             : { modelContextWindowTokens }),
           permissionGate,
           toolRegistry,
-          sessionFiles,
+          rolloutAssets,
           approvalPolicy:
             process.env.YAKITORI_APPROVAL_POLICY === "auto_file_tools"
               ? "auto_file_tools"
@@ -240,7 +242,7 @@ export async function createYakitoriApplication(
       resolvePermission: (input) => permissionGate.resolve(input),
       listPendingPermissions: (sessionId) => permissionGate.list(sessionId),
       availableProviders: providerRegistry.providers,
-      sessionFiles,
+      rolloutAssets,
     })
 
     let closePromise: Promise<void> | undefined
@@ -250,7 +252,7 @@ export async function createYakitoriApplication(
       mateDatabasePath,
       threadManager,
       threadStore,
-      sessionFiles,
+      rolloutAssets,
       sessionStoreRoot,
       workspace,
       activeMate: {
@@ -267,7 +269,7 @@ export async function createYakitoriApplication(
           providers,
           userConfig,
           availableProviders: providerRegistry.providers,
-          sessionFiles,
+          rolloutAssets,
           ...(options.guiStaticDir === undefined
             ? {}
             : { staticAssets: { directory: options.guiStaticDir } }),
@@ -305,17 +307,17 @@ export async function createYakitoriApplication(
   }
 }
 
-async function collectReferencedSessionFiles(
+async function collectReferencedRolloutAssets(
   store: ThreadStore,
 ): Promise<ReadonlySet<string>> {
   const referenced = new Set<string>()
   const threadIds = await store.listThreadIds()
   for (const threadId of threadIds) {
-    referenced.add(threadId)
     const thread = await store.readThread(threadId)
     if (thread === undefined) {
       throw new Error(`Thread ${threadId} disappeared during file recovery.`)
     }
+    referenced.add(thread.metadata.rolloutId)
     collectThreadFileReferences(thread, referenced)
   }
   return referenced
@@ -331,7 +333,7 @@ function collectThreadFileReferences(
     if (message.role !== "user") return
     for (const image of message.images ?? []) {
       if ("file" in image && image.file !== undefined) {
-        referenced.add(image.file.sessionId)
+        referenced.add(image.file.rolloutId)
       }
     }
   }

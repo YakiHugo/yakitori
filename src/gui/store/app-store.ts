@@ -1071,7 +1071,7 @@ function sameAttachments(
         attachment.mediaType === right[index]?.mediaType &&
         attachment.sizeBytes === right[index]?.sizeBytes &&
         attachment.detail === right[index]?.detail &&
-        attachment.file.sessionId === right[index]?.file.sessionId &&
+        attachment.file.rolloutId === right[index]?.file.rolloutId &&
         attachment.file.path === right[index]?.file.path,
     )
   )

@@ -21,6 +21,7 @@ import {
   isSessionConfigurationSnapshot,
   isTokenUsage,
 } from "../kernel/events.ts"
+import { isStorageKey } from "../kernel/ids.ts"
 import type {
   HistoryPosition,
   ResponseItemEnvelope,
@@ -378,7 +379,7 @@ export class JsonlThreadStore implements ThreadStore {
     return (await readdir(this.#threadsDirectory))
       .filter((file) => file.endsWith(".json"))
       .map((file) => basename(file, ".json"))
-      .filter(isSupportedThreadId)
+      .filter(isStorageKey)
       .sort()
   }
 
@@ -395,7 +396,7 @@ export class JsonlThreadStore implements ThreadStore {
             try {
               const metadata = await this.#readMetadata(basename(file, ".json"))
               const history = await this.#materialize(
-                requireRolloutId(metadata),
+                metadata.rolloutId,
                 new Set(),
               )
               return {
@@ -487,7 +488,7 @@ export class JsonlThreadStore implements ThreadStore {
       this.#writerLockPath(normalized.id),
       `Thread ${normalized.id} already has an active writer.`,
     )
-    const rolloutId = requireRolloutId(normalized)
+    const rolloutId = normalized.rolloutId
     const rolloutPath = this.#rolloutPath(rolloutId)
     const metadataPath = this.#metadataPath(normalized.id)
     const sessionMeta: StoredRolloutItem = {
@@ -553,7 +554,7 @@ export class JsonlThreadStore implements ThreadStore {
     writerLock: OwnedFileLock,
   ) {
     const threadId = metadata.id
-    const rolloutId = requireRolloutId(metadata)
+    const rolloutId = metadata.rolloutId
     const rolloutPath = this.#rolloutPath(rolloutId)
     if (repairTrailingLine) await repairTrailingJsonLine(rolloutPath)
     const entries = await readPhysicalRollout(rolloutPath, {
@@ -682,10 +683,7 @@ export class JsonlThreadStore implements ThreadStore {
 
   async #readRequiredThread(threadId: string): Promise<StoredThread> {
     const metadata = await this.#readMetadata(threadId)
-    const rollout = await this.#materialize(
-      requireRolloutId(metadata),
-      new Set(),
-    )
+    const rollout = await this.#materialize(metadata.rolloutId, new Set())
     return { metadata, rollout }
   }
 
@@ -845,7 +843,7 @@ export class JsonlThreadStore implements ThreadStore {
         return
       }
     }
-    const retained = new Set(metadata.map(requireRolloutId))
+    const retained = new Set(metadata.map((thread) => thread.rolloutId))
     const pending: string[] = [...retained]
     for (const thread of metadata) {
       if (thread.historyBase !== undefined) {
@@ -987,7 +985,7 @@ async function readPhysicalRollout(
   const logicalThreadId = sessionMeta.item.metadata.id
   if (
     sessionMeta.rolloutId !== expected.rolloutId ||
-    requireRolloutId(sessionMeta.item.metadata) !== expected.rolloutId ||
+    sessionMeta.item.metadata.rolloutId !== expected.rolloutId ||
     (expected.threadId !== undefined && logicalThreadId !== expected.threadId)
   ) {
     throw new Error(`Rollout ${expected.rolloutId} has mismatched identity.`)
@@ -1166,28 +1164,16 @@ function isMissing(error: unknown): boolean {
 }
 
 function requireThreadId(threadId: string): void {
-  if (!isSupportedThreadId(threadId)) {
+  if (!isStorageKey(threadId)) {
     throw new Error("Thread id contains unsupported characters.")
   }
 }
 
-function isSupportedThreadId(value: unknown): value is string {
-  return typeof value === "string" && /^[A-Za-z0-9_-]+$/.test(value)
-}
-
 function normalizeMetadata(metadata: ThreadMetadata): ThreadMetadata {
   const copy = structuredClone(metadata)
-  const rolloutId = copy.rolloutId ?? copy.id
   requireThreadId(copy.id)
-  requireThreadId(rolloutId)
-  return { ...copy, rolloutId }
-}
-
-function requireRolloutId(metadata: ThreadMetadata): string {
-  if (metadata.rolloutId === undefined) {
-    throw new Error(`Thread ${metadata.id} has no physical rollout id.`)
-  }
-  return metadata.rolloutId
+  requireThreadId(copy.rolloutId)
+  return copy
 }
 
 function isThreadMetadata(value: unknown): value is ThreadMetadata {
@@ -1210,8 +1196,8 @@ function isThreadMetadata(value: unknown): value is ThreadMetadata {
       "historyBase",
       "metadata",
     ]) &&
-    isSupportedThreadId(value.id) &&
-    isSupportedThreadId(value.rolloutId) &&
+    isStorageKey(value.id) &&
+    isStorageKey(value.rolloutId) &&
     typeof value.conversationId === "string" &&
     typeof value.createdAt === "string" &&
     typeof value.updatedAt === "string" &&
@@ -1234,8 +1220,8 @@ function isStoredRolloutItem(value: unknown): value is StoredRolloutItem {
   return (
     isRecord(value) &&
     hasOnlyKeys(value, ["threadId", "rolloutId", "seq", "createdAt", "item"]) &&
-    isSupportedThreadId(value.threadId) &&
-    isSupportedThreadId(value.rolloutId) &&
+    isStorageKey(value.threadId) &&
+    isStorageKey(value.rolloutId) &&
     typeof value.seq === "number" &&
     Number.isSafeInteger(value.seq) &&
     value.seq >= 0 &&
@@ -1356,7 +1342,7 @@ function isRolloutError(
 function isHistoryPosition(value: unknown): value is HistoryPosition {
   return (
     isRecord(value) &&
-    isSupportedThreadId(value.rolloutId) &&
+    isStorageKey(value.rolloutId) &&
     Number.isInteger(value.endSeqExclusive) &&
     Number(value.endSeqExclusive) >= 1 &&
     Number.isInteger(value.endByteOffset) &&

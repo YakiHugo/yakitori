@@ -30,7 +30,7 @@ export function UserMessageCell({
           >
             {attachments.map((attachment) => (
               <img
-                key={`${attachment.name}:${attachment.sizeBytes}:${attachment.file.sessionId}:${attachment.file.path}`}
+                key={`${attachment.name}:${attachment.sizeBytes}:${attachment.file.rolloutId}:${attachment.file.path}`}
                 src={imageAttachmentUrl(attachment, apiBase)}
                 alt={attachment.name}
                 className="max-h-72 min-h-24 w-full rounded-lg bg-black/10 object-cover"

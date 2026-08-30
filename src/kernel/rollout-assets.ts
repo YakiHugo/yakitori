@@ -12,8 +12,8 @@ import {
   stat,
 } from "node:fs/promises"
 import { basename, dirname, join, posix, resolve, sep } from "node:path"
-import type { ImageAttachment, SessionFileReference } from "./events.ts"
-import { isGeneratedSessionId } from "./ids.ts"
+import type { ImageAttachment, RolloutAssetReference } from "./events.ts"
+import { isStorageKey } from "./ids.ts"
 import { inspectImageBytes } from "./image-metadata.ts"
 
 // Grok Build applies the same per-image send boundary. This is a transport
@@ -28,11 +28,11 @@ export type ImageBytesInput = {
 
 export type PreparedCommandFiles = {
   readonly stdout: {
-    readonly reference: SessionFileReference
+    readonly reference: RolloutAssetReference
     readonly path: string
   }
   readonly stderr: {
-    readonly reference: SessionFileReference
+    readonly reference: RolloutAssetReference
     readonly path: string
   }
 }
@@ -46,74 +46,75 @@ export type PreparedImageAttachments = {
   rollback(): Promise<void>
 }
 
-export type SessionFiles = {
+export type RolloutAssets = {
   importImagePaths(
-    sessionId: string,
+    rolloutId: string,
     ownerId: string,
     paths: readonly string[],
   ): Promise<readonly ImageAttachment[]>
   importImageBytes(
-    sessionId: string,
+    rolloutId: string,
     ownerId: string,
     images: readonly ImageBytesInput[],
   ): Promise<readonly ImageAttachment[]>
   promoteImageAttachments(
-    sessionId: string,
+    rolloutId: string,
     ownerId: string,
     attachments: readonly ImageAttachment[],
   ): Promise<PreparedImageAttachments>
   copyImageAttachments(
-    sessionId: string,
+    rolloutId: string,
     ownerId: string,
     attachments: readonly ImageAttachment[],
   ): Promise<readonly ImageAttachment[]>
   discardRequestImageAttachments(
-    sessionId: string,
+    rolloutId: string,
     ownerId: string,
   ): Promise<void>
-  discardSessionFiles(sessionId: string): Promise<void>
-  collectUnreferencedSessionFiles(
-    referencedSessionIds: ReadonlySet<string>,
+  discardRolloutAssets(rolloutId: string): Promise<void>
+  collectUnreferencedRolloutAssets(
+    referencedRolloutIds: ReadonlySet<string>,
   ): Promise<void>
   discardDraftImageAttachments(
     attachments: readonly ImageAttachment[],
   ): Promise<void>
   cleanupStagingImageAttachments(): Promise<void>
   prepareCommandFiles(
-    sessionId: string,
+    rolloutId: string,
     toolCallId: string,
   ): Promise<PreparedCommandFiles>
-  read(reference: SessionFileReference): Promise<Buffer>
+  read(reference: RolloutAssetReference): Promise<Buffer>
   readRange(
-    reference: SessionFileReference,
+    reference: RolloutAssetReference,
     offset: number,
     limit: number,
   ): Promise<{ readonly bytes: Buffer; readonly totalBytes: number }>
   openRead(
-    reference: SessionFileReference,
+    reference: RolloutAssetReference,
   ): Promise<{ readonly stream: ReadStream; readonly totalBytes: number }>
-  resolve(reference: SessionFileReference): string
+  resolve(reference: RolloutAssetReference): string
 }
 
-export function createSessionFiles(sessionsDir: string): SessionFiles {
-  const root = resolve(sessionsDir)
+export function createRolloutAssets(storageRoot: string): RolloutAssets {
+  const storageRootPath = resolve(storageRoot)
+  const root = join(storageRootPath, "assets")
 
-  function resolveReference(reference: SessionFileReference): string {
-    requireSessionId(reference.sessionId)
+  function resolveReference(reference: RolloutAssetReference): string {
+    requireRolloutId(reference.rolloutId)
     requireRelativeFilePath(reference.path)
-    const filesDir = join(root, reference.sessionId, "files")
+    const filesDir = join(root, reference.rolloutId, "files")
     const path = resolve(filesDir, reference.path)
     if (path !== filesDir && !path.startsWith(`${filesDir}${sep}`)) {
-      throw new Error("Session file path escapes its Session directory.")
+      throw new Error("Rollout asset path escapes its rollout directory.")
     }
     return path
   }
 
   async function createEmptyFile(
-    reference: SessionFileReference,
+    reference: RolloutAssetReference,
   ): Promise<string> {
     const path = resolveReference(reference)
-    await ensureDirectoryChain(root, dirname(path))
+    await ensureDirectoryChain(storageRootPath, dirname(path))
     const handle = await open(path, "w", 0o600)
     try {
       await handle.sync()
@@ -124,8 +125,8 @@ export function createSessionFiles(sessionsDir: string): SessionFiles {
   }
 
   return {
-    async importImagePaths(sessionId, ownerId, paths) {
-      requireSessionId(sessionId)
+    async importImagePaths(rolloutId, ownerId, paths) {
+      requireRolloutId(rolloutId)
       requirePathSegment(ownerId, "attachment owner")
       const ownerDirectory = fileNameForId(ownerId)
       const attachments: ImageAttachment[] = []
@@ -134,16 +135,16 @@ export function createSessionFiles(sessionsDir: string): SessionFiles {
           const name = basename(sourcePath)
           requireAttachmentName(name)
           const snapshot = await copyImageSnapshot({
-            root,
+            root: storageRootPath,
             sourcePath,
             stagingDirectory: stagingOwnerDirectory(
               root,
-              sessionId,
+              rolloutId,
               ownerDirectory,
             ),
           })
           const reference = imageReference(
-            sessionId,
+            rolloutId,
             "staging",
             ownerDirectory,
             index,
@@ -166,7 +167,7 @@ export function createSessionFiles(sessionsDir: string): SessionFiles {
         }
         return attachments
       } catch (error) {
-        await rm(stagingOwnerDirectory(root, sessionId, ownerDirectory), {
+        await rm(stagingOwnerDirectory(root, rolloutId, ownerDirectory), {
           recursive: true,
           force: true,
         })
@@ -174,8 +175,8 @@ export function createSessionFiles(sessionsDir: string): SessionFiles {
       }
     },
 
-    async importImageBytes(sessionId, ownerId, images) {
-      requireSessionId(sessionId)
+    async importImageBytes(rolloutId, ownerId, images) {
+      requireRolloutId(rolloutId)
       requirePathSegment(ownerId, "attachment owner")
       const ownerDirectory = fileNameForId(ownerId)
       const attachments: ImageAttachment[] = []
@@ -186,13 +187,13 @@ export function createSessionFiles(sessionsDir: string): SessionFiles {
           requireImageSize(bytes.byteLength)
           const { mediaType } = inspectImageBytes(bytes)
           const reference = imageReference(
-            sessionId,
+            rolloutId,
             "staging",
             ownerDirectory,
             index,
             mediaType,
           )
-          await writeOnce(root, resolveReference(reference), bytes)
+          await writeOnce(storageRootPath, resolveReference(reference), bytes)
           attachments.push({
             name: image.name,
             mediaType,
@@ -203,7 +204,7 @@ export function createSessionFiles(sessionsDir: string): SessionFiles {
         }
         return attachments
       } catch (error) {
-        await rm(stagingOwnerDirectory(root, sessionId, ownerDirectory), {
+        await rm(stagingOwnerDirectory(root, rolloutId, ownerDirectory), {
           recursive: true,
           force: true,
         })
@@ -211,8 +212,8 @@ export function createSessionFiles(sessionsDir: string): SessionFiles {
       }
     },
 
-    async promoteImageAttachments(sessionId, ownerId, attachments) {
-      requireSessionId(sessionId)
+    async promoteImageAttachments(rolloutId, ownerId, attachments) {
+      requireRolloutId(rolloutId)
       requirePathSegment(ownerId, "attachment owner")
       const ownerDirectory = fileNameForId(ownerId)
       const promoted: ImageAttachment[] = []
@@ -223,9 +224,9 @@ export function createSessionFiles(sessionsDir: string): SessionFiles {
         )
       try {
         for (const [index, attachment] of attachments.entries()) {
-          requireDraftImageAttachment(sessionId, attachment)
+          requireDraftImageAttachment(rolloutId, attachment)
           const file = imageReference(
-            sessionId,
+            rolloutId,
             "requests",
             ownerDirectory,
             index,
@@ -255,7 +256,14 @@ export function createSessionFiles(sessionsDir: string): SessionFiles {
           const sourcePath = resolveReference(attachment.file)
           const source = await inspectStoredImage(sourcePath)
           requireMatchingImageMetadata(source, attachment)
-          if (await linkOnce(root, sourcePath, targetPath, source.sizeBytes)) {
+          if (
+            await linkOnce(
+              storageRootPath,
+              sourcePath,
+              targetPath,
+              source.sizeBytes,
+            )
+          ) {
             createdPaths.push(targetPath)
           }
           promoted.push({ ...attachment, file })
@@ -267,8 +275,8 @@ export function createSessionFiles(sessionsDir: string): SessionFiles {
       }
     },
 
-    async copyImageAttachments(sessionId, ownerId, attachments) {
-      requireSessionId(sessionId)
+    async copyImageAttachments(rolloutId, ownerId, attachments) {
+      requireRolloutId(rolloutId)
       requirePathSegment(ownerId, "attachment owner")
       const ownerDirectory = fileNameForId(ownerId)
       const copied: ImageAttachment[] = []
@@ -279,7 +287,7 @@ export function createSessionFiles(sessionsDir: string): SessionFiles {
           const source = await inspectStoredImage(sourcePath)
           requireMatchingImageMetadata(source, attachment)
           const file = imageReference(
-            sessionId,
+            rolloutId,
             "requests",
             ownerDirectory,
             index,
@@ -289,7 +297,12 @@ export function createSessionFiles(sessionsDir: string): SessionFiles {
           const existing = await inspectStoredImageIfPresent(targetPath)
           if (existing === undefined) {
             if (
-              await linkOnce(root, sourcePath, targetPath, source.sizeBytes)
+              await linkOnce(
+                storageRootPath,
+                sourcePath,
+                targetPath,
+                source.sizeBytes,
+              )
             ) {
               createdPaths.push(targetPath)
             }
@@ -305,13 +318,13 @@ export function createSessionFiles(sessionsDir: string): SessionFiles {
       }
     },
 
-    async discardRequestImageAttachments(sessionId, ownerId) {
-      requireSessionId(sessionId)
+    async discardRequestImageAttachments(rolloutId, ownerId) {
+      requireRolloutId(rolloutId)
       requirePathSegment(ownerId, "attachment owner")
       await rm(
         join(
           root,
-          sessionId,
+          rolloutId,
           "files",
           "attachments",
           "requests",
@@ -321,20 +334,20 @@ export function createSessionFiles(sessionsDir: string): SessionFiles {
       )
     },
 
-    async discardSessionFiles(sessionId) {
-      requireSessionId(sessionId)
-      await rm(join(root, sessionId), { recursive: true, force: true })
+    async discardRolloutAssets(rolloutId) {
+      requireRolloutId(rolloutId)
+      await rm(join(root, rolloutId), { recursive: true, force: true })
     },
 
-    async collectUnreferencedSessionFiles(referencedSessionIds) {
+    async collectUnreferencedRolloutAssets(referencedRolloutIds) {
       const entries = await readdirIfPresent(root)
       await Promise.all(
         entries
           .filter(
             (entry) =>
               entry.isDirectory() &&
-              isGeneratedSessionId(entry.name) &&
-              !referencedSessionIds.has(entry.name),
+              isStorageKey(entry.name) &&
+              !referencedRolloutIds.has(entry.name),
           )
           .map((entry) =>
             rm(join(root, entry.name), { recursive: true, force: true }),
@@ -345,7 +358,7 @@ export function createSessionFiles(sessionsDir: string): SessionFiles {
     async discardDraftImageAttachments(attachments) {
       await Promise.all(
         attachments.map(async (attachment) => {
-          requireDraftImageAttachment(attachment.file.sessionId, attachment)
+          requireDraftImageAttachment(attachment.file.rolloutId, attachment)
           await rm(resolveReference(attachment.file), { force: true })
         }),
       )
@@ -365,16 +378,16 @@ export function createSessionFiles(sessionsDir: string): SessionFiles {
       )
     },
 
-    async prepareCommandFiles(sessionId, toolCallId) {
-      requireSessionId(sessionId)
+    async prepareCommandFiles(rolloutId, toolCallId) {
+      requireRolloutId(rolloutId)
       requirePathSegment(toolCallId, "tool call id")
       const toolDirectory = fileNameForId(toolCallId)
       const stdout = {
-        sessionId,
+        rolloutId,
         path: posix.join("tools", toolDirectory, "stdout.log"),
       }
       const stderr = {
-        sessionId,
+        rolloutId,
         path: posix.join("tools", toolDirectory, "stderr.log"),
       }
       const [stdoutPath, stderrPath] = await Promise.all([
@@ -393,7 +406,7 @@ export function createSessionFiles(sessionsDir: string): SessionFiles {
       try {
         const stat = await handle.stat()
         if (!stat.isFile())
-          throw new Error("Session file is not a regular file.")
+          throw new Error("Rollout asset is not a regular file.")
         return await handle.readFile()
       } finally {
         await handle.close()
@@ -402,17 +415,17 @@ export function createSessionFiles(sessionsDir: string): SessionFiles {
 
     async readRange(reference, offset, limit) {
       if (!Number.isSafeInteger(offset) || offset < 0) {
-        throw new Error("Session file offset must be a non-negative integer.")
+        throw new Error("Rollout asset offset must be a non-negative integer.")
       }
       if (!Number.isSafeInteger(limit) || limit <= 0) {
-        throw new Error("Session file limit must be a positive integer.")
+        throw new Error("Rollout asset limit must be a positive integer.")
       }
       const path = resolveReference(reference)
       const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
       try {
         const stat = await handle.stat()
         if (!stat.isFile())
-          throw new Error("Session file is not a regular file.")
+          throw new Error("Rollout asset is not a regular file.")
         const length = Math.min(limit, Math.max(0, stat.size - offset))
         const bytes = Buffer.alloc(length)
         const read = await handle.read(bytes, 0, length, offset)
@@ -431,7 +444,7 @@ export function createSessionFiles(sessionsDir: string): SessionFiles {
       try {
         const file = await handle.stat()
         if (!file.isFile())
-          throw new Error("Session file is not a regular file.")
+          throw new Error("Rollout asset is not a regular file.")
         return {
           stream: handle.createReadStream(),
           totalBytes: file.size,
@@ -446,20 +459,20 @@ export function createSessionFiles(sessionsDir: string): SessionFiles {
   }
 }
 
-function requireSessionId(sessionId: string): void {
-  if (isGeneratedSessionId(sessionId)) return
-  throw new Error(`Invalid session id ${sessionId}.`)
+function requireRolloutId(rolloutId: string): void {
+  if (isStorageKey(rolloutId)) return
+  throw new Error(`Invalid rollout id ${rolloutId}.`)
 }
 
 function imageReference(
-  sessionId: string,
+  rolloutId: string,
   namespace: "staging" | "requests",
   ownerDirectory: string,
   index: number,
   mediaType: ImageAttachment["mediaType"],
-): SessionFileReference {
+): RolloutAssetReference {
   return {
-    sessionId,
+    rolloutId,
     path: posix.join(
       "attachments",
       namespace,
@@ -471,12 +484,12 @@ function imageReference(
 
 function stagingOwnerDirectory(
   root: string,
-  sessionId: string,
+  rolloutId: string,
   ownerDirectory: string,
 ): string {
   return join(
     root,
-    sessionId,
+    rolloutId,
     "files",
     "attachments",
     "staging",
@@ -535,14 +548,14 @@ function requireAttachmentName(name: string): void {
 }
 
 function requireDraftImageAttachment(
-  sessionId: string,
+  rolloutId: string,
   attachment: ImageAttachment,
 ): void {
   if (
-    attachment.file.sessionId !== sessionId ||
+    attachment.file.rolloutId !== rolloutId ||
     !isStagingImagePath(attachment.file.path)
   ) {
-    throw new Error("Image attachment is not a draft owned by this Session.")
+    throw new Error("Image attachment is not a draft owned by this rollout.")
   }
   requireAttachmentName(attachment.name)
 }
@@ -606,7 +619,7 @@ async function linkOnce(
     if (!isAlreadyExists(error)) throw error
     const existing = await stat(path)
     if (!existing.isFile() || existing.size !== sourceBytes) {
-      throw new Error("A different Session file already exists at this path.")
+      throw new Error("A different rollout asset already exists at this path.")
     }
     const [source, target] = await Promise.all([
       readFile(sourcePath),
@@ -634,7 +647,7 @@ async function linkTemporaryFile(
     if (!isAlreadyExists(error)) throw error
     const existing = await stat(path)
     if (!existing.isFile() || existing.size !== sourceBytes) {
-      throw new Error("A different Session file already exists at this path.")
+      throw new Error("A different rollout asset already exists at this path.")
     }
   }
 }
@@ -665,7 +678,9 @@ async function writeOnce(
       if (!isAlreadyExists(error)) throw error
       const existing = await readFile(path)
       if (!existing.equals(bytes)) {
-        throw new Error("A different Session file already exists at this path.")
+        throw new Error(
+          "A different rollout asset already exists at this path.",
+        )
       }
       await syncDirectory(directory)
     }
@@ -718,7 +733,7 @@ function requireRelativeFilePath(path: string): void {
       .split("/")
       .some((segment) => segment === "" || segment === "." || segment === "..")
   ) {
-    throw new Error("Invalid Session file path.")
+    throw new Error("Invalid rollout asset path.")
   }
 }
 

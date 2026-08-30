@@ -9,7 +9,7 @@ import { ThreadManager } from "../../src/core/thread-manager.ts"
 import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
 import { MemoryThreadStore } from "./memory-thread-store.ts"
 
-describe("Codex-style live Session", () => {
+describe("live Session actor", () => {
   it("routes turn input atomically as Started, Steered, or NotSubmitted", async () => {
     const mayFinish = deferred<void>()
     const steering: string[] = []
@@ -308,7 +308,7 @@ describe("Codex-style live Session", () => {
             mediaType: "image/png",
             sizeBytes: 123,
             detail: "original",
-            file: { sessionId: thread.id, path: "attachments/screen.png" },
+            file: { rolloutId: thread.id, path: "attachments/screen.png" },
           },
         ],
       },
@@ -329,7 +329,7 @@ describe("Codex-style live Session", () => {
               mediaType: "image/png",
               detail: "original",
               file: {
-                sessionId: thread.id,
+                rolloutId: thread.id,
                 path: "attachments/screen.png",
               },
               sizeBytes: 123,
@@ -671,11 +671,11 @@ async function nextEventOfType<
   Type extends NonNullable<
     Awaited<
       ReturnType<
-        import("../../src/core/codex-thread.ts").CodexThread["nextEvent"]
+        import("../../src/core/live-thread.ts").LiveThread["nextEvent"]
       >
     >
   >["type"],
->(thread: import("../../src/core/codex-thread.ts").CodexThread, type: Type) {
+>(thread: import("../../src/core/live-thread.ts").LiveThread, type: Type) {
   for (;;) {
     const event = await thread.nextEvent()
     if (event === undefined) throw new Error(`Session ended before ${type}.`)

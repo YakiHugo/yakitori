@@ -15,7 +15,7 @@ export type HistoryPosition = {
 
 export type ThreadMetadata = {
   readonly id: string
-  readonly rolloutId?: string
+  readonly rolloutId: string
   readonly conversationId: string
   readonly createdAt: string
   readonly updatedAt: string

@@ -8,7 +8,7 @@ import type {
 
 // Public live-thread handle. Session remains the owner of state and execution;
 // SessionIo is the only ordinary command/event transport exposed to callers.
-export class CodexThread {
+export class LiveThread {
   readonly id: string
   readonly #session: Session
 

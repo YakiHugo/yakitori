@@ -18,6 +18,7 @@ import type {
   RolloutItem,
   ThreadMetadata,
 } from "../../src/core/rollout.ts"
+import type { CreateThreadMetadata } from "../../src/core/thread-store.ts"
 
 const roots: string[] = []
 
@@ -125,6 +126,7 @@ describe("JsonlThreadStore", () => {
     expect(prepared.historyPosition).toBeUndefined()
     const forged: ThreadMetadata = {
       ...metadata("thread_forged_child"),
+      rolloutId: "rollout_forged_child",
       historyBase: {
         rolloutId: "rollout_unreserved",
         endSeqExclusive: 2,
@@ -889,8 +891,8 @@ async function holdStorageLock(root: string): Promise<{
 
 function metadata(
   id: string,
-  extra: Partial<ThreadMetadata> = {},
-): ThreadMetadata {
+  extra: Partial<CreateThreadMetadata> = {},
+): CreateThreadMetadata {
   const now = new Date().toISOString()
   return {
     id,

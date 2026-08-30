@@ -10,7 +10,7 @@ import {
   MISSING_TOOL_RESULT_TEXT,
   type ModelMessage,
   type ModelSelection,
-  type SessionFiles,
+  type RolloutAssets,
   type TokenUsage,
 } from "../kernel/index.ts"
 import {
@@ -64,7 +64,7 @@ import {
   type WorldState,
 } from "./world-state.ts"
 
-export type LiveTurnProcessorOptions = {
+export type TurnProcessorOptions = {
   readonly stream: StreamFn
   readonly toolRegistry?: ToolRegistry
   readonly permissionGate?: PermissionGate
@@ -77,7 +77,7 @@ export type LiveTurnProcessorOptions = {
   readonly modelContextWindowTokens?: number
   readonly loadProjectInstructions?: typeof loadProjectInstructions
   readonly now?: () => Date
-  readonly sessionFiles?: SessionFiles
+  readonly rolloutAssets?: RolloutAssets
   readonly onRuntimeError?: (error: unknown) => void
 }
 
@@ -86,8 +86,8 @@ type CompactionState = {
   failedHistoryLength: number | undefined
 }
 
-export function createLiveTurnProcessor(
-  options: LiveTurnProcessorOptions,
+export function createTurnProcessor(
+  options: TurnProcessorOptions,
 ): TurnProcessor {
   const toolRegistry = options.toolRegistry ?? createToolRegistry()
   const permissionGate = options.permissionGate ?? createPermissionGate()
@@ -204,7 +204,7 @@ async function executeTurn(input: {
   readonly runtimeTiming: RunnerTimingPolicy
   readonly projectInstructionLoader: typeof loadProjectInstructions
   readonly compactionState: CompactionState
-  readonly options: LiveTurnProcessorOptions
+  readonly options: TurnProcessorOptions
   readonly setActiveStream: (
     stream: AsyncIterator<ModelStreamEvent> | undefined,
   ) => void
@@ -290,9 +290,9 @@ async function executeTurn(input: {
       target: turn.configuration.target,
       cacheKey: turn.configuration.promptCacheKey,
       system: [turn.configuration.baseInstructions],
-      messages: await resolveSessionFileImages(
+      messages: await resolveRolloutAssetImages(
         adapted.messages,
-        input.options.sessionFiles,
+        input.options.rolloutAssets,
       ),
       tools: toolPlan.definitions,
       signal: input.signal,
@@ -321,7 +321,7 @@ async function executeTurn(input: {
         history: beforeStep.context.history,
         stream: input.options.stream,
         signal: input.signal,
-        sessionFiles: input.options.sessionFiles,
+        rolloutAssets: input.options.rolloutAssets,
         usages,
         compactionState: input.compactionState,
         onRuntimeError: input.options.onRuntimeError,
@@ -407,6 +407,7 @@ async function executeTurn(input: {
       const results = await executeToolCalls({
         calls,
         threadId: metadata.id,
+        rolloutId: metadata.rolloutId,
         turnId: input.input.submissionId,
         workspaceRoot,
         signal: input.signal,
@@ -416,7 +417,7 @@ async function executeTurn(input: {
           input.runtime.emitPermissionEvent(event),
         permissionTimeoutMs: input.runtimeTiming.permissionWaitTimeoutMs,
         approvalPolicy: turn.configuration.approvalPolicy,
-        sessionFiles: input.options.sessionFiles,
+        rolloutAssets: input.options.rolloutAssets,
         visibleFileObservations,
         onRuntimeError: input.options.onRuntimeError,
       })
@@ -564,7 +565,7 @@ async function compactLiveHistory(input: {
   readonly history: readonly ResponseItemEnvelope[]
   readonly stream: StreamFn
   readonly signal: AbortSignal
-  readonly sessionFiles: SessionFiles | undefined
+  readonly rolloutAssets: RolloutAssets | undefined
   readonly usages: ModelUsage[]
   readonly compactionState: CompactionState
   readonly onRuntimeError: ((error: unknown) => void) | undefined
@@ -649,7 +650,7 @@ async function compactLiveHistory(input: {
     while (result === undefined) {
       const hydratedSource = await Promise.all(
         sourceGroups.map(async (group) => ({
-          messages: await resolveSessionFileImages(
+          messages: await resolveRolloutAssetImages(
             adaptImagesForModel(
               limitToolResults(
                 completeToolCallHistory(
@@ -662,7 +663,7 @@ async function compactLiveHistory(input: {
               ),
               input.turn.configuration.target,
             ).messages,
-            input.sessionFiles,
+            input.rolloutAssets,
           ),
         })),
       )
@@ -755,6 +756,7 @@ async function compactLiveHistory(input: {
 
 type ToolExecutionScope = {
   readonly threadId: string
+  readonly rolloutId: string
   readonly turnId: string
   readonly workspaceRoot: string
   readonly signal: AbortSignal
@@ -763,7 +765,7 @@ type ToolExecutionScope = {
   readonly publishPermissionEvent: TurnRuntime["emitPermissionEvent"]
   readonly permissionTimeoutMs: number
   readonly approvalPolicy: ApprovalPolicy
-  readonly sessionFiles: SessionFiles | undefined
+  readonly rolloutAssets: RolloutAssets | undefined
   readonly visibleFileObservations: VisibleFileObservations
   readonly onRuntimeError: ((error: unknown) => void) | undefined
 }
@@ -885,12 +887,12 @@ async function executePreparedTool(
       prepared.call.input,
       {
         workspaceRoot: input.workspaceRoot,
-        sessionId: input.threadId,
+        rolloutId: input.rolloutId,
         toolCallId: prepared.call.id,
         signal: input.signal,
-        ...(input.sessionFiles === undefined
+        ...(input.rolloutAssets === undefined
           ? {}
-          : { sessionFiles: input.sessionFiles }),
+          : { rolloutAssets: input.rolloutAssets }),
         visibleFileObservations: input.visibleFileObservations,
       },
     )
@@ -1015,9 +1017,9 @@ function envelope(
   }
 }
 
-async function resolveSessionFileImages(
+async function resolveRolloutAssetImages(
   messages: readonly ModelMessage[],
-  sessionFiles: SessionFiles | undefined,
+  rolloutAssets: RolloutAssets | undefined,
 ): Promise<readonly ModelMessage[]> {
   return Promise.all(
     messages.map(async (message): Promise<ModelMessage> => {
@@ -1026,13 +1028,13 @@ async function resolveSessionFileImages(
       const images = await Promise.all(
         message.images.map(async (image) => {
           if ("data" in image && image.data !== undefined) return image
-          if (sessionFiles === undefined) {
-            throw new Error("Session image storage is unavailable.")
+          if (rolloutAssets === undefined) {
+            throw new Error("Rollout image storage is unavailable.")
           }
-          const bytes = await sessionFiles.read(image.file)
+          const bytes = await rolloutAssets.read(image.file)
           if (bytes.byteLength !== image.sizeBytes) {
             throw new Error(
-              "Session image size does not match its recorded size.",
+              "Rollout image size does not match its recorded size.",
             )
           }
           return {

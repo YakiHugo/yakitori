@@ -222,19 +222,19 @@ export function createRunCommandTool(
       let commandFiles:
         | Awaited<
             ReturnType<
-              NonNullable<typeof context.sessionFiles>["prepareCommandFiles"]
+              NonNullable<typeof context.rolloutAssets>["prepareCommandFiles"]
             >
           >
         | undefined
       const persistenceWarnings: string[] = []
       if (
-        context.sessionFiles !== undefined &&
-        context.sessionId !== undefined &&
+        context.rolloutAssets !== undefined &&
+        context.rolloutId !== undefined &&
         context.toolCallId !== undefined
       ) {
         try {
-          commandFiles = await context.sessionFiles.prepareCommandFiles(
-            context.sessionId,
+          commandFiles = await context.rolloutAssets.prepareCommandFiles(
+            context.rolloutId,
             context.toolCallId,
           )
         } catch (error) {

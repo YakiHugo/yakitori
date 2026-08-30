@@ -1,7 +1,9 @@
-import { mkdtemp, rm, stat, writeFile } from "node:fs/promises"
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
+import type { Server as HttpServer } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
+import { createRolloutAssets } from "../../src/kernel/rollout-assets.ts"
 import { createFauxProvider } from "../../src/runtime/faux-provider.ts"
 import {
   createYakitoriApplication,
@@ -15,7 +17,105 @@ afterEach(async () => {
   await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()))
 })
 
-describe("Session file lineage", () => {
+describe("rollout asset lineage", () => {
+  it("keeps physical rollout ownership distinct from the logical Thread id", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "yakitori-physical-rollout-"))
+    const workspace = await mkdtemp(
+      join(tmpdir(), "yakitori-physical-rollout-work-"),
+    )
+    cleanups.push(async () => {
+      await rm(rootDir, { recursive: true, force: true })
+      await rm(workspace, { recursive: true, force: true })
+    })
+    const options = {
+      rootDir,
+      workspace,
+      userConfigPath: join(rootDir, "config.toml"),
+    }
+    const initial = await createYakitoriApplication({
+      ...options,
+      stream: createFauxProvider([]).stream,
+    })
+    const created = await initial.handlers.createSession()
+    expectOk(created)
+    const threadId = created.body.session.id
+    const sessionStoreRoot = initial.sessionStoreRoot
+    await initial.close()
+
+    const rolloutId = "rollout_physical_integration"
+    await reidentifyPhysicalRollout(sessionStoreRoot, threadId, rolloutId)
+    const assets = createRolloutAssets(sessionStoreRoot)
+    const retainedCommand = await assets.prepareCommandFiles(
+      rolloutId,
+      "call_retained",
+    )
+    await writeFile(retainedCommand.stdout.path, "physical output")
+    const orphanCommand = await assets.prepareCommandFiles(
+      "rollout_orphan",
+      "call_orphan",
+    )
+    await writeFile(orphanCommand.stdout.path, "orphan output")
+
+    const application = await createYakitoriApplication({
+      ...options,
+      stream: createFauxProvider([
+        { content: [{ type: "text", text: "done" }] },
+      ]).stream,
+    })
+    try {
+      expect(
+        (await application.threadStore.readThread(threadId))?.metadata
+          .rolloutId,
+      ).toBe(rolloutId)
+      await expect(
+        application.rolloutAssets.read(retainedCommand.stdout.reference),
+      ).resolves.toEqual(Buffer.from("physical output"))
+      await expect(
+        stat(join(sessionStoreRoot, "assets", "rollout_orphan")),
+      ).rejects.toMatchObject({ code: "ENOENT" })
+
+      const imageBytes = pngBuffer(128)
+      const attachments = await application.rolloutAssets.importImageBytes(
+        rolloutId,
+        "draft_physical_integration",
+        [{ name: "screen.png", data: imageBytes }],
+      )
+      const admitted = await application.handlers.admitInput({
+        sessionId: threadId,
+        requestId: "request_physical_integration",
+        content: { kind: "text", text: "inspect", attachments },
+      })
+      expectOk(admitted)
+      await waitForThreadIdle(application, threadId)
+      const storedImage = await durableImageFile(application, threadId)
+      expect(storedImage.rolloutId).toBe(rolloutId)
+
+      const server = application.createHttpServer()
+      const baseUrl = await listen(server)
+      try {
+        const physical = await fetch(
+          `${baseUrl}/rollouts/${rolloutId}/assets/${storedImage.path}`,
+        )
+        expect(physical.status).toBe(200)
+        expect(Buffer.from(await physical.arrayBuffer())).toEqual(imageBytes)
+        expect(
+          await fetch(
+            `${baseUrl}/rollouts/${threadId}/assets/${storedImage.path}`,
+          ),
+        ).toMatchObject({ status: 404 })
+        expect(
+          await fetch(
+            `${baseUrl}/rollouts/${rolloutId}/assets/tools/call_retained/stdout.log`,
+          ),
+        ).toMatchObject({ status: 404 })
+      } finally {
+        await closeServer(server)
+      }
+    } finally {
+      await application.close()
+    }
+  })
+
   it("retains inherited fork images until the last descendant is deleted", async () => {
     const rootDir = await mkdtemp(join(tmpdir(), "yakitori-lineage-"))
     const workspace = await mkdtemp(join(tmpdir(), "yakitori-lineage-work-"))
@@ -58,7 +158,7 @@ describe("Session file lineage", () => {
     const created = await application.handlers.createSession()
     expectOk(created)
     const sourceId = created.body.session.id
-    const attachments = await application.sessionFiles.importImageBytes(
+    const attachments = await application.rolloutAssets.importImageBytes(
       sourceId,
       "lineage_draft",
       [{ name: "source.png", data: imageBytes }],
@@ -102,7 +202,7 @@ describe("Session file lineage", () => {
 
     expectOk(await application.handlers.deleteSession({ sessionId: sourceId }))
     expectOk(await application.handlers.deleteSession({ sessionId: childId }))
-    await expect(application.sessionFiles.read(sourceFile)).resolves.toEqual(
+    await expect(application.rolloutAssets.read(sourceFile)).resolves.toEqual(
       imageBytes,
     )
 
@@ -125,8 +225,9 @@ describe("Session file lineage", () => {
       stream: createFauxProvider([]).stream,
     })
     try {
-      await expect(stat(join(restarted.sessionStoreRoot, sourceId))).rejects
-        .toMatchObject({ code: "ENOENT" })
+      await expect(
+        stat(join(restarted.sessionStoreRoot, "assets", sourceId)),
+      ).rejects.toMatchObject({ code: "ENOENT" })
     } finally {
       await restarted.close()
     }
@@ -166,7 +267,7 @@ describe("Session file lineage", () => {
       }),
     )
     await waitForThreadIdle(application, sourceId)
-    const commandFiles = await application.sessionFiles.prepareCommandFiles(
+    const commandFiles = await application.rolloutAssets.prepareCommandFiles(
       sourceId,
       "call_lineage_output",
     )
@@ -195,7 +296,7 @@ describe("Session file lineage", () => {
       stream: createFauxProvider([]).stream,
     })
     await expect(
-      retained.sessionFiles.read(commandFiles.stdout.reference),
+      retained.rolloutAssets.read(commandFiles.stdout.reference),
     ).resolves.toEqual(Buffer.from("durable command output"))
     expectOk(await retained.handlers.deleteSession({ sessionId: childId }))
     await retained.close()
@@ -205,13 +306,76 @@ describe("Session file lineage", () => {
       stream: createFauxProvider([]).stream,
     })
     try {
-      await expect(stat(join(collected.sessionStoreRoot, sourceId))).rejects
-        .toMatchObject({ code: "ENOENT" })
+      await expect(
+        stat(join(collected.sessionStoreRoot, "assets", sourceId)),
+      ).rejects.toMatchObject({ code: "ENOENT" })
     } finally {
       await collected.close()
     }
   })
 })
+
+async function reidentifyPhysicalRollout(
+  sessionStoreRoot: string,
+  threadId: string,
+  rolloutId: string,
+): Promise<void> {
+  const metadataPath = join(sessionStoreRoot, "threads", `${threadId}.json`)
+  const metadata = JSON.parse(await readFile(metadataPath, "utf8")) as Record<
+    string,
+    unknown
+  >
+  metadata.rolloutId = rolloutId
+  await writeFile(metadataPath, JSON.stringify(metadata))
+
+  const sourcePath = join(sessionStoreRoot, "rollouts", `${threadId}.jsonl`)
+  const targetPath = join(sessionStoreRoot, "rollouts", `${rolloutId}.jsonl`)
+  const records = (await readFile(sourcePath, "utf8"))
+    .trimEnd()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>)
+  for (const record of records) {
+    record.rolloutId = rolloutId
+    const item = record.item
+    if (
+      typeof item === "object" &&
+      item !== null &&
+      "type" in item &&
+      item.type === "session_meta" &&
+      "metadata" in item &&
+      typeof item.metadata === "object" &&
+      item.metadata !== null
+    ) {
+      ;(item.metadata as Record<string, unknown>).rolloutId = rolloutId
+    }
+  }
+  await writeFile(
+    targetPath,
+    `${records.map((record) => JSON.stringify(record)).join("\n")}\n`,
+  )
+  await rm(sourcePath)
+}
+
+async function listen(server: HttpServer): Promise<string> {
+  await new Promise<void>((resolve) => {
+    server.listen(0, "127.0.0.1", resolve)
+  })
+  const address = server.address()
+  if (address === null || typeof address === "string") {
+    throw new Error("Expected HTTP server to listen on a TCP address.")
+  }
+  return `http://${address.address}:${address.port}`
+}
+
+async function closeServer(server: HttpServer): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => {
+      if (error) reject(error)
+      else resolve()
+    })
+    server.closeAllConnections()
+  })
+}
 
 async function localInputId(
   application: YakitoriApplication,

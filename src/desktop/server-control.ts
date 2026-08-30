@@ -101,8 +101,8 @@ function isImageAttachment(value: unknown): value is ImageAttachment {
     "file" in value &&
     typeof value.file === "object" &&
     value.file !== null &&
-    "sessionId" in value.file &&
-    typeof value.file.sessionId === "string" &&
+    "rolloutId" in value.file &&
+    typeof value.file.rolloutId === "string" &&
     "path" in value.file &&
     typeof value.file.path === "string"
   )

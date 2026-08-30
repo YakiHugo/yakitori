@@ -40,7 +40,7 @@ export function imageAttachmentUrl(
 ): string {
   return apiUrl(
     apiBase,
-    `/sessions/${encodeURIComponent(attachment.file.sessionId)}/files/${attachment.file.path
+    `/rollouts/${encodeURIComponent(attachment.file.rolloutId)}/assets/${attachment.file.path
       .split("/")
       .map(encodeURIComponent)
       .join("/")}`,

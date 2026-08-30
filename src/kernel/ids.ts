@@ -57,6 +57,10 @@ export function isGeneratedSessionId(value: string): boolean {
   )
 }
 
+export function isStorageKey(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9_-]+$/.test(value)
+}
+
 function createPrefixedId(prefix: IdPrefix): string {
   return `${prefix}_${globalThis.crypto.randomUUID()}`
 }

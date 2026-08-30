@@ -1,9 +1,9 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { createSessionId } from "../../src/kernel/ids.ts"
-import { createSessionFiles } from "../../src/kernel/session-files.ts"
+import { createRolloutAssets } from "../../src/kernel/rollout-assets.ts"
 
 const roots: string[] = []
 
@@ -13,11 +13,11 @@ afterEach(async () => {
   )
 })
 
-describe("Session files", () => {
+describe("rollout assets", () => {
   it("separates staging images from idempotent request snapshots", async () => {
     const root = await makeRoot()
     const sessionId = createSessionId()
-    const files = createSessionFiles(root)
+    const files = createRolloutAssets(root)
     const data = pngBytes()
 
     const draft = await files.importImageBytes(sessionId, "attachment_1", [
@@ -48,7 +48,7 @@ describe("Session files", () => {
         detail: "original",
         sizeBytes: data.byteLength,
         file: {
-          sessionId,
+          rolloutId: sessionId,
           path: "attachments/requests/attachment_1/1.png",
         },
       },
@@ -62,6 +62,7 @@ describe("Session files", () => {
       await readFile(
         join(
           root,
+          "assets",
           sessionId,
           "files",
           "attachments",
@@ -79,7 +80,7 @@ describe("Session files", () => {
   it("rejects a reused request owner when a new draft has different bytes", async () => {
     const root = await makeRoot()
     const sessionId = createSessionId()
-    const files = createSessionFiles(root)
+    const files = createRolloutAssets(root)
     const original = pngBytes()
     const replacement = Buffer.from(original)
     replacement[12] = 1
@@ -107,7 +108,7 @@ describe("Session files", () => {
   it("gives a concurrent promotion exclusive rollback ownership", async () => {
     const root = await makeRoot()
     const sessionId = createSessionId()
-    const files = createSessionFiles(root)
+    const files = createRolloutAssets(root)
     const firstBytes = pngBytes()
     const secondBytes = Buffer.from(firstBytes)
     secondBytes[12] = 1
@@ -151,7 +152,7 @@ describe("Session files", () => {
     const root = await makeRoot()
     const sourceSessionId = createSessionId()
     const targetSessionId = createSessionId()
-    const files = createSessionFiles(root)
+    const files = createRolloutAssets(root)
     const [source] = await files.importImageBytes(
       sourceSessionId,
       "draft_source",
@@ -161,7 +162,7 @@ describe("Session files", () => {
     const missing = {
       ...source,
       file: {
-        sessionId: sourceSessionId,
+        rolloutId: sourceSessionId,
         path: "attachments/requests/missing/2.png",
       },
     }
@@ -176,6 +177,7 @@ describe("Session files", () => {
       readFile(
         join(
           root,
+          "assets",
           targetSessionId,
           "files",
           "attachments",
@@ -192,7 +194,7 @@ describe("Session files", () => {
     const sessionId = createSessionId()
     const sourcePath = join(root, "selected.png")
     await writeFile(sourcePath, pngBytes())
-    const files = createSessionFiles(root)
+    const files = createRolloutAssets(root)
 
     const [attachment] = await files.importImagePaths(
       sessionId,
@@ -208,10 +210,10 @@ describe("Session files", () => {
     })
   })
 
-  it("pages files and rejects references that escape the Session", async () => {
+  it("pages assets and rejects references that escape the rollout", async () => {
     const root = await makeRoot()
     const sessionId = createSessionId()
-    const files = createSessionFiles(root)
+    const files = createRolloutAssets(root)
     const prepared = await files.prepareCommandFiles(sessionId, "call_1")
     await writeFile(prepared.stdout.path, "0123456789")
 
@@ -219,14 +221,14 @@ describe("Session files", () => {
       files.readRange(prepared.stdout.reference, 3, 4),
     ).resolves.toEqual({ bytes: Buffer.from("3456"), totalBytes: 10 })
     await expect(
-      files.read({ sessionId, path: "../events.jsonl" }),
-    ).rejects.toThrow("Invalid Session file path")
+      files.read({ rolloutId: sessionId, path: "../events.jsonl" }),
+    ).rejects.toThrow("Invalid rollout asset path")
   })
 
   it("maps filesystem-unsafe owner IDs to stable portable directories", async () => {
     const root = await makeRoot()
     const sessionId = createSessionId()
-    const files = createSessionFiles(root)
+    const files = createRolloutAssets(root)
     const stored = await files.importImageBytes(sessionId, "request:1", [
       { name: "screen.png", data: pngBytes() },
     ])
@@ -245,7 +247,7 @@ describe("Session files", () => {
   it("rolls back a staging batch when an image is invalid", async () => {
     const root = await makeRoot()
     const sessionId = createSessionId()
-    const files = createSessionFiles(root)
+    const files = createRolloutAssets(root)
 
     await expect(
       files.importImageBytes(sessionId, "atomic_batch", [
@@ -260,6 +262,7 @@ describe("Session files", () => {
       readFile(
         join(
           root,
+          "assets",
           sessionId,
           "files",
           "attachments",
@@ -271,24 +274,43 @@ describe("Session files", () => {
     ).rejects.toMatchObject({ code: "ENOENT" })
   })
 
-  it("is deleted with the owning Session directory", async () => {
+  it("is deleted with the owning rollout asset directory", async () => {
     const root = await makeRoot()
-    const files = createSessionFiles(root)
+    const files = createRolloutAssets(root)
     const sessionId = createSessionId()
     const prepared = await files.prepareCommandFiles(sessionId, "call_1")
     await expect(files.read(prepared.stdout.reference)).resolves.toEqual(
       Buffer.alloc(0),
     )
 
-    await files.discardSessionFiles(sessionId)
+    await files.discardRolloutAssets(sessionId)
     await expect(files.read(prepared.stdout.reference)).rejects.toMatchObject({
       code: "ENOENT",
     })
   })
+
+  it("accepts storage-safe rollout IDs without exposing store directories to GC", async () => {
+    const root = await makeRoot()
+    const files = createRolloutAssets(root)
+    const rolloutId = "rollout_source"
+    const prepared = await files.prepareCommandFiles(rolloutId, "call_1")
+    await writeFile(prepared.stdout.path, "output")
+    await mkdir(join(root, "threads"))
+
+    await expect(files.read(prepared.stdout.reference)).resolves.toEqual(
+      Buffer.from("output"),
+    )
+    await files.collectUnreferencedRolloutAssets(new Set())
+
+    await expect(stat(join(root, "assets", rolloutId))).rejects.toMatchObject({
+      code: "ENOENT",
+    })
+    await expect(stat(join(root, "threads"))).resolves.toMatchObject({})
+  })
 })
 
 async function makeRoot(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), "yakitori-session-files-"))
+  const root = await mkdtemp(join(tmpdir(), "yakitori-rollout-assets-"))
   roots.push(root)
   return root
 }

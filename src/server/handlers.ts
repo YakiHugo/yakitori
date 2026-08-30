@@ -1,5 +1,5 @@
 import { realpath, stat } from "node:fs/promises"
-import type { CodexThread } from "../core/codex-thread.ts"
+import type { LiveThread } from "../core/live-thread.ts"
 import type {
   RolloutItem,
   StoredRolloutItem,
@@ -14,16 +14,17 @@ import {
   type EventMetadata,
   ForkReason,
   IdPrefix,
-  ImageAttachmentConflictError,
   type ImageAttachment,
+  ImageAttachmentConflictError,
   InputRole,
   isIdWithPrefix,
-  isKernelEvent,
   isJsonValue,
+  isKernelEvent,
   isRequestId,
+  isStorageKey,
   isYakitoriError,
   type ModelSelection,
-  type SessionFiles,
+  type RolloutAssets,
   type StoredEventEnvelope,
   type TextContent,
   type TokenUsage,
@@ -81,7 +82,7 @@ export type ThreadServerHandlerOptions = {
   ) => readonly RuntimePermissionRequest[]
   readonly maxInputBytes?: number
   readonly availableProviders?: readonly string[]
-  readonly sessionFiles?: SessionFiles
+  readonly rolloutAssets?: RolloutAssets
 }
 
 export type ServerHandlers = {
@@ -157,7 +158,7 @@ export function createThreadServerHandlers(
     if (last !== undefined) publishedThrough.set(threadId, hostSeq(last))
   }
 
-  async function ensureEventPump(thread: CodexThread): Promise<void> {
+  async function ensureEventPump(thread: LiveThread): Promise<void> {
     if (closing) throw new Error("Server handlers are shutting down.")
     const existing = pumpReady.get(thread.id)
     if (existing !== undefined) {
@@ -267,7 +268,7 @@ export function createThreadServerHandlers(
     }
   }
 
-  async function resumeRequired(threadId: string): Promise<CodexThread> {
+  async function resumeRequired(threadId: string): Promise<LiveThread> {
     const thread = await options.manager.resumeThread(threadId)
     if (thread === undefined) {
       throw notFound(`Session ${threadId} was not found.`, {
@@ -433,6 +434,7 @@ export function createThreadServerHandlers(
           forkedFromInputId: request.atInputId,
           forkReason: request.reason,
         })
+        const forkRolloutId = forked.thread.snapshot().metadata.rolloutId
         let submissionId: string | undefined
         try {
           await ensureEventPump(forked.thread)
@@ -441,8 +443,8 @@ export function createThreadServerHandlers(
             const attachments =
               sourceAttachments.length === 0
                 ? undefined
-                : await requireSessionFiles(options).copyImageAttachments(
-                    forked.thread.id,
+                : await requireRolloutAssets(options).copyImageAttachments(
+                    forkRolloutId,
                     submissionId,
                     sourceAttachments,
                   )
@@ -457,8 +459,8 @@ export function createThreadServerHandlers(
                 : { modelSelection: request.modelSelection }),
             })
             if (submitted.type !== "started") {
-              await options.sessionFiles?.discardRequestImageAttachments(
-                forked.thread.id,
+              await options.rolloutAssets?.discardRequestImageAttachments(
+                forkRolloutId,
                 submissionId,
               )
               throw conflict(`Fork input was not started: ${submitted.type}.`)
@@ -468,10 +470,7 @@ export function createThreadServerHandlers(
           try {
             await options.manager.discardThread(forked.thread.id)
           } catch (cleanupError) {
-            console.error(
-              "Failed to roll back a forked Session.",
-              cleanupError,
-            )
+            console.error("Failed to roll back a forked Session.", cleanupError)
           }
           throw error
         }
@@ -519,18 +518,19 @@ export function createThreadServerHandlers(
           request.requestId,
           async () => {
             const thread = await resumeRequired(request.sessionId)
+            const rolloutId = thread.snapshot().metadata.rolloutId
             let content: TextContent = request.content
             let rollbackPromotion: (() => Promise<void>) | undefined
             if (request.content.attachments !== undefined) {
-              if (options.sessionFiles === undefined) {
+              if (options.rolloutAssets === undefined) {
                 throw invalidInput(
-                  "Image attachments require Session file storage.",
+                  "Image attachments require rollout asset storage.",
                 )
               }
               try {
                 const promotion =
-                  await options.sessionFiles.promoteImageAttachments(
-                    request.sessionId,
+                  await options.rolloutAssets.promoteImageAttachments(
+                    rolloutId,
                     request.requestId,
                     request.content.attachments,
                   )
@@ -578,7 +578,7 @@ export function createThreadServerHandlers(
             }
             rollbackPromotion = undefined
             if (request.content.attachments !== undefined) {
-              await options.sessionFiles
+              await options.rolloutAssets
                 ?.discardDraftImageAttachments(request.content.attachments)
                 .catch((error: unknown) =>
                   console.warn(
@@ -757,7 +757,7 @@ function mapThreadSummary(thread: ThreadSummary): ApiSessionSummary {
 
 function mapStoredThread(
   stored: StoredThread,
-  live: CodexThread | undefined,
+  live: LiveThread | undefined,
   options: ThreadServerHandlerOptions,
 ): ApiSessionDetail {
   const rollout = stored.rollout.map((record) => record.item)
@@ -1016,11 +1016,11 @@ function inputAttachments(
   )
 }
 
-function requireSessionFiles(
+function requireRolloutAssets(
   options: ThreadServerHandlerOptions,
-): SessionFiles {
-  if (options.sessionFiles !== undefined) return options.sessionFiles
-  throw invalidInput("Forked image input requires Session file storage.")
+): RolloutAssets {
+  if (options.rolloutAssets !== undefined) return options.rolloutAssets
+  throw invalidInput("Forked image input requires rollout asset storage.")
 }
 
 function addUsage(left: TokenUsage | undefined, right: TokenUsage): TokenUsage {
@@ -1530,24 +1530,24 @@ function requireImageAttachment(
     mediaType,
     detail,
     sizeBytes: value.sizeBytes as number,
-    file: requireSessionFileReference(value.file, index),
+    file: requireRolloutAssetReference(value.file, index),
   }
 }
 
-function requireSessionFileReference(
+function requireRolloutAssetReference(
   value: unknown,
   index: number,
 ): ImageAttachment["file"] {
   if (
     !isRecord(value) ||
-    typeof value.sessionId !== "string" ||
+    !isStorageKey(value.rolloutId) ||
     typeof value.path !== "string"
   ) {
     throw invalidInput(
-      `content.attachments[${index}].file must be a Session file reference.`,
+      `content.attachments[${index}].file must be a rollout asset reference.`,
     )
   }
-  return { sessionId: value.sessionId, path: value.path }
+  return { rolloutId: value.rolloutId, path: value.path }
 }
 
 function optionalStringField(

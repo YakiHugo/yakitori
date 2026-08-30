@@ -84,7 +84,7 @@ describe("application composition", () => {
         expectOk(created)
         const sessionId = created.body.session.id
         const imageBytes = pngBuffer(128)
-        const attachments = await application.sessionFiles.importImageBytes(
+        const attachments = await application.rolloutAssets.importImageBytes(
           sessionId,
           "draft_application_test",
           [{ name: "screen.png", data: imageBytes }],
@@ -108,7 +108,7 @@ describe("application composition", () => {
                 {
                   detail: "high",
                   file: {
-                    sessionId,
+                    rolloutId: sessionId,
                     path: "attachments/requests/request_image/1.png",
                   },
                 },
@@ -123,6 +123,7 @@ describe("application composition", () => {
           await readFile(
             join(
               application.sessionStoreRoot,
+              "assets",
               sessionId,
               "files",
               "attachments",
@@ -146,20 +147,20 @@ describe("application composition", () => {
         })
 
         const image = await fetch(
-          `${baseUrl}/sessions/${sessionId}/files/attachments/requests/request_image/1.png`,
+          `${baseUrl}/rollouts/${sessionId}/assets/attachments/requests/request_image/1.png`,
         )
         expect(image.status).toBe(200)
         expect(image.headers.get("content-type")).toBe("image/png")
         expect(Buffer.from(await image.arrayBuffer())).toEqual(imageBytes)
         const logRoute = await fetch(
-          `${baseUrl}/sessions/${sessionId}/files/tools/call_1/stdout.log`,
+          `${baseUrl}/rollouts/${sessionId}/assets/tools/call_1/stdout.log`,
         )
         expect(logRoute.status).toBe(404)
 
         const replacementBytes = Buffer.from(imageBytes)
         replacementBytes[12] = 1
         const replacementDraft =
-          await application.sessionFiles.importImageBytes(
+          await application.rolloutAssets.importImageBytes(
             sessionId,
             "draft_application_conflict",
             [{ name: "screen.png", data: replacementBytes }],
@@ -181,6 +182,7 @@ describe("application composition", () => {
           await readFile(
             join(
               application.sessionStoreRoot,
+              "assets",
               sessionId,
               "files",
               "attachments",
@@ -244,7 +246,7 @@ describe("application composition", () => {
               images: [
                 {
                   file: {
-                    sessionId: forked.body.session.id,
+                    rolloutId: forked.body.session.id,
                     path: expect.stringMatching(
                       /^attachments\/requests\/request_.+\/1\.png$/,
                     ),
@@ -266,6 +268,7 @@ describe("application composition", () => {
           await readFile(
             join(
               application.sessionStoreRoot,
+              "assets",
               forked.body.session.id,
               "files",
               childImagePath,
@@ -276,12 +279,12 @@ describe("application composition", () => {
         const concurrentSession = await application.handlers.createSession()
         expectOk(concurrentSession)
         const [draftA, draftB] = await Promise.all([
-          application.sessionFiles.importImageBytes(
+          application.rolloutAssets.importImageBytes(
             concurrentSession.body.session.id,
             "draft_concurrent_a",
             [{ name: "screen.png", data: imageBytes }],
           ),
-          application.sessionFiles.importImageBytes(
+          application.rolloutAssets.importImageBytes(
             concurrentSession.body.session.id,
             "draft_concurrent_b",
             [{ name: "screen.png", data: imageBytes }],
@@ -303,8 +306,8 @@ describe("application composition", () => {
           201, 409,
         ])
         await expect(
-          application.sessionFiles.read({
-            sessionId: concurrentSession.body.session.id,
+          application.rolloutAssets.read({
+            rolloutId: concurrentSession.body.session.id,
             path: "attachments/requests/request_concurrent_image/1.png",
           }),
         ).resolves.toEqual(imageBytes)
@@ -368,12 +371,12 @@ describe("application composition", () => {
         const created = await application.handlers.createSession({})
         expectOk(created)
         const sessionId = created.body.session.id
-        const attachments = await application.sessionFiles.importImageBytes(
+        const attachments = await application.rolloutAssets.importImageBytes(
           sessionId,
           "text_only_draft",
           [{ name: "screen.png", data: pngBuffer(128) }],
         )
-        const read = vi.spyOn(application.sessionFiles, "read")
+        const read = vi.spyOn(application.rolloutAssets, "read")
         const admitted = await application.handlers.admitInput({
           sessionId,
           requestId: "text_only_request",
@@ -404,7 +407,7 @@ describe("application composition", () => {
     })
   })
 
-  it("streams native image files from Session storage", async () => {
+  it("streams native images from rollout asset storage", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const application = await createYakitoriApplication(
         testApplicationOptions({ rootDir, workspace }),
@@ -417,7 +420,7 @@ describe("application composition", () => {
         const imageBytes = pngBuffer(128 * 1024 + 17)
         const sourcePath = join(rootDir, "large.png")
         await writeFile(sourcePath, imageBytes)
-        const [attachment] = await application.sessionFiles.importImagePaths(
+        const [attachment] = await application.rolloutAssets.importImagePaths(
           created.body.session.id,
           "draft_large_http",
           [sourcePath],
@@ -425,7 +428,7 @@ describe("application composition", () => {
         if (attachment === undefined) throw new Error("missing imported image")
 
         const response = await fetch(
-          `${baseUrl}/sessions/${attachment.file.sessionId}/files/${attachment.file.path}`,
+          `${baseUrl}/rollouts/${attachment.file.rolloutId}/assets/${attachment.file.path}`,
         )
 
         expect(response.status).toBe(200)

@@ -9,7 +9,7 @@ import { pipeline } from "node:stream/promises"
 import {
   isKernelEvent,
   isYakitoriError,
-  type SessionFiles,
+  type RolloutAssets,
   type StoredEventEnvelope,
 } from "../kernel/index.ts"
 import type { LiveSessionEvent } from "../runtime/live-events.ts"
@@ -39,7 +39,7 @@ type YakitoriHttpServerCommonOptions = {
   readonly providers?: () => Promise<ApiListProvidersResponse>
   readonly userConfig?: UserConfigStore
   readonly availableProviders?: readonly string[]
-  readonly sessionFiles?: SessionFiles
+  readonly rolloutAssets?: RolloutAssets
 }
 
 export type YakitoriHttpServerOptions = YakitoriHttpServerCommonOptions & {
@@ -58,7 +58,7 @@ export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
   const providers = options.providers
   const userConfig = options.userConfig
   const availableProviders = options.availableProviders
-  const sessionFiles = options.sessionFiles
+  const rolloutAssets = options.rolloutAssets
 
   const staticAssets =
     options.staticAssets === undefined
@@ -75,7 +75,7 @@ export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
       providers,
       userConfig,
       availableProviders,
-      sessionFiles,
+      rolloutAssets,
       staticAssets,
     ).catch((error) => {
       writeUnhandledError(response, error)
@@ -93,7 +93,7 @@ async function handleRequest(
   providers: (() => Promise<ApiListProvidersResponse>) | undefined,
   userConfig: UserConfigStore | undefined,
   availableProviders: readonly string[] | undefined,
-  sessionFiles: SessionFiles | undefined,
+  rolloutAssets: RolloutAssets | undefined,
   staticAssets: StaticAssetContext | undefined,
 ): Promise<void> {
   const origin = requestOrigin(request)
@@ -235,8 +235,8 @@ async function handleRequest(
     return
   }
 
-  if (route.kind === "readSessionFile") {
-    if (sessionFiles === undefined) {
+  if (route.kind === "readRolloutAsset") {
+    if (rolloutAssets === undefined) {
       writeResult(
         response,
         errorResult(404, ApiErrorCode.NotFound, "Route not found."),
@@ -244,14 +244,14 @@ async function handleRequest(
       return
     }
     try {
-      const file = await sessionFiles.openRead({
-        sessionId: route.sessionId,
+      const file = await rolloutAssets.openRead({
+        rolloutId: route.rolloutId,
         path: route.path,
       })
       response.writeHead(200, {
         "Cache-Control": "private, no-store",
         "Content-Length": file.totalBytes,
-        "Content-Type": sessionFileContentType(route.path),
+        "Content-Type": rolloutAssetContentType(route.path),
         "X-Content-Type-Options": "nosniff",
       })
       await pipeline(file.stream, response)
@@ -262,7 +262,7 @@ async function handleRequest(
       }
       writeResult(
         response,
-        errorResult(404, ApiErrorCode.NotFound, "Session file was not found."),
+        errorResult(404, ApiErrorCode.NotFound, "Rollout asset was not found."),
       )
     }
     return
@@ -463,25 +463,27 @@ function routeRequest(method: string, url: URL): Route {
     return { kind: "updateUserPreference" }
   }
 
+  if (
+    method === "GET" &&
+    segments.length > 4 &&
+    segments[0] === "rollouts" &&
+    typeof segments[1] === "string" &&
+    segments[2] === "assets" &&
+    segments[3] === "attachments"
+  ) {
+    return {
+      kind: "readRolloutAsset",
+      rolloutId: segments[1],
+      path: segments.slice(3).join("/"),
+    }
+  }
+
   if (segments[0] !== "sessions" || typeof segments[1] !== "string") {
     return { kind: "notFound", segments }
   }
 
   if (method === "GET" && segments.length === 2) {
     return { kind: "readSession", sessionId: segments[1] }
-  }
-
-  if (
-    method === "GET" &&
-    segments.length > 4 &&
-    segments[2] === "files" &&
-    segments[3] === "attachments"
-  ) {
-    return {
-      kind: "readSessionFile",
-      sessionId: segments[1],
-      path: segments.slice(3).join("/"),
-    }
   }
 
   if (method === "DELETE" && segments.length === 2) {
@@ -1229,8 +1231,8 @@ type Route =
   | { readonly kind: "notFound"; readonly segments: readonly string[] }
   | { readonly kind: "readSession"; readonly sessionId: string }
   | {
-      readonly kind: "readSessionFile"
-      readonly sessionId: string
+      readonly kind: "readRolloutAsset"
+      readonly rolloutId: string
       readonly path: string
     }
   | { readonly kind: "listProjects" }
@@ -1245,7 +1247,7 @@ type Route =
     }
   | { readonly kind: "streamSessionEvents"; readonly sessionId: string }
 
-function sessionFileContentType(path: string): string {
+function rolloutAssetContentType(path: string): string {
   const extension = extname(path).toLowerCase()
   if (extension === ".gif") return "image/gif"
   if (extension === ".jpg" || extension === ".jpeg") return "image/jpeg"

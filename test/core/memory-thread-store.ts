@@ -74,7 +74,7 @@ export class MemoryThreadStore implements ThreadStore {
     const last = thread.rollout.at(-1)
     this.#writers.set(threadId, {
       pending: [],
-      rolloutId: thread.metadata.rolloutId ?? threadId,
+      rolloutId: thread.metadata.rolloutId,
       tail: Promise.resolve(),
       nextSeq: last === undefined ? 1 : last.seq + 1,
     })
@@ -112,6 +112,25 @@ export class MemoryThreadStore implements ThreadStore {
 
   async discardThread(threadId: string): Promise<void> {
     this.#writers.delete(threadId)
+  }
+
+  reidentifyRollout(threadId: string, rolloutId: string): void {
+    if (this.#writers.has(threadId)) {
+      throw new Error("Thread writer must be shut down before reidentifying.")
+    }
+    const source = this.#requireThread(threadId)
+    const metadata = { ...source.metadata, rolloutId }
+    this.#threads.set(threadId, {
+      metadata,
+      rollout: source.rollout.map((record) => ({
+        ...record,
+        rolloutId,
+        item:
+          record.item.type === "session_meta"
+            ? { type: "session_meta", metadata }
+            : record.item,
+      })),
+    })
   }
 
   async prepareFork(input: PrepareForkInput): Promise<PreparedFork> {

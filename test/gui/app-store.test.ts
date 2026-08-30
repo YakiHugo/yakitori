@@ -1064,7 +1064,7 @@ describe("model selection", () => {
       detail: "high" as const,
       sizeBytes: 9,
       file: {
-        sessionId: "session_1",
+        rolloutId: "session_1",
         path: "attachments/staging/draft_1/1.png",
       },
     }

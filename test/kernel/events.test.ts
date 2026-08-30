@@ -55,7 +55,7 @@ describe("kernel facts", () => {
     ).toThrow("Invalid event data")
   })
 
-  it("accepts Session image references and rejects inline image data", () => {
+  it("accepts rollout image references and rejects inline image data", () => {
     const event = (attachment: unknown) =>
       isKernelEvent({
         type: EventType.InputAdmitted,
@@ -74,7 +74,7 @@ describe("kernel facts", () => {
         detail: "original",
         sizeBytes: 5,
         file: {
-          sessionId: "session_00000000-0000-4000-8000-000000000000",
+          rolloutId: "session_00000000-0000-4000-8000-000000000000",
           path: "attachments/requests/request-1/1.png",
         },
       }),
@@ -86,7 +86,7 @@ describe("kernel facts", () => {
         detail: "auto",
         sizeBytes: 5,
         file: {
-          sessionId: "session_00000000-0000-4000-8000-000000000000",
+          rolloutId: "session_00000000-0000-4000-8000-000000000000",
           path: "attachments/requests/request-1/1.png",
         },
       }),
@@ -101,11 +101,22 @@ describe("kernel facts", () => {
     ).toBe(false)
     expect(
       event({
+        name: "unsafe.png",
+        mediaType: "image/png",
+        sizeBytes: 5,
+        file: {
+          rolloutId: "../escape",
+          path: "attachments/requests/request-1/1.png",
+        },
+      }),
+    ).toBe(false)
+    expect(
+      event({
         name: "invalid.png",
         mediaType: "image/png",
         sizeBytes: 5,
         data: "aGVsbG8=",
-        file: { sessionId: "session_bad", path: "image.png" },
+        file: { rolloutId: "session_bad", path: "image.png" },
       }),
     ).toBe(false)
   })

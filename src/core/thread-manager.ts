@@ -1,6 +1,6 @@
 import type { EventMetadata } from "../kernel/events.ts"
 import { createSessionId } from "../kernel/ids.ts"
-import { CodexThread } from "./codex-thread.ts"
+import { LiveThread } from "./live-thread.ts"
 import type { StoredThread } from "./rollout.ts"
 import { Session, type TurnProcessor } from "./session.ts"
 import type {
@@ -40,8 +40,8 @@ export class ThreadManager {
   readonly #onPersistenceError?:
     | ((error: unknown, threadId: string) => void)
     | undefined
-  readonly #threads = new Map<string, CodexThread>()
-  readonly #loads = new Map<string, Promise<CodexThread | undefined>>()
+  readonly #threads = new Map<string, LiveThread>()
+  readonly #loads = new Map<string, Promise<LiveThread | undefined>>()
   readonly #starting = new Set<Promise<unknown>>()
   readonly #discarding = new Set<string>()
   #closing = false
@@ -53,12 +53,12 @@ export class ThreadManager {
     this.#onPersistenceError = options.onPersistenceError
   }
 
-  getThread(threadId: string): CodexThread | undefined {
+  getThread(threadId: string): LiveThread | undefined {
     const thread = this.#threads.get(threadId)
     return thread?.status === "shutdown" ? undefined : thread
   }
 
-  createThread(input: CreateThreadInput = {}): Promise<CodexThread> {
+  createThread(input: CreateThreadInput = {}): Promise<LiveThread> {
     this.#requireOpen()
     return this.#trackStarting(async () => {
       const now = new Date().toISOString()
@@ -90,7 +90,7 @@ export class ThreadManager {
     })
   }
 
-  resumeThread(threadId: string): Promise<CodexThread | undefined> {
+  resumeThread(threadId: string): Promise<LiveThread | undefined> {
     this.#requireOpen()
     if (this.#discarding.has(threadId)) {
       return Promise.reject(new Error(`Thread ${threadId} is being discarded.`))
@@ -118,7 +118,7 @@ export class ThreadManager {
   }
 
   forkThread(input: ForkThreadInput): Promise<{
-    readonly thread: CodexThread
+    readonly thread: LiveThread
     readonly result: ThreadStoreForkResult
   }> {
     this.#requireOpen()
@@ -203,7 +203,7 @@ export class ThreadManager {
     this.#threads.clear()
   }
 
-  #installStored(stored: StoredThread): CodexThread {
+  #installStored(stored: StoredThread): LiveThread {
     this.#requireOpen()
     const threadId = stored.metadata.id
     if (this.#discarding.has(threadId)) {
@@ -211,9 +211,9 @@ export class ThreadManager {
     }
     const existing = this.getThread(threadId)
     if (existing !== undefined) return existing
-    let thread: CodexThread
+    let thread: LiveThread
     try {
-      thread = new CodexThread(
+      thread = new LiveThread(
         new Session({
           stored,
           store: this.#store,

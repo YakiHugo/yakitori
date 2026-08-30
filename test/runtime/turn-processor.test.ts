@@ -2,8 +2,8 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
-import { ThreadManager } from "../../src/core/thread-manager.ts"
 import type { SessionEvent } from "../../src/core/session-io.ts"
+import { ThreadManager } from "../../src/core/thread-manager.ts"
 import { createFauxProvider } from "../../src/runtime/faux-provider.ts"
 import { createSessionExecutionPolicy } from "../../src/runtime/limits.ts"
 import type { ModelStreamEvent, StreamFn } from "../../src/runtime/model.ts"
@@ -11,8 +11,8 @@ import { ModelStopReason } from "../../src/runtime/model.ts"
 import { createPermissionGate } from "../../src/runtime/permission-gate.ts"
 import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
 import {
-  createLiveTurnProcessor,
-  type LiveTurnProcessorOptions,
+  createTurnProcessor,
+  type TurnProcessorOptions,
 } from "../../src/runtime/turn-processor.ts"
 import { MemoryThreadStore } from "../core/memory-thread-store.ts"
 
@@ -22,7 +22,7 @@ afterEach(async () => {
   await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()))
 })
 
-describe("live Turn processor", () => {
+describe("Turn processor", () => {
   it("runs against actor-owned context and persists usage with the terminal Turn", async () => {
     const provider = createFauxProvider([
       {
@@ -105,6 +105,75 @@ describe("live Turn processor", () => {
     expect(
       thread.snapshot().context.history.map((item) => item.item.role),
     ).toEqual(["user", "user", "assistant", "tool", "assistant"])
+  })
+
+  it("passes the physical rollout ID to tool asset storage", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yakitori-rollout-identity-"))
+    const store = new MemoryThreadStore()
+    const threadId = "session_logical"
+    const rolloutId = "rollout_physical"
+    const now = new Date().toISOString()
+    await store.createThread({
+      id: threadId,
+      conversationId: threadId,
+      createdAt: now,
+      updatedAt: now,
+      workingDirectory: root,
+      mateId: "mate_live",
+      mateRevisionId: "mate_revision_live",
+    })
+    await store.shutdownThread(threadId)
+    store.reidentifyRollout(threadId, rolloutId)
+
+    let toolRolloutId: string | undefined
+    const tools = createToolRegistry([
+      {
+        name: "capture_rollout",
+        description: "Capture the rollout asset owner.",
+        inputSchema: { type: "object" },
+        effect: "observe",
+        approvalRequirement: { kind: "none" },
+        async execute(_value, context) {
+          toolRolloutId = context.rolloutId
+          return { ok: true, output: {}, content: "captured" }
+        },
+      },
+    ])
+    const provider = createFauxProvider([
+      {
+        stopReason: ModelStopReason.ToolUse,
+        content: [
+          {
+            type: "tool_call",
+            id: "tool_capture_rollout",
+            name: "capture_rollout",
+            input: {},
+          },
+        ],
+      },
+      { content: [{ type: "text", text: "done" }] },
+    ])
+    const manager = new ThreadManager({
+      store,
+      createTurnProcessor: () =>
+        createTurnProcessor({
+          stream: provider.stream,
+          toolRegistry: tools,
+          loadProjectInstructions: async () => undefined,
+        }),
+    })
+    cleanups.push(async () => {
+      await manager.shutdown()
+      await rm(root, { recursive: true, force: true })
+    })
+
+    const thread = await manager.resumeThread(threadId)
+    if (thread === undefined) throw new Error("Thread was not resumed.")
+    await thread.startIfIdle({ content: { kind: "text", text: "capture" } })
+    await nextLifecycleEvent(thread)
+    await nextLifecycleEvent(thread)
+
+    expect(toolRolloutId).toBe(rolloutId)
   })
 
   it("persists a visible read so a later model call can edit the file", async () => {
@@ -223,7 +292,7 @@ describe("live Turn processor", () => {
     const resumedManager = new ThreadManager({
       store: runtime.store,
       createTurnProcessor: () =>
-        createLiveTurnProcessor({
+        createTurnProcessor({
           stream: provider.stream,
           toolRegistry: tools,
           loadProjectInstructions: async () => undefined,
@@ -1117,7 +1186,7 @@ async function createRuntime(
   stream: StreamFn,
   toolRegistry = createToolRegistry([]),
   options: Omit<
-    Partial<LiveTurnProcessorOptions>,
+    Partial<TurnProcessorOptions>,
     "stream" | "toolRegistry"
   > = {},
 ) {
@@ -1126,7 +1195,7 @@ async function createRuntime(
   const manager = new ThreadManager({
     store,
     createTurnProcessor: () =>
-      createLiveTurnProcessor({
+      createTurnProcessor({
         stream,
         toolRegistry,
         loadProjectInstructions: async () => undefined,
