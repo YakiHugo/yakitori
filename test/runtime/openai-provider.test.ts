@@ -76,6 +76,300 @@ describe("OpenAI Responses provider", () => {
     ])
   })
 
+  it("round-trips client tool search as protocol items and loads the matched definition", () => {
+    const searchCall = fromOpenAIResponse(
+      responseFixture({
+        output: [
+          {
+            type: "tool_search_call",
+            id: "item_search_1",
+            call_id: "search_1",
+            execution: "client",
+            status: "completed",
+            arguments: { query: "calendar events", limit: 5 },
+          },
+        ] as Response["output"],
+      }),
+    )
+    expect(searchCall).toMatchObject({
+      stopReason: ModelStopReason.ToolUse,
+      content: [
+        {
+          type: "tool_call",
+          id: "search_1",
+          name: "tool_search",
+          input: { query: "calendar events", limit: 5 },
+          toolKind: "tool_search",
+        },
+      ],
+    })
+
+    const deferred = {
+      name: "calendar__search_events",
+      description: "Search calendar events",
+      inputSchema: {
+        type: "object" as const,
+        properties: { query: { type: "string" } },
+      },
+      deferLoading: true,
+    }
+    expect(
+      toOpenAITools([
+        {
+          name: "tool_search",
+          description: "Find tools",
+          inputSchema: { type: "object" },
+          kind: "tool_search",
+        },
+        deferred,
+      ]),
+    ).toEqual([
+      {
+        type: "tool_search",
+        execution: "client",
+        description: "Find tools",
+        parameters: { type: "object" },
+      },
+    ])
+    expect(
+      toOpenAIInput([
+        { role: "assistant", content: searchCall.content },
+        {
+          role: "tool",
+          toolCallId: "search_1",
+          content: JSON.stringify({ tools: [deferred] }),
+          toolSearch: { tools: [deferred] },
+        },
+      ]),
+    ).toEqual([
+      {
+        type: "tool_search_call",
+        call_id: "search_1",
+        execution: "client",
+        status: "completed",
+        arguments: { query: "calendar events", limit: 5 },
+      },
+      {
+        type: "tool_search_output",
+        call_id: "search_1",
+        execution: "client",
+        status: "completed",
+        tools: [
+          {
+            type: "function",
+            name: "calendar__search_events",
+            description: "Search calendar events",
+            parameters: {
+              type: "object",
+              properties: { query: { type: "string" } },
+            },
+            strict: false,
+            defer_loading: true,
+          },
+        ],
+      },
+    ])
+  })
+
+  it("round-trips custom freeform tools and their outputs", () => {
+    const grammar = {
+      type: "grammar" as const,
+      syntax: "lark" as const,
+      definition: 'start: "patch"',
+    }
+    expect(
+      toOpenAITools([
+        {
+          name: "apply_patch",
+          description: "Apply a patch",
+          kind: "custom",
+          inputFormat: grammar,
+          inputSchema: { type: "object" },
+        },
+      ]),
+    ).toEqual([
+      {
+        type: "custom",
+        name: "apply_patch",
+        description: "Apply a patch",
+        format: grammar,
+      },
+    ])
+    expect(
+      toOpenAIInput([
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_call",
+              id: "patch_1",
+              name: "apply_patch",
+              input: "*** Begin Patch",
+              toolKind: "custom",
+              customInputFallbackKey: "patch",
+            },
+          ],
+        },
+        { role: "tool", toolCallId: "patch_1", content: "Done" },
+      ]),
+    ).toEqual([
+      {
+        type: "custom_tool_call",
+        call_id: "patch_1",
+        name: "apply_patch",
+        input: "*** Begin Patch",
+      },
+      {
+        type: "custom_tool_call_output",
+        call_id: "patch_1",
+        output: "Done",
+      },
+    ])
+
+    expect(
+      fromOpenAIResponse(
+        responseFixture({
+          output: [
+            {
+              type: "custom_tool_call",
+              id: "item_patch_1",
+              call_id: "patch_1",
+              name: "apply_patch",
+              input: "*** Begin Patch",
+            },
+          ],
+        }),
+        new Map([["apply_patch", "patch"]]),
+      ).content,
+    ).toEqual([
+      {
+        type: "tool_call",
+        id: "patch_1",
+        name: "apply_patch",
+        input: "*** Begin Patch",
+        toolKind: "custom",
+        customInputFallbackKey: "patch",
+      },
+    ])
+  })
+
+  it("parses custom calls with the exact definition loaded by tool search", async () => {
+    const historical = {
+      name: "demo__evaluate",
+      description: "Evaluate code",
+      inputSchema: {
+        type: "object" as const,
+        properties: { code: { type: "string" } },
+        required: ["code"],
+      },
+      kind: "custom" as const,
+      inputFormat: {
+        type: "grammar" as const,
+        syntax: "lark" as const,
+        definition: "start: /.+/",
+      },
+      customInputFallbackKey: "code",
+      deferLoading: true,
+    }
+    const current = {
+      ...historical,
+      inputSchema: {
+        type: "object" as const,
+        properties: { script: { type: "string" } },
+        required: ["script"],
+      },
+      customInputFallbackKey: "script",
+    }
+    const toolSearch = {
+      name: "tool_search",
+      description: "Find tools",
+      inputSchema: { type: "object" as const },
+      kind: "tool_search" as const,
+    }
+    const unrelated = {
+      name: "calendar__list_events",
+      description: "List events",
+      inputSchema: { type: "object" as const },
+      deferLoading: true,
+    }
+    const messages: ModelRequest["messages"] = [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_call",
+            id: "search_1",
+            name: "tool_search",
+            input: { query: "evaluate" },
+            toolKind: "tool_search",
+          },
+        ],
+      },
+      {
+        role: "tool",
+        toolCallId: "search_1",
+        content: JSON.stringify({ tools: [historical] }),
+        toolSearch: { tools: [historical] },
+      },
+    ]
+    const call = {
+      type: "custom_tool_call" as const,
+      id: "item_eval_1",
+      call_id: "eval_1",
+      name: "demo__evaluate",
+      input: "1 + 1",
+    }
+
+    for (const tools of [
+      [toolSearch, unrelated],
+      [toolSearch, current],
+    ]) {
+      const client = {
+        responses: {
+          async create() {
+            return (async function* () {
+              yield {
+                type: "response.completed",
+                response: responseFixture({ output: [call] }),
+              }
+            })()
+          },
+        },
+      } as unknown as OpenAI
+      const stream = createOpenAIProvider({
+        apiKey: "test",
+        model: "gpt-test",
+        client,
+      })
+      const events = []
+      for await (const event of stream(
+        requestFixture({
+          tools,
+          messages,
+          toolWireProtocol: "openai_deferred",
+        }),
+      )) {
+        events.push(event)
+      }
+
+      expect(events).toEqual([
+        {
+          type: "response",
+          response: expect.objectContaining({
+            content: [
+              expect.objectContaining({
+                type: "tool_call",
+                name: "demo__evaluate",
+                toolKind: "custom",
+                customInputFallbackKey: "code",
+              }),
+            ],
+          }),
+        },
+      ])
+    }
+  })
+
   it("converts attached images into Responses API input blocks", () => {
     expect(
       toOpenAIInput([
@@ -282,6 +576,114 @@ describe("OpenAI Responses provider", () => {
       },
       { type: "text", text: "Done." },
     ])
+  })
+
+  it("selects native deferred loading only for official request targets", async () => {
+    const deferred = {
+      name: "calendar__search_events",
+      description: "Search calendar events",
+      inputSchema: { type: "object" as const },
+      deferLoading: true,
+    }
+    const tools: ModelRequest["tools"] = [
+      {
+        name: "tool_search",
+        description: "Find tools",
+        inputSchema: { type: "object" },
+        kind: "tool_search",
+      },
+      deferred,
+    ]
+    const messages: ModelRequest["messages"] = [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_call",
+            id: "search_1",
+            name: "tool_search",
+            input: { query: "calendar" },
+            toolKind: "tool_search",
+          },
+        ],
+      },
+      {
+        role: "tool",
+        toolCallId: "search_1",
+        content: JSON.stringify({ tools: [deferred] }),
+        toolSearch: { tools: [deferred] },
+      },
+    ]
+    const capture = async (
+      provider: string,
+      toolWireProtocol: ModelRequest["toolWireProtocol"],
+    ) => {
+      let body: Record<string, unknown> | undefined
+      const client = {
+        responses: {
+          async create(input: Record<string, unknown>) {
+            body = input
+            return (async function* () {
+              yield {
+                type: "response.completed",
+                response: responseFixture(),
+              }
+            })()
+          },
+        },
+      } as unknown as OpenAI
+      const stream = createOpenAIProvider({
+        apiKey: "test",
+        model: "gpt-test",
+        client,
+      })
+      for await (const _event of stream(
+        requestFixture({
+          target: {
+            provider,
+            model: "gpt-test",
+            instructionProfileId: "codex",
+          },
+          tools,
+          messages,
+          toolWireProtocol,
+        }),
+      )) {
+        void _event
+      }
+      return body
+    }
+
+    const official = await capture("openai", "openai_deferred")
+    expect(official?.tools).toEqual([
+      {
+        type: "tool_search",
+        execution: "client",
+        description: "Find tools",
+        parameters: { type: "object" },
+      },
+    ])
+    expect(official?.input).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "tool_search_call" }),
+        expect.objectContaining({ type: "tool_search_output" }),
+      ]),
+    )
+
+    const compatible = await capture("xai", "eager")
+    expect(compatible?.tools).toEqual([
+      expect.objectContaining({ type: "function", name: "tool_search" }),
+      expect.objectContaining({
+        type: "function",
+        name: "calendar__search_events",
+      }),
+    ])
+    expect(compatible?.input).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "function_call", name: "tool_search" }),
+        expect.objectContaining({ type: "function_call_output" }),
+      ]),
+    )
   })
 
   it("streams full snapshots and uses the request's pinned model", async () => {
@@ -739,6 +1141,7 @@ function requestFixture(overrides: Partial<ModelRequest> = {}): ModelRequest {
     system: [{ id: "base", revision: "base-1", text: "Be helpful." }],
     messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
     tools: [],
+    toolWireProtocol: "openai_deferred",
     ...overrides,
   }
 }

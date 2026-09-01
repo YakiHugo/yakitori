@@ -37,6 +37,7 @@ function request(provider: string, model: string): ModelRequest {
     system: [],
     messages: [],
     tools: [],
+    toolWireProtocol: "eager",
   }
 }
 

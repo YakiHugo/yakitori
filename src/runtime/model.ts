@@ -8,6 +8,8 @@ import type {
   ModelReasoningBlock,
   ModelTextBlock,
   ModelToolCallBlock,
+  ModelToolDefinition,
+  ModelToolInputFormat,
   ModelToolResultMessage,
   ModelUserMessage,
 } from "../kernel/index.ts"
@@ -21,6 +23,8 @@ export type {
   ModelReasoningBlock,
   ModelTextBlock,
   ModelToolCallBlock,
+  ModelToolDefinition,
+  ModelToolInputFormat,
   ModelToolResultMessage,
   ModelUserMessage,
 }
@@ -36,12 +40,6 @@ export const ModelStopReason = {
 export type ModelStopReason =
   (typeof ModelStopReason)[keyof typeof ModelStopReason]
 
-export type ModelToolDefinition = {
-  readonly name: string
-  readonly description: string
-  readonly inputSchema: JsonObject
-}
-
 export type ModelTarget = {
   readonly provider: string
   readonly model: string
@@ -49,6 +47,12 @@ export type ModelTarget = {
   readonly effort?: string
   readonly speed?: string
 }
+
+export type ToolWireProtocol =
+  | "anthropic_deferred"
+  | "eager"
+  | "meta_dispatch"
+  | "openai_deferred"
 
 export type ModelSystemSection = {
   readonly id: string
@@ -62,6 +66,7 @@ export type ModelRequest = {
   readonly system: readonly ModelSystemSection[]
   readonly messages: readonly ModelMessage[]
   readonly tools: readonly ModelToolDefinition[]
+  readonly toolWireProtocol: ToolWireProtocol
   readonly maxOutputTokens?: number
   readonly signal?: AbortSignal
 }
