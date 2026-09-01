@@ -12,6 +12,7 @@ import {
 } from "./execution-descriptors.ts"
 import { noToolApprovalRequired } from "./approval-requirements.ts"
 import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
+import { plainToolName } from "./tool-name.ts"
 
 const MAX_MESSAGE_CHARACTERS = 65_536
 const MAX_TASK_NAME_CHARACTERS = 64
@@ -31,7 +32,7 @@ export function createMultiAgentTools(): readonly RuntimeTool[] {
 
 function createSpawnAgentTool(): RuntimeTool {
   return {
-    name: "spawn_agent",
+    toolName: plainToolName("spawn_agent"),
     description:
       "Spawn an agent for a concrete, bounded subtask that can run independently alongside useful local work. The child inherits the current model and tools, can spawn descendants within the configured depth limit, and returns immediately with an agent id and canonical task path. It starts with a fresh conversation context by default and receives message as its assigned task. Set fork_turns to all or a positive integer string only when the child genuinely needs parent history.",
     approvalRequirement: noToolApprovalRequired,
@@ -94,7 +95,7 @@ function createSpawnAgentTool(): RuntimeTool {
 
 function createSendMessageTool(): RuntimeTool {
   return {
-    name: "send_message",
+    toolName: plainToolName("send_message"),
     description:
       "Send a message to an existing agent. The message is delivered at the next model sampling boundary and does not start a new turn.",
     approvalRequirement: noToolApprovalRequired,
@@ -127,7 +128,7 @@ function createSendMessageTool(): RuntimeTool {
 
 function createFollowupTaskTool(): RuntimeTool {
   return {
-    name: "followup_task",
+    toolName: plainToolName("followup_task"),
     description:
       "Send a follow-up task to a non-root agent. If it is idle, this starts a new turn; if it is running, the task is queued for the next turn boundary.",
     approvalRequirement: noToolApprovalRequired,
@@ -155,7 +156,7 @@ function createFollowupTaskTool(): RuntimeTool {
 
 function createWaitAgentTool(): RuntimeTool {
   return {
-    name: "wait_agent",
+    toolName: plainToolName("wait_agent"),
     description:
       "Wait for a mailbox or final-status update from any agent in the current tree. Returns immediately when an update is already queued, or after the timeout with an empty update list.",
     approvalRequirement: noToolApprovalRequired,
@@ -190,7 +191,7 @@ function createWaitAgentTool(): RuntimeTool {
 
 function createInterruptAgentTool(): RuntimeTool {
   return {
-    name: "interrupt_agent",
+    toolName: plainToolName("interrupt_agent"),
     description:
       "Interrupt an agent's current turn, if any, and return its previous status. The agent remains available for messages and follow-up tasks.",
     approvalRequirement: noToolApprovalRequired,
@@ -219,7 +220,7 @@ function createInterruptAgentTool(): RuntimeTool {
 
 function createListAgentsTool(): RuntimeTool {
   return {
-    name: "list_agents",
+    toolName: plainToolName("list_agents"),
     description:
       "List agents in the current root tree, optionally filtered by a canonical task-path prefix.",
     approvalRequirement: noToolApprovalRequired,

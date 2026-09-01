@@ -12,6 +12,7 @@ import {
 } from "./execution-descriptors.ts"
 import { runRipgrepRecords } from "./ripgrep.ts"
 import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
+import { plainToolName } from "./tool-name.ts"
 
 const DEFAULT_RESULTS = 250
 const DEFAULT_TIMEOUT_MS = 20_000
@@ -69,11 +70,12 @@ export function createGrepTool(
   // TODO(grep-edit-monitoring): Measure grep -> read_file -> edit_file
   // sequences before reconsidering grep-derived edit authorization.
   return {
-    name: "grep",
+    toolName: plainToolName("grep"),
     description:
       "Search file contents with ripgrep. Read the relevant file before editing it. Supports regex, file globs, file types, context lines, case-insensitive and multiline search, and workspace-relative or absolute paths. Results are paginated and bounded.",
     approvalRequirement: noToolApprovalRequired,
     effect: "observe",
+    supportsParallelToolCalls: true,
     describeExecution: fileSearchExecution("grep"),
     completeExecution: completeFileSearchExecution,
     inputSchema: GrepInputSchema,

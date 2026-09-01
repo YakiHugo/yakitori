@@ -55,12 +55,6 @@ export async function resolveCommandCwd(
         : resolve(canonicalRoot, cwd)
   try {
     const absolutePath = await realpath(candidate)
-    if (!isInsideWorkspace(canonicalRoot, absolutePath)) {
-      return pathError(
-        "invalid_cwd",
-        "Command cwd escapes the workspace via symlink.",
-      )
-    }
     const stats = await lstat(absolutePath)
     if (!stats.isDirectory()) {
       return pathError("invalid_cwd", "Command cwd must be a directory.")

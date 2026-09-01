@@ -1,7 +1,7 @@
 import { createEventId, isStorageKey } from "./ids.ts"
 import { jsonValuesEqual } from "./json-equality.ts"
 
-export const EVENT_SCHEMA_VERSION = 5
+export const EVENT_SCHEMA_VERSION = 6
 
 export const EventType = {
   SessionCreated: "session.created",
@@ -131,11 +131,29 @@ export type ModelReasoningBlock = {
   readonly providerMetadata?: JsonObject
 }
 
+export type ModelToolInputFormat = Readonly<{
+  type: "grammar"
+  syntax: "lark"
+  definition: string
+}>
+
+export type ModelToolDefinition = {
+  readonly name: string
+  readonly description: string
+  readonly inputSchema: JsonObject
+  readonly kind?: "function" | "custom" | "tool_search"
+  readonly inputFormat?: ModelToolInputFormat
+  readonly customInputFallbackKey?: string
+  readonly deferLoading?: boolean
+}
+
 export type ModelToolCallBlock = {
   readonly type: "tool_call"
   readonly id: string
   readonly name: string
   readonly input: JsonValue
+  readonly toolKind?: "function" | "custom" | "tool_search"
+  readonly customInputFallbackKey?: string
 }
 
 export type ModelContentBlock =
@@ -169,7 +187,13 @@ export type ModelAssistantMessage = {
 
 export type FileObservation = {
   readonly path: string
-  readonly kind: "edit" | "ranged_read" | "whole_file_read" | "write"
+  readonly kind:
+    | "delete"
+    | "edit"
+    | "invalidate"
+    | "ranged_read"
+    | "whole_file_read"
+    | "write"
   readonly complete: boolean
   readonly sha256?: string
   readonly ranges?: readonly {
@@ -185,9 +209,15 @@ export type ModelToolResultMessage = {
   readonly toolCallId: string
   readonly content: string
   readonly isError?: boolean
+  // A structural discovery result. Provider adapters encode this as an
+  // OpenAI tool_search_output or Anthropic tool_reference blocks instead of
+  // degrading it to ordinary tool-result text.
+  readonly toolSearch?: Readonly<{
+    tools: readonly ModelToolDefinition[]
+  }>
   // Execution-only metadata. Providers receive content; the actor retains this
   // grant so later model-visible Turns can safely authorize file mutations.
-  readonly fileObservation?: FileObservation
+  readonly fileObservations?: readonly FileObservation[]
 }
 
 export type ModelMessage =
@@ -296,14 +326,16 @@ export type SessionExecutionPolicyDefaultsSnapshot = {
   readonly assistantResponseBytes: number
 }
 
+export type ApprovalPolicy = "always_approve" | "auto_file_tools"
+
 export type SessionConfigurationSnapshot = {
-  readonly schemaVersion: 3
+  readonly schemaVersion: 4
   readonly workspaceRoot: string
   readonly promptCacheKey: string
   readonly defaultTarget: ModelSelection
   readonly baseInstructions: BaseInstructionsSnapshot
   readonly enabledTools: readonly string[]
-  readonly approvalPolicy: "auto_file_tools" | "never"
+  readonly approvalPolicy: ApprovalPolicy
   readonly executionPolicyDefaults: SessionExecutionPolicyDefaultsSnapshot
   readonly modelContextWindowTokens?: number
 }
@@ -324,7 +356,7 @@ export type TurnExecutionContext = {
   readonly effectiveModelContextWindowTokens?: number
   readonly workingDirectory: string
   readonly enabledTools: readonly string[]
-  readonly approvalPolicy: string
+  readonly approvalPolicy: ApprovalPolicy
   readonly executionPolicy: TurnExecutionLimits
 }
 
@@ -548,6 +580,7 @@ export type ToolExecutionDescriptor =
         paths: ReadonlyArray<string>
       }>
       changes: ReadonlyArray<FileChange>
+      exact?: boolean
     }>
   | Readonly<{
       type: "file_read"
@@ -941,9 +974,10 @@ function isToolExecutionItemWithLifecycle(
       )
     case "file_change":
       return (
-        onlyKeys(value, [...commonKeys, "request", "changes"]) &&
+        onlyKeys(value, [...commonKeys, "request", "changes", "exact"]) &&
         isFileChangeRequest(value.request) &&
-        isFileChanges(value.changes)
+        isFileChanges(value.changes) &&
+        (value.exact === undefined || typeof value.exact === "boolean")
       )
     case "file_read":
       return (
@@ -1284,13 +1318,20 @@ export function isModelMessage(value: unknown): value is ModelMessage {
         "toolCallId",
         "content",
         "isError",
-        "fileObservation",
+        "toolSearch",
+        "fileObservations",
       ]) &&
       isString(value.toolCallId) &&
       isString(value.content) &&
       (value.isError === undefined || typeof value.isError === "boolean") &&
-      (value.fileObservation === undefined ||
-        isFileObservation(value.fileObservation))
+      (value.toolSearch === undefined ||
+        (isRecord(value.toolSearch) &&
+          onlyKeys(value.toolSearch, ["tools"]) &&
+          Array.isArray(value.toolSearch.tools) &&
+          value.toolSearch.tools.every(isModelToolDefinition))) &&
+      (value.fileObservations === undefined ||
+        (Array.isArray(value.fileObservations) &&
+          value.fileObservations.every(isFileObservation)))
     )
   }
   if (value.role === "assistant") {
@@ -1332,7 +1373,9 @@ function isFileObservation(value: unknown): value is FileObservation {
       "optimisticRebase",
     ]) ||
     !isString(value.path) ||
-    (value.kind !== "edit" &&
+    (value.kind !== "delete" &&
+      value.kind !== "edit" &&
+      value.kind !== "invalidate" &&
       value.kind !== "ranged_read" &&
       value.kind !== "whole_file_read" &&
       value.kind !== "write") ||
@@ -1382,10 +1425,66 @@ function isModelContentBlock(value: unknown): boolean {
   }
   return (
     value.type === "tool_call" &&
-    onlyKeys(value, ["type", "id", "name", "input"]) &&
+    onlyKeys(value, [
+      "type",
+      "id",
+      "name",
+      "input",
+      "toolKind",
+      "customInputFallbackKey",
+    ]) &&
     isString(value.id) &&
     isString(value.name) &&
-    isJsonValue(value.input)
+    isJsonValue(value.input) &&
+    (value.toolKind === "custom"
+      ? isString(value.input) &&
+        isString(value.customInputFallbackKey) &&
+        value.customInputFallbackKey.trim().length > 0 &&
+        value.customInputFallbackKey === value.customInputFallbackKey.trim()
+      : (value.toolKind === undefined ||
+          value.toolKind === "function" ||
+          value.toolKind === "tool_search") &&
+        value.customInputFallbackKey === undefined)
+  )
+}
+
+function isModelToolDefinition(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    onlyKeys(value, [
+      "name",
+      "description",
+      "inputSchema",
+      "kind",
+      "inputFormat",
+      "customInputFallbackKey",
+      "deferLoading",
+    ]) &&
+    isString(value.name) &&
+    isString(value.description) &&
+    isJsonObject(value.inputSchema) &&
+    (value.deferLoading === undefined ||
+      typeof value.deferLoading === "boolean") &&
+    (value.kind === "custom"
+      ? isModelToolInputFormat(value.inputFormat) &&
+        isString(value.customInputFallbackKey) &&
+        value.customInputFallbackKey.trim().length > 0 &&
+        value.customInputFallbackKey === value.customInputFallbackKey.trim()
+      : (value.kind === undefined ||
+          value.kind === "function" ||
+          value.kind === "tool_search") &&
+        value.inputFormat === undefined &&
+        value.customInputFallbackKey === undefined)
+  )
+}
+
+function isModelToolInputFormat(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    onlyKeys(value, ["type", "syntax", "definition"]) &&
+    value.type === "grammar" &&
+    value.syntax === "lark" &&
+    isString(value.definition)
   )
 }
 
@@ -1427,7 +1526,7 @@ export function isSessionConfigurationSnapshot(
       "executionPolicyDefaults",
       "modelContextWindowTokens",
     ]) ||
-    value.schemaVersion !== 3 ||
+    value.schemaVersion !== 4 ||
     !isString(value.workspaceRoot) ||
     !isString(value.promptCacheKey) ||
     value.promptCacheKey.trim().length === 0 ||
@@ -1435,8 +1534,8 @@ export function isSessionConfigurationSnapshot(
     !isBaseInstructionsSnapshot(value.baseInstructions) ||
     !Array.isArray(value.enabledTools) ||
     !value.enabledTools.every(isString) ||
-    (value.approvalPolicy !== "auto_file_tools" &&
-      value.approvalPolicy !== "never") ||
+    (value.approvalPolicy !== "always_approve" &&
+      value.approvalPolicy !== "auto_file_tools") ||
     !isSessionExecutionPolicyDefaults(value.executionPolicyDefaults) ||
     (value.modelContextWindowTokens !== undefined &&
       !isPositiveInteger(value.modelContextWindowTokens))

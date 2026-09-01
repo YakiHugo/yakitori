@@ -78,7 +78,7 @@ describe("web_search contract", () => {
       provider: async () => ({ ok: true, text: "" }),
     })
     expect(tool).toMatchObject({
-      name: "web_search",
+      toolName: { name: "web_search" },
       approvalRequirement: { kind: "none" },
       effect: "observe",
       inputSchema: {
@@ -87,7 +87,7 @@ describe("web_search contract", () => {
         properties: { query: { type: "string", minLength: 1 } },
       },
     })
-    expect(createDefaultTools().map((entry) => entry.name)).toContain(
+    expect(createDefaultTools().map((entry) => entry.toolName.name)).toContain(
       "web_search",
     )
   })
