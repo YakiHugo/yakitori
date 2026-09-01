@@ -1,5 +1,8 @@
 import type { ModelMessage, ModelTarget } from "./model.ts"
-import { catalogModelCapabilities } from "./model-catalog.ts"
+import {
+  catalogModelCapabilities,
+  type ModelCapabilities,
+} from "./model-catalog.ts"
 
 export type ModelImageAdaptation = Readonly<{
   messages: readonly ModelMessage[]
@@ -10,8 +13,11 @@ export type ModelImageAdaptation = Readonly<{
 export function adaptImagesForModel(
   messages: readonly ModelMessage[],
   target: ModelTarget,
+  capabilities: Pick<
+    ModelCapabilities,
+    "imageDetailModes" | "inputModalities"
+  > = catalogModelCapabilities(target),
 ): ModelImageAdaptation {
-  const capabilities = catalogModelCapabilities(target)
   const supportsImages = capabilities.inputModalities.includes("image")
   const supportsOriginal = capabilities.imageDetailModes.includes("original")
   const shouldDowngradeOriginal = supportsImages && !supportsOriginal
