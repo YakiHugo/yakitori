@@ -7,12 +7,13 @@ import {
   fileChangeExecution,
 } from "./execution-descriptors.ts"
 import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
+import { plainToolName } from "./tool-name.ts"
 
 export function createWriteFileTool(
   maxBytes = ToolLimitDefaults.fileWriteBytes,
 ): RuntimeTool {
   return {
-    name: "write_file",
+    toolName: plainToolName("write_file"),
     description:
       "Create or intentionally replace a complete UTF-8 text file using compare-and-write. Accepts paths relative to the workspace and absolute paths. New files are created without a prior read. Before replacing an existing file, read the complete current file; write_file rejects missing, partial, or stale observations. Prefer edit_file for focused modifications.",
     approvalRequirement: fileChangeApprovalRequirement,

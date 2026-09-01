@@ -18,6 +18,7 @@ import {
   type TokenUsage,
   type ToolExecutionItem,
 } from "../kernel/index.ts"
+import type { AgentControl, BoundAgentControl } from "./agent-control.ts"
 import {
   buildCompactionRequest,
   isContextOverflowError,
@@ -50,16 +51,23 @@ import {
   createTurnContext,
   SessionConfiguration,
 } from "./session-configuration.ts"
+import {
+  createToolExecutionGate,
+  type ToolExecutionGate,
+  type ToolExecutionReservation,
+} from "./tool-execution-gate.ts"
 import { resolveToolPermissionRequest } from "./tool-permissions.ts"
 import { resolveWorkspaceRoot } from "./tools/path-policy.ts"
 import { createToolRegistry, type ToolRegistry } from "./tools/registry.ts"
+import { captureStepContext } from "./tools/spec-plan.ts"
 import type {
   ToolExecutionResult,
   ToolPermissionRequest,
 } from "./tools/types.ts"
+
 import {
   createVisibleFileObservationsFromMessages,
-  grantFromToolOutput,
+  grantsFromToolOutput,
   type VisibleFileObservations,
 } from "./tools/visible-file-observations.ts"
 import {
@@ -67,7 +75,6 @@ import {
   diffWorldState,
   type WorldState,
 } from "./world-state.ts"
-import type { AgentControl, BoundAgentControl } from "./agent-control.ts"
 
 export type TurnProcessorOptions = {
   readonly stream: StreamFn
@@ -100,7 +107,7 @@ export function createTurnProcessor(
   const executionPolicy =
     options.executionPolicy ?? createSessionExecutionPolicy()
   const runtimeTiming = options.runtimeTiming ?? createRunnerTimingPolicy()
-  const approvalPolicy = options.approvalPolicy ?? "never"
+  const approvalPolicy = options.approvalPolicy ?? "always_approve"
   const provider = options.provider ?? "faux"
   const model = options.model ?? "scripted"
   const projectInstructionLoader =
@@ -109,8 +116,10 @@ export function createTurnProcessor(
     consecutiveFailures: 0,
     failedHistoryLength: undefined,
   }
+  const toolExecutionGate = createToolExecutionGate()
 
   return {
+    dispose: () => toolRegistry.dispose(),
     prepare(snapshot, input) {
       const metadata = snapshot.metadata
       if (
@@ -129,7 +138,7 @@ export function createTurnProcessor(
           ? SessionConfiguration.create({
               selection,
               workspaceRoot: metadata.workingDirectory,
-              enabledTools: toolRegistry.tools.map((tool) => tool.name),
+              enabledTools: toolRegistry.trustedToolNames(),
               approvalPolicy,
               promptCacheKey: metadata.conversationId,
               ...(options.baseInstructions === undefined
@@ -181,6 +190,7 @@ export function createTurnProcessor(
         runtimeTiming,
         projectInstructionLoader,
         compactionState,
+        toolExecutionGate,
         options,
         setActiveStream(stream) {
           activeStream = stream
@@ -210,6 +220,7 @@ async function executeTurn(input: {
   readonly runtimeTiming: RunnerTimingPolicy
   readonly projectInstructionLoader: typeof loadProjectInstructions
   readonly compactionState: CompactionState
+  readonly toolExecutionGate: ToolExecutionGate
   readonly options: TurnProcessorOptions
   readonly setActiveStream: (
     stream: AsyncIterator<ModelStreamEvent> | undefined,
@@ -224,253 +235,292 @@ async function executeTurn(input: {
     mateId: requireValue(metadata.mateId, "Mate id"),
     mateRevisionId: requireValue(metadata.mateRevisionId, "Mate revision id"),
   })
+  if (turn.configuration.modelInfo.usedFallbackModelMetadata) {
+    input.runtime.emitWarning(
+      `Model metadata for ${turn.configuration.target.provider}/${turn.configuration.target.model} was not found. Yakitori is using conservative fallback metadata, so model-specific editing capabilities are unavailable.`,
+    )
+  }
   const usages: ModelUsage[] = []
   let modelCalls = 0
   let toolCalls = 0
-
   while (modelCalls < turn.execution.executionPolicy.modelCallsPerTurn) {
-    throwIfAborted(input.signal)
-    await recordSteering(input.runtime, input.control.takeSteering())
-    const workspaceRoot = await resolveWorkspaceRoot(
-      turn.configuration.workspaceRoot,
-    )
-    const projectInstructions = await input.projectInstructionLoader({
-      workspaceRoot,
-      workingDirectory: turn.configuration.workspaceRoot,
-    })
-    const environment = observeEnvironment({
-      workspaceRoot,
-      workingDirectory: turn.configuration.workspaceRoot,
-      ...(input.options.now === undefined ? {} : { now: input.options.now() }),
-    })
-    const beforeStep = input.runtime.snapshot()
-    const priorModelId = previousModelId(
-      beforeStep.context.history,
-      input.context,
-    )
-    const worldState = buildWorldStateFromSnapshot({
-      configuration: turn.configuration,
-      ...(baseModelId(input.context) === undefined
-        ? {}
-        : { baseModelId: baseModelId(input.context) }),
-      ...(priorModelId === undefined ? {} : { previousModelId: priorModelId }),
-      environment,
-      ...(projectInstructions === undefined ? {} : { projectInstructions }),
-      ...(input.options.agentControl === undefined
-        ? {}
-        : {
-            multiAgent: input.options.agentControl.runtimeContext(metadata.id),
-          }),
-    })
-    const worldDiff = diffWorldState(
-      beforeStep.context.worldStateBaseline,
-      worldState,
-    )
-    if (worldDiff !== undefined) {
-      await input.runtime.recordWorldStateUpdate(
-        worldDiff.fragments.map((fragment) =>
-          envelope(input.input.submissionId, {
-            role: fragment.role,
-            content: [{ type: "text", text: fragment.text }],
-            context: {
-              type: "world_state",
-              sectionId: fragment.id,
-              revision: fragment.revision,
-            },
-          }),
-        ),
-        {
-          full: worldDiff.full,
-          state: worldDiff.state,
-          snapshot: worldDiff.snapshot,
-        },
-      )
-    }
-
-    const toolPlan = input.toolRegistry.finalize(
-      new Set(turn.configuration.enabledTools),
-    )
-    const durableMessages = completeToolCallHistory(
-      input.runtime.snapshot().context.history.map((entry) => entry.item),
-    )
-    const messages = limitToolResults(
-      durableMessages,
-      turn.execution.executionPolicy.modelVisibleToolResultBytes,
-      turn.execution.executionPolicy.modelVisibleToolResultLines,
-    )
-    const visibleFileObservations =
-      createVisibleFileObservationsFromMessages(messages)
-    const adapted = adaptImagesForModel(messages, turn.configuration.target)
-    const request: ModelRequest = {
+    const step = captureStepContext({
+      registry: input.toolRegistry,
       target: turn.configuration.target,
-      cacheKey: turn.configuration.promptCacheKey,
-      system: [turn.configuration.baseInstructions],
-      messages: await resolveRolloutAssetImages(
-        adapted.messages,
-        input.options.rolloutAssets,
-      ),
-      tools: toolPlan.definitions,
-      signal: input.signal,
-    }
-    const admission = assessModelRequest({
-      request,
-      rawMessages: messages,
-      turn,
+      modelInfo: turn.configuration.modelInfo,
+      enabledTools: turn.configuration.enabledTools,
     })
-    if (
-      input.compactionState.failedHistoryLength !==
-      beforeStep.context.history.length
-    ) {
-      input.compactionState.consecutiveFailures = 0
-      input.compactionState.failedHistoryLength = undefined
-    }
-    if (
-      admission.shouldCompact &&
-      input.compactionState.consecutiveFailures < 3
-    ) {
-      const compacted = await compactLiveHistory({
-        runtime: input.runtime,
-        turnId: input.input.submissionId,
-        turn,
-        worldState,
-        history: beforeStep.context.history,
-        contextRevision: beforeStep.contextRevision,
-        stream: input.options.stream,
-        signal: input.signal,
-        rolloutAssets: input.options.rolloutAssets,
-        usages,
-        compactionState: input.compactionState,
-        onRuntimeError: input.options.onRuntimeError,
-        setActiveStream: input.setActiveStream,
-      })
-      if (compacted) continue
-    }
-    if (admission.exceedsHardLimit) {
-      throw new Error("The complete model request exceeds the context window.")
-    }
-    const responseItemId = `message_${globalThis.crypto.randomUUID()}`
-    const response = await consumeModelStream({
-      request,
-      stream: input.options.stream,
-      threadId: metadata.id,
-      turnId: input.input.submissionId,
-      itemId: responseItemId,
-      emitModelStream: (event) => input.runtime.emitModelStream(event),
-      assistantResponseBytes:
-        turn.execution.executionPolicy.assistantResponseBytes,
-      onRuntimeError: input.options.onRuntimeError,
-      onUsage(usage) {
-        usages.push(usage)
-        const aggregate = aggregateTokenUsage(usages)
-        if (aggregate !== undefined) input.runtime.recordUsage(aggregate)
-      },
-      setActiveStream: input.setActiveStream,
-    })
-    input.setActiveStream(undefined)
-    modelCalls += 1
-    throwIfAborted(input.signal)
-
-    if (response.stopReason === ModelStopReason.Length) {
-      throw new Error("Model response was truncated by length.")
-    }
-    if (response.stopReason === ModelStopReason.Error) {
-      throw new Error(response.error?.message ?? "Model returned an error.")
-    }
-    if (response.stopReason === ModelStopReason.Aborted) {
-      throw abortError()
-    }
-
-    const calls = response.content.filter(
-      (block): block is ModelToolCallBlock => block.type === "tool_call",
-    )
-    if (response.stopReason === ModelStopReason.ToolUse && calls.length === 0) {
-      throw new Error(
-        "tool_use stop reason requires at least one complete tool call.",
+    const toolPlan = step.toolRouter
+    try {
+      throwIfAborted(input.signal)
+      await recordSteering(input.runtime, input.control.takeSteering())
+      const workspaceRoot = await resolveWorkspaceRoot(
+        turn.configuration.workspaceRoot,
       )
-    }
-    if (response.stopReason !== ModelStopReason.ToolUse && calls.length > 0) {
-      throw new Error("Non-tool_use responses must not include tool calls.")
-    }
-    if (
-      utf8Bytes(JSON.stringify(response.content)) >
-      turn.execution.executionPolicy.assistantResponseBytes
-    ) {
-      throw new Error("Assistant response exceeded the configured byte limit.")
-    }
-    if (response.content.length > 0) {
-      const responseItem = envelope(
-        input.input.submissionId,
-        { role: "assistant", content: response.content },
-        {
-          provider: turn.execution.provider,
-          model: turn.execution.model,
-          callIndex: modelCalls,
-        },
-        responseItemId,
-      )
-      await input.runtime.recordConversationItems([responseItem])
-      await input.runtime.recordItemCompletions(
-        completedResponseItems(responseItem),
-      )
-    }
-
-    if (response.stopReason === ModelStopReason.ToolUse) {
-      if (
-        toolCalls + calls.length >
-        turn.execution.executionPolicy.toolCallsPerTurn
-      ) {
-        throw new Error("Turn exceeded its tool call budget.")
-      }
-      toolCalls += calls.length
-      const results = await executeToolCalls({
-        calls,
-        threadId: metadata.id,
-        rolloutId: metadata.rolloutId,
-        turnId: input.input.submissionId,
+      const projectInstructions = await input.projectInstructionLoader({
         workspaceRoot,
-        signal: input.signal,
-        toolPlan,
-        permissionGate: input.permissionGate,
-        emitItemStarted: input.runtime.emitItemStarted,
-        publishPermissionEvent: (event) =>
-          input.runtime.emitPermissionEvent(event),
-        permissionTimeoutMs: input.runtimeTiming.permissionWaitTimeoutMs,
-        approvalPolicy: turn.configuration.approvalPolicy,
-        rolloutAssets: input.options.rolloutAssets,
-        visibleFileObservations,
-        onRuntimeError: input.options.onRuntimeError,
+        workingDirectory: turn.configuration.workspaceRoot,
+      })
+      const environment = observeEnvironment({
+        workspaceRoot,
+        workingDirectory: turn.configuration.workspaceRoot,
+        ...(input.options.now === undefined
+          ? {}
+          : { now: input.options.now() }),
+      })
+      const beforeStep = input.runtime.snapshot()
+      const priorModelId = previousModelId(
+        beforeStep.context.history,
+        input.context,
+      )
+      const worldState = buildWorldStateFromSnapshot({
+        configuration: turn.configuration,
+        enabledToolNames: new Set(
+          toolPlan.definitions.map((definition) => definition.name),
+        ),
+        ...(baseModelId(input.context) === undefined
+          ? {}
+          : { baseModelId: baseModelId(input.context) }),
+        ...(priorModelId === undefined
+          ? {}
+          : { previousModelId: priorModelId }),
+        environment,
+        ...(projectInstructions === undefined ? {} : { projectInstructions }),
         ...(input.options.agentControl === undefined
           ? {}
           : {
-              agentControl: input.options.agentControl.bind(
+              multiAgent: input.options.agentControl.runtimeContext(
                 metadata.id,
-                turn.configuration.target,
               ),
             }),
       })
-      for (const { call, item, result } of results) {
-        const fileObservation = toolFileObservation(call.name, result)
-        const resultItem = envelope(input.input.submissionId, {
-          role: "tool",
-          toolCallId: call.id,
-          content: result.content,
-          ...(!result.ok ? { isError: true } : {}),
-          ...(fileObservation === undefined ? {} : { fileObservation }),
-        })
-        await input.runtime.recordConversationItems([resultItem])
-        await input.runtime.recordItemCompletions([
-          completeToolItem(toolPlan, item, resultItem.id, result),
-        ])
+      const worldDiff = diffWorldState(
+        beforeStep.context.worldStateBaseline,
+        worldState,
+      )
+      if (worldDiff !== undefined) {
+        await input.runtime.recordWorldStateUpdate(
+          worldDiff.fragments.map((fragment) =>
+            envelope(input.input.submissionId, {
+              role: fragment.role,
+              content: [{ type: "text", text: fragment.text }],
+              context: {
+                type: "world_state",
+                sectionId: fragment.id,
+                revision: fragment.revision,
+              },
+            }),
+          ),
+          {
+            full: worldDiff.full,
+            state: worldDiff.state,
+            snapshot: worldDiff.snapshot,
+          },
+        )
       }
-      continue
-    }
 
-    const completion = input.control.takeSteeringOrComplete()
-    if (completion.type === "steering") {
-      await recordSteering(input.runtime, completion.inputs)
-      continue
+      const durableMessages = completeToolCallHistory(
+        input.runtime.snapshot().context.history.map(({ item }) => item),
+      )
+      const messages = limitToolResults(
+        durableMessages,
+        turn.execution.executionPolicy.modelVisibleToolResultBytes,
+        turn.execution.executionPolicy.modelVisibleToolResultLines,
+      )
+      const visibleFileObservations =
+        createVisibleFileObservationsFromMessages(messages)
+      const adapted = adaptImagesForModel(messages, step.target, step.modelInfo)
+      const request: ModelRequest = {
+        target: step.target,
+        cacheKey: turn.configuration.promptCacheKey,
+        system: [turn.configuration.baseInstructions],
+        messages: await resolveRolloutAssetImages(
+          adapted.messages,
+          input.options.rolloutAssets,
+        ),
+        tools: toolPlan.modelDefinitions,
+        toolWireProtocol: step.toolWireProtocol,
+        signal: input.signal,
+      }
+      const admission = assessModelRequest({
+        request,
+        rawMessages: messages,
+        turn,
+      })
+      if (
+        input.compactionState.failedHistoryLength !==
+        beforeStep.context.history.length
+      ) {
+        input.compactionState.consecutiveFailures = 0
+        input.compactionState.failedHistoryLength = undefined
+      }
+      if (
+        admission.shouldCompact &&
+        input.compactionState.consecutiveFailures < 3
+      ) {
+        const compacted = await compactLiveHistory({
+          runtime: input.runtime,
+          turnId: input.input.submissionId,
+          turn,
+          worldState,
+          history: beforeStep.context.history,
+          contextRevision: beforeStep.contextRevision,
+          stream: input.options.stream,
+          signal: input.signal,
+          rolloutAssets: input.options.rolloutAssets,
+          usages,
+          compactionState: input.compactionState,
+          onRuntimeError: input.options.onRuntimeError,
+          setActiveStream: input.setActiveStream,
+        })
+        if (compacted) continue
+      }
+      if (admission.exceedsHardLimit) {
+        throw new Error(
+          "The complete model request exceeds the context window.",
+        )
+      }
+      const responseItemId = `message_${globalThis.crypto.randomUUID()}`
+      const response = await consumeModelStream({
+        request,
+        stream: input.options.stream,
+        threadId: metadata.id,
+        turnId: input.input.submissionId,
+        itemId: responseItemId,
+        emitModelStream: (event) => input.runtime.emitModelStream(event),
+        assistantResponseBytes:
+          turn.execution.executionPolicy.assistantResponseBytes,
+        onRuntimeError: input.options.onRuntimeError,
+        onUsage(usage) {
+          usages.push(usage)
+          const aggregate = aggregateTokenUsage(usages)
+          if (aggregate !== undefined) input.runtime.recordUsage(aggregate)
+        },
+        setActiveStream: input.setActiveStream,
+      })
+      input.setActiveStream(undefined)
+      modelCalls += 1
+      throwIfAborted(input.signal)
+
+      if (response.stopReason === ModelStopReason.Length) {
+        throw new Error("Model response was truncated by length.")
+      }
+      if (response.stopReason === ModelStopReason.Error) {
+        throw new Error(response.error?.message ?? "Model returned an error.")
+      }
+      if (response.stopReason === ModelStopReason.Aborted) {
+        throw abortError()
+      }
+
+      const calls = response.content.filter(
+        (block): block is ModelToolCallBlock => block.type === "tool_call",
+      )
+      if (
+        response.stopReason === ModelStopReason.ToolUse &&
+        calls.length === 0
+      ) {
+        throw new Error(
+          "tool_use stop reason requires at least one complete tool call.",
+        )
+      }
+      if (response.stopReason !== ModelStopReason.ToolUse && calls.length > 0) {
+        throw new Error("Non-tool_use responses must not include tool calls.")
+      }
+      if (
+        utf8Bytes(JSON.stringify(response.content)) >
+        turn.execution.executionPolicy.assistantResponseBytes
+      ) {
+        throw new Error(
+          "Assistant response exceeded the configured byte limit.",
+        )
+      }
+      if (response.content.length > 0) {
+        const responseItem = envelope(
+          input.input.submissionId,
+          { role: "assistant", content: response.content },
+          {
+            provider: turn.execution.provider,
+            model: turn.execution.model,
+            callIndex: modelCalls,
+          },
+          responseItemId,
+        )
+        await input.runtime.recordConversationItems([responseItem])
+        await input.runtime.recordItemCompletions(
+          completedResponseItems(responseItem),
+        )
+      }
+
+      if (response.stopReason === ModelStopReason.ToolUse) {
+        if (
+          toolCalls + calls.length >
+          turn.execution.executionPolicy.toolCallsPerTurn
+        ) {
+          throw new Error("Turn exceeded its tool call budget.")
+        }
+        toolCalls += calls.length
+        const results = await executeToolCalls({
+          calls,
+          threadId: metadata.id,
+          rolloutId: metadata.rolloutId,
+          turnId: input.input.submissionId,
+          workspaceRoot,
+          signal: input.signal,
+          toolPlan,
+          permissionGate: input.permissionGate,
+          emitItemStarted: input.runtime.emitItemStarted,
+          publishPermissionEvent: (event) =>
+            input.runtime.emitPermissionEvent(event),
+          permissionTimeoutMs: input.runtimeTiming.permissionWaitTimeoutMs,
+          approvalPolicy: turn.configuration.approvalPolicy,
+          rolloutAssets: input.options.rolloutAssets,
+          visibleFileObservations,
+          toolExecutionGate: input.toolExecutionGate,
+          onRuntimeError: input.options.onRuntimeError,
+          ...(input.options.agentControl === undefined
+            ? {}
+            : {
+                agentControl: input.options.agentControl.bind(
+                  metadata.id,
+                  step.target,
+                ),
+              }),
+        })
+        for (const { call, item, result } of results) {
+          const fileObservations = toolFileObservations(item.name, result)
+          const resultItem = envelope(input.input.submissionId, {
+            role: "tool",
+            toolCallId: call.id,
+            content: result.content,
+            ...(!result.ok ? { isError: true } : {}),
+            ...(call.toolKind === "tool_search"
+              ? {
+                  toolSearch: {
+                    tools: result.ok
+                      ? discoveredTools(toolPlan, call.input)
+                      : [],
+                  },
+                }
+              : {}),
+            ...(fileObservations.length === 0 ? {} : { fileObservations }),
+          })
+          await input.runtime.recordConversationItems([resultItem])
+          await input.runtime.recordItemCompletions([
+            completeToolItem(toolPlan, item, resultItem.id, result),
+          ])
+        }
+        continue
+      }
+
+      const completion = input.control.takeSteeringOrComplete()
+      if (completion.type === "steering") {
+        await recordSteering(input.runtime, completion.inputs)
+        continue
+      }
+      return
+    } finally {
+      await toolPlan.release()
     }
-    return
   }
   throw new Error("Turn exceeded its model call budget.")
 }
@@ -557,7 +607,7 @@ function assessModelRequest(input: {
   const messageBlocks = input.rawMessages.reduce(
     (count, message) =>
       count +
-      message.content.length +
+      (typeof message.content === "string" ? 1 : message.content.length) +
       (message.role === "user" ? (message.images?.length ?? 0) : 0),
     0,
   )
@@ -696,6 +746,7 @@ async function compactLiveHistory(input: {
                   .modelVisibleToolResultLines,
               ),
               input.turn.configuration.target,
+              input.turn.configuration.modelInfo,
             ).messages,
             input.rolloutAssets,
           ),
@@ -822,12 +873,17 @@ type ToolExecutionScope = {
   readonly approvalPolicy: ApprovalPolicy
   readonly rolloutAssets: RolloutAssets | undefined
   readonly visibleFileObservations: VisibleFileObservations
+  readonly toolExecutionGate: ToolExecutionGate
   readonly onRuntimeError: ((error: unknown) => void) | undefined
   readonly agentControl?: BoundAgentControl
 }
 
 type PreparedToolCall = {
   readonly call: ModelToolCallBlock
+  readonly invocation: Readonly<{
+    name: string
+    input: import("../kernel/index.ts").JsonValue
+  }>
   readonly item: ToolExecutionItem
   readonly permission?: ToolPermissionRequest
   readonly preparationError?: unknown
@@ -844,11 +900,15 @@ async function executeToolCalls(
 > {
   const prepared = await Promise.all(
     input.calls.map(async (call): Promise<PreparedToolCall> => {
-      const descriptor = input.toolPlan.describeExecution(call.name, call.input)
+      const invocation = input.toolPlan.resolveInvocation(call.name, call.input)
+      const descriptor = input.toolPlan.describeExecution(
+        invocation.name,
+        invocation.input,
+      )
       try {
         const requirement = await input.toolPlan.approvalRequirement(
-          call.name,
-          call.input,
+          invocation.name,
+          invocation.input,
           { workspaceRoot: input.workspaceRoot },
         )
         const permission = resolveToolPermissionRequest(
@@ -857,11 +917,12 @@ async function executeToolCalls(
         )
         return {
           call,
+          invocation,
           item: {
             itemId: `tool_${globalThis.crypto.randomUUID()}`,
             toolCallId: call.id,
-            name: call.name,
-            input: call.input,
+            name: invocation.name,
+            input: invocation.input,
             requiresPermission: permission !== undefined,
             ...descriptor,
           },
@@ -870,11 +931,12 @@ async function executeToolCalls(
       } catch (error) {
         return {
           call,
+          invocation,
           item: {
             itemId: `tool_${globalThis.crypto.randomUUID()}`,
             toolCallId: call.id,
-            name: call.name,
-            input: call.input,
+            name: invocation.name,
+            input: invocation.input,
             requiresPermission: false,
             ...descriptor,
           },
@@ -884,16 +946,13 @@ async function executeToolCalls(
     }),
   )
   for (const item of prepared) input.emitItemStarted(item.item)
-  const firstBarrier = prepared.findIndex((item) => {
-    const effect = input.toolPlan.get(item.call.name)?.effect ?? "opaque"
-    return (
-      effect !== "observe" ||
-      item.permission !== undefined ||
-      item.preparationError !== undefined
-    )
-  })
-  const prefix = firstBarrier < 0 ? prepared : prepared.slice(0, firstBarrier)
-  const rest = firstBarrier < 0 ? [] : prepared.slice(firstBarrier)
+  const scheduled = prepared.map((item) => ({
+    item,
+    reservation: input.toolExecutionGate.reserve(
+      input.toolPlan.supportsParallelToolCalls(item.invocation.name),
+      input.signal,
+    ),
+  }))
   const results: Array<{
     readonly call: ModelToolCallBlock
     readonly item: ToolExecutionItem
@@ -901,10 +960,10 @@ async function executeToolCalls(
   }> = []
 
   const settled = await Promise.allSettled(
-    prefix.map(async (item) => ({
+    scheduled.map(async ({ item, reservation }) => ({
       call: item.call,
       item: item.item,
-      result: await executePreparedTool(input, item),
+      result: await executePreparedTool(input, item, reservation),
     })),
   )
   let firstError: unknown
@@ -913,22 +972,6 @@ async function executeToolCalls(
     else if (firstError === undefined) firstError = outcome.reason
   }
   if (firstError !== undefined) throw firstError
-
-  for (const item of rest) {
-    throwIfAborted(input.signal)
-    const executed = {
-      call: item.call,
-      item: item.item,
-      result: await executePreparedTool(input, item),
-    }
-    results.push(executed)
-    if (input.toolPlan.get(item.call.name)?.effect !== "observe") {
-      const observation = toolFileObservation(item.call.name, executed.result)
-      if (observation !== undefined) {
-        input.visibleFileObservations.apply(observation)
-      }
-    }
-  }
   return results
 }
 
@@ -1033,6 +1076,7 @@ function completeCompactionItem(
 async function executePreparedTool(
   input: ToolExecutionScope,
   prepared: PreparedToolCall,
+  reservation: ToolExecutionReservation,
 ): Promise<ToolExecutionResult> {
   try {
     if (prepared.preparationError !== undefined) {
@@ -1055,6 +1099,7 @@ async function executePreparedTool(
         publish: input.publishPermissionEvent,
       })
       if (outcome.kind !== "allow") {
+        reservation.cancel()
         const message =
           outcome.reason?.message ?? `Tool permission ${outcome.kind}.`
         return {
@@ -1065,24 +1110,44 @@ async function executePreparedTool(
         }
       }
     }
-    return await input.toolPlan.execute(
-      prepared.call.name,
-      prepared.call.input,
-      {
+    await waitForToolReadiness(
+      input.toolPlan.waitUntilReady(prepared.invocation.name, {
         workspaceRoot: input.workspaceRoot,
-        rolloutId: input.rolloutId,
-        toolCallId: prepared.call.id,
         signal: input.signal,
-        ...(input.rolloutAssets === undefined
-          ? {}
-          : { rolloutAssets: input.rolloutAssets }),
-        visibleFileObservations: input.visibleFileObservations,
-        ...(input.agentControl === undefined
-          ? {}
-          : { agentControl: input.agentControl }),
-      },
+      }),
+      input.signal,
     )
+    return await reservation.run(async () => {
+      const result = await input.toolPlan.execute(
+        prepared.invocation.name,
+        prepared.invocation.input,
+        {
+          workspaceRoot: input.workspaceRoot,
+          rolloutId: input.rolloutId,
+          toolCallId: prepared.call.id,
+          signal: input.signal,
+          ...(input.rolloutAssets === undefined
+            ? {}
+            : { rolloutAssets: input.rolloutAssets }),
+          visibleFileObservations: input.visibleFileObservations,
+          ...(input.agentControl === undefined
+            ? {}
+            : { agentControl: input.agentControl }),
+        },
+      )
+      if (input.toolPlan.get(prepared.invocation.name)?.effect !== "observe") {
+        const observations = toolFileObservations(
+          prepared.invocation.name,
+          result,
+        )
+        for (const observation of observations) {
+          input.visibleFileObservations.apply(observation)
+        }
+      }
+      return result
+    })
   } catch (error) {
+    reservation.cancel()
     if (input.signal.aborted || isAbortError(error)) throw abortError()
     reportRuntimeError(input.onRuntimeError, error)
     const message = error instanceof Error ? error.message : "Tool failed."
@@ -1095,8 +1160,29 @@ async function executePreparedTool(
   }
 }
 
-function toolFileObservation(name: string, result: ToolExecutionResult) {
-  return result.ok ? grantFromToolOutput(name, result.output) : undefined
+async function waitForToolReadiness(
+  readiness: Promise<void>,
+  signal: AbortSignal,
+): Promise<void> {
+  if (signal.aborted) throw abortError()
+  let rejectAborted: (() => void) | undefined
+  const aborted = new Promise<never>((_, reject) => {
+    rejectAborted = () => reject(abortError())
+  })
+  const onAbort = () => rejectAborted?.()
+  signal.addEventListener("abort", onAbort, { once: true })
+  if (signal.aborted) onAbort()
+  try {
+    await Promise.race([readiness, aborted])
+  } finally {
+    signal.removeEventListener("abort", onAbort)
+  }
+}
+
+function toolFileObservations(name: string, result: ToolExecutionResult) {
+  return result.output === undefined
+    ? []
+    : grantsFromToolOutput(name, result.output)
 }
 
 function limitToolResults(
@@ -1121,8 +1207,7 @@ function limitToolResults(
       truncated = true
     }
     if (!truncated) return message
-    const { fileObservation: _fileObservation, ...visible } = message
-    return { ...visible, content }
+    return { ...message, content }
   })
 }
 
@@ -1254,34 +1339,55 @@ function completeToolCallHistory(
   messages: readonly ModelMessage[],
 ): readonly ModelMessage[] {
   const completed: ModelMessage[] = []
-  let pending: string[] = []
+  let pending: Array<
+    Readonly<{ id: string; toolKind: ModelToolCallBlock["toolKind"] }>
+  > = []
   const flushMissing = () => {
     completed.push(
-      ...pending.map((toolCallId) => ({
+      ...pending.map(({ id: toolCallId, toolKind }) => ({
         role: "tool" as const,
         toolCallId,
         content: MISSING_TOOL_RESULT_TEXT,
         isError: true,
+        ...(toolKind === "tool_search" ? { toolSearch: { tools: [] } } : {}),
       })),
     )
     pending = []
   }
   for (const message of messages) {
-    if (message.role === "tool" && pending.includes(message.toolCallId)) {
+    if (
+      message.role === "tool" &&
+      pending.some(({ id }) => id === message.toolCallId)
+    ) {
       completed.push(message)
-      pending = pending.filter((id) => id !== message.toolCallId)
+      pending = pending.filter(({ id }) => id !== message.toolCallId)
       continue
     }
     if (pending.length > 0) flushMissing()
     completed.push(message)
     if (message.role === "assistant") {
       pending = message.content.flatMap((block) =>
-        block.type === "tool_call" ? [block.id] : [],
+        block.type === "tool_call"
+          ? [{ id: block.id, toolKind: block.toolKind }]
+          : [],
       )
     }
   }
   if (pending.length > 0) flushMissing()
   return completed
+}
+
+function discoveredTools(
+  toolPlan: ReturnType<ToolRegistry["finalize"]>,
+  input: import("../kernel/index.ts").JsonValue,
+): readonly import("./model.ts").ModelToolDefinition[] {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return []
+  }
+  const query = Reflect.get(input, "query")
+  const limit = Reflect.get(input, "limit")
+  if (typeof query !== "string") return []
+  return toolPlan.search(query, typeof limit === "number" ? limit : undefined)
 }
 
 function previousModelId(

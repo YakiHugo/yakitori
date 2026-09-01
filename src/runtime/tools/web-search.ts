@@ -1,4 +1,5 @@
 import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
+import { plainToolName } from "./tool-name.ts"
 import { noToolApprovalRequired } from "./approval-requirements.ts"
 import {
   completeWebSearchExecution,
@@ -152,11 +153,12 @@ export function createWebSearchTool(
 ): RuntimeTool {
   const provider = options.provider ?? createExaMcpSearchProvider()
   return {
-    name: "web_search",
+    toolName: plainToolName("web_search"),
     description:
       "Search the web for current information beyond the model's knowledge cutoff. Returns a digest of relevant results with URLs. Include the current year in the query for time-sensitive topics. Follow up with web_fetch to read the full content of a result URL. Read-only.",
     approvalRequirement: noToolApprovalRequired,
     effect: "observe",
+    supportsParallelToolCalls: true,
     describeExecution: webSearchExecution,
     completeExecution: completeWebSearchExecution,
     inputSchema: {

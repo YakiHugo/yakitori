@@ -13,7 +13,7 @@ export function testTurnExecutionContext(
     modelInstructionsRevision: "model_test",
     workingDirectory: "/tmp",
     enabledTools: [],
-    approvalPolicy: "never",
+    approvalPolicy: "always_approve",
     executionPolicy: {
       modelCallsPerTurn: 16,
       toolCallsPerTurn: 32,

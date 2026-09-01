@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import {
   createVisibleFileObservations,
+  createVisibleFileObservationsFromMessages,
   type StoredToolObservation,
 } from "../../../src/runtime/tools/visible-file-observations.ts"
 
@@ -153,6 +154,85 @@ describe("visible file observations", () => {
       complete: true,
       observation: "edit",
     })
+  })
+
+  it("restores every file revision emitted by a multi-file patch", () => {
+    const visible = createVisibleFileObservations([
+      toolProjection("apply_patch", {
+        fileObservations: [
+          {
+            path: "src/a.ts",
+            kind: "write",
+            complete: true,
+            created: true,
+            sha256: "a".repeat(64),
+          },
+          {
+            path: "src/b.ts",
+            kind: "edit",
+            complete: true,
+            sha256: "b".repeat(64),
+          },
+        ],
+      }),
+    ])
+
+    expect(visible.latest("src/a.ts")).toMatchObject({
+      sha256: "a".repeat(64),
+      complete: true,
+    })
+    expect(visible.latest("src/b.ts")).toMatchObject({
+      sha256: "b".repeat(64),
+      complete: true,
+    })
+  })
+
+  it("restores plural message grants and applies deletion tombstones", () => {
+    const visible = createVisibleFileObservationsFromMessages([
+      {
+        role: "tool",
+        toolCallId: "patch",
+        content: "done",
+        fileObservations: [
+          {
+            path: "src/a.ts",
+            kind: "write",
+            complete: true,
+            sha256: "a".repeat(64),
+          },
+          {
+            path: "src/b.ts",
+            kind: "write",
+            complete: true,
+            sha256: "b".repeat(64),
+          },
+          { path: "src/a.ts", kind: "delete", complete: true },
+        ],
+      },
+    ])
+
+    expect(visible.latest("src/a.ts")).toBeUndefined()
+    expect(visible.latest("src/b.ts")).toMatchObject({
+      sha256: "b".repeat(64),
+      complete: true,
+    })
+  })
+
+  it("invalidates a revision when a patch delta is not exact", () => {
+    const visible = createVisibleFileObservations([
+      toolProjection("write_file", {
+        path: "destination.txt",
+        sha256: "a".repeat(64),
+        created: true,
+      }),
+    ])
+
+    visible.apply({
+      path: "destination.txt",
+      kind: "invalidate",
+      complete: true,
+    })
+    expect(visible.latest("destination.txt")).toBeUndefined()
   })
 })
 

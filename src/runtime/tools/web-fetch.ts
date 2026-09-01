@@ -1,4 +1,5 @@
 import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
+import { plainToolName } from "./tool-name.ts"
 import { noToolApprovalRequired } from "./approval-requirements.ts"
 import {
   completeWebFetchExecution,
@@ -6,7 +7,7 @@ import {
 } from "./execution-descriptors.ts"
 
 // web_fetch deliberately performs no SSRF protection: it runs with the host
-// user's full network authority, same as run_command. This mirrors dsh's
+// user's full network authority, same as exec_command. This mirrors dsh's
 // explicit decision — a local coding agent fetches whatever URL the user or
 // repository points it at, and private-network targets are legitimate.
 
@@ -89,11 +90,12 @@ export function createWebFetchTool(
   }
 
   return {
-    name: "web_fetch",
+    toolName: plainToolName("web_fetch"),
     description:
       "Fetch a specific http(s) URL and return its content as text. Read-only. HTML is converted to plain text with links preserved as markdown. Redirects to a different origin are not followed; call web_fetch again with the redirect URL instead. Binary content types are not supported. Not a search tool — use it only when you already have a URL.",
     approvalRequirement: noToolApprovalRequired,
     effect: "observe",
+    supportsParallelToolCalls: true,
     describeExecution: webFetchExecution,
     completeExecution: completeWebFetchExecution,
     inputSchema: {

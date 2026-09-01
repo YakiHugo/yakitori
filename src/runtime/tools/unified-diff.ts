@@ -7,11 +7,11 @@ export type BoundedUnifiedDiff = {
 export function createBoundedUnifiedDiff(input: {
   readonly path: string
   readonly before: string | null
-  readonly after: string
+  readonly after: string | null
   readonly maxBytes: number
 }): BoundedUnifiedDiff {
   const before = splitLines(input.before ?? "")
-  const after = splitLines(input.after)
+  const after = splitLines(input.after ?? "")
   const prefix = commonPrefix(before, after)
   const suffix = commonSuffix(before, after, prefix)
   const oldChangeEnd = before.length - suffix
@@ -23,7 +23,7 @@ export function createBoundedUnifiedDiff(input: {
   const oldLabel = input.before === null ? "/dev/null" : `a/${input.path}`
   const lines = [
     `--- ${oldLabel}`,
-    `+++ b/${input.path}`,
+    `+++ ${input.after === null ? "/dev/null" : `b/${input.path}`}`,
     `@@ -${rangeStart(oldStart, oldEnd)},${oldEnd - oldStart} +${rangeStart(newStart, newEnd)},${newEnd - newStart} @@`,
     ...before.slice(oldStart, prefix).map((line) => ` ${line}`),
     ...before.slice(prefix, oldChangeEnd).map((line) => `-${line}`),

@@ -8,3 +8,6 @@ allowBuilds:
   # target, so its install script stays disabled.
   electron-winstaller: false
   fs-ext: true
+  node-pty: true
+patchedDependencies:
+  node-pty@1.2.0-beta.15: patches/node-pty@1.2.0-beta.15.patch

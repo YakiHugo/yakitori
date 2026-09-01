@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto"
 import type { ProviderUsageBaseline } from "../kernel/events.ts"
 import { readImageDimensions } from "../kernel/image-metadata.ts"
+import { nativeDeferredToolProtocol } from "./deferred-tool-loading.ts"
 import {
   DEFAULT_MODEL_MAX_OUTPUT_TOKENS,
   type ModelImageBlock,
@@ -40,7 +41,11 @@ export function estimateModelRequestBudget(
   const messageTokens = estimateTextTokens(
     JSON.stringify(request.messages, omitImagePayload),
   )
-  const toolTokens = estimateTextTokens(JSON.stringify(request.tools))
+  const budgetedTools =
+    nativeDeferredToolProtocol(request) === undefined
+      ? request.tools
+      : request.tools.filter((tool) => tool.deferLoading !== true)
+  const toolTokens = estimateTextTokens(JSON.stringify(budgetedTools))
   const imageTokens = request.messages.reduce(
     (total, message) =>
       message.role !== "user"

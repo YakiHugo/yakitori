@@ -12,6 +12,7 @@ import {
   ModelStopReason,
   type ModelStreamEvent,
 } from "../../src/runtime/model.ts"
+import { toOpenAIInput } from "../../src/runtime/openai-provider.ts"
 
 describe("anthropic provider conversion", () => {
   it("builds Anthropic messages from internal history with tools and results", () => {
@@ -89,6 +90,386 @@ describe("anthropic provider conversion", () => {
         description: "Read a file",
         input_schema: { type: "object" },
       },
+    ])
+  })
+
+  it("round-trips custom tool search through deferred definitions and tool references", () => {
+    const searchCall = fromAnthropicMessage({
+      stop_reason: "tool_use",
+      content: [
+        {
+          type: "tool_use",
+          id: "search_1",
+          name: "tool_search",
+          input: { query: "calendar events" },
+        },
+      ],
+    })
+    expect(searchCall.content).toEqual([
+      {
+        type: "tool_call",
+        id: "search_1",
+        name: "tool_search",
+        input: { query: "calendar events" },
+        toolKind: "tool_search",
+      },
+    ])
+
+    const deferred = {
+      name: "calendar__search_events",
+      description: "Search calendar events",
+      inputSchema: { type: "object" as const },
+      deferLoading: true,
+    }
+    expect(
+      toAnthropicTools(
+        [
+          {
+            name: "tool_search",
+            description: "Find tools",
+            inputSchema: { type: "object" },
+            kind: "tool_search",
+          },
+          deferred,
+        ],
+        true,
+      ),
+    ).toEqual([
+      {
+        name: "tool_search",
+        description: "Find tools",
+        input_schema: { type: "object" },
+        cache_control: { type: "ephemeral" },
+      },
+      {
+        name: "calendar__search_events",
+        description: "Search calendar events",
+        input_schema: { type: "object" },
+        defer_loading: true,
+      },
+    ])
+    expect(
+      toAnthropicMessages([
+        { role: "assistant", content: searchCall.content },
+        {
+          role: "tool",
+          toolCallId: "search_1",
+          content: JSON.stringify({ tools: [deferred] }),
+          toolSearch: { tools: [deferred] },
+        },
+      ]),
+    ).toEqual([
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "search_1",
+            name: "tool_search",
+            input: { query: "calendar events" },
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "search_1",
+            content: [
+              {
+                type: "tool_reference",
+                tool_name: "calendar__search_events",
+              },
+            ],
+          },
+        ],
+      },
+    ])
+
+    expect(toAnthropicTools([deferred], false, false)).toEqual([
+      {
+        name: "calendar__search_events",
+        description: "Search calendar events",
+        input_schema: { type: "object" },
+      },
+    ])
+    expect(
+      toAnthropicMessages([
+        {
+          role: "tool",
+          toolCallId: "search_empty",
+          content: "No matching tools were found.",
+          toolSearch: { tools: [] },
+        },
+      ]),
+    ).toEqual([
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "search_empty",
+            content: "No matching tools were found.",
+          },
+        ],
+      },
+    ])
+  })
+
+  it("selects native deferred loading only for official request targets", async () => {
+    const deferred = {
+      name: "calendar__search_events",
+      description: "Search calendar events",
+      inputSchema: { type: "object" as const },
+      deferLoading: true,
+    }
+    const toolSearch = {
+      name: "tool_search",
+      description: "Find tools",
+      inputSchema: { type: "object" as const },
+      kind: "tool_search" as const,
+    }
+    const tools: ModelRequest["tools"] = [toolSearch, deferred]
+    const useTool = {
+      name: "use_tool",
+      description: "Invoke a deferred tool",
+      inputSchema: { type: "object" as const },
+    }
+    const messages: ModelRequest["messages"] = [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_call",
+            id: "search_1",
+            name: "tool_search",
+            input: { query: "calendar" },
+            toolKind: "tool_search",
+          },
+        ],
+      },
+      {
+        role: "tool",
+        toolCallId: "search_1",
+        content: JSON.stringify({ tools: [deferred] }),
+        toolSearch: { tools: [deferred] },
+      },
+    ]
+    const capture = async (provider: string) => {
+      let body: Record<string, unknown> | undefined
+      const client = {
+        messages: {
+          stream(input: Record<string, unknown>) {
+            body = input
+            return {
+              async *[Symbol.asyncIterator]() {},
+              async finalMessage() {
+                return {
+                  id: "message_1",
+                  stop_reason: "end_turn",
+                  content: [{ type: "text", text: "done" }],
+                }
+              },
+            }
+          },
+        },
+      } as unknown as Anthropic
+      const stream = createAnthropicProvider({
+        apiKey: "test",
+        model: "claude-test",
+        client,
+      })
+      const request: ModelRequest = {
+        target: {
+          provider,
+          model: "claude-test",
+          instructionProfileId: "anthropic",
+        },
+        system: [],
+        messages,
+        tools: provider === "anthropic" ? tools : [toolSearch, useTool],
+        toolWireProtocol:
+          provider === "anthropic" ? "anthropic_deferred" : "meta_dispatch",
+      }
+      for await (const _event of stream(request)) void _event
+      return body
+    }
+
+    const official = await capture("anthropic")
+    expect(official?.tools).toEqual([
+      expect.objectContaining({ name: "tool_search" }),
+      expect.objectContaining({
+        name: "calendar__search_events",
+        defer_loading: true,
+      }),
+    ])
+    expect(official?.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: "user",
+          content: expect.arrayContaining([
+            expect.objectContaining({
+              type: "tool_result",
+              content: [
+                {
+                  type: "tool_reference",
+                  tool_name: "calendar__search_events",
+                },
+              ],
+            }),
+          ]),
+        }),
+      ]),
+    )
+
+    const compatible = await capture("kimi")
+    expect(
+      (compatible?.tools as ReadonlyArray<{ name: string }>).map(
+        ({ name }) => name,
+      ),
+    ).toEqual(["tool_search", "use_tool"])
+    expect(JSON.stringify(compatible?.tools)).not.toContain("defer_loading")
+    expect(compatible?.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: "user",
+          content: expect.arrayContaining([
+            expect.objectContaining({
+              type: "tool_result",
+              content: JSON.stringify({ tools: [deferred] }),
+            }),
+          ]),
+        }),
+      ]),
+    )
+  })
+
+  it("adapts custom tools to Anthropic function tools", () => {
+    expect(
+      toAnthropicMessages([
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_call",
+              id: "patch_1",
+              name: "apply_patch",
+              input: "*** Begin Patch",
+              toolKind: "custom",
+              customInputFallbackKey: "patch",
+            },
+          ],
+        },
+      ]),
+    ).toEqual([
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "patch_1",
+            name: "apply_patch",
+            input: { patch: "*** Begin Patch" },
+          },
+        ],
+      },
+    ])
+
+    expect(
+      fromAnthropicMessage(
+        {
+          stop_reason: "tool_use",
+          content: [
+            {
+              type: "tool_use",
+              id: "patch_2",
+              name: "apply_patch",
+              input: { patch: "*** Begin Patch" },
+            },
+          ],
+        },
+        new Map([["apply_patch", "patch"]]),
+      ).content,
+    ).toEqual([
+      {
+        type: "tool_call",
+        id: "patch_2",
+        name: "apply_patch",
+        input: "*** Begin Patch",
+        toolKind: "custom",
+        customInputFallbackKey: "patch",
+      },
+    ])
+  })
+
+  it("falls back to historical search text when the current Step changed its schema", () => {
+    const deferred = {
+      name: "calendar__search_events",
+      description: "Search calendar events",
+      inputSchema: { type: "object" },
+      deferLoading: true,
+    }
+    expect(
+      toAnthropicMessages(
+        [
+          {
+            role: "tool",
+            toolCallId: "search_old",
+            content: JSON.stringify({ tools: [deferred] }),
+            toolSearch: { tools: [deferred] },
+          },
+        ],
+        true,
+        new Map([
+          [
+            deferred.name,
+            {
+              ...deferred,
+              inputSchema: {
+                type: "object",
+                properties: { replacementQuery: { type: "string" } },
+              },
+            },
+          ],
+        ]),
+      ),
+    ).toEqual([
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "search_old",
+            content: JSON.stringify({ tools: [deferred] }),
+          },
+        ],
+      },
+    ])
+  })
+
+  it("round-trips a non-patch custom fallback key across providers", () => {
+    const response = fromAnthropicMessage(
+      {
+        stop_reason: "tool_use",
+        content: [
+          {
+            type: "tool_use",
+            id: "code_1",
+            name: "evaluate",
+            input: { code: "1 + 1" },
+          },
+        ],
+      },
+      new Map([["evaluate", "code"]]),
+    )
+    const message = { role: "assistant" as const, content: response.content }
+
+    expect(toAnthropicMessages([message])[0]).toMatchObject({
+      content: [{ name: "evaluate", input: { code: "1 + 1" } }],
+    })
+    expect(toOpenAIInput([message])).toMatchObject([
+      { type: "custom_tool_call", name: "evaluate", input: "1 + 1" },
     ])
   })
 
@@ -295,6 +676,7 @@ describe("anthropic provider conversion", () => {
       system: [],
       messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
       tools: [],
+      toolWireProtocol: "anthropic_deferred",
     }
 
     const events: ModelStreamEvent[] = []
@@ -358,6 +740,7 @@ describe("anthropic provider conversion", () => {
           inputSchema: { type: "object" },
         },
       ],
+      toolWireProtocol: "anthropic_deferred",
     }
 
     for await (const _event of stream(request)) void _event
@@ -452,6 +835,7 @@ describe("anthropic provider conversion", () => {
         },
       ],
       tools: [],
+      toolWireProtocol: "anthropic_deferred",
     })) {
       void _event
     }
@@ -499,6 +883,7 @@ describe("anthropic provider conversion", () => {
       ],
       messages: [],
       tools: [],
+      toolWireProtocol: "eager",
     }
 
     expect(toAnthropicSystem(request.system)).toBe("base\n\nenvironment")
@@ -786,6 +1171,7 @@ function effortRequest(
     system: [{ id: "base", revision: "base-1", text: "Be helpful." }],
     messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
     tools: [],
+    toolWireProtocol: provider === "anthropic" ? "anthropic_deferred" : "eager",
   }
 }
 
@@ -936,6 +1322,7 @@ async function collectWithClient(
     system: [{ id: "base", revision: "base-1", text: "Be helpful." }],
     messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
     tools: [],
+    toolWireProtocol: "anthropic_deferred",
   }
   const events: ModelStreamEvent[] = []
   for await (const event of stream(request)) events.push(event)

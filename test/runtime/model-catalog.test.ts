@@ -6,12 +6,41 @@ import {
 } from "../../src/runtime/limits.ts"
 import {
   catalogContextWindowTokens,
+  catalogModelCapabilities,
   catalogModelCapacity,
   resolveModel,
   validateModelSelection,
 } from "../../src/runtime/model-catalog.ts"
 
 describe("model catalog context windows", () => {
+  it("resolves orthogonal tool capabilities and a conservative unknown fallback", () => {
+    expect(
+      catalogModelCapabilities({ provider: "codex", model: "gpt-5.6-sol" }),
+    ).toMatchObject({
+      shellToolType: "unified_exec",
+      applyPatchToolType: "custom",
+      fileEditingToolType: "none",
+      supportsNativeToolSearch: true,
+    })
+    expect(
+      catalogModelCapabilities({
+        provider: "anthropic",
+        model: "claude-sonnet-4-6",
+      }),
+    ).toMatchObject({
+      shellToolType: "unified_exec",
+      fileEditingToolType: "edit_write",
+      supportsNativeToolSearch: true,
+    })
+    expect(
+      catalogModelCapabilities({ provider: "unknown", model: "future" }),
+    ).toMatchObject({
+      shellToolType: "unified_exec",
+      fileEditingToolType: "none",
+      supportsNativeToolSearch: false,
+    })
+  })
+
   it("returns the curated window for known models", () => {
     expect(
       catalogContextWindowTokens({
@@ -85,20 +114,53 @@ describe("model catalog context windows", () => {
   })
 
   it("binds known profiles explicitly without guessing unknown models", () => {
-    expect(resolveModel({ provider: "codex", model: "gpt-5.6-sol" })).toEqual({
+    expect(
+      resolveModel({ provider: "codex", model: "gpt-5.6-sol" }),
+    ).toMatchObject({
       provider: "codex",
       model: "gpt-5.6-sol",
       instructionProfileId: "codex",
+      applyPatchToolType: "custom",
+      usedFallbackModelMetadata: false,
     })
-    expect(resolveModel({ provider: "grok", model: "grok-4.6" })).toEqual({
-      provider: "grok",
-      model: "grok-4.6",
-      instructionProfileId: "grok",
+    expect(
+      resolveModel({
+        provider: "codex",
+        model: "gpt-5.6-sol-2026-09-01",
+      }),
+    ).toMatchObject({
+      provider: "codex",
+      model: "gpt-5.6-sol-2026-09-01",
+      instructionProfileId: "codex",
+      applyPatchToolType: "custom",
+      usedFallbackModelMetadata: false,
     })
-    expect(resolveModel({ provider: "codex", model: "gpt-future" })).toEqual({
+    expect(
+      resolveModel({ provider: "openai", model: "gpt-5.2" }),
+    ).toMatchObject({
+      instructionProfileId: "codex",
+      applyPatchToolType: "custom",
+      usedFallbackModelMetadata: false,
+    })
+    expect(resolveModel({ provider: "openai", model: "gpt-50" })).toMatchObject(
+      {
+        instructionProfileId: "default",
+        usedFallbackModelMetadata: true,
+      },
+    )
+    expect(resolveModel({ provider: "kimi", model: "k30" })).toMatchObject({
+      instructionProfileId: "default",
+      fileEditingToolType: "none",
+      usedFallbackModelMetadata: true,
+    })
+    expect(
+      resolveModel({ provider: "codex", model: "gpt-future" }),
+    ).toMatchObject({
       provider: "codex",
       model: "gpt-future",
       instructionProfileId: "default",
+      supportsNativeToolSearch: false,
+      usedFallbackModelMetadata: true,
     })
   })
 })

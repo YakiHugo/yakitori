@@ -375,6 +375,7 @@ function compactionRequest(signal?: AbortSignal): ModelRequest {
     system: [{ id: "compaction", revision: "1", text: "sys" }],
     messages: [],
     tools: [],
+    toolWireProtocol: "eager",
     ...(signal === undefined ? {} : { signal }),
   }
 }

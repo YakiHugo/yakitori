@@ -1,10 +1,12 @@
 import { createHash } from "node:crypto"
 import type {
+  ApprovalPolicy,
   ModelSelection,
   SessionConfigurationSnapshot,
   TurnExecutionContext,
   TurnExecutionLimits,
 } from "../kernel/index.ts"
+import { isSessionConfigurationSnapshot } from "../kernel/index.ts"
 import {
   createSessionExecutionPolicy,
   deriveCompactionContextBytes,
@@ -15,13 +17,14 @@ import {
 import {
   catalogContextWindowTokens,
   catalogModelCapacity,
+  type ResolvedModel,
   resolveModel,
   validateModelSelection,
 } from "./model-catalog.ts"
 import type { ModelSystemSection, ModelTarget } from "./model.ts"
 import { getInstructionProfile } from "./prompt-registry.ts"
 
-export type ApprovalPolicy = "auto_file_tools" | "never"
+export type { ApprovalPolicy } from "../kernel/index.ts"
 
 type ResolvedSessionConfigurationSnapshot = Omit<
   SessionConfigurationSnapshot,
@@ -41,6 +44,7 @@ export type ResolvedModelCapacity = Readonly<{
 
 export type ResolvedTurnConfiguration = Readonly<{
   target: ModelTarget
+  modelInfo: ResolvedModel
   promptCacheKey: string
   baseInstructions: ModelSystemSection
   modelInstructions: ModelSystemSection
@@ -85,7 +89,7 @@ export class SessionConfiguration {
     }
     validateContextWindowOverride(model, input.modelContextWindowTokens)
     return new SessionConfiguration({
-      schemaVersion: 3,
+      schemaVersion: 4,
       workspaceRoot: input.workspaceRoot,
       promptCacheKey: input.promptCacheKey,
       defaultTarget: { ...input.selection },
@@ -102,6 +106,9 @@ export class SessionConfiguration {
   }
 
   static restore(snapshot: SessionConfigurationSnapshot): SessionConfiguration {
+    if (!isSessionConfigurationSnapshot(snapshot)) {
+      throw new Error("Invalid Session configuration snapshot.")
+    }
     const executionPolicyDefaults = requireSessionExecutionPolicy(
       snapshot.executionPolicyDefaults,
     )
@@ -139,6 +146,7 @@ export class SessionConfiguration {
         ...(selection.effort === undefined ? {} : { effort: selection.effort }),
         ...(selection.speed === undefined ? {} : { speed: selection.speed }),
       },
+      modelInfo: model,
       promptCacheKey: this.snapshot.promptCacheKey,
       baseInstructions: {
         id: "base.instructions",

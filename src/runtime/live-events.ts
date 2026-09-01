@@ -53,12 +53,21 @@ export type LiveSessionError = {
   readonly createdAt: string
 }
 
+export type LiveRuntimeWarning = {
+  readonly type: "runtime.warning"
+  readonly sessionId: string
+  readonly turnId: string
+  readonly message: string
+  readonly createdAt: string
+}
+
 export type LiveSessionEvent =
   | LiveDisplayItemStarted
   | LiveAssistantDelta
   | LiveReasoningDelta
   | LiveSessionUsage
   | LiveSessionError
+  | LiveRuntimeWarning
   | RuntimePermissionEvent
 
 export type LiveEventPublisher = {

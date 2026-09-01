@@ -7,15 +7,28 @@ export type InstructionProfileId =
   | "grok"
   | "kimi"
 
-export type ResolvedModel = {
+export type ResolvedModel = Readonly<{
   readonly provider: string
   readonly model: string
   readonly instructionProfileId: InstructionProfileId
-}
+  readonly inputModalities: readonly ModelInputModality[]
+  readonly imageDetailModes: readonly ModelImageDetailMode[]
+  readonly shellToolType: ModelShellToolType
+  readonly applyPatchToolType?: ModelApplyPatchToolType
+  readonly fileEditingToolType: ModelFileEditingToolType
+  readonly supportsNativeToolSearch: boolean
+  readonly supportsCustomTools: boolean
+  readonly usedFallbackModelMetadata: boolean
+}>
 
 export type CatalogModel = {
   readonly model: string
   readonly instructionProfileId: InstructionProfileId
+  readonly shellToolType: ModelShellToolType
+  readonly applyPatchToolType?: ModelApplyPatchToolType
+  readonly fileEditingToolType: ModelFileEditingToolType
+  readonly supportsNativeToolSearch: boolean
+  readonly supportsCustomTools?: boolean
   readonly displayName?: string
   readonly effortStyle?: "none" | "levels"
   readonly efforts?: readonly string[]
@@ -26,10 +39,18 @@ export type CatalogModel = {
 
 export type ModelInputModality = "image" | "text" | "video"
 export type ModelImageDetailMode = "high" | "original"
+export type ModelShellToolType = "disabled" | "unified_exec"
+export type ModelApplyPatchToolType = "custom"
+export type ModelFileEditingToolType = "edit_write" | "none" | "search_replace"
 
 export type ModelCapabilities = Readonly<{
   inputModalities: readonly ModelInputModality[]
   imageDetailModes: readonly ModelImageDetailMode[]
+  shellToolType: ModelShellToolType
+  applyPatchToolType?: ModelApplyPatchToolType
+  fileEditingToolType: ModelFileEditingToolType
+  supportsNativeToolSearch: boolean
+  supportsCustomTools: boolean
 }>
 
 export type ModelCapacity = Readonly<{
@@ -47,6 +68,22 @@ export function listCatalogModels(provider: string): CatalogModel[] {
       instructionProfileId: requireInstructionProfileId(
         entry.instructionProfileId,
       ),
+      shellToolType: requireShellToolType(entry.shellToolType),
+      ...("applyPatchToolType" in entry &&
+      entry.applyPatchToolType !== undefined
+        ? {
+            applyPatchToolType: requireApplyPatchToolType(
+              entry.applyPatchToolType,
+            ),
+          }
+        : {}),
+      fileEditingToolType: requireFileEditingToolType(
+        entry.fileEditingToolType,
+      ),
+      supportsNativeToolSearch: entry.supportsNativeToolSearch,
+      ...(entry.supportsCustomTools === undefined
+        ? {}
+        : { supportsCustomTools: entry.supportsCustomTools }),
       ...("displayName" in entry && entry.displayName !== undefined
         ? { displayName: entry.displayName }
         : {}),
@@ -69,10 +106,17 @@ export function catalogModelCapabilities(input: {
   readonly provider: string
   readonly model: string
 }): ModelCapabilities {
-  const entry = findCatalogEntry(input)
+  const model = resolveModel(input)
   return {
-    inputModalities: requireInputModalities(entry?.inputModalities),
-    imageDetailModes: requireImageDetailModes(entry?.imageDetailModes),
+    inputModalities: model.inputModalities,
+    imageDetailModes: model.imageDetailModes,
+    shellToolType: model.shellToolType,
+    ...(model.applyPatchToolType === undefined
+      ? {}
+      : { applyPatchToolType: model.applyPatchToolType }),
+    fileEditingToolType: model.fileEditingToolType,
+    supportsNativeToolSearch: model.supportsNativeToolSearch,
+    supportsCustomTools: model.supportsCustomTools,
   }
 }
 
@@ -80,21 +124,42 @@ export function resolveModel(input: {
   readonly provider: string
   readonly model: string
 }): ResolvedModel {
-  const provider = input.provider.toLowerCase()
-  const model = input.model.toLowerCase()
-  const exact = catalog.models.find(
-    (candidate) =>
-      candidate.provider.toLowerCase() === provider &&
-      candidate.model.toLowerCase() === model,
-  )
-  if (exact)
+  const entry = findCatalogEntry(input)
+  if (entry !== undefined) {
     return {
       ...input,
       instructionProfileId: requireInstructionProfileId(
-        exact.instructionProfileId,
+        entry.instructionProfileId,
       ),
+      inputModalities: requireInputModalities(entry.inputModalities),
+      imageDetailModes: requireImageDetailModes(entry.imageDetailModes),
+      shellToolType: requireShellToolType(entry.shellToolType),
+      ...(entry.applyPatchToolType === undefined
+        ? {}
+        : {
+            applyPatchToolType: requireApplyPatchToolType(
+              entry.applyPatchToolType,
+            ),
+          }),
+      fileEditingToolType: requireFileEditingToolType(
+        entry.fileEditingToolType,
+      ),
+      supportsNativeToolSearch: entry.supportsNativeToolSearch,
+      supportsCustomTools: entry.supportsCustomTools ?? false,
+      usedFallbackModelMetadata: false,
     }
-  return { ...input, instructionProfileId: "default" }
+  }
+  return {
+    ...input,
+    instructionProfileId: "default",
+    inputModalities: ["text"],
+    imageDetailModes: [],
+    shellToolType: "unified_exec",
+    fileEditingToolType: "none",
+    supportsNativeToolSearch: false,
+    supportsCustomTools: false,
+    usedFallbackModelMetadata: true,
+  }
 }
 
 export function validateModelSelection(input: {
@@ -103,13 +168,7 @@ export function validateModelSelection(input: {
   readonly effort?: string
   readonly speed?: string
 }): void {
-  const provider = input.provider.toLowerCase()
-  const model = input.model.toLowerCase()
-  const entry = catalog.models.find(
-    (candidate) =>
-      candidate.provider.toLowerCase() === provider &&
-      candidate.model.toLowerCase() === model,
-  )
+  const entry = findCatalogEntry(input)
   if (entry === undefined) return
   if (
     input.effort !== undefined &&
@@ -137,13 +196,7 @@ export function catalogContextWindowTokens(input: {
   readonly provider: string
   readonly model: string
 }): number | undefined {
-  const provider = input.provider.toLowerCase()
-  const model = input.model.toLowerCase()
-  const entry = catalog.models.find(
-    (candidate) =>
-      candidate.provider.toLowerCase() === provider &&
-      candidate.model.toLowerCase() === model,
-  )
+  const entry = findCatalogEntry(input)
   if (entry === undefined || !("contextWindowTokens" in entry)) return undefined
   return entry.contextWindowTokens
 }
@@ -152,13 +205,7 @@ export function catalogModelCapacity(input: {
   readonly provider: string
   readonly model: string
 }): ModelCapacity | undefined {
-  const provider = input.provider.toLowerCase()
-  const model = input.model.toLowerCase()
-  const entry = catalog.models.find(
-    (candidate) =>
-      candidate.provider.toLowerCase() === provider &&
-      candidate.model.toLowerCase() === model,
-  )
+  const entry = findCatalogEntry(input)
   if (
     entry === undefined ||
     !("contextWindowTokens" in entry) ||
@@ -189,17 +236,47 @@ export function requireInstructionProfileId(
   throw new Error(`Unknown instruction profile ID in model catalog: ${value}`)
 }
 
+function requireShellToolType(value: string): ModelShellToolType {
+  if (value === "disabled" || value === "unified_exec") return value
+  throw new Error(`Unknown shell tool type in model catalog: ${value}`)
+}
+
+function requireApplyPatchToolType(value: string): ModelApplyPatchToolType {
+  if (value === "custom") return value
+  throw new Error(`Unknown apply_patch tool type in model catalog: ${value}`)
+}
+
+function requireFileEditingToolType(value: string): ModelFileEditingToolType {
+  if (
+    value === "edit_write" ||
+    value === "none" ||
+    value === "search_replace"
+  ) {
+    return value
+  }
+  throw new Error(`Unknown file editing tool type in model catalog: ${value}`)
+}
+
 function findCatalogEntry(input: {
   readonly provider: string
   readonly model: string
 }) {
   const provider = input.provider.toLowerCase()
   const model = input.model.toLowerCase()
-  return catalog.models.find(
-    (candidate) =>
-      candidate.provider.toLowerCase() === provider &&
-      candidate.model.toLowerCase() === model,
-  )
+  return catalog.models
+    .filter(
+      (candidate) =>
+        candidate.provider.toLowerCase() === provider &&
+        matchesModelFamily(model, candidate.model.toLowerCase()),
+    )
+    .sort((left, right) => right.model.length - left.model.length)[0]
+}
+
+function matchesModelFamily(model: string, family: string): boolean {
+  if (model === family) return true
+  if (!model.startsWith(family)) return false
+  const separator = model.at(family.length)
+  return separator === "-" || separator === "."
 }
 
 function requireInputModalities(

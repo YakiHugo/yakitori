@@ -19,6 +19,27 @@ function resolveSessionConfiguration(
 }
 
 describe("session configuration", () => {
+  it("rejects the legacy never approval policy at the restore boundary", () => {
+    const current = SessionConfiguration.create({
+      promptCacheKey: "session-cache",
+      selection: { provider: "codex", model: "gpt-5.6-sol" },
+      workspaceRoot: "/workspace",
+      enabledTools: [],
+      approvalPolicy: "always_approve",
+    })
+    const legacy = {
+      ...current.snapshot,
+      schemaVersion: 3,
+      approvalPolicy: "never",
+    }
+
+    expect(() =>
+      SessionConfiguration.restore(
+        legacy as unknown as Parameters<typeof SessionConfiguration.restore>[0],
+      ),
+    ).toThrow("Invalid Session configuration snapshot")
+  })
+
   it("uses the Codex default capacity and its 95% effective window", () => {
     const configuration = resolveSessionConfiguration({
       selection: { provider: "codex", model: "gpt-5.6-sol" },
@@ -58,7 +79,7 @@ describe("session configuration", () => {
       selection: { provider: "codex", model: "gpt-5.6-sol" },
       workspaceRoot: "/workspace",
       enabledTools: [],
-      approvalPolicy: "never",
+      approvalPolicy: "always_approve",
       modelContextWindowTokens: 600_000,
     })
 
@@ -73,7 +94,7 @@ describe("session configuration", () => {
         selection: { provider: "codex", model: "gpt-5.6-sol" },
         workspaceRoot: "/workspace",
         enabledTools: [],
-        approvalPolicy: "never",
+        approvalPolicy: "always_approve",
         modelContextWindowTokens: 900_000,
       }),
     ).toThrow("exceeds codex/gpt-5.6-sol maximum of 872000")
@@ -84,7 +105,7 @@ describe("session configuration", () => {
       selection: { provider: "codex", model: "gpt-5.6-sol" },
       workspaceRoot: "/workspace",
       enabledTools: [],
-      approvalPolicy: "never",
+      approvalPolicy: "always_approve",
       executionPolicy: createSessionExecutionPolicy({
         modelVisibleContextBytes: 123_456,
       }),
@@ -106,7 +127,7 @@ describe("session configuration", () => {
       selection: { provider: "codex", model: "gpt-5.6-sol" },
       workspaceRoot: "/workspace",
       enabledTools: ["read_file"],
-      approvalPolicy: "never",
+      approvalPolicy: "always_approve",
     })
     const restored = SessionConfiguration.restore({
       ...created.snapshot,
@@ -133,7 +154,7 @@ describe("session configuration", () => {
       selection: { provider: "codex", model: "gpt-5.6-sol" },
       workspaceRoot: "/workspace",
       enabledTools: [],
-      approvalPolicy: "never",
+      approvalPolicy: "always_approve",
       baseInstructions: "  Follow the custom harness contract.  ",
     })
     const switched = session.resolveTurn({
@@ -161,7 +182,7 @@ describe("session configuration", () => {
       selection: { provider: "codex", model: "gpt-5.6-sol" },
       workspaceRoot: "/workspace",
       enabledTools: [],
-      approvalPolicy: "never",
+      approvalPolicy: "always_approve",
     })
     expect(
       SessionConfiguration.restore(created.snapshot).resolveTurn(
@@ -181,7 +202,7 @@ describe("session configuration", () => {
         },
         workspaceRoot: "/workspace",
         enabledTools: [],
-        approvalPolicy: "never",
+        approvalPolicy: "always_approve",
       }),
     ).toThrow("Reasoning effort max is not supported")
     expect(() =>
@@ -194,7 +215,7 @@ describe("session configuration", () => {
         },
         workspaceRoot: "/workspace",
         enabledTools: [],
-        approvalPolicy: "never",
+        approvalPolicy: "always_approve",
       }),
     ).toThrow("Speed turbo is not supported")
   })

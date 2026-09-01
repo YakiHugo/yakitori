@@ -256,6 +256,16 @@ export function createThreadServerHandlers(
               message: event.message,
               createdAt: new Date().toISOString(),
             })
+            continue
+          }
+          if (event.type === "runtime.warning") {
+            options.eventHub?.publishTransient({
+              type: "runtime.warning",
+              sessionId: event.threadId,
+              turnId: event.turnId,
+              message: event.message,
+              createdAt: new Date().toISOString(),
+            })
           }
         }
         for (const publisher of streams.values()) publisher.flush()

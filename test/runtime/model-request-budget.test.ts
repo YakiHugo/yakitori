@@ -93,6 +93,44 @@ describe("complete model request budgeting", () => {
       }),
     ).toBe(replacedPrefixBudget.estimatedInputTokens)
   })
+
+  it("does not charge native deferred definitions to the initial prompt", () => {
+    const nativeRequest: ModelRequest = {
+      ...requestWithImage("high"),
+      toolWireProtocol: "openai_deferred",
+      tools: [
+        {
+          name: "tool_search",
+          description: "Search tools",
+          inputSchema: { type: "object" },
+          kind: "tool_search",
+        },
+        {
+          name: "calendar__search_events",
+          description: "A deliberately long deferred calendar definition",
+          inputSchema: {
+            type: "object",
+            properties: { query: { type: "string" } },
+          },
+          deferLoading: true,
+        },
+      ],
+    }
+    const compatibleRequest: ModelRequest = {
+      ...nativeRequest,
+      target: { ...nativeRequest.target, provider: "xai" },
+      toolWireProtocol: "eager",
+    }
+
+    expect(estimateModelRequestBudget(nativeRequest).toolTokens).toBe(
+      Math.ceil(
+        Buffer.byteLength(JSON.stringify(nativeRequest.tools.slice(0, 1))) / 4,
+      ),
+    )
+    expect(
+      estimateModelRequestBudget(compatibleRequest).toolTokens,
+    ).toBeGreaterThan(estimateModelRequestBudget(nativeRequest).toolTokens)
+  })
 })
 
 function requestWithImage(detail: "high" | "original"): ModelRequest {
@@ -132,5 +170,6 @@ function requestWithImage(detail: "high" | "original"): ModelRequest {
       },
     ],
     maxOutputTokens: 4_096,
+    toolWireProtocol: "openai_deferred",
   }
 }

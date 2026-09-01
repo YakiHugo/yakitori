@@ -204,6 +204,7 @@ function baseRequest(overrides: Partial<ModelRequest> = {}): ModelRequest {
       },
     ],
     tools: [],
+    toolWireProtocol: "eager",
     ...overrides,
   }
 }

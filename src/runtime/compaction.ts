@@ -141,6 +141,7 @@ export function buildCompactionRequest(input: {
       },
     ],
     tools: [],
+    toolWireProtocol: "eager",
     ...(input.signal === undefined ? {} : { signal: input.signal }),
   }
 }

@@ -5,9 +5,9 @@ import type {
   StartedExecutionItem,
   TokenUsage,
 } from "../kernel/events.ts"
-import { fingerprintInputAdmission } from "../kernel/operation.ts"
 import { InputRole } from "../kernel/events.ts"
 import { createTurnId } from "../kernel/ids.ts"
+import { fingerprintInputAdmission } from "../kernel/operation.ts"
 import { ContextManager, type ContextSnapshot } from "./context-manager.ts"
 import type {
   ResponseItemEnvelope,
@@ -17,15 +17,15 @@ import type {
   TurnContextItem,
 } from "./rollout.ts"
 import {
-  AsyncQueue,
   type AgentStatus,
+  AsyncQueue,
   BoundedQueue,
   type NotSubmittedReason,
   NotSubmittedReason as Reason,
   type SessionEvent,
-  type SessionPermissionEvent,
   SessionIo,
   type SessionOp,
+  type SessionPermissionEvent,
   SessionStatus,
   type TurnInput,
   type TurnInputSubmission,
@@ -59,6 +59,7 @@ export type TurnRuntime = {
     readonly kind: "assistant" | "reasoning"
     readonly text: string
   }): void
+  emitWarning(message: string): void
   emitItemStarted(item: StartedExecutionItem): void
   emitPermissionEvent(event: SessionPermissionEvent): void
   recordConversationItems(items: readonly ResponseItemEnvelope[]): Promise<void>
@@ -91,6 +92,7 @@ export type TurnProcessor = {
     context: TurnContextItem,
     control: TurnControl,
   ): TurnTask
+  dispose?(): void | Promise<void>
 }
 
 // The processor owns effects outside Session state, so cancellation must stop
@@ -254,12 +256,16 @@ export class Session {
       await this.#activeTurn?.task.catch(() => undefined)
     } finally {
       try {
-        await this.#shutdownPersistence()
+        await this.#processor.dispose?.()
       } finally {
-        this.#setStatus(SessionStatus.Shutdown)
-        this.#setAgentStatus("shutdown")
-        this.#events.close()
-        this.#submissions.close()
+        try {
+          await this.#shutdownPersistence()
+        } finally {
+          this.#setStatus(SessionStatus.Shutdown)
+          this.#setAgentStatus("shutdown")
+          this.#events.close()
+          this.#submissions.close()
+        }
       }
     }
   }
@@ -649,6 +655,15 @@ export class Session {
           threadId: this.id,
           turnId: active.input.submissionId,
           ...input,
+        })
+      },
+      emitWarning: (message) => {
+        requireLease()
+        this.#events.send({
+          type: "runtime.warning",
+          threadId: this.id,
+          turnId: active.input.submissionId,
+          message,
         })
       },
       emitItemStarted: (item) => {

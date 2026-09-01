@@ -100,6 +100,20 @@ file.
 | `EXA_API_KEY` | Optional; raises the Exa free-tier quota used by `web_search` |
 | `HOST` / `PORT` | Server listen address (default `127.0.0.1:4141`) |
 
+Shell commands inherit the complete user environment by default. Optional
+Codex-style filtering is configured in `~/.yakitori/config.toml`:
+
+```toml
+[shell_environment_policy]
+inherit = "core"                  # all (default) | core | none
+ignore_default_excludes = false   # drop *KEY* / *SECRET* / *TOKEN*
+exclude = ["ACME_*", "CI_*"]
+include_only = ["PATH", "HOME", "MY_FLAG"]
+
+[shell_environment_policy.set]
+MY_FLAG = "1"
+```
+
 Every provider example specifies a model so provider-default changes cannot
 silently change the model recorded on a Turn. Model slugs below are examples,
 not application defaults.

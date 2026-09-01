@@ -3,6 +3,7 @@ import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname, isAbsolute, join, resolve } from "node:path"
 import { parse, stringify, type TomlTable } from "smol-toml"
+import type { ShellEnvironmentPolicy } from "../runtime/user-shell-env.ts"
 import type { ApiUserModelPreference } from "./protocol.ts"
 
 export type UserConfigStore = {
@@ -15,6 +16,7 @@ export type UserConfiguration = Readonly<{
   preference?: ApiUserModelPreference
   baseInstructions?: string
   modelContextWindowTokens?: number
+  shellEnvironmentPolicy?: Partial<ShellEnvironmentPolicy>
 }>
 
 export function createUserConfigStore(
@@ -117,7 +119,12 @@ async function readConfigDocument(
       configuration: await configurationFromConfig(value, cwd),
     }
   } catch (error) {
-    if (error instanceof ModelInstructionsConfigError) throw error
+    if (
+      error instanceof ModelInstructionsConfigError ||
+      error instanceof ShellEnvironmentPolicyConfigError
+    ) {
+      throw error
+    }
     console.warn(`Ignoring malformed user config at ${configPath}.`, error)
     return undefined
   }
@@ -129,6 +136,7 @@ async function configurationFromConfig(
 ): Promise<UserConfiguration> {
   const preference = preferenceFromConfig(value)
   const baseInstructions = await baseInstructionsFromConfig(value, cwd)
+  const shellEnvironmentPolicy = shellEnvironmentPolicyFromConfig(value)
   const modelContextWindowTokens = value.model_context_window
   if (
     modelContextWindowTokens !== undefined &&
@@ -144,7 +152,104 @@ async function configurationFromConfig(
     ...(modelContextWindowTokens === undefined
       ? {}
       : { modelContextWindowTokens }),
+    ...(shellEnvironmentPolicy === undefined
+      ? {}
+      : { shellEnvironmentPolicy }),
   }
+}
+
+function shellEnvironmentPolicyFromConfig(
+  value: TomlTable,
+): Partial<ShellEnvironmentPolicy> | undefined {
+  const configured = value.shell_environment_policy
+  if (configured === undefined) return undefined
+  if (!isTomlTable(configured)) {
+    throw new ShellEnvironmentPolicyConfigError(
+      "shell_environment_policy must be a table.",
+    )
+  }
+  const allowedFields = new Set([
+    "inherit",
+    "ignore_default_excludes",
+    "exclude",
+    "set",
+    "include_only",
+  ])
+  const unknownField = Object.keys(configured).find(
+    (field) => !allowedFields.has(field),
+  )
+  if (unknownField !== undefined) {
+    throw new ShellEnvironmentPolicyConfigError(
+      `Unknown shell_environment_policy field: ${unknownField}`,
+    )
+  }
+  const inherit = configured.inherit
+  if (
+    inherit !== undefined &&
+    inherit !== "all" &&
+    inherit !== "core" &&
+    inherit !== "none"
+  ) {
+    throw new ShellEnvironmentPolicyConfigError(
+      'shell_environment_policy.inherit must be "all", "core", or "none".',
+    )
+  }
+  const ignoreDefaultExcludes = configured.ignore_default_excludes
+  if (
+    ignoreDefaultExcludes !== undefined &&
+    typeof ignoreDefaultExcludes !== "boolean"
+  ) {
+    throw new ShellEnvironmentPolicyConfigError(
+      "shell_environment_policy.ignore_default_excludes must be a boolean.",
+    )
+  }
+  const exclude = stringArray(configured.exclude, "exclude")
+  const includeOnly = stringArray(configured.include_only, "include_only")
+  const set = configured.set
+  if (set !== undefined && !isTomlTable(set)) {
+    throw new ShellEnvironmentPolicyConfigError(
+      "shell_environment_policy.set must be a table.",
+    )
+  }
+  const environmentSet =
+    set === undefined
+      ? undefined
+      : Object.fromEntries(
+          Object.entries(set).map(([name, entry]) => {
+            if (typeof entry !== "string") {
+              throw new ShellEnvironmentPolicyConfigError(
+                `shell_environment_policy.set.${name} must be a string.`,
+              )
+            }
+            return [name, entry]
+          }),
+        )
+  return {
+    ...(inherit === undefined ? {} : { inherit }),
+    ...(ignoreDefaultExcludes === undefined
+      ? {}
+      : { ignoreDefaultExcludes }),
+    ...(exclude === undefined ? {} : { exclude }),
+    ...(environmentSet === undefined ? {} : { set: environmentSet }),
+    ...(includeOnly === undefined ? {} : { includeOnly }),
+  }
+}
+
+function stringArray(
+  value: unknown,
+  field: "exclude" | "include_only",
+): readonly string[] | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value) || !value.every((entry) => typeof entry === "string")) {
+    throw new ShellEnvironmentPolicyConfigError(
+      `shell_environment_policy.${field} must be an array of strings.`,
+    )
+  }
+  return value
+}
+
+function isTomlTable(value: unknown): value is TomlTable {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
 async function baseInstructionsFromConfig(
@@ -191,6 +296,13 @@ class ModelInstructionsConfigError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options)
     this.name = "ModelInstructionsConfigError"
+  }
+}
+
+class ShellEnvironmentPolicyConfigError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "ShellEnvironmentPolicyConfigError"
   }
 }
 

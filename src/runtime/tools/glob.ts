@@ -7,6 +7,7 @@ import {
 } from "./execution-descriptors.ts"
 import { type RipgrepRecordStopReason, runRipgrepRecords } from "./ripgrep.ts"
 import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
+import { plainToolName } from "./tool-name.ts"
 
 const DEFAULT_LIMIT = 100
 const DEFAULT_TIMEOUT_MS = 20_000
@@ -38,11 +39,12 @@ export function createGlobTool(
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
   const maxRawBytes = options.maxRawBytes ?? DEFAULT_RAW_BYTES
   return {
-    name: "glob",
+    toolName: plainToolName("glob"),
     description:
       "Fast file pattern matching that works with any codebase size. Supports patterns such as **/*.js and src/**/*.ts, accepts workspace-relative or absolute search paths, returns normalized file paths sorted lexicographically, and caps results at 100 files.",
     approvalRequirement: noToolApprovalRequired,
     effect: "observe",
+    supportsParallelToolCalls: true,
     describeExecution: fileSearchExecution("glob"),
     completeExecution: completeFileSearchExecution,
     inputSchema: {

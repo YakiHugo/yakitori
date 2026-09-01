@@ -149,6 +149,10 @@ function cloneRequest(request: ModelRequest): ModelRequest {
     system: structuredClone(request.system),
     messages: structuredClone(request.messages),
     tools: structuredClone(request.tools),
+    toolWireProtocol: request.toolWireProtocol,
+    ...(request.maxOutputTokens === undefined
+      ? {}
+      : { maxOutputTokens: request.maxOutputTokens }),
     ...(request.signal === undefined ? {} : { signal: request.signal }),
   }
 }
