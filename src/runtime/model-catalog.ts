@@ -16,7 +16,7 @@ export type ResolvedModel = Readonly<{
   readonly shellToolType: ModelShellToolType
   readonly applyPatchToolType?: ModelApplyPatchToolType
   readonly fileEditingToolType: ModelFileEditingToolType
-  readonly supportsToolSearch: boolean
+  readonly supportsNativeToolSearch: boolean
   readonly supportsCustomTools: boolean
   readonly usedFallbackModelMetadata: boolean
 }>
@@ -27,7 +27,7 @@ export type CatalogModel = {
   readonly shellToolType: ModelShellToolType
   readonly applyPatchToolType?: ModelApplyPatchToolType
   readonly fileEditingToolType: ModelFileEditingToolType
-  readonly supportsToolSearch: boolean
+  readonly supportsNativeToolSearch: boolean
   readonly supportsCustomTools?: boolean
   readonly displayName?: string
   readonly effortStyle?: "none" | "levels"
@@ -49,7 +49,7 @@ export type ModelCapabilities = Readonly<{
   shellToolType: ModelShellToolType
   applyPatchToolType?: ModelApplyPatchToolType
   fileEditingToolType: ModelFileEditingToolType
-  supportsToolSearch: boolean
+  supportsNativeToolSearch: boolean
   supportsCustomTools: boolean
 }>
 
@@ -80,7 +80,7 @@ export function listCatalogModels(provider: string): CatalogModel[] {
       fileEditingToolType: requireFileEditingToolType(
         entry.fileEditingToolType,
       ),
-      supportsToolSearch: entry.supportsToolSearch,
+      supportsNativeToolSearch: entry.supportsNativeToolSearch,
       ...(entry.supportsCustomTools === undefined
         ? {}
         : { supportsCustomTools: entry.supportsCustomTools }),
@@ -115,7 +115,7 @@ export function catalogModelCapabilities(input: {
       ? {}
       : { applyPatchToolType: model.applyPatchToolType }),
     fileEditingToolType: model.fileEditingToolType,
-    supportsToolSearch: model.supportsToolSearch,
+    supportsNativeToolSearch: model.supportsNativeToolSearch,
     supportsCustomTools: model.supportsCustomTools,
   }
 }
@@ -144,7 +144,7 @@ export function resolveModel(input: {
       fileEditingToolType: requireFileEditingToolType(
         entry.fileEditingToolType,
       ),
-      supportsToolSearch: entry.supportsToolSearch,
+      supportsNativeToolSearch: entry.supportsNativeToolSearch,
       supportsCustomTools: entry.supportsCustomTools ?? false,
       usedFallbackModelMetadata: false,
     }
@@ -156,7 +156,7 @@ export function resolveModel(input: {
     imageDetailModes: [],
     shellToolType: "unified_exec",
     fileEditingToolType: "none",
-    supportsToolSearch: false,
+    supportsNativeToolSearch: false,
     supportsCustomTools: false,
     usedFallbackModelMetadata: true,
   }
@@ -267,9 +267,16 @@ function findCatalogEntry(input: {
     .filter(
       (candidate) =>
         candidate.provider.toLowerCase() === provider &&
-        model.startsWith(candidate.model.toLowerCase()),
+        matchesModelFamily(model, candidate.model.toLowerCase()),
     )
     .sort((left, right) => right.model.length - left.model.length)[0]
+}
+
+function matchesModelFamily(model: string, family: string): boolean {
+  if (model === family) return true
+  if (!model.startsWith(family)) return false
+  const separator = model.at(family.length)
+  return separator === "-" || separator === "."
 }
 
 function requireInputModalities(

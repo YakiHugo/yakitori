@@ -237,7 +237,7 @@ async function executeTurn(input: {
   })
   if (turn.configuration.modelInfo.usedFallbackModelMetadata) {
     input.runtime.emitWarning(
-      `Model metadata for ${turn.configuration.target.provider}/${turn.configuration.target.model} was not found. Yakitori is using conservative fallback metadata, so model-specific editing and deferred tools are unavailable.`,
+      `Model metadata for ${turn.configuration.target.provider}/${turn.configuration.target.model} was not found. Yakitori is using conservative fallback metadata, so model-specific editing capabilities are unavailable.`,
     )
   }
   const usages: ModelUsage[] = []
@@ -329,11 +329,7 @@ async function executeTurn(input: {
       )
       const visibleFileObservations =
         createVisibleFileObservationsFromMessages(messages)
-      const adapted = adaptImagesForModel(
-        messages,
-        step.target,
-        step.modelInfo,
-      )
+      const adapted = adaptImagesForModel(messages, step.target, step.modelInfo)
       const request: ModelRequest = {
         target: step.target,
         cacheKey: turn.configuration.promptCacheKey,

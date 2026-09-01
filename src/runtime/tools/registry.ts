@@ -50,7 +50,6 @@ type Retirement = {
 const TOOL_SEARCH_NAME = "tool_search"
 const USE_TOOL_NAME = "use_tool"
 const DEFAULT_TOOL_SEARCH_LIMIT = 8
-const MAX_TOOL_SEARCH_LIMIT = 20
 const RESERVED_EXTERNAL_DEFAULT_NAMES = new Set([
   "exec_command",
   "write_stdin",
@@ -62,7 +61,6 @@ const RESERVED_EXTERNAL_DEFAULT_NAMES = new Set([
 export type ToolFinalizeOptions = Readonly<{
   enabledTrustedTools: ReadonlySet<string>
   customToolMode: "function" | "native"
-  deferredTools: boolean
   wireProtocol: ToolWireProtocol
 }>
 
@@ -280,9 +278,8 @@ export function createToolRegistry(
     finalize(options) {
       const eligible = [...registered.entries()].filter(
         ([name, entry]) =>
-          (entry.source.kind === "external" ||
-            options.enabledTrustedTools.has(name)) &&
-          (options.deferredTools || entry.exposure !== "deferred"),
+          entry.source.kind === "external" ||
+          options.enabledTrustedTools.has(name),
       )
       const selected = new Map([
         ...eligible.filter(([, entry]) => entry.source.kind === "trusted"),
@@ -295,7 +292,6 @@ export function createToolRegistry(
       )
       const selectionKey = JSON.stringify({
         customToolMode: options.customToolMode,
-        deferredTools: options.deferredTools,
         enabledTrustedTools: [...options.enabledTrustedTools].sort(),
       })
       // External runtimes may refresh their definition/search metadata in
@@ -637,7 +633,6 @@ function createToolSearchTool(
         limit: {
           type: "integer",
           minimum: 1,
-          maximum: MAX_TOOL_SEARCH_LIMIT,
         },
       },
       required: ["query"],
@@ -656,13 +651,9 @@ function createToolSearchTool(
       }
       if (
         rawLimit !== undefined &&
-        (!Number.isInteger(rawLimit) ||
-          (rawLimit as number) < 1 ||
-          (rawLimit as number) > MAX_TOOL_SEARCH_LIMIT)
+        (!Number.isInteger(rawLimit) || (rawLimit as number) < 1)
       ) {
-        return invalidToolSearchInput(
-          `limit must be an integer from 1 to ${MAX_TOOL_SEARCH_LIMIT}`,
-        )
+        return invalidToolSearchInput("limit must be a positive integer")
       }
       const tools = search(query, rawLimit as number | undefined)
       return {
@@ -684,10 +675,8 @@ function invalidToolSearchInput(message: string): ToolExecutionResult {
 }
 
 function validateToolSearchLimit(limit: number): void {
-  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_TOOL_SEARCH_LIMIT) {
-    throw new Error(
-      `Tool search limit must be an integer from 1 to ${MAX_TOOL_SEARCH_LIMIT}.`,
-    )
+  if (!Number.isInteger(limit) || limit < 1) {
+    throw new Error("Tool search limit must be a positive integer.")
   }
 }
 

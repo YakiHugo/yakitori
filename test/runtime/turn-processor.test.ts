@@ -447,7 +447,13 @@ describe("Turn processor", () => {
     expect(callCount).toBe(4)
   })
 
-  it("routes Grok use_tool through the deferred runtime captured by that Step", async () => {
+  it.each([
+    { provider: "grok", model: "grok-4.6" },
+    { provider: "kimi", model: "k3" },
+  ])("routes $provider use_tool through the deferred runtime captured by that Step", async ({
+    provider,
+    model,
+  }) => {
     const registry = createToolRegistry([])
     expect(
       registry.registerExternal(
@@ -505,7 +511,7 @@ describe("Turn processor", () => {
 
     await thread.startIfIdle({
       content: { kind: "text", text: "find it" },
-      modelSelection: { provider: "grok", model: "grok-4.6" },
+      modelSelection: { provider, model },
     })
     expect((await nextLifecycleEvent(thread))?.type).toBe("turn.started")
     expect((await nextLifecycleEvent(thread))?.type).toBe("turn.completed")
@@ -516,10 +522,7 @@ describe("Turn processor", () => {
     const provider = createFauxProvider([
       { content: [{ type: "text", text: "done" }] },
     ])
-    const runtime = await createRuntime(
-      provider.stream,
-      createToolRegistry([]),
-    )
+    const runtime = await createRuntime(provider.stream, createToolRegistry([]))
     const thread = await runtime.createThread()
 
     await thread.startIfIdle({

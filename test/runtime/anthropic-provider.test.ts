@@ -224,15 +224,18 @@ describe("anthropic provider conversion", () => {
       inputSchema: { type: "object" as const },
       deferLoading: true,
     }
-    const tools: ModelRequest["tools"] = [
-      {
-        name: "tool_search",
-        description: "Find tools",
-        inputSchema: { type: "object" },
-        kind: "tool_search",
-      },
-      deferred,
-    ]
+    const toolSearch = {
+      name: "tool_search",
+      description: "Find tools",
+      inputSchema: { type: "object" as const },
+      kind: "tool_search" as const,
+    }
+    const tools: ModelRequest["tools"] = [toolSearch, deferred]
+    const useTool = {
+      name: "use_tool",
+      description: "Invoke a deferred tool",
+      inputSchema: { type: "object" as const },
+    }
     const messages: ModelRequest["messages"] = [
       {
         role: "assistant",
@@ -285,9 +288,9 @@ describe("anthropic provider conversion", () => {
         },
         system: [],
         messages,
-        tools,
+        tools: provider === "anthropic" ? tools : [toolSearch, useTool],
         toolWireProtocol:
-          provider === "anthropic" ? "anthropic_deferred" : "eager",
+          provider === "anthropic" ? "anthropic_deferred" : "meta_dispatch",
       }
       for await (const _event of stream(request)) void _event
       return body
@@ -321,6 +324,11 @@ describe("anthropic provider conversion", () => {
     )
 
     const compatible = await capture("kimi")
+    expect(
+      (compatible?.tools as ReadonlyArray<{ name: string }>).map(
+        ({ name }) => name,
+      ),
+    ).toEqual(["tool_search", "use_tool"])
     expect(JSON.stringify(compatible?.tools)).not.toContain("defer_loading")
     expect(compatible?.messages).toEqual(
       expect.arrayContaining([

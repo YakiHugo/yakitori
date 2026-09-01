@@ -585,15 +585,18 @@ describe("OpenAI Responses provider", () => {
       inputSchema: { type: "object" as const },
       deferLoading: true,
     }
-    const tools: ModelRequest["tools"] = [
-      {
-        name: "tool_search",
-        description: "Find tools",
-        inputSchema: { type: "object" },
-        kind: "tool_search",
-      },
-      deferred,
-    ]
+    const toolSearch = {
+      name: "tool_search",
+      description: "Find tools",
+      inputSchema: { type: "object" as const },
+      kind: "tool_search" as const,
+    }
+    const tools: ModelRequest["tools"] = [toolSearch, deferred]
+    const useTool = {
+      name: "use_tool",
+      description: "Invoke a deferred tool",
+      inputSchema: { type: "object" as const },
+    }
     const messages: ModelRequest["messages"] = [
       {
         role: "assistant",
@@ -617,6 +620,7 @@ describe("OpenAI Responses provider", () => {
     const capture = async (
       provider: string,
       toolWireProtocol: ModelRequest["toolWireProtocol"],
+      requestTools: ModelRequest["tools"] = tools,
     ) => {
       let body: Record<string, unknown> | undefined
       const client = {
@@ -644,7 +648,7 @@ describe("OpenAI Responses provider", () => {
             model: "gpt-test",
             instructionProfileId: "codex",
           },
-          tools,
+          tools: requestTools,
           messages,
           toolWireProtocol,
         }),
@@ -670,13 +674,13 @@ describe("OpenAI Responses provider", () => {
       ]),
     )
 
-    const compatible = await capture("xai", "eager")
+    const compatible = await capture("xai", "meta_dispatch", [
+      toolSearch,
+      useTool,
+    ])
     expect(compatible?.tools).toEqual([
       expect.objectContaining({ type: "function", name: "tool_search" }),
-      expect.objectContaining({
-        type: "function",
-        name: "calendar__search_events",
-      }),
+      expect.objectContaining({ type: "function", name: "use_tool" }),
     ])
     expect(compatible?.input).toEqual(
       expect.arrayContaining([

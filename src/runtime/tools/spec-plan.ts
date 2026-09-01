@@ -6,7 +6,11 @@ const FILE_EDITING_TOOLS = new Set(["apply_patch", "edit_file", "write_file"])
 
 type ProviderToolCapabilities = Readonly<{
   supportsCustomTools: boolean
-  wireProtocol: ToolWireProtocol
+  nativeDeferredProtocol?: Extract<
+    ToolWireProtocol,
+    "anthropic_deferred" | "openai_deferred"
+  >
+  eagerTools?: boolean
 }>
 
 export type StepContext = Readonly<{
@@ -32,6 +36,13 @@ export function captureStepContext(input: {
     throw new Error("Step model metadata does not match its concrete target.")
   }
   const provider = providerToolCapabilities(target.provider)
+  const toolWireProtocol =
+    model.supportsNativeToolSearch &&
+    provider.nativeDeferredProtocol !== undefined
+      ? provider.nativeDeferredProtocol
+      : provider.eagerTools === true
+        ? "eager"
+        : "meta_dispatch"
   const fileEditingTools = new Set([
     ...(model.applyPatchToolType === undefined ? [] : ["apply_patch"]),
     ...(model.fileEditingToolType === "edit_write"
@@ -57,28 +68,28 @@ export function captureStepContext(input: {
         model.supportsCustomTools && provider.supportsCustomTools
           ? "native"
           : "function",
-      deferredTools: model.supportsToolSearch,
-      wireProtocol: provider.wireProtocol,
+      wireProtocol: toolWireProtocol,
     }),
-    toolWireProtocol: provider.wireProtocol,
+    toolWireProtocol,
   }
 }
 
 function providerToolCapabilities(provider: string): ProviderToolCapabilities {
-  if (provider === "openai" || provider === "codex") {
-    return { supportsCustomTools: true, wireProtocol: "openai_deferred" }
-  }
-  if (provider === "anthropic") {
+  const normalized = provider.toLowerCase()
+  if (normalized === "openai" || normalized === "codex") {
     return {
-      supportsCustomTools: false,
-      wireProtocol: "anthropic_deferred",
+      supportsCustomTools: true,
+      nativeDeferredProtocol: "openai_deferred",
     }
   }
-  if (provider === "grok") {
-    return { supportsCustomTools: false, wireProtocol: "meta_dispatch" }
+  if (normalized === "anthropic") {
+    return {
+      supportsCustomTools: false,
+      nativeDeferredProtocol: "anthropic_deferred",
+    }
   }
-  if (provider === "faux") {
-    return { supportsCustomTools: true, wireProtocol: "eager" }
+  if (normalized === "faux") {
+    return { supportsCustomTools: true, eagerTools: true }
   }
-  return { supportsCustomTools: false, wireProtocol: "eager" }
+  return { supportsCustomTools: false }
 }

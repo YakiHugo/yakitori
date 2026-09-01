@@ -98,10 +98,19 @@ describe("finalized tool router", () => {
     expect(router.search("search calendar events")).toMatchObject([
       { name: "calendar__search_events" },
     ])
+    expect(router.search("search calendar events", 21)).toMatchObject([
+      { name: "calendar__search_events" },
+    ])
+    expect(
+      JSON.stringify(
+        router.definitions.find(({ name }) => name === "tool_search")
+          ?.inputSchema,
+      ),
+    ).not.toContain('"maximum"')
     await expect(
       router.execute(
         "tool_search",
-        { query: "search calendar events" },
+        { query: "search calendar events", limit: 21 },
         { workspaceRoot: "/workspace" },
       ),
     ).resolves.toMatchObject({
@@ -115,6 +124,23 @@ describe("finalized tool router", () => {
         { workspaceRoot: "/workspace" },
       ),
     ).resolves.toMatchObject({ ok: true, content: "deferred" })
+  })
+
+  it("returns eight deferred tools by default", () => {
+    const registry = createToolRegistry([])
+    registry.replaceExternalSource(
+      "calendar-server",
+      Array.from({ length: 9 }, (_, index) =>
+        identifiedTool(
+          namespacedToolName("calendar", `search_events_${String(index)}`),
+          "deferred",
+          "deferred",
+        ),
+      ),
+    )
+    const router = finalize(registry, new Set())
+
+    expect(router.search("search events")).toHaveLength(8)
   })
 
   it("adds newly registered external tools to the next Step without mutating the trusted allowlist", () => {
@@ -517,7 +543,6 @@ describe("finalized tool router", () => {
     const router = registry.finalize({
       enabledTrustedTools: new Set(),
       customToolMode: "function",
-      deferredTools: true,
       wireProtocol: "anthropic_deferred",
     })
 
@@ -723,7 +748,6 @@ function finalize(
   return registry.finalize({
     enabledTrustedTools,
     customToolMode: "native",
-    deferredTools: true,
     wireProtocol: "openai_deferred",
   })
 }

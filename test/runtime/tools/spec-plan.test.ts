@@ -17,6 +17,18 @@ describe("Step tool planning", () => {
       protocol: "openai_deferred",
     },
     {
+      target: target("openai", "gpt-5", "codex"),
+      present: ["apply_patch"],
+      absent: ["edit_file", "write_file"],
+      protocol: "openai_deferred",
+    },
+    {
+      target: target("OpenAI", "GPT-5", "codex"),
+      present: ["apply_patch"],
+      absent: ["edit_file", "write_file"],
+      protocol: "openai_deferred",
+    },
+    {
       target: target("anthropic", "claude-sonnet-4-6", "anthropic"),
       present: ["edit_file", "write_file"],
       absent: ["apply_patch"],
@@ -32,7 +44,7 @@ describe("Step tool planning", () => {
       target: target("kimi", "k3", "kimi"),
       present: ["edit_file", "write_file"],
       absent: ["apply_patch"],
-      protocol: "eager",
+      protocol: "meta_dispatch",
     },
   ] as const)("$target.provider/$target.model selects its model capabilities", ({
     target,
@@ -54,7 +66,7 @@ describe("Step tool planning", () => {
     expect(step.toolWireProtocol).toBe(protocol)
   })
 
-  it("does not infer apply_patch or tool search for an unknown model", () => {
+  it("keeps unknown model capabilities conservative and falls back to meta-dispatch", () => {
     const registry = createToolRegistry()
     const deferred = externalDeferredTool()
     registry.registerExternal(deferred, "calendar")
@@ -69,8 +81,12 @@ describe("Step tool planning", () => {
     expect(names).toContain("exec_command")
     expect(names).not.toContain("apply_patch")
     expect(names).not.toContain("edit_file")
-    expect(names).not.toContain("tool_search")
+    expect(names).toEqual(expect.arrayContaining(["tool_search", "use_tool"]))
     expect(names).not.toContain("calendar__search_events")
+    expect(step.toolRouter.search("calendar events")).toMatchObject([
+      { name: "calendar__search_events" },
+    ])
+    expect(step.toolWireProtocol).toBe("meta_dispatch")
   })
 
   it("keeps Grok's model-visible catalog stable and resolves use_tool through the Step router", () => {
@@ -160,7 +176,7 @@ describe("Step tool planning", () => {
     expect(JSON.stringify(second.toolRouter.modelDefinitions)).toBe(firstBytes)
   })
 
-  it("does not share deferred search catalogs across model capabilities", async () => {
+  it("keeps meta-dispatch and native deferred projections isolated", async () => {
     const registry = createToolRegistry()
     registry.registerExternal(externalDeferredTool(), "calendar")
     const enabledTools = registry.trustedToolNames()
@@ -171,11 +187,15 @@ describe("Step tool planning", () => {
       modelInfo: resolveModel(kimiTarget),
       enabledTools,
     })
+    expect(kimi.toolRouter.modelDefinitions.map(({ name }) => name)).toEqual(
+      expect.arrayContaining(["tool_search", "use_tool"]),
+    )
     expect(
       kimi.toolRouter.modelDefinitions.map(({ name }) => name),
-    ).not.toEqual(
-      expect.arrayContaining(["tool_search", "calendar__search_events"]),
-    )
+    ).not.toContain("calendar__search_events")
+    expect(kimi.toolRouter.search("calendar events")).toMatchObject([
+      { name: "calendar__search_events" },
+    ])
     await kimi.toolRouter.release()
 
     const anthropicTarget = target(
@@ -194,6 +214,9 @@ describe("Step tool planning", () => {
     ).toEqual(
       expect.arrayContaining(["tool_search", "calendar__search_events"]),
     )
+    expect(
+      anthropic.toolRouter.modelDefinitions.map(({ name }) => name),
+    ).not.toContain("use_tool")
     await anthropic.toolRouter.release()
 
     const kimiAgain = captureStepContext({
@@ -204,9 +227,10 @@ describe("Step tool planning", () => {
     })
     expect(
       kimiAgain.toolRouter.modelDefinitions.map(({ name }) => name),
-    ).not.toEqual(
-      expect.arrayContaining(["tool_search", "calendar__search_events"]),
-    )
+    ).toEqual(expect.arrayContaining(["tool_search", "use_tool"]))
+    expect(
+      kimiAgain.toolRouter.modelDefinitions.map(({ name }) => name),
+    ).not.toContain("calendar__search_events")
   })
 })
 

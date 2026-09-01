@@ -20,7 +20,7 @@ describe("model catalog context windows", () => {
       shellToolType: "unified_exec",
       applyPatchToolType: "custom",
       fileEditingToolType: "none",
-      supportsToolSearch: true,
+      supportsNativeToolSearch: true,
     })
     expect(
       catalogModelCapabilities({
@@ -30,14 +30,14 @@ describe("model catalog context windows", () => {
     ).toMatchObject({
       shellToolType: "unified_exec",
       fileEditingToolType: "edit_write",
-      supportsToolSearch: true,
+      supportsNativeToolSearch: true,
     })
     expect(
       catalogModelCapabilities({ provider: "unknown", model: "future" }),
     ).toMatchObject({
       shellToolType: "unified_exec",
       fileEditingToolType: "none",
-      supportsToolSearch: false,
+      supportsNativeToolSearch: false,
     })
   })
 
@@ -136,12 +136,30 @@ describe("model catalog context windows", () => {
       usedFallbackModelMetadata: false,
     })
     expect(
+      resolveModel({ provider: "openai", model: "gpt-5.2" }),
+    ).toMatchObject({
+      instructionProfileId: "codex",
+      applyPatchToolType: "custom",
+      usedFallbackModelMetadata: false,
+    })
+    expect(resolveModel({ provider: "openai", model: "gpt-50" })).toMatchObject(
+      {
+        instructionProfileId: "default",
+        usedFallbackModelMetadata: true,
+      },
+    )
+    expect(resolveModel({ provider: "kimi", model: "k30" })).toMatchObject({
+      instructionProfileId: "default",
+      fileEditingToolType: "none",
+      usedFallbackModelMetadata: true,
+    })
+    expect(
       resolveModel({ provider: "codex", model: "gpt-future" }),
     ).toMatchObject({
       provider: "codex",
       model: "gpt-future",
       instructionProfileId: "default",
-      supportsToolSearch: false,
+      supportsNativeToolSearch: false,
       usedFallbackModelMetadata: true,
     })
   })
