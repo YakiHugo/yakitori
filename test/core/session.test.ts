@@ -530,6 +530,23 @@ describe("live Session actor", () => {
     await manager.shutdown()
   })
 
+  it("disposes processor-owned live resources during Session shutdown", async () => {
+    let disposals = 0
+    const manager = createManager({
+      run() {},
+      dispose() {
+        disposals += 1
+      },
+    })
+    const thread = await manager.createThread()
+
+    await thread.shutdownAndWait()
+
+    expect(disposals).toBe(1)
+    await manager.shutdown()
+    expect(disposals).toBe(1)
+  })
+
   it("isolates throwing persistence observers from teardown", async () => {
     const store = new MemoryThreadStore()
     const manager = new ThreadManager({
@@ -758,10 +775,12 @@ type TestProcessor = {
     control: TurnControl,
   ): Promise<void> | void
   abort?(): void
+  dispose?(): void | Promise<void>
 }
 
 function withPreparation(processor: TestProcessor): TurnProcessor {
   return {
+    dispose: () => processor.dispose?.(),
     prepare(_snapshot, input) {
       const selection = { provider: "faux", model: "scripted" }
       return {
@@ -771,7 +790,7 @@ function withPreparation(processor: TestProcessor): TurnProcessor {
           selection,
           workspaceRoot: "/workspace",
           enabledTools: [],
-          approvalPolicy: "never",
+          approvalPolicy: "always_approve",
           promptCacheKey: input.submissionId,
         }).snapshot,
       }

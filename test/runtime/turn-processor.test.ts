@@ -9,7 +9,11 @@ import { createSessionExecutionPolicy } from "../../src/runtime/limits.ts"
 import type { ModelStreamEvent, StreamFn } from "../../src/runtime/model.ts"
 import { ModelStopReason } from "../../src/runtime/model.ts"
 import { createPermissionGate } from "../../src/runtime/permission-gate.ts"
-import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
+import {
+  createToolRegistry,
+  plainToolName,
+  type RuntimeTool,
+} from "../../src/runtime/tools/registry.ts"
 import {
   createTurnProcessor,
   type TurnProcessorOptions,
@@ -202,7 +206,7 @@ describe("Turn processor", () => {
     ])
     const tools = createToolRegistry([
       {
-        name: "echo",
+        toolName: plainToolName("echo"),
         description: "Echo text",
         inputSchema: { type: "object" },
         effect: "observe",
@@ -233,6 +237,312 @@ describe("Turn processor", () => {
     )
   })
 
+  it("carries a deferred search hit through the next model request and dispatches it", async () => {
+    const registry = createToolRegistry([])
+    expect(
+      registry.registerExternal(
+        {
+          toolName: { namespace: "calendar", name: "search_events" },
+          exposure: "deferred",
+          description: "Search calendar events",
+          inputSchema: {
+            type: "object",
+            properties: { query: { type: "string" } },
+            required: ["query"],
+          },
+          effect: "observe",
+          approvalRequirement: { kind: "none" },
+          async execute() {
+            return {
+              ok: true,
+              output: { events: ["planning"] },
+              content: "planning",
+            }
+          },
+        },
+        "calendar-server",
+      ),
+    ).toBe(true)
+    const provider = createFauxProvider([
+      {
+        stopReason: ModelStopReason.ToolUse,
+        content: [
+          {
+            type: "tool_call",
+            id: "search_1",
+            name: "tool_search",
+            input: { query: "calendar events" },
+            toolKind: "tool_search",
+          },
+        ],
+      },
+      {
+        assertRequest(request) {
+          expect(request.tools.map((tool) => tool.name)).toEqual([
+            "tool_search",
+            "calendar__search_events",
+          ])
+          expect(request.tools[1]).toMatchObject({ deferLoading: true })
+          expect(request.messages.at(-1)).toMatchObject({
+            role: "tool",
+            toolCallId: "search_1",
+            toolSearch: {
+              tools: [{ name: "calendar__search_events" }],
+            },
+          })
+        },
+        stopReason: ModelStopReason.ToolUse,
+        content: [
+          {
+            type: "tool_call",
+            id: "calendar_1",
+            name: "calendar__search_events",
+            input: { query: "planning" },
+          },
+        ],
+      },
+      {
+        assertRequest(request) {
+          expect(request.messages.at(-1)).toMatchObject({
+            role: "tool",
+            toolCallId: "calendar_1",
+            content: "planning",
+          })
+        },
+        content: [{ type: "text", text: "found it" }],
+      },
+    ])
+    const runtime = await createRuntime(provider.stream, registry, {
+      modelContextWindowTokens: 100_000,
+    })
+    const thread = await runtime.createThread()
+
+    await thread.startIfIdle({ content: { kind: "text", text: "find it" } })
+    expect((await nextLifecycleEvent(thread))?.type).toBe("turn.started")
+    expect((await nextLifecycleEvent(thread))?.type).toBe("turn.completed")
+    expect(provider.callCount).toBe(3)
+  })
+
+  it("pins each response to one Step and refreshes definitions before the next sample", async () => {
+    const registry = createToolRegistry([])
+    const versionOne = {
+      ...identifiedDeferredTool("version one"),
+      inputSchema: {
+        type: "object",
+        properties: { legacyQuery: { type: "string" } },
+        required: ["legacyQuery"],
+      },
+    }
+    const versionTwo = {
+      ...identifiedDeferredTool("version two"),
+      inputSchema: {
+        type: "object",
+        properties: { replacementQuery: { type: "string" } },
+        required: ["replacementQuery"],
+      },
+    }
+    expect(registry.registerExternal(versionOne, "calendar-server")).toBe(true)
+    let callCount = 0
+    const stream: StreamFn = async function* (request) {
+      callCount += 1
+      if (callCount === 1) {
+        yield {
+          type: "response",
+          response: {
+            stopReason: ModelStopReason.ToolUse,
+            content: [
+              {
+                type: "tool_call",
+                id: "search_pinned",
+                name: "tool_search",
+                input: { query: "calendar events" },
+                toolKind: "tool_search",
+              },
+            ],
+          },
+        }
+        registry.replaceExternalSource("calendar-server", [versionTwo])
+        return
+      }
+      if (callCount === 2) {
+        expect(request.tools[1]).toMatchObject({
+          description: "version two",
+          inputSchema: { required: ["replacementQuery"] },
+        })
+        expect(request.messages.at(-1)).toMatchObject({
+          toolSearch: {
+            tools: [
+              {
+                description: "version one",
+                inputSchema: { required: ["legacyQuery"] },
+              },
+            ],
+          },
+        })
+        yield {
+          type: "response",
+          response: {
+            stopReason: ModelStopReason.ToolUse,
+            content: [
+              {
+                type: "tool_call",
+                id: "calendar_pinned",
+                name: "calendar__search_events",
+                input: { legacyQuery: "planning" },
+              },
+            ],
+          },
+        }
+        return
+      }
+      if (callCount === 3) {
+        expect(request.messages.at(-1)).toMatchObject({
+          role: "tool",
+          toolCallId: "calendar_pinned",
+          content: "version two",
+        })
+        yield {
+          type: "response",
+          response: {
+            stopReason: ModelStopReason.EndTurn,
+            content: [{ type: "text", text: "done" }],
+          },
+        }
+        return
+      }
+      expect(request.tools[1]).toMatchObject({
+        description: "version two",
+        inputSchema: { required: ["replacementQuery"] },
+      })
+      expect(
+        request.messages.find(
+          (message) =>
+            message.role === "tool" && message.toolCallId === "search_pinned",
+        ),
+      ).toMatchObject({
+        content: expect.stringContaining("version one"),
+        toolSearch: {
+          tools: [expect.objectContaining({ description: "version one" })],
+        },
+      })
+      yield {
+        type: "response",
+        response: {
+          stopReason: ModelStopReason.EndTurn,
+          content: [{ type: "text", text: "new turn" }],
+        },
+      }
+    }
+    const runtime = await createRuntime(stream, registry, {
+      modelContextWindowTokens: 100_000,
+    })
+    const thread = await runtime.createThread()
+
+    await thread.startIfIdle({ content: { kind: "text", text: "find it" } })
+    expect((await nextLifecycleEvent(thread))?.type).toBe("turn.started")
+    expect((await nextLifecycleEvent(thread))?.type).toBe("turn.completed")
+    await thread.startIfIdle({ content: { kind: "text", text: "again" } })
+    expect((await nextLifecycleEvent(thread))?.type).toBe("turn.started")
+    expect((await nextLifecycleEvent(thread))?.type).toBe("turn.completed")
+    expect(callCount).toBe(4)
+  })
+
+  it("routes Grok use_tool through the deferred runtime captured by that Step", async () => {
+    const registry = createToolRegistry([])
+    expect(
+      registry.registerExternal(
+        identifiedDeferredTool("meta result"),
+        "calendar-server",
+      ),
+    ).toBe(true)
+    const visibleToolSets: string[][] = []
+    let callCount = 0
+    const stream: StreamFn = async function* (request) {
+      callCount += 1
+      visibleToolSets.push(request.tools.map(({ name }) => name))
+      if (callCount === 1) {
+        expect(request.toolWireProtocol).toBe("meta_dispatch")
+        expect(request.tools.map(({ name }) => name)).toEqual([
+          "tool_search",
+          "use_tool",
+        ])
+        yield {
+          type: "response",
+          response: {
+            stopReason: ModelStopReason.ToolUse,
+            content: [
+              {
+                type: "tool_call",
+                id: "meta_1",
+                name: "use_tool",
+                input: {
+                  tool_name: "calendar__search_events",
+                  tool_input: { query: "planning" },
+                },
+              },
+            ],
+          },
+        }
+        return
+      }
+      expect(request.messages.at(-1)).toMatchObject({
+        role: "tool",
+        toolCallId: "meta_1",
+        content: "meta result",
+      })
+      yield {
+        type: "response",
+        response: {
+          stopReason: ModelStopReason.EndTurn,
+          content: [{ type: "text", text: "done" }],
+        },
+      }
+    }
+    const runtime = await createRuntime(stream, registry, {
+      modelContextWindowTokens: 100_000,
+    })
+    const thread = await runtime.createThread()
+
+    await thread.startIfIdle({
+      content: { kind: "text", text: "find it" },
+      modelSelection: { provider: "grok", model: "grok-4.6" },
+    })
+    expect((await nextLifecycleEvent(thread))?.type).toBe("turn.started")
+    expect((await nextLifecycleEvent(thread))?.type).toBe("turn.completed")
+    expect(visibleToolSets[1]).toEqual(visibleToolSets[0])
+  })
+
+  it("warns once when a Turn uses conservative fallback model metadata", async () => {
+    const provider = createFauxProvider([
+      { content: [{ type: "text", text: "done" }] },
+    ])
+    const runtime = await createRuntime(
+      provider.stream,
+      createToolRegistry([]),
+    )
+    const thread = await runtime.createThread()
+
+    await thread.startIfIdle({
+      content: { kind: "text", text: "continue safely" },
+      modelSelection: { provider: "future-provider", model: "future-model" },
+    })
+
+    expect((await nextLifecycleEvent(thread))?.type).toBe("turn.started")
+    let warning: SessionEvent | undefined
+    while (warning?.type !== "runtime.warning") {
+      warning = await thread.nextEvent()
+      if (warning === undefined) throw new Error("Thread ended before warning.")
+    }
+    expect(warning).toMatchObject({
+      type: "runtime.warning",
+      turnId: expect.any(String),
+      message: expect.stringContaining(
+        "future-provider/future-model was not found",
+      ),
+    })
+    expect((await nextLifecycleEvent(thread))?.type).toBe("turn.completed")
+  })
+
   it("passes the physical rollout ID to tool asset storage", async () => {
     const root = await mkdtemp(join(tmpdir(), "yakitori-rollout-identity-"))
     const store = new MemoryThreadStore()
@@ -254,7 +564,7 @@ describe("Turn processor", () => {
     let toolRolloutId: string | undefined
     const tools = createToolRegistry([
       {
-        name: "capture_rollout",
+        toolName: plainToolName("capture_rollout"),
         description: "Capture the rollout asset owner.",
         inputSchema: { type: "object" },
         effect: "observe",
@@ -351,11 +661,13 @@ describe("Turn processor", () => {
             item.item.toolCallId === "tool_read_value",
         )?.item,
     ).toMatchObject({
-      fileObservation: {
-        path: "value.txt",
-        kind: "whole_file_read",
-        complete: true,
-      },
+      fileObservations: [
+        {
+          path: "value.txt",
+          kind: "whole_file_read",
+          complete: true,
+        },
+      ],
     })
     const completedItems =
       (await runtime.store.readThread(thread.id))?.rollout.flatMap((entry) =>
@@ -588,7 +900,7 @@ describe("Turn processor", () => {
       provider.stream,
       createToolRegistry([
         {
-          name: "echo",
+          toolName: plainToolName("echo"),
           description: "Echo text",
           inputSchema: { type: "object" },
           effect: "observe",
@@ -645,7 +957,7 @@ describe("Turn processor", () => {
       provider.stream,
       createToolRegistry([
         {
-          name: "approved",
+          toolName: plainToolName("approved"),
           description: "Requires approval",
           inputSchema: { type: "object" },
           effect: "mutate",
@@ -715,16 +1027,24 @@ describe("Turn processor", () => {
     expect(toolResultAt).toBeGreaterThan(resolvedAt)
   })
 
-  it("executes the permission-free observe prefix concurrently", async () => {
+  it("uses a local serial barrier and resumes later parallel calls together", async () => {
     const firstEntered = deferred<void>()
     const secondEntered = deferred<void>()
-    const releaseFirst = deferred<void>()
+    const releaseReaders = deferred<void>()
+    const writerEntered = deferred<void>()
+    const releaseWriter = deferred<void>()
+    const fourthEntered = deferred<void>()
+    const fifthEntered = deferred<void>()
+    const events: string[] = []
     const provider = createFauxProvider([
       {
         stopReason: ModelStopReason.ToolUse,
         content: [
           { type: "tool_call", id: "tool_first", name: "first", input: {} },
           { type: "tool_call", id: "tool_second", name: "second", input: {} },
+          { type: "tool_call", id: "tool_writer", name: "writer", input: {} },
+          { type: "tool_call", id: "tool_fourth", name: "fourth", input: {} },
+          { type: "tool_call", id: "tool_fifth", name: "fifth", input: {} },
         ],
       },
       {
@@ -733,45 +1053,254 @@ describe("Turn processor", () => {
             request.messages
               .filter((message) => message.role === "tool")
               .map((message) => message.toolCallId),
-          ).toEqual(["tool_first", "tool_second"])
+          ).toEqual([
+            "tool_first",
+            "tool_second",
+            "tool_writer",
+            "tool_fourth",
+            "tool_fifth",
+          ])
         },
         content: [{ type: "text", text: "done" }],
       },
     ])
     const tools = createToolRegistry([
       {
-        name: "first",
+        toolName: plainToolName("first"),
         description: "First observation",
         inputSchema: { type: "object" },
         effect: "observe",
+        supportsParallelToolCalls: true,
         approvalRequirement: { kind: "none" },
         async execute() {
+          events.push("start:first")
           firstEntered.resolve()
-          await releaseFirst.promise
+          await releaseReaders.promise
+          events.push("end:first")
           return { ok: true, output: "first", content: "first" }
         },
       },
       {
-        name: "second",
+        toolName: plainToolName("second"),
         description: "Second observation",
         inputSchema: { type: "object" },
         effect: "observe",
+        supportsParallelToolCalls: true,
         approvalRequirement: { kind: "none" },
         async execute() {
+          events.push("start:second")
           secondEntered.resolve()
+          await releaseReaders.promise
+          events.push("end:second")
           return { ok: true, output: "second", content: "second" }
         },
       },
+      scheduledTool("writer", false, events, writerEntered, releaseWriter),
+      scheduledTool("fourth", true, events, fourthEntered),
+      scheduledTool("fifth", true, events, fifthEntered),
     ])
     const runtime = await createRuntime(provider.stream, tools)
     const thread = await runtime.createThread()
     await thread.startIfIdle({ content: { kind: "text", text: "observe" } })
     await firstEntered.promise
     await secondEntered.promise
-    releaseFirst.resolve()
+    expect(events).toEqual(["start:first", "start:second"])
+    releaseReaders.resolve()
+    await writerEntered.promise
+    expect(events.at(-1)).toBe("start:writer")
+    expect(events).not.toContain("start:fourth")
+    expect(events).not.toContain("start:fifth")
+    releaseWriter.resolve()
+    await fourthEntered.promise
+    await fifthEntered.promise
+    expect(events.indexOf("start:fourth")).toBeGreaterThan(
+      events.indexOf("end:writer"),
+    )
+    expect(events.indexOf("start:fifth")).toBeGreaterThan(
+      events.indexOf("end:writer"),
+    )
     await nextLifecycleEvent(thread)
     await nextLifecycleEvent(thread)
     expect(provider.callCount).toBe(2)
+  })
+
+  it("reserves a serial barrier before waiting for its permission", async () => {
+    const permissionGate = createPermissionGate()
+    const firstEntered = deferred<void>()
+    const secondEntered = deferred<void>()
+    const writerEntered = deferred<void>()
+    const fourthEntered = deferred<void>()
+    const fifthEntered = deferred<void>()
+    const events: string[] = []
+    const provider = createFauxProvider([
+      {
+        stopReason: ModelStopReason.ToolUse,
+        content: [
+          {
+            type: "tool_call",
+            id: "permission_first",
+            name: "first",
+            input: {},
+          },
+          {
+            type: "tool_call",
+            id: "permission_second",
+            name: "second",
+            input: {},
+          },
+          {
+            type: "tool_call",
+            id: "permission_writer",
+            name: "writer",
+            input: {},
+          },
+          {
+            type: "tool_call",
+            id: "permission_fourth",
+            name: "fourth",
+            input: {},
+          },
+          {
+            type: "tool_call",
+            id: "permission_fifth",
+            name: "fifth",
+            input: {},
+          },
+        ],
+      },
+      { content: [{ type: "text", text: "done" }] },
+    ])
+    const tools = createToolRegistry([
+      scheduledTool("first", true, events, firstEntered),
+      scheduledTool("second", true, events, secondEntered),
+      {
+        ...scheduledTool("writer", false, events, writerEntered),
+        approvalRequirement: {
+          kind: "approval",
+          action: "command_execution",
+        },
+      },
+      scheduledTool("fourth", true, events, fourthEntered),
+      scheduledTool("fifth", true, events, fifthEntered),
+    ])
+    const runtime = await createRuntime(provider.stream, tools, {
+      permissionGate,
+      approvalPolicy: "auto_file_tools",
+    })
+    const thread = await runtime.createThread()
+
+    await thread.startIfIdle({ content: { kind: "text", text: "schedule" } })
+    const pending = await waitForValue(() => permissionGate.list(thread.id)[0])
+    await firstEntered.promise
+    await secondEntered.promise
+    expect(events).not.toContain("start:fourth")
+    expect(events).not.toContain("start:fifth")
+
+    permissionGate.resolve({
+      sessionId: thread.id,
+      turnId: pending.turnId,
+      permissionRequestId: pending.permissionRequestId,
+      behavior: "allow",
+    })
+    await writerEntered.promise
+    await fourthEntered.promise
+    await fifthEntered.promise
+    expect(events.indexOf("start:writer")).toBeLessThan(
+      events.indexOf("start:fourth"),
+    )
+    expect(events.indexOf("start:writer")).toBeLessThan(
+      events.indexOf("start:fifth"),
+    )
+    await nextLifecycleEvent(thread)
+    await nextLifecycleEvent(thread)
+    expect(provider.callCount).toBe(2)
+  })
+
+  it("waits for tool readiness before the execution lock without losing its barrier", async () => {
+    const readerEntered = deferred<void>()
+    const releaseReader = deferred<void>()
+    const readinessEntered = deferred<void>()
+    const releaseReadiness = deferred<void>()
+    const writerEntered = deferred<void>()
+    const laterEntered = deferred<void>()
+    const events: string[] = []
+    const provider = createFauxProvider([
+      {
+        stopReason: ModelStopReason.ToolUse,
+        content: [
+          { type: "tool_call", id: "ready_reader", name: "reader", input: {} },
+          { type: "tool_call", id: "ready_writer", name: "writer", input: {} },
+          { type: "tool_call", id: "ready_later", name: "later", input: {} },
+        ],
+      },
+      { content: [{ type: "text", text: "done" }] },
+    ])
+    const writer = scheduledTool("writer", false, events, writerEntered)
+    const tools = createToolRegistry([
+      scheduledTool("reader", true, events, readerEntered, releaseReader),
+      {
+        ...writer,
+        async waitUntilReady() {
+          events.push("ready:writer")
+          readinessEntered.resolve()
+          await releaseReadiness.promise
+        },
+      },
+      scheduledTool("later", true, events, laterEntered),
+    ])
+    const runtime = await createRuntime(provider.stream, tools)
+    const thread = await runtime.createThread()
+
+    await thread.startIfIdle({ content: { kind: "text", text: "schedule" } })
+    await readerEntered.promise
+    await readinessEntered.promise
+    await Promise.resolve()
+    expect(events).toEqual(
+      expect.arrayContaining(["start:reader", "ready:writer"]),
+    )
+    expect(events).not.toContain("end:reader")
+    expect(events).not.toContain("start:later")
+    releaseReadiness.resolve()
+    await Promise.resolve()
+    expect(events).not.toContain("start:writer")
+    releaseReader.resolve()
+    await writerEntered.promise
+    await laterEntered.promise
+    expect(events.indexOf("start:writer")).toBeLessThan(
+      events.indexOf("start:later"),
+    )
+    await nextLifecycleEvent(thread)
+    await nextLifecycleEvent(thread)
+    expect(provider.callCount).toBe(2)
+  })
+
+  it("interrupts a readiness implementation that ignores its abort signal", async () => {
+    const readinessEntered = deferred<void>()
+    const provider = createFauxProvider([
+      {
+        stopReason: ModelStopReason.ToolUse,
+        content: [
+          { type: "tool_call", id: "stuck_ready", name: "stuck", input: {} },
+        ],
+      },
+    ])
+    const tools = createToolRegistry([
+      {
+        ...scheduledTool("stuck", false, [], deferred<void>()),
+        async waitUntilReady() {
+          readinessEntered.resolve()
+          await new Promise<void>(() => undefined)
+        },
+      },
+    ])
+    const runtime = await createRuntime(provider.stream, tools)
+    const thread = await runtime.createThread()
+
+    await thread.startIfIdle({ content: { kind: "text", text: "wait" } })
+    await readinessEntered.promise
+    await thread.interrupt("test")
+    expect((await nextLifecycleEvent(thread))?.type).toBe("turn.started")
+    expect((await nextLifecycleEvent(thread))?.type).toBe("turn.interrupted")
   })
 
   it("consumes steering in the active task and aborts the underlying stream", async () => {
@@ -929,7 +1458,7 @@ describe("Turn processor", () => {
     ])
     const tools = createToolRegistry([
       {
-        name: "wait",
+        toolName: plainToolName("wait"),
         description: "Wait until interrupted",
         inputSchema: { type: "object" },
         effect: "observe",
@@ -1219,7 +1748,7 @@ describe("Turn processor", () => {
     ])
     const tools = createToolRegistry([
       {
-        name: "large_result",
+        toolName: plainToolName("large_result"),
         description: "Return a large result",
         inputSchema: { type: "object" },
         effect: "observe",
@@ -1433,7 +1962,8 @@ async function nextLifecycleEvent(thread: {
       (event.type !== "rollout.appended" &&
         event.type !== "model.stream" &&
         event.type !== "item.started" &&
-        event.type !== "permission")
+        event.type !== "permission" &&
+        event.type !== "runtime.warning")
     ) {
       return event
     }
@@ -1498,4 +2028,42 @@ function deferred<T>() {
     resolve = accept
   })
   return { promise, resolve }
+}
+
+function scheduledTool(
+  name: string,
+  supportsParallelToolCalls: boolean,
+  events: string[],
+  entered: ReturnType<typeof deferred<void>>,
+  release?: ReturnType<typeof deferred<void>>,
+): RuntimeTool {
+  return {
+    toolName: plainToolName(name),
+    description: `${name} scheduling probe`,
+    inputSchema: { type: "object" },
+    effect: supportsParallelToolCalls ? "observe" : "mutate",
+    supportsParallelToolCalls,
+    approvalRequirement: { kind: "none" },
+    async execute() {
+      events.push(`start:${name}`)
+      entered.resolve()
+      await release?.promise
+      events.push(`end:${name}`)
+      return { ok: true, output: name, content: name }
+    },
+  }
+}
+
+function identifiedDeferredTool(content: string): RuntimeTool {
+  return {
+    toolName: { namespace: "calendar", name: "search_events" },
+    exposure: "deferred",
+    description: content,
+    inputSchema: { type: "object" },
+    effect: "observe",
+    approvalRequirement: { kind: "none" },
+    async execute() {
+      return { ok: true, output: { content }, content }
+    },
+  }
 }

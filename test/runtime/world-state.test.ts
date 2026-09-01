@@ -159,7 +159,7 @@ function worldState(
     selection: { provider: "codex", model: "gpt-5.6-sol" },
     workspaceRoot: "/workspace",
     enabledTools,
-    approvalPolicy: "never",
+    approvalPolicy: "always_approve",
   })
   return buildWorldStateFromSnapshot({
     configuration: sessionConfiguration.resolveTurn(

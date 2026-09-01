@@ -47,6 +47,7 @@ type ErasedWorldStateSection = Readonly<{
 
 export function buildWorldStateFromSnapshot(input: {
   readonly configuration: ResolvedTurnConfiguration
+  readonly enabledToolNames?: ReadonlySet<string>
   readonly baseModelId?: string | undefined
   readonly previousModelId?: string | undefined
   readonly environment: EnvironmentSnapshot
@@ -64,7 +65,10 @@ export function buildWorldStateFromSnapshot(input: {
         : [
             multiAgentSection(
               input.multiAgent,
-              input.configuration.enabledTools.includes("spawn_agent"),
+              (
+                input.enabledToolNames ??
+                new Set(input.configuration.enabledTools)
+              ).has("spawn_agent"),
             ),
           ]),
       projectInstructionsSection(input.projectInstructions),
