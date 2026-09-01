@@ -43,7 +43,7 @@ server.listen(port, host, () => {
     `workspace=${application.workspace} mate=${application.activeMate.mateId} revision=${application.activeMate.mateRevisionId}`,
   )
   void application.probeUserShellEnv().catch((error: unknown) => {
-    console.warn("run_command shell-env probe failed", error)
+    console.warn("exec_command shell-env probe failed", error)
   })
 })
 

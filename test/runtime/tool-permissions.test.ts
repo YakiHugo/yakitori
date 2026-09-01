@@ -8,17 +8,17 @@ describe("tool permission policy", () => {
     ).toBeUndefined()
   })
 
-  it("bypasses every approval requirement in YOLO mode", () => {
+  it("bypasses every approval requirement in always-approve mode", () => {
     expect(
       resolveToolPermissionRequest(
         { kind: "approval", action: "command_execution" },
-        "never",
+        "always_approve",
       ),
     ).toBeUndefined()
     expect(
       resolveToolPermissionRequest(
         { kind: "approval", action: "file_change" },
-        "never",
+        "always_approve",
       ),
     ).toBeUndefined()
   })
@@ -62,5 +62,14 @@ describe("tool permission policy", () => {
         "future_policy",
       ),
     ).toThrow("Unsupported approval policy: future_policy")
+  })
+
+  it("does not treat the Codex never policy as always approve", () => {
+    expect(() =>
+      resolveToolPermissionRequest(
+        { kind: "approval", action: "command_execution" },
+        "never",
+      ),
+    ).toThrow("Unsupported approval policy: never")
   })
 })

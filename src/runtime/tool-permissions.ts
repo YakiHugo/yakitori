@@ -7,10 +7,12 @@ export function resolveToolPermissionRequest(
   requirement: ToolApprovalRequirement,
   policy: string,
 ): ToolPermissionRequest | undefined {
-  if (policy !== "never" && policy !== "auto_file_tools") {
+  if (policy !== "always_approve" && policy !== "auto_file_tools") {
     throw new Error(`Unsupported approval policy: ${policy}`)
   }
-  if (requirement.kind === "none" || policy === "never") return undefined
+  if (requirement.kind === "none" || policy === "always_approve") {
+    return undefined
+  }
   if (requirement.action === "file_change" && policy === "auto_file_tools") {
     return undefined
   }

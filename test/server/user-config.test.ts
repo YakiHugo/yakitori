@@ -62,6 +62,51 @@ describe("user config", () => {
     })
   })
 
+  it("loads the Codex-style shell environment policy", async () => {
+    await withConfigPath(async (configPath) => {
+      await writeFile(
+        configPath,
+        [
+          "[shell_environment_policy]",
+          'inherit = "core"',
+          "ignore_default_excludes = false",
+          'exclude = ["ACME_*", "CI_?"]',
+          'include_only = ["PATH", "HOME", "MY_FLAG"]',
+          "",
+          "[shell_environment_policy.set]",
+          'MY_FLAG = "1"',
+          "",
+        ].join("\n"),
+      )
+      const store = createUserConfigStore({ configPath })
+
+      await expect(store.readConfiguration()).resolves.toEqual({
+        shellEnvironmentPolicy: {
+          inherit: "core",
+          ignoreDefaultExcludes: false,
+          exclude: ["ACME_*", "CI_?"],
+          includeOnly: ["PATH", "HOME", "MY_FLAG"],
+          set: { MY_FLAG: "1" },
+        },
+      })
+    })
+  })
+
+  it.each([
+    ['inherit = "nonee"', 'inherit must be "all", "core", or "none"'],
+    ['exlcude = ["API_KEY"]', "Unknown shell_environment_policy field"],
+  ])("fails closed for an invalid shell environment policy: %s", async (line, message) => {
+    await withConfigPath(async (configPath) => {
+      await writeFile(
+        configPath,
+        ["[shell_environment_policy]", line, ""].join("\n"),
+      )
+      const store = createUserConfigStore({ configPath })
+
+      await expect(store.readConfiguration()).rejects.toThrow(message)
+    })
+  })
+
   it("does not silently replace an unreadable custom instruction file", async () => {
     await withConfigPath(async (configPath) => {
       const cwd = dirname(configPath)

@@ -31,7 +31,7 @@ server.listen(port, host, () => {
   // The one machine-readable line the parent parses; keep it exactly this.
   console.log(`yakitori-listening http://${host}:${address.port}`)
   void application.probeUserShellEnv().catch((error: unknown) => {
-    console.warn("run_command shell-env probe failed", error)
+    console.warn("exec_command shell-env probe failed", error)
   })
 })
 
