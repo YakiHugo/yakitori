@@ -30,7 +30,7 @@ export default defineConfig(({ mode }) => {
         rollupOptions: {
           // Native addons must stay external so electron-builder can rebuild
           // and package them for Electron's Node ABI.
-          external: ["electron", "fs-ext", /^node:/],
+          external: ["electron", "fs-ext", "node-pty", /^node:/],
         },
         sourcemap: true,
       },

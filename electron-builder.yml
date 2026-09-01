@@ -8,13 +8,15 @@ npmRebuild: false
 asarUnpack:
   - dist/desktop/**
   - node_modules/fs-ext/**
-# JavaScript dependencies are inlined. fs-ext remains external because its
-# native addon must be rebuilt against and loaded by Electron's Node runtime.
+  - node_modules/node-pty/**
+# JavaScript dependencies are inlined. Native addons remain external because
+# they must be rebuilt against and loaded by Electron's Node runtime.
 files:
   - dist/desktop/**
   - package.json
   - "!node_modules/**"
   - node_modules/fs-ext/**
+  - node_modules/node-pty/**
 extraResources:
   - from: dist/gui
     to: gui

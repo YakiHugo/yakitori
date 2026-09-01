@@ -2,7 +2,13 @@ import { spawn } from "node:child_process"
 
 let packagingError: unknown
 try {
-  await run("pnpm", ["exec", "electron-rebuild", "--force", "--only", "fs-ext"])
+  await run("pnpm", [
+    "exec",
+    "electron-rebuild",
+    "--force",
+    "--only",
+    "fs-ext,node-pty",
+  ])
   await run("pnpm", ["exec", "electron-builder"])
   await run(process.execPath, ["scripts/verify-packaged-runtime.ts"])
 } catch (error) {
@@ -12,7 +18,7 @@ try {
 try {
   // electron-rebuild mutates the workspace addon. Restore the ABI used by the
   // ordinary Node runtime so tests and the development server still work.
-  await run("pnpm", ["rebuild", "fs-ext"])
+  await run("pnpm", ["rebuild", "fs-ext", "node-pty"])
 } catch (restoreError) {
   if (packagingError !== undefined) {
     throw new AggregateError(
