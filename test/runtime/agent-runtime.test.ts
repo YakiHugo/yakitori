@@ -487,7 +487,7 @@ function immediateProcessor(): TurnProcessor {
           selection: TARGET,
           workspaceRoot: "/workspace",
           enabledTools: [],
-          approvalPolicy: "never",
+          approvalPolicy: "always_approve",
           promptCacheKey: input.submissionId,
         }).snapshot,
       }

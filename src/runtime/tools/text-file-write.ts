@@ -1,8 +1,12 @@
 import { createHash, randomBytes } from "node:crypto"
-import { link, open, readFile, rename, rm } from "node:fs/promises"
-import { dirname, join } from "node:path"
+import { link, mkdir, open, readFile, rename, rm, unlink } from "node:fs/promises"
+import { dirname, isAbsolute, join, resolve } from "node:path"
 import { ToolLimitDefaults } from "../limits.ts"
-import { resolveWritePath, type ResolvedFileTarget } from "./path-policy.ts"
+import {
+  type ResolvedFileTarget,
+  resolveWorkspaceRoot,
+  resolveWritePath,
+} from "./path-policy.ts"
 import type { ToolExecutionResult } from "./types.ts"
 import { createBoundedUnifiedDiff } from "./unified-diff.ts"
 
@@ -11,11 +15,29 @@ export type CompareAndWriteTextFileInput = {
   readonly path: string
   readonly content: string
   readonly expectedSha256: string | null
+  readonly createParentDirectories?: boolean
 }
 
 export async function compareAndWriteTextFile(
   input: CompareAndWriteTextFileInput,
 ): Promise<ToolExecutionResult> {
+  if (input.createParentDirectories === true) {
+    if (input.path.length === 0 || input.path.includes("\0")) {
+      return writeFailure("path_denied", "Path must be a non-empty string.")
+    }
+    try {
+      const root = await resolveWorkspaceRoot(input.workspaceRoot)
+      const candidate = resolve(
+        isAbsolute(input.path) ? input.path : resolve(root, input.path),
+      )
+      await mkdir(dirname(candidate), { recursive: true })
+    } catch {
+      return writeFailure(
+        "write_failed",
+        "The destination parent directory could not be created.",
+      )
+    }
+  }
   const resolved = await resolveWritePath(input.workspaceRoot, input.path)
   if (!resolved.ok) return pathError(resolved)
 
@@ -114,6 +136,55 @@ export async function compareAndWriteTextFile(
       "write_failed",
       "The file could not be written safely.",
       { suggestion: "Inspect the file and retry with its latest revision." },
+    )
+  }
+}
+
+export async function compareAndDeleteTextFile(input: {
+  readonly workspaceRoot: string
+  readonly path: string
+  readonly expectedSha256: string
+}): Promise<ToolExecutionResult> {
+  const resolved = await resolveWritePath(input.workspaceRoot, input.path)
+  if (!resolved.ok) return pathError(resolved)
+  if (!resolved.exists) {
+    return writeFailure("file_missing", "The file no longer exists.")
+  }
+
+  try {
+    return await withPathWriteLock(resolved.absolutePath, async () => {
+      const target = await resolveWritePath(input.workspaceRoot, input.path)
+      if (!target.ok) return pathError(target)
+      if (!target.exists || target.absolutePath !== resolved.absolutePath) {
+        return writeFailure(
+          "path_changed",
+          "File path changed while the deletion was being prepared.",
+        )
+      }
+      const checked = await checkPrecondition(target, input.expectedSha256)
+      if (!checked.ok) return checked.result
+      await unlink(target.absolutePath)
+      return {
+        ok: true,
+        output: {
+          path: target.displayPath,
+          previousSha256: checked.currentSha256,
+          deleted: true,
+          diff: createBoundedUnifiedDiff({
+            path: target.displayPath,
+            before: checked.currentContent?.toString("utf8") ?? "",
+            after: null,
+            maxBytes: ToolLimitDefaults.toolDiffBytes,
+          }),
+        },
+        content: `Deleted ${target.displayPath}.`,
+      }
+    })
+  } catch {
+    return writeFailure(
+      "delete_failed",
+      "The file could not be deleted safely.",
+      { suggestion: "Inspect the path and retry from its latest revision." },
     )
   }
 }

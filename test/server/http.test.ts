@@ -1442,7 +1442,7 @@ function createTestHandlers(eventHub?: SessionEventHub) {
             selection,
             workspaceRoot: process.cwd(),
             enabledTools: [],
-            approvalPolicy: "never",
+            approvalPolicy: "always_approve",
             promptCacheKey: input.submissionId,
           }).snapshot,
         }

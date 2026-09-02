@@ -32,11 +32,13 @@ import {
   createUserShellEnv,
   GROK_API_BASE_URL,
   ModelStopReason,
+  type ApprovalPolicy,
   type RuntimeLock,
   readCodexLogin,
   resolveGrokAccessToken,
   resolveModel,
   type StreamFn,
+  type ShellEnvironmentPolicy,
   type UserShellEnv,
 } from "../runtime/index.ts"
 import { withRetries } from "../runtime/retrying-stream.ts"
@@ -93,6 +95,7 @@ export type YakitoriApplicationOptions = {
   readonly fauxScenario?: string
   readonly userShellEnv?: UserShellEnv
   readonly reportOperationalFailure?: OperationalFailureReporter
+  readonly shellEnvironmentPolicy?: Partial<ShellEnvironmentPolicy>
 }
 
 export type YakitoriApplication = {
@@ -132,6 +135,9 @@ export async function createYakitoriApplication(
   )
   const activeMateId =
     options.activeMateId ?? process.env.YAKITORI_MATE_ID ?? undefined
+  const approvalPolicy = resolveApprovalPolicy(
+    process.env.YAKITORI_APPROVAL_POLICY,
+  )
   let runtimeLock: RuntimeLock | undefined
   let threadManagerForCleanup: ThreadManager | undefined
   let agentRuntimeForCleanup: AgentRuntime | undefined
@@ -163,13 +169,20 @@ export async function createYakitoriApplication(
         : { configPath: options.userConfigPath }),
     })
     const userConfiguration = await userConfig.readConfiguration()
-    const userShellEnv = options.userShellEnv ?? createUserShellEnv()
-    const toolRegistry = createToolRegistry(
+    const configuredShellEnvironmentPolicy =
+      options.shellEnvironmentPolicy ?? userConfiguration.shellEnvironmentPolicy
+    const userShellEnv =
+      options.userShellEnv ??
+      createUserShellEnv({
+        ...(configuredShellEnvironmentPolicy === undefined
+          ? {}
+          : { shellEnvironmentPolicy: configuredShellEnvironmentPolicy }),
+      })
+    const createTrustedTools = () =>
       createDefaultTools({
         userShellEnv,
-        runCommandLog: (message) => console.log(message),
-      }),
-    )
+        execCommandLog: (message) => console.log(message),
+      })
     const activeMate = await resolveActiveMate(mateKernel, activeMateId)
     const sessionDefaults: SessionCreateDefaults = {
       workingDirectory: workspace,
@@ -254,13 +267,11 @@ export async function createYakitoriApplication(
             ? {}
             : { modelContextWindowTokens }),
           permissionGate,
-          toolRegistry,
+          // Each Session owns both its external catalog and process manager.
+          toolRegistry: createToolRegistry(createTrustedTools()),
           agentControl: agentRuntime.registerThread(stored),
           rolloutAssets,
-          approvalPolicy:
-            process.env.YAKITORI_APPROVAL_POLICY === "auto_file_tools"
-              ? "auto_file_tools"
-              : "never",
+          approvalPolicy,
           onOperationalFailure: (failure) => {
             reportOperationalFailure(reporter, {
               component: "turn-processor",
@@ -368,6 +379,14 @@ export async function createYakitoriApplication(
     }
     throw error
   }
+}
+
+function resolveApprovalPolicy(value: string | undefined): ApprovalPolicy {
+  if (value === undefined || value === "always_approve") {
+    return "always_approve"
+  }
+  if (value === "auto_file_tools") return value
+  throw new Error(`Unsupported YAKITORI_APPROVAL_POLICY: ${value}`)
 }
 
 async function providerSummary(
@@ -767,8 +786,8 @@ function createFauxScenarioStream(scenario: string): StreamFn {
             : {
                 type: "tool_call",
                 id: `tool_cmd_${toolCallSequence}`,
-                name: "run_command",
-                input: { command: "echo faux-command" },
+                name: "exec_command",
+                input: { cmd: "echo faux-command" },
               },
         ],
       },

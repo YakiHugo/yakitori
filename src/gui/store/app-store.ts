@@ -264,6 +264,9 @@ export const useAppStore = create<AppStore>()((set, get) => {
                 type: "transient",
                 event,
               }),
+              ...(event.type === "runtime.warning"
+                ? { message: event.message }
+                : {}),
             }))
           },
         },

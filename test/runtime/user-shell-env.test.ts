@@ -4,8 +4,8 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import {
+  applyShellEnvironmentPolicy,
   createUserShellEnv,
-  filterCommandEnvironment,
   isSparsePath,
   mergeShellEnvironment,
   parseNullEnvironment,
@@ -69,9 +69,9 @@ describe("user shell environment", () => {
     expect(candidates).toEqual(["/bin/zsh", "/bin/bash"])
   })
 
-  it("filters exact, suffix, app, and Electron secrets", () => {
+  it("inherits user credentials by default and scrubs internal process control", () => {
     expect(
-      filterCommandEnvironment({
+      applyShellEnvironmentPolicy({
         PATH: "/bin",
         HOME: "/Users/test",
         LANG: "en_US.UTF-8",
@@ -96,7 +96,55 @@ describe("user shell environment", () => {
       SSH_AUTH_SOCK: "/tmp/agent",
       USER: "test",
       VISIBLE_TEST_VAR: "visible",
+      TOKEN: "secret",
+      GITHUB_TOKEN: "secret",
+      AWS_ACCESS_KEY_ID: "secret",
+      SERVICE_DATABASE_URL: "secret",
+      ACCOUNT_CREDENTIAL: "secret",
+      BASH_ENV: "/tmp/bash-env",
+      ENV: "/tmp/sh-env",
+      ZDOTDIR: "/tmp/zsh",
+      YAKITORI_STORE_DIR: "secret",
     })
+  })
+
+  it("applies Codex-style inherit, exclude, set, and include-only policy", () => {
+    expect(
+      applyShellEnvironmentPolicy(
+        {
+          PATH: "/bin",
+          HOME: "/Users/test",
+          API_KEY: "secret",
+          ACCESS_TOKEN: "secret",
+          ACME_VISIBLE: "yes",
+          DROP_ME: "no",
+        },
+        {
+          inherit: "all",
+          ignoreDefaultExcludes: false,
+          exclude: ["DROP_*"],
+          set: { ADDED: "1" },
+          includeOnly: ["PATH", "HOME", "ACME_*", "ADDED"],
+        },
+      ),
+    ).toEqual({
+      PATH: "/bin",
+      HOME: "/Users/test",
+      ACME_VISIBLE: "yes",
+      ADDED: "1",
+    })
+    expect(
+      applyShellEnvironmentPolicy(
+        { PATH: "/bin", HOME: "/Users/test", CUSTOM: "value" },
+        {
+          inherit: "core",
+          ignoreDefaultExcludes: true,
+          exclude: [],
+          set: {},
+          includeOnly: [],
+        },
+      ),
+    ).toEqual({ PATH: "/bin", HOME: "/Users/test" })
   })
 
   it("uses the probed PATH for a sparse app and keeps a rich app PATH", () => {
@@ -150,9 +198,9 @@ describe("user shell environment", () => {
     const command = await environment.commandEnvironment("/workspace")
     expect(calls).toEqual(["env -0", "printenv"])
     expect(logs).toEqual([
-      "run_command shell-env probe: pending",
-      "run_command shell-env probe: fallback_printenv (exit code 1)",
-      "run_command shell-env probe: ready",
+      "exec_command shell-env probe: pending",
+      "exec_command shell-env probe: fallback_printenv (exit code 1)",
+      "exec_command shell-env probe: ready",
     ])
     expect(command).toMatchObject({
       shell: "/bin/zsh",
@@ -191,7 +239,42 @@ describe("user shell environment", () => {
       await expect(environment.probe()).resolves.toBe("ready")
       const command = await environment.commandEnvironment(workspace)
       expect(command.env.PATH).toMatch(/^\/custom\/from-zdot:/)
-      expect(command.env.ZDOTDIR).toBeUndefined()
+      expect(command.env.ZDOTDIR).toBe(zdotdir)
+    },
+  )
+
+  it.skipIf(process.platform === "win32" || !existsSync("/bin/zsh"))(
+    "applies the environment policy before and after login-shell startup",
+    async () => {
+      const workspace = await realpath(
+        await mkdtemp(join(tmpdir(), "yakitori-shell-policy-")),
+      )
+      workspaces.push(workspace)
+      await writeFile(
+        join(workspace, ".zprofile"),
+        `export LEAK="\${API_KEY:-missing}"\nexport FROM_SET="\${POLICY_FLAG:-missing}"\n`,
+      )
+      const environment = createUserShellEnv({
+        appEnv: {
+          HOME: workspace,
+          PATH: "/usr/bin:/bin",
+          ZDOTDIR: workspace,
+          API_KEY: "must-not-reach-startup",
+        },
+        shellEnvironmentPolicy: {
+          ignoreDefaultExcludes: false,
+          set: { POLICY_FLAG: "visible-to-startup" },
+        },
+        resolveShell: async () => ({ shell: "/bin/zsh", warnings: [] }),
+        log: () => {},
+      })
+
+      await expect(environment.probe()).resolves.toBe("ready")
+      const command = await environment.commandEnvironment(workspace)
+      expect(command.env.API_KEY).toBeUndefined()
+      expect(command.env.LEAK).toBe("missing")
+      expect(command.env.FROM_SET).toBe("visible-to-startup")
+      expect(command.env.POLICY_FLAG).toBe("visible-to-startup")
     },
   )
 })

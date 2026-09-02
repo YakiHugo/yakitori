@@ -1,11 +1,12 @@
 import OpenAI from "openai"
 import type {
-  FunctionTool,
+  Tool as OpenAITool,
   Response,
   ResponseInput,
 } from "openai/resources/responses/responses"
 import type { ReasoningEffort } from "openai/resources/shared"
 import { isJsonObject, isJsonValue, type JsonObject } from "../kernel/index.ts"
+import { nativeDeferredToolProtocol } from "./deferred-tool-loading.ts"
 import { isAbortError } from "./errors.ts"
 import {
   DEFAULT_MODEL_MAX_OUTPUT_TOKENS,
@@ -55,12 +56,18 @@ async function* streamOpenAI(
   }
 
   try {
+    const nativeDeferredLoading =
+      nativeDeferredToolProtocol(request) === "openai"
+    const customFallbackKeys = customFallbackKeysForRequest(
+      request,
+      nativeDeferredLoading,
+    )
     const stream = await client.responses.create(
       {
         model: request.target.model || defaultModel,
         instructions: flattenModelSystem(request.system),
-        input: toOpenAIInput(request.messages),
-        tools: toOpenAITools(request.tools),
+        input: toOpenAIInput(request.messages, nativeDeferredLoading),
+        tools: toOpenAITools(request.tools, nativeDeferredLoading),
         parallel_tool_calls: true,
         max_output_tokens:
           request.maxOutputTokens ?? DEFAULT_MODEL_MAX_OUTPUT_TOKENS,
@@ -112,7 +119,10 @@ async function* streamOpenAI(
         event.type === "response.incomplete" ||
         event.type === "response.failed"
       ) {
-        yield { type: "response", response: fromOpenAIResponse(event.response) }
+        yield {
+          type: "response",
+          response: fromOpenAIResponse(event.response, customFallbackKeys),
+        }
         return
       }
       if (event.type === "error") {
@@ -145,10 +155,45 @@ async function* streamOpenAI(
   }
 }
 
+function customFallbackKeysForRequest(
+  request: ModelRequest,
+  nativeDeferredLoading: boolean,
+): ReadonlyMap<string, string> {
+  const result = new Map<string, string>()
+  for (const tool of request.tools) {
+    if (
+      tool.kind === "custom" &&
+      tool.customInputFallbackKey !== undefined &&
+      (!nativeDeferredLoading || tool.deferLoading !== true)
+    ) {
+      result.set(tool.name, tool.customInputFallbackKey)
+    }
+  }
+  if (!nativeDeferredLoading) return result
+
+  // Responses can call a custom tool loaded by an earlier tool_search_output
+  // even after the live catalog changes. Interpret that call using the exact
+  // historical definition that granted the capability on the wire.
+  for (const message of request.messages) {
+    if (message.role !== "tool" || message.toolSearch === undefined) continue
+    for (const tool of message.toolSearch.tools) {
+      if (
+        tool.kind === "custom" &&
+        tool.customInputFallbackKey !== undefined
+      ) {
+        result.set(tool.name, tool.customInputFallbackKey)
+      }
+    }
+  }
+  return result
+}
+
 export function toOpenAIInput(
   messages: readonly ModelMessage[],
+  nativeDeferredLoading = true,
 ): ResponseInput {
   const input: ResponseInput = []
+  const customCallIds = new Set<string>()
   for (const message of messages) {
     if (message.role === "developer") {
       input.push({
@@ -182,13 +227,34 @@ export function toOpenAIInput(
       continue
     }
     if (message.role === "tool") {
-      input.push({
-        type: "function_call_output",
-        call_id: message.toolCallId,
-        output: message.isError
-          ? `[tool_error]\n${message.content}`
-          : message.content,
-      })
+      if (nativeDeferredLoading && message.toolSearch !== undefined) {
+        input.push({
+          type: "tool_search_output",
+          call_id: message.toolCallId,
+          execution: "client",
+          status: "completed",
+          tools: message.toolSearch.tools.flatMap((tool) =>
+            toOpenAITool(tool, true),
+          ),
+        })
+        continue
+      }
+      const output = message.isError
+        ? `[tool_error]\n${message.content}`
+        : message.content
+      input.push(
+        customCallIds.has(message.toolCallId)
+          ? {
+              type: "custom_tool_call_output",
+              call_id: message.toolCallId,
+              output,
+            }
+          : {
+              type: "function_call_output",
+              call_id: message.toolCallId,
+              output,
+            },
+      )
       continue
     }
 
@@ -210,6 +276,26 @@ export function toOpenAIInput(
         continue
       }
       flushText()
+      if (block.toolKind === "tool_search" && nativeDeferredLoading) {
+        input.push({
+          type: "tool_search_call",
+          call_id: block.id,
+          execution: "client",
+          status: "completed",
+          arguments: block.input,
+        })
+        continue
+      }
+      if (block.toolKind === "custom") {
+        customCallIds.add(block.id)
+        input.push({
+          type: "custom_tool_call",
+          call_id: block.id,
+          name: block.name,
+          input: customToolInput(block.input),
+        })
+        continue
+      }
       input.push({
         type: "function_call",
         call_id: block.id,
@@ -222,17 +308,57 @@ export function toOpenAIInput(
   return input
 }
 
-export function toOpenAITools(tools: ModelRequest["tools"]): FunctionTool[] {
-  return tools.map((tool) => ({
-    type: "function",
-    name: tool.name,
-    description: tool.description,
-    parameters: tool.inputSchema,
-    strict: false,
-  }))
+export function toOpenAITools(
+  tools: ModelRequest["tools"],
+  nativeDeferredLoading = true,
+): OpenAITool[] {
+  return tools.flatMap((tool) => {
+    if (nativeDeferredLoading && tool.deferLoading === true) return []
+    if (nativeDeferredLoading && tool.kind === "tool_search") {
+      return [
+        {
+          type: "tool_search" as const,
+          execution: "client" as const,
+          description: tool.description,
+          parameters: tool.inputSchema,
+        },
+      ]
+    }
+    return toOpenAITool(tool, false)
+  })
 }
 
-export function fromOpenAIResponse(response: Response): ModelResponse {
+function toOpenAITool(
+  tool: ModelRequest["tools"][number],
+  deferLoading: boolean,
+): OpenAITool[] {
+  if (tool.kind === "custom") {
+    return [
+      {
+        type: "custom",
+        name: tool.name,
+        description: tool.description,
+        ...(tool.inputFormat === undefined ? {} : { format: tool.inputFormat }),
+        ...(deferLoading ? { defer_loading: true } : {}),
+      },
+    ]
+  }
+  return [
+    {
+      type: "function",
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.inputSchema,
+      strict: false,
+      ...(deferLoading ? { defer_loading: true } : {}),
+    },
+  ]
+}
+
+export function fromOpenAIResponse(
+  response: Response,
+  customFallbackKeys: ReadonlyMap<string, string> = new Map(),
+): ModelResponse {
   if (response.status === "cancelled") {
     return { stopReason: ModelStopReason.Aborted, content: [] }
   }
@@ -287,6 +413,37 @@ export function fromOpenAIResponse(response: Response): ModelResponse {
       }
       continue
     }
+    if (item.type === "custom_tool_call") {
+      const customInputFallbackKey = customFallbackKeys.get(item.name)
+      content.push({
+        type: "tool_call",
+        id: item.call_id,
+        name: item.name,
+        input: item.input,
+        toolKind: "custom",
+        ...(customInputFallbackKey === undefined
+          ? {}
+          : { customInputFallbackKey }),
+      })
+      continue
+    }
+    if (item.type === "tool_search_call") {
+      if (
+        item.execution !== "client" ||
+        item.call_id === null ||
+        !isJsonValue(item.arguments)
+      ) {
+        continue
+      }
+      content.push({
+        type: "tool_call",
+        id: item.call_id,
+        name: "tool_search",
+        input: item.arguments,
+        toolKind: "tool_search",
+      })
+      continue
+    }
     if (item.type !== "function_call") continue
 
     let parsed: unknown
@@ -321,6 +478,13 @@ export function fromOpenAIResponse(response: Response): ModelResponse {
       : ModelStopReason.EndTurn,
     content,
   )
+}
+
+function customToolInput(
+  input: import("../kernel/index.ts").JsonValue,
+): string {
+  if (typeof input === "string") return input
+  return JSON.stringify(input)
 }
 
 function toOpenAIReasoningItem(

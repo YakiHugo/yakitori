@@ -179,6 +179,12 @@ export type SessionEvent =
       readonly operation: "turn_input" | "interrupt" | "persistence"
       readonly message: string
     }
+  | {
+      readonly type: "runtime.warning"
+      readonly threadId: string
+      readonly turnId: string
+      readonly message: string
+    }
 
 export class SessionIo {
   readonly #send: (operation: SessionOp) => Promise<void>

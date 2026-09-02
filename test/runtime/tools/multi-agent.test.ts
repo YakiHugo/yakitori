@@ -8,6 +8,7 @@ import type {
   ToolExecutionDescriptor,
 } from "../../../src/kernel/index.ts"
 import { createMultiAgentTools } from "../../../src/runtime/tools/multi-agent.ts"
+import { canonicalToolName } from "../../../src/runtime/tools/tool-name.ts"
 import type {
   RuntimeTool,
   ToolExecutionContext,
@@ -17,7 +18,7 @@ import type {
 describe("multi-agent tools", () => {
   it("registers the Codex V2 control surface with stable schemas", () => {
     const tools = createMultiAgentTools()
-    expect(tools.map((tool) => tool.name)).toEqual([
+    expect(tools.map((tool) => canonicalToolName(tool.toolName))).toEqual([
       "spawn_agent",
       "send_message",
       "followup_task",
@@ -32,7 +33,9 @@ describe("multi-agent tools", () => {
           tool.approvalRequirement.kind === "none",
       ),
     ).toBe(true)
-    expect(tools.find((tool) => tool.name === "spawn_agent")).toMatchObject({
+    expect(
+      tools.find((tool) => canonicalToolName(tool.toolName) === "spawn_agent"),
+    ).toMatchObject({
       effect: "observe",
       inputSchema: {
         required: ["task_name", "message"],
@@ -148,7 +151,7 @@ function completedExecution(
 
 function requireTool(name: string) {
   const tool = createMultiAgentTools().find(
-    (candidate) => candidate.name === name,
+    (candidate) => canonicalToolName(candidate.toolName) === name,
   )
   if (tool === undefined) throw new Error(`missing tool ${name}`)
   return tool

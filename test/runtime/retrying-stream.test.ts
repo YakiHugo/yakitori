@@ -183,6 +183,7 @@ function requestFixture(signal?: AbortSignal): ModelRequest {
     system: [{ id: "base", revision: "base-1", text: "Be helpful." }],
     messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
     tools: [],
+    toolWireProtocol: "eager",
     ...(signal === undefined ? {} : { signal }),
   }
 }

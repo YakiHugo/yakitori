@@ -20,6 +20,7 @@ import {
 } from "./text-file-format.ts"
 import { compareAndWriteTextFile } from "./text-file-write.ts"
 import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
+import { plainToolName } from "./tool-name.ts"
 
 type EditInput = {
   readonly path: string
@@ -32,7 +33,7 @@ export function createEditFileTool(
   maxBytes = ToolLimitDefaults.fileWriteBytes,
 ): RuntimeTool {
   return {
-    name: "edit_file",
+    toolName: plainToolName("edit_file"),
     description:
       "Replace text in an existing UTF-8 file, or create a new file by setting oldString to an empty string. Accepts paths relative to the workspace and absolute paths. An empty oldString never overwrites an existing file. Read existing files before editing them. Supply the smallest unique non-empty oldString, usually 2-4 lines, and exclude read_file's {N}\\t line prefixes. A ranged read requires an exact unique oldString; replaceAll requires a complete read. For a complete unchanged revision, matching is exact first, followed only by deterministic line-ending, curly-quote, and trailing-whitespace equivalence. No similarity edit is ever applied.",
     approvalRequirement: fileChangeApprovalRequirement,

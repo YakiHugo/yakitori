@@ -51,7 +51,7 @@ describe("web_fetch contract", () => {
   it("requires no approval, is read-only, and is in the default tool set", () => {
     const tool = createWebFetchTool()
     expect(tool).toMatchObject({
-      name: "web_fetch",
+      toolName: { name: "web_fetch" },
       approvalRequirement: { kind: "none" },
       effect: "observe",
       inputSchema: {
@@ -60,7 +60,7 @@ describe("web_fetch contract", () => {
         properties: { url: { type: "string" } },
       },
     })
-    expect(createDefaultTools().map((entry) => entry.name)).toContain(
+    expect(createDefaultTools().map((entry) => entry.toolName.name)).toContain(
       "web_fetch",
     )
   })

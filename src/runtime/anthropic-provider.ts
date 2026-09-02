@@ -15,6 +15,7 @@ import {
   type JsonObject,
   type JsonValue,
 } from "../kernel/index.ts"
+import { nativeDeferredToolProtocol } from "./deferred-tool-loading.ts"
 import { isAbortError } from "./errors.ts"
 import {
   DEFAULT_MODEL_MAX_OUTPUT_TOKENS,
@@ -69,11 +70,24 @@ async function* streamAnthropic(
   }
 
   let stream: Awaited<ReturnType<typeof client.messages.stream>>
+  const customFallbackKeys = new Map(
+    request.tools.flatMap((tool) =>
+      tool.kind === "custom" && tool.customInputFallbackKey !== undefined
+        ? [[tool.name, tool.customInputFallbackKey] as const]
+        : [],
+    ),
+  )
   try {
+    const nativeDeferredLoading =
+      nativeDeferredToolProtocol(request) === "anthropic"
     const explicitPromptCaching =
       request.target.provider === "anthropic" ||
       request.target.provider === "kimi"
-    const tools = toAnthropicTools(request.tools, explicitPromptCaching)
+    const tools = toAnthropicTools(
+      request.tools,
+      explicitPromptCaching,
+      nativeDeferredLoading,
+    )
     // Effort is only sent where support is confirmed: official Anthropic and
     // Kimi's Anthropic-compatible coding endpoint (which mirrors Claude Code).
     // Explicit cache breakpoints are supported by both official Anthropic and
@@ -101,7 +115,9 @@ async function* streamAnthropic(
         system: toAnthropicSystem(request.system, explicitPromptCaching),
         messages: toAnthropicRequestMessages(
           request.messages,
+          request.tools,
           explicitPromptCaching,
+          nativeDeferredLoading,
         ),
         ...(tools === undefined ? {} : { tools }),
         ...(request.cacheKey === undefined
@@ -164,7 +180,7 @@ async function* streamAnthropic(
     const final = await stream.finalMessage()
     yield {
       type: "response",
-      response: fromAnthropicMessage(final),
+      response: fromAnthropicMessage(final, customFallbackKeys),
     }
   } catch (error) {
     if (request.signal?.aborted || isAbortError(error)) {
@@ -183,6 +199,8 @@ async function* streamAnthropic(
 
 export function toAnthropicMessages(
   messages: readonly ModelMessage[],
+  nativeDeferredLoading = true,
+  availableTools?: ReadonlyMap<string, ModelRequest["tools"][number]>,
 ): MessageParam[] {
   const converted: MessageParam[] = []
   for (const message of messages) {
@@ -227,7 +245,23 @@ export function toAnthropicMessages(
     const toolResult: ToolResultBlockParam = {
       type: "tool_result",
       tool_use_id: message.toolCallId,
-      content: message.content,
+      content:
+        nativeDeferredLoading &&
+        message.toolSearch !== undefined &&
+        message.toolSearch.tools.length > 0 &&
+        (availableTools === undefined ||
+          message.toolSearch.tools.every((tool) => {
+            const available = availableTools.get(tool.name)
+            return (
+              available !== undefined &&
+              JSON.stringify(available) === JSON.stringify(tool)
+            )
+          }))
+          ? message.toolSearch.tools.map((tool) => ({
+              type: "tool_reference" as const,
+              tool_name: tool.name,
+            }))
+          : message.content,
       ...(message.isError ? { is_error: true } : {}),
     }
     appendAnthropicUserContent(converted, [toolResult])
@@ -253,13 +287,26 @@ function appendAnthropicUserContent(
 export function toAnthropicTools(
   tools: ModelRequest["tools"],
   cacheBreakpoint = false,
+  nativeDeferredLoading = true,
 ): Tool[] | undefined {
   if (tools.length === 0) return undefined
+  let cacheBreakpointIndex = -1
+  if (cacheBreakpoint) {
+    for (let index = tools.length - 1; index >= 0; index -= 1) {
+      if (!nativeDeferredLoading || tools[index]?.deferLoading !== true) {
+        cacheBreakpointIndex = index
+        break
+      }
+    }
+  }
   return tools.map((tool, index) => ({
     name: tool.name,
     description: tool.description,
     input_schema: tool.inputSchema as Tool["input_schema"],
-    ...(cacheBreakpoint && index === tools.length - 1
+    ...(nativeDeferredLoading && tool.deferLoading === true
+      ? { defer_loading: true }
+      : {}),
+    ...(index === cacheBreakpointIndex
       ? { cache_control: { type: "ephemeral" as const } }
       : {}),
   }))
@@ -283,9 +330,15 @@ export function toAnthropicSystem(
 
 function toAnthropicRequestMessages(
   messages: readonly ModelMessage[],
+  tools: ModelRequest["tools"],
   cacheBreakpoint: boolean,
+  nativeDeferredLoading: boolean,
 ): MessageParam[] {
-  const dynamic = toAnthropicMessages(messages)
+  const dynamic = toAnthropicMessages(
+    messages,
+    nativeDeferredLoading,
+    new Map(tools.map((tool) => [tool.name, tool])),
+  )
   if (cacheBreakpoint) markLastModelContentBlockCacheable(dynamic)
   return dynamic
 }
@@ -318,17 +371,20 @@ function markLastModelContentBlockCacheable(messages: MessageParam[]): boolean {
   return false
 }
 
-export function fromAnthropicMessage(message: {
-  readonly content: readonly unknown[]
-  readonly stop_reason: string | null
-  readonly usage?: {
-    readonly input_tokens?: number
-    readonly output_tokens?: number
-    readonly cache_read_input_tokens?: number | null
-    readonly cache_creation_input_tokens?: number | null
-  }
-  readonly id?: string
-}): ModelResponse {
+export function fromAnthropicMessage(
+  message: {
+    readonly content: readonly unknown[]
+    readonly stop_reason: string | null
+    readonly usage?: {
+      readonly input_tokens?: number
+      readonly output_tokens?: number
+      readonly cache_read_input_tokens?: number | null
+      readonly cache_creation_input_tokens?: number | null
+    }
+    readonly id?: string
+  },
+  customFallbackKeys: ReadonlyMap<string, string> = new Map(),
+): ModelResponse {
   const content: ModelContentBlock[] = []
   for (const block of message.content) {
     if (!isRecord(block)) continue
@@ -365,11 +421,29 @@ export function fromAnthropicMessage(message: {
       typeof block.id === "string" &&
       typeof block.name === "string"
     ) {
+      const fallbackKey = customFallbackKeys.get(block.name)
+      const toolInput =
+        fallbackKey !== undefined &&
+        isRecord(block.input) &&
+        typeof block.input[fallbackKey] === "string"
+          ? block.input[fallbackKey]
+          : isJsonValue(block.input)
+            ? block.input
+            : {}
       content.push({
         type: "tool_call",
         id: block.id,
         name: block.name,
-        input: (isJsonValue(block.input) ? block.input : {}) as JsonValue,
+        input: toolInput as JsonValue,
+        ...(block.name === "tool_search"
+          ? { toolKind: "tool_search" as const }
+          : {}),
+        ...(fallbackKey !== undefined
+          ? {
+              toolKind: "custom" as const,
+              customInputFallbackKey: fallbackKey,
+            }
+          : {}),
       })
     }
   }
@@ -428,6 +502,19 @@ function toAnthropicAssistantBlock(
 ): ContentBlockParam | undefined {
   if (block.type === "text") return { type: "text", text: block.text }
   if (block.type === "reasoning") return toAnthropicReasoningBlock(block)
+  if (block.toolKind === "custom" && typeof block.input === "string") {
+    if (block.customInputFallbackKey === undefined) {
+      throw new Error(
+        `Custom tool ${block.name} is missing its function fallback key.`,
+      )
+    }
+    return {
+      type: "tool_use",
+      id: block.id,
+      name: block.name,
+      input: { [block.customInputFallbackKey]: block.input },
+    }
+  }
   return {
     type: "tool_use",
     id: block.id,

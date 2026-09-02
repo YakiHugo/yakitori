@@ -8,27 +8,33 @@ const PROBE_CAPTURE_BYTES = 1024 * 1024
 const PROBE_FORCE_COMPLETION_MS = 100
 const PROBE_SENTINEL = "__YAKITORI_ENV_START_7F31B6A9__"
 const SUPPORTED_SHELLS = new Set(["zsh", "bash", "sh"])
-const SHELL_STARTUP_ENV_NAMES = new Set(["BASH_ENV", "ENV", "ZDOTDIR"])
-const SECRET_ENV_NAMES = new Set(
+const NON_INHERITABLE_ENV_NAMES = new Set([
+  "ELECTRON_RUN_AS_NODE",
+  "NODE_REPL_AUTH_TOKEN",
+])
+const CORE_ENV_NAMES = new Set(
   [
-    "TOKEN",
-    "GITHUB_TOKEN",
-    "GH_TOKEN",
-    "NPM_TOKEN",
-    "NPM_AUTH_TOKEN",
-    "AWS_ACCESS_KEY_ID",
-    "AWS_SECRET_ACCESS_KEY",
-    "AWS_SESSION_TOKEN",
-    "DATABASE_URL",
-    "MYSQL_PWD",
-    "SSH_PRIVATE_KEY",
-    "OPENAI_API_KEY",
-    "ANTHROPIC_API_KEY",
-    "XAI_API_KEY",
+    "PATH",
+    "SHELL",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LOGNAME",
+    "USER",
   ].map((name) => name.toUpperCase()),
 )
-const SECRET_ENV_PATTERN =
-  /(api[_-]?key|_token$|^token_|[_-]token[_-]|auth[_-]?token|secret|password|passwd|credential|private[_-]?key|bearer)/i
+
+export type ShellEnvironmentPolicy = Readonly<{
+  inherit: "all" | "core" | "none"
+  ignoreDefaultExcludes: boolean
+  exclude: readonly string[]
+  set: Readonly<Record<string, string>>
+  includeOnly: readonly string[]
+}>
 
 export type CommandEnvironment = {
   readonly shell: string
@@ -56,18 +62,28 @@ export function createUserShellEnv(
       shell: string,
       command: "env -0" | "printenv",
     ) => Promise<ShellProbeResult>
+    readonly shellEnvironmentPolicy?: Partial<ShellEnvironmentPolicy>
     readonly log?: (message: string) => void
   } = {},
 ): UserShellEnv {
   const appEnv = { ...(options.appEnv ?? process.env) }
+  const shellEnvironmentPolicy = resolveShellEnvironmentPolicy(
+    options.shellEnvironmentPolicy,
+  )
   const resolveShell = options.resolveShell ?? resolveCommandShell
   const runProbe =
     options.runProbe ??
     ((shell, command) =>
-      runShellProbe(shell, command, filterProbeEnvironment(appEnv)))
+      runShellProbe(
+        shell,
+        command,
+        applyShellEnvironmentPolicy(appEnv, shellEnvironmentPolicy),
+      ))
   const log = options.log ?? ((message: string) => console.log(message))
   const shellPromise = resolveShell()
-  const fallback = Object.freeze(filterCommandEnvironment(appEnv))
+  const fallback = Object.freeze(
+    applyShellEnvironmentPolicy(appEnv, shellEnvironmentPolicy),
+  )
   let probed: Readonly<NodeJS.ProcessEnv> | undefined
   let probePromise: Promise<"ready" | "unavailable"> | undefined
 
@@ -88,7 +104,7 @@ export function createUserShellEnv(
     },
     async probe() {
       if (probePromise !== undefined) return probePromise
-      log("run_command shell-env probe: pending")
+      log("exec_command shell-env probe: pending")
       probePromise = (async () => {
         const resolved = await shellPromise
         const nul = await runProbe(resolved.shell, "env -0")
@@ -98,20 +114,22 @@ export function createUserShellEnv(
             : undefined
         if (parsed === undefined) {
           log(
-            `run_command shell-env probe: fallback_printenv (${probeFailureReason(nul)})`,
+            `exec_command shell-env probe: fallback_printenv (${probeFailureReason(nul)})`,
           )
           const lines = await runProbe(resolved.shell, "printenv")
           if (lines.exitCode === 0 && lines.truncated !== true)
             parsed = parsePrintenvEnvironment(lines.stdout)
           if (parsed === undefined) {
             log(
-              `run_command shell-env probe: unavailable (${probeFailureReason(lines)})`,
+              `exec_command shell-env probe: unavailable (${probeFailureReason(lines)})`,
             )
             return "unavailable"
           }
         }
-        probed = Object.freeze(mergeShellEnvironment(appEnv, parsed))
-        log("run_command shell-env probe: ready")
+        probed = Object.freeze(
+          mergeShellEnvironment(appEnv, parsed, shellEnvironmentPolicy),
+        )
+        log("exec_command shell-env probe: ready")
         return "ready"
       })()
       return probePromise
@@ -178,37 +196,35 @@ async function verifyShellCandidate(
   }
 }
 
-export function filterCommandEnvironment(
+export function applyShellEnvironmentPolicy(
   environment: NodeJS.ProcessEnv,
+  policy: ShellEnvironmentPolicy = resolveShellEnvironmentPolicy(),
 ): NodeJS.ProcessEnv {
-  return Object.fromEntries(
+  const inherited = Object.fromEntries(
     Object.entries(environment).filter(([name, value]) => {
-      if (value === undefined) return false
-      const upper = name.toUpperCase()
-      if (upper.startsWith("YAKITORI_") || upper.startsWith("ELECTRON_")) {
-        return false
-      }
-      if (SHELL_STARTUP_ENV_NAMES.has(upper)) return false
-      if (SECRET_ENV_NAMES.has(upper) || /_DATABASE_URL$/i.test(name))
-        return false
-      return !SECRET_ENV_PATTERN.test(name)
+      if (value === undefined || policy.inherit === "none") return false
+      return policy.inherit === "all" || CORE_ENV_NAMES.has(name.toUpperCase())
     }),
   )
-}
-
-function filterProbeEnvironment(
-  environment: NodeJS.ProcessEnv,
-): NodeJS.ProcessEnv {
-  const filtered = filterCommandEnvironment(environment)
-  if (environment.ZDOTDIR !== undefined) filtered.ZDOTDIR = environment.ZDOTDIR
-  return filtered
+  if (!policy.ignoreDefaultExcludes) {
+    removeMatching(inherited, ["*KEY*", "*SECRET*", "*TOKEN*"])
+  }
+  removeMatching(inherited, policy.exclude)
+  Object.assign(inherited, policy.set)
+  if (policy.includeOnly.length > 0) {
+    for (const name of Object.keys(inherited)) {
+      if (!matchesAnyPattern(name, policy.includeOnly)) delete inherited[name]
+    }
+  }
+  return scrubNonInheritableEnvironment(inherited)
 }
 
 export function mergeShellEnvironment(
   appEnv: NodeJS.ProcessEnv,
   shellEnv: NodeJS.ProcessEnv,
+  policy: ShellEnvironmentPolicy = resolveShellEnvironmentPolicy(),
 ): NodeJS.ProcessEnv {
-  const merged: NodeJS.ProcessEnv = { ...filterCommandEnvironment(shellEnv) }
+  const merged: NodeJS.ProcessEnv = { ...shellEnv, ...appEnv }
   const sparsePath = isSparsePath(appEnv.PATH)
   for (const name of ["PATH", "MANPATH"] as const) {
     const appValue = appEnv[name]
@@ -218,18 +234,55 @@ export function mergeShellEnvironment(
       : (appValue ?? shellValue)
     if (selected !== undefined) merged[name] = selected
   }
-  for (const [name, value] of Object.entries(appEnv)) {
-    if (
-      value !== undefined &&
-      (name === "PORT" ||
-        name === "NODE_ENV" ||
-        name.startsWith("YAKITORI_") ||
-        name.startsWith("ELECTRON_"))
-    ) {
-      merged[name] = value
-    }
+  return applyShellEnvironmentPolicy(merged, policy)
+}
+
+function resolveShellEnvironmentPolicy(
+  input: Partial<ShellEnvironmentPolicy> = {},
+): ShellEnvironmentPolicy {
+  return {
+    inherit: input.inherit ?? "all",
+    ignoreDefaultExcludes: input.ignoreDefaultExcludes ?? true,
+    exclude: [...(input.exclude ?? [])],
+    set: { ...(input.set ?? {}) },
+    includeOnly: [...(input.includeOnly ?? [])],
   }
-  return filterCommandEnvironment(merged)
+}
+
+function scrubNonInheritableEnvironment(
+  environment: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  return Object.fromEntries(
+    Object.entries(environment).filter(
+      ([name, value]) =>
+        value !== undefined &&
+        !NON_INHERITABLE_ENV_NAMES.has(name.toUpperCase()),
+    ),
+  )
+}
+
+function removeMatching(
+  environment: NodeJS.ProcessEnv,
+  patterns: readonly string[],
+): void {
+  for (const name of Object.keys(environment)) {
+    if (matchesAnyPattern(name, patterns)) delete environment[name]
+  }
+}
+
+function matchesAnyPattern(name: string, patterns: readonly string[]): boolean {
+  return patterns.some((pattern) => globPattern(pattern).test(name))
+}
+
+function globPattern(pattern: string): RegExp {
+  const source = [...pattern]
+    .map((character) => {
+      if (character === "*") return ".*"
+      if (character === "?") return "."
+      return character.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&")
+    })
+    .join("")
+  return new RegExp(`^${source}$`, "i")
 }
 
 export function isSparsePath(path: string | undefined): boolean {

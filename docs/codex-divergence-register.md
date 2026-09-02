@@ -10,9 +10,9 @@ tests remain authoritative for behavior that has already landed.
 
 ## Comparison baseline
 
-- Yakitori: working tree based on commit `f306449`, including the C6 recovery
-  and documentation changes recorded on 2026-08-31 and the C7 lifecycle slice
-  recorded on 2026-09-02.
+- Yakitori: working tree based on commit `bced04f`, including the C6 recovery,
+  C3 tool-execution changes, and the C7 lifecycle slice recorded through
+  2026-09-02.
 - Codex: `.references/public/codex` commit `536f86e5` from 2026-08-21.
 - grok-build: `.references/public/grok-build` commit `19d42e35` from
   2026-08-19. It confirms the Session actor/persistence boundary and provides
@@ -51,7 +51,7 @@ change that decision.
 | --- | --- | --- | --- | --- |
 | C1 | Session/Turn authority, durable protocol, persistence, and fork | `src/core/*`, legacy `src/kernel/*`, narrow recovery paths in `src/runtime/recovery.ts` | `core/session`, `core/codex_thread.rs`, `core/thread_manager.rs`, `history`, `rollout`, `thread-store` | Implemented |
 | C2 | Execution loop, model context, world state, and compaction | `src/runtime/session-runner.ts`, `compaction.ts`, `model-context.ts`, `world-state.ts` | `core/session/turn.rs`, `context_manager`, `compact*`, `session/world_state.rs` | Audited |
-| C3 | Tool catalog, execution, permissions, and sandboxing | `src/runtime/tools/*`, `permission-gate.ts`, `tool-permissions.ts` | `core/tools`, `tools`, `exec`, `execpolicy`, `sandboxing`, platform sandboxes | Unreviewed |
+| C3 | Tool catalog, execution, permissions, and sandboxing | `src/runtime/tools/*`, `permission-gate.ts`, `tool-permissions.ts` | `core/tools`, `tools`, `exec`, `execpolicy`, `sandboxing`, platform sandboxes | Audited; core implemented |
 | C4 | Provider transport, model catalog, credentials, retry, and usage | `src/runtime/*provider.ts`, catalog and credentials modules | `model-provider`, `model-provider-info`, `models-manager`, `codex-client`, `responses_retry` | Unreviewed |
 | C5 | Instructions, environment, shell, skills, plugins, MCP, and connectors | prompt, instruction, environment, and future extension owners | `agents_md_manager`, `context`, `skills`, `core-plugins`, `mcp`, `connectors`, `shell*` | Unreviewed |
 | C6 | Subagents, AgentControl, and Mate lifecycle | `src/runtime/agent-control.ts`, `agent-runtime.ts`, multi-agent tools, `src/mates/*` | `core/agent`, `agent-graph-store`, `agent-identity`, thread spawning | Audited; core implemented |
@@ -78,6 +78,12 @@ change that decision.
 | C2-D5 | Provider-neutral local prefix compaction versus provider-selected local/remote strategies | Open | C1-D2 and C4 provider capabilities |
 | C2-D6 | Fixed per-Turn call budgets versus an unbounded tool-follow-up loop with separate rollout budget | Open | Local safety policy; C6 rollout budget |
 | C2-D7 | Universal replay across model changes versus compatibility-aware pre-switch compaction | Open | C1-D2, C2-D1, and C4 model contracts |
+| C3-D1 | Codex permission profiles and sandbox escalation versus unrestricted YOLO execution | Deliberate | Product requirement: the active execution mode grants full host access |
+| C3-D2 | `always_approve`/`auto_file_tools` versus Codex `on-request`/`never` semantics | Deliberate | Names describe Yakitori behavior; `never` remains reserved for deny-without-asking |
+| C3-D3 | Flat mutable tool maps versus typed source-aware Step routers | Converge | Follow Codex; implemented 2026-08-31 |
+| C3-D4 | First-serial-call scheduling versus capability-based fair execution admission | Converge | Follow Codex runtime capability and readiness boundaries; implemented 2026-08-31 |
+| C3-D5 | One-shot commands and bespoke file edits versus unified exec sessions and grammar apply_patch | Converge | Follow Codex; provider-neutral fallback is explicit; implemented 2026-08-31 |
+| C3-D6 | Tool runtime hooks, MCP readiness sources, and plugin configuration | Derived | C5 owns extension discovery/configuration; C3 now exposes the required runtime readiness boundary |
 | C6-D1 | Process-local task registry versus one per-root AgentControl over real child Threads | Converge | Follow Codex; implemented 2026-08-31 |
 | C6-D2 | Ephemeral child registry versus durable spawn topology and lazy identity restoration | Converge | Follow Codex V2 graph boundary; implemented 2026-08-31 |
 | C6-D3 | Volatile mailbox completion versus retry-safe model-visible inter-agent delivery | Converge | Child Session and rollout contract; implemented 2026-08-31 |
@@ -619,8 +625,8 @@ comments direct step-scoped work to `StepContext`. This permits a later sample
 in one Turn to use newly resolved model capabilities or environment bindings
 without pretending the original Turn snapshot changed.
 
-Concrete consequence: Yakitori can prove that every tool side effect in a Turn
-used one persisted execution contract. It cannot currently switch model,
+Concrete consequence: Yakitori can prove that every tool side effect in a Step
+used the same frozen router that produced the model request. It cannot currently switch model,
 provider policy, MCP catalog, or approval behavior between tool follow-ups.
 Codex can refresh those request-scoped dependencies, but its durable
 `TurnContextItem` is not a complete event-sourced description of every Step.
@@ -628,7 +634,8 @@ Codex can refresh those request-scoped dependencies, but its durable
 Evidence anchors:
 
 - Yakitori: `src/runtime/session-configuration.ts`,
-  `src/runtime/step-context.ts`, `SessionRunner.executeTextTurn`.
+  `src/runtime/tools/spec-plan.ts`, and the sampling loop in
+  `src/runtime/turn-processor.ts`.
 - Codex: `core/src/session/turn_context.rs`,
   `core/src/session/step_context.rs`, Step capture in
   `core/src/session/mod.rs` and `core/src/session/turn.rs`.
@@ -861,6 +868,97 @@ Before changing the execution loop across module boundaries, decide:
 5. Are per-Turn model/tool call counts durable user/session policy or
    process-local runaway protection?
 6. Which model/provider changes require compaction rather than direct replay?
+
+---
+
+## C3 — Tool catalog, execution, permissions, and sandboxing
+
+Status: audited. The core tool identity, dispatch, execution-ordering, command,
+and patch boundaries follow Codex. Unrestricted execution remains an explicit
+Yakitori product decision rather than an unfinished sandbox implementation.
+
+### First-principles problem
+
+A model tool call crosses four independent contracts:
+
+1. catalog identity: the definition shown to the model must name exactly the
+   runtime that will receive the call;
+2. admission: approval and readiness waits must finish without occupying an
+   execution slot or letting later calls cross a serial barrier;
+3. execution: concurrent observations may overlap, while mutations and opaque
+   effects need a fair global ordering boundary;
+4. evidence: outputs, file revisions, partial side effects, process sessions,
+   and provider replay must remain truthful after the current Step ends.
+
+A flat `Map<string, handler>` does not establish those contracts. In
+particular, a catalog refresh can change the meaning of a name after the model
+saw it, a pending mutation can be overtaken by later reads, and a failed
+multi-file patch can modify disk while reporting no durable delta.
+
+### Adopted Codex boundaries
+
+- `ToolName` owns structured namespace identity and one injective canonical
+  model-facing name. Trusted and external registration are different APIs;
+  reserved names, namespace ownership, first collision, exposure, and search
+  metadata are decided before a Step is finalized.
+- A finalized `ToolRouter` is the Step snapshot for definitions, exposure,
+  source, search, runtime identity, parallel capability, approval, readiness,
+  and execution. Definition and search metadata are cloned and frozen; later
+  extension mutation affects only a later Step.
+- Each call reserves the Session-owned fair read/write execution gate in model order.
+  Permission and runtime readiness waits occur before the reservation takes its
+  execution lock. A waiting writer remains a barrier, so later ready readers
+  cannot overtake it; earlier admitted readers can finish.
+- `exec_command` and `write_stdin` share a Session-owned process manager. PTY
+  and pipe processes support bounded initial yield, continued polling,
+  incremental drain-only output, queued interaction, cancellation, process
+  groups, timeout, and soft-cap LRU cleanup.
+- Model metadata selects file-editing capability independently of the Provider
+  wire protocol. Codex-capable models receive the grammar `apply_patch` tool;
+  function-oriented model families receive their own structured edit/write
+  tools instead. A durable custom-call item retains its fallback property, so
+  historical cross-provider replay never reconstructs it from the current
+  Step's tool set.
+- Patch execution follows Codex parsing and file semantics: lenient markers,
+  ordered contexts, EOF additions, mixed line-ending preservation, Add/Move
+  overwrite, missing destination parents, resolved-path duplicate rejection,
+  and cumulative partial-failure delta. Multi-file revision grants, deletion
+  tombstones, and inexact invalidation survive into later model Steps.
+
+### Deliberate YOLO permission difference
+
+Yakitori does not compile Codex `PermissionProfile` filesystem/network
+capabilities and does not invoke platform sandboxes. The active product mode is
+unrestricted host execution: inherited environment, arbitrary command cwd,
+filesystem access, network access, and child processes have the host user's
+authority. Process time/output caps, binary-output checks, process-group
+termination, credential-like environment filtering, and catastrophic-command
+fuses remain operational safety boundaries; they are not described as a
+sandbox or security boundary.
+
+The approval vocabulary therefore names actual behavior:
+
+- `always_approve`: execute admitted tool calls without asking;
+- `auto_file_tools`: file changes proceed automatically while command
+  execution can ask through the permission gate.
+
+The name `never` is not used for full access. It remains available for the
+Codex meaning “never ask and never escalate,” should Yakitori later add bounded
+profiles. This keeps product mode names separate from runtime capabilities and
+avoids silently changing the meaning of a stored policy.
+
+### Extension boundary
+
+Concrete MCP/plugin discovery, connection ownership, configuration trust, and
+user-configured Pre/PostToolUse hooks belong to C5. C3 already supplies the
+runtime contracts they need: external registration, deferred exposure, Step
+snapshotting, tool-owned readiness, fair admission, explicit fallback
+adaptation, and registry disposal. A future extension must enter through those
+contracts; it must not mutate an active Step or run an alternate dispatch loop.
+
+Grok-build confirms the need for Session-owned execution state and durable
+tool evidence, but Codex is the selected reference for catalog identity,
+fair parallel dispatch, process sessions, and patch behavior.
 
 ---
 

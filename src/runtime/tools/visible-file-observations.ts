@@ -34,8 +34,9 @@ export function createVisibleFileObservations(
   const revisions = new Map<string, VisibleFileRevision>()
   for (const tool of tools) {
     if (tool.state === "completed" && tool.output !== undefined) {
-      const grant = grantFromToolOutput(tool.name, tool.output)
-      if (grant !== undefined) applyGrant(revisions, grant)
+      for (const grant of grantsFromToolOutput(tool.name, tool.output)) {
+        applyGrant(revisions, grant)
+      }
     }
   }
   return {
@@ -53,8 +54,8 @@ export function createVisibleFileObservationsFromMessages(
 ): VisibleFileObservations {
   const observations = createVisibleFileObservations()
   for (const message of messages) {
-    if (message.role === "tool" && message.fileObservation !== undefined) {
-      observations.apply(message.fileObservation)
+    if (message.role === "tool" && message.fileObservations !== undefined) {
+      for (const grant of message.fileObservations) observations.apply(grant)
     }
   }
   return observations
@@ -64,11 +65,26 @@ export function grantFromToolOutput(
   name: string,
   output: JsonValue,
 ): FileObservationGrant | undefined {
-  if (!isRecord(output)) return undefined
+  return grantsFromToolOutput(name, output)[0]
+}
+
+export function grantsFromToolOutput(
+  name: string,
+  output: JsonValue,
+): readonly FileObservationGrant[] {
+  if (!isRecord(output)) return []
   if (Object.hasOwn(output, "fileObservation")) {
-    return parseExplicitGrant(output.fileObservation)
+    const grant = parseExplicitGrant(output.fileObservation)
+    return grant === undefined ? [] : [grant]
   }
-  return inferLegacyGrant(name, output)
+  if (Array.isArray(output.fileObservations)) {
+    return output.fileObservations.flatMap((value) => {
+      const grant = parseExplicitGrant(value)
+      return grant === undefined ? [] : [grant]
+    })
+  }
+  const grant = inferLegacyGrant(name, output)
+  return grant === undefined ? [] : [grant]
 }
 
 function applyGrant(
@@ -77,6 +93,11 @@ function applyGrant(
 ): void {
   const path = normalizePath(grant.path)
   const previous = revisions.get(path)
+
+  if (grant.kind === "delete" || grant.kind === "invalidate") {
+    revisions.delete(path)
+    return
+  }
 
   if (grant.kind === "whole_file_read") {
     if (!grant.complete || grant.sha256 === undefined) return
@@ -111,7 +132,11 @@ function applyGrant(
   }
 
   if (grant.sha256 === undefined) return
-  if (grant.kind === "write" || grant.created === true) {
+  if (
+    grant.kind === "write" ||
+    grant.created === true ||
+    grant.complete === true
+  ) {
     revisions.set(path, {
       sha256: grant.sha256,
       complete: true,
@@ -133,7 +158,9 @@ function parseExplicitGrant(value: unknown): FileObservationGrant | undefined {
   const kind = value.kind
   if (
     path === undefined ||
-    (kind !== "edit" &&
+    (kind !== "delete" &&
+      kind !== "invalidate" &&
+      kind !== "edit" &&
       kind !== "ranged_read" &&
       kind !== "whole_file_read" &&
       kind !== "write")

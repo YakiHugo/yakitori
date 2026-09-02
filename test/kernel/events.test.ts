@@ -4,6 +4,7 @@ import {
   EventType,
   InputRole,
   isKernelEvent,
+  isModelMessage,
 } from "../../src/kernel/events.ts"
 
 describe("kernel facts", () => {
@@ -30,7 +31,7 @@ describe("kernel facts", () => {
     expect(envelope).toMatchObject({
       sessionId: "session_00000000-0000-4000-8000-000000000000",
       seq: 1,
-      version: 5,
+      version: 6,
       type: EventType.SessionCreated,
       data: { title: "Witness" },
     })
@@ -53,6 +54,90 @@ describe("kernel facts", () => {
         } as never,
       }),
     ).toThrow("Invalid event data")
+  })
+
+  it("enforces the durable custom-tool fallback invariant", () => {
+    const assistantMessage = (block: unknown) =>
+      isModelMessage({ role: "assistant", content: [block] })
+
+    expect(
+      assistantMessage({
+        type: "tool_call",
+        id: "custom_1",
+        name: "evaluate",
+        input: "1 + 1",
+        toolKind: "custom",
+        customInputFallbackKey: "code",
+      }),
+    ).toBe(true)
+    expect(
+      assistantMessage({
+        type: "tool_call",
+        id: "custom_1",
+        name: "evaluate",
+        input: "1 + 1",
+        toolKind: "custom",
+      }),
+    ).toBe(false)
+    expect(
+      assistantMessage({
+        type: "tool_call",
+        id: "function_1",
+        name: "evaluate",
+        input: {},
+        customInputFallbackKey: "code",
+      }),
+    ).toBe(false)
+  })
+
+  it("validates structural deferred-tool discovery results", () => {
+    const message = (definition: unknown) =>
+      isModelMessage({
+        role: "tool",
+        toolCallId: "search_1",
+        content: "search result",
+        toolSearch: { tools: [definition] },
+      })
+    const customDefinition = {
+      name: "demo__evaluate",
+      description: "Evaluate an expression",
+      inputSchema: {
+        type: "object",
+        properties: { code: { type: "string" } },
+        required: ["code"],
+      },
+      kind: "custom",
+      inputFormat: {
+        type: "grammar",
+        syntax: "lark",
+        definition: "start: /.+/",
+      },
+      customInputFallbackKey: "code",
+      deferLoading: true,
+    }
+
+    expect(message(customDefinition)).toBe(true)
+    expect(
+      message({
+        ...customDefinition,
+        customInputFallbackKey: undefined,
+      }),
+    ).toBe(false)
+    expect(
+      message({
+        ...customDefinition,
+        kind: "function",
+        inputFormat: customDefinition.inputFormat,
+      }),
+    ).toBe(false)
+    expect(
+      isModelMessage({
+        role: "tool",
+        toolCallId: "search_1",
+        content: "search result",
+        toolSearch: { tools: [customDefinition], extra: true },
+      }),
+    ).toBe(false)
   })
 
   it("accepts rollout image references and rejects inline image data", () => {

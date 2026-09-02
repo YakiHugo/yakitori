@@ -1091,7 +1091,7 @@ describe("application composition", () => {
         expect(selected.requests[0]?.target).toEqual({
           provider: "openai",
           model: "gpt-5.6-sol",
-          instructionProfileId: "default",
+          instructionProfileId: "codex",
         })
       } finally {
         await application.close()
