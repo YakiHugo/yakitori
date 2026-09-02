@@ -27,6 +27,11 @@ export function createAgentRuntime(input: {
   readonly getThreadManager: () => ThreadManager
   readonly maxDepth?: number
   readonly maxConcurrentAgents?: number
+  readonly onBackgroundError?: (
+    error: unknown,
+    threadId: string,
+    operation: string,
+  ) => void
 }): AgentRuntime {
   const controls = new Map<string, AgentControl>()
   const threadRoots = new Map<string, string>()
@@ -238,6 +243,9 @@ export function createAgentRuntime(input: {
       ...(input.maxConcurrentAgents === undefined
         ? {}
         : { maxConcurrentAgents: input.maxConcurrentAgents }),
+      ...(input.onBackgroundError === undefined
+        ? {}
+        : { onBackgroundError: input.onBackgroundError }),
     })
     controls.set(rootThreadId, created)
     return created

@@ -10,8 +10,9 @@ tests remain authoritative for behavior that has already landed.
 
 ## Comparison baseline
 
-- Yakitori: working tree based on commit `08c405c`, including the C6 recovery
-  and documentation changes recorded on 2026-08-31.
+- Yakitori: working tree based on commit `f306449`, including the C6 recovery
+  and documentation changes recorded on 2026-08-31 and the C7 lifecycle slice
+  recorded on 2026-09-02.
 - Codex: `.references/public/codex` commit `536f86e5` from 2026-08-21.
 - grok-build: `.references/public/grok-build` commit `19d42e35` from
   2026-08-19. It confirms the Session actor/persistence boundary and provides
@@ -54,7 +55,7 @@ change that decision.
 | C4 | Provider transport, model catalog, credentials, retry, and usage | `src/runtime/*provider.ts`, catalog and credentials modules | `model-provider`, `model-provider-info`, `models-manager`, `codex-client`, `responses_retry` | Unreviewed |
 | C5 | Instructions, environment, shell, skills, plugins, MCP, and connectors | prompt, instruction, environment, and future extension owners | `agents_md_manager`, `context`, `skills`, `core-plugins`, `mcp`, `connectors`, `shell*` | Unreviewed |
 | C6 | Subagents, AgentControl, and Mate lifecycle | `src/runtime/agent-control.ts`, `agent-runtime.ts`, multi-agent tools, `src/mates/*` | `core/agent`, `agent-graph-store`, `agent-identity`, thread spawning | Audited; core implemented |
-| C7 | Process recovery, concurrency, failure reporting, and shutdown | runtime recovery/locks, server application and event hubs | core task/session lifecycle, app-server lifecycle, rollout writer recovery | Unreviewed beyond C1 persistence semantics |
+| C7 | Process recovery, concurrency, failure reporting, and shutdown | runtime recovery/locks, server application and event hubs | core task/session lifecycle, app-server lifecycle, rollout writer recovery | Lifecycle slice audited and implemented |
 | C8 | Host protocol, configuration, projects, and model discovery | `src/server/*` excluding GUI consumers | `app-server`, `app-server-protocol`, `config` | Unreviewed |
 | C9 | Observability, diagnostics, history search, and operational state | currently distributed | `otel`, `diagnostics`, `analytics`, `thread-store` search/projections | Unreviewed |
 
@@ -83,6 +84,8 @@ change that decision.
 | C6-D4 | Fresh/forked child context and bounded tree execution | Converge | Follow Codex; implemented subset excludes roles/residency |
 | C6-D5 | Codex tree control versus grok-build's global task/subagent coordinator | Deliberate | Codex selected for the coding-agent harness |
 | C6-D6 | Coding subagents versus persistent colleague Mates | Deliberate | Current single-Mate product boundary |
+| C7-D1 | Immediate process teardown versus active-Turn drain and explicit force | Converge | Follow Codex; implemented 2026-09-02 |
+| C7-D2 | Silent detached failures versus owner-local observation | Converge | Follow Codex ownership semantics through a thin Yakitori reporter; implemented 2026-09-02 |
 
 ---
 
@@ -1015,7 +1018,81 @@ Evidence anchors:
 - grok-build: `xai-grok-tools` task coordinator/admission modules,
   `xai-grok-shell` subagent runner, and the subagent user guide.
 
+---
+
+## C7 — Process lifecycle and operational failure observation
+
+Status: the application-lifecycle slice is audited and implemented. Broader
+runtime concurrency, lock recovery, residency, and diagnostics remain future
+C7/C9 audit work.
+
+### C7-D1 — Shutdown ownership
+
+Disposition: **Converge on Codex; implemented.**
+
+Codex separates shutdown request from teardown. On the first signal its
+app-server enters a draining state, continues serving requests while assistant
+Turns are active, and starts transport/task/resource teardown only after the
+running count reaches zero. A second signal is an explicit forced exit.
+
+Yakitori now has the same process contract. `ThreadManager` is the authority
+for live active-Turn ownership. The shared server-process owner observes that
+count for both standalone and packaged entry points. At the zero-Turn
+transition it closes a process-wide request gate and the HTTP listener
+synchronously. Like Codex's `ConnectionRpcGate`, work admitted before close is
+tracked and drained while later work is never polled. Yakitori then rechecks
+and drains any Turn that an admitted request started before it closes
+`ThreadManager`, Session workers, stores, and locks. The Electron parent
+directly owns the real sidecar in development and production, sends the first
+termination request, and waits without an independent deadline; a second quit
+uses the explicit force path. This also removes the previous development
+versus packaged drift in privileged attachment-control IPC.
+
+### C7-D2 — Failures without a caller
+
+Disposition: **Converge on Codex's ownership semantics; implemented through a
+thin Yakitori reporting contract.**
+
+Codex does not turn operational failures into one global error hierarchy.
+Detached task owners and lifecycle loops observe failures locally through
+tracing, preserve the owning module's error semantics, and decide whether to
+retry, terminate, or continue.
+
+Yakitori follows that split. Expected provider, persistence, tool, HTTP, and
+domain failures retain their existing contracts. A narrow reporter is used
+only when a failure can no longer be returned to a caller—for example event
+subscriber rejection, background Turn/subagent work, cleanup, a tolerated
+configuration fallback, or top-level unexpected request failure. Reports keep
+the original cause plus owning component/operation and available Session,
+Turn, or event-range context. Reporting is isolated from the operation itself,
+so a synchronous reporter throw or asynchronous reporter rejection cannot roll
+back durable work or break teardown. Turn-processor reports name the owner-local
+operation (`abort-model-stream`, `close-model-stream`, `compact`, or
+`execute-tool`) rather than collapsing unrelated failures into a generic
+background-task label. Expected provider context-overflow retry remains on its
+normal compaction path and is not reported as an operational failure.
+
+Evidence anchors:
+
+- Yakitori: `src/server/server-process.ts`, `shutdown.ts`,
+  `operational-errors.ts`, `src/core/thread-manager.ts`, and
+  `src/runtime/agent-control.ts`.
+- Codex: `app-server/src/lib.rs`, `app-server/src/connection_cleanup.rs`,
+  `app-server/src/thread_processor.rs`, and `rollout/src/recorder.rs`.
+
 ## Progress log
+
+### 2026-09-02
+
+- Audited and implemented the C7 application-lifecycle slice against Codex.
+- Unified standalone and packaged startup, attachment-control IPC, first-signal
+  active-Turn drain, second-signal forced exit, and Electron parent ownership.
+- Added Codex-style request admission and in-flight draining across HTTP and
+  privileged control IPC, including a second active-Turn check after admitted
+  requests finish; development Electron now directly owns the real sidecar.
+- Added one context-bearing operational failure outlet for detached work while
+  preserving each module's expected-error contract, isolating asynchronous
+  reporter rejection, and retaining owner-local Turn operation names.
 
 ### 2026-08-31
 

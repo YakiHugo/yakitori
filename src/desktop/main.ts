@@ -24,10 +24,11 @@ if (!app.isPackaged) {
 
 const maxLoadAttempts = 20
 const loadRetryDelayMs = 500
-const forceQuitDelayMs = 10_000
 
 let serverProcess: ServerProcess | undefined
 let stopping = false
+let allowQuit = false
+let forcing = false
 let shutdown: Promise<void> | undefined
 
 // .then(start, failStartup) would miss rejections from start() itself.
@@ -39,24 +40,33 @@ app.on("window-all-closed", () => {
 })
 
 app.on("will-quit", (event) => {
-  // A second will-quit while shutdown is in progress is the force-quit
-  // hatch: it falls through without preventDefault, so Electron exits now.
-  if (shutdown !== undefined) return
+  if (allowQuit) return
   event.preventDefault()
   stopping = true
-  const forceQuit = setTimeout(() => {
-    app.exit(1)
-  }, forceQuitDelayMs)
-  // Backstop only; the timer must never keep the process alive by itself.
-  forceQuit.unref()
+  // Match the sidecar's two-stage contract: the first quit waits for active
+  // Turns to drain without a parent-imposed deadline; a second quit is the
+  // explicit force-quit hatch.
+  if (shutdown !== undefined) {
+    if (forcing) return
+    forcing = true
+    void (serverProcess?.forceStop() ?? Promise.resolve())
+      .catch((error: unknown) => {
+        console.error("yakitori: forced sidecar stop failed", error)
+      })
+      .finally(() => {
+        allowQuit = true
+        app.exit(1)
+      })
+    return
+  }
   shutdown = (serverProcess?.stop() ?? Promise.resolve()).then(
     () => {
-      clearTimeout(forceQuit)
+      allowQuit = true
       app.quit()
     },
     (error: unknown) => {
-      clearTimeout(forceQuit)
       console.error("yakitori: shutdown failed", error)
+      allowQuit = true
       app.exit(1)
     },
   )
@@ -82,10 +92,10 @@ async function start(): Promise<void> {
       })
     : await spawnServerProcess({
         command: "node",
-        // --watch restarts the child on server edits without touching the
-        // window. A fixed dev port keeps the GUI's api param valid across
-        // restarts; prod binds ephemeral ports instead.
-        args: ["--watch", path.join(appRoot, "src", "server", "start.ts")],
+        // Electron must directly own the process that implements shutdown and
+        // control IPC. A Node watch supervisor would receive those messages
+        // itself and could leave its actual server child orphaned.
+        args: [path.join(appRoot, "src", "server", "start.ts")],
         cwd: appRoot,
         env: {
           ...process.env,

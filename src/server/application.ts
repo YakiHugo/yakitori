@@ -48,6 +48,12 @@ import {
 } from "./handlers.ts"
 import { createYakitoriHttpServer } from "./http.ts"
 import { createModelDirectory, type ModelDirectory } from "./model-directory.ts"
+import {
+  consoleOperationalFailureReporter,
+  type OperationalFailureReporter,
+  reportOperationalFailure,
+} from "./operational-errors.ts"
+import type { RequestGate } from "./request-gate.ts"
 import { createProjectRegistry } from "./project-registry.ts"
 import type {
   ApiListProvidersResponse,
@@ -86,6 +92,7 @@ export type YakitoriApplicationOptions = {
   readonly model?: string
   readonly fauxScenario?: string
   readonly userShellEnv?: UserShellEnv
+  readonly reportOperationalFailure?: OperationalFailureReporter
 }
 
 export type YakitoriApplication = {
@@ -103,7 +110,9 @@ export type YakitoriApplication = {
     readonly name: string
     readonly revision: number
   }
-  createHttpServer(): ReturnType<typeof createYakitoriHttpServer>
+  createHttpServer(options?: {
+    readonly requestGate?: RequestGate
+  }): ReturnType<typeof createYakitoriHttpServer>
   probeUserShellEnv(): Promise<"ready" | "unavailable">
   close(): Promise<void>
 }
@@ -111,6 +120,8 @@ export type YakitoriApplication = {
 export async function createYakitoriApplication(
   options: YakitoriApplicationOptions = {},
 ): Promise<YakitoriApplication> {
+  const reporter =
+    options.reportOperationalFailure ?? consoleOperationalFailureReporter
   const rootDir = options.rootDir ?? ".yakitori"
   const configuredSessionStoreRoot =
     options.sessionStoreRoot ?? join(rootDir, "sessions")
@@ -136,13 +147,17 @@ export async function createYakitoriApplication(
     })
     mateStore = ownedMateStore
     const mateKernel = createMateKernel(ownedMateStore)
-    const eventHub = createSessionEventHub()
+    const eventHub = createSessionEventHub({
+      reportOperationalFailure: reporter,
+    })
     const permissionGate = createPermissionGate()
     const projectRegistry = createProjectRegistry({
       defaultProject: workspace,
+      reportOperationalFailure: reporter,
     })
     const userConfig = createUserConfigStore({
       cwd: workspace,
+      reportOperationalFailure: reporter,
       ...(options.userConfigPath === undefined
         ? {}
         : { configPath: options.userConfigPath }),
@@ -169,6 +184,7 @@ export async function createYakitoriApplication(
       fauxScenario: options.fauxScenario ?? process.env.YAKITORI_FAUX_SCENARIO,
       primaryStream: options.stream,
       injected: options.providerStreams,
+      reportOperationalFailure: reporter,
     })
     const providerRegistry = createProviderRegistry(provider.streams)
     // Auto-registered providers pick the model per request, so only the
@@ -216,6 +232,14 @@ export async function createYakitoriApplication(
     const agentRuntime = createAgentRuntime({
       graphStore: agentGraphStore,
       getThreadManager: () => threadManager,
+      onBackgroundError: (error, threadId, operation) => {
+        reportOperationalFailure(reporter, {
+          component: "agent-control",
+          operation,
+          cause: error,
+          sessionId: threadId,
+        })
+      },
     })
     agentRuntimeForCleanup = agentRuntime
     threadManager = new ThreadManager({
@@ -237,12 +261,30 @@ export async function createYakitoriApplication(
             process.env.YAKITORI_APPROVAL_POLICY === "auto_file_tools"
               ? "auto_file_tools"
               : "never",
-          onRuntimeError: (error) => {
-            console.error("Session execution failed", error)
+          onOperationalFailure: (failure) => {
+            reportOperationalFailure(reporter, {
+              component: "turn-processor",
+              operation: failure.operation,
+              cause: failure.cause,
+              sessionId: stored.metadata.id,
+            })
           },
         }),
       onPersistenceError: (error, threadId) => {
-        console.error(`Thread persistence failed: ${threadId}`, error)
+        reportOperationalFailure(reporter, {
+          component: "thread-store",
+          operation: "persist",
+          cause: error,
+          sessionId: threadId,
+        })
+      },
+      onBackgroundError: (error, threadId, operation) => {
+        reportOperationalFailure(reporter, {
+          component: "thread-manager",
+          operation,
+          cause: error,
+          sessionId: threadId,
+        })
       },
     })
     threadManagerForCleanup = threadManager
@@ -257,6 +299,7 @@ export async function createYakitoriApplication(
       listPendingPermissions: (sessionId) => permissionGate.list(sessionId),
       availableProviders: providerRegistry.providers,
       rolloutAssets,
+      reportOperationalFailure: reporter,
     })
 
     let closePromise: Promise<void> | undefined
@@ -275,7 +318,7 @@ export async function createYakitoriApplication(
         name: activeMate.currentRevision.name,
         revision: activeMate.currentRevision.revision,
       },
-      createHttpServer() {
+      createHttpServer(httpOptions = {}) {
         return createYakitoriHttpServer({
           eventHub,
           handlers,
@@ -284,6 +327,8 @@ export async function createYakitoriApplication(
           userConfig,
           availableProviders: providerRegistry.providers,
           rolloutAssets,
+          reportOperationalFailure: reporter,
+          ...httpOptions,
           ...(options.guiStaticDir === undefined
             ? {}
             : { staticAssets: { directory: options.guiStaticDir } }),
@@ -377,6 +422,7 @@ async function configureProviders(input: {
   readonly fauxScenario: string | undefined
   readonly primaryStream: StreamFn | undefined
   readonly injected: Readonly<Record<string, StreamFn>> | undefined
+  readonly reportOperationalFailure: OperationalFailureReporter
 }): Promise<{
   readonly provider: string
   readonly model: string
@@ -394,7 +440,7 @@ async function configureProviders(input: {
     }
   }
   providers.grok ??= createGrokStream()
-  await registerCodexLogin(providers)
+  await registerCodexLogin(providers, input.reportOperationalFailure)
 
   const model =
     input.model ??
@@ -491,15 +537,17 @@ function createApiKeyStream(
 // it. A missing or unreadable login disables codex without breaking startup.
 async function registerCodexLogin(
   providers: Record<string, StreamFn>,
+  reporter: OperationalFailureReporter,
 ): Promise<void> {
   let login: CodexLogin | undefined
   try {
     login = await readCodexLogin()
   } catch (error) {
-    console.warn(
-      "Codex login could not be read; codex provider disabled.",
-      error,
-    )
+    reportOperationalFailure(reporter, {
+      component: "codex-credentials",
+      operation: "read-login",
+      cause: error,
+    })
     return
   }
   if (login === undefined) return

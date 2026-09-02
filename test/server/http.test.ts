@@ -25,7 +25,9 @@ import {
   type YakitoriHttpServerOptions,
   type YakitoriStaticAssets,
 } from "../../src/server/http.ts"
+import type { OperationalFailure } from "../../src/server/operational-errors.ts"
 import { createProjectRegistry } from "../../src/server/project-registry.ts"
+import { createRequestGate } from "../../src/server/request-gate.ts"
 import {
   type ApiAdmitInputResponse,
   type ApiCancelInputResponse,
@@ -1270,6 +1272,72 @@ describe("HTTP static assets", () => {
     )
   })
 
+  it("reports an unexpected request failure before returning 500", async () => {
+    const cause = new Error("catalog unavailable")
+    const failures: OperationalFailure[] = []
+    await withListeningServer(
+      createYakitoriHttpServer({
+        handlers: createTestHandlers(),
+        providers: async () => Promise.reject(cause),
+        reportOperationalFailure(failure) {
+          failures.push(failure)
+        },
+      }),
+      async (baseUrl) => {
+        const response = await fetch(`${baseUrl}/providers`)
+
+        expect(response.status).toBe(500)
+        expect(failures).toEqual([
+          {
+            component: "http-server",
+            operation: "handle-request",
+            cause,
+          },
+        ])
+      },
+    )
+  })
+
+  it("holds its request gate token until an error response finishes", async () => {
+    const gate = createRequestGate()
+    const endCalled = deferred<void>()
+    let releaseResponse: (() => void) | undefined
+    const server = createYakitoriHttpServer({
+      handlers: createTestHandlers(),
+      providers: async () => Promise.reject(new Error("catalog unavailable")),
+      requestGate: gate,
+      reportOperationalFailure: () => {},
+    })
+    server.prependListener("request", (_request, response) => {
+      const originalEnd = response.end.bind(response)
+      response.end = ((...args: unknown[]) => {
+        releaseResponse = () => {
+          Reflect.apply(originalEnd, response, args)
+        }
+        endCalled.resolve()
+        return response
+      }) as typeof response.end
+    })
+
+    await withListeningServer(server, async (baseUrl) => {
+      const response = fetch(`${baseUrl}/providers`)
+      await endCalled.promise
+      gate.close()
+      let drained = false
+      const shutdown = gate.shutdown().then(() => {
+        drained = true
+      })
+      await Promise.resolve()
+
+      expect(drained).toBe(false)
+
+      releaseResponse?.()
+      expect((await response).status).toBe(500)
+      await shutdown
+      expect(drained).toBe(true)
+    })
+  })
+
   it("keeps the providers route at 404 without a catalog", async () => {
     await withHttpServer(async (baseUrl) => {
       const listed = await fetch(`${baseUrl}/providers`)
@@ -1460,6 +1528,22 @@ async function postJson<T = unknown>(url: string, body: unknown) {
   return {
     status: response.status,
     body: (await response.json()) as T,
+  }
+}
+
+function deferred<T>(): {
+  readonly promise: Promise<T>
+  readonly resolve: (value: T) => void
+} {
+  let resolvePromise: ((value: T) => void) | undefined
+  const promise = new Promise<T>((resolve) => {
+    resolvePromise = resolve
+  })
+  return {
+    promise,
+    resolve(value) {
+      resolvePromise?.(value)
+    },
   }
 }
 

@@ -233,6 +233,50 @@ describe("Turn processor", () => {
     )
   })
 
+  it("reports an unexpected tool throw with its owning operation", async () => {
+    const provider = createFauxProvider([
+      {
+        stopReason: ModelStopReason.ToolUse,
+        content: [
+          {
+            type: "tool_call",
+            id: "tool_throw",
+            name: "throwing_tool",
+            input: {},
+          },
+        ],
+      },
+      { content: [{ type: "text", text: "recovered" }] },
+    ])
+    const cause = new Error("unexpected tool throw")
+    const tools = createToolRegistry([
+      {
+        name: "throwing_tool",
+        description: "Throw unexpectedly",
+        inputSchema: { type: "object" },
+        effect: "observe",
+        approvalRequirement: { kind: "none" },
+        async execute() {
+          throw cause
+        },
+      },
+    ])
+    const failures: Array<{ operation: string; cause: unknown }> = []
+    const runtime = await createRuntime(provider.stream, tools, {
+      async onOperationalFailure(failure) {
+        failures.push(failure)
+        throw new Error("reporter rejected")
+      },
+    })
+    const thread = await runtime.createThread()
+
+    await thread.startIfIdle({ content: { kind: "text", text: "use it" } })
+    await nextLifecycleEvent(thread)
+    expect((await nextLifecycleEvent(thread))?.type).toBe("turn.completed")
+    await Promise.resolve()
+    expect(failures).toEqual([{ operation: "execute-tool", cause }])
+  })
+
   it("passes the physical rollout ID to tool asset storage", async () => {
     const root = await mkdtemp(join(tmpdir(), "yakitori-rollout-identity-"))
     const store = new MemoryThreadStore()
@@ -1015,7 +1059,10 @@ describe("Turn processor", () => {
   it("stops late stream publications and observes iterator cleanup failures", async () => {
     const entered = deferred<void>()
     const release = deferred<void>()
-    const runtimeErrors: unknown[] = []
+    const runtimeErrors: Array<{
+      readonly operation: string
+      readonly cause: unknown
+    }> = []
     let nextCalls = 0
     const iterator: AsyncIterableIterator<ModelStreamEvent> = {
       [Symbol.asyncIterator]() {
@@ -1036,7 +1083,9 @@ describe("Turn processor", () => {
     }
     const stream: StreamFn = () => iterator
     const runtime = await createRuntime(stream, createToolRegistry([]), {
-      onRuntimeError: (error) => runtimeErrors.push(error),
+      onOperationalFailure(failure) {
+        runtimeErrors.push(failure)
+      },
     })
     const thread = await runtime.createThread()
     await thread.startIfIdle({ content: { kind: "text", text: "start" } })
@@ -1048,8 +1097,14 @@ describe("Turn processor", () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
 
     expect(runtimeErrors).toEqual([
-      expect.objectContaining({ message: "iterator cleanup failed" }),
-      expect.objectContaining({ message: "iterator cleanup failed" }),
+      {
+        operation: "abort-model-stream",
+        cause: expect.objectContaining({ message: "iterator cleanup failed" }),
+      },
+      {
+        operation: "close-model-stream",
+        cause: expect.objectContaining({ message: "iterator cleanup failed" }),
+      },
     ])
     expect(nextCalls).toBe(1)
   })
@@ -1271,6 +1326,7 @@ describe("Turn processor", () => {
   it("retries provider-overflowed compaction with an older prefix", async () => {
     let normalCalls = 0
     let compactionCalls = 0
+    const operationalFailures: Array<{ operation: string; cause: unknown }> = []
     const stream: StreamFn = async function* (request) {
       const compacting = request.system.some(
         (section) => section.id === "compaction.instructions",
@@ -1293,6 +1349,9 @@ describe("Turn processor", () => {
         compactionTriggerRatio: 0.6,
         compactionRetainRatio: 0,
       }),
+      onOperationalFailure(failure) {
+        operationalFailures.push(failure)
+      },
     })
     const thread = await runtime.createThread()
     for (const text of ["one", "two", "three", "four"]) {
@@ -1303,6 +1362,7 @@ describe("Turn processor", () => {
 
     expect(compactionCalls).toBe(2)
     expect(normalCalls).toBe(4)
+    expect(operationalFailures).toEqual([])
     expect(
       (await runtime.store.readThread(thread.id))?.rollout.some(
         (entry) => entry.item.type === "compacted",

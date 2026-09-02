@@ -3,6 +3,11 @@ import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname, isAbsolute, join, resolve } from "node:path"
 import { parse, stringify, type TomlTable } from "smol-toml"
+import {
+  consoleOperationalFailureReporter,
+  type OperationalFailureReporter,
+  reportOperationalFailure,
+} from "./operational-errors.ts"
 import type { ApiUserModelPreference } from "./protocol.ts"
 
 export type UserConfigStore = {
@@ -18,25 +23,31 @@ export type UserConfiguration = Readonly<{
 }>
 
 export function createUserConfigStore(
-  options: { readonly configPath?: string; readonly cwd?: string } = {},
+  options: {
+    readonly configPath?: string
+    readonly cwd?: string
+    readonly reportOperationalFailure?: OperationalFailureReporter
+  } = {},
 ): UserConfigStore {
   const configPath = options.configPath ?? defaultUserConfigPath()
   const cwd = options.cwd ?? process.cwd()
+  const reporter =
+    options.reportOperationalFailure ?? consoleOperationalFailureReporter
   let pendingWrite = Promise.resolve()
 
   return {
     async read() {
-      const document = await readConfigDocument(configPath, cwd)
+      const document = await readConfigDocument(configPath, cwd, reporter)
       return document?.configuration.preference
     },
     async readConfiguration() {
-      const document = await readConfigDocument(configPath, cwd)
+      const document = await readConfigDocument(configPath, cwd, reporter)
       return document?.configuration ?? {}
     },
     write(preference) {
       const write = pendingWrite.then(
-        () => writePreference(configPath, cwd, preference),
-        () => writePreference(configPath, cwd, preference),
+        () => writePreference(configPath, cwd, preference, reporter),
+        () => writePreference(configPath, cwd, preference, reporter),
       )
       pendingWrite = write.then(
         () => undefined,
@@ -58,8 +69,9 @@ async function writePreference(
   configPath: string,
   cwd: string,
   preference: ApiUserModelPreference,
+  reporter: OperationalFailureReporter,
 ): Promise<ApiUserModelPreference> {
-  const document = await readConfigDocument(configPath, cwd)
+  const document = await readConfigDocument(configPath, cwd, reporter)
   const content = stringify({
     ...(document?.value ?? {}),
     provider: preference.provider,
@@ -101,6 +113,7 @@ type ConfigDocument = {
 async function readConfigDocument(
   configPath: string,
   cwd: string,
+  reporter: OperationalFailureReporter,
 ): Promise<ConfigDocument | undefined> {
   let content: string
   try {
@@ -118,7 +131,11 @@ async function readConfigDocument(
     }
   } catch (error) {
     if (error instanceof ModelInstructionsConfigError) throw error
-    console.warn(`Ignoring malformed user config at ${configPath}.`, error)
+    reportOperationalFailure(reporter, {
+      component: "user-config",
+      operation: "parse",
+      cause: error,
+    })
     return undefined
   }
 }

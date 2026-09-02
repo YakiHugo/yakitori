@@ -1,5 +1,10 @@
 import type { StoredEventEnvelope } from "../kernel/index.ts"
 import type { LiveSessionEvent } from "../runtime/live-events.ts"
+import {
+  consoleOperationalFailureReporter,
+  type OperationalFailureReporter,
+  reportOperationalFailure,
+} from "./operational-errors.ts"
 
 export type SessionDelivery =
   | {
@@ -26,7 +31,7 @@ export type SessionEventHub = {
 }
 
 export type SessionEventHubOptions = {
-  readonly onListenerError?: (error: unknown) => void
+  readonly reportOperationalFailure?: OperationalFailureReporter
 }
 
 type Subscriber = {
@@ -40,6 +45,35 @@ export function createSessionEventHub(
   options: SessionEventHubOptions = {},
 ): SessionEventHub {
   const subscribers = new Map<string, Set<Subscriber>>()
+  const reporter =
+    options.reportOperationalFailure ?? consoleOperationalFailureReporter
+
+  const reportListenerFailure = (
+    delivery: SessionDelivery,
+    error: unknown,
+  ): void => {
+    const firstEvent =
+      delivery.kind === "durable" ? delivery.events[0] : undefined
+    const lastEvent =
+      delivery.kind === "durable" ? delivery.events.at(-1) : undefined
+    const transient = delivery.kind === "transient" ? delivery.event : undefined
+    const sessionId =
+      delivery.kind === "durable"
+        ? firstEvent?.sessionId
+        : delivery.event.sessionId
+    reportOperationalFailure(reporter, {
+      component: "session-event-hub",
+      operation: "deliver",
+      cause: error,
+      ...(sessionId === undefined ? {} : { sessionId }),
+      ...(transient !== undefined && "turnId" in transient
+        ? { turnId: transient.turnId }
+        : {}),
+      ...(firstEvent === undefined || lastEvent === undefined
+        ? {}
+        : { eventRange: { from: firstEvent.seq, through: lastEvent.seq } }),
+    })
+  }
 
   const drain = (subscriber: Subscriber): void => {
     if (subscriber.closed || subscriber.delivering) return
@@ -51,14 +85,14 @@ export function createSessionEventHub(
         if (result === undefined) continue
         subscriber.delivering = true
         void Promise.resolve(result)
-          .catch((error) => options.onListenerError?.(error))
+          .catch((error) => reportListenerFailure(delivery, error))
           .finally(() => {
             subscriber.delivering = false
             drain(subscriber)
           })
         return
       } catch (error) {
-        options.onListenerError?.(error)
+        reportListenerFailure(delivery, error)
       }
     }
   }

@@ -320,6 +320,13 @@ describe("agent control", () => {
     })
 
     await expect(root.wait(1_000)).resolves.toEqual([])
+    expect(harness.backgroundErrors).toEqual([
+      {
+        error: expect.objectContaining({ message: "delivery failed" }),
+        agentId: child.agentId,
+        operation: "task-worker",
+      },
+    ])
     await expect(root.wait(1_000)).resolves.toEqual([
       expect.objectContaining({
         agentId: child.agentId,
@@ -392,6 +399,11 @@ function createHarness(
   const deliveryAttempts: Array<
     Parameters<AgentControlAdapter["deliverMessage"]>[0]
   > = []
+  const backgroundErrors: Array<{
+    readonly error: unknown
+    readonly agentId: string
+    readonly operation: string
+  }> = []
   let shouldFailDelivery = input.failDeliveryOnce ?? false
   const prefix: readonly ModelMessage[] = [
     { role: "user", content: [{ type: "text", text: "parent prefix" }] },
@@ -473,6 +485,9 @@ function createHarness(
       ...(input.maxConcurrentAgents === undefined
         ? {}
         : { maxConcurrentAgents: input.maxConcurrentAgents }),
+      onBackgroundError(error, agentId, operation) {
+        backgroundErrors.push({ error, agentId, operation })
+      },
     }),
     runs,
     runRequests,
@@ -481,6 +496,7 @@ function createHarness(
     deliveredMessages,
     rolledBack,
     deliveryAttempts,
+    backgroundErrors,
   }
 }
 

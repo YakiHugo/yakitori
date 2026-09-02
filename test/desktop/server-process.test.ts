@@ -1,3 +1,6 @@
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { spawnServerProcess } from "../../src/desktop/server-process.ts"
 
@@ -41,6 +44,45 @@ describe("spawnServerProcess", () => {
     await server.stop()
   })
 
+  it.each([
+    "desktop-entry.ts",
+    "start.ts",
+  ])("provides control IPC from the directly managed %s sidecar", async (entry) => {
+    const workspace = await mkdtemp(join(tmpdir(), "yakitori-sidecar-test-"))
+    let server: Awaited<ReturnType<typeof spawnServerProcess>> | undefined
+    try {
+      server = await spawnServerProcess({
+        command: node,
+        args: [join(process.cwd(), "src", "server", entry)],
+        cwd: workspace,
+        env: {
+          ...process.env,
+          PORT: "0",
+          YAKITORI_PROVIDER: "faux",
+          YAKITORI_STORE_DIR: join(workspace, ".yakitori"),
+          YAKITORI_WORKSPACE: workspace,
+        },
+        onStderr: () => {},
+      })
+
+      await expect(
+        server.request({
+          type: "import_image_paths",
+          sessionId: "session_missing",
+          ownerId: "draft_missing",
+          paths: [],
+        }),
+      ).resolves.toEqual({
+        requestId: expect.any(String),
+        ok: false,
+        error: "Session session_missing was not found.",
+      })
+    } finally {
+      await server?.stop()
+      await rm(workspace, { recursive: true, force: true })
+    }
+  })
+
   it("rejects and kills the child when no listening line arrives in time", async () => {
     const started = Date.now()
     await expect(
@@ -63,7 +105,7 @@ describe("spawnServerProcess", () => {
     ).rejects.toThrow("exited before listening (code 3")
   })
 
-  it("escalates SIGTERM to SIGKILL for a child that traps termination", async () => {
+  it("leaves a draining child alive until forceStop is requested", async () => {
     const server = await spawnServerProcess({
       command: node,
       args: [
@@ -72,14 +114,18 @@ describe("spawnServerProcess", () => {
          console.log("yakitori-listening http://127.0.0.1:1");
          setInterval(() => {}, 60000)`,
       ],
-      termToKillMs: 200,
     })
 
-    const started = Date.now()
-    await server.stop()
+    let stopped = false
+    const stopping = server.stop().then(() => {
+      stopped = true
+    })
+    await new Promise((resolve) => setTimeout(resolve, 300))
 
-    expect(Date.now() - started).toBeLessThan(2_000)
-    expect(server.child.exitCode === null || server.child.killed).toBe(true)
+    expect(stopped).toBe(false)
+    await server.forceStop()
+    await stopping
+    expect(server.child.signalCode).toBe("SIGKILL")
   })
 
   it("stops a well-behaved child with SIGTERM alone", async () => {
@@ -91,7 +137,6 @@ describe("spawnServerProcess", () => {
          console.log("yakitori-listening http://127.0.0.1:1");
          setInterval(() => {}, 60000)`,
       ],
-      termToKillMs: 1_000,
     })
 
     await server.stop()

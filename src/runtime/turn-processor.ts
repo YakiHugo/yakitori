@@ -83,9 +83,22 @@ export type TurnProcessorOptions = {
   readonly loadProjectInstructions?: typeof loadProjectInstructions
   readonly now?: () => Date
   readonly rolloutAssets?: RolloutAssets
-  readonly onRuntimeError?: (error: unknown) => void
+  readonly onOperationalFailure?: TurnProcessorOperationalFailureReporter
   readonly agentControl?: AgentControl
 }
+
+export type TurnProcessorOperationalFailure = Readonly<{
+  operation:
+    | "abort-model-stream"
+    | "close-model-stream"
+    | "compact"
+    | "execute-tool"
+  cause: unknown
+}>
+
+export type TurnProcessorOperationalFailureReporter = (
+  failure: TurnProcessorOperationalFailure,
+) => void | Promise<void>
 
 type CompactionState = {
   consecutiveFailures: number
@@ -190,9 +203,12 @@ export function createTurnProcessor(
         completion,
         abort() {
           forcedAbort.abort()
-          void activeStream
-            ?.return?.()
-            .catch((error) => reportRuntimeError(options.onRuntimeError, error))
+          void activeStream?.return?.().catch((cause) =>
+            reportOperationalFailure(options.onOperationalFailure, {
+              operation: "abort-model-stream",
+              cause,
+            }),
+          )
         },
       }
     },
@@ -340,7 +356,7 @@ async function executeTurn(input: {
         rolloutAssets: input.options.rolloutAssets,
         usages,
         compactionState: input.compactionState,
-        onRuntimeError: input.options.onRuntimeError,
+        onOperationalFailure: input.options.onOperationalFailure,
         setActiveStream: input.setActiveStream,
       })
       if (compacted) continue
@@ -358,7 +374,7 @@ async function executeTurn(input: {
       emitModelStream: (event) => input.runtime.emitModelStream(event),
       assistantResponseBytes:
         turn.execution.executionPolicy.assistantResponseBytes,
-      onRuntimeError: input.options.onRuntimeError,
+      onOperationalFailure: input.options.onOperationalFailure,
       onUsage(usage) {
         usages.push(usage)
         const aggregate = aggregateTokenUsage(usages)
@@ -438,7 +454,7 @@ async function executeTurn(input: {
         approvalPolicy: turn.configuration.approvalPolicy,
         rolloutAssets: input.options.rolloutAssets,
         visibleFileObservations,
-        onRuntimeError: input.options.onRuntimeError,
+        onOperationalFailure: input.options.onOperationalFailure,
         ...(input.options.agentControl === undefined
           ? {}
           : {
@@ -483,7 +499,9 @@ async function consumeModelStream(input: {
   readonly itemId?: string
   readonly emitModelStream?: TurnRuntime["emitModelStream"]
   readonly assistantResponseBytes: number
-  readonly onRuntimeError: ((error: unknown) => void) | undefined
+  readonly onOperationalFailure:
+    | TurnProcessorOperationalFailureReporter
+    | undefined
   readonly onUsage: (usage: ModelUsage) => void
   readonly setActiveStream: (
     stream: AsyncIterator<ModelStreamEvent> | undefined,
@@ -537,7 +555,10 @@ async function consumeModelStream(input: {
       try {
         await iterator.return?.()
       } catch (error) {
-        reportRuntimeError(input.onRuntimeError, error)
+        reportOperationalFailure(input.onOperationalFailure, {
+          operation: "close-model-stream",
+          cause: error,
+        })
       }
     }
   }
@@ -598,7 +619,9 @@ async function compactLiveHistory(input: {
   readonly rolloutAssets: RolloutAssets | undefined
   readonly usages: ModelUsage[]
   readonly compactionState: CompactionState
-  readonly onRuntimeError: ((error: unknown) => void) | undefined
+  readonly onOperationalFailure:
+    | TurnProcessorOperationalFailureReporter
+    | undefined
   readonly setActiveStream: (
     stream: AsyncIterator<ModelStreamEvent> | undefined,
   ) => void
@@ -648,7 +671,7 @@ async function compactLiveHistory(input: {
         turnId: input.turnId,
         assistantResponseBytes:
           input.turn.configuration.executionPolicy.compactionSummaryBytes,
-        onRuntimeError: input.onRuntimeError,
+        onOperationalFailure: input.onOperationalFailure,
         onUsage(usage) {
           input.usages.push(usage)
           const aggregate = aggregateTokenUsage(input.usages)
@@ -802,8 +825,11 @@ async function compactLiveHistory(input: {
     ])
     input.compactionState.consecutiveFailures += 1
     input.compactionState.failedHistoryLength = input.history.length
-    reportRuntimeError(input.onRuntimeError, error)
     if (isContextOverflowError(error)) return false
+    reportOperationalFailure(input.onOperationalFailure, {
+      operation: "compact",
+      cause: error,
+    })
     return false
   }
 }
@@ -822,7 +848,9 @@ type ToolExecutionScope = {
   readonly approvalPolicy: ApprovalPolicy
   readonly rolloutAssets: RolloutAssets | undefined
   readonly visibleFileObservations: VisibleFileObservations
-  readonly onRuntimeError: ((error: unknown) => void) | undefined
+  readonly onOperationalFailure:
+    | TurnProcessorOperationalFailureReporter
+    | undefined
   readonly agentControl?: BoundAgentControl
 }
 
@@ -1084,7 +1112,10 @@ async function executePreparedTool(
     )
   } catch (error) {
     if (input.signal.aborted || isAbortError(error)) throw abortError()
-    reportRuntimeError(input.onRuntimeError, error)
+    reportOperationalFailure(input.onOperationalFailure, {
+      operation: "execute-tool",
+      cause: error,
+    })
     const message = error instanceof Error ? error.message : "Tool failed."
     return {
       ok: false,
@@ -1317,12 +1348,13 @@ function isWorldStateMessage(message: ModelMessage): boolean {
   )
 }
 
-function reportRuntimeError(
-  callback: ((error: unknown) => void) | undefined,
-  error: unknown,
+function reportOperationalFailure(
+  callback: TurnProcessorOperationalFailureReporter | undefined,
+  failure: TurnProcessorOperationalFailure,
 ): void {
   try {
-    callback?.(error)
+    const result = callback?.(failure)
+    if (result !== undefined) void Promise.resolve(result).catch(() => {})
   } catch {
     // Observability callbacks cannot break Turn lifecycle or cleanup.
   }

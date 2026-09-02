@@ -3,6 +3,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { createProjectRegistry } from "../../src/server/project-registry.ts"
+import type { OperationalFailure } from "../../src/server/operational-errors.ts"
 
 const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => {
@@ -29,9 +30,71 @@ describe("project registry", () => {
 
   it("starts from the default project when the file is corrupt", async () => {
     await withRegistry(async ({ registryPath, defaultProject }) => {
+      const failures: OperationalFailure[] = []
       await writeFile(registryPath, "{not json")
-      const registry = createProjectRegistry({ registryPath, defaultProject })
+      const registry = createProjectRegistry({
+        registryPath,
+        defaultProject,
+        reportOperationalFailure(failure) {
+          failures.push(failure)
+        },
+      })
       expect(await registry.list()).toEqual([defaultProject])
+      expect(failures).toEqual([
+        expect.objectContaining({
+          component: "project-registry",
+          operation: "parse",
+          cause: expect.any(SyntaxError),
+        }),
+      ])
+    })
+  })
+
+  it("reports a registry read failure before using the default", async () => {
+    await withRegistry(async ({ rootDir, defaultProject }) => {
+      const failures: OperationalFailure[] = []
+      const registry = createProjectRegistry({
+        registryPath: rootDir,
+        defaultProject,
+        reportOperationalFailure(failure) {
+          failures.push(failure)
+        },
+      })
+
+      expect(await registry.list()).toEqual([defaultProject])
+      expect(failures).toEqual([
+        expect.objectContaining({
+          component: "project-registry",
+          operation: "read",
+          cause: expect.any(Error),
+        }),
+      ])
+    })
+  })
+
+  it("rejects a partially invalid persisted project list", async () => {
+    await withRegistry(async ({ registryPath, defaultProject }) => {
+      const failures: OperationalFailure[] = []
+      await writeFile(
+        registryPath,
+        JSON.stringify({ projects: ["relative/project", 42] }),
+      )
+      const registry = createProjectRegistry({
+        registryPath,
+        defaultProject,
+        reportOperationalFailure(failure) {
+          failures.push(failure)
+        },
+      })
+
+      expect(await registry.list()).toEqual([defaultProject])
+      expect(failures).toEqual([
+        expect.objectContaining({
+          component: "project-registry",
+          operation: "parse",
+          cause: expect.any(Error),
+        }),
+      ])
     })
   })
 
