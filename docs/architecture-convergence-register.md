@@ -21,67 +21,13 @@ owning boundary moves once.
 
 | Order | Outcome | Owning areas | Severity driver |
 | --- | --- | --- | --- |
-| 1 | Application and background failures observable | server application/start/desktop-entry | Silent failures, but no known incident |
-| 2 | Production exports narrowed, test support separated | runtime and server public surfaces | Hygiene; churns exports, so it runs last |
+| 1 | Production exports narrowed, test support separated | runtime and server public surfaces | Hygiene; churns exports, so it runs last |
 
-The next piece of work is Stage 3. The former Agent-lifecycle stage is resolved
+The next piece of work is Stage 4. The former Agent-lifecycle stage is resolved
 by the Session-owned status, per-root AgentControl, durable spawn graph, lazy
 identity restoration, and retryable completion/message delivery. Mate's
 production mutation surface remains limited to create/list/read for the
 current single-Mate product.
-
-## Stage 3 — Application lifecycle and background failures
-
-Sequenced after Stage 1 because its error-reporting hooks land on the event
-hubs. One Session delivery hub orders durable item/Turn batches with transient
-usage, permission, and streamed-display events. Persistence and domain types
-remain separate: all item starts, streamed deltas, and progress are live-only;
-complete item snapshots are durable.
-
-### Current behavior
-
-`start.ts` and `desktop-entry.ts` separately assemble the application,
-listen, handle signals, and shut resources down. Their process semantics can
-drift. The production HTTP constructor also accepts handlers, a kernel, or
-an event store; the latter two exist for test convenience and widen the
-production contract.
-
-The Session delivery hub accepts an optional listener-error hook, but production
-does not install one. A failed asynchronous listener can therefore be invisible
-even though the durable write succeeded. Runner and recovery code also repeat
-structural checks for selected kernel
-`InvalidState` failures; the concrete instance is the fork interrupt/retry
-loop matching `error.details?.operation` structurally
-(`forkAfterSettlingActiveTurn`, handlers.ts:117-144).
-
-### Target boundary
-
-- One application owner assembles dependencies, listens, handles signals,
-  drains, and closes resources. CLI and desktop entry points derive options
-  and call it.
-- The production HTTP constructor accepts one handler/service boundary.
-  Tests get kernel/store convenience from test support.
-- Extend the existing kernel error guard with optional code matching instead
-  of repeating structural predicates.
-- Require an operational error reporter wherever background work or listener
-  delivery can fail. Subscriber failure must not roll back durable writes,
-  but it must identify the component, Session, event range, and cause.
-
-This does not require one global error hierarchy. Kernel, provider, tool,
-HTTP, and storage modules retain their own contracts; each owning boundary
-translates expected failures and reports unexpected ones.
-
-### Done when
-
-- CLI and desktop cannot drift in startup or shutdown semantics.
-- Production APIs do not accept dependencies solely for tests.
-- No fire-and-forget Promise or event listener can fail silently.
-- Expected errors preserve their stable code and unexpected errors preserve
-  their cause through the reporting boundary.
-
-Reference anchor:
-
-- `.references/public/codex/codex-rs/app-server/src/lib.rs`
 
 ## Stage 4 — Production surface cleanup
 
@@ -122,6 +68,22 @@ guard.
 
 The following are constraints, not future modules:
 
+- Standalone and Electron-sidecar startup, privileged control IPC, signal
+  handling, and resource teardown share one process-lifecycle owner. The first
+  shutdown request keeps transports open while any Session owns an active Turn;
+  when the count reaches zero, one process-wide request gate synchronously
+  closes HTTP and control-IPC admission and the listener stops accepting new
+  connections. Requests admitted before that boundary drain before their
+  resulting Turns are checked again; only then do Thread admission and owned
+  resources close. A second request forces exit. The Electron parent directly
+  owns the real sidecar process and imposes no hidden first-request kill
+  deadline.
+- Modules retain their own expected-error contracts. Failures from detached
+  workers, listeners, fallback paths, or cleanup that can no longer reach a
+  caller cross one narrow operational-reporting boundary with component,
+  operation, cause, and available Session/Turn/event-range context. Reporter
+  failure, including an asynchronous reporter rejection, cannot alter domain
+  work, persistence, delivery, or cleanup.
 - Assistant and reasoning display items start live, then receive transient
   suffix deltas keyed by item id; providers emit cumulative snapshots
   internally and the runtime converts them to bounded publications. A final,

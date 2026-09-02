@@ -53,6 +53,11 @@ import {
   type ApiSessionDetail,
   type ApiSessionSummary,
 } from "./protocol.ts"
+import {
+  consoleOperationalFailureReporter,
+  type OperationalFailureReporter,
+  reportOperationalFailure,
+} from "./operational-errors.ts"
 
 export type SessionCreateDefaults = {
   readonly workingDirectory: string
@@ -84,6 +89,7 @@ export type ThreadServerHandlerOptions = {
   readonly maxInputBytes?: number
   readonly availableProviders?: readonly string[]
   readonly rolloutAssets?: RolloutAssets
+  readonly reportOperationalFailure?: OperationalFailureReporter
 }
 
 export type ServerHandlers = {
@@ -130,6 +136,8 @@ type AdmissionTextContent = {
 export function createThreadServerHandlers(
   options: ThreadServerHandlerOptions,
 ): ThreadServerHandlers {
+  const reporter =
+    options.reportOperationalFailure ?? consoleOperationalFailureReporter
   const pumps = new Map<string, Promise<void>>()
   const pumpReady = new Map<string, Promise<void>>()
   const publishedThrough = new Map<string, number>()
@@ -194,7 +202,12 @@ export function createThreadServerHandlers(
                 break
               } catch (error) {
                 if (thread.status === "shutdown" || closing) throw error
-                console.error(`Thread event replay failed: ${thread.id}`, error)
+                reportOperationalFailure(reporter, {
+                  component: "thread-event-pump",
+                  operation: "replay-rollout",
+                  cause: error,
+                  sessionId: thread.id,
+                })
                 await new Promise((resolve) => setTimeout(resolve, 100))
               }
             }
@@ -272,7 +285,12 @@ export function createThreadServerHandlers(
       })()
       pump
         .catch((error) => {
-          console.error(`Thread event delivery failed: ${thread.id}`, error)
+          reportOperationalFailure(reporter, {
+            component: "thread-event-pump",
+            operation: "deliver",
+            cause: error,
+            sessionId: thread.id,
+          })
         })
         .finally(() => {
           pumps.delete(thread.id)
@@ -360,7 +378,7 @@ export function createThreadServerHandlers(
           event,
         })
       } catch (error) {
-        return fail(error)
+        return fail(error, reporter, "create-session")
       }
     },
 
@@ -395,7 +413,7 @@ export function createThreadServerHandlers(
               }),
         })
       } catch (error) {
-        return fail(error)
+        return fail(error, reporter, "list-sessions")
       }
     },
 
@@ -414,7 +432,7 @@ export function createThreadServerHandlers(
           ),
         })
       } catch (error) {
-        return fail(error)
+        return fail(error, reporter, "read-session")
       }
     },
 
@@ -429,7 +447,7 @@ export function createThreadServerHandlers(
         publishedThrough.delete(sessionId)
         return ok(200, { sessionId })
       } catch (error) {
-        return fail(error)
+        return fail(error, reporter, "delete-session")
       }
     },
 
@@ -492,7 +510,12 @@ export function createThreadServerHandlers(
           try {
             await options.manager.discardThread(forked.thread.id)
           } catch (cleanupError) {
-            console.error("Failed to roll back a forked Session.", cleanupError)
+            reportOperationalFailure(reporter, {
+              component: "thread-handlers",
+              operation: "rollback-fork",
+              cause: cleanupError,
+              sessionId: forked.thread.id,
+            })
           }
           throw error
         }
@@ -512,7 +535,7 @@ export function createThreadServerHandlers(
           events,
         })
       } catch (error) {
-        return fail(error)
+        return fail(error, reporter, "fork-session")
       }
     },
 
@@ -602,12 +625,15 @@ export function createThreadServerHandlers(
             if (request.content.attachments !== undefined) {
               await options.rolloutAssets
                 ?.discardDraftImageAttachments(request.content.attachments)
-                .catch((error: unknown) =>
-                  console.warn(
-                    "Could not remove admitted draft attachments.",
-                    error,
-                  ),
-                )
+                .catch((error: unknown) => {
+                  reportOperationalFailure(reporter, {
+                    component: "thread-handlers",
+                    operation: "discard-admitted-draft-attachments",
+                    cause: error,
+                    sessionId: request.sessionId,
+                    turnId: request.requestId,
+                  })
+                })
             }
             const stored = await requireStoredThread(
               options.store,
@@ -643,7 +669,7 @@ export function createThreadServerHandlers(
           },
         )
       } catch (error) {
-        return fail(error)
+        return fail(error, reporter, "admit-input")
       }
     },
 
@@ -656,7 +682,7 @@ export function createThreadServerHandlers(
           { sessionId: request.sessionId },
         )
       } catch (error) {
-        return fail(error)
+        return fail(error, reporter, "compact-session")
       }
     },
 
@@ -672,7 +698,7 @@ export function createThreadServerHandlers(
           },
         )
       } catch (error) {
-        return fail(error)
+        return fail(error, reporter, "cancel-input")
       }
     },
 
@@ -697,7 +723,7 @@ export function createThreadServerHandlers(
           turnId: request.turnId,
         })
       } catch (error) {
-        return fail(error)
+        return fail(error, reporter, "cancel-turn")
       }
     },
 
@@ -712,7 +738,7 @@ export function createThreadServerHandlers(
         }
         return ok(200, request)
       } catch (error) {
-        return fail(error)
+        return fail(error, reporter, "resolve-permission")
       }
     },
 
@@ -743,7 +769,7 @@ export function createThreadServerHandlers(
             : {}),
         })
       } catch (error) {
-        return fail(error)
+        return fail(error, reporter, "read-session-events")
       }
     },
   }
@@ -1705,8 +1731,30 @@ function ok<T>(status: number, body: T): ApiHandlerResult<T> {
   }
 }
 
-function fail(error: unknown): ApiHandlerResult<never> {
+function fail(
+  error: unknown,
+  reporter?: OperationalFailureReporter,
+  operation?: string,
+): ApiHandlerResult<never> {
   const mapped = mapError(error)
+  if (mapped.status >= 500 && reporter !== undefined) {
+    const sessionId =
+      mapped.details !== undefined &&
+      typeof mapped.details.sessionId === "string"
+        ? mapped.details.sessionId
+        : undefined
+    const turnId =
+      mapped.details !== undefined && typeof mapped.details.turnId === "string"
+        ? mapped.details.turnId
+        : undefined
+    reportOperationalFailure(reporter, {
+      component: "thread-handlers",
+      operation: operation ?? "request",
+      cause: error,
+      ...(sessionId === undefined ? {} : { sessionId }),
+      ...(turnId === undefined ? {} : { turnId }),
+    })
+  }
   return {
     ok: false,
     status: mapped.status,

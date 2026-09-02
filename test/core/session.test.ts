@@ -10,6 +10,31 @@ import { SessionConfiguration } from "../../src/runtime/session-configuration.ts
 import { MemoryThreadStore } from "./memory-thread-store.ts"
 
 describe("live Session actor", () => {
+  it("reports active Turn ownership synchronously enough for shutdown", async () => {
+    const mayFinish = deferred<void>()
+    const counts: number[] = []
+    const manager = createManager({
+      async run() {
+        await mayFinish.promise
+      },
+    })
+    const unsubscribe = manager.subscribeRunningTurnCount((count) => {
+      counts.push(count)
+    })
+    const thread = await manager.createThread()
+
+    await thread.startIfIdle({ content: { kind: "text", text: "run" } })
+    expect(manager.runningTurnCount).toBe(1)
+
+    mayFinish.resolve()
+    await nextEventOfType(thread, "turn.completed")
+    expect(manager.runningTurnCount).toBe(0)
+    expect(counts).toContain(0)
+
+    unsubscribe()
+    await manager.shutdown()
+  })
+
   it("routes turn input atomically as Started, Steered, or NotSubmitted", async () => {
     const mayFinish = deferred<void>()
     const steering: string[] = []

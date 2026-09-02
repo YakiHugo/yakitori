@@ -161,6 +161,11 @@ export function createAgentControl(input: {
   readonly maxDepth?: number
   readonly maxConcurrentAgents?: number
   readonly restoreAgents?: () => Promise<readonly AgentRegistration[]>
+  readonly onBackgroundError?: (
+    error: unknown,
+    agentId: string,
+    operation: string,
+  ) => void
 }): AgentControl {
   const maxDepth = requirePositiveInteger(input.maxDepth ?? 2, "maxDepth")
   const maxConcurrentAgents = requirePositiveInteger(
@@ -504,7 +509,14 @@ export function createAgentControl(input: {
     }
     void worker.then(
       () => settle(true),
-      () => settle(false),
+      (error: unknown) => {
+        settle(false)
+        try {
+          input.onBackgroundError?.(error, agent.agentId, "task-worker")
+        } catch {
+          // Observability callbacks cannot break AgentControl lifecycle.
+        }
+      },
     )
   }
 

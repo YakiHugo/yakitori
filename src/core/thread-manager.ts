@@ -7,6 +7,7 @@ import { createItemId, createSessionId, createTurnId } from "../kernel/ids.ts"
 import { AgentThread } from "./agent-thread.ts"
 import type { StoredThread } from "./rollout.ts"
 import { Session, type TurnProcessor } from "./session.ts"
+import { SessionStatus } from "./session-io.ts"
 import type {
   CreateThreadMetadata,
   ThreadStore,
@@ -43,6 +44,11 @@ export type ThreadManagerOptions = {
   readonly store: ThreadStore
   readonly createTurnProcessor: (stored: StoredThread) => TurnProcessor
   readonly onPersistenceError?: (error: unknown, threadId: string) => void
+  readonly onBackgroundError?: (
+    error: unknown,
+    threadId: string,
+    operation: string,
+  ) => void
 }
 
 export class ThreadManager {
@@ -51,7 +57,13 @@ export class ThreadManager {
   readonly #onPersistenceError?:
     | ((error: unknown, threadId: string) => void)
     | undefined
+  readonly #onBackgroundError?:
+    | ((error: unknown, threadId: string, operation: string) => void)
+    | undefined
   readonly #threads = new Map<string, AgentThread>()
+  readonly #threadStatusSubscriptions = new Map<string, () => void>()
+  readonly #runningThreadIds = new Set<string>()
+  readonly #runningTurnCountListeners = new Set<(count: number) => void>()
   readonly #loads = new Map<string, Promise<AgentThread | undefined>>()
   readonly #starting = new Set<Promise<unknown>>()
   readonly #discarding = new Set<string>()
@@ -62,6 +74,21 @@ export class ThreadManager {
     this.#store = options.store
     this.#createTurnProcessor = options.createTurnProcessor
     this.#onPersistenceError = options.onPersistenceError
+    this.#onBackgroundError = options.onBackgroundError
+  }
+
+  get runningTurnCount(): number {
+    // Status notifications are intentionally delivered in microtasks, so the
+    // set below drives change notifications but cannot be the authoritative
+    // value read by a signal handler in the same tick as Turn admission.
+    return [...this.#threads.values()].filter(
+      (thread) => thread.status === SessionStatus.Active,
+    ).length
+  }
+
+  subscribeRunningTurnCount(listener: (count: number) => void): () => void {
+    this.#runningTurnCountListeners.add(listener)
+    return () => this.#runningTurnCountListeners.delete(listener)
   }
 
   getThread(threadId: string): AgentThread | undefined {
@@ -236,17 +263,23 @@ export class ThreadManager {
     try {
       await this.#loads.get(threadId)?.catch(() => undefined)
       const live = this.#threads.get(threadId)
-      if (live !== undefined) await live.shutdownAndWait()
-      this.#threads.delete(threadId)
+      if (live !== undefined) {
+        await live.shutdownAndWait()
+        this.#removeInstalledThread(threadId, live)
+      }
       await this.#store.deleteThread(threadId)
     } finally {
       this.#discarding.delete(threadId)
     }
   }
 
+  beginShutdown(): void {
+    this.#closing = true
+  }
+
   shutdown(): Promise<void> {
     if (this.#shutdownPromise !== undefined) return this.#shutdownPromise
-    this.#closing = true
+    this.beginShutdown()
     this.#shutdownPromise = this.#finishShutdown()
     return this.#shutdownPromise
   }
@@ -257,7 +290,7 @@ export class ThreadManager {
     }
     const threads = [...this.#threads.values()]
     await Promise.all(threads.map((thread) => thread.shutdownAndWait()))
-    this.#threads.clear()
+    for (const thread of threads) this.#removeInstalledThread(thread.id, thread)
   }
 
   #installStored(stored: StoredThread): AgentThread {
@@ -284,14 +317,73 @@ export class ThreadManager {
         }),
       )
     } catch (error) {
-      void this.#store.discardThread(threadId)
+      void this.#store.discardThread(threadId).catch((discardError) => {
+        this.#reportBackgroundError(
+          discardError,
+          threadId,
+          "discard-failed-installation",
+        )
+      })
       throw error
     }
     this.#threads.set(threadId, thread)
-    void thread.termination.then(() => {
-      if (this.#threads.get(threadId) === thread) this.#threads.delete(threadId)
-    })
+    this.#threadStatusSubscriptions.set(
+      threadId,
+      thread.subscribeStatus((status) => {
+        if (this.#threads.get(threadId) !== thread) return
+        this.#updateRunningThread(threadId, status === SessionStatus.Active)
+      }),
+    )
+    this.#updateRunningThread(threadId, thread.status === SessionStatus.Active)
+    void thread.termination.then(
+      () => this.#removeInstalledThread(threadId, thread),
+      (error: unknown) => {
+        this.#removeInstalledThread(threadId, thread)
+        this.#reportBackgroundError(error, threadId, "session-termination")
+      },
+    )
     return thread
+  }
+
+  #removeInstalledThread(threadId: string, thread: AgentThread): void {
+    if (this.#threads.get(threadId) !== thread) return
+    this.#threads.delete(threadId)
+    this.#threadStatusSubscriptions.get(threadId)?.()
+    this.#threadStatusSubscriptions.delete(threadId)
+    this.#updateRunningThread(threadId, false)
+  }
+
+  #updateRunningThread(threadId: string, running: boolean): void {
+    const changed = running
+      ? !this.#runningThreadIds.has(threadId)
+      : this.#runningThreadIds.has(threadId)
+    if (!changed) return
+    if (running) this.#runningThreadIds.add(threadId)
+    else this.#runningThreadIds.delete(threadId)
+    const count = this.runningTurnCount
+    for (const listener of this.#runningTurnCountListeners) {
+      try {
+        listener(count)
+      } catch (error) {
+        this.#reportBackgroundError(
+          error,
+          threadId,
+          "running-turn-count-listener",
+        )
+      }
+    }
+  }
+
+  #reportBackgroundError(
+    error: unknown,
+    threadId: string,
+    operation: string,
+  ): void {
+    try {
+      this.#onBackgroundError?.(error, threadId, operation)
+    } catch {
+      // Observability callbacks cannot break ThreadManager lifecycle.
+    }
   }
 
   #trackStarting<T>(operation: () => Promise<T>): Promise<T> {

@@ -27,6 +27,12 @@ import {
   type ApiUserModelPreference,
 } from "./protocol.ts"
 import type { UserConfigStore } from "./user-config.ts"
+import {
+  consoleOperationalFailureReporter,
+  type OperationalFailureReporter,
+  reportOperationalFailure,
+} from "./operational-errors.ts"
+import { createRequestGate, type RequestGate } from "./request-gate.ts"
 
 export type YakitoriStaticAssets = {
   readonly directory: string
@@ -40,6 +46,8 @@ type YakitoriHttpServerCommonOptions = {
   readonly userConfig?: UserConfigStore
   readonly availableProviders?: readonly string[]
   readonly rolloutAssets?: RolloutAssets
+  readonly reportOperationalFailure?: OperationalFailureReporter
+  readonly requestGate?: RequestGate
 }
 
 export type YakitoriHttpServerOptions = YakitoriHttpServerCommonOptions & {
@@ -52,36 +60,85 @@ export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
       "Injected handlers are required. Use createYakitoriApplication() for an owned runtime.",
     )
   }
-  const eventHub = options.eventHub ?? createSessionEventHub()
+  const reporter =
+    options.reportOperationalFailure ?? consoleOperationalFailureReporter
+  const requestGate = options.requestGate ?? createRequestGate()
+  const eventHub =
+    options.eventHub ??
+    createSessionEventHub({ reportOperationalFailure: reporter })
   const handlers = options.handlers
   const projectRegistry = options.projectRegistry
   const providers = options.providers
   const userConfig = options.userConfig
   const availableProviders = options.availableProviders
   const rolloutAssets = options.rolloutAssets
-
   const staticAssets =
     options.staticAssets === undefined
       ? undefined
       : createStaticAssetContext(options.staticAssets.directory)
 
   const server = createServer((request, response) => {
-    void handleRequest(
-      request,
-      response,
-      handlers,
-      eventHub,
-      projectRegistry,
-      providers,
-      userConfig,
-      availableProviders,
-      rolloutAssets,
-      staticAssets,
-    ).catch((error) => {
-      writeUnhandledError(response, error)
-    })
+    void requestGate
+      .run(async () => {
+        try {
+          await handleRequest(
+            request,
+            response,
+            handlers,
+            eventHub,
+            projectRegistry,
+            providers,
+            userConfig,
+            availableProviders,
+            rolloutAssets,
+            staticAssets,
+          )
+        } catch (error) {
+          if (!(error instanceof URIError)) {
+            reportOperationalFailure(reporter, {
+              component: "http-server",
+              operation: "handle-request",
+              cause: error,
+            })
+          }
+          writeUnhandledError(response, error)
+        }
+        await waitForResponseCompletion(response)
+      })
+      .then((result) => {
+        if (!result.accepted) {
+          writeResult(
+            response,
+            errorResult(
+              503,
+              ApiErrorCode.InternalError,
+              "Server is shutting down.",
+            ),
+          )
+        }
+      })
   })
   return server
+}
+
+function waitForResponseCompletion(response: ServerResponse): Promise<void> {
+  const contentType = response.getHeader("content-type")
+  if (
+    typeof contentType === "string" &&
+    contentType.startsWith("text/event-stream")
+  ) {
+    return Promise.resolve()
+  }
+  if (response.writableFinished || response.destroyed) return Promise.resolve()
+  return new Promise((resolve) => {
+    const finish = (): void => {
+      response.off("finish", finish)
+      response.off("close", finish)
+      resolve()
+    }
+    response.once("finish", finish)
+    response.once("close", finish)
+  })
 }
 
 async function handleRequest(

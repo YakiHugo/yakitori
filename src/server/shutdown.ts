@@ -1,18 +1,191 @@
 import type { Server } from "node:http"
+import type { OperationalFailureReporter } from "./operational-errors.ts"
+import { reportOperationalFailure } from "./operational-errors.ts"
 
 export type ShutdownInput = {
   readonly server: Server
   readonly closeApplication: () => Promise<void>
+  readonly httpShutdown?: HttpServerShutdown
   readonly timeoutMs?: number
   readonly onTimeout?: (step: string) => void
 }
 
-const DEFAULT_SHUTDOWN_TIMEOUT_MS = 1_000
+export type HttpServerShutdown = Readonly<{
+  readonly closed: Promise<void>
+  forceClose(): void
+}>
 
-// Bounded shutdown: no single step may stall the process forever. The HTTP
-// close force-drops keep-alive and SSE connections up front; both the server
-// close and the application close give up after the deadline so a wedged
-// connection or store can never hold the event loop hostage.
+const DEFAULT_SHUTDOWN_TIMEOUT_MS = 10_000
+
+export const ShutdownPhase = {
+  Running: "running",
+  Draining: "draining",
+  ShuttingDown: "shutting_down",
+  Forced: "forced",
+  Finished: "finished",
+} as const
+
+export type ShutdownPhase = (typeof ShutdownPhase)[keyof typeof ShutdownPhase]
+
+export type ShutdownResult = Readonly<{
+  clean: boolean
+  forced: boolean
+}>
+
+export type ShutdownController = Readonly<{
+  readonly phase: ShutdownPhase
+  readonly termination: Promise<ShutdownResult>
+  requestShutdown(): void
+}>
+
+export async function drainAdmittedRequestsAndTurns(input: {
+  readonly drainRequests: Promise<void>
+  readonly runningTurnCount: () => number
+  readonly subscribeRunningTurnCount: (
+    listener: (count: number) => void,
+  ) => () => void
+  readonly timeoutMs?: number
+  readonly onTimeout?: (step: string) => void
+}): Promise<boolean> {
+  const requestsClean = await withTimeout(
+    input.drainRequests,
+    input.timeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS,
+    "request-drain",
+    input.onTimeout ?? (() => {}),
+  )
+  if (!requestsClean) return false
+  if (input.runningTurnCount() === 0) return true
+
+  await new Promise<void>((resolve) => {
+    let unsubscribe: (() => void) | undefined
+    const finishIfDrained = (count: number): void => {
+      if (count !== 0) return
+      unsubscribe?.()
+      resolve()
+    }
+    unsubscribe = input.subscribeRunningTurnCount(finishIfDrained)
+    finishIfDrained(input.runningTurnCount())
+  })
+  return true
+}
+
+export function createShutdownController(input: {
+  readonly runningTurnCount: () => number
+  readonly subscribeRunningTurnCount: (
+    listener: (count: number) => void,
+  ) => () => void
+  readonly beginShutdown: () => void
+  readonly shutdown: () => Promise<boolean>
+  readonly forceShutdown: () => void
+  readonly reportOperationalFailure: OperationalFailureReporter
+}): ShutdownController {
+  let phase: ShutdownPhase = ShutdownPhase.Running
+  let resolveTermination: ((result: ShutdownResult) => void) | undefined
+  const termination = new Promise<ShutdownResult>((resolve) => {
+    resolveTermination = resolve
+  })
+  const unsubscribe = input.subscribeRunningTurnCount((count) => {
+    if (phase === ShutdownPhase.Draining && count === 0) startShutdown()
+  })
+
+  const finish = (result: ShutdownResult): void => {
+    if (phase === ShutdownPhase.Forced || phase === ShutdownPhase.Finished) {
+      return
+    }
+    phase = ShutdownPhase.Finished
+    unsubscribe()
+    resolveTermination?.(result)
+  }
+
+  const force = (): void => {
+    if (phase === ShutdownPhase.Forced || phase === ShutdownPhase.Finished) {
+      return
+    }
+    phase = ShutdownPhase.Forced
+    unsubscribe()
+    try {
+      input.forceShutdown()
+    } catch (error) {
+      reportOperationalFailure(input.reportOperationalFailure, {
+        component: "server-lifecycle",
+        operation: "force-shutdown",
+        cause: error,
+      })
+    }
+    resolveTermination?.({ clean: false, forced: true })
+  }
+
+  const startShutdown = (): void => {
+    if (phase !== ShutdownPhase.Draining) return
+    phase = ShutdownPhase.ShuttingDown
+    try {
+      // The lifecycle owner synchronously closes request admission here. Work
+      // admitted before this boundary is drained by shutdown().
+      input.beginShutdown()
+    } catch (error) {
+      reportOperationalFailure(input.reportOperationalFailure, {
+        component: "server-lifecycle",
+        operation: "begin-shutdown",
+        cause: error,
+      })
+      finish({ clean: false, forced: false })
+      return
+    }
+    void input.shutdown().then(
+      (clean) => finish({ clean, forced: false }),
+      (error: unknown) => {
+        reportOperationalFailure(input.reportOperationalFailure, {
+          component: "server-lifecycle",
+          operation: "shutdown",
+          cause: error,
+        })
+        finish({ clean: false, forced: false })
+      },
+    )
+  }
+
+  return {
+    get phase() {
+      return phase
+    },
+    termination,
+    requestShutdown() {
+      if (
+        phase === ShutdownPhase.Draining ||
+        phase === ShutdownPhase.ShuttingDown
+      ) {
+        force()
+        return
+      }
+      if (phase !== ShutdownPhase.Running) return
+      phase = ShutdownPhase.Draining
+      if (input.runningTurnCount() === 0) startShutdown()
+    },
+  }
+}
+
+// Stops accepting new TCP connections while allowing admitted requests to
+// finish. The lifecycle owner calls forceClose only after request and Turn
+// work has drained, matching Codex's close-then-wait RPC gate sequence.
+export function beginHttpServerShutdown(server: Server): HttpServerShutdown {
+  const closed = new Promise<void>((resolve, reject) => {
+    server.close((error) => {
+      if (error === undefined) resolve()
+      else reject(error)
+    })
+  })
+  server.closeIdleConnections()
+  return {
+    closed,
+    forceClose() {
+      server.closeAllConnections()
+    },
+  }
+}
+
+// Bounded resource teardown. At this point new requests are rejected and
+// admitted requests and Turns have drained, so remaining connections are SSE
+// or keep-alive transports that can be closed without truncating operations.
 export async function shutdownHttpApplication(
   input: ShutdownInput,
 ): Promise<boolean> {
@@ -23,15 +196,11 @@ export async function shutdownHttpApplication(
       console.error(`yakitori: shutdown step "${step}" timed out`)
     })
 
-  const serverClosed = new Promise<void>((resolve) => {
-    input.server.close(() => {
-      resolve()
-    })
-  })
-  input.server.closeIdleConnections()
-  input.server.closeAllConnections()
+  const httpShutdown =
+    input.httpShutdown ?? beginHttpServerShutdown(input.server)
+  httpShutdown.forceClose()
   const serverClean = await withTimeout(
-    serverClosed,
+    httpShutdown.closed,
     timeoutMs,
     "http-close",
     onTimeout,

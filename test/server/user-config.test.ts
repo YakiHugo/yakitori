@@ -2,12 +2,9 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { parse } from "smol-toml"
-import { afterEach, describe, expect, it, vi } from "vitest"
+import { describe, expect, it } from "vitest"
+import type { OperationalFailure } from "../../src/server/operational-errors.ts"
 import { createUserConfigStore } from "../../src/server/user-config.ts"
-
-afterEach(() => {
-  vi.restoreAllMocks()
-})
 
 describe("user config", () => {
   it("omits the preference when the injected file is missing", async () => {
@@ -163,31 +160,47 @@ describe("user config", () => {
     })
   })
 
-  it("warns and treats malformed TOML as an empty preference", async () => {
+  it("reports and treats malformed TOML as an empty preference", async () => {
     await withConfigPath(async (configPath) => {
       await writeFile(configPath, 'provider = "unterminated\nmodel = "x"\n')
-      const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
-      const store = createUserConfigStore({ configPath })
+      const failures: OperationalFailure[] = []
+      const store = createUserConfigStore({
+        configPath,
+        reportOperationalFailure(failure) {
+          failures.push(failure)
+        },
+      })
 
       await expect(store.read()).resolves.toBeUndefined()
-      expect(warn).toHaveBeenCalledWith(
-        expect.stringContaining("Ignoring malformed user config"),
-        expect.any(Error),
-      )
+      expect(failures).toEqual([
+        {
+          component: "user-config",
+          operation: "parse",
+          cause: expect.any(Error),
+        },
+      ])
     })
   })
 
   it("rejects a non-positive model context window as malformed config", async () => {
     await withConfigPath(async (configPath) => {
       await writeFile(configPath, "model_context_window = 0\n")
-      const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
-      const store = createUserConfigStore({ configPath })
+      const failures: OperationalFailure[] = []
+      const store = createUserConfigStore({
+        configPath,
+        reportOperationalFailure(failure) {
+          failures.push(failure)
+        },
+      })
 
       await expect(store.readConfiguration()).resolves.toEqual({})
-      expect(warn).toHaveBeenCalledWith(
-        expect.stringContaining("Ignoring malformed user config"),
-        expect.any(Error),
-      )
+      expect(failures).toEqual([
+        {
+          component: "user-config",
+          operation: "parse",
+          cause: expect.any(Error),
+        },
+      ])
     })
   })
 })

@@ -16,6 +16,7 @@ import {
 } from "../../src/runtime/tools/registry.ts"
 import {
   createTurnProcessor,
+  type TurnProcessorOperationalFailure,
   type TurnProcessorOptions,
 } from "../../src/runtime/turn-processor.ts"
 import { MemoryThreadStore } from "../core/memory-thread-store.ts"
@@ -235,6 +236,51 @@ describe("Turn processor", () => {
     expect(rollout.map((entry) => String(entry.item.type))).not.toContain(
       "item_started",
     )
+  })
+
+  it("reports an unexpected tool throw with its owning operation", async () => {
+    const provider = createFauxProvider([
+      {
+        stopReason: ModelStopReason.ToolUse,
+        content: [
+          {
+            type: "tool_call",
+            id: "tool_throw",
+            name: "throwing_tool",
+            input: {},
+          },
+        ],
+      },
+      { content: [{ type: "text", text: "recovered" }] },
+    ])
+    const cause = new Error("unexpected tool throw")
+    const tools = createToolRegistry([
+      {
+        toolName: plainToolName("throwing_tool"),
+        description: "Throw unexpectedly",
+        inputSchema: { type: "object" },
+        effect: "observe",
+        approvalRequirement: { kind: "none" },
+        async execute() {
+          throw cause
+        },
+      },
+    ])
+    const failures: TurnProcessorOperationalFailure[] = []
+    const runtime = await createRuntime(provider.stream, tools, {
+      async onOperationalFailure(failure) {
+        failures.push(failure)
+        throw new Error("reporter rejected")
+      },
+    })
+    const thread = await runtime.createThread()
+
+    await thread.startIfIdle({ content: { kind: "text", text: "use it" } })
+    await nextLifecycleEvent(thread)
+    expect((await nextLifecycleEvent(thread))?.type).toBe("turn.completed")
+    await Promise.resolve()
+
+    expect(failures).toEqual([{ operation: "execute-tool", cause }])
   })
 
   it("carries a deferred search hit through the next model request and dispatches it", async () => {
@@ -1547,7 +1593,7 @@ describe("Turn processor", () => {
   it("stops late stream publications and observes iterator cleanup failures", async () => {
     const entered = deferred<void>()
     const release = deferred<void>()
-    const runtimeErrors: unknown[] = []
+    const runtimeErrors: TurnProcessorOperationalFailure[] = []
     let nextCalls = 0
     const iterator: AsyncIterableIterator<ModelStreamEvent> = {
       [Symbol.asyncIterator]() {
@@ -1568,7 +1614,9 @@ describe("Turn processor", () => {
     }
     const stream: StreamFn = () => iterator
     const runtime = await createRuntime(stream, createToolRegistry([]), {
-      onRuntimeError: (error) => runtimeErrors.push(error),
+      onOperationalFailure(failure) {
+        runtimeErrors.push(failure)
+      },
     })
     const thread = await runtime.createThread()
     await thread.startIfIdle({ content: { kind: "text", text: "start" } })
@@ -1580,8 +1628,14 @@ describe("Turn processor", () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
 
     expect(runtimeErrors).toEqual([
-      expect.objectContaining({ message: "iterator cleanup failed" }),
-      expect.objectContaining({ message: "iterator cleanup failed" }),
+      {
+        operation: "abort-model-stream",
+        cause: expect.objectContaining({ message: "iterator cleanup failed" }),
+      },
+      {
+        operation: "close-model-stream",
+        cause: expect.objectContaining({ message: "iterator cleanup failed" }),
+      },
     ])
     expect(nextCalls).toBe(1)
   })
@@ -1803,6 +1857,7 @@ describe("Turn processor", () => {
   it("retries provider-overflowed compaction with an older prefix", async () => {
     let normalCalls = 0
     let compactionCalls = 0
+    const operationalFailures: TurnProcessorOperationalFailure[] = []
     const stream: StreamFn = async function* (request) {
       const compacting = request.system.some(
         (section) => section.id === "compaction.instructions",
@@ -1825,6 +1880,9 @@ describe("Turn processor", () => {
         compactionTriggerRatio: 0.6,
         compactionRetainRatio: 0,
       }),
+      onOperationalFailure(failure) {
+        operationalFailures.push(failure)
+      },
     })
     const thread = await runtime.createThread()
     for (const text of ["one", "two", "three", "four"]) {
@@ -1835,6 +1893,7 @@ describe("Turn processor", () => {
 
     expect(compactionCalls).toBe(2)
     expect(normalCalls).toBe(4)
+    expect(operationalFailures).toEqual([])
     expect(
       (await runtime.store.readThread(thread.id))?.rollout.some(
         (entry) => entry.item.type === "compacted",

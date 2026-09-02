@@ -11,6 +11,7 @@ export type ServerProcess = {
   readonly url: string
   request(command: ServerControlCommand): Promise<ServerControlResponse>
   stop(): Promise<void>
+  forceStop(): Promise<void>
 }
 
 export type SpawnServerProcessInput = {
@@ -19,14 +20,12 @@ export type SpawnServerProcessInput = {
   readonly cwd?: string
   readonly env?: NodeJS.ProcessEnv
   readonly timeoutMs?: number
-  readonly termToKillMs?: number
   readonly onStdout?: (line: string) => void
   readonly onStderr?: (line: string) => void
 }
 
 const LISTENING_PREFIX = "yakitori-listening "
 const DEFAULT_LISTEN_TIMEOUT_MS = 15_000
-const DEFAULT_TERM_TO_KILL_MS = 2_000
 
 // Spawns the sidecar server and resolves once it prints its bound URL. The
 // parent never guesses ports: the child owns the bind and reports the URL on
@@ -35,7 +34,6 @@ export function spawnServerProcess(
   input: SpawnServerProcessInput,
 ): Promise<ServerProcess> {
   const timeoutMs = input.timeoutMs ?? DEFAULT_LISTEN_TIMEOUT_MS
-  const termToKillMs = input.termToKillMs ?? DEFAULT_TERM_TO_KILL_MS
   const onStdout = input.onStdout ?? ((line: string) => console.log(line))
   const onStderr = input.onStderr ?? ((line: string) => console.error(line))
 
@@ -63,8 +61,13 @@ export function spawnServerProcess(
   let exited:
     | { readonly code: number | null; readonly signal: string | null }
     | undefined
+  let resolveExit: (() => void) | undefined
+  const exit = new Promise<void>((resolve) => {
+    resolveExit = resolve
+  })
   child.once("exit", (code, signal) => {
     exited = { code, signal }
+    resolveExit?.()
     for (const request of pending.values()) {
       request.reject(
         new Error("Sidecar server exited during a control request."),
@@ -106,11 +109,20 @@ export function spawnServerProcess(
     readLines(child.stdout, (line) => {
       if (line.startsWith(LISTENING_PREFIX)) {
         clearTimeout(timeout)
+        let stopPromise: Promise<void> | undefined
         resolve({
           child,
           url: line.slice(LISTENING_PREFIX.length).trim(),
           request: (command) => requestChild(child, pending, command),
-          stop: () => stopChild(child, () => exited, termToKillMs),
+          stop() {
+            if (exited !== undefined) return Promise.resolve()
+            stopPromise ??= signalAndWaitForExit(child, exit, "SIGTERM")
+            return stopPromise
+          },
+          forceStop() {
+            if (exited !== undefined) return Promise.resolve()
+            return signalAndWaitForExit(child, exit, "SIGKILL")
+          },
         })
         return
       }
@@ -141,35 +153,13 @@ function requestChild(
   })
 }
 
-async function stopChild(
+async function signalAndWaitForExit(
   child: ChildProcess,
-  exited: () =>
-    | { readonly code: number | null; readonly signal: string | null }
-    | undefined,
-  termToKillMs: number,
+  exit: Promise<void>,
+  signal: NodeJS.Signals,
 ): Promise<void> {
-  if (exited() !== undefined) return
-  child.kill("SIGTERM")
-  if (await waitForExit(child, exited, termToKillMs)) return
-  child.kill("SIGKILL")
-  await waitForExit(child, exited, termToKillMs)
-}
-
-async function waitForExit(
-  child: ChildProcess,
-  exited: () => unknown,
-  timeoutMs: number,
-): Promise<boolean> {
-  if (exited() !== undefined) return true
-  let timer: ReturnType<typeof setTimeout> | undefined
-  const outcome = await Promise.race([
-    new Promise<"exit">((resolve) => child.once("exit", () => resolve("exit"))),
-    new Promise<"timeout">((resolve) => {
-      timer = setTimeout(() => resolve("timeout"), timeoutMs)
-    }),
-  ])
-  clearTimeout(timer)
-  return outcome === "exit"
+  child.kill(signal)
+  await exit
 }
 
 function readLines(

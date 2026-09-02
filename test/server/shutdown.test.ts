@@ -1,7 +1,146 @@
 import { createServer, type Server } from "node:http"
 import net from "node:net"
 import { describe, expect, it } from "vitest"
-import { shutdownHttpApplication } from "../../src/server/shutdown.ts"
+import {
+  createShutdownController,
+  drainAdmittedRequestsAndTurns,
+  ShutdownPhase,
+  shutdownHttpApplication,
+} from "../../src/server/shutdown.ts"
+import { createRequestGate } from "../../src/server/request-gate.ts"
+
+describe("createShutdownController", () => {
+  it("waits for active Turns before closing admission and transports", async () => {
+    let runningTurnCount = 1
+    let onRunningTurnCount: ((count: number) => void) | undefined
+    let beganShutdown = false
+    let shutdownCalls = 0
+    const shutdownFinished = deferred<boolean>()
+    const controller = createShutdownController({
+      runningTurnCount: () => runningTurnCount,
+      subscribeRunningTurnCount(listener) {
+        onRunningTurnCount = listener
+        return () => {
+          onRunningTurnCount = undefined
+        }
+      },
+      beginShutdown: () => {
+        beganShutdown = true
+      },
+      shutdown: () => {
+        shutdownCalls += 1
+        return shutdownFinished.promise
+      },
+      forceShutdown: () => {
+        throw new Error("unreachable")
+      },
+      reportOperationalFailure: () => {},
+    })
+
+    controller.requestShutdown()
+
+    expect(controller.phase).toBe(ShutdownPhase.Draining)
+    expect(beganShutdown).toBe(false)
+    expect(shutdownCalls).toBe(0)
+
+    runningTurnCount = 0
+    onRunningTurnCount?.(0)
+    expect(controller.phase).toBe(ShutdownPhase.ShuttingDown)
+    expect(beganShutdown).toBe(true)
+    expect(shutdownCalls).toBe(1)
+
+    shutdownFinished.resolve(true)
+    await expect(controller.termination).resolves.toEqual({
+      clean: true,
+      forced: false,
+    })
+    expect(controller.phase).toBe(ShutdownPhase.Finished)
+  })
+
+  it("forces shutdown when requested a second time", async () => {
+    let forced = false
+    const controller = createShutdownController({
+      runningTurnCount: () => 1,
+      subscribeRunningTurnCount: () => () => {},
+      beginShutdown: () => {},
+      shutdown: () => Promise.resolve(true),
+      forceShutdown: () => {
+        forced = true
+      },
+      reportOperationalFailure: () => {},
+    })
+
+    controller.requestShutdown()
+    controller.requestShutdown()
+
+    expect(forced).toBe(true)
+    await expect(controller.termination).resolves.toEqual({
+      clean: false,
+      forced: true,
+    })
+    expect(controller.phase).toBe(ShutdownPhase.Forced)
+  })
+
+  it("waits for a Turn started by a request admitted before shutdown", async () => {
+    const gate = createRequestGate()
+    const releaseRequest = deferred<void>()
+    let runningTurnCount = 0
+    let onRunningTurnCount: ((count: number) => void) | undefined
+    const admitted = gate.run(async () => {
+      await releaseRequest.promise
+      runningTurnCount = 1
+      onRunningTurnCount?.(1)
+    })
+    const controller = createShutdownController({
+      runningTurnCount: () => runningTurnCount,
+      subscribeRunningTurnCount(listener) {
+        onRunningTurnCount = listener
+        return () => {
+          onRunningTurnCount = undefined
+        }
+      },
+      beginShutdown: () => gate.close(),
+      shutdown: () =>
+        drainAdmittedRequestsAndTurns({
+          drainRequests: gate.shutdown(),
+          runningTurnCount: () => runningTurnCount,
+          subscribeRunningTurnCount(listener) {
+            onRunningTurnCount = listener
+            return () => {
+              onRunningTurnCount = undefined
+            }
+          },
+        }),
+      forceShutdown: () => {
+        throw new Error("unreachable")
+      },
+      reportOperationalFailure: () => {},
+    })
+
+    controller.requestShutdown()
+    expect(controller.phase).toBe(ShutdownPhase.ShuttingDown)
+    await expect(gate.run(async () => {})).resolves.toEqual({
+      accepted: false,
+    })
+
+    let terminated = false
+    void controller.termination.then(() => {
+      terminated = true
+    })
+    releaseRequest.resolve()
+    await admitted
+    await Promise.resolve()
+    expect(runningTurnCount).toBe(1)
+    expect(terminated).toBe(false)
+
+    runningTurnCount = 0
+    onRunningTurnCount?.(0)
+    await expect(controller.termination).resolves.toEqual({
+      clean: true,
+      forced: false,
+    })
+  })
+})
 
 describe("shutdownHttpApplication", () => {
   it("force-closes hanging SSE-style connections and completes promptly", async () => {
@@ -71,4 +210,20 @@ async function openHangingRequest(port: number): Promise<net.Socket> {
   // Give the server a tick to accept and hold the connection.
   await new Promise((resolve) => setTimeout(resolve, 100))
   return socket
+}
+
+function deferred<T>(): {
+  readonly promise: Promise<T>
+  readonly resolve: (value: T) => void
+} {
+  let resolvePromise: ((value: T) => void) | undefined
+  const promise = new Promise<T>((resolve) => {
+    resolvePromise = resolve
+  })
+  return {
+    promise,
+    resolve(value) {
+      resolvePromise?.(value)
+    },
+  }
 }

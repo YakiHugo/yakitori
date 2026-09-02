@@ -1,6 +1,5 @@
-import { createYakitoriApplication } from "./application.ts"
 import { loadLocalEnvFile } from "./env-file.ts"
-import { shutdownHttpApplication } from "./shutdown.ts"
+import { runYakitoriServerProcess } from "./server-process.ts"
 
 // Sidecar entry for the Electron desktop shell. Runs in a plain Node child
 // process (ELECTRON_RUN_AS_NODE) in both dev and prod. Dev spawns the repo
@@ -15,44 +14,15 @@ const port = Number(process.env.PORT ?? 0)
 const rootDir = process.env.YAKITORI_STORE_DIR ?? ".yakitori"
 const guiStaticDir = process.env.YAKITORI_GUI_DIR
 
-const application = await createYakitoriApplication({
-  rootDir,
-  ...(guiStaticDir === undefined ? {} : { guiStaticDir }),
+await runYakitoriServerProcess({
+  host,
+  port,
+  application: {
+    rootDir,
+    ...(guiStaticDir === undefined ? {} : { guiStaticDir }),
+  },
+  onListening(url) {
+    // The one machine-readable line the parent parses; keep it exactly this.
+    console.log(`yakitori-listening ${url}`)
+  },
 })
-const server = application.createHttpServer()
-let shuttingDown = false
-
-server.listen(port, host, () => {
-  const address = server.address()
-  if (address === null || typeof address === "string") {
-    console.error("yakitori: sidecar server did not bind a TCP address")
-    process.exit(1)
-  }
-  // The one machine-readable line the parent parses; keep it exactly this.
-  console.log(`yakitori-listening http://${host}:${address.port}`)
-  void application.probeUserShellEnv().catch((error: unknown) => {
-    console.warn("exec_command shell-env probe failed", error)
-  })
-})
-
-for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.on(signal, () => {
-    if (shuttingDown) return
-    shuttingDown = true
-    void shutdownHttpApplication({
-      server,
-      closeApplication: () => application.close(),
-    }).then(
-      (clean) => {
-        process.exit(clean ? 0 : 1)
-      },
-      (error: unknown) => {
-        console.error("yakitori: sidecar shutdown failed", error)
-        process.exit(1)
-      },
-    )
-    setTimeout(() => {
-      process.exit(1)
-    }, 5_000).unref()
-  })
-}
