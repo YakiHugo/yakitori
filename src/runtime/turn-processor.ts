@@ -93,6 +93,7 @@ export type TurnProcessorOptions = {
   readonly baseInstructions?: string
   readonly modelContextWindowTokens?: number
   readonly loadProjectInstructions?: typeof loadProjectInstructions
+  readonly resolveShellName?: () => Promise<string>
   readonly now?: () => Date
   readonly rolloutAssets?: RolloutAssets
   readonly onOperationalFailure?: TurnProcessorOperationalFailureReporter
@@ -358,6 +359,9 @@ async function executeTurnModelLoop(
       const environment = observeEnvironment({
         workspaceRoot,
         workingDirectory: configuration.workspaceRoot,
+        ...(input.options.resolveShellName === undefined
+          ? {}
+          : { shell: await input.options.resolveShellName() }),
         ...(input.options.now === undefined
           ? {}
           : { now: input.options.now() }),

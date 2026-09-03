@@ -45,4 +45,24 @@ describe("environment context", () => {
       await rm(dir, { recursive: true, force: true })
     }
   })
+
+  it("renders the shell name when the host supplies one", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "yakitori-env-"))
+    try {
+      const withShell = buildEnvironmentContext({
+        workingDirectory: dir,
+        now: new Date(2026, 6, 31),
+        shell: "zsh",
+      })
+      const withoutShell = buildEnvironmentContext({
+        workingDirectory: dir,
+        now: new Date(2026, 6, 31),
+      })
+
+      expect(withShell).toContain("Shell: zsh")
+      expect(withoutShell).not.toContain("Shell:")
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
 })

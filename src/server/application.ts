@@ -272,6 +272,7 @@ export async function createYakitoriApplication(
             ? {}
             : { modelContextWindowTokens }),
           permissionGate,
+          resolveShellName: () => userShellEnv.shellName(),
           // Each Session owns both its external catalog and process manager.
           toolRegistry: createToolRegistry(createTrustedTools()),
           agentControl: agentRuntime.registerThread(stored),
