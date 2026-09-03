@@ -36,11 +36,11 @@ describe("user config", () => {
     })
   })
 
-  it("loads custom model instructions relative to the effective cwd", async () => {
+  it("resolves model_instructions_file relative to the config file directory", async () => {
     await withConfigPath(async (configPath) => {
-      const cwd = dirname(configPath)
+      const configDirectory = dirname(configPath)
       await writeFile(
-        join(cwd, "model-instructions.md"),
+        join(configDirectory, "model-instructions.md"),
         "\nUse the custom harness instructions.\n",
       )
       await writeFile(
@@ -51,7 +51,7 @@ describe("user config", () => {
           "",
         ].join("\n"),
       )
-      const store = createUserConfigStore({ configPath, cwd })
+      const store = createUserConfigStore({ configPath })
 
       await expect(store.readConfiguration()).resolves.toEqual({
         baseInstructions: "Use the custom harness instructions.",
@@ -106,12 +106,11 @@ describe("user config", () => {
 
   it("does not silently replace an unreadable custom instruction file", async () => {
     await withConfigPath(async (configPath) => {
-      const cwd = dirname(configPath)
       await writeFile(
         configPath,
         'model_instructions_file = "missing-instructions.md"\n',
       )
-      const store = createUserConfigStore({ configPath, cwd })
+      const store = createUserConfigStore({ configPath })
 
       await expect(store.readConfiguration()).rejects.toThrow(
         "Failed to read model instructions file",
