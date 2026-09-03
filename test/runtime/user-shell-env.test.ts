@@ -1,7 +1,15 @@
 import { existsSync } from "node:fs"
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  utimes,
+  writeFile,
+} from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { basename, join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import {
   applyShellEnvironmentPolicy,
@@ -11,6 +19,7 @@ import {
   parseNullEnvironment,
   parsePrintenvEnvironment,
   resolveCommandShell,
+  wrapWithShellSnapshot,
 } from "../../src/runtime/user-shell-env.ts"
 
 const workspaces: string[] = []
@@ -173,13 +182,23 @@ describe("user shell environment", () => {
     ).toEqual({ PATH: "/bin", HOME: "/home/test" })
   })
 
+  it("exposes the resolved shell basename for environment context", async () => {
+    const environment = createUserShellEnv({
+      appEnv: { PATH: "/usr/bin:/bin" },
+      resolveShell: async () => ({ shell: "/bin/zsh", warnings: [] }),
+    })
+
+    await expect(environment.shellName()).resolves.toBe("zsh")
+    await expect(environment.shellName()).resolves.toBe("zsh")
+  })
+
   it("falls back to printenv and freezes the ready map", async () => {
     const calls: string[] = []
     const logs: string[] = []
     const environment = createUserShellEnv({
       appEnv: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin", PORT: "4141" },
       resolveShell: async () => ({ shell: "/bin/zsh", warnings: [] }),
-      runProbe: async (_shell, command) => {
+      runCapture: async (_shell, command) => {
         calls.push(command)
         return command === "env -0"
           ? { exitCode: 1, stdout: Buffer.from("unsupported") }
@@ -277,4 +296,168 @@ describe("user shell environment", () => {
       expect(command.env.POLICY_FLAG).toBe("visible-to-startup")
     },
   )
+})
+
+describe("shell snapshot", () => {
+  it("generates a snapshot once and reuses it across instances", async () => {
+    const home = await realpath(
+      await mkdtemp(join(tmpdir(), "yakitori-snapshot-")),
+    )
+    workspaces.push(home)
+    let captureCalls = 0
+    const runCapture = async (_shell: string, command: string) => {
+      captureCalls += 1
+      return command.startsWith("source ")
+        ? { exitCode: 0, stdout: Buffer.alloc(0) }
+        : { exitCode: 0, stdout: Buffer.from("alias gst='git status'\n") }
+    }
+    const first = createUserShellEnv({
+      homeDir: home,
+      resolveShell: async () => ({ shell: "/bin/zsh", warnings: [] }),
+      runCapture,
+      log: () => {},
+    })
+
+    const path = await first.shellSnapshot()
+    if (path === undefined) throw new Error("missing snapshot path")
+    expect(path.startsWith(`${join(home, "shell-snapshots")}/`)).toBe(true)
+    expect(basename(path)).toMatch(/^zsh-[0-9a-f]{8}\.sh$/)
+    expect(captureCalls).toBe(2)
+    await expect(readFile(path, "utf8")).resolves.toContain(
+      "alias gst='git status'",
+    )
+
+    const second = createUserShellEnv({
+      homeDir: home,
+      resolveShell: async () => ({ shell: "/bin/zsh", warnings: [] }),
+      runCapture: async () => {
+        throw new Error("snapshot must be reused, not regenerated")
+      },
+      log: () => {},
+    })
+    await expect(second.shellSnapshot()).resolves.toBe(path)
+  })
+
+  it("regenerates a snapshot older than the retention window", async () => {
+    const home = await realpath(
+      await mkdtemp(join(tmpdir(), "yakitori-snapshot-")),
+    )
+    workspaces.push(home)
+    let captures = 0
+    const create = () =>
+      createUserShellEnv({
+        homeDir: home,
+        resolveShell: async () => ({ shell: "/bin/zsh", warnings: [] }),
+        runCapture: async (_shell, command) => {
+          if (!command.startsWith("source ")) captures += 1
+          return { exitCode: 0, stdout: Buffer.from("alias a='b'\n") }
+        },
+        log: () => {},
+      })
+
+    const path = await create().shellSnapshot()
+    expect(captures).toBe(1)
+    if (path === undefined) throw new Error("missing snapshot path")
+    const fourDaysAgo = new Date(Date.now() - 4 * 24 * 60 * 60 * 1000)
+    await utimes(path, fourDaysAgo, fourDaysAgo)
+
+    await expect(create().shellSnapshot()).resolves.toBe(path)
+    expect(captures).toBe(2)
+  })
+
+  it("returns undefined when the dump or the validation fails", async () => {
+    const home = await realpath(
+      await mkdtemp(join(tmpdir(), "yakitori-snapshot-")),
+    )
+    workspaces.push(home)
+    const failingDump = createUserShellEnv({
+      homeDir: home,
+      resolveShell: async () => ({ shell: "/bin/zsh", warnings: [] }),
+      runCapture: async () => ({ exitCode: 1, stdout: Buffer.alloc(0) }),
+      log: () => {},
+    })
+    await expect(failingDump.shellSnapshot()).resolves.toBeUndefined()
+
+    const failingValidation = createUserShellEnv({
+      homeDir: home,
+      resolveShell: async () => ({ shell: "/bin/zsh", warnings: [] }),
+      runCapture: async (_shell, command) =>
+        command.startsWith("source ")
+          ? { exitCode: 1, stdout: Buffer.alloc(0) }
+          : { exitCode: 0, stdout: Buffer.from("alias a='b'\n") },
+      log: () => {},
+    })
+    await expect(failingValidation.shellSnapshot()).resolves.toBeUndefined()
+  })
+
+  it("regenerates when the cached snapshot goes stale within one process", async () => {
+    const home = await realpath(
+      await mkdtemp(join(tmpdir(), "yakitori-snapshot-")),
+    )
+    workspaces.push(home)
+    let captures = 0
+    const environment = createUserShellEnv({
+      homeDir: home,
+      resolveShell: async () => ({ shell: "/bin/zsh", warnings: [] }),
+      runCapture: async (_shell, command) => {
+        if (!command.startsWith("source ")) captures += 1
+        return { exitCode: 0, stdout: Buffer.from("alias a='b'\n") }
+      },
+      log: () => {},
+    })
+
+    const path = await environment.shellSnapshot()
+    expect(captures).toBe(1)
+    if (path === undefined) throw new Error("missing snapshot path")
+    const fourDaysAgo = new Date(Date.now() - 4 * 24 * 60 * 60 * 1000)
+    await utimes(path, fourDaysAgo, fourDaysAgo)
+
+    await expect(environment.shellSnapshot()).resolves.toBe(path)
+    expect(captures).toBe(2)
+  })
+
+  it("degrades to undefined when the snapshot directory is not writable", async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "yakitori-snapshot-")),
+    )
+    workspaces.push(root)
+    // A regular file where the home directory should be forces mkdir to fail.
+    const blocker = join(root, "not-a-directory")
+    await writeFile(blocker, "")
+    const environment = createUserShellEnv({
+      homeDir: blocker,
+      resolveShell: async () => ({ shell: "/bin/zsh", warnings: [] }),
+      runCapture: async () => ({
+        exitCode: 0,
+        stdout: Buffer.from("alias a='b'\n"),
+      }),
+      log: () => {},
+    })
+
+    await expect(environment.shellSnapshot()).resolves.toBeUndefined()
+    await expect(environment.shellSnapshot()).resolves.toBeUndefined()
+  })
+
+  it("skips snapshots for shells without a dump specification", async () => {
+    const home = await realpath(
+      await mkdtemp(join(tmpdir(), "yakitori-snapshot-")),
+    )
+    workspaces.push(home)
+    const environment = createUserShellEnv({
+      homeDir: home,
+      resolveShell: async () => ({ shell: "/bin/sh", warnings: [] }),
+      runCapture: async () => {
+        throw new Error("sh must not be snapshotted")
+      },
+      log: () => {},
+    })
+
+    await expect(environment.shellSnapshot()).resolves.toBeUndefined()
+  })
+
+  it("quotes snapshot paths and commands for the source-plus-eval wrapper", () => {
+    expect(wrapWithShellSnapshot("/snap dir/snap.sh", "printf 'a b'")).toBe(
+      "source '/snap dir/snap.sh' 2>/dev/null || true\neval 'printf '\\''a b'\\'''",
+    )
+  })
 })

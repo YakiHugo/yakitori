@@ -54,7 +54,7 @@ change that decision.
 | C2 | Execution loop, model context, world state, and compaction | `src/runtime/session-runner.ts`, `compaction.ts`, `model-context.ts`, `world-state.ts` | `core/session/turn.rs`, `context_manager`, `compact*`, `session/world_state.rs` | Audited |
 | C3 | Tool catalog, execution, permissions, and sandboxing | `src/runtime/tools/*`, `permission-gate.ts`, `tool-permissions.ts` | `core/tools`, `tools`, `exec`, `execpolicy`, `sandboxing`, platform sandboxes | Audited; core implemented |
 | C4 | Provider transport, model catalog, credentials, retry, and usage | `src/runtime/*provider.ts`, catalog and credentials modules | `model-provider`, `model-provider-info`, `models-manager`, `codex-client`, `responses_retry` | Audited; core implemented |
-| C5 | Instructions, environment, shell, skills, plugins, MCP, and connectors | prompt, instruction, environment, and future extension owners | `agents_md_manager`, `context`, `skills`, `core-plugins`, `mcp`, `connectors`, `shell*` | Unreviewed |
+| C5 | Instructions, environment, shell, skills, plugins, MCP, and connectors | prompt, instruction, environment, and future extension owners | `agents_md_manager`, `context`, `skills`, `core-plugins`, `mcp`, `connectors`, `shell*` | Audited; shell/environment/instruction slices implemented |
 | C6 | Subagents, AgentControl, and Mate lifecycle | `src/runtime/agent-control.ts`, `agent-runtime.ts`, multi-agent tools, `src/mates/*` | `core/agent`, `agent-graph-store`, `agent-identity`, thread spawning | Audited; core implemented |
 | C7 | Process recovery, concurrency, failure reporting, and shutdown | runtime recovery/locks, server application and event hubs | core task/session lifecycle, app-server lifecycle, rollout writer recovery | Lifecycle slice audited and implemented |
 | C8 | Host protocol, configuration, projects, and model discovery | `src/server/*` excluding GUI consumers | `app-server`, `app-server-protocol`, `config` | Unreviewed |
@@ -91,6 +91,13 @@ change that decision.
 | C4-D4 | Request-local credential reads versus provider-owned live auth recovery | Converge | Follow Codex/grok-build live-auth ownership; implemented for Codex login 2026-09-03 |
 | C4-D5 | Terminal-error retry versus output-aware physical attempt policy | Deliberate | Follow grok-build because multiple wire APIs share the boundary; implemented 2026-09-03 |
 | C4-D6 | One accumulated usage counter versus billing and active-context semantics | Converge | Follow both references; implemented 2026-09-03; rate-limit presentation remains C8/C9 work |
+| C5-D1 | Model-facing shell selection parameter versus host-owned shell detection | Converge | Codex, Claude Code, grok-build, and opencode all keep shell identity out of the model tool schema; implemented 2026-09-03 |
+| C5-D2 | Env-only capture versus a login-shell snapshot sourced per exec command | Converge | Codex, Claude Code, and grok-build independently converge on snapshot plus source; cross-session snapshot reuse with TTL accepted as product decision 2026-09-03 |
+| C5-D3 | Environment context content: shell identity versus sandbox/network rendering | Converge | Shell identity follows Codex/Claude Code; permission-profile and network fields are Derived from the C3-D1 YOLO decision |
+| C5-D4 | Project-only AGENTS.md versus user-level plus project instruction layers | Converge | Follow Codex `$HOME`-level instructions, joined ahead of project documents |
+| C5-D5 | Trust gating for project instructions | Derived | C3-D1 YOLO makes instruction text non-privileged; does not extend to future project-layer hook/MCP configuration |
+| C5-D6 | MCP, skills, plugins, connectors, and user hooks | Open | Product sequencing; entry contracts already exist (C3 external registration, world-state sections) |
+| C5-D7 | Single-layer user config versus a layered config stack | Open | Deferred to C8; project-scoped keys arrive with the extension work that needs them |
 | C6-D1 | Process-local task registry versus one per-root AgentControl over real child Threads | Converge | Follow Codex; implemented 2026-08-31 |
 | C6-D2 | Ephemeral child registry versus durable spawn topology and lazy identity restoration | Converge | Follow Codex V2 graph boundary; implemented 2026-08-31 |
 | C6-D3 | Volatile mailbox completion versus retry-safe model-visible inter-agent delivery | Converge | Child Session and rollout contract; implemented 2026-08-31 |
@@ -1124,6 +1131,167 @@ Evidence anchors:
 
 ---
 
+## C5 — Instructions, environment, shell, and the extension surface
+
+Status: audited for the instruction, environment, and shell boundaries.
+MCP, skills, plugins, connectors, and user hooks are recorded as Open product
+decisions; their runtime entry contracts already exist (C3 external tool
+registration, Step-snapshotted routers, and world-state sections) and no
+extension may bypass them.
+
+### First-principles problem
+
+Beyond the conversation, each model call sees a world made of three kinds of
+state, each with its own contract:
+
+1. authority: instruction text from layered sources (base prompt, user-level,
+   project-level) must compose at unambiguous scopes, and low-trust content
+   must not gain authority;
+2. freshness versus per-Step consistency: AGENTS.md edits and environment
+   changes arrive mid-session, but one model call must observe one coherent
+   snapshot, and durable history must record what the model actually saw;
+3. host reality: exec commands are interpreted by a concrete shell whose
+   identity and startup state the model cannot supply; the harness owns that
+   contract.
+
+Yakitori already has the unifying mechanism for (1) and (2): world-state
+sections snapshotted per Step, diffed via RFC 7386 merge patch, persisted as
+`world_state` rollout items, and rebuilt on resume
+(`src/runtime/world-state.ts`, `src/core/context-manager.ts`). C5 attaches
+further state to that spine rather than adding parallel mechanisms.
+
+### C5-D1 — Model-facing shell selection
+
+Disposition: **Converge; implemented 2026-09-03.**
+
+Codex, Claude Code, grok-build, and opencode all keep shell identity out of
+the model-facing tool schema: the shell is a host deployment fact, detected
+once by the harness (account shell, PATH candidates, fixed fallbacks), with
+operator overrides living in env vars or config behind basename whitelists or
+deny-lists. Claude Code exposes PowerShell as a separate tool rather than a
+parameter.
+
+Yakitori's `exec_command` previously accepted a model-supplied `shell` string
+that passed unvalidated into `spawn`; any unrecognized name silently received
+POSIX `-c` semantics, so `shell: "fish"` executed with wrong syntax semantics
+instead of producing an input error. The parameter is removed; shell identity
+is host-owned. This is a contract fix, not a security boundary — under YOLO
+the model can already run arbitrary commands.
+
+### C5-D2 — Shell state for exec commands
+
+Disposition: **Converge on snapshot replay; cross-session reuse accepted
+2026-09-03.**
+
+Codex, Claude Code, and grok-build independently converge on one design:
+capture the login shell's state once, persist it as a script, and source that
+script in each fresh non-login `-c` command. An `env`-only capture (Yakitori's
+previous behavior, also opencode's) carries environment variables but cannot
+carry aliases or shell functions, so model commands referencing them fail with
+uninformative `command not found` errors. The snapshot additionally forces
+alias expansion in non-interactive shells, and commands run through `eval`
+because alias expansion requires a second parse pass after sourcing.
+
+Yakitori decision: generate the snapshot once, cache it across sessions under
+the Yakitori home directory, and expire snapshots older than three days
+(product decision: local shell environments are stable enough that the
+startup cost of per-session regeneration is not worth paying; Codex uses the
+same three-day retention). Snapshot failure degrades to the previous env-probe
+plus plain `-c` behavior.
+
+### C5-D3 — Environment context content
+
+Disposition: **Converge for shell identity; Derived for the rest.**
+
+The model must know which shell interprets its commands; Codex and Claude
+Code both render shell identity into the environment context. Yakitori adds
+the detected shell basename to `EnvironmentSnapshot`. Codex's network and
+filesystem permission-profile fields exist to communicate sandbox boundaries;
+under the C3-D1 YOLO decision there is no sandbox to describe, so those
+fields are Derived and intentionally absent.
+
+### C5-D4 — Instruction layers
+
+Disposition: **Converge.**
+
+Codex composes user-level instructions (`$CODEX_HOME/AGENTS.override.md` then
+`AGENTS.md`) ahead of project documents, with subagents inheriting the
+parent's text. Yakitori adds the same user layer under its own home
+directory, joined ahead of the project sections. Child sessions are not
+passed the parent's text at spawn: every thread resolves the same home-level
+file through its own loader, so mid-session user-file edits surface in
+children as well — a deliberate simplification of Codex's spawn-time freeze.
+The user file has its own 32 KiB budget with a truncation marker (a local
+resource-safety boundary; Codex leaves user instructions uncapped), and
+project documents share the configured limit below it. The project-doc walk
+itself (workspace root to working directory, `AGENTS.override.md` then
+`AGENTS.md` per directory, 32 KiB shared budget, truncation marker,
+symlink-escape rejection) already matches Codex.
+
+Freshness: project instructions are still evaluated every Step so mid-session
+edits flow through the world-state diff, but unchanged files are no longer
+re-read — a per-thread cache keyed by path and mtime stats the candidate
+files and re-reads only on change. No file watcher; watch lifecycle cost
+exceeds the saving.
+
+### C5-D5 — Trust gating for instructions
+
+Disposition: **Derived.**
+
+Codex skips project documents for untrusted projects. Under C3-D1, Yakitori
+executes with full host authority and instruction text carries no execution
+privilege, so no trust gate applies to AGENTS.md content. This conclusion is
+scoped to instruction text only: if project-layer configuration later
+declares hooks or MCP servers (code execution paths), the trust boundary must
+be re-audited before such keys are accepted.
+
+### C5-D6 — Extension surface: MCP, skills, plugins, connectors, hooks
+
+Disposition: **Open; product sequencing.**
+
+None exist in Yakitori today. The entry contracts are already built: external
+tool sources register through `registerExternal` / `replaceExternalSource`
+with namespaced identity, deferred exposure, readiness, and per-Step router
+snapshots (`src/runtime/tools/registry.ts`); model-visible catalogs attach as
+world-state sections. Codex-specific findings recorded for the future audit:
+MCP connections are owned by a manager that diffs connection identity and
+reuses live connections, with lazy-when-cached startup from a persisted tool
+catalog; skills are `SKILL.md` files discovered from user, repo, system, and
+plugin roots with a token-budgeted catalog section; connectors are
+ChatGPT-backend applications riding a reserved MCP server and are unlikely to
+map to Yakitori's multi-provider boundary; hooks follow the Claude Code
+eleven-event vocabulary with hash-pinned trust. Deciding whether and when
+each of these enters the single-Mate product remains with the user.
+
+### C5-D7 — Configuration layering
+
+Disposition: **Open; deferred to C8.**
+
+Yakitori has a single global `~/.yakitori/config.toml`. Layered configuration
+(project-scoped keys with trust rules) has no consumer until the C5-D6
+extension work lands, so building it now would be speculative. One contained
+fix lands with C5: `model_instructions_file` resolves relative to the config
+file's directory rather than the server process cwd.
+
+Evidence anchors:
+
+- Yakitori: `src/runtime/project-instructions.ts`,
+  `src/runtime/environment-context.ts`, `src/runtime/user-shell-env.ts`,
+  `src/runtime/tools/unified-exec.ts`, `src/runtime/world-state.ts`,
+  `src/runtime/session-configuration.ts`, `src/server/user-config.ts`.
+- Codex: `core/src/agents_md.rs`, `core/src/agents_md_manager.rs`,
+  `core/src/context/`, `core/src/shell.rs`, `core/src/shell_snapshot.rs`,
+  `shell-command/src/shell_detect.rs`, `core/src/exec_env.rs`.
+- Claude Code (secondary): `src/utils/shell/bashProvider.ts`,
+  `src/utils/bash/ShellSnapshot.ts`, `src/utils/Shell.ts`.
+- grok-build: `xai-grok-tools/src/computer/local/terminal.rs`,
+  `shell_state.rs`, `static_shell.rs`, `xai-grok-config/src/shell.rs`.
+- opencode (secondary): `packages/core/src/shell.ts`,
+  `packages/core/src/shell/select.ts`,
+  `packages/desktop/src/main/service/shell-env.ts`.
+
+---
+
 ## C6 — Subagents, AgentControl, and Mate lifecycle
 
 Status: audited. The core coding-subagent boundary is implemented. Role
@@ -1344,6 +1512,21 @@ Evidence anchors:
 
 ### 2026-09-03
 
+- Completed the C5 audit for instructions, environment, and shell; MCP,
+  skills, plugins, connectors, hooks, and config layering remain Open product
+  decisions (C5-D6/C5-D7).
+- Removed the model-facing `shell` parameter from `exec_command`; shell
+  identity is host-owned (C5-D1).
+- Added the detected shell name to the environment world-state section
+  (C5-D3).
+- Added a cross-session login-shell snapshot sourced per exec command so
+  aliases and functions reach model commands, with three-day retention and a
+  non-login validation pass (C5-D2).
+- Added user-level `$YAKITORI_HOME/AGENTS.override.md`/`AGENTS.md`
+  instructions ahead of project documents, and an mtime-keyed per-thread
+  project-instructions cache (C5-D4).
+- Resolved `model_instructions_file` relative to the config file directory
+  instead of the server process cwd (C5-D7).
 - Audited and implemented the C4 provider core against Codex and grok-build.
 - Selected Codex provider/Session/Turn ownership while retaining one
   grok-build-style tagged multi-wire conversation algebra for first-class

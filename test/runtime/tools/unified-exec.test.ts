@@ -1,4 +1,9 @@
+import { existsSync } from "node:fs"
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { describe, expect, it } from "vitest"
+import { createUserShellEnv } from "../../../src/runtime/user-shell-env.ts"
 import {
   createUnifiedExecProcessManager,
   createUnifiedExecTools,
@@ -220,7 +225,7 @@ describe("unified exec tools", () => {
     await execCommand.dispose?.()
   })
 
-  it("uses an explicitly requested shell", async () => {
+  it("rejects a model-supplied shell parameter", async () => {
     const [execCommand] = createUnifiedExecTools()
     if (execCommand === undefined) throw new Error("missing exec_command")
 
@@ -229,12 +234,54 @@ describe("unified exec tools", () => {
       context,
     )
 
+    expect(result).toMatchObject({ ok: false, code: "invalid_tool_input" })
     expect(result).toMatchObject({
-      ok: true,
-      output: { exit_code: 0, output: "shell-ok" },
+      message: expect.stringContaining("does not accept: shell"),
     })
     await execCommand.dispose?.()
   })
+
+  it.skipIf(process.platform === "win32" || !existsSync("/bin/zsh"))(
+    "makes login-shell aliases and functions available through the snapshot",
+    async () => {
+      const home = await realpath(
+        await mkdtemp(join(tmpdir(), "yakitori-exec-snapshot-")),
+      )
+      try {
+        await writeFile(
+          join(home, ".zshrc"),
+          "alias yak_smoke_alias='printf alias-ran'\nyak_smoke_fn() { printf fn-ran; }\n",
+        )
+        const userShellEnv = createUserShellEnv({
+          appEnv: {
+            HOME: home,
+            ZDOTDIR: home,
+            PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+          },
+          homeDir: home,
+          resolveShell: async () => ({ shell: "/bin/zsh", warnings: [] }),
+          log: () => {},
+        })
+        const [execCommand] = createUnifiedExecTools({ userShellEnv })
+        if (execCommand === undefined) throw new Error("missing exec_command")
+
+        const viaAlias = await execCommand.execute(
+          { cmd: "yak_smoke_alias", "yield-time_ms": 250 },
+          { workspaceRoot: home },
+        )
+        const viaFunction = await execCommand.execute(
+          { cmd: "yak_smoke_fn", "yield-time_ms": 250 },
+          { workspaceRoot: home },
+        )
+
+        expect(requireOutput(viaAlias).output).toContain("alias-ran")
+        expect(requireOutput(viaFunction).output).toContain("fn-ran")
+        await execCommand.dispose?.()
+      } finally {
+        await rm(home, { recursive: true, force: true })
+      }
+    },
+  )
 
   it.each([
     false,

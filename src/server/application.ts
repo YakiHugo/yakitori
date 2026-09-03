@@ -166,7 +166,6 @@ export async function createYakitoriApplication(
       reportOperationalFailure: reporter,
     })
     const userConfig = createUserConfigStore({
-      cwd: workspace,
       reportOperationalFailure: reporter,
       ...(options.userConfigPath === undefined
         ? {}
@@ -272,6 +271,7 @@ export async function createYakitoriApplication(
             ? {}
             : { modelContextWindowTokens }),
           permissionGate,
+          resolveShellName: () => userShellEnv.shellName(),
           // Each Session owns both its external catalog and process manager.
           toolRegistry: createToolRegistry(createTrustedTools()),
           agentControl: agentRuntime.registerThread(stored),

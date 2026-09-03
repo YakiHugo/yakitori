@@ -10,12 +10,14 @@ export type EnvironmentSnapshot = {
   readonly osVersion: string
   readonly currentDate: string
   readonly timezone: string
+  readonly shell?: string
 }
 
 export type EnvironmentContextInput = {
   readonly workspaceRoot?: string
   readonly workingDirectory: string
   readonly now?: Date
+  readonly shell?: string
 }
 
 export function observeEnvironment(
@@ -31,6 +33,7 @@ export function observeEnvironment(
     osVersion: release(),
     currentDate: formatLocalDate(now),
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    ...(input.shell === undefined ? {} : { shell: input.shell }),
   }
 }
 
@@ -41,6 +44,7 @@ export function renderEnvironmentContext(
     "<environment>",
     `Workspace root: ${snapshot.workspaceRoot}`,
     `Working directory: ${snapshot.workingDirectory}`,
+    ...(snapshot.shell === undefined ? [] : [`Shell: ${snapshot.shell}`]),
     `Is workspace a git repo: ${snapshot.isGitRepository ? "yes" : "no"}`,
     `Platform: ${snapshot.platform}`,
     `OS version: ${snapshot.osVersion}`,

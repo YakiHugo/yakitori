@@ -27,29 +27,27 @@ export type UserConfiguration = Readonly<{
 export function createUserConfigStore(
   options: {
     readonly configPath?: string
-    readonly cwd?: string
     readonly reportOperationalFailure?: OperationalFailureReporter
   } = {},
 ): UserConfigStore {
   const configPath = options.configPath ?? defaultUserConfigPath()
-  const cwd = options.cwd ?? process.cwd()
   const reporter =
     options.reportOperationalFailure ?? consoleOperationalFailureReporter
   let pendingWrite = Promise.resolve()
 
   return {
     async read() {
-      const document = await readConfigDocument(configPath, cwd, reporter)
+      const document = await readConfigDocument(configPath, reporter)
       return document?.configuration.preference
     },
     async readConfiguration() {
-      const document = await readConfigDocument(configPath, cwd, reporter)
+      const document = await readConfigDocument(configPath, reporter)
       return document?.configuration ?? {}
     },
     write(preference) {
       const write = pendingWrite.then(
-        () => writePreference(configPath, cwd, preference, reporter),
-        () => writePreference(configPath, cwd, preference, reporter),
+        () => writePreference(configPath, preference, reporter),
+        () => writePreference(configPath, preference, reporter),
       )
       pendingWrite = write.then(
         () => undefined,
@@ -69,11 +67,10 @@ function defaultUserConfigPath(): string {
 
 async function writePreference(
   configPath: string,
-  cwd: string,
   preference: ApiUserModelPreference,
   reporter: OperationalFailureReporter,
 ): Promise<ApiUserModelPreference> {
-  const document = await readConfigDocument(configPath, cwd, reporter)
+  const document = await readConfigDocument(configPath, reporter)
   const content = stringify({
     ...(document?.value ?? {}),
     provider: preference.provider,
@@ -114,7 +111,6 @@ type ConfigDocument = {
 
 async function readConfigDocument(
   configPath: string,
-  cwd: string,
   reporter: OperationalFailureReporter,
 ): Promise<ConfigDocument | undefined> {
   let content: string
@@ -129,7 +125,9 @@ async function readConfigDocument(
     const value = parse(content, { integersAsBigInt: "asNeeded" })
     return {
       value,
-      configuration: await configurationFromConfig(value, cwd),
+      // Relative paths in config resolve against the config file's
+      // directory, not the server process cwd.
+      configuration: await configurationFromConfig(value, dirname(configPath)),
     }
   } catch (error) {
     if (
@@ -149,10 +147,13 @@ async function readConfigDocument(
 
 async function configurationFromConfig(
   value: TomlTable,
-  cwd: string,
+  baseDirectory: string,
 ): Promise<UserConfiguration> {
   const preference = preferenceFromConfig(value)
-  const baseInstructions = await baseInstructionsFromConfig(value, cwd)
+  const baseInstructions = await baseInstructionsFromConfig(
+    value,
+    baseDirectory,
+  )
   const shellEnvironmentPolicy = shellEnvironmentPolicyFromConfig(value)
   const modelContextWindowTokens = value.model_context_window
   if (
@@ -270,7 +271,7 @@ function isTomlTable(value: unknown): value is TomlTable {
 
 async function baseInstructionsFromConfig(
   value: TomlTable,
-  cwd: string,
+  baseDirectory: string,
 ): Promise<string | undefined> {
   const configuredPath = value.model_instructions_file
   if (
@@ -282,7 +283,7 @@ async function baseInstructionsFromConfig(
   if (typeof configuredPath === "string") {
     const path = isAbsolute(configuredPath)
       ? configuredPath
-      : resolve(cwd, configuredPath)
+      : resolve(baseDirectory, configuredPath)
     let content: string
     try {
       content = await readFile(path, "utf8")
