@@ -257,6 +257,7 @@ export type TokenUsage = {
   readonly outputTokens: number
   readonly cacheReadInputTokens?: number
   readonly cacheWriteInputTokens?: number
+  readonly activeContextTokens?: number
 }
 
 // Provider-reported input usage is authoritative only for the exact request
@@ -1677,13 +1678,16 @@ export function isTokenUsage(value: unknown): value is TokenUsage {
       "outputTokens",
       "cacheReadInputTokens",
       "cacheWriteInputTokens",
+      "activeContextTokens",
     ]) &&
     isNonNegativeInteger(value.inputTokens) &&
     isNonNegativeInteger(value.outputTokens) &&
     (value.cacheReadInputTokens === undefined ||
       isNonNegativeInteger(value.cacheReadInputTokens)) &&
     (value.cacheWriteInputTokens === undefined ||
-      isNonNegativeInteger(value.cacheWriteInputTokens))
+      isNonNegativeInteger(value.cacheWriteInputTokens)) &&
+    (value.activeContextTokens === undefined ||
+      isNonNegativeInteger(value.activeContextTokens))
   )
 }
 

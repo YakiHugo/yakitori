@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import type { ModelTarget } from "../../../src/runtime/model.ts"
-import { resolveModel } from "../../../src/runtime/model-catalog.ts"
+import { SessionConfiguration } from "../../../src/runtime/session-configuration.ts"
 import {
   createToolRegistry,
   namespacedToolName,
@@ -55,9 +55,7 @@ describe("Step tool planning", () => {
     const registry = createToolRegistry()
     const step = captureStepContext({
       registry,
-      target,
-      modelInfo: resolveModel(target),
-      enabledTools: registry.trustedToolNames(),
+      configuration: configuration(target, registry.trustedToolNames()),
     })
     const names = step.toolRouter.definitions.map(({ name }) => name)
 
@@ -72,9 +70,10 @@ describe("Step tool planning", () => {
     registry.registerExternal(deferred, "calendar")
     const step = captureStepContext({
       registry,
-      target: target("other", "future-model", "default"),
-      modelInfo: resolveModel({ provider: "other", model: "future-model" }),
-      enabledTools: registry.trustedToolNames(),
+      configuration: configuration(
+        target("other", "future-model", "default"),
+        registry.trustedToolNames(),
+      ),
     })
     const names = step.toolRouter.modelDefinitions.map(({ name }) => name)
 
@@ -94,9 +93,10 @@ describe("Step tool planning", () => {
     registry.registerExternal(externalDeferredTool(), "calendar")
     const step = captureStepContext({
       registry,
-      target: target("grok", "grok-4.6", "grok"),
-      modelInfo: resolveModel({ provider: "grok", model: "grok-4.6" }),
-      enabledTools: registry.trustedToolNames(),
+      configuration: configuration(
+        target("grok", "grok-4.6", "grok"),
+        registry.trustedToolNames(),
+      ),
     })
     const names = step.toolRouter.modelDefinitions.map(({ name }) => name)
 
@@ -119,27 +119,21 @@ describe("Step tool planning", () => {
     const codex = target("codex", "gpt-5.6-sol", "codex")
     const first = captureStepContext({
       registry,
-      target: codex,
-      modelInfo: resolveModel(codex),
-      enabledTools,
+      configuration: configuration(codex, enabledTools),
     })
     const firstBytes = JSON.stringify(first.toolRouter.modelDefinitions)
     await first.toolRouter.release()
     const anthropic = captureStepContext({
       registry,
-      target: target("anthropic", "claude-sonnet-4-6", "anthropic"),
-      modelInfo: resolveModel({
-        provider: "anthropic",
-        model: "claude-sonnet-4-6",
-      }),
-      enabledTools,
+      configuration: configuration(
+        target("anthropic", "claude-sonnet-4-6", "anthropic"),
+        enabledTools,
+      ),
     })
     await anthropic.toolRouter.release()
     const second = captureStepContext({
       registry,
-      target: codex,
-      modelInfo: resolveModel(codex),
-      enabledTools,
+      configuration: configuration(codex, enabledTools),
     })
 
     expect(JSON.stringify(second.toolRouter.modelDefinitions)).toBe(firstBytes)
@@ -155,9 +149,7 @@ describe("Step tool planning", () => {
     const enabledTools = registry.trustedToolNames()
     const first = captureStepContext({
       registry,
-      target: modelTarget,
-      modelInfo: resolveModel(modelTarget),
-      enabledTools,
+      configuration: configuration(modelTarget, enabledTools),
     })
     const firstBytes = JSON.stringify(first.toolRouter.modelDefinitions)
     await first.toolRouter.release()
@@ -168,9 +160,7 @@ describe("Step tool planning", () => {
     ])
     const second = captureStepContext({
       registry,
-      target: modelTarget,
-      modelInfo: resolveModel(modelTarget),
-      enabledTools,
+      configuration: configuration(modelTarget, enabledTools),
     })
 
     expect(JSON.stringify(second.toolRouter.modelDefinitions)).toBe(firstBytes)
@@ -183,9 +173,7 @@ describe("Step tool planning", () => {
     const kimiTarget = target("kimi", "k3", "kimi")
     const kimi = captureStepContext({
       registry,
-      target: kimiTarget,
-      modelInfo: resolveModel(kimiTarget),
-      enabledTools,
+      configuration: configuration(kimiTarget, enabledTools),
     })
     expect(kimi.toolRouter.modelDefinitions.map(({ name }) => name)).toEqual(
       expect.arrayContaining(["tool_search", "use_tool"]),
@@ -205,9 +193,7 @@ describe("Step tool planning", () => {
     )
     const anthropic = captureStepContext({
       registry,
-      target: anthropicTarget,
-      modelInfo: resolveModel(anthropicTarget),
-      enabledTools,
+      configuration: configuration(anthropicTarget, enabledTools),
     })
     expect(
       anthropic.toolRouter.modelDefinitions.map(({ name }) => name),
@@ -221,9 +207,7 @@ describe("Step tool planning", () => {
 
     const kimiAgain = captureStepContext({
       registry,
-      target: kimiTarget,
-      modelInfo: resolveModel(kimiTarget),
-      enabledTools,
+      configuration: configuration(kimiTarget, enabledTools),
     })
     expect(
       kimiAgain.toolRouter.modelDefinitions.map(({ name }) => name),
@@ -240,6 +224,25 @@ function target(
   instructionProfileId: string,
 ): ModelTarget {
   return { provider, model, instructionProfileId }
+}
+
+function configuration(
+  modelTarget: ModelTarget,
+  enabledTools: readonly string[],
+) {
+  const selection = {
+    provider: modelTarget.provider,
+    model: modelTarget.model,
+    ...(modelTarget.effort === undefined ? {} : { effort: modelTarget.effort }),
+    ...(modelTarget.speed === undefined ? {} : { speed: modelTarget.speed }),
+  }
+  return SessionConfiguration.create({
+    selection,
+    workspaceRoot: "/workspace",
+    enabledTools,
+    approvalPolicy: "always_approve",
+    promptCacheKey: "step-test",
+  }).resolveStep(selection)
 }
 
 function externalDeferredTool(name = "search_events"): RuntimeTool {

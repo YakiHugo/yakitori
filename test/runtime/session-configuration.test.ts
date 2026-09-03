@@ -15,7 +15,7 @@ function resolveSessionConfiguration(
     ...input,
     promptCacheKey: "session-cache",
   })
-  return session.resolveTurn(input.selection)
+  return session.resolveStep(input.selection)
 }
 
 describe("session configuration", () => {
@@ -48,7 +48,7 @@ describe("session configuration", () => {
       approvalPolicy: "auto_file_tools",
     })
     const turn = createTurnContext({
-      configuration,
+      requestSettings: configuration,
       mateId: "mate_1",
       mateRevisionId: "mate_revision_1",
     })
@@ -111,7 +111,7 @@ describe("session configuration", () => {
       }),
     })
     const turn = createTurnContext({
-      configuration,
+      requestSettings: configuration,
       mateId: "mate_1",
       mateRevisionId: "mate_revision_1",
     })
@@ -136,7 +136,7 @@ describe("session configuration", () => {
         text: "persisted session instructions",
         revision: "persisted-revision",
       },
-    }).resolveTurn(created.snapshot.defaultTarget)
+    }).resolveStep(created.snapshot.defaultTarget)
 
     expect(restored.baseInstructions).toEqual({
       id: "base.instructions",
@@ -157,7 +157,7 @@ describe("session configuration", () => {
       approvalPolicy: "always_approve",
       baseInstructions: "  Follow the custom harness contract.  ",
     })
-    const switched = session.resolveTurn({
+    const switched = session.resolveStep({
       provider: "anthropic",
       model: "claude-sonnet-4-6",
     })
@@ -185,7 +185,7 @@ describe("session configuration", () => {
       approvalPolicy: "always_approve",
     })
     expect(
-      SessionConfiguration.restore(created.snapshot).resolveTurn(
+      SessionConfiguration.restore(created.snapshot).resolveStep(
         created.snapshot.defaultTarget,
       ).promptCacheKey,
     ).toBe("persisted-cache")

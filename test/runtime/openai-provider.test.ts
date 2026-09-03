@@ -471,6 +471,79 @@ describe("OpenAI Responses provider", () => {
     ])
   })
 
+  it("does not replay reasoning owned by a different provider identity", () => {
+    expect(
+      toOpenAIInput(
+        [
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "reasoning",
+                text: "Private continuation state.",
+                providerMetadata: {
+                  openai: {
+                    provider: "codex",
+                    id: "reasoning_1",
+                    encryptedContent: "encrypted_1",
+                  },
+                },
+              },
+              { type: "text", text: "Visible answer." },
+            ],
+          },
+        ],
+        true,
+        "openai",
+      ),
+    ).toEqual([{ role: "assistant", content: "Visible answer." }])
+  })
+
+  it("does not replay reasoning owned by a different backend scope", () => {
+    expect(
+      toOpenAIInput(
+        [
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "reasoning",
+                text: "Private continuation state.",
+                providerMetadata: {
+                  openai: {
+                    provider: "openai",
+                    scope: "account-a",
+                    id: "reasoning_1",
+                    encryptedContent: "encrypted_1",
+                  },
+                },
+              },
+              { type: "text", text: "Visible answer." },
+            ],
+          },
+        ],
+        true,
+        "openai",
+        "account-b",
+      ),
+    ).toEqual([{ role: "assistant", content: "Visible answer." }])
+  })
+
+  it("uses xAI context details for active context size", () => {
+    const response = responseFixture({
+      usage: {
+        input_tokens: 40,
+        output_tokens: 8,
+        total_tokens: 48,
+        context_details: { input_tokens: 30, output_tokens: 6 },
+      } as never,
+    })
+
+    expect(fromOpenAIResponse(response, new Map(), "grok").usage).toMatchObject(
+      { activeContextTokens: 36 },
+    )
+  })
+
   it("maps text, function calls, usage, and incomplete responses", () => {
     expect(
       fromOpenAIResponse(
@@ -522,7 +595,11 @@ describe("OpenAI Responses provider", () => {
           input: { pattern: "needle" },
         },
       ],
-      usage: { inputTokens: 10, outputTokens: 4 },
+      usage: {
+        inputTokens: 10,
+        outputTokens: 4,
+        activeContextTokens: 14,
+      },
       providerRequestId: "response_1",
     })
 
@@ -568,6 +645,7 @@ describe("OpenAI Responses provider", () => {
         text: "Inspect the repository.",
         providerMetadata: {
           openai: {
+            provider: "openai",
             id: "reasoning_1",
             encryptedContent: "encrypted_1",
             status: "completed",

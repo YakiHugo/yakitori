@@ -41,6 +41,7 @@ import {
   type ModelUsage,
   type StreamFn,
 } from "./model.ts"
+import type { ModelClient } from "./model-provider.ts"
 import { createCompactionReplacementHistory } from "./model-context.ts"
 import { adaptImagesForModel } from "./model-images.ts"
 import { estimateModelRequestBudget } from "./model-request-budget.ts"
@@ -59,7 +60,7 @@ import {
 import { resolveToolPermissionRequest } from "./tool-permissions.ts"
 import { resolveWorkspaceRoot } from "./tools/path-policy.ts"
 import { createToolRegistry, type ToolRegistry } from "./tools/registry.ts"
-import { captureStepContext } from "./tools/spec-plan.ts"
+import { captureStepContext, type StepContext } from "./tools/spec-plan.ts"
 import type {
   ToolExecutionResult,
   ToolPermissionRequest,
@@ -77,7 +78,8 @@ import {
 } from "./world-state.ts"
 
 export type TurnProcessorOptions = {
-  readonly stream: StreamFn
+  readonly modelClient?: ModelClient
+  readonly stream?: StreamFn
   readonly toolRegistry?: ToolRegistry
   readonly permissionGate?: PermissionGate
   readonly provider?: string
@@ -97,6 +99,7 @@ export type TurnProcessorOptions = {
 export type TurnProcessorOperationalFailure = Readonly<{
   operation:
     | "abort-model-stream"
+    | "close-model-session"
     | "close-model-stream"
     | "compact"
     | "execute-tool"
@@ -115,6 +118,9 @@ type CompactionState = {
 export function createTurnProcessor(
   options: TurnProcessorOptions,
 ): TurnProcessor {
+  if (options.modelClient === undefined && options.stream === undefined) {
+    throw new Error("Turn processor requires a model client or stream.")
+  }
   const toolRegistry = options.toolRegistry ?? createToolRegistry()
   const permissionGate = options.permissionGate ?? createPermissionGate()
   const executionPolicy =
@@ -132,7 +138,18 @@ export function createTurnProcessor(
   const toolExecutionGate = createToolExecutionGate()
 
   return {
-    dispose: () => toolRegistry.dispose(),
+    async dispose() {
+      const results = await Promise.allSettled([
+        Promise.resolve().then(() => options.modelClient?.close()),
+        Promise.resolve().then(() => toolRegistry.dispose()),
+      ])
+      const errors = results.flatMap((result) =>
+        result.status === "rejected" ? [result.reason] : [],
+      )
+      if (errors.length > 0) {
+        throw new AggregateError(errors, "Failed to dispose Turn processor.")
+      }
+    },
     prepare(snapshot, input) {
       const metadata = snapshot.metadata
       if (
@@ -146,28 +163,36 @@ export function createTurnProcessor(
       }
       const selection: ModelSelection = input.modelSelection ??
         snapshot.configuration?.defaultTarget ?? { provider, model }
+      const models = options.modelClient?.models(selection.provider)
       const configuration =
         snapshot.configuration === undefined
-          ? SessionConfiguration.create({
-              selection,
-              workspaceRoot: metadata.workingDirectory,
-              enabledTools: toolRegistry.trustedToolNames(),
-              approvalPolicy,
-              promptCacheKey: metadata.conversationId,
-              ...(options.baseInstructions === undefined
-                ? {}
-                : { baseInstructions: options.baseInstructions }),
-              executionPolicy,
-              ...(options.modelContextWindowTokens === undefined
-                ? {}
-                : {
-                    modelContextWindowTokens: options.modelContextWindowTokens,
-                  }),
-            })
-          : SessionConfiguration.restore({
-              ...snapshot.configuration,
-              defaultTarget: selection,
-            })
+          ? SessionConfiguration.create(
+              {
+                selection,
+                workspaceRoot: metadata.workingDirectory,
+                enabledTools: toolRegistry.trustedToolNames(),
+                approvalPolicy,
+                promptCacheKey: metadata.conversationId,
+                ...(options.baseInstructions === undefined
+                  ? {}
+                  : { baseInstructions: options.baseInstructions }),
+                executionPolicy,
+                ...(options.modelContextWindowTokens === undefined
+                  ? {}
+                  : {
+                      modelContextWindowTokens:
+                        options.modelContextWindowTokens,
+                    }),
+              },
+              models,
+            )
+          : SessionConfiguration.restore(
+              {
+                ...snapshot.configuration,
+                defaultTarget: selection,
+              },
+              models,
+            )
       return {
         turnId: input.submissionId,
         configuration: configuration.snapshot,
@@ -182,16 +207,20 @@ export function createTurnProcessor(
       ) {
         return undefined
       }
-      return SessionConfiguration.restore({
-        ...snapshot.configuration,
-        defaultTarget: input.modelSelection,
-      }).snapshot
+      return SessionConfiguration.restore(
+        {
+          ...snapshot.configuration,
+          defaultTarget: input.modelSelection,
+        },
+        options.modelClient?.models(input.modelSelection.provider),
+      ).snapshot
     },
 
     start(runtime, input, context, control) {
       const forcedAbort = new AbortController()
       const signal = AbortSignal.any([control.signal, forcedAbort.signal])
       let activeStream: AsyncIterator<ModelStreamEvent> | undefined
+      let closeModelSession: (() => Promise<void>) | undefined
       const completion = executeTurn({
         runtime,
         input,
@@ -208,6 +237,9 @@ export function createTurnProcessor(
         setActiveStream(stream) {
           activeStream = stream
         },
+        setCloseModelSession(close) {
+          closeModelSession = close
+        },
       })
       return {
         completion,
@@ -216,6 +248,12 @@ export function createTurnProcessor(
           void activeStream?.return?.().catch((cause) =>
             reportOperationalFailure(options.onOperationalFailure, {
               operation: "abort-model-stream",
+              cause,
+            }),
+          )
+          void closeModelSession?.().catch((cause) =>
+            reportOperationalFailure(options.onOperationalFailure, {
+              operation: "close-model-session",
               cause,
             }),
           )
@@ -241,45 +279,82 @@ async function executeTurn(input: {
   readonly setActiveStream: (
     stream: AsyncIterator<ModelStreamEvent> | undefined,
   ) => void
+  readonly setCloseModelSession: (
+    close: (() => Promise<void>) | undefined,
+  ) => void
 }): Promise<void> {
   const metadata = input.runtime.snapshot().metadata
-  const configuration = SessionConfiguration.restore(
+  const models = input.options.modelClient?.models(
+    input.context.selection.provider,
+  )
+  const requestSettings = SessionConfiguration.restore(
     input.context.configuration,
-  ).resolveTurn(input.context.selection)
+    models,
+  ).resolveStep(input.context.selection, models)
   const turn = createTurnContext({
-    configuration,
+    requestSettings,
     mateId: requireValue(metadata.mateId, "Mate id"),
     mateRevisionId: requireValue(metadata.mateRevisionId, "Mate revision id"),
   })
-  if (turn.configuration.modelInfo.usedFallbackModelMetadata) {
+  if (turn.requestSettings.modelInfo.usedFallbackModelMetadata) {
     input.runtime.emitWarning(
-      `Model metadata for ${turn.configuration.target.provider}/${turn.configuration.target.model} was not found. Yakitori is using conservative fallback metadata, so model-specific editing capabilities are unavailable.`,
+      `Model metadata for ${turn.requestSettings.target.provider}/${turn.requestSettings.target.model} was not found. Yakitori is using conservative fallback metadata, so model-specific editing capabilities are unavailable.`,
     )
   }
+  const modelSession = input.options.modelClient?.startTurn(
+    turn.requestSettings.target.provider,
+  )
+  let closePromise: Promise<void> | undefined
+  const closeModelSession = () => {
+    closePromise ??= Promise.resolve().then(() => modelSession?.close())
+    return closePromise
+  }
+  input.setCloseModelSession(closeModelSession)
+  const stream = modelSession?.stream ?? input.options.stream
+  if (stream === undefined) {
+    throw new Error("Turn has no model stream.")
+  }
+  try {
+    await executeTurnModelLoop(input, turn, stream)
+  } finally {
+    try {
+      await closeModelSession()
+    } finally {
+      input.setCloseModelSession(undefined)
+    }
+  }
+}
+
+async function executeTurnModelLoop(
+  input: Parameters<typeof executeTurn>[0],
+  turn: ReturnType<typeof createTurnContext>,
+  stream: StreamFn,
+): Promise<void> {
+  const metadata = input.runtime.snapshot().metadata
   const usages: ModelUsage[] = []
   let modelCalls = 0
   let toolCalls = 0
   while (modelCalls < turn.execution.executionPolicy.modelCallsPerTurn) {
-    const step = captureStepContext({
-      registry: input.toolRegistry,
-      target: turn.configuration.target,
-      modelInfo: turn.configuration.modelInfo,
-      enabledTools: turn.configuration.enabledTools,
-    })
-    const toolPlan = step.toolRouter
+    let step: StepContext | undefined
     try {
       throwIfAborted(input.signal)
       await recordSteering(input.runtime, input.control.takeSteering())
+      step = captureStepContext({
+        registry: input.toolRegistry,
+        configuration: turn.requestSettings,
+      })
+      const configuration = step.configuration
+      const toolPlan = step.toolRouter
       const workspaceRoot = await resolveWorkspaceRoot(
-        turn.configuration.workspaceRoot,
+        configuration.workspaceRoot,
       )
       const projectInstructions = await input.projectInstructionLoader({
         workspaceRoot,
-        workingDirectory: turn.configuration.workspaceRoot,
+        workingDirectory: configuration.workspaceRoot,
       })
       const environment = observeEnvironment({
         workspaceRoot,
-        workingDirectory: turn.configuration.workspaceRoot,
+        workingDirectory: configuration.workspaceRoot,
         ...(input.options.now === undefined
           ? {}
           : { now: input.options.now() }),
@@ -290,7 +365,7 @@ async function executeTurn(input: {
         input.context,
       )
       const worldState = buildWorldStateFromSnapshot({
-        configuration: turn.configuration,
+        configuration,
         enabledToolNames: new Set(
           toolPlan.definitions.map((definition) => definition.name),
         ),
@@ -340,16 +415,16 @@ async function executeTurn(input: {
       )
       const messages = limitToolResults(
         durableMessages,
-        turn.execution.executionPolicy.modelVisibleToolResultBytes,
-        turn.execution.executionPolicy.modelVisibleToolResultLines,
+        step.executionPolicy.modelVisibleToolResultBytes,
+        step.executionPolicy.modelVisibleToolResultLines,
       )
       const visibleFileObservations =
         createVisibleFileObservationsFromMessages(messages)
       const adapted = adaptImagesForModel(messages, step.target, step.modelInfo)
       const request: ModelRequest = {
         target: step.target,
-        cacheKey: turn.configuration.promptCacheKey,
-        system: [turn.configuration.baseInstructions],
+        cacheKey: configuration.promptCacheKey,
+        system: [configuration.baseInstructions],
         messages: await resolveRolloutAssetImages(
           adapted.messages,
           input.options.rolloutAssets,
@@ -361,7 +436,7 @@ async function executeTurn(input: {
       const admission = assessModelRequest({
         request,
         rawMessages: messages,
-        turn,
+        step,
       })
       if (
         input.compactionState.failedHistoryLength !==
@@ -377,11 +452,11 @@ async function executeTurn(input: {
         const compacted = await compactLiveHistory({
           runtime: input.runtime,
           turnId: input.input.submissionId,
-          turn,
+          step,
           worldState,
           history: beforeStep.context.history,
           contextRevision: beforeStep.contextRevision,
-          stream: input.options.stream,
+          stream,
           signal: input.signal,
           rolloutAssets: input.options.rolloutAssets,
           usages,
@@ -399,13 +474,12 @@ async function executeTurn(input: {
       const responseItemId = `message_${globalThis.crypto.randomUUID()}`
       const response = await consumeModelStream({
         request,
-        stream: input.options.stream,
+        stream,
         threadId: metadata.id,
         turnId: input.input.submissionId,
         itemId: responseItemId,
         emitModelStream: (event) => input.runtime.emitModelStream(event),
-        assistantResponseBytes:
-          turn.execution.executionPolicy.assistantResponseBytes,
+        assistantResponseBytes: step.executionPolicy.assistantResponseBytes,
         onOperationalFailure: input.options.onOperationalFailure,
         onUsage(usage) {
           usages.push(usage)
@@ -444,7 +518,7 @@ async function executeTurn(input: {
       }
       if (
         utf8Bytes(JSON.stringify(response.content)) >
-        turn.execution.executionPolicy.assistantResponseBytes
+        step.executionPolicy.assistantResponseBytes
       ) {
         throw new Error(
           "Assistant response exceeded the configured byte limit.",
@@ -455,9 +529,12 @@ async function executeTurn(input: {
           input.input.submissionId,
           { role: "assistant", content: response.content },
           {
-            provider: turn.execution.provider,
-            model: turn.execution.model,
+            provider: step.target.provider,
+            model: step.target.model,
             callIndex: modelCalls,
+            ...(response.providerRequestId === undefined
+              ? {}
+              : { requestId: response.providerRequestId }),
           },
           responseItemId,
         )
@@ -468,10 +545,7 @@ async function executeTurn(input: {
       }
 
       if (response.stopReason === ModelStopReason.ToolUse) {
-        if (
-          toolCalls + calls.length >
-          turn.execution.executionPolicy.toolCallsPerTurn
-        ) {
+        if (toolCalls + calls.length > step.executionPolicy.toolCallsPerTurn) {
           throw new Error("Turn exceeded its tool call budget.")
         }
         toolCalls += calls.length
@@ -488,7 +562,7 @@ async function executeTurn(input: {
           publishPermissionEvent: (event) =>
             input.runtime.emitPermissionEvent(event),
           permissionTimeoutMs: input.runtimeTiming.permissionWaitTimeoutMs,
-          approvalPolicy: turn.configuration.approvalPolicy,
+          approvalPolicy: configuration.approvalPolicy,
           rolloutAssets: input.options.rolloutAssets,
           visibleFileObservations,
           toolExecutionGate: input.toolExecutionGate,
@@ -535,7 +609,7 @@ async function executeTurn(input: {
       }
       return
     } finally {
-      await toolPlan.release()
+      await step?.toolRouter.release()
     }
   }
   throw new Error("Turn exceeded its model call budget.")
@@ -621,9 +695,9 @@ async function consumeModelStream(input: {
 function assessModelRequest(input: {
   readonly request: ModelRequest
   readonly rawMessages: readonly ModelMessage[]
-  readonly turn: ReturnType<typeof createTurnContext>
+  readonly step: StepContext
 }): { readonly shouldCompact: boolean; readonly exceedsHardLimit: boolean } {
-  const limits = input.turn.execution.executionPolicy
+  const limits = input.step.executionPolicy
   const messageBytes = utf8Bytes(JSON.stringify(input.rawMessages))
   const messageBlocks = input.rawMessages.reduce(
     (count, message) =>
@@ -636,13 +710,13 @@ function assessModelRequest(input: {
     input.request,
   ).requiredContextTokens
   const contextTokens =
-    input.turn.configuration.modelCapacity?.effectiveContextWindowTokens
+    input.step.configuration.modelCapacity?.effectiveContextWindowTokens
   const tokenTrigger =
     contextTokens === undefined
       ? undefined
       : Math.floor(
           contextTokens *
-            input.turn.configuration.executionPolicy.compactionTriggerRatio,
+            input.step.configuration.executionPolicy.compactionTriggerRatio,
         )
   return {
     shouldCompact:
@@ -660,7 +734,7 @@ function assessModelRequest(input: {
 async function compactLiveHistory(input: {
   readonly runtime: TurnRuntime
   readonly turnId: string
-  readonly turn: ReturnType<typeof createTurnContext>
+  readonly step: StepContext
   readonly worldState: WorldState
   readonly history: readonly ResponseItemEnvelope[]
   readonly contextRevision: number
@@ -691,7 +765,7 @@ async function compactLiveHistory(input: {
   const historyEnd = currentIndex < 0 ? groups.length : currentIndex
   const historyGroups = groups.slice(0, historyEnd)
   const retainBytes =
-    input.turn.execution.executionPolicy.compactionRetainContextBytes ?? 0
+    input.step.executionPolicy.compactionRetainContextBytes ?? 0
   let retainedBytes = utf8Bytes(JSON.stringify(groups.slice(historyEnd)))
   let keepFromIndex = historyGroups.length
   for (let index = historyGroups.length - 1; index >= 0; index -= 1) {
@@ -720,7 +794,7 @@ async function compactLiveHistory(input: {
         threadId: input.runtime.snapshot().metadata.id,
         turnId: input.turnId,
         assistantResponseBytes:
-          input.turn.configuration.executionPolicy.compactionSummaryBytes,
+          input.step.configuration.executionPolicy.compactionSummaryBytes,
         onOperationalFailure: input.onOperationalFailure,
         onUsage(usage) {
           input.usages.push(usage)
@@ -753,7 +827,7 @@ async function compactLiveHistory(input: {
       }
     }
     const capacity =
-      input.turn.configuration.modelCapacity?.effectiveContextWindowTokens
+      input.step.configuration.modelCapacity?.effectiveContextWindowTokens
     let result: Awaited<ReturnType<typeof compact>> | undefined
     let attempts = 0
     while (result === undefined) {
@@ -763,13 +837,11 @@ async function compactLiveHistory(input: {
             adaptImagesForModel(
               limitToolResults(
                 completeToolCallHistory(group.items.map((item) => item.item)),
-                input.turn.execution.executionPolicy
-                  .modelVisibleToolResultBytes,
-                input.turn.execution.executionPolicy
-                  .modelVisibleToolResultLines,
+                input.step.executionPolicy.modelVisibleToolResultBytes,
+                input.step.executionPolicy.modelVisibleToolResultLines,
               ),
-              input.turn.configuration.target,
-              input.turn.configuration.modelInfo,
+              input.step.target,
+              input.step.modelInfo,
             ).messages,
             input.rolloutAssets,
           ),
@@ -778,9 +850,9 @@ async function compactLiveHistory(input: {
       try {
         const request = buildCompactionRequest({
           source: hydratedSource,
-          target: input.turn.configuration.target,
-          baseInstructions: input.turn.configuration.baseInstructions,
-          cacheKey: input.turn.configuration.promptCacheKey,
+          target: input.step.target,
+          baseInstructions: input.step.configuration.baseInstructions,
+          cacheKey: input.step.configuration.promptCacheKey,
           signal: input.signal,
         })
         result =
@@ -788,9 +860,9 @@ async function compactLiveHistory(input: {
           estimateModelRequestBudget(request).requiredContextTokens > capacity
             ? await runTwoPassCompaction({
                 source: hydratedSource,
-                target: input.turn.configuration.target,
-                baseInstructions: input.turn.configuration.baseInstructions,
-                cacheKey: input.turn.configuration.promptCacheKey,
+                target: input.step.target,
+                baseInstructions: input.step.configuration.baseInstructions,
+                cacheKey: input.step.configuration.promptCacheKey,
                 capacityTokens: capacity,
                 signal: input.signal,
                 compact,
@@ -815,7 +887,7 @@ async function compactLiveHistory(input: {
     }
     if (
       utf8Bytes(result.summary) >
-      input.turn.configuration.executionPolicy.compactionSummaryBytes
+      input.step.configuration.executionPolicy.compactionSummaryBytes
     ) {
       throw new Error(
         "Compaction checkpoint exceeded its configured byte limit.",
@@ -1361,6 +1433,11 @@ function aggregateTokenUsage(
         (total.cacheReadInputTokens ?? 0) + (usage.cacheReadInputTokens ?? 0),
       cacheWriteInputTokens:
         (total.cacheWriteInputTokens ?? 0) + (usage.cacheWriteInputTokens ?? 0),
+      ...(usage.activeContextTokens === undefined
+        ? total.activeContextTokens === undefined
+          ? {}
+          : { activeContextTokens: total.activeContextTokens }
+        : { activeContextTokens: usage.activeContextTokens }),
     }),
     { inputTokens: 0, outputTokens: 0 },
   )

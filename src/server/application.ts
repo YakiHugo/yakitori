@@ -25,6 +25,8 @@ import {
   createCodexProvider,
   createDefaultTools,
   createOpenAIProvider,
+  createModelProvider,
+  createProviderContinuationScope,
   createPermissionGate,
   createProviderRegistry,
   createToolRegistry,
@@ -34,6 +36,7 @@ import {
   ModelStopReason,
   type ApprovalPolicy,
   type RuntimeLock,
+  type ModelProvider,
   readCodexLogin,
   resolveGrokAccessToken,
   resolveModel,
@@ -41,7 +44,6 @@ import {
   type ShellEnvironmentPolicy,
   type UserShellEnv,
 } from "../runtime/index.ts"
-import { withRetries } from "../runtime/retrying-stream.ts"
 import { createSessionEventHub } from "./event-hub.ts"
 import {
   createThreadServerHandlers,
@@ -76,6 +78,8 @@ const defaultMateProfile = {
 // identity — Kimi's terms warn that spoofing another client can suspend
 // membership benefits.
 const KIMI_CODE_API_BASE_URL = "https://api.kimi.com/coding"
+const OPENAI_API_BASE_URL = "https://api.openai.com/v1"
+const ANTHROPIC_API_BASE_URL = "https://api.anthropic.com"
 
 export type YakitoriApplicationOptions = {
   readonly activeMateId?: string
@@ -199,11 +203,12 @@ export async function createYakitoriApplication(
       injected: options.providerStreams,
       reportOperationalFailure: reporter,
     })
-    const providerRegistry = createProviderRegistry(provider.streams)
+    const providerRegistry = createProviderRegistry(provider.providers)
     // Auto-registered providers pick the model per request, so only the
     // primary provider carries its configured default model. The payload is
     // assembled per request: the model directory resolves lazily.
-    const modelDirectory = options.modelDirectory ?? createModelDirectory()
+    const modelDirectory =
+      options.modelDirectory ?? createModelDirectory(providerRegistry)
     const providers = async (): Promise<ApiListProvidersResponse> => {
       const [summaries, userPreference] = await Promise.all([
         Promise.all(
@@ -259,7 +264,7 @@ export async function createYakitoriApplication(
       store: threadStore,
       createTurnProcessor: (stored) =>
         createTurnProcessor({
-          stream: providerRegistry.stream,
+          modelClient: providerRegistry.createClient(),
           provider: provider.provider,
           model: provider.model,
           ...(baseInstructions === undefined ? {} : { baseInstructions }),
@@ -445,20 +450,22 @@ async function configureProviders(input: {
 }): Promise<{
   readonly provider: string
   readonly model: string
-  readonly streams: Readonly<Record<string, StreamFn>>
+  readonly providers: Readonly<Record<string, ModelProvider | StreamFn>>
 }> {
-  const providers: Record<string, StreamFn> = { ...input.injected }
+  const providers: Record<string, ModelProvider | StreamFn> = {
+    ...input.injected,
+  }
   for (const provider of apiKeyProviderNames) {
     const apiKey = process.env[apiKeyEnvironment[provider]]
     if (apiKey && providers[provider] === undefined) {
-      providers[provider] = createApiKeyStream(
+      providers[provider] = createApiKeyProvider(
         provider,
         apiKey,
         "selected-at-request-time",
       )
     }
   }
-  providers.grok ??= createGrokStream()
+  providers.grok ??= createGrokProvider()
   await registerCodexLogin(providers, input.reportOperationalFailure)
 
   const model =
@@ -473,15 +480,18 @@ async function configureProviders(input: {
     return {
       provider: input.provider,
       model: model ?? "injected",
-      streams: providers,
+      providers,
     }
   }
   if (input.provider === "faux") {
-    providers.faux = createFauxScenarioStream(input.fauxScenario ?? "text")
+    providers.faux = createModelProvider({
+      info: providerInfo("faux", "faux"),
+      stream: createFauxScenarioStream(input.fauxScenario ?? "text"),
+    })
     return {
       provider: input.provider,
       model: model ?? "scripted",
-      streams: providers,
+      providers,
     }
   }
   if (isApiKeyProvider(input.provider)) {
@@ -497,12 +507,12 @@ async function configureProviders(input: {
         `YAKITORI_MODEL is required when YAKITORI_PROVIDER=${input.provider}.`,
       )
     }
-    providers[input.provider] = createApiKeyStream(
+    providers[input.provider] = createApiKeyProvider(
       input.provider,
       apiKey,
       model,
     )
-    return { provider: input.provider, model, streams: providers }
+    return { provider: input.provider, model, providers }
   }
   if (input.provider !== "grok") {
     throw new Error(
@@ -514,8 +524,8 @@ async function configureProviders(input: {
       `YAKITORI_MODEL is required when YAKITORI_PROVIDER=${input.provider}.`,
     )
   }
-  providers.grok = createGrokStream()
-  return { provider: input.provider, model, streams: providers }
+  providers.grok = createGrokProvider()
+  return { provider: input.provider, model, providers }
 }
 
 const apiKeyEnvironment = {
@@ -534,28 +544,44 @@ function isApiKeyProvider(
   return Object.hasOwn(apiKeyEnvironment, provider)
 }
 
-function createApiKeyStream(
+function createApiKeyProvider(
   provider: keyof typeof apiKeyEnvironment,
   apiKey: string,
   model: string,
-): StreamFn {
+): ModelProvider {
   if (provider === "openai") {
-    return withRetries(createOpenAIProvider({ apiKey, model }))
+    return createModelProvider({
+      info: providerInfo(provider, "openai_responses"),
+      stream: createOpenAIProvider({ apiKey, model }),
+      continuationScope: createProviderContinuationScope(
+        provider,
+        OPENAI_API_BASE_URL,
+        apiKey,
+      ),
+    })
   }
-  return withRetries(
-    createAnthropicProvider({
+  const baseURL =
+    provider === "kimi" ? KIMI_CODE_API_BASE_URL : ANTHROPIC_API_BASE_URL
+  return createModelProvider({
+    info: providerInfo(provider, "anthropic_messages"),
+    stream: createAnthropicProvider({
       apiKey,
       model,
       ...(provider === "kimi" ? { baseURL: KIMI_CODE_API_BASE_URL } : {}),
     }),
-  )
+    continuationScope: createProviderContinuationScope(
+      provider,
+      baseURL,
+      apiKey,
+    ),
+  })
 }
 
 // Registers the codex provider from the local codex CLI login, or the plain
 // openai provider for API-key logins when no environment key already claims
 // it. A missing or unreadable login disables codex without breaking startup.
 async function registerCodexLogin(
-  providers: Record<string, StreamFn>,
+  providers: Record<string, ModelProvider | StreamFn>,
   reporter: OperationalFailureReporter,
 ): Promise<void> {
   let login: CodexLogin | undefined
@@ -571,16 +597,25 @@ async function registerCodexLogin(
   }
   if (login === undefined) return
   if (login.kind === "chatgpt") {
-    providers.codex ??= createCodexProvider()
+    providers.codex ??= createModelProvider({
+      info: providerInfo("codex", "openai_responses"),
+      stream: createCodexProvider(),
+    })
     return
   }
   if (providers.openai === undefined) {
-    providers.openai = withRetries(
-      createOpenAIProvider({
+    providers.openai = createModelProvider({
+      info: providerInfo("openai", "openai_responses"),
+      stream: createOpenAIProvider({
         apiKey: login.apiKey,
         model: "selected-at-request-time",
       }),
-    )
+      continuationScope: createProviderContinuationScope(
+        "openai",
+        OPENAI_API_BASE_URL,
+        login.apiKey,
+      ),
+    })
   }
 }
 
@@ -699,7 +734,7 @@ async function listAllActiveMateIds(mateKernel: MateKernel): Promise<string[]> {
   }
 }
 
-function createGrokStream(): StreamFn {
+function createGrokProvider(): ModelProvider {
   // XAI_API_KEY wins; otherwise reuse the Grok CLI's OIDC login. OAuth
   // tokens expire, so resolve per model call rather than freezing one token at
   // application startup. The same lazy stream supports primary and switched
@@ -710,9 +745,30 @@ function createGrokStream(): StreamFn {
       apiKey,
       model: request.target.model,
       baseURL: GROK_API_BASE_URL,
-    })(request)
+    })({
+      ...request,
+      continuationScope: createProviderContinuationScope(
+        "grok",
+        GROK_API_BASE_URL,
+        apiKey,
+      ),
+    })
   }
-  return withRetries(stream)
+  return createModelProvider({
+    info: providerInfo("grok", "openai_responses"),
+    stream,
+  })
+}
+
+function providerInfo(
+  id: string,
+  wireApi: ModelProvider["info"]["wireApi"],
+): ModelProvider["info"] {
+  return {
+    id,
+    wireApi,
+    capabilities: { remoteCompaction: false },
+  }
 }
 
 function createFauxScenarioStream(scenario: string): StreamFn {

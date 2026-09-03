@@ -62,6 +62,10 @@ export type ModelSystemSection = {
 
 export type ModelRequest = {
   readonly target: ModelTarget
+  // Runtime-only fence for opaque provider continuation state. The provider
+  // owner adds it immediately before transport serialization; Session target
+  // configuration never sets or persists it.
+  readonly continuationScope?: string
   readonly cacheKey?: string
   readonly system: readonly ModelSystemSection[]
   readonly messages: readonly ModelMessage[]
@@ -80,10 +84,14 @@ export function flattenModelSystem(
 }
 
 export type ModelUsage = {
+  // Billing counters accumulate across physical requests.
   readonly inputTokens?: number
   readonly outputTokens?: number
   readonly cacheReadInputTokens?: number
   readonly cacheWriteInputTokens?: number
+  // Provider-reported size of the model-visible prefix for this response.
+  // Unlike billing counters, callers keep the latest value rather than sum it.
+  readonly activeContextTokens?: number
 }
 
 export type ModelError = {

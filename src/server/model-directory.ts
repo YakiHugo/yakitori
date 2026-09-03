@@ -1,6 +1,7 @@
 import {
   type InstructionProfileId,
   listCatalogModels,
+  type ProviderRegistry,
 } from "../runtime/index.ts"
 
 export type DirectoryModel = {
@@ -18,10 +19,16 @@ export type ModelDirectory = {
   listModels(provider: string): Promise<readonly DirectoryModel[]>
 }
 
-export function createModelDirectory(): ModelDirectory {
+export function createModelDirectory(
+  providerRegistry?: ProviderRegistry,
+): ModelDirectory {
   return {
     async listModels(provider) {
-      return listCatalogModels(provider).map((entry) => ({
+      const models =
+        providerRegistry === undefined
+          ? listCatalogModels(provider)
+          : await providerRegistry.models(provider).listModels()
+      return models.map((entry) => ({
         id: entry.model,
         displayName: entry.displayName ?? entry.model,
         instructionProfileId: entry.instructionProfileId,

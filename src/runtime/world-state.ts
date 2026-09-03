@@ -14,7 +14,7 @@ import {
   renderEnvironmentContext,
 } from "./environment-context.ts"
 import type { ProjectInstructions } from "./project-instructions.ts"
-import type { ResolvedTurnConfiguration } from "./session-configuration.ts"
+import type { ResolvedStepConfiguration } from "./session-configuration.ts"
 
 export const WorldStateSectionId = {
   Model: "model",
@@ -46,7 +46,7 @@ type ErasedWorldStateSection = Readonly<{
 }>
 
 export function buildWorldStateFromSnapshot(input: {
-  readonly configuration: ResolvedTurnConfiguration
+  readonly configuration: ResolvedStepConfiguration
   readonly enabledToolNames?: ReadonlySet<string>
   readonly baseModelId?: string | undefined
   readonly previousModelId?: string | undefined
@@ -153,7 +153,7 @@ export function snapshotWorldState(current: WorldState): JsonObject {
 }
 
 function modelSection(
-  configuration: ResolvedTurnConfiguration,
+  configuration: ResolvedStepConfiguration,
   previousModelId: string | undefined,
 ): ErasedWorldStateSection {
   const modelId = `${configuration.target.provider}/${configuration.target.model}`

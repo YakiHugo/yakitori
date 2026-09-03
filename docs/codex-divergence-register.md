@@ -11,13 +11,14 @@ tests remain authoritative for behavior that has already landed.
 ## Comparison baseline
 
 - Yakitori: working tree based on commit `bced04f`, including the C6 recovery,
-  C3 tool-execution changes, and the C7 lifecycle slice recorded through
-  2026-09-02.
+  C3 tool-execution changes, C7 lifecycle slice, and C4 provider core recorded
+  through 2026-09-03.
 - Codex: `.references/public/codex` commit `536f86e5` from 2026-08-21.
 - grok-build: `.references/public/grok-build` commit `19d42e35` from
-  2026-08-19. It confirms the Session actor/persistence boundary and provides
-  the explicit alternative considered in C6: a unified task/subagent
-  coordinator rather than Codex's per-root AgentControl tree.
+  2026-08-19. It confirms the Session actor/persistence boundary, provides the
+  explicit C6 coordinator alternative, and is the selected reference for C4's
+  multi-wire conversation and physical-attempt boundaries where Codex is
+  intentionally Responses-only.
 - GUI and renderer behavior are out of scope. App-server and transport
   contracts remain in scope because they define the non-GUI host boundary.
 - Legacy Codex paths are evidence about compatibility obligations, not default
@@ -52,7 +53,7 @@ change that decision.
 | C1 | Session/Turn authority, durable protocol, persistence, and fork | `src/core/*`, legacy `src/kernel/*`, narrow recovery paths in `src/runtime/recovery.ts` | `core/session`, `core/codex_thread.rs`, `core/thread_manager.rs`, `history`, `rollout`, `thread-store` | Implemented |
 | C2 | Execution loop, model context, world state, and compaction | `src/runtime/session-runner.ts`, `compaction.ts`, `model-context.ts`, `world-state.ts` | `core/session/turn.rs`, `context_manager`, `compact*`, `session/world_state.rs` | Audited |
 | C3 | Tool catalog, execution, permissions, and sandboxing | `src/runtime/tools/*`, `permission-gate.ts`, `tool-permissions.ts` | `core/tools`, `tools`, `exec`, `execpolicy`, `sandboxing`, platform sandboxes | Audited; core implemented |
-| C4 | Provider transport, model catalog, credentials, retry, and usage | `src/runtime/*provider.ts`, catalog and credentials modules | `model-provider`, `model-provider-info`, `models-manager`, `codex-client`, `responses_retry` | Unreviewed |
+| C4 | Provider transport, model catalog, credentials, retry, and usage | `src/runtime/*provider.ts`, catalog and credentials modules | `model-provider`, `model-provider-info`, `models-manager`, `codex-client`, `responses_retry` | Audited; core implemented |
 | C5 | Instructions, environment, shell, skills, plugins, MCP, and connectors | prompt, instruction, environment, and future extension owners | `agents_md_manager`, `context`, `skills`, `core-plugins`, `mcp`, `connectors`, `shell*` | Unreviewed |
 | C6 | Subagents, AgentControl, and Mate lifecycle | `src/runtime/agent-control.ts`, `agent-runtime.ts`, multi-agent tools, `src/mates/*` | `core/agent`, `agent-graph-store`, `agent-identity`, thread spawning | Audited; core implemented |
 | C7 | Process recovery, concurrency, failure reporting, and shutdown | runtime recovery/locks, server application and event hubs | core task/session lifecycle, app-server lifecycle, rollout writer recovery | Lifecycle slice audited and implemented |
@@ -64,14 +65,14 @@ change that decision.
 | ID | Boundary | Current disposition | Decision dependency |
 | --- | --- | --- | --- |
 | C1-D1 | Durable projection versus live Session actor as execution authority | Converge | Foundational decision accepted 2026-08-29 |
-| C1-D2 | Provider-neutral normalized facts versus Responses-item rollout as canonical history | Converge | Follow Codex; provider adapters must map into one rollout item algebra |
+| C1-D2 | Provider-neutral normalized facts versus Responses-item rollout as canonical history | Deliberate | One rollout algebra follows Codex ownership; C4-D2 selects a tagged multi-wire representation |
 | C1-D3 | Fail-closed crash-atomic kernel commits versus buffered/retried transcript persistence | Converge | Follow Codex rollout writer and ThreadStore semantics |
 | C1-D4 | One strict development schema versus compatibility modes and migrations | Deliberate | No production compatibility obligation |
 | C1-D5 | Input-boundary reference forks versus Codex turn/snapshot fork modes | Converge | Follow Codex; C6 verifies subagent inheritance details |
 | C1-D6 | Eager startup reconciliation versus demand-driven thread resume | Converge | Derived from accepted C1-D1; durable host work remains a separate C8 decision |
 | C1-D7 | One whole-Session projection versus purpose-specific live and stored projections | Converge | Derived from accepted C1-D1 |
 | C1-D8 | Per-Session command serialization plus optimistic sequence checks versus actor mailbox serialization | Converge | Derived from accepted C1-D1 |
-| C2-D1 | Turn-frozen model/policy versus request-scoped model and policy resolution | Open | Model switching; C4 |
+| C2-D1 | Turn-owned request settings versus one request-scoped Step snapshot | Converge | Core Step ownership implemented 2026-09-03; extension fields arrive with C5 |
 | C2-D2 | Rebuild prompt from durable projection versus mutate a live ContextManager | Converge | Derived from accepted C1-D1; representation still depends on C1-D2 |
 | C2-D3 | Pre-send complete-request admission versus usage-driven compaction and provider admission | Open | Reliability contract and C4 usage semantics |
 | C2-D4 | Next-Turn user queue versus in-Turn steering | Converge | Follow Codex `start` / `steer` semantics |
@@ -84,6 +85,12 @@ change that decision.
 | C3-D4 | First-serial-call scheduling versus capability-based fair execution admission | Converge | Follow Codex runtime capability and readiness boundaries; implemented 2026-08-31 |
 | C3-D5 | One-shot commands and bespoke file edits versus unified exec sessions and grammar apply_patch | Converge | Follow Codex; provider-neutral fallback is explicit; implemented 2026-08-31 |
 | C3-D6 | Tool runtime hooks, MCP readiness sources, and plugin configuration | Derived | C5 owns extension discovery/configuration; C3 now exposes the required runtime readiness boundary |
+| C4-D1 | Function-map dispatch versus provider, Session-client, and Turn-session owners | Converge | Follow Codex ownership and lifetime boundaries; implemented 2026-09-03 |
+| C4-D2 | Responses-native history versus one tagged multi-wire conversation algebra | Deliberate | First-class Anthropic/OpenAI-compatible providers require grok-build's representation boundary; implemented 2026-09-03 |
+| C4-D3 | Global static catalog lookups versus provider-scoped model managers | Converge | Follow Codex manager ownership; static managers remain the fallback when no authoritative discovery endpoint exists |
+| C4-D4 | Request-local credential reads versus provider-owned live auth recovery | Converge | Follow Codex/grok-build live-auth ownership; implemented for Codex login 2026-09-03 |
+| C4-D5 | Terminal-error retry versus output-aware physical attempt policy | Deliberate | Follow grok-build because multiple wire APIs share the boundary; implemented 2026-09-03 |
+| C4-D6 | One accumulated usage counter versus billing and active-context semantics | Converge | Follow both references; implemented 2026-09-03; rate-limit presentation remains C8/C9 work |
 | C6-D1 | Process-local task registry versus one per-root AgentControl over real child Threads | Converge | Follow Codex; implemented 2026-08-31 |
 | C6-D2 | Ephemeral child registry versus durable spawn topology and lazy identity restoration | Converge | Follow Codex V2 graph boundary; implemented 2026-08-31 |
 | C6-D3 | Volatile mailbox completion versus retry-safe model-visible inter-agent delivery | Converge | Child Session and rollout contract; implemented 2026-08-31 |
@@ -232,11 +239,13 @@ represented in its intermediate form. Codex keeps first-party Responses
 semantics closer to the canonical transcript, at the cost of coupling history
 to a larger provider/protocol item algebra.
 
-Yakitori will replace the normalized fact protocol as canonical model history
-with one Codex-style rollout item algebra. Multi-provider adapters may retain
-provider-specific metadata inside that algebra, but may not create a second
-provider-native transcript beside it. Provider wire conversion remains C4's
-responsibility; it no longer keeps this C1 boundary open.
+Yakitori uses one Codex-style rollout ownership boundary but, by the explicit
+C4-D2 decision, not Codex's Responses-only item type. The canonical
+`ModelMessage` algebra is a tagged multi-wire superset: provider adapters retain
+provider identity and opaque continuation metadata inside the corresponding
+reasoning item, and may not create a second provider-native transcript beside
+it. This is the minimum required difference for first-class Anthropic Messages
+and OpenAI Responses transports.
 
 The current paginated item policy was selected on 2026-08-30: `ResponseItem`
 records are durable model history, terminal `ItemCompleted` snapshots are
@@ -593,24 +602,12 @@ The remaining differences concern how much a Step may change, where prompt
 history lives, how admission is decided, and which compaction implementation
 owns replacement history.
 
-### C2-D1 — Turn-frozen versus Step-resolved execution configuration
+### C2-D1 — Turn-owned settings versus a Step-owned request snapshot
 
-Disposition: **Open; coupled to C4.**
+Disposition: **Converge on Codex; core implemented.**
 
-Yakitori creates a `TurnContext` once before `turn.started`. It freezes the
-provider, model, effort, speed, instruction revisions, context capacity,
-working directory, enabled tools, approval policy, and execution limits for
-the complete Turn. Each `StepContext` then refreshes:
-
-- project instructions;
-- environment observation;
-- world state;
-- finalized tool definitions/router;
-- multi-agent runtime context;
-- resolved workspace root.
-
-Codex also has a Turn/Step split, but its `StepContext` deliberately resolves a
-larger request-scoped surface:
+Codex captures one `StepContext` after pending input has been drained and
+before each logical model sampling request. That Step owns:
 
 - concrete `ModelInfo`, reasoning effort/summary, and service tier;
 - approval policy and approval reviewer after model-specific constraints;
@@ -620,16 +617,30 @@ larger request-scoped surface:
 - the observed AGENTS.md value;
 - model-attributed telemetry.
 
-Codex retains some legacy model fields on `TurnContext`, but its source
-comments direct step-scoped work to `StepContext`. This permits a later sample
-in one Turn to use newly resolved model capabilities or environment bindings
-without pretending the original Turn snapshot changed.
+Codex retains legacy model fields on `TurnContext`, but step execution reads
+the corresponding `StepContext` fields. A physical retry reuses the same Step;
+it does not recapture tools or policy. Ordinary user model-setting changes are
+still admitted for the next Turn: request-scoped ownership must not be confused
+with changing the active Turn's model after every steering input. Alternate
+model contexts used by compaction and model-switch paths can nevertheless pass
+their own concrete model through the same Turn-scoped transport session.
 
-Concrete consequence: Yakitori can prove that every tool side effect in a Step
-used the same frozen router that produced the model request. It cannot currently switch model,
-provider policy, MCP catalog, or approval behavior between tool follow-ups.
-Codex can refresh those request-scoped dependencies, but its durable
-`TurnContextItem` is not a complete event-sourced description of every Step.
+Yakitori now follows that shape for its implemented surface. The Turn keeps
+its initial attribution and total call counters. After steering input is
+recorded, every sampling iteration captures one immutable `StepContext`
+containing the concrete target and model metadata, context capacity and
+derived execution limits, approval policy, enabled-tool eligibility, wire
+protocol, and finalized router. Request construction, image adaptation,
+admission and compaction, response attribution, approval, and tool execution
+all consume that same Step. Project instructions, environment, world state,
+and multi-agent context are observed in the same iteration before the request
+is sent.
+
+The active Turn's selected model remains stable, matching Codex. A steered
+model selection is persisted as Session configuration for later Turns. MCP,
+approval-reviewer, service-tier, executor-capability, and telemetry fields do
+not yet have Yakitori product implementations; when added under C5/C9, they
+must extend this Step rather than create another request owner.
 
 Evidence anchors:
 
@@ -962,6 +973,157 @@ fair parallel dispatch, process sessions, and patch behavior.
 
 ---
 
+## C4 — Provider transport, models, credentials, retry, and usage
+
+Status: audited and core implementation completed. Codex is the selected
+reference for provider ownership and Session/Turn transport lifetimes.
+grok-build is the selected reference only where Yakitori's explicit
+first-class multi-provider requirement makes Codex's Responses-only boundary
+inapplicable: conversation wire conversion and physical-attempt retry.
+
+### C4-D1 — Provider and transport ownership
+
+Disposition: **Converge on Codex; implemented.**
+
+Codex has a process-scoped `ModelProvider`, a Session-scoped `ModelClient`, and
+a Turn-scoped `ModelClientSession`. Yakitori now has the same ownership shape.
+`ProviderRegistry` owns provider objects rather than only a string-to-function
+map. Each live Session obtains one routing `ModelClient`; it retains the
+provider clients used by that Session, while every Turn gets one transport
+session and independent retry state. Like Codex, that session is not bound to
+the complete model target: each Step passes its concrete model settings to the
+stream request. The compatibility `StreamFn` port remains only for focused
+tests and injected transports; the application production path uses the owned
+clients.
+
+Yakitori's Session-level routing client selects one provider client when each
+Turn starts. The resulting provider Turn session accepts request-specific
+models but rejects another provider, so sticky state cannot cross provider
+boundaries. Selecting providers between Turns is the required multi-provider
+difference from Codex's normally stable provider client, not a second
+orchestration owner. `Session` and `TurnProcessor` continue to own the agent
+loop.
+
+Turn cleanup is explicit on normal completion and abort. The routing
+`ModelClient` also tracks outstanding Turn sessions so Session shutdown closes
+them before provider clients; both paths are idempotent under abort/finally
+races.
+
+### C4-D2 — Canonical conversation and wire conversion
+
+Disposition: **Deliberate multi-provider difference; follow grok-build's
+tagged-superset boundary.**
+
+Codex persists Responses-native items. That is exact for its selected wire but
+would make Anthropic Messages a lossy compatibility adapter. Yakitori instead
+keeps one durable `ModelMessage` algebra and provider-specific converters, as
+grok-build does. Opaque reasoning continuation data now records both the
+provider identity and issuing backend/account scope. An adapter may replay
+that continuation only when both match; a matching wire protocol or provider
+name alone is insufficient because IDs, signatures, and encrypted content
+belong to one service account/backend. Codex derives the stable scope from its
+account ID. Generic API-key providers derive a stable, domain-separated digest
+from provider ID, endpoint, and credential identity; the credential itself is
+never persisted. Grok CLI login uses the same rule with its current access
+token because its shared login exposes no stable account identity. Legacy
+untagged metadata is accepted only by direct legacy adapter calls without an
+active scope, never by the production provider owner.
+
+There is still no parallel provider-native transcript. Incompatible reasoning
+is omitted from the new provider request while ordinary assistant text and
+tool history remain replayable. C2-D7 remains open because deciding whether a
+model switch must compact or may discard incompatible continuation state is a
+separate product behavior.
+
+### C4-D3 — Model manager ownership
+
+Disposition: **Converge on Codex's manager boundary; core implemented with
+static managers.**
+
+Every registered provider now owns one `ModelsManager`. Session configuration,
+Turn resolution, context capacity, and the server model directory consult that
+same manager rather than independently reading the bundled catalog. Providers
+without a first-party capability-discovery response use a provider-scoped
+static manager backed by the bundled fallback, matching Codex's static-manager
+variant.
+
+Yakitori does not fabricate remote capability metadata from a generic
+`/models` list. Codex's authenticated models endpoint returns Codex-specific
+metadata and ETags; the registered Anthropic, Kimi, and xAI endpoints do not
+establish one common authoritative payload. Remote refresh/cache/ETag support
+should be added to an individual provider manager only with that provider's
+first-party contract. Host-facing refresh and presentation remain part of C8.
+
+### C4-D4 — Credential freshness and unauthorized recovery
+
+Disposition: **Converge on live provider-owned auth; implemented for Codex.**
+
+The Codex ChatGPT provider now owns a live auth resolver. It re-reads the
+shared CLI login so external rotation is visible and single-flights stale
+refresh. Like Codex, it treats refresh as a mutation of the owning credential
+source: Yakitori refreshers serialize through a cross-process file lock,
+perform a guarded reload under that lock, and atomically persist the replacement
+access token, rotated refresh token, optional ID token, and `last_refresh`
+before returning the new access token. A pre-output HTTP 401 permits exactly
+one forced refresh attempt. Recovery is fenced to the initiating account;
+same-account external rotation wins through guarded reload, while an account
+change terminates recovery without resending the request. Token material is
+never included in errors.
+
+The Grok CLI login remains read-only and fails closed near expiry. This is a
+necessary difference: its shared token family can rotate during refresh, and
+Yakitori does not own the CLI credential file or an authoritative locking
+protocol. `XAI_API_KEY` remains the provider-owned non-refreshing alternative.
+
+### C4-D5 — Retry and logical-output integrity
+
+Disposition: **Follow grok-build's physical-attempt contract; implemented.**
+
+SDK retries remain disabled. The provider layer classifies errors; the
+Turn-scoped request runtime applies the bounded policy. A retryable terminal
+may be hidden and retried only before any snapshot has become externally
+visible. Once text or reasoning output is observed, the error is returned to
+the Session rather than merging a second physical attempt into the same live
+item. Rate limits use grok-build's smaller two-attempt budget and honor the
+full provider `Retry-After` hint after a separate 120-second parser safety
+bound; other transient failures retain the generic backoff ceiling. A stream
+that emits no event for 300 seconds is aborted and terminated as an idle
+timeout. Cancellation still terminates both streaming and backoff immediately.
+
+### C4-D6 — Usage and request correlation
+
+Disposition: **Converge on separated semantics; implemented core.**
+
+Provider usage now distinguishes accumulated billing counters from the active
+model-visible context reported for the latest response. Billing input/output
+and cache counters sum across calls; `activeContextTokens` is replaced by the
+latest reported input-plus-output context value. xAI Responses uses its
+provider-specific `context_details` counters when present; Anthropic includes
+cache-read, cache-created, current input, and current output tokens; OpenAI and
+Codex use the response total. Both semantics survive Turn completion and
+server projection.
+Provider request IDs are retained on the durable assistant envelope so an
+observed response can be correlated with provider diagnostics.
+
+Rate-limit/account quota snapshots are not inferred from token usage. Current
+SDK transports do not expose one stable cross-provider event contract, so C8
+and C9 must add provider-specific snapshots when they add host presentation and
+diagnostics rather than overloading `TokenUsage`.
+
+Evidence anchors:
+
+- Yakitori: `src/runtime/model-provider.ts`, `models-manager.ts`,
+  `provider-registry.ts`, `retrying-stream.ts`, `codex-credentials.ts`,
+  `codex-provider.ts`, `openai-provider.ts`, `anthropic-provider.ts`, and
+  `turn-processor.ts`.
+- Codex: `model-provider-info/src/lib.rs`, `model-provider/src/provider.rs`,
+  `models-manager/src/manager.rs`, `core/src/client.rs`, and
+  `core/src/responses_retry.rs`.
+- grok-build: `xai-grok-sampler/src/config.rs`, `actor/request_task.rs`,
+  `retry.rs`, and `xai-grok-sampling-types/src/conversation.rs`.
+
+---
+
 ## C6 — Subagents, AgentControl, and Mate lifecycle
 
 Status: audited. The core coding-subagent boundary is implemented. Role
@@ -1179,6 +1341,22 @@ Evidence anchors:
   `app-server/src/thread_processor.rs`, and `rollout/src/recorder.rs`.
 
 ## Progress log
+
+### 2026-09-03
+
+- Audited and implemented the C4 provider core against Codex and grok-build.
+- Selected Codex provider/Session/Turn ownership while retaining one
+  grok-build-style tagged multi-wire conversation algebra for first-class
+  Anthropic Messages and OpenAI Responses transports.
+- Added provider-scoped model managers, target-independent Turn transport
+  sessions and request-scoped Step configuration,
+  output-aware retry with `Retry-After` and idle deadlines, Codex credential
+  single-flight and pre-output 401 recovery, provider-and-account continuation
+  fencing, durable
+  provider request IDs, and separate billing versus active-context usage.
+- Kept remote model discovery provider-specific and left model-switch
+  compaction, host rate-limit presentation, and diagnostics in their existing
+  C2/C8/C9 boundaries.
 
 ### 2026-09-02
 

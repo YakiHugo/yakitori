@@ -1098,6 +1098,11 @@ function addUsage(left: TokenUsage | undefined, right: TokenUsage): TokenUsage {
             (left?.cacheWriteInputTokens ?? 0) +
             (right.cacheWriteInputTokens ?? 0),
         }),
+    ...(right.activeContextTokens === undefined
+      ? left?.activeContextTokens === undefined
+        ? {}
+        : { activeContextTokens: left.activeContextTokens }
+      : { activeContextTokens: right.activeContextTokens }),
   }
 }
 
