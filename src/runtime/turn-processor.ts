@@ -46,7 +46,10 @@ import { createCompactionReplacementHistory } from "./model-context.ts"
 import { adaptImagesForModel } from "./model-images.ts"
 import { estimateModelRequestBudget } from "./model-request-budget.ts"
 import { createPermissionGate, type PermissionGate } from "./permission-gate.ts"
-import { loadProjectInstructions } from "./project-instructions.ts"
+import {
+  createProjectInstructionsLoader,
+  type loadProjectInstructions,
+} from "./project-instructions.ts"
 import {
   type ApprovalPolicy,
   createTurnContext,
@@ -130,7 +133,7 @@ export function createTurnProcessor(
   const provider = options.provider ?? "faux"
   const model = options.model ?? "scripted"
   const projectInstructionLoader =
-    options.loadProjectInstructions ?? loadProjectInstructions
+    options.loadProjectInstructions ?? createProjectInstructionsLoader()
   const compactionState: CompactionState = {
     consecutiveFailures: 0,
     failedHistoryLength: undefined,
