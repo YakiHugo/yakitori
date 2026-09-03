@@ -162,7 +162,7 @@ function worldState(
     approvalPolicy: "always_approve",
   })
   return buildWorldStateFromSnapshot({
-    configuration: sessionConfiguration.resolveTurn(
+    configuration: sessionConfiguration.resolveStep(
       sessionConfiguration.snapshot.defaultTarget,
     ),
     environment: {

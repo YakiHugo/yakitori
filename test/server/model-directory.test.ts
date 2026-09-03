@@ -1,4 +1,8 @@
 import { describe, expect, it } from "vitest"
+import {
+  createModelProvider,
+  createProviderRegistry,
+} from "../../src/runtime/index.ts"
 import { createModelDirectory } from "../../src/server/model-directory.ts"
 
 describe("model directory", () => {
@@ -90,5 +94,54 @@ describe("model directory", () => {
       "levels",
     ])
     expect(await directory.listModels("unknown")).toEqual([])
+  })
+
+  it("reads models from the registered provider owner", async () => {
+    const registry = createProviderRegistry({
+      custom: createModelProvider({
+        info: {
+          id: "custom",
+          wireApi: "unknown",
+          capabilities: { remoteCompaction: false },
+        },
+        stream: async function* () {},
+        models: {
+          provider: "custom",
+          async listModels() {
+            return [
+              {
+                model: "remote-model",
+                displayName: "Remote Model",
+                instructionProfileId: "default",
+                inputModalities: ["text"],
+                imageDetailModes: [],
+                shellToolType: "unified_exec",
+                fileEditingToolType: "none",
+                supportsNativeToolSearch: false,
+              },
+            ]
+          },
+          resolve() {
+            throw new Error("not used")
+          },
+          validate() {},
+          capacity() {
+            return undefined
+          },
+        },
+      }),
+    })
+
+    await expect(
+      createModelDirectory(registry).listModels("custom"),
+    ).resolves.toEqual([
+      {
+        id: "remote-model",
+        displayName: "Remote Model",
+        instructionProfileId: "default",
+        inputModalities: ["text"],
+        imageDetailModes: [],
+      },
+    ])
   })
 })

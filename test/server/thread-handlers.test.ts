@@ -23,6 +23,63 @@ afterEach(async () => {
 })
 
 describe("thread server handlers", () => {
+  it("sums billing usage across Turns while keeping the latest active context", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "yakitori-handler-usage-"))
+    const store = new MemoryThreadStore()
+    const provider = createFauxProvider([
+      {
+        content: [{ type: "text", text: "first" }],
+        usage: { inputTokens: 10, outputTokens: 2, activeContextTokens: 9 },
+      },
+      {
+        content: [{ type: "text", text: "second" }],
+        usage: { inputTokens: 4, outputTokens: 1, activeContextTokens: 3 },
+      },
+    ])
+    const manager = new ThreadManager({
+      store,
+      createTurnProcessor: () =>
+        createTurnProcessor({
+          stream: provider.stream,
+          toolRegistry: createToolRegistry([]),
+          loadProjectInstructions: async () => undefined,
+        }),
+    })
+    const handlers = createThreadServerHandlers({ manager, store })
+    cleanups.push(async () => {
+      await manager.shutdown()
+      await handlers.close()
+      await rm(workspace, { recursive: true, force: true })
+    })
+    const created = await handlers.createSession({
+      workingDirectory: workspace,
+      mateId: "mate_test",
+      mateRevisionId: "mate_revision_test",
+    })
+    if (!created.ok) throw new Error(created.body.error.message)
+    const sessionId = created.body.session.id
+
+    for (const text of ["first", "second"]) {
+      const admitted = await handlers.admitInput({
+        sessionId,
+        requestId: `request_${text}`,
+        content: { kind: "text", text },
+      })
+      if (!admitted.ok) throw new Error(admitted.body.error.message)
+      await waitForValue(() =>
+        manager.getThread(sessionId)?.status === "idle" ? true : undefined,
+      )
+    }
+
+    const read = await handlers.readSession({ sessionId })
+    if (!read.ok) throw new Error(read.body.error.message)
+    expect(read.body.session.usage).toEqual({
+      inputTokens: 14,
+      outputTokens: 3,
+      activeContextTokens: 3,
+    })
+  })
+
   it("publishes each rollout event only through its append fence", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "yakitori-handler-fence-"))
     const store = new MemoryThreadStore()

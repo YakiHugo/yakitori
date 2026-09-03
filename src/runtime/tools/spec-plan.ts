@@ -1,5 +1,9 @@
 import type { ModelTarget, ToolWireProtocol } from "../model.ts"
 import type { ResolvedModel } from "../model-catalog.ts"
+import {
+  type ResolvedStepConfiguration,
+  stepExecutionLimits,
+} from "../session-configuration.ts"
 import type { ToolRegistry, ToolRouter } from "./registry.ts"
 
 const FILE_EDITING_TOOLS = new Set(["apply_patch", "edit_file", "write_file"])
@@ -14,23 +18,27 @@ type ProviderToolCapabilities = Readonly<{
 }>
 
 export type StepContext = Readonly<{
+  configuration: ResolvedStepConfiguration
   target: ModelTarget
   modelInfo: ResolvedModel
+  executionPolicy: ReturnType<typeof stepExecutionLimits>
   toolRouter: ToolRouter
   toolWireProtocol: ToolWireProtocol
 }>
 
 export function captureStepContext(input: {
   readonly registry: ToolRegistry
-  readonly target: ModelTarget
-  readonly modelInfo: ResolvedModel
-  readonly enabledTools: readonly string[]
+  readonly configuration: ResolvedStepConfiguration
 }): StepContext {
-  const target = Object.freeze({ ...input.target })
+  const target = Object.freeze({ ...input.configuration.target })
   const model = Object.freeze({
-    ...input.modelInfo,
-    inputModalities: Object.freeze([...input.modelInfo.inputModalities]),
-    imageDetailModes: Object.freeze([...input.modelInfo.imageDetailModes]),
+    ...input.configuration.modelInfo,
+    inputModalities: Object.freeze([
+      ...input.configuration.modelInfo.inputModalities,
+    ]),
+    imageDetailModes: Object.freeze([
+      ...input.configuration.modelInfo.imageDetailModes,
+    ]),
   })
   if (model.provider !== target.provider || model.model !== target.model) {
     throw new Error("Step model metadata does not match its concrete target.")
@@ -52,7 +60,7 @@ export function captureStepContext(input: {
         : []),
   ])
   const enabledTrustedTools = new Set(
-    input.enabledTools.filter(
+    input.configuration.enabledTools.filter(
       (name) =>
         (!FILE_EDITING_TOOLS.has(name) || fileEditingTools.has(name)) &&
         (model.shellToolType !== "disabled" ||
@@ -60,8 +68,15 @@ export function captureStepContext(input: {
     ),
   )
   return {
+    configuration: Object.freeze({
+      ...input.configuration,
+      target,
+      modelInfo: model,
+      enabledTools: Object.freeze([...input.configuration.enabledTools]),
+    }),
     target,
     modelInfo: model,
+    executionPolicy: stepExecutionLimits(input.configuration),
     toolRouter: input.registry.finalize({
       enabledTrustedTools,
       customToolMode:

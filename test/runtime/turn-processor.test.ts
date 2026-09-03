@@ -8,6 +8,11 @@ import { createFauxProvider } from "../../src/runtime/faux-provider.ts"
 import { createSessionExecutionPolicy } from "../../src/runtime/limits.ts"
 import type { ModelStreamEvent, StreamFn } from "../../src/runtime/model.ts"
 import { ModelStopReason } from "../../src/runtime/model.ts"
+import type { ModelClient } from "../../src/runtime/model-provider.ts"
+import {
+  createStaticModelsManager,
+  type ModelsManager,
+} from "../../src/runtime/models-manager.ts"
 import { createPermissionGate } from "../../src/runtime/permission-gate.ts"
 import {
   createToolRegistry,
@@ -32,6 +37,43 @@ afterEach(async () => {
 })
 
 describe("Turn processor", () => {
+  it("disposes tools when model-client cleanup fails", async () => {
+    let toolDisposed = false
+    const toolRegistry = createToolRegistry([
+      {
+        toolName: plainToolName("cleanup_probe"),
+        description: "Cleanup probe",
+        inputSchema: { type: "object" },
+        effect: "observe",
+        approvalRequirement: { kind: "none" },
+        async execute() {
+          return { ok: true, output: null, content: "done" }
+        },
+        dispose() {
+          toolDisposed = true
+        },
+      },
+    ])
+    const modelClient: ModelClient = {
+      models: () => createStaticModelsManager("faux"),
+      startTurn() {
+        throw new Error("unused")
+      },
+      async close() {
+        throw new Error("model close failed")
+      },
+    }
+    const processor = createTurnProcessor({ modelClient, toolRegistry })
+
+    const dispose = processor.dispose?.()
+    await expect(dispose).rejects.toThrow("Failed to dispose Turn processor")
+    await expect(dispose).rejects.toMatchObject({
+      errors: [expect.objectContaining({ message: "model close failed" })],
+    })
+
+    expect(toolDisposed).toBe(true)
+  })
+
   it("persists an acknowledged mailbox message exactly once after append failure", async () => {
     const root = await mkdtemp(join(tmpdir(), "yakitori-mailbox-"))
     const store = new MemoryThreadStore()
@@ -147,7 +189,12 @@ describe("Turn processor", () => {
           { type: "reasoning", text: "Think", providerMetadata: { id: "r" } },
           { type: "text", text: "Hello" },
         ],
-        usage: { inputTokens: 12, outputTokens: 3 },
+        usage: {
+          inputTokens: 12,
+          outputTokens: 3,
+          activeContextTokens: 9,
+        },
+        providerRequestId: "provider_request_1",
       },
     ])
     const runtime = await createRuntime(provider.stream)
@@ -174,7 +221,26 @@ describe("Turn processor", () => {
           entry.item.outcome === "completed",
       )?.item,
     ).toMatchObject({
-      usage: { inputTokens: 12, outputTokens: 3 },
+      usage: {
+        inputTokens: 12,
+        outputTokens: 3,
+        activeContextTokens: 9,
+      },
+    })
+    expect(
+      stored?.rollout.find(
+        (entry) =>
+          entry.item.type === "response_item" &&
+          entry.item.item.item.role === "assistant",
+      )?.item,
+    ).toMatchObject({
+      item: {
+        providerMetadata: {
+          provider: "faux",
+          model: "scripted",
+          requestId: "provider_request_1",
+        },
+      },
     })
     expect(
       stored?.rollout.flatMap((entry) =>
@@ -186,6 +252,7 @@ describe("Turn processor", () => {
   it("records assistant tool calls and tool results before the next model call", async () => {
     const provider = createFauxProvider([
       {
+        usage: { inputTokens: 10, outputTokens: 2, activeContextTokens: 9 },
         stopReason: ModelStopReason.ToolUse,
         content: [
           {
@@ -197,6 +264,7 @@ describe("Turn processor", () => {
         ],
       },
       {
+        usage: { inputTokens: 4, outputTokens: 1, activeContextTokens: 3 },
         assertRequest(request) {
           expect(
             request.messages.slice(-2).map((message) => message.role),
@@ -236,6 +304,19 @@ describe("Turn processor", () => {
     expect(rollout.map((entry) => String(entry.item.type))).not.toContain(
       "item_started",
     )
+    expect(
+      rollout.find(
+        (entry) =>
+          entry.item.type === "turn_completed" &&
+          entry.item.outcome === "completed",
+      )?.item,
+    ).toMatchObject({
+      usage: {
+        inputTokens: 14,
+        outputTokens: 3,
+        activeContextTokens: 3,
+      },
+    })
   })
 
   it("reports an unexpected tool throw with its owning operation", async () => {
@@ -590,6 +671,66 @@ describe("Turn processor", () => {
       ),
     })
     expect((await nextLifecycleEvent(thread))?.type).toBe("turn.completed")
+  })
+
+  it("uses a provider ModelsManager for Step capabilities and capacity validation", async () => {
+    const fallback = createStaticModelsManager("faux")
+    const models: ModelsManager = {
+      provider: "faux",
+      listModels: fallback.listModels,
+      resolve(selection) {
+        return { ...fallback.resolve(selection), shellToolType: "disabled" }
+      },
+      validate: fallback.validate,
+      capacity() {
+        return {
+          contextWindowTokens: 12_000,
+          maxContextWindowTokens: 12_345,
+          effectiveContextWindowPercent: 100,
+        }
+      },
+    }
+    const modelClient: ModelClient = {
+      models: () => models,
+      startTurn() {
+        return {
+          stream: async function* (request) {
+            expect(request.tools.map(({ name }) => name)).not.toContain(
+              "exec_command",
+            )
+            yield responseEvent("done")
+          },
+          close() {},
+        }
+      },
+      close() {},
+    }
+    const runtime = await createRuntime(
+      () => {
+        throw new Error("fallback stream must not run")
+      },
+      createToolRegistry(),
+      { modelClient },
+    )
+    const thread = await runtime.createThread()
+
+    await thread.startIfIdle({ content: { kind: "text", text: "run" } })
+    expect((await nextLifecycleEvent(thread))?.type).toBe("turn.started")
+    expect((await nextLifecycleEvent(thread))?.type).toBe("turn.completed")
+
+    const invalid = await createRuntime(
+      () => {
+        throw new Error("fallback stream must not run")
+      },
+      createToolRegistry([]),
+      { modelClient, modelContextWindowTokens: 12_346 },
+    )
+    const invalidThread = await invalid.createThread()
+    await expect(
+      invalidThread.startIfIdle({ content: { kind: "text", text: "run" } }),
+    ).rejects.toThrow(
+      "model_context_window 12346 exceeds faux/scripted maximum of 12345",
+    )
   })
 
   it("passes the physical rollout ID to tool asset storage", async () => {
@@ -1350,6 +1491,69 @@ describe("Turn processor", () => {
     await thread.interrupt("test")
     expect((await nextLifecycleEvent(thread))?.type).toBe("turn.started")
     expect((await nextLifecycleEvent(thread))?.type).toBe("turn.interrupted")
+  })
+
+  it("closes a force-aborted model Turn session once and starts the next Turn fresh", async () => {
+    const streamEntered = deferred<void>()
+    const closes: number[] = []
+    let sessions = 0
+    const modelClient: ModelClient = {
+      models: () => createStaticModelsManager("faux"),
+      startTurn() {
+        const index = sessions
+        sessions += 1
+        closes[index] = 0
+        return {
+          stream() {
+            if (index !== 0) {
+              return (async function* () {
+                yield responseEvent("fresh Turn")
+              })()
+            }
+            const iterator: AsyncIterableIterator<ModelStreamEvent> = {
+              [Symbol.asyncIterator]() {
+                return iterator
+              },
+              async next() {
+                streamEntered.resolve()
+                await new Promise<void>(() => undefined)
+                return { done: true, value: undefined }
+              },
+              async return() {
+                await new Promise<void>(() => undefined)
+                return { done: true, value: undefined }
+              },
+            }
+            return iterator
+          },
+          close() {
+            closes[index] = (closes[index] ?? 0) + 1
+          },
+        }
+      },
+      close() {},
+    }
+    const runtime = await createRuntime(
+      () => {
+        throw new Error("fallback stream must not run")
+      },
+      createToolRegistry([]),
+      { modelClient },
+    )
+    const thread = await runtime.createThread()
+
+    await thread.startIfIdle({ content: { kind: "text", text: "wait" } })
+    await streamEntered.promise
+    await thread.interrupt("test")
+    expect((await nextLifecycleEvent(thread))?.type).toBe("turn.started")
+    expect((await nextLifecycleEvent(thread))?.type).toBe("turn.interrupted")
+    expect(closes).toEqual([1])
+
+    await thread.startIfIdle({ content: { kind: "text", text: "again" } })
+    expect((await nextLifecycleEvent(thread))?.type).toBe("turn.started")
+    expect((await nextLifecycleEvent(thread))?.type).toBe("turn.completed")
+    expect(sessions).toBe(2)
+    expect(closes).toEqual([1, 1])
   })
 
   it("consumes steering in the active task and aborts the underlying stream", async () => {
