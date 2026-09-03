@@ -3,6 +3,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it, vi } from "vitest"
 import {
+  createCodexAuthProvider,
   readCodexLogin,
   resolveCodexAccessToken,
 } from "../../src/runtime/codex-credentials.ts"
@@ -96,9 +97,8 @@ describe("resolveCodexAccessToken", () => {
     })
   })
 
-  it("refreshes in memory once last_refresh is stale, never writing back", async () => {
+  it("refreshes and persists a stale shared login", async () => {
     await withAuthFile(chatgptAuth, async (path) => {
-      const before = await readFile(path, "utf8")
       const fetchFn = vi.fn(
         async () =>
           new Response(JSON.stringify({ access_token: "fresh-access-token" })),
@@ -123,8 +123,12 @@ describe("resolveCodexAccessToken", () => {
           }),
         }),
       )
-      // v1 never writes the login file back.
-      expect(await readFile(path, "utf8")).toBe(before)
+      const persisted = JSON.parse(await readFile(path, "utf8"))
+      expect(persisted.tokens).toMatchObject({
+        access_token: "fresh-access-token",
+        refresh_token: "stored-refresh-token",
+      })
+      expect(persisted.last_refresh).toBe("2026-08-10T00:00:00.000Z")
     })
   })
 
@@ -159,6 +163,91 @@ describe("resolveCodexAccessToken", () => {
     })
   })
 
+  it("does not corrupt the shared login with a malformed refreshed ID token", async () => {
+    await withAuthFile(chatgptAuth, async (path) => {
+      const before = await readFile(path, "utf8")
+      const fetchFn = vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              access_token: "fresh-access-token",
+              refresh_token: "rotated-refresh-token",
+              id_token: "not-a-jwt",
+            }),
+          ),
+      ) as unknown as typeof fetch
+
+      await expect(
+        resolveCodexAccessToken({
+          path,
+          now: () => Date.parse("2026-08-10T00:00:00.000Z"),
+          fetchFn,
+        }),
+      ).rejects.toThrow("invalid ID token")
+      expect(await readFile(path, "utf8")).toBe(before)
+    })
+  })
+
+  it("rejects a canonical ID token whose claims Codex cannot deserialize", async () => {
+    await withAuthFile(chatgptAuth, async (path) => {
+      const before = await readFile(path, "utf8")
+      const badClaims = Buffer.from(JSON.stringify({ email: 123 })).toString(
+        "base64url",
+      )
+      const fetchFn = vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              access_token: "fresh-access-token",
+              refresh_token: "rotated-refresh-token",
+              id_token: `header.${badClaims}.signature`,
+            }),
+          ),
+      ) as unknown as typeof fetch
+
+      await expect(
+        resolveCodexAccessToken({
+          path,
+          now: () => Date.parse("2026-08-10T00:00:00.000Z"),
+          fetchFn,
+        }),
+      ).rejects.toThrow("invalid ID token")
+      expect(await readFile(path, "utf8")).toBe(before)
+    })
+  })
+
+  it("rejects null for Codex's non-optional FedRAMP claim", async () => {
+    await withAuthFile(chatgptAuth, async (path) => {
+      const before = await readFile(path, "utf8")
+      const badClaims = Buffer.from(
+        JSON.stringify({
+          "https://api.openai.com/auth": {
+            chatgpt_account_is_fedramp: null,
+          },
+        }),
+      ).toString("base64url")
+      const fetchFn = vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              access_token: "fresh-access-token",
+              refresh_token: "rotated-refresh-token",
+              id_token: `header.${badClaims}.signature`,
+            }),
+          ),
+      ) as unknown as typeof fetch
+
+      await expect(
+        resolveCodexAccessToken({
+          path,
+          now: () => Date.parse("2026-08-10T00:00:00.000Z"),
+          fetchFn,
+        }),
+      ).rejects.toThrow("invalid ID token")
+      expect(await readFile(path, "utf8")).toBe(before)
+    })
+  })
+
   it("rejects API-key logins for the ChatGPT token path", async () => {
     await withAuthFile(
       { auth_mode: "apikey", OPENAI_API_KEY: "sk-test", tokens: null },
@@ -170,3 +259,235 @@ describe("resolveCodexAccessToken", () => {
     )
   })
 })
+
+describe("Codex auth provider", () => {
+  it("keeps a 401-refreshed token ahead of a still-fresh disk login", async () => {
+    await withAuthFile(chatgptAuth, async (path) => {
+      const fetchFn = vi.fn(
+        async () =>
+          new Response(JSON.stringify({ access_token: "recovered-token" })),
+      ) as unknown as typeof fetch
+      const auth = createCodexAuthProvider({
+        path,
+        now: () => Date.parse("2026-08-05T00:00:00.000Z"),
+        fetchFn,
+      })
+
+      expect((await auth.resolve()).accessToken).toBe("stored-access-token")
+      auth.invalidate()
+      expect((await auth.resolve({ forceRefresh: true })).accessToken).toBe(
+        "recovered-token",
+      )
+      expect((await auth.resolve()).accessToken).toBe("recovered-token")
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it("persists a refresh-token rotation across provider restarts", async () => {
+    await withAuthFile(chatgptAuth, async (path) => {
+      const fetchFn = vi
+        .fn()
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({
+              access_token: "first-access",
+              refresh_token: "rotated-refresh-token",
+            }),
+          ),
+        )
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ access_token: "second-access" })),
+        ) as unknown as typeof fetch
+      const auth = createCodexAuthProvider({
+        path,
+        now: () => Date.parse("2026-08-10T00:00:00.000Z"),
+        fetchFn,
+      })
+
+      expect((await auth.resolve()).accessToken).toBe("first-access")
+      const persisted = JSON.parse(await readFile(path, "utf8"))
+      expect(persisted.tokens).toMatchObject({
+        access_token: "first-access",
+        refresh_token: "rotated-refresh-token",
+      })
+      const restarted = createCodexAuthProvider({
+        path,
+        now: () => Date.parse("2026-08-10T00:00:01.000Z"),
+        fetchFn: (() => {
+          throw new Error("fresh persisted login must not refresh")
+        }) as typeof fetch,
+      })
+      expect((await restarted.resolve()).accessToken).toBe("first-access")
+      auth.invalidate()
+      expect((await auth.resolve({ forceRefresh: true })).accessToken).toBe(
+        "second-access",
+      )
+      expect(fetchFn).toHaveBeenNthCalledWith(
+        2,
+        "https://auth.openai.com/oauth/token",
+        expect.objectContaining({
+          body: expect.stringContaining("rotated-refresh-token"),
+        }),
+      )
+    })
+  })
+
+  it("single-flights a stale shared login and caches the refreshed token", async () => {
+    await withAuthFile(chatgptAuth, async (path) => {
+      const fetchFn = vi.fn(
+        async () =>
+          new Response(JSON.stringify({ access_token: "fresh-access-token" })),
+      ) as unknown as typeof fetch
+      const auth = createCodexAuthProvider({
+        path,
+        now: () => Date.parse("2026-08-10T00:00:00.000Z"),
+        fetchFn,
+      })
+
+      const [first, second] = await Promise.all([
+        auth.resolve(),
+        auth.resolve(),
+      ])
+      const third = await auth.resolve()
+
+      expect(first.accessToken).toBe("fresh-access-token")
+      expect(second).toEqual(first)
+      expect(third).toEqual(first)
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it("serializes refresh without worker-pool deadlock across five owners", async () => {
+    await withAuthFile(chatgptAuth, async (path) => {
+      let finishRefresh!: (response: Response) => void
+      const pendingRefresh = new Promise<Response>((resolve) => {
+        finishRefresh = resolve
+      })
+      const fetchFn = vi.fn(() => pendingRefresh) as unknown as typeof fetch
+      const owners = Array.from({ length: 5 }, () =>
+        createCodexAuthProvider({
+          path,
+          now: () => Date.parse("2026-08-10T00:00:00.000Z"),
+          fetchFn,
+        }),
+      )
+
+      const [firstOwner, ...waitingOwners] = owners
+      if (firstOwner === undefined) throw new Error("missing first owner")
+      const firstAttempt = firstOwner.resolve()
+      await waitFor(() => vi.mocked(fetchFn).mock.calls.length === 1)
+      const waitingAttempts = waitingOwners.map((owner) => owner.resolve())
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      finishRefresh(
+        new Response(
+          JSON.stringify({
+            access_token: "shared-access",
+            refresh_token: "shared-refresh",
+          }),
+        ),
+      )
+
+      await expect(
+        Promise.all([firstAttempt, ...waitingAttempts]),
+      ).resolves.toEqual(
+        Array.from({ length: 5 }, () => ({
+          accessToken: "shared-access",
+          accountId: "account-1",
+        })),
+      )
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it("invalidates cached refreshes when the shared login identity changes", async () => {
+    await withAuthFile(chatgptAuth, async (path) => {
+      const fetchFn = vi
+        .fn()
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ access_token: "first-refresh" })),
+        )
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ access_token: "second-refresh" })),
+        ) as unknown as typeof fetch
+      const auth = createCodexAuthProvider({
+        path,
+        now: () => Date.parse("2026-08-10T00:00:00.000Z"),
+        fetchFn,
+      })
+
+      expect((await auth.resolve()).accessToken).toBe("first-refresh")
+      await writeFile(
+        path,
+        JSON.stringify({
+          ...chatgptAuth,
+          tokens: {
+            ...chatgptAuth.tokens,
+            access_token: "rotated-access-token",
+            refresh_token: "rotated-refresh-token",
+          },
+        }),
+      )
+
+      expect((await auth.resolve()).accessToken).toBe("second-refresh")
+      expect(fetchFn).toHaveBeenCalledTimes(2)
+    })
+  })
+
+  it("rejects an in-flight refresh when the shared login identity changes", async () => {
+    await withAuthFile(chatgptAuth, async (path) => {
+      let finishOldRefresh!: (response: Response) => void
+      const oldRefresh = new Promise<Response>((resolve) => {
+        finishOldRefresh = resolve
+      })
+      const fetchFn = vi
+        .fn()
+        .mockReturnValueOnce(oldRefresh)
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ access_token: "account-b-token" })),
+        ) as unknown as typeof fetch
+      const auth = createCodexAuthProvider({
+        path,
+        now: () => Date.parse("2026-08-10T00:00:00.000Z"),
+        fetchFn,
+      })
+      const oldAttempt = auth.resolve()
+      const oldOutcome = oldAttempt.catch((error: unknown) => error)
+      await waitFor(() => vi.mocked(fetchFn).mock.calls.length === 1)
+      await writeFile(
+        path,
+        JSON.stringify({
+          ...chatgptAuth,
+          tokens: {
+            ...chatgptAuth.tokens,
+            access_token: "account-b-stored",
+            refresh_token: "account-b-refresh",
+            account_id: "account-b",
+          },
+        }),
+      )
+
+      const newAttempt = auth.resolve()
+      finishOldRefresh(
+        new Response(JSON.stringify({ access_token: "late-account-a-token" })),
+      )
+      await expect(newAttempt).resolves.toEqual({
+        accessToken: "account-b-token",
+        accountId: "account-b",
+      })
+      expect(await oldOutcome).toMatchObject({
+        message: expect.stringContaining(
+          "Codex login changed while credentials were refreshing",
+        ),
+      })
+    })
+  })
+})
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (predicate()) return
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  }
+  throw new Error("Timed out waiting for test condition.")
+}
