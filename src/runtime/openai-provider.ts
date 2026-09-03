@@ -8,6 +8,7 @@ import type { ReasoningEffort } from "openai/resources/shared"
 import { isJsonObject, isJsonValue, type JsonObject } from "../kernel/index.ts"
 import { nativeDeferredToolProtocol } from "./deferred-tool-loading.ts"
 import { isAbortError } from "./errors.ts"
+import { parseRetryAfterMs } from "./retry-after.ts"
 import {
   DEFAULT_MODEL_MAX_OUTPUT_TOKENS,
   flattenModelSystem,
@@ -66,7 +67,12 @@ async function* streamOpenAI(
       {
         model: request.target.model || defaultModel,
         instructions: flattenModelSystem(request.system),
-        input: toOpenAIInput(request.messages, nativeDeferredLoading),
+        input: toOpenAIInput(
+          request.messages,
+          nativeDeferredLoading,
+          request.target.provider,
+          request.continuationScope,
+        ),
         tools: toOpenAITools(request.tools, nativeDeferredLoading),
         parallel_tool_calls: true,
         max_output_tokens:
@@ -121,7 +127,12 @@ async function* streamOpenAI(
       ) {
         yield {
           type: "response",
-          response: fromOpenAIResponse(event.response, customFallbackKeys),
+          response: fromOpenAIResponse(
+            event.response,
+            customFallbackKeys,
+            request.target.provider,
+            request.continuationScope,
+          ),
         }
         return
       }
@@ -177,10 +188,7 @@ function customFallbackKeysForRequest(
   for (const message of request.messages) {
     if (message.role !== "tool" || message.toolSearch === undefined) continue
     for (const tool of message.toolSearch.tools) {
-      if (
-        tool.kind === "custom" &&
-        tool.customInputFallbackKey !== undefined
-      ) {
+      if (tool.kind === "custom" && tool.customInputFallbackKey !== undefined) {
         result.set(tool.name, tool.customInputFallbackKey)
       }
     }
@@ -191,6 +199,8 @@ function customFallbackKeysForRequest(
 export function toOpenAIInput(
   messages: readonly ModelMessage[],
   nativeDeferredLoading = true,
+  provider = "openai",
+  continuationScope?: string,
 ): ResponseInput {
   const input: ResponseInput = []
   const customCallIds = new Set<string>()
@@ -267,7 +277,11 @@ export function toOpenAIInput(
     for (const block of message.content) {
       if (block.type === "reasoning") {
         flushText()
-        const reasoning = toOpenAIReasoningItem(block)
+        const reasoning = toOpenAIReasoningItem(
+          block,
+          provider,
+          continuationScope,
+        )
         if (reasoning !== undefined) input.push(reasoning)
         continue
       }
@@ -358,18 +372,22 @@ function toOpenAITool(
 export function fromOpenAIResponse(
   response: Response,
   customFallbackKeys: ReadonlyMap<string, string> = new Map(),
+  provider = "openai",
+  continuationScope?: string,
 ): ModelResponse {
   if (response.status === "cancelled") {
     return { stopReason: ModelStopReason.Aborted, content: [] }
   }
   if (response.status === "incomplete") {
     if (response.incomplete_details?.reason === "max_output_tokens") {
-      return responseResult(response, ModelStopReason.Length, [])
+      return responseResult(response, ModelStopReason.Length, [], provider)
     }
     return responseError(
       response,
       "openai_incomplete",
       `OpenAI response was incomplete: ${response.incomplete_details?.reason ?? "unknown"}.`,
+      undefined,
+      provider,
     )
   }
   if (response.status === "failed" || response.error) {
@@ -379,6 +397,7 @@ export function fromOpenAIResponse(
       code,
       response.error?.message ?? "OpenAI response failed.",
       TRANSIENT_ERROR_CODES.has(code) ? { retryable: true } : undefined,
+      provider,
     )
   }
 
@@ -391,6 +410,10 @@ export function fromOpenAIResponse(
         text,
         providerMetadata: {
           openai: {
+            provider,
+            ...(continuationScope === undefined
+              ? {}
+              : { scope: continuationScope }),
             id: item.id,
             ...(item.encrypted_content === undefined
               ? {}
@@ -408,7 +431,13 @@ export function fromOpenAIResponse(
           continue
         }
         if (part.type === "refusal") {
-          return responseError(response, "openai_refusal", part.refusal)
+          return responseError(
+            response,
+            "openai_refusal",
+            part.refusal,
+            undefined,
+            provider,
+          )
         }
       }
       continue
@@ -454,6 +483,8 @@ export function fromOpenAIResponse(
         response,
         "openai_invalid_tool_arguments",
         `OpenAI returned invalid JSON arguments for tool ${item.name}.`,
+        undefined,
+        provider,
       )
     }
     if (!isJsonValue(parsed)) {
@@ -461,6 +492,8 @@ export function fromOpenAIResponse(
         response,
         "openai_invalid_tool_arguments",
         `OpenAI returned non-JSON arguments for tool ${item.name}.`,
+        undefined,
+        provider,
       )
     }
     content.push({
@@ -477,6 +510,7 @@ export function fromOpenAIResponse(
       ? ModelStopReason.ToolUse
       : ModelStopReason.EndTurn,
     content,
+    provider,
   )
 }
 
@@ -489,11 +523,20 @@ function customToolInput(
 
 function toOpenAIReasoningItem(
   block: Extract<ModelContentBlock, { readonly type: "reasoning" }>,
+  provider: string,
+  continuationScope?: string,
 ): ResponseInput[number] | undefined {
   const metadata = block.providerMetadata?.openai
   if (!isJsonObject(metadata) || typeof metadata.id !== "string") {
     return undefined
   }
+  if (
+    metadata.provider !== provider &&
+    !(metadata.provider === undefined && provider === "openai")
+  ) {
+    return undefined
+  }
+  if (metadata.scope !== continuationScope) return undefined
   const encryptedContent = metadata.encryptedContent
   const status = metadata.status
   return {
@@ -518,6 +561,7 @@ function responseResult(
   response: Response,
   stopReason: ModelResponse["stopReason"],
   content: readonly ModelContentBlock[],
+  provider = "openai",
 ): ModelResponse {
   return {
     stopReason,
@@ -527,6 +571,7 @@ function responseResult(
       : {
           usage: {
             inputTokens: response.usage.input_tokens,
+            activeContextTokens: activeContextTokens(response.usage, provider),
             outputTokens: response.usage.output_tokens,
             ...((response.usage.input_tokens_details?.cached_tokens ?? 0) === 0
               ? {}
@@ -552,15 +597,34 @@ function responseError(
   code: string,
   message: string,
   details?: JsonObject,
+  provider = "openai",
 ): ModelResponse {
   return {
-    ...responseResult(response, ModelStopReason.Error, []),
+    ...responseResult(response, ModelStopReason.Error, [], provider),
     error: { code, message, ...(details === undefined ? {} : { details }) },
   }
 }
 
+function activeContextTokens(
+  usage: NonNullable<Response["usage"]>,
+  provider: string,
+): number {
+  if (provider === "grok") {
+    const contextDetails = (usage as unknown as Record<string, unknown>)
+      .context_details
+    if (isJsonObject(contextDetails)) {
+      const inputTokens = contextDetails.input_tokens
+      const outputTokens = contextDetails.output_tokens
+      if (typeof inputTokens === "number" && typeof outputTokens === "number") {
+        return inputTokens + outputTokens
+      }
+    }
+  }
+  return usage.total_tokens
+}
+
 function terminalError(error: unknown): ModelResponse {
-  const details = retryableDetails(error)
+  const details = providerErrorDetails(error)
   return {
     stopReason: ModelStopReason.Error,
     content: [],
@@ -604,6 +668,21 @@ function retryableDetails(error: unknown): JsonObject | undefined {
     return { retryable: true, status: error.status }
   }
   return undefined
+}
+
+function providerErrorDetails(error: unknown): JsonObject | undefined {
+  const retryable = retryableDetails(error)
+  if (error instanceof OpenAI.APIError && typeof error.status === "number") {
+    if (retryable !== undefined || error.status === 401) {
+      const retryAfterMs = parseRetryAfterMs(error.headers)
+      return {
+        ...(retryable ?? {}),
+        status: error.status,
+        ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+      }
+    }
+  }
+  return retryable
 }
 
 function abortedResponse(): ModelStreamEvent {

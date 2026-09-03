@@ -8,7 +8,7 @@ import {
 import { withRetries } from "../../src/runtime/retrying-stream.ts"
 
 describe("withRetries", () => {
-  it("retries a retryable error and streams the second attempt", async () => {
+  it("does not retry after an attempt produced visible output", async () => {
     const provider = scriptedStream([
       [{ type: "snapshot", text: "par" }, retryableError(429)],
       [{ type: "snapshot", text: "full" }, success],
@@ -25,16 +25,98 @@ describe("withRetries", () => {
 
     expect(events).toEqual([
       { type: "snapshot", text: "par" },
-      { type: "snapshot", text: "full" },
-      success,
+      retryableError(429),
     ])
+    expect(provider.calls()).toBe(1)
+    expect(sleeps).toEqual([])
+  })
+
+  it("retries a retryable error before any output is visible", async () => {
+    const provider = scriptedStream([
+      [retryableError(429)],
+      [{ type: "snapshot", text: "full" }, success],
+    ])
+    const sleeps: number[] = []
+    const stream = withRetries(provider.stream, {
+      sleep: async (ms) => {
+        sleeps.push(ms)
+      },
+      random: () => 1,
+    })
+
+    const events = await collect(stream, requestFixture())
+
+    expect(events).toEqual([{ type: "snapshot", text: "full" }, success])
     expect(provider.calls()).toBe(2)
     expect(sleeps).toEqual([500])
   })
 
-  it("stops after maxAttempts and yields the final error response", async () => {
+  it("honors the full bounded rate-limit retry-after delay", async () => {
+    const provider = scriptedStream([[retryableError(429, 20_000)], [success]])
+    const sleeps: number[] = []
+    const stream = withRetries(provider.stream, {
+      maxDelayMs: 8_000,
+      sleep: async (ms) => {
+        sleeps.push(ms)
+      },
+    })
+
+    await collect(stream, requestFixture())
+
+    expect(sleeps).toEqual([20_000])
+  })
+
+  it("still caps non-rate-limit retry-after delays", async () => {
+    const provider = scriptedStream([[retryableError(503, 20_000)], [success]])
+    const sleeps: number[] = []
+    const stream = withRetries(provider.stream, {
+      maxDelayMs: 8_000,
+      sleep: async (ms) => {
+        sleeps.push(ms)
+      },
+    })
+
+    await collect(stream, requestFixture())
+
+    expect(sleeps).toEqual([8_000])
+  })
+
+  it("uses the smaller retry budget for rate limits", async () => {
     const provider = scriptedStream([
       [retryableError(429)],
+      [retryableError(429)],
+      [success],
+    ])
+    const sleeps: number[] = []
+    const stream = withRetries(provider.stream, {
+      sleep: async (ms) => {
+        sleeps.push(ms)
+      },
+      random: () => 1,
+    })
+
+    const events = await collect(stream, requestFixture())
+
+    expect(events).toEqual([retryableError(429)])
+    expect(provider.calls()).toBe(2)
+    expect(sleeps).toEqual([500])
+  })
+
+  it("uses the rate-limit budget when only the provider error code is available", async () => {
+    const rateLimit = retryableCodeError("rate_limit_exceeded")
+    const provider = scriptedStream([[rateLimit], [rateLimit], [success]])
+    const stream = withRetries(provider.stream, {
+      sleep: async () => {},
+      random: () => 1,
+    })
+
+    expect(await collect(stream, requestFixture())).toEqual([rateLimit])
+    expect(provider.calls()).toBe(2)
+  })
+
+  it("stops after maxAttempts and yields the final error response", async () => {
+    const provider = scriptedStream([
+      [retryableError(500)],
       [retryableError(500)],
       [retryableError(503)],
       [retryableError(529)],
@@ -158,7 +240,10 @@ const success: ModelStreamEvent = {
   },
 }
 
-function retryableError(status: number): ModelStreamEvent {
+function retryableError(
+  status: number,
+  retryAfterMs?: number,
+): ModelStreamEvent {
   return {
     type: "response",
     response: {
@@ -167,7 +252,26 @@ function retryableError(status: number): ModelStreamEvent {
       error: {
         code: "provider_error",
         message: `HTTP ${status}`,
-        details: { retryable: true, status },
+        details: {
+          retryable: true,
+          status,
+          ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+        },
+      },
+    },
+  }
+}
+
+function retryableCodeError(code: string): ModelStreamEvent {
+  return {
+    type: "response",
+    response: {
+      stopReason: ModelStopReason.Error,
+      content: [],
+      error: {
+        code,
+        message: code,
+        details: { retryable: true },
       },
     },
   }

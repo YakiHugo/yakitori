@@ -17,6 +17,7 @@ import {
 } from "../kernel/index.ts"
 import { nativeDeferredToolProtocol } from "./deferred-tool-loading.ts"
 import { isAbortError } from "./errors.ts"
+import { parseRetryAfterMs } from "./retry-after.ts"
 import {
   DEFAULT_MODEL_MAX_OUTPUT_TOKENS,
   flattenModelSystem,
@@ -118,6 +119,8 @@ async function* streamAnthropic(
           request.tools,
           explicitPromptCaching,
           nativeDeferredLoading,
+          request.target.provider,
+          request.continuationScope,
         ),
         ...(tools === undefined ? {} : { tools }),
         ...(request.cacheKey === undefined
@@ -180,7 +183,12 @@ async function* streamAnthropic(
     const final = await stream.finalMessage()
     yield {
       type: "response",
-      response: fromAnthropicMessage(final, customFallbackKeys),
+      response: fromAnthropicMessage(
+        final,
+        customFallbackKeys,
+        request.target.provider,
+        request.continuationScope,
+      ),
     }
   } catch (error) {
     if (request.signal?.aborted || isAbortError(error)) {
@@ -201,6 +209,8 @@ export function toAnthropicMessages(
   messages: readonly ModelMessage[],
   nativeDeferredLoading = true,
   availableTools?: ReadonlyMap<string, ModelRequest["tools"][number]>,
+  provider = "anthropic",
+  continuationScope?: string,
 ): MessageParam[] {
   const converted: MessageParam[] = []
   for (const message of messages) {
@@ -231,7 +241,11 @@ export function toAnthropicMessages(
     }
     if (message.role === "assistant") {
       const content = message.content.flatMap((block) => {
-        const converted = toAnthropicAssistantBlock(block)
+        const converted = toAnthropicAssistantBlock(
+          block,
+          provider,
+          continuationScope,
+        )
         return converted === undefined ? [] : [converted]
       })
       if (content.length === 0) continue
@@ -333,11 +347,15 @@ function toAnthropicRequestMessages(
   tools: ModelRequest["tools"],
   cacheBreakpoint: boolean,
   nativeDeferredLoading: boolean,
+  provider: string,
+  continuationScope?: string,
 ): MessageParam[] {
   const dynamic = toAnthropicMessages(
     messages,
     nativeDeferredLoading,
     new Map(tools.map((tool) => [tool.name, tool])),
+    provider,
+    continuationScope,
   )
   if (cacheBreakpoint) markLastModelContentBlockCacheable(dynamic)
   return dynamic
@@ -384,6 +402,8 @@ export function fromAnthropicMessage(
     readonly id?: string
   },
   customFallbackKeys: ReadonlyMap<string, string> = new Map(),
+  provider = "anthropic",
+  continuationScope?: string,
 ): ModelResponse {
   const content: ModelContentBlock[] = []
   for (const block of message.content) {
@@ -397,7 +417,13 @@ export function fromAnthropicMessage(
         type: "reasoning",
         text: block.thinking,
         providerMetadata: {
-          anthropic: { signature: block.signature },
+          anthropic: {
+            provider,
+            ...(continuationScope === undefined
+              ? {}
+              : { scope: continuationScope }),
+            signature: block.signature,
+          },
         },
       })
       continue
@@ -407,7 +433,13 @@ export function fromAnthropicMessage(
         type: "reasoning",
         text: "",
         providerMetadata: {
-          anthropic: { redactedData: block.data },
+          anthropic: {
+            provider,
+            ...(continuationScope === undefined
+              ? {}
+              : { scope: continuationScope }),
+            redactedData: block.data,
+          },
         },
       })
       continue
@@ -460,6 +492,11 @@ export function fromAnthropicMessage(
               (message.usage.input_tokens ?? 0) +
               (message.usage.cache_read_input_tokens ?? 0) +
               (message.usage.cache_creation_input_tokens ?? 0),
+            activeContextTokens:
+              (message.usage.input_tokens ?? 0) +
+              (message.usage.cache_read_input_tokens ?? 0) +
+              (message.usage.cache_creation_input_tokens ?? 0) +
+              (message.usage.output_tokens ?? 0),
             ...(message.usage.output_tokens === undefined
               ? {}
               : { outputTokens: message.usage.output_tokens }),
@@ -483,9 +520,18 @@ export function fromAnthropicMessage(
 
 function toAnthropicReasoningBlock(
   block: Extract<ModelContentBlock, { readonly type: "reasoning" }>,
+  provider: string,
+  continuationScope?: string,
 ): ThinkingBlockParam | RedactedThinkingBlockParam | undefined {
   const metadata = block.providerMetadata?.anthropic
   if (!isJsonObject(metadata)) return undefined
+  if (
+    metadata.provider !== provider &&
+    !(metadata.provider === undefined && provider === "anthropic")
+  ) {
+    return undefined
+  }
+  if (metadata.scope !== continuationScope) return undefined
   if (typeof metadata.redactedData === "string") {
     return { type: "redacted_thinking", data: metadata.redactedData }
   }
@@ -499,9 +545,12 @@ function toAnthropicReasoningBlock(
 
 function toAnthropicAssistantBlock(
   block: ModelContentBlock,
+  provider: string,
+  continuationScope?: string,
 ): ContentBlockParam | undefined {
   if (block.type === "text") return { type: "text", text: block.text }
-  if (block.type === "reasoning") return toAnthropicReasoningBlock(block)
+  if (block.type === "reasoning")
+    return toAnthropicReasoningBlock(block, provider, continuationScope)
   if (block.toolKind === "custom" && typeof block.input === "string") {
     if (block.customInputFallbackKey === undefined) {
       throw new Error(
@@ -548,7 +597,7 @@ function mapStopReason(
 }
 
 function terminalError(error: unknown): ModelResponse {
-  const details = retryableDetails(error)
+  const details = providerErrorDetails(error)
   return {
     stopReason: ModelStopReason.Error,
     content: [],
@@ -600,6 +649,21 @@ function retryableDetails(error: unknown): JsonObject | undefined {
     return { retryable: true, type: error.type }
   }
   return undefined
+}
+
+function providerErrorDetails(error: unknown): JsonObject | undefined {
+  const retryable = retryableDetails(error)
+  if (error instanceof Anthropic.APIError && typeof error.status === "number") {
+    if (retryable !== undefined || error.status === 401) {
+      const retryAfterMs = parseRetryAfterMs(error.headers)
+      return {
+        ...(retryable ?? {}),
+        status: error.status,
+        ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+      }
+    }
+  }
+  return retryable
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -517,6 +517,7 @@ describe("anthropic provider conversion", () => {
       outputTokens: 4,
       cacheReadInputTokens: 80,
       cacheWriteInputTokens: 6,
+      activeContextTokens: 100,
     })
 
     expect(
@@ -529,7 +530,11 @@ describe("anthropic provider conversion", () => {
     ).toEqual({
       stopReason: ModelStopReason.EndTurn,
       content: [{ type: "text", text: "hello" }],
-      usage: { inputTokens: 10, outputTokens: 4 },
+      usage: {
+        inputTokens: 10,
+        outputTokens: 4,
+        activeContextTokens: 14,
+      },
       providerRequestId: "msg_1",
     })
 
@@ -584,14 +589,20 @@ describe("anthropic provider conversion", () => {
         type: "reasoning",
         text: "Inspect the event log.",
         providerMetadata: {
-          anthropic: { signature: "signature_1" },
+          anthropic: {
+            provider: "anthropic",
+            signature: "signature_1",
+          },
         },
       },
       {
         type: "reasoning",
         text: "",
         providerMetadata: {
-          anthropic: { redactedData: "redacted_1" },
+          anthropic: {
+            provider: "anthropic",
+            redactedData: "redacted_1",
+          },
         },
       },
       { type: "text", text: "Done." },
@@ -630,6 +641,74 @@ describe("anthropic provider conversion", () => {
           },
           { type: "redacted_thinking", data: "redacted_1" },
         ],
+      },
+    ])
+  })
+
+  it("does not replay thinking owned by a different provider identity", () => {
+    expect(
+      toAnthropicMessages(
+        [
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "reasoning",
+                text: "Private continuation state.",
+                providerMetadata: {
+                  anthropic: {
+                    provider: "kimi",
+                    signature: "signature_1",
+                  },
+                },
+              },
+              { type: "text", text: "Visible answer." },
+            ],
+          },
+        ],
+        true,
+        undefined,
+        "anthropic",
+      ),
+    ).toEqual([
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "Visible answer." }],
+      },
+    ])
+  })
+
+  it("does not replay thinking owned by a different backend scope", () => {
+    expect(
+      toAnthropicMessages(
+        [
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "reasoning",
+                text: "Private continuation state.",
+                providerMetadata: {
+                  anthropic: {
+                    provider: "anthropic",
+                    scope: "account-a",
+                    signature: "signature_1",
+                  },
+                },
+              },
+              { type: "text", text: "Visible answer." },
+            ],
+          },
+        ],
+        true,
+        undefined,
+        "anthropic",
+        "account-b",
+      ),
+    ).toEqual([
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "Visible answer." }],
       },
     ])
   })
