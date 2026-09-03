@@ -4,7 +4,11 @@ import { basename } from "node:path"
 import { type IPty, spawn as spawnPty } from "node-pty"
 import type { JsonValue } from "../../kernel/index.ts"
 import { ToolLimitDefaults } from "../limits.ts"
-import { createUserShellEnv, type UserShellEnv } from "../user-shell-env.ts"
+import {
+  createUserShellEnv,
+  type UserShellEnv,
+  wrapWithShellSnapshot,
+} from "../user-shell-env.ts"
 import { commandApprovalRequirement } from "./approval-requirements.ts"
 import { matchCatastrophicCommand } from "./command-fuse.ts"
 import {
@@ -39,7 +43,6 @@ export type UnifiedExecOutput = Readonly<{
 type ExecInput = Readonly<{
   cmd: string
   workdir?: string
-  shell?: string
   tty: boolean
   yieldTimeMs: number
   maxOutputTokens: number
@@ -156,11 +159,6 @@ export function createUnifiedExecTools(
           description:
             "True allocates a PTY; false or omitted uses plain pipes.",
         },
-        shell: {
-          type: "string",
-          description:
-            "Shell binary to launch. Defaults to the user's default shell.",
-        },
         "yield-time_ms": {
           type: "integer",
           minimum: MIN_YIELD_MS,
@@ -195,14 +193,18 @@ export function createUnifiedExecTools(
       const environment = await userShellEnv.commandEnvironment(
         cwd.absolutePath,
       )
+      const snapshot = await userShellEnv.shellSnapshot()
       log(
         `exec_command start token=${firstCommandToken(parsed.value.cmd)} bytes=${Buffer.byteLength(parsed.value.cmd, "utf8")}`,
       )
       try {
         const output = await manager.exec({
-          command: parsed.value.cmd,
+          command:
+            snapshot === undefined
+              ? parsed.value.cmd
+              : wrapWithShellSnapshot(snapshot, parsed.value.cmd),
           cwd: cwd.absolutePath,
-          shell: parsed.value.shell ?? environment.shell,
+          shell: environment.shell,
           env: environment.env,
           tty: parsed.value.tty,
           yieldTimeMs: parsed.value.yieldTimeMs,
@@ -700,12 +702,6 @@ function parseExecInput(
   if (input.workdir !== undefined && typeof input.workdir !== "string") {
     return invalid("exec_command workdir must be a string.")
   }
-  if (
-    input.shell !== undefined &&
-    (typeof input.shell !== "string" || input.shell.trim().length === 0)
-  ) {
-    return invalid("exec_command shell must be a non-empty string.")
-  }
   if (input.tty !== undefined && typeof input.tty !== "boolean") {
     return invalid("exec_command tty must be a boolean.")
   }
@@ -724,14 +720,9 @@ function parseExecInput(
     return invalid(`exec_command ${maxOutputTokens.message}`)
   const unknown = Object.keys(input).filter(
     (name) =>
-      ![
-        "cmd",
-        "workdir",
-        "shell",
-        "tty",
-        "yield-time_ms",
-        "max_output_tokens",
-      ].includes(name),
+      !["cmd", "workdir", "tty", "yield-time_ms", "max_output_tokens"].includes(
+        name,
+      ),
   )
   if (unknown.length > 0) {
     return invalid(`exec_command does not accept: ${unknown.join(", ")}.`)
@@ -744,7 +735,6 @@ function parseExecInput(
       yieldTimeMs: yieldTimeMs.value,
       maxOutputTokens: maxOutputTokens.value,
       ...(input.workdir === undefined ? {} : { workdir: input.workdir }),
-      ...(input.shell === undefined ? {} : { shell: input.shell }),
     },
   }
 }
