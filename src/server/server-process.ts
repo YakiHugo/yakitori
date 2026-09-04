@@ -36,6 +36,14 @@ export type YakitoriServerProcessInput = Readonly<{
 export async function runYakitoriServerProcess(
   input: YakitoriServerProcessInput,
 ): Promise<void> {
+  // Codex refuses to start a non-loopback websocket listener without auth
+  // (transport/auth.rs). Yakitori has no auth mechanism, so the invariant
+  // becomes an outright startup refusal.
+  if (!isLoopbackHost(input.host)) {
+    throw new Error(
+      `Refusing to bind the Yakitori server to non-loopback host "${input.host}": the server has no authentication mechanism and must bind a loopback address.`,
+    )
+  }
   const reporter =
     input.reportOperationalFailure ?? consoleOperationalFailureReporter
   const application = await createYakitoriApplication({
@@ -207,6 +215,17 @@ export async function handleServerControlRequest(
         error instanceof Error ? error.message : "Attachment import failed.",
     }
   }
+}
+
+function isLoopbackHost(host: string): boolean {
+  if (host === "localhost" || host === "::1" || host === "[::1]") return true
+  // IPv4 loopback is the whole 127.0.0.0/8 block.
+  const parts = host.split(".")
+  return (
+    parts.length === 4 &&
+    parts[0] === "127" &&
+    parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255)
+  )
 }
 
 function listen(

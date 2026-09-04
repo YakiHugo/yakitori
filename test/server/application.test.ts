@@ -10,6 +10,8 @@ import type { Server as HttpServer } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { WebSocket } from "ws"
+import packageJson from "../../package.json" with { type: "json" }
 import { MateEventType, MateLifecycle } from "../../src/mates/events.ts"
 import { createMateKernel } from "../../src/mates/mate-kernel.ts"
 import { createSqliteMateStore } from "../../src/mates/sqlite-mate-store.ts"
@@ -727,6 +729,45 @@ describe("application composition", () => {
       }
     })
   }, 15_000)
+
+  it("serves the RPC WebSocket endpoint with the package version as userAgent", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const application = await createYakitoriApplication(
+        testApplicationOptions({ rootDir, workspace }),
+      )
+      const server = application.createHttpServer()
+      const wsUrl = `${(await listen(server)).replace("http://", "ws://")}/rpc`
+      const ws = new WebSocket(wsUrl)
+      try {
+        const response = await new Promise<Record<string, unknown>>(
+          (resolve, reject) => {
+            ws.once("error", reject)
+            ws.once("open", () => {
+              ws.send(
+                JSON.stringify({
+                  id: 1,
+                  method: "initialize",
+                  params: { clientInfo: { name: "test", version: "0" } },
+                }),
+              )
+            })
+            ws.once("message", (data) => {
+              resolve(JSON.parse(data.toString()) as Record<string, unknown>)
+            })
+          },
+        )
+        expect(response).toMatchObject({
+          id: 1,
+          result: { userAgent: `yakitori/${packageJson.version}` },
+        })
+      } finally {
+        ws.close()
+        await new Promise((resolve) => ws.once("close", resolve))
+        await closeServer(server)
+        await application.close()
+      }
+    })
+  })
 
   it("binds the runtime lock to the canonical Session store", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
