@@ -33,6 +33,12 @@ import {
   reportOperationalFailure,
 } from "./operational-errors.ts"
 import { createRequestGate, type RequestGate } from "./request-gate.ts"
+import { MessageProcessor } from "./rpc/message-processor.ts"
+import {
+  reconcileBufferedSessionDeliveries,
+  unbufferedPendingPermissions,
+} from "./rpc/subscriptions.ts"
+import { attachWebsocketRpcTransport } from "./rpc/websocket-transport.ts"
 
 export type YakitoriStaticAssets = {
   readonly directory: string
@@ -48,6 +54,8 @@ type YakitoriHttpServerCommonOptions = {
   readonly rolloutAssets?: RolloutAssets
   readonly reportOperationalFailure?: OperationalFailureReporter
   readonly requestGate?: RequestGate
+  readonly messageProcessor?: MessageProcessor
+  readonly userAgent?: string
 }
 
 export type YakitoriHttpServerOptions = YakitoriHttpServerCommonOptions & {
@@ -117,6 +125,25 @@ export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
           )
         }
       })
+  })
+
+  const messageProcessor =
+    options.messageProcessor ??
+    new MessageProcessor({
+      handlers,
+      eventHub,
+      reportOperationalFailure: reporter,
+      ...(projectRegistry === undefined ? {} : { projectRegistry }),
+      ...(providers === undefined ? {} : { providers }),
+      ...(userConfig === undefined ? {} : { userConfig }),
+      ...(availableProviders === undefined ? {} : { availableProviders }),
+      ...(options.userAgent === undefined
+        ? {}
+        : { userAgent: options.userAgent }),
+    })
+  attachWebsocketRpcTransport(server, {
+    processor: messageProcessor,
+    reportOperationalFailure: reporter,
   })
   return server
 }
@@ -702,16 +729,10 @@ async function streamSessionEvents(
   // Re-send still-pending permission requests so a (re)connecting client can
   // resolve them without a separate fetch. Requests already buffered live
   // during replay win over the older snapshot read.
-  const bufferedRequestIds = new Set(
-    pendingDeliveries.flatMap((delivery) => {
-      const event = delivery.kind === "transient" ? delivery.event : undefined
-      return event?.type === "permission.requested"
-        ? [event.permissionRequestId]
-        : []
-    }),
-  )
-  for (const permission of snapshot.body.session.pendingPermissions) {
-    if (bufferedRequestIds.has(permission.permissionRequestId)) continue
+  for (const permission of unbufferedPendingPermissions(
+    snapshot.body.session.pendingPermissions,
+    pendingDeliveries,
+  )) {
     writeTransientSseEvent(response, {
       type: "permission.requested",
       sessionId,
@@ -722,25 +743,13 @@ async function streamSessionEvents(
   // lifecycle facts that arrived after it. This closes the commit→publish
   // window where a terminal Turn is already in the snapshot but an older
   // buffered delta reaches the connection afterward.
-  let liveTurnId = snapshot.body.session.activeTurnId
-  for (const delivery of pendingDeliveries) {
-    if (delivery.kind === "transient" && isLiveDisplayEvent(delivery.event)) {
-      if (delivery.event.turnId !== liveTurnId) continue
-    }
-    lastSequence = writeSessionDelivery(response, delivery, lastSequence)
-    if (delivery.kind === "durable") {
-      for (const event of delivery.events) {
-        if (!isKernelEvent(event)) continue
-        if (event.type === "turn.started") liveTurnId = event.data.turnId
-        if (
-          event.type === "turn.completed" &&
-          event.data.turnId === liveTurnId
-        ) {
-          liveTurnId = undefined
-        }
-      }
-    }
-  }
+  reconcileBufferedSessionDeliveries(
+    pendingDeliveries,
+    snapshot.body.session.activeTurnId,
+    (delivery) => {
+      lastSequence = writeSessionDelivery(response, delivery, lastSequence)
+    },
+  )
   pendingDeliveries.length = 0
   live = true
 
@@ -748,19 +757,6 @@ async function streamSessionEvents(
     if (responseClosed) return
     response.write(": heartbeat\n\n")
   }, 15_000)
-}
-
-function isLiveDisplayEvent(
-  event: LiveSessionEvent,
-): event is Extract<
-  LiveSessionEvent,
-  { readonly type: "item.started" | "assistant.delta" | "reasoning.delta" }
-> {
-  return (
-    event.type === "item.started" ||
-    event.type === "assistant.delta" ||
-    event.type === "reasoning.delta"
-  )
 }
 
 function writeSessionDelivery(
@@ -878,7 +874,7 @@ function requireBodyRecord(value: unknown): Record<string, unknown> {
   return {}
 }
 
-function requireUserModelPreference(
+export function requireUserModelPreference(
   value: unknown,
   availableProviders: readonly string[],
 ):
@@ -1253,7 +1249,7 @@ function requestOrigin(request: IncomingMessage): string | undefined {
   return undefined
 }
 
-function isAllowedCorsOrigin(origin: string): boolean {
+export function isAllowedCorsOrigin(origin: string): boolean {
   try {
     const url = new URL(origin)
     return (
