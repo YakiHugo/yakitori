@@ -57,7 +57,7 @@ change that decision.
 | C5 | Instructions, environment, shell, skills, plugins, MCP, and connectors | prompt, instruction, environment, and future extension owners | `agents_md_manager`, `context`, `skills`, `core-plugins`, `mcp`, `connectors`, `shell*` | Audited; shell/environment/instruction slices implemented |
 | C6 | Subagents, AgentControl, and Mate lifecycle | `src/runtime/agent-control.ts`, `agent-runtime.ts`, multi-agent tools, `src/mates/*` | `core/agent`, `agent-graph-store`, `agent-identity`, thread spawning | Audited; core implemented |
 | C7 | Process recovery, concurrency, failure reporting, and shutdown | runtime recovery/locks, server application and event hubs | core task/session lifecycle, app-server lifecycle, rollout writer recovery | Lifecycle slice audited and implemented |
-| C8 | Host protocol, configuration, projects, and model discovery | `src/server/*` excluding GUI consumers | `app-server`, `app-server-protocol`, `config` | Unreviewed |
+| C8 | Host protocol, configuration, projects, and model discovery | `src/server/*` excluding GUI consumers | `app-server`, `app-server-protocol`, `config` | Protocol and projects audited with accepted decisions 2026-09-04; configuration and model-discovery surfaces remain Open |
 | C9 | Observability, diagnostics, history search, and operational state | currently distributed | `otel`, `diagnostics`, `analytics`, `thread-store` search/projections | Unreviewed |
 
 ## Decision summary
@@ -106,6 +106,10 @@ change that decision.
 | C6-D6 | Coding subagents versus persistent colleague Mates | Deliberate | Current single-Mate product boundary |
 | C7-D1 | Immediate process teardown versus active-Turn drain and explicit force | Converge | Follow Codex; implemented 2026-09-02 |
 | C7-D2 | Silent detached failures versus owner-local observation | Converge | Follow Codex ownership semantics through a thin Yakitori reporter; implemented 2026-09-02 |
+| C8-D1 | Ad-hoc REST+SSE versus Codex's single-channel JSON-RPC host protocol | Converge | Product decision 2026-09-04; staged implementation tracked in the convergence register |
+| C8-D2 | Flat project path registry versus a first-class Project entity | Converge | Product decision 2026-09-04 |
+| C8-D3 | Single-layer user config versus provenance-tracked layered configuration | Open | Owns C5-D7; requirements-stack adoption is a separate enterprise question |
+| C8-D4 | Static-only catalog and zero credential surface versus provider discovery plus auth presentation | Open | Owns the C4-D3 fallback clause and the C4-D6 rate-limit presentation remainder |
 
 ---
 
@@ -1508,7 +1512,232 @@ Evidence anchors:
 - Codex: `app-server/src/lib.rs`, `app-server/src/connection_cleanup.rs`,
   `app-server/src/thread_processor.rs`, and `rollout/src/recorder.rs`.
 
+## C8 — Host protocol, configuration, projects, and model discovery
+
+Status: the protocol and project boundaries are audited with accepted
+decisions C8-D1 and C8-D2 (2026-09-04). Configuration layering (C8-D3) and
+model discovery plus credential presentation (C8-D4) remain Open.
+
+### First-principles problem
+
+C1–C7 assume a caller exists. C8 owns how callers find the harness, speak to
+it, and observe it. The boundary carries three flows with different
+reliability contracts over one relationship:
+
+- Client commands need exactly-once delivery and per-resource ordering (a
+  resume and a delete of the same thread must not interleave).
+- Server events fan out to N clients with independent lifetimes; this
+  requires subscription ownership, backpressure policy for slow consumers,
+  and replay semantics after reconnect.
+- Server-initiated requests (approvals, user input) block a Turn on a client
+  decision. They must survive client disconnect and be replayable to a
+  reconnected or second client, which makes them correlated RPCs rather than
+  notifications.
+
+Two further problems share the boundary. Configuration is provenance and
+trust, not file reading: every layer has a different writer and trust level,
+project layers are repository content (untrusted input), and administrator
+constraints cannot ride the same last-writer-wins merge as user values or a
+higher config layer could override them. And the host must state
+capabilities: which models are usable under the current credential, and what
+that credential is.
+
+### C8-D1 — Host protocol shape
+
+Disposition: **Converge on Codex.** Product decision 2026-09-04.
+
+Codex's app-server speaks a JSON-RPC-style envelope without the `"jsonrpc"`
+field; requests, notifications, responses, and errors are distinguished by
+field shape, and method names follow `<resource>/<method>`. One channel
+carries all three flows:
+
+- Client requests deserialize into a generated `ClientRequest` union; unknown
+  methods and malformed params fail at the envelope boundary.
+- Server→client requests (approvals, elicitation, user input) correlate
+  through a process-global pending map keyed by a process-wide request id, so
+  any connection may answer. Pending entries carry their thread id, which
+  enables replay to a reconnected connection and per-thread cancellation.
+  Turn transitions fail pending requests with a marker reason that handlers
+  distinguish from a user denial and drop silently.
+- Each request declares a serialization scope (thread, named global, shared
+  read, process) enforced by per-key queues: exclusive requests run FIFO one
+  at a time; shared reads batch contiguously and late reads join a running
+  batch only when no writer is queued between. This is a fair reader-writer
+  lock expressed as a queue, and it is what makes cross-client config
+  read/write and resume/delete interleavings safe.
+
+Connections pass through an initialize handshake (capabilities, experimental
+opt-in, notification opt-outs) and run under a `ConnectionRpcGate`: after
+close, queued handlers are never polled while running handlers drain.
+Subscription sets hang off threads, not connections, so a reconnecting or
+second client attaches to live state. A biased per-thread listener loop
+drains queued listener commands before polling the next live event, which
+keeps resume responses and `serverRequest/resolved` notifications ordered
+with the events that produced them. Backpressure is asymmetric by transport
+and direction: disconnectable transports drop a slow client when the outbound
+queue fills; inbound overload rejects new requests with a retryable error
+while responses and notifications block rather than drop. Protocol evolution
+is additive — v2-only new surface, TypeScript/JSON-Schema generated from the
+protocol types, field-level experimental gating instead of numeric versions.
+
+Yakitori's current boundary is ad-hoc REST plus SSE over `node:http`
+(`src/server/http.ts`) with DTOs imported directly by the GUI. Single-client
+semantics are already correct (SSE replay watermark, transient/durable split,
+permission replay after `session.replay-complete`, RequestGate drain), but
+the shape cannot grow a second client, cannot express server→client requests
+on one channel, and hand-rolls the association that the Codex envelope
+provides.
+
+Yakitori adopts the Codex design with one deliberate transport difference:
+the supported clients are the browser GUI and the Electron renderer reaching
+the sidecar, so the primary transport is WebSocket rather than stdio. The
+unix control socket has no Yakitori analog because the desktop control plane
+already uses the parent↔sidecar IPC. In-process dispatch remains available
+for tests. Implementation lands in stages tracked in
+`docs/architecture-convergence-register.md`; REST+SSE is removed when the GUI
+cutover completes rather than kept as a compatibility layer.
+
+Evidence anchors:
+
+- Codex: `app-server-protocol/src/rpc.rs`, `protocol/common.rs`,
+  `app-server/src/message_processor.rs`, `outgoing_message.rs`,
+  `request_serialization.rs`, `connection_rpc_gate.rs`,
+  `request_processors/thread_lifecycle.rs`, `thread_state.rs`,
+  `transport/mod.rs`, `app-server/src/lib.rs`.
+- Yakitori (pre-convergence): `src/server/http.ts`, `protocol.ts`,
+  `event-hub.ts`, `handlers.ts`.
+
+### C8-D2 — Projects
+
+Disposition: **Converge on Codex's first-class Project entity.** Product
+decision 2026-09-04.
+
+Codex stores `Project { id, name, roots, metadata, position, created_at,
+updated_at }` in its SQLite state DB: `project_roots` cascades on delete,
+while an idempotency-key table deliberately survives deletion so a repeated
+create can report that its key referred to a deleted project. Threads link
+with `ON DELETE SET NULL` — deleting a project orphans threads instead of
+deleting them. CRUD is cursor-paginated on a `position|id` keyset, updates
+suppress no-op change notifications, and move uses dense renumbering. The
+entity carries what cwd-derived grouping cannot: server-assigned identity,
+user naming, an opaque client metadata bag, manual ordering, multi-root
+membership, and membership independent of cwd. cwd filtering remains
+available alongside project filtering.
+
+Yakitori's `ProjectRegistry` is a flat JSON path list with list/add only, and
+session working directories are not constrained by it. Yakitori replaces it
+with the Codex entity shape, stored in the existing SQLite pattern used by
+the Mate and agent-graph stores, exposed through the C8-D1 protocol methods
+(`project/list|read|create|update|move|delete` with `project/changed`
+notifications), and linked from sessions with orphan-on-delete semantics.
+
+Evidence anchors:
+
+- Codex: `app-server-protocol/src/protocol/v2/project.rs`,
+  `app-server/src/request_processors/projects.rs`,
+  `state/migrations/0049_projects.sql`, `state/src/runtime/projects.rs`.
+- Yakitori (pre-convergence): `src/server/project-registry.ts`.
+
+### C8-D3 — Configuration layering and provenance
+
+Disposition: **Open.** Owns the C5-D7 decision.
+
+Codex runs two stacks: config layers merge last-writer-wins with per-leaf
+origin tracking and content fingerprints, while requirements (administrator
+allowlists and pins) compose separately with domain mergers so a higher
+config layer cannot override a constraint. Project layers are discovered from
+cwd upward, gated by a trust table, loaded-but-disabled when untrusted, and
+denylist-sanitized even when trusted so repository content cannot redirect
+credentials or register local commands. Writes target only the user layer
+with optimistic concurrency on the layer fingerprint, and a write that is
+overridden by a higher layer reports `OkOverridden` with the effective value.
+
+Yakitori has a single user-level layer plus environment variables, read once
+at construction. Adoption is separable: provenance tracking and trusted
+project layers can land without the requirements stack, and the requirements
+stack only becomes load-bearing with enterprise management needs. Project
+layers with a trust gate become a safety requirement once C5-D6 lets project
+content configure hooks or MCP servers. Awaiting a product decision.
+
+### C8-D4 — Model discovery and credential presentation
+
+Disposition: **Open.** Owns the C4-D3 static-fallback clause and the C4-D6
+rate-limit presentation remainder.
+
+Codex seeds an in-memory catalog from a bundled static list so the picker
+works offline, refreshes from the provider's models endpoint under explicit
+strategies (`Offline` for sub-agents, `OnlineIfUncached` at the host
+boundary, periodic `Online` from a background worker), and revalidates
+through ETags that ride ordinary response traffic. Remote models replace the
+catalog under ChatGPT auth and merge by slug under API-key auth; backend-only
+models are filtered out for identities that cannot call them. Credentials
+are a full RPC surface: login variants (API key, browser OAuth with a
+loopback listener, device code, host-supplied tokens refreshed through a
+server→client request on 401), logout, account read, and rate-limit
+notifications and reads.
+
+Yakitori today uses static per-provider managers only, and credentials are
+not exposed to clients at all — provider availability is inferred from
+startup-time registration. Awaiting a product decision.
+
 ## Progress log
+
+### 2026-09-04
+
+- Audited the C8 host boundary against Codex with grok-build as contrast.
+- Accepted C8-D1: converge the host protocol on Codex's single-channel
+  JSON-RPC design (typed methods, server→client pending requests with replay,
+  serialization scopes, per-thread subscriptions, initialize handshake),
+  with WebSocket as the primary transport instead of stdio. Staged
+  implementation is tracked in the convergence register; REST+SSE is removed
+  at cutover, not kept as a compatibility layer.
+- Accepted C8-D2: replace the flat project path registry with Codex's
+  first-class Project entity (id/name/roots/metadata/position, idempotency
+  keys, thread linkage with orphan-on-delete).
+- Left C8-D3 (configuration layering and provenance) and C8-D4 (model
+  discovery and credential presentation) Open pending product decisions.
+- Landed the C8-D1 protocol core (`src/server/rpc/`): JSON-RPC-style
+  envelope, `ConnectionRpcGate`, process-wide pending server→client requests
+  with turn-transition abort, and request serialization queues with
+  shared-read batching. Unwired from production paths until the method and
+  transport stage.
+- Landed the method surface and in-process message processor: `initialize`
+  handshake with capabilities and notification opt-outs, the `session/*`,
+  `project/*`, `provider/list`, and `userPreference/write` method table with
+  per-method serialization scopes, per-Session subscription sets keyed by
+  connection, and the full SSE replay contract reproduced over notifications
+  (snapshot response, watermark-bounded paged replay, `session/replayComplete`,
+  still-pending permission replay, reconciled buffered drain, seq-less
+  transients).
+- Landed the WebSocket transport on `/rpc` (`ws` dependency, framing only):
+  one frame per message, per-connection outbound queue with
+  disconnect-on-full (1024-frame cap and 4 MiB high-water pause, both named
+  implementation safety boundaries), Origin validated against the existing
+  loopback allowlist (deliberate browser-client difference from Codex's
+  reject-any-Origin), and shutdown ordering stop-accepting → HTTP/Turn drain
+  → disconnect all → gate drains → application close.
+- Reviewed the whole surface against the Codex spec with three independent
+  passes and fixed the findings: envelope `result`-before-`error`
+  discrimination, integer-only request ids, run-time gate re-check in the
+  serialization queue, unserialized `session/list`/`session/create` and a
+  dedicated `projects` queue key, detached subscribe replay so a long replay
+  no longer blocks same-session methods (notably `session/permission/resolve`
+  on the Turn critical path), a subscription leak in the closeConnection
+  drain window, a process-killing unguarded URL parse in the upgrade path,
+  refusal to bind non-loopback hosts without an auth mechanism, inbound
+  overload rejection with retryable `SERVER_OVERLOADED` (128 in-flight
+  requests, an implementation safety boundary), and disconnectAll awaiting
+  per-connection gate drains with the registration race closed.
+- Recorded as deliberate protocol differences from Codex wire behavior:
+  wrong-type request ids are rejected with `INVALID_REQUEST` instead of
+  demoted to a notification; malformed input receives a null-id `PARSE_ERROR`
+  frame instead of a silent drop; error-code mapping uses the JSON-RPC
+  conventional `-32601`/`-32602`/`-32603` with the `ApiErrorCode` preserved
+  in `error.data.code`. New connections are refused once shutdown draining
+  begins (Codex keeps accepting until turns finish; its graceful-restart
+  handoff has no Yakitori analog). Experimental method gating exists but no
+  method is marked experimental yet; revisit when the C8-D2 project entity
+  lands. An initialize-response config-home field is deferred to C8-D3.
 
 ### 2026-09-03
 

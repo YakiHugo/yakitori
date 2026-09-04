@@ -1,5 +1,6 @@
 import { mkdir, realpath, stat } from "node:fs/promises"
 import { join } from "node:path"
+import packageJson from "../../package.json" with { type: "json" }
 import {
   JsonlThreadStore,
   createSqliteAgentGraphStore,
@@ -80,6 +81,10 @@ const defaultMateProfile = {
 const KIMI_CODE_API_BASE_URL = "https://api.kimi.com/coding"
 const OPENAI_API_BASE_URL = "https://api.openai.com/v1"
 const ANTHROPIC_API_BASE_URL = "https://api.anthropic.com"
+
+// The C8-D1 initialize handshake identifies the host as name/version, read
+// from the package manifest (bundled into the desktop build at build time).
+const serverUserAgent = `${packageJson.name}/${packageJson.version}`
 
 export type YakitoriApplicationOptions = {
   readonly activeMateId?: string
@@ -344,6 +349,7 @@ export async function createYakitoriApplication(
           availableProviders: providerRegistry.providers,
           rolloutAssets,
           reportOperationalFailure: reporter,
+          userAgent: serverUserAgent,
           ...httpOptions,
           ...(options.guiStaticDir === undefined
             ? {}

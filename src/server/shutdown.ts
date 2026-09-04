@@ -1,6 +1,7 @@
 import type { Server } from "node:http"
 import type { OperationalFailureReporter } from "./operational-errors.ts"
 import { reportOperationalFailure } from "./operational-errors.ts"
+import { disconnectWebsocketRpcClients } from "./rpc/websocket-transport.ts"
 
 export type ShutdownInput = {
   readonly server: Server
@@ -184,8 +185,12 @@ export function beginHttpServerShutdown(server: Server): HttpServerShutdown {
 }
 
 // Bounded resource teardown. At this point new requests are rejected and
-// admitted requests and Turns have drained, so remaining connections are SSE
-// or keep-alive transports that can be closed without truncating operations.
+// admitted requests and Turns have drained, so remaining connections are SSE,
+// keep-alive, or WebSocket transports that can be closed without truncating
+// operations. WS connections stay admitted through the drain above; they are
+// disconnected here, after the forced HTTP close, because node:http counts
+// upgraded sockets toward close() but closeAllConnections() skips them — the
+// listener cannot finish closing while a WS client is still connected.
 export async function shutdownHttpApplication(
   input: ShutdownInput,
 ): Promise<boolean> {
@@ -199,6 +204,12 @@ export async function shutdownHttpApplication(
   const httpShutdown =
     input.httpShutdown ?? beginHttpServerShutdown(input.server)
   httpShutdown.forceClose()
+  const websocketsClean = await withTimeout(
+    disconnectWebsocketRpcClients(input.server),
+    timeoutMs,
+    "websocket-disconnect",
+    onTimeout,
+  )
   const serverClean = await withTimeout(
     httpShutdown.closed,
     timeoutMs,
@@ -212,7 +223,7 @@ export async function shutdownHttpApplication(
     "application-close",
     onTimeout,
   )
-  return serverClean && applicationClean
+  return websocketsClean && serverClean && applicationClean
 }
 
 async function withTimeout(

@@ -21,13 +21,37 @@ owning boundary moves once.
 
 | Order | Outcome | Owning areas | Severity driver |
 | --- | --- | --- | --- |
-| 1 | Production exports narrowed, test support separated | runtime and server public surfaces | Hygiene; churns exports, so it runs last |
+| 1 | C8-D1 host methods and WebSocket transport; GUI cutover; REST+SSE removal | `src/server/*`, `src/gui` | C8-D1; changes the client contract |
+| 2 | C8-D2 first-class Project entity | `src/server/*`, session storage | C8-D2 |
+| 3 | Production exports narrowed, test support separated | runtime and server public surfaces | Hygiene; churns exports, so it runs last |
 
-The next piece of work is Stage 4. The former Agent-lifecycle stage is resolved
-by the Session-owned status, per-root AgentControl, durable spawn graph, lazy
-identity restoration, and retryable completion/message delivery. Mate's
-production mutation surface remains limited to create/list/read for the
-current single-Mate product.
+The next piece of work is Stage 6 (C8 host methods, transport, and GUI
+cutover). The former Agent-lifecycle stage is resolved by the Session-owned
+status, per-root AgentControl, durable spawn graph, lazy identity restoration,
+and retryable completion/message delivery. Mate's production mutation surface
+remains limited to create/list/read for the current single-Mate product.
+
+## Stage 6 — C8 host methods, transport, and GUI cutover
+
+Continues C8-D1. Defines the typed method surface (`<resource>/<method>`,
+`*Params`/`*Response`/`*Notification`, cursor pagination) over the existing
+handlers, adds the initialize handshake and per-Session subscription
+notifications, introduces the WebSocket transport with Codex's asymmetric
+backpressure, migrates the GUI client, and removes REST+SSE.
+
+### Done when
+
+- The GUI speaks only the RPC protocol; REST routes and the SSE endpoint are
+  deleted; permission resolve is a server→client request answered over the
+  same channel; a second concurrent client can subscribe to a Session.
+
+## Stage 7 — C8 project entity
+
+Decision C8-D2: replace `ProjectRegistry`'s flat path list with the Codex
+Project entity (id/name/roots/metadata/position, idempotency keys that
+survive deletion, sessions linked with orphan-on-delete, `position|id` keyset
+pagination, no-op update suppression), stored in the existing SQLite pattern
+and exposed through the Stage 6 protocol methods.
 
 ## Stage 4 — Production surface cleanup
 
