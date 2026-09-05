@@ -10,7 +10,10 @@ import {
   type JsonRpcNotification,
   type JsonRpcResponse,
 } from "../../../src/server/rpc/messages.ts"
-import type { ApiSessionDetail } from "../../../src/server/protocol.ts"
+import type {
+  ApiPendingPermission,
+  ApiSessionDetail,
+} from "../../../src/server/protocol.ts"
 import {
   createFakeHandlers,
   createTestProcessor,
@@ -356,15 +359,10 @@ describe("session/subscribe", () => {
 
     // The replay is still blocked on its first page, but it no longer holds
     // the session queue: a Turn-critical method completes now.
-    const resolved = await connection.sendRequest(
-      "session/permission/resolve",
-      {
-        sessionId,
-        turnId: "turn_1",
-        permissionRequestId: "perm_1",
-        behavior: "allow",
-      },
-    )
+    const resolved = await connection.sendRequest("session/turn/cancel", {
+      sessionId,
+      turnId: "turn_1",
+    })
     expect(resolved).toHaveProperty("result")
 
     blockFirstPage.gate.resolve()
@@ -516,5 +514,271 @@ describe("subscription fan-out", () => {
 
     expect(connectionA.frames.length).toBe(framesBefore)
     expect(connectionB.notifications("session/event")).toHaveLength(1)
+  })
+})
+
+describe("session/permission/request", () => {
+  type ResolveCall = {
+    sessionId: string
+    turnId: string
+    permissionRequestId: string
+    behavior: "allow" | "deny"
+    reason?: { kind: string; message?: string }
+  }
+
+  function permissionSetup(input: {
+    pendingPermissions?: ApiPendingPermission[]
+    detail?: Partial<ApiSessionDetail>
+  }) {
+    const resolveCalls: ResolveCall[] = []
+    const handlers = createFakeHandlers({
+      readSession: async () =>
+        okResult({
+          session: makeSessionDetail(sessionId, {
+            seq: 0,
+            activeTurnId: "turn_1",
+            ...input.detail,
+            pendingPermissions: input.pendingPermissions ?? [],
+          }),
+        }),
+      resolvePermission: async (resolveInput) => {
+        resolveCalls.push(resolveInput as ResolveCall)
+        return okResult({
+          sessionId,
+          turnId: "turn_1",
+          permissionRequestId: "perm_1",
+          behavior: "allow" as const,
+        })
+      },
+    })
+    const { processor, eventHub } = createTestProcessor({ handlers })
+    return { processor, eventHub, resolveCalls }
+  }
+
+  function permissionRequests(
+    connection: TestConnection,
+  ): { id: string | number; params: { permissionRequestId: string } }[] {
+    return connection.frames
+      .filter(
+        (frame) =>
+          "method" in frame &&
+          "id" in frame &&
+          frame.method === "session/permission/request",
+      )
+      .map((frame) => ({
+        id: (frame as { id: string | number }).id,
+        params: (frame as { params: { permissionRequestId: string } }).params,
+      }))
+  }
+
+  async function subscribeAndDrain(connection: TestConnection): Promise<void> {
+    await subscribe(connection)
+    await connection.waitForFrame(
+      (frame) => "method" in frame && frame.method === "session/replayComplete",
+    )
+  }
+
+  it("sends a server request for a live permission and resolves it from the answer", async () => {
+    const { processor, eventHub, resolveCalls } = permissionSetup({})
+    const connection = openTestConnection(processor)
+    await initializeConnection(connection)
+    await subscribeAndDrain(connection)
+
+    eventHub.publishTransient(makePermissionRequested(sessionId, "turn_1", "perm_1"))
+    await connection.waitForFrame(
+      (frame) =>
+        "method" in frame &&
+        "id" in frame &&
+        frame.method === "session/permission/request",
+    )
+
+    // The display transient still flows; the request only carries the answer
+    // channel with the same tool detail.
+    expect(connection.notifications("session/transient")).toHaveLength(1)
+    const request = permissionRequests(connection)[0]
+    expect(request?.params).toMatchObject({
+      sessionId,
+      turnId: "turn_1",
+      permissionRequestId: "perm_1",
+      toolCallId: "call_1",
+      action: "exec",
+    })
+
+    connection.sendRaw(
+      JSON.stringify({
+        id: request?.id,
+        result: { behavior: "allow", reason: { kind: "user_allowed" } },
+      }),
+    )
+    await waitForCondition(() => resolveCalls.length === 1)
+    expect(resolveCalls[0]).toEqual({
+      sessionId,
+      turnId: "turn_1",
+      permissionRequestId: "perm_1",
+      behavior: "allow",
+      reason: { kind: "user_allowed" },
+    })
+  })
+
+  it("fans one answer channel out to every subscribed connection and resolves once", async () => {
+    const { processor, eventHub, resolveCalls } = permissionSetup({})
+    const connectionA = openTestConnection(processor)
+    const connectionB = openTestConnection(processor)
+    await initializeConnection(connectionA)
+    await initializeConnection(connectionB)
+    await subscribeAndDrain(connectionA)
+    await subscribeAndDrain(connectionB)
+
+    eventHub.publishTransient(makePermissionRequested(sessionId, "turn_1", "perm_1"))
+    await connectionB.waitForFrame(
+      (frame) =>
+        "method" in frame &&
+        "id" in frame &&
+        frame.method === "session/permission/request",
+    )
+
+    const [requestA] = permissionRequests(connectionA)
+    const [requestB] = permissionRequests(connectionB)
+    expect(requestA?.id).toBe(requestB?.id)
+
+    // The first answer wins; a duplicate answer finds no pending entry.
+    connectionB.sendRaw(
+      JSON.stringify({ id: requestB?.id, result: { behavior: "deny" } }),
+    )
+    connectionA.sendRaw(
+      JSON.stringify({ id: requestA?.id, result: { behavior: "allow" } }),
+    )
+    await waitForCondition(() => resolveCalls.length === 1)
+    await flush()
+    expect(resolveCalls).toHaveLength(1)
+    expect(resolveCalls[0]?.behavior).toBe("deny")
+  })
+
+  it("fails closed when the client answers with an error", async () => {
+    const { processor, eventHub, resolveCalls } = permissionSetup({})
+    const connection = openTestConnection(processor)
+    await initializeConnection(connection)
+    await subscribeAndDrain(connection)
+
+    eventHub.publishTransient(makePermissionRequested(sessionId, "turn_1", "perm_1"))
+    await connection.waitForFrame(
+      (frame) =>
+        "method" in frame &&
+        "id" in frame &&
+        frame.method === "session/permission/request",
+    )
+    const [request] = permissionRequests(connection)
+
+    connection.sendRaw(
+      JSON.stringify({
+        id: request?.id,
+        error: { code: INTERNAL_ERROR, message: "client blew up" },
+      }),
+    )
+    await waitForCondition(() => resolveCalls.length === 1)
+    expect(resolveCalls[0]).toMatchObject({
+      permissionRequestId: "perm_1",
+      behavior: "deny",
+      reason: { kind: "approval_request_failed" },
+    })
+  })
+
+  it("fails closed when the answer payload is malformed", async () => {
+    const { processor, eventHub, resolveCalls } = permissionSetup({})
+    const connection = openTestConnection(processor)
+    await initializeConnection(connection)
+    await subscribeAndDrain(connection)
+
+    eventHub.publishTransient(makePermissionRequested(sessionId, "turn_1", "perm_1"))
+    await connection.waitForFrame(
+      (frame) =>
+        "method" in frame &&
+        "id" in frame &&
+        frame.method === "session/permission/request",
+    )
+    const [request] = permissionRequests(connection)
+
+    connection.sendRaw(
+      JSON.stringify({ id: request?.id, result: { behavior: "maybe" } }),
+    )
+    await waitForCondition(() => resolveCalls.length === 1)
+    expect(resolveCalls[0]).toMatchObject({
+      permissionRequestId: "perm_1",
+      behavior: "deny",
+      reason: { kind: "approval_request_failed" },
+    })
+  })
+
+  it("re-sends the pending request on re-subscribe so a reconnected client can answer", async () => {
+    const permission = makePendingPermission({ permissionRequestId: "perm_1" })
+    const { processor, resolveCalls } = permissionSetup({
+      pendingPermissions: [permission],
+      detail: { activeTurnId: "turn_1" },
+    })
+    const connection = openTestConnection(processor)
+    await initializeConnection(connection)
+
+    await subscribeAndDrain(connection)
+    const first = permissionRequests(connection)
+    expect(first).toHaveLength(1)
+
+    // A repeat subscribe replaces the previous one, mirroring a reconnect.
+    await subscribeAndDrain(connection)
+    const all = permissionRequests(connection)
+    expect(all).toHaveLength(2)
+    // Register-or-reuse: the re-sent request keeps the same server id.
+    expect(all[1]?.id).toBe(first[0]?.id)
+
+    connection.sendRaw(
+      JSON.stringify({ id: all[1]?.id, result: { behavior: "allow" } }),
+    )
+    await waitForCondition(() => resolveCalls.length === 1)
+    expect(resolveCalls[0]?.behavior).toBe("allow")
+  })
+
+  it("prunes pending requests the snapshot no longer lists, without resolving", async () => {
+    const permission = makePendingPermission({ permissionRequestId: "perm_1" })
+    let snapshotPermissions = [permission]
+    const resolveCalls: ResolveCall[] = []
+    const handlers = createFakeHandlers({
+      readSession: async () =>
+        okResult({
+          session: makeSessionDetail(sessionId, {
+            seq: 0,
+            activeTurnId: "turn_1",
+            pendingPermissions: snapshotPermissions,
+          }),
+        }),
+      resolvePermission: async (resolveInput) => {
+        resolveCalls.push(resolveInput as ResolveCall)
+        return okResult({
+          sessionId,
+          turnId: "turn_1",
+          permissionRequestId: "perm_1",
+          behavior: "allow" as const,
+        })
+      },
+    })
+    const { processor } = createTestProcessor({ handlers })
+    const connection = openTestConnection(processor)
+    await initializeConnection(connection)
+
+    await subscribeAndDrain(connection)
+    expect(permissionRequests(connection)).toHaveLength(1)
+    expect(
+      processor.pendingServerRequests.pendingForSession(sessionId),
+    ).toHaveLength(1)
+
+    // The Turn ended while nobody watched: the next subscribe prunes the
+    // entry instead of re-sending it.
+    snapshotPermissions = []
+    await subscribeAndDrain(connection)
+    await flush()
+
+    expect(permissionRequests(connection)).toHaveLength(1)
+    expect(
+      processor.pendingServerRequests.pendingForSession(sessionId),
+    ).toHaveLength(0)
+    expect(resolveCalls).toHaveLength(0)
   })
 })

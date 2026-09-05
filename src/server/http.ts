@@ -6,16 +6,9 @@ import {
 } from "node:http"
 import { extname, join, resolve, sep } from "node:path"
 import { pipeline } from "node:stream/promises"
-import {
-  isKernelEvent,
-  isYakitoriError,
-  type RolloutAssets,
-  type StoredEventEnvelope,
-} from "../kernel/index.ts"
-import type { LiveSessionEvent } from "../runtime/live-events.ts"
+import type { RolloutAssets } from "../kernel/index.ts"
 import {
   createSessionEventHub,
-  type SessionDelivery,
   type SessionEventHub,
 } from "./event-hub.ts"
 import type { ServerHandlers } from "./handlers.ts"
@@ -34,10 +27,6 @@ import {
 } from "./operational-errors.ts"
 import { createRequestGate, type RequestGate } from "./request-gate.ts"
 import { MessageProcessor } from "./rpc/message-processor.ts"
-import {
-  reconcileBufferedSessionDeliveries,
-  unbufferedPendingPermissions,
-} from "./rpc/subscriptions.ts"
 import { attachWebsocketRpcTransport } from "./rpc/websocket-transport.ts"
 
 export type YakitoriStaticAssets = {
@@ -89,18 +78,7 @@ export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
     void requestGate
       .run(async () => {
         try {
-          await handleRequest(
-            request,
-            response,
-            handlers,
-            eventHub,
-            projectRegistry,
-            providers,
-            userConfig,
-            availableProviders,
-            rolloutAssets,
-            staticAssets,
-          )
+          await handleRequest(request, response, rolloutAssets, staticAssets)
         } catch (error) {
           if (!(error instanceof URIError)) {
             reportOperationalFailure(reporter, {
@@ -149,13 +127,6 @@ export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
 }
 
 function waitForResponseCompletion(response: ServerResponse): Promise<void> {
-  const contentType = response.getHeader("content-type")
-  if (
-    typeof contentType === "string" &&
-    contentType.startsWith("text/event-stream")
-  ) {
-    return Promise.resolve()
-  }
   if (response.writableFinished || response.destroyed) return Promise.resolve()
   return new Promise((resolve) => {
     const finish = (): void => {
@@ -168,15 +139,12 @@ function waitForResponseCompletion(response: ServerResponse): Promise<void> {
   })
 }
 
+// The HTTP surface is intentionally small: API traffic moved to the JSON-RPC
+// WebSocket transport (/rpc). What remains is the health probe, the rollout
+// asset binary route, static GUI assets with the SPA fallback, and CORS.
 async function handleRequest(
   request: IncomingMessage,
   response: ServerResponse,
-  handlers: ServerHandlers,
-  eventHub: SessionEventHub,
-  projectRegistry: ProjectRegistry | undefined,
-  providers: (() => Promise<ApiListProvidersResponse>) | undefined,
-  userConfig: UserConfigStore | undefined,
-  availableProviders: readonly string[] | undefined,
   rolloutAssets: RolloutAssets | undefined,
   staticAssets: StaticAssetContext | undefined,
 ): Promise<void> {
@@ -202,120 +170,6 @@ async function handleRequest(
 
   if (route.kind === "health") {
     writeJson(response, 200, { ok: true })
-    return
-  }
-
-  if (route.kind === "listProjects") {
-    if (projectRegistry === undefined) {
-      writeResult(
-        response,
-        errorResult(404, ApiErrorCode.NotFound, "Route not found."),
-      )
-      return
-    }
-    writeJson(response, 200, { projects: await projectRegistry.list() })
-    return
-  }
-
-  if (route.kind === "addProject") {
-    if (projectRegistry === undefined) {
-      writeResult(
-        response,
-        errorResult(404, ApiErrorCode.NotFound, "Route not found."),
-      )
-      return
-    }
-    const body = await readJson(request)
-    if (!body.ok) {
-      writeResult(response, body.result)
-      return
-    }
-    const path = requireBodyRecord(body.value).path
-    if (typeof path !== "string" || path.trim() === "") {
-      writeResult(
-        response,
-        errorResult(
-          400,
-          ApiErrorCode.InvalidInput,
-          "path must be a non-empty string.",
-        ),
-      )
-      return
-    }
-    try {
-      writeJson(response, 200, { projects: await projectRegistry.add(path) })
-    } catch (error) {
-      writeResult(response, projectRegistryError(error))
-    }
-    return
-  }
-
-  if (route.kind === "listProviders") {
-    if (providers === undefined) {
-      writeResult(
-        response,
-        errorResult(404, ApiErrorCode.NotFound, "Route not found."),
-      )
-      return
-    }
-    writeJson(response, 200, await providers())
-    return
-  }
-
-  if (route.kind === "updateUserPreference") {
-    if (userConfig === undefined) {
-      writeResult(
-        response,
-        errorResult(404, ApiErrorCode.NotFound, "Route not found."),
-      )
-      return
-    }
-    const body = await readJson(request)
-    if (!body.ok) {
-      writeResult(response, body.result)
-      return
-    }
-    const preference = requireUserModelPreference(
-      body.value,
-      availableProviders ?? [],
-    )
-    if (!preference.ok) {
-      writeResult(response, preference.result)
-      return
-    }
-    writeJson(response, 200, {
-      userPreference: await userConfig.write(preference.value),
-    })
-    return
-  }
-
-  if (route.kind === "listSessions") {
-    writeResult(
-      response,
-      await handlers.listSessions({
-        ...optionalQueryNumber(url, "limit"),
-        ...optionalQueryString(url, "cursor"),
-        ...optionalQueryString(url, "workingDirectory"),
-      }),
-    )
-    return
-  }
-
-  if (route.kind === "createSession") {
-    const body = await readJson(request)
-    if (!body.ok) {
-      writeResult(response, body.result)
-      return
-    }
-    writeResult(response, await handlers.createSession(body.value))
-    return
-  }
-
-  if (route.kind === "readSession") {
-    writeResult(
-      response,
-      await handlers.readSession({ sessionId: route.sessionId }),
-    )
     return
   }
 
@@ -352,133 +206,6 @@ async function handleRequest(
     return
   }
 
-  if (route.kind === "deleteSession") {
-    writeResult(
-      response,
-      await handlers.deleteSession({ sessionId: route.sessionId }),
-    )
-    return
-  }
-
-  if (route.kind === "forkSession") {
-    const body = await readJson(request)
-    if (!body.ok) {
-      writeResult(response, body.result)
-      return
-    }
-    writeResult(
-      response,
-      await handlers.forkSession({
-        ...requireBodyRecord(body.value),
-        sessionId: route.sessionId,
-      }),
-    )
-    return
-  }
-
-  if (route.kind === "admitInput") {
-    const body = await readJson(request)
-    if (!body.ok) {
-      writeResult(response, body.result)
-      return
-    }
-    writeResult(
-      response,
-      await handlers.admitInput({
-        ...requireBodyRecord(body.value),
-        sessionId: route.sessionId,
-      }),
-    )
-    return
-  }
-
-  if (route.kind === "compactSession") {
-    const body = await readJson(request)
-    if (!body.ok) {
-      writeResult(response, body.result)
-      return
-    }
-    writeResult(
-      response,
-      await handlers.compactSession({
-        ...requireBodyRecord(body.value),
-        sessionId: route.sessionId,
-      }),
-    )
-    return
-  }
-
-  if (route.kind === "cancelInput") {
-    const body = await readJson(request)
-    if (!body.ok) {
-      writeResult(response, body.result)
-      return
-    }
-    writeResult(
-      response,
-      await handlers.cancelInput({
-        ...requireBodyRecord(body.value),
-        sessionId: route.sessionId,
-        inputId: route.inputId,
-      }),
-    )
-    return
-  }
-
-  if (route.kind === "cancelTurn") {
-    const body = await readJson(request)
-    if (!body.ok) {
-      writeResult(response, body.result)
-      return
-    }
-    writeResult(
-      response,
-      await handlers.cancelTurn({
-        ...requireBodyRecord(body.value),
-        sessionId: route.sessionId,
-        turnId: route.turnId,
-      }),
-    )
-    return
-  }
-
-  if (route.kind === "resolvePermission") {
-    const body = await readJson(request)
-    if (!body.ok) {
-      writeResult(response, body.result)
-      return
-    }
-    writeResult(
-      response,
-      await handlers.resolvePermission({
-        ...requireBodyRecord(body.value),
-        sessionId: route.sessionId,
-        turnId: route.turnId,
-        permissionRequestId: route.permissionRequestId,
-      }),
-    )
-    return
-  }
-
-  if (route.kind === "streamSessionEvents") {
-    const cursor = resolveEventCursor(
-      url.searchParams.get("after") ?? undefined,
-      request.headers["last-event-id"],
-    )
-    if (!cursor.ok) {
-      writeResult(response, cursor.result)
-      return
-    }
-    await streamSessionEvents(
-      response,
-      handlers,
-      eventHub,
-      route.sessionId,
-      cursor.after,
-    )
-    return
-  }
-
   // Static serving is GET-only: HEAD and other methods keep the JSON 404.
   // Decoded first-segment API paths keep the JSON 404 so clients can tell a
   // missing API resource apart from the SPA fallback.
@@ -507,46 +234,6 @@ function routeRequest(method: string, url: URL): Route {
     return { kind: "health" }
   }
 
-  if (method === "GET" && segments.length === 1 && segments[0] === "sessions") {
-    return { kind: "listSessions" }
-  }
-
-  if (
-    method === "POST" &&
-    segments.length === 1 &&
-    segments[0] === "sessions"
-  ) {
-    return { kind: "createSession" }
-  }
-
-  if (method === "GET" && segments.length === 1 && segments[0] === "projects") {
-    return { kind: "listProjects" }
-  }
-
-  if (
-    method === "POST" &&
-    segments.length === 1 &&
-    segments[0] === "projects"
-  ) {
-    return { kind: "addProject" }
-  }
-
-  if (
-    method === "GET" &&
-    segments.length === 1 &&
-    segments[0] === "providers"
-  ) {
-    return { kind: "listProviders" }
-  }
-
-  if (
-    method === "PUT" &&
-    segments.length === 1 &&
-    segments[0] === "user-preference"
-  ) {
-    return { kind: "updateUserPreference" }
-  }
-
   if (
     method === "GET" &&
     segments.length > 4 &&
@@ -562,309 +249,7 @@ function routeRequest(method: string, url: URL): Route {
     }
   }
 
-  if (segments[0] !== "sessions" || typeof segments[1] !== "string") {
-    return { kind: "notFound", segments }
-  }
-
-  if (method === "GET" && segments.length === 2) {
-    return { kind: "readSession", sessionId: segments[1] }
-  }
-
-  if (method === "DELETE" && segments.length === 2) {
-    return { kind: "deleteSession", sessionId: segments[1] }
-  }
-
-  if (method === "POST" && segments.length === 3 && segments[2] === "fork") {
-    return { kind: "forkSession", sessionId: segments[1] }
-  }
-
-  if (method === "POST" && segments.length === 3 && segments[2] === "inputs") {
-    return { kind: "admitInput", sessionId: segments[1] }
-  }
-
-  if (method === "POST" && segments.length === 3 && segments[2] === "compact") {
-    return { kind: "compactSession", sessionId: segments[1] }
-  }
-
-  if (method === "GET" && segments.length === 3 && segments[2] === "events") {
-    return { kind: "streamSessionEvents", sessionId: segments[1] }
-  }
-
-  // POST /sessions/:id/inputs/:inputId/cancel
-  if (
-    method === "POST" &&
-    segments.length === 5 &&
-    segments[2] === "inputs" &&
-    segments[4] === "cancel" &&
-    typeof segments[3] === "string"
-  ) {
-    return {
-      kind: "cancelInput",
-      sessionId: segments[1],
-      inputId: segments[3],
-    }
-  }
-
-  // POST /sessions/:id/turns/:turnId/cancel
-  if (
-    method === "POST" &&
-    segments.length === 5 &&
-    segments[2] === "turns" &&
-    segments[4] === "cancel" &&
-    typeof segments[3] === "string"
-  ) {
-    return {
-      kind: "cancelTurn",
-      sessionId: segments[1],
-      turnId: segments[3],
-    }
-  }
-
-  // POST /sessions/:id/turns/:turnId/permissions/:id/resolve
-  if (
-    method === "POST" &&
-    segments.length === 7 &&
-    segments[2] === "turns" &&
-    segments[4] === "permissions" &&
-    segments[6] === "resolve" &&
-    typeof segments[3] === "string" &&
-    typeof segments[5] === "string"
-  ) {
-    return {
-      kind: "resolvePermission",
-      sessionId: segments[1],
-      turnId: segments[3],
-      permissionRequestId: segments[5],
-    }
-  }
-
   return { kind: "notFound", segments }
-}
-
-async function streamSessionEvents(
-  response: ServerResponse,
-  handlers: ServerHandlers,
-  eventHub: SessionEventHub,
-  sessionId: string,
-  after: number,
-): Promise<void> {
-  const pendingDeliveries: SessionDelivery[] = []
-  let heartbeat: ReturnType<typeof setInterval> | undefined
-  let live = false
-  let lastSequence = 0
-  let responseClosed = false
-  const subscription = eventHub.subscribe(sessionId, (delivery) => {
-    if (responseClosed) return
-    if (!live) {
-      pendingDeliveries.push(delivery)
-      return
-    }
-    lastSequence = writeSessionDelivery(response, delivery, lastSequence)
-  })
-  const cleanup = () => {
-    if (heartbeat) clearInterval(heartbeat)
-    subscription.close()
-  }
-
-  response.once("close", () => {
-    responseClosed = true
-    cleanup()
-  })
-
-  const snapshot = await handlers.readSession({ sessionId })
-  if (responseClosed) {
-    cleanup()
-    return
-  }
-  if (!snapshot.ok) {
-    cleanup()
-    writeResult(response, snapshot)
-    return
-  }
-  const replayThrough = snapshot.body.session.seq
-  let replayAfter = after
-  let replayed = await handlers.readSessionEvents({
-    sessionId,
-    after: replayAfter,
-    through: replayThrough,
-    limit: 500,
-  })
-  if (responseClosed) {
-    cleanup()
-    return
-  }
-  if (!replayed.ok) {
-    cleanup()
-    writeResult(response, replayed)
-    return
-  }
-
-  writeSseHead(response)
-  response.write(": connected\n\n")
-  response.write("event: session.snapshot\n")
-  response.write(`data: ${JSON.stringify(snapshot.body)}\n\n`)
-  lastSequence = after
-  for (;;) {
-    if (responseClosed) {
-      cleanup()
-      return
-    }
-    lastSequence = writeSseEvents(response, replayed.body.events, lastSequence)
-    if (replayed.body.nextAfter === undefined) break
-    replayAfter = replayed.body.nextAfter
-    replayed = await handlers.readSessionEvents({
-      sessionId,
-      after: replayAfter,
-      through: replayThrough,
-      limit: 500,
-    })
-    if (!replayed.ok) {
-      cleanup()
-      response.destroy()
-      return
-    }
-  }
-  response.write("event: session.replay-complete\n")
-  response.write("data: {}\n\n")
-  // Re-send still-pending permission requests so a (re)connecting client can
-  // resolve them without a separate fetch. Requests already buffered live
-  // during replay win over the older snapshot read.
-  for (const permission of unbufferedPendingPermissions(
-    snapshot.body.session.pendingPermissions,
-    pendingDeliveries,
-  )) {
-    writeTransientSseEvent(response, {
-      type: "permission.requested",
-      sessionId,
-      ...permission,
-    })
-  }
-  // Reconcile client-only display events against the snapshot and the durable
-  // lifecycle facts that arrived after it. This closes the commit→publish
-  // window where a terminal Turn is already in the snapshot but an older
-  // buffered delta reaches the connection afterward.
-  reconcileBufferedSessionDeliveries(
-    pendingDeliveries,
-    snapshot.body.session.activeTurnId,
-    (delivery) => {
-      lastSequence = writeSessionDelivery(response, delivery, lastSequence)
-    },
-  )
-  pendingDeliveries.length = 0
-  live = true
-
-  heartbeat = setInterval(() => {
-    if (responseClosed) return
-    response.write(": heartbeat\n\n")
-  }, 15_000)
-}
-
-function writeSessionDelivery(
-  response: ServerResponse,
-  delivery: SessionDelivery,
-  lastSequence: number,
-): number {
-  if (delivery.kind === "durable") {
-    return writeSseEvents(response, delivery.events, lastSequence)
-  }
-  writeTransientSseEvent(response, delivery.event)
-  return lastSequence
-}
-
-function writeSseHead(response: ServerResponse): void {
-  response.writeHead(200, {
-    "Cache-Control": "no-cache, no-transform",
-    Connection: "keep-alive",
-    "Content-Type": "text/event-stream; charset=utf-8",
-    "X-Accel-Buffering": "no",
-  })
-}
-
-function writeSseEvents(
-  response: ServerResponse,
-  events: readonly StoredEventEnvelope[],
-  lastSequence: number,
-): number {
-  let lastRuntimeSequence = lastSequence
-  const sequence = events.reduce((sequence, event) => {
-    if (event.seq <= sequence) return sequence
-    response.write(`id: ${event.seq}\n`)
-    response.write(
-      isKernelEvent(event)
-        ? "event: session.event\n"
-        : "event: session.rollout\n",
-    )
-    response.write(`data: ${JSON.stringify(event)}\n\n`)
-    lastRuntimeSequence = event.seq
-    return event.seq
-  }, lastSequence)
-  if (sequence > lastRuntimeSequence) {
-    response.write(`id: ${sequence}\n`)
-    response.write("event: session.cursor\n")
-    response.write("data: {}\n\n")
-  }
-  return sequence
-}
-
-function writeTransientSseEvent(
-  response: ServerResponse,
-  event: LiveSessionEvent,
-): void {
-  // Transient events never set SSE id and must not advance Last-Event-ID.
-  response.write("event: session.transient\n")
-  response.write(`data: ${JSON.stringify(event)}\n\n`)
-}
-
-async function readJson(request: IncomingMessage): Promise<JsonReadResult> {
-  const body = await readRequestBody(request)
-  if (body === undefined) {
-    return {
-      ok: false,
-      result: errorResult(
-        400,
-        ApiErrorCode.InvalidInput,
-        "Request body is too large.",
-      ),
-    }
-  }
-  if (body.trim() === "") {
-    return {
-      ok: true,
-      value: {},
-    }
-  }
-
-  try {
-    return {
-      ok: true,
-      value: JSON.parse(body),
-    }
-  } catch {
-    return {
-      ok: false,
-      result: errorResult(
-        400,
-        ApiErrorCode.InvalidInput,
-        "Request body must be valid JSON.",
-      ),
-    }
-  }
-}
-
-async function readRequestBody(
-  request: IncomingMessage,
-): Promise<string | undefined> {
-  // JSON remains bounded independently of binary Session attachments.
-  const maxRequestBodyBytes = 24 * 1024 * 1024
-  const chunks: Buffer[] = []
-  let size = 0
-  for await (const chunk of request) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
-    size += buffer.length
-    if (size > maxRequestBodyBytes) return undefined
-    chunks.push(buffer)
-  }
-  return Buffer.concat(chunks).toString("utf8")
 }
 
 function requireBodyRecord(value: unknown): Record<string, unknown> {
@@ -986,19 +371,6 @@ function errorResult(
       },
     },
   }
-}
-
-function projectRegistryError(error: unknown): ApiHandlerResult<never> {
-  // resolveWorkspaceDirectory rejects invalid paths with a plain Error;
-  // anything else is an unexpected registry failure.
-  if (error instanceof Error && !isYakitoriError(error)) {
-    return errorResult(400, ApiErrorCode.InvalidInput, error.message)
-  }
-  return errorResult(
-    500,
-    ApiErrorCode.InternalError,
-    "Unexpected server error.",
-  )
 }
 
 function writeUnhandledError(response: ServerResponse, error: unknown): void {
@@ -1175,60 +547,6 @@ const staticContentTypes: Record<string, string> = {
   ".woff2": "font/woff2",
 }
 
-function optionalQueryString(url: URL, field: string): Record<string, string> {
-  const value = url.searchParams.get(field)
-  if (value === null) return {}
-  return { [field]: value }
-}
-
-function optionalQueryNumber(
-  url: URL,
-  field: string,
-): Record<string, number | string> {
-  const value = url.searchParams.get(field)
-  if (value === null) return {}
-  if (/^[0-9]+$/.test(value)) return { [field]: Number(value) }
-  return { [field]: value }
-}
-
-function resolveEventCursor(
-  after: string | undefined,
-  lastEventId: string | string[] | undefined,
-): EventCursorResult {
-  const invalidField = !isOptionalEventSequence(after)
-    ? "after"
-    : !isOptionalEventSequence(lastEventId)
-      ? "Last-Event-ID"
-      : undefined
-  if (invalidField !== undefined) {
-    return {
-      ok: false,
-      result: errorResult(
-        400,
-        ApiErrorCode.InvalidInput,
-        `${invalidField} must be a non-negative integer sequence.`,
-      ),
-    }
-  }
-
-  const values = [after, lastEventId]
-  return {
-    ok: true,
-    after: Math.max(
-      0,
-      ...values.flatMap((value) =>
-        typeof value === "string" ? [Number(value)] : [],
-      ),
-    ),
-  }
-}
-
-function isOptionalEventSequence(value: unknown): boolean {
-  if (value === undefined) return true
-  if (typeof value !== "string" || !/^[0-9]+$/.test(value)) return false
-  return Number.isSafeInteger(Number(value))
-}
-
 function applyCorsHeaders(
   response: ServerResponse,
   origin: string | undefined,
@@ -1237,10 +555,8 @@ function applyCorsHeaders(
     response.setHeader("Access-Control-Allow-Origin", origin)
     response.setHeader("Vary", "Origin")
   }
-  response.setHeader(
-    "Access-Control-Allow-Methods",
-    "GET,POST,PUT,DELETE,OPTIONS",
-  )
+  // Only GET routes remain on the HTTP surface; API traffic moved to /rpc.
+  response.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS")
   response.setHeader("Access-Control-Allow-Headers", "content-type")
 }
 
@@ -1264,41 +580,13 @@ export function isAllowedCorsOrigin(origin: string): boolean {
 }
 
 type Route =
-  | { readonly kind: "admitInput"; readonly sessionId: string }
-  | { readonly kind: "compactSession"; readonly sessionId: string }
-  | {
-      readonly kind: "cancelInput"
-      readonly sessionId: string
-      readonly inputId: string
-    }
-  | {
-      readonly kind: "cancelTurn"
-      readonly sessionId: string
-      readonly turnId: string
-    }
-  | { readonly kind: "createSession" }
-  | { readonly kind: "deleteSession"; readonly sessionId: string }
-  | { readonly kind: "forkSession"; readonly sessionId: string }
   | { readonly kind: "health" }
-  | { readonly kind: "listSessions" }
   | { readonly kind: "notFound"; readonly segments: readonly string[] }
-  | { readonly kind: "readSession"; readonly sessionId: string }
   | {
       readonly kind: "readRolloutAsset"
       readonly rolloutId: string
       readonly path: string
     }
-  | { readonly kind: "listProjects" }
-  | { readonly kind: "addProject" }
-  | { readonly kind: "listProviders" }
-  | { readonly kind: "updateUserPreference" }
-  | {
-      readonly kind: "resolvePermission"
-      readonly sessionId: string
-      readonly turnId: string
-      readonly permissionRequestId: string
-    }
-  | { readonly kind: "streamSessionEvents"; readonly sessionId: string }
 
 function rolloutAssetContentType(path: string): string {
   const extension = extname(path).toLowerCase()
@@ -1309,23 +597,3 @@ function rolloutAssetContentType(path: string): string {
   if (extension === ".json") return "application/json; charset=utf-8"
   return "text/plain; charset=utf-8"
 }
-
-type JsonReadResult =
-  | {
-      readonly ok: true
-      readonly value: unknown
-    }
-  | {
-      readonly ok: false
-      readonly result: ApiHandlerResult<never>
-    }
-
-type EventCursorResult =
-  | {
-      readonly ok: true
-      readonly after: number
-    }
-  | {
-      readonly ok: false
-      readonly result: ApiHandlerResult<never>
-    }

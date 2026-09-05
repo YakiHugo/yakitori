@@ -12,6 +12,18 @@ import type {
   ApiPendingPermission,
   ApiReadSessionResponse,
 } from "../protocol.ts"
+import {
+  sessionPermissionRequestMethod,
+  type SessionPermissionRequestParams,
+  type SessionPermissionRequestResult,
+} from "./methods.ts"
+import { INTERNAL_ERROR } from "./messages.ts"
+import {
+  isTurnTransitionRejection,
+  type PendingServerRequest,
+  type PendingServerRequests,
+  TURN_TRANSITION_PENDING_REQUEST_REASON,
+} from "./pending-requests.ts"
 
 export type SessionSubscribeInput = Readonly<{
   connectionId: number
@@ -39,6 +51,11 @@ export type SessionSubscriptionsOptions = Readonly<{
   handlers: ServerHandlers
   eventHub: SessionEventHub
   notify(connectionId: number, method: string, params: unknown): void
+  // Sends a server→client request frame (id + method + params) to one
+  // connection. The answer arrives as a response on any connection and
+  // resolves the entry in pendingRequests.
+  sendRequest(connectionId: number, request: PendingServerRequest): void
+  pendingRequests: PendingServerRequests
   reportOperationalFailure?: OperationalFailureReporter
 }>
 
@@ -56,6 +73,116 @@ export function createSessionSubscriptions(
   const reporter =
     options.reportOperationalFailure ?? consoleOperationalFailureReporter
   const bySession = new Map<string, Map<number, { close(): void }>>()
+  // One pending answer channel per permission request, shared by every
+  // subscribed connection: the permission.requested publication fans out per
+  // connection, so registration dedupes on sessionId:permissionRequestId.
+  const pendingPermissionRequests = new Map<string, PendingServerRequest>()
+
+  function ensurePermissionRequest(
+    sessionId: string,
+    permission: ApiPendingPermission,
+  ): PendingServerRequest {
+    const key = `${sessionId}:${permission.permissionRequestId}`
+    const existing = pendingPermissionRequests.get(key)
+    if (existing !== undefined) return existing
+    const params: SessionPermissionRequestParams = { sessionId, ...permission }
+    const registered = options.pendingRequests.register({
+      sessionId,
+      method: sessionPermissionRequestMethod,
+      params,
+    })
+    const request: PendingServerRequest = {
+      id: registered.id,
+      method: sessionPermissionRequestMethod,
+      params,
+    }
+    pendingPermissionRequests.set(key, request)
+    const settle = (answer: SessionPermissionRequestResult): void => {
+      void settlePermissionRequest(key, params, answer).then(undefined, onSettleFailure)
+    }
+    void registered.response.then(
+      (result) => settle(parseAnswer(result)),
+      (error: unknown) => {
+        // A turn-transition abort means the Turn ended while nobody could
+        // answer; the runtime already disposed of the wait, so stay silent.
+        if (isTurnTransitionRejection(error)) {
+          pendingPermissionRequests.delete(key)
+          return
+        }
+        // Errored or undelivered answers fail closed (Codex's
+        // ReviewDecision::denied("approval request failed")).
+        settle(failedAnswer("The permission answer was not delivered."))
+      },
+    )
+    return request
+  }
+
+  async function settlePermissionRequest(
+    key: string,
+    params: SessionPermissionRequestParams,
+    answer: SessionPermissionRequestResult,
+  ): Promise<void> {
+    pendingPermissionRequests.delete(key)
+    const result = await options.handlers.resolvePermission({
+      sessionId: params.sessionId,
+      turnId: params.turnId,
+      permissionRequestId: params.permissionRequestId,
+      behavior: answer.behavior,
+      ...(answer.reason === undefined ? {} : { reason: answer.reason }),
+    })
+    if (result.ok) return
+    reportOperationalFailure(reporter, {
+      component: "session-subscriptions",
+      operation: "resolve-permission",
+      cause: new Error(result.body.error.message),
+      sessionId: params.sessionId,
+      turnId: params.turnId,
+    })
+  }
+
+  function onSettleFailure(error: unknown): void {
+    reportOperationalFailure(reporter, {
+      component: "session-subscriptions",
+      operation: "resolve-permission",
+      cause: error,
+    })
+  }
+
+  function parseAnswer(result: unknown): SessionPermissionRequestResult {
+    // Malformed answers fail closed, same as an errored response.
+    if (typeof result !== "object" || result === null || Array.isArray(result)) {
+      return failedAnswer("The permission answer was malformed.")
+    }
+    const behavior = (result as Record<string, unknown>).behavior
+    const decision =
+      behavior === "allow" || behavior === "deny" ? behavior : undefined
+    if (decision === undefined) {
+      return failedAnswer("The permission answer was malformed.")
+    }
+    const reason = (result as Record<string, unknown>).reason
+    if (typeof reason !== "object" || reason === null || Array.isArray(reason)) {
+      return { behavior: decision }
+    }
+    const kind = (reason as Record<string, unknown>).kind
+    if (typeof kind !== "string" || kind.trim() === "") {
+      return { behavior: decision }
+    }
+    const message = (reason as Record<string, unknown>).message
+    return {
+      behavior: decision,
+      reason: {
+        kind,
+        ...(typeof message === "string" ? { message } : {}),
+      },
+    }
+  }
+
+  function failedAnswer(message: string): SessionPermissionRequestResult {
+    return {
+      behavior: "deny",
+      reason: { kind: "approval_request_failed", message },
+    }
+  }
 
   function remove(connectionId: number, sessionId: string): void {
     const set = bySession.get(sessionId)
@@ -95,6 +222,14 @@ export function createSessionSubscriptions(
         return
       }
       // Transient events never carry a durable cursor.
+      if (delivery.event.type === "permission.requested") {
+        // The same publication fans out to every subscribed connection; the
+        // dedupe inside ensurePermissionRequest keeps one answer channel per
+        // permission request, and whichever client answers first wins.
+        const { type: _, sessionId: __, ...permission } = delivery.event
+        const request = ensurePermissionRequest(input.sessionId, permission)
+        options.sendRequest(input.connectionId, request)
+      }
       options.notify(input.connectionId, "session/transient", delivery.event)
     }
 
@@ -123,6 +258,39 @@ export function createSessionSubscriptions(
       return { ok: false, result: snapshot }
     }
     const watermark = snapshot.body.session.seq
+    // Entries the snapshot no longer lists belong to Turns that ended while
+    // nobody was subscribed; rejecting them with the turn-transition marker
+    // keeps the pending map bounded and their continuations silent.
+    const snapshotPendingIds = new Set(
+      snapshot.body.session.pendingPermissions.map(
+        (permission) => permission.permissionRequestId,
+      ),
+    )
+    for (const pending of options.pendingRequests.pendingForSession(
+      input.sessionId,
+    )) {
+      const permissionRequestId =
+        typeof pending.params === "object" &&
+        pending.params !== null &&
+        "permissionRequestId" in pending.params &&
+        typeof pending.params.permissionRequestId === "string"
+          ? pending.params.permissionRequestId
+          : undefined
+      if (
+        permissionRequestId !== undefined &&
+        snapshotPendingIds.has(permissionRequestId)
+      ) {
+        continue
+      }
+      pendingPermissionRequests.delete(
+        `${input.sessionId}:${permissionRequestId}`,
+      )
+      options.pendingRequests.reject(pending.id, {
+        code: INTERNAL_ERROR,
+        message: "client request resolved because the turn state was changed",
+        data: { reason: TURN_TRANSITION_PENDING_REQUEST_REASON },
+      })
+    }
 
     const replay = async (): Promise<void> => {
       try {
@@ -149,11 +317,18 @@ export function createSessionSubscriptions(
         })
         // Still-pending permissions replay on every (re)subscribe so the
         // client can resolve them without a separate fetch; requests already
-        // buffered live during replay win over the older snapshot read.
+        // buffered live during replay win over the older snapshot read. Each
+        // replayed permission also re-sends its answer channel as a
+        // session/permission/request (register-or-reuse dedupe) so a
+        // reconnected client can answer.
         for (const permission of unbufferedPendingPermissions(
           snapshot.body.session.pendingPermissions,
           buffered,
         )) {
+          options.sendRequest(
+            input.connectionId,
+            ensurePermissionRequest(input.sessionId, permission),
+          )
           options.notify(input.connectionId, "session/permissionRequested", {
             sessionId: input.sessionId,
             ...permission,
