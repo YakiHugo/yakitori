@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { projectExecutionView } from "../../src/gui/execution-view.ts"
+import { ApiRequestError } from "../../src/gui/lib/rpc-client.ts"
 import {
   createInitialAppState,
   normalizeKimiModelSelection,
@@ -11,42 +12,24 @@ import {
   createEventEnvelope,
   EventType,
   InputRole,
-  type ModelSelection,
 } from "../../src/kernel/events.ts"
 import type { ApiSessionDetail } from "../../src/server/protocol.ts"
+import { FakeRpcClient, type FakeSessionStream } from "./fake-rpc-client.ts"
 
-type Listener = (event: unknown) => void
+const fakeRef = vi.hoisted(() => ({
+  current: undefined as unknown as FakeRpcClient,
+}))
 
-class FakeEventSource {
-  static instances: FakeEventSource[] = []
-
-  readonly url: string
-  closed = false
-  private readonly listeners = new Map<string, Listener[]>()
-
-  constructor(url: string) {
-    this.url = url
-    FakeEventSource.instances.push(this)
+vi.mock("../../src/gui/lib/rpc-client.ts", async (importOriginal) => {
+  const original =
+    await importOriginal<
+      typeof import("../../src/gui/lib/rpc-client.ts")
+    >()
+  return {
+    ...original,
+    getAppRpcClient: () => fakeRef.current,
   }
-
-  addEventListener(type: string, listener: Listener): void {
-    const current = this.listeners.get(type) ?? []
-    current.push(listener)
-    this.listeners.set(type, current)
-  }
-
-  removeEventListener(): void {}
-
-  close(): void {
-    this.closed = true
-  }
-
-  emit(type: string, data?: unknown): void {
-    for (const listener of this.listeners.get(type) ?? []) {
-      listener({ data: JSON.stringify(data) })
-    }
-  }
-}
+})
 
 const sessionDetail: ApiSessionDetail = {
   id: "session_1",
@@ -67,31 +50,20 @@ const sessionDetail: ApiSessionDetail = {
 }
 
 function emitSnapshot(
-  source: FakeEventSource | undefined,
+  stream: FakeSessionStream | undefined,
   session: ApiSessionDetail = sessionDetail,
 ): void {
-  source?.emit("session.snapshot", { session })
+  stream?.emitSnapshot({ session })
+}
+
+function notFound(): never {
+  throw new ApiRequestError("not found", "not_found")
 }
 
 beforeEach(() => {
-  FakeEventSource.instances = []
-  vi.stubGlobal("EventSource", FakeEventSource)
+  fakeRef.current = new FakeRpcClient()
   useAppStore.setState(createInitialAppState())
   useAppStore.setState({ apiBase: "http://api.test" })
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async (input: unknown, init?: RequestInit) => {
-      if (
-        String(input) === "http://api.test/user-preference" &&
-        init?.method === "PUT"
-      ) {
-        return jsonResponse({
-          userPreference: JSON.parse(String(init.body)) as unknown,
-        })
-      }
-      return errorResponse(404)
-    }),
-  )
 })
 
 afterEach(() => {
@@ -100,25 +72,14 @@ afterEach(() => {
 
 describe("app store event stream", () => {
   it("streams durable execution events into the store", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: unknown) => {
-        if (String(input) === "http://api.test/sessions/session_1") {
-          return jsonResponse({ session: sessionDetail })
-        }
-        return errorResponse(404)
-      }),
-    )
-
     useAppStore.setState({ sessions: [sessionDetail] })
     await useAppStore.getState().selectSession("session_1")
 
-    const source = FakeEventSource.instances[0]
-    emitSnapshot(source)
-    expect(detailCallCount(vi.mocked(fetch))).toBe(0)
-    expect(source?.url).toBe(
-      "http://api.test/sessions/session_1/events?after=0",
-    )
+    const stream = fakeRef.current.streams[0]
+    emitSnapshot(stream)
+    expect(fakeRef.current.requests).toEqual([])
+    expect(stream?.sessionId).toBe("session_1")
+    expect(stream?.after).toBe(0)
     expect(useAppStore.getState().selectedSession?.id).toBe("session_1")
     expect(useAppStore.getState().restoringModelSelectionFor).toBe("session_1")
 
@@ -135,7 +96,7 @@ describe("app store event stream", () => {
         },
       },
     })
-    source?.emit("session.event", admitted)
+    stream?.emitEvent(admitted)
     expect(
       projectExecutionView(useAppStore.getState().execution).entries,
     ).toEqual([expect.objectContaining({ kind: "user_input", text: "hello" })])
@@ -144,11 +105,10 @@ describe("app store event stream", () => {
       pendingInputs: 1,
       turns: 0,
     })
-    source?.emit("session.replay-complete")
+    stream?.emitReplayComplete()
     expect(useAppStore.getState().restoringModelSelectionFor).toBeUndefined()
 
-    source?.emit(
-      "session.event",
+    stream?.emitEvent(
       createEventEnvelope({
         sessionId: "session_1",
         seq: 3,
@@ -158,14 +118,14 @@ describe("app store event stream", () => {
         },
       }),
     )
-    source?.emit("session.transient", {
+    stream?.emitTransient({
       type: "item.started",
       sessionId: "session_1",
       turnId: "turn_1",
       item: { type: "agent_message", itemId: "item_1" },
       createdAt: "2026-07-24T00:00:00.000Z",
     })
-    source?.emit("session.transient", {
+    stream?.emitTransient({
       type: "assistant.delta",
       sessionId: "session_1",
       turnId: "turn_1",
@@ -188,8 +148,7 @@ describe("app store event stream", () => {
       turns: 1,
       items: 0,
     })
-    source?.emit(
-      "session.event",
+    stream?.emitEvent(
       createEventEnvelope({
         sessionId: "session_1",
         seq: 4,
@@ -206,8 +165,7 @@ describe("app store event stream", () => {
         },
       }),
     )
-    source?.emit(
-      "session.event",
+    stream?.emitEvent(
       createEventEnvelope({
         sessionId: "session_1",
         seq: 5,
@@ -236,24 +194,10 @@ describe("app store event stream", () => {
     expect(useAppStore.getState().sessions[0]?.seq).toBe(5)
   })
 
-  it("does not revive a permission resolved before its POST failure returns", async () => {
-    let rejectResolution: ((error: Error) => void) | undefined
-    const resolution = new Promise<Response>((_, reject) => {
-      rejectResolution = reject
-    })
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: unknown) => {
-        if (String(input).includes("/permissions/permission_1/resolve")) {
-          return resolution
-        }
-        return errorResponse(404)
-      }),
-    )
-
+  it("does not revive a permission resolved before its answer failure returns", async () => {
     await useAppStore.getState().selectSession("session_1")
-    const source = FakeEventSource.instances[0]
-    emitSnapshot(source, {
+    const stream = fakeRef.current.streams[0]
+    emitSnapshot(stream, {
       ...sessionDetail,
       activeTurnId: "turn_1",
       pendingPermissions: [
@@ -268,10 +212,11 @@ describe("app store event stream", () => {
       counts: { ...sessionDetail.counts, permissions: 1 },
     })
 
+    fakeRef.current.answerError = new Error("answer lost")
     const resolving = useAppStore
       .getState()
       .resolvePermission("turn_1", "permission_1", "allow")
-    source?.emit("session.transient", {
+    stream?.emitTransient({
       type: "permission.resolved",
       sessionId: "session_1",
       turnId: "turn_1",
@@ -279,7 +224,6 @@ describe("app store event stream", () => {
       outcome: "allow",
       createdAt: "2026-07-24T00:00:01.000Z",
     })
-    rejectResolution?.(new Error("response lost"))
     await resolving
 
     expect(
@@ -295,38 +239,49 @@ describe("app store event stream", () => {
     expect(useAppStore.getState().selectedSession?.counts.permissions).toBe(0)
   })
 
-  it("ignores events from a stale stream after switching sessions", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: unknown) => {
-        const url = String(input)
-        if (url === "http://api.test/sessions/session_a") {
-          return jsonResponse({
-            session: { ...sessionDetail, id: "session_a" },
-          })
-        }
-        if (url === "http://api.test/sessions/session_b") {
-          return jsonResponse({
-            session: { ...sessionDetail, id: "session_b" },
-          })
-        }
-        return errorResponse(404)
-      }),
-    )
+  it("answers the pending server request when resolving a permission", async () => {
+    await useAppStore.getState().selectSession("session_1")
+    const stream = fakeRef.current.streams[0]
+    emitSnapshot(stream, {
+      ...sessionDetail,
+      activeTurnId: "turn_1",
+      pendingPermissions: [
+        {
+          permissionRequestId: "permission_1",
+          turnId: "turn_1",
+          toolCallId: "call_1",
+          action: "run_command",
+          createdAt: "2026-07-24T00:00:00.000Z",
+        },
+      ],
+      counts: { ...sessionDetail.counts, permissions: 1 },
+    })
 
+    await useAppStore
+      .getState()
+      .resolvePermission("turn_1", "permission_1", "deny")
+
+    expect(fakeRef.current.answeredPermissions).toEqual([
+      {
+        permissionRequestId: "permission_1",
+        result: { behavior: "deny", reason: { kind: "user_denied" } },
+      },
+    ])
+    expect(useAppStore.getState().message).toBeUndefined()
+  })
+
+  it("ignores events from a stale stream after switching sessions", async () => {
     await useAppStore.getState().selectSession("session_a")
     await useAppStore.getState().selectSession("session_b")
 
-    const stale = FakeEventSource.instances[0]
-    const current = FakeEventSource.instances[1]
+    const stale = fakeRef.current.streams[0]
+    const current = fakeRef.current.streams[1]
     emitSnapshot(current, { ...sessionDetail, id: "session_b" })
     expect(stale?.closed).toBe(true)
-    expect(current?.url).toBe(
-      "http://api.test/sessions/session_b/events?after=0",
-    )
+    expect(current?.sessionId).toBe("session_b")
+    expect(current?.after).toBe(0)
 
-    stale?.emit(
-      "session.event",
+    stale?.emitEvent(
       createEventEnvelope({
         sessionId: "session_a",
         seq: 1,
@@ -350,7 +305,7 @@ describe("app store event stream", () => {
 })
 
 describe("cancel queued input", () => {
-  it("posts the cancel route and clears the queue when input.cancelled flows", async () => {
+  it("sends the cancel method and clears the queue when input.cancelled flows", async () => {
     const cancelled = createEventEnvelope({
       sessionId: "session_1",
       seq: 3,
@@ -359,30 +314,17 @@ describe("cancel queued input", () => {
         data: { inputId: "input_1", reason: "user_cancel" },
       },
     })
-    const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
-      const url = String(input)
-      if (url === "http://api.test/sessions/session_1") {
-        return jsonResponse({ session: sessionDetail })
+    fakeRef.current.respond = (method) => {
+      if (method === "session/input/cancel") {
+        return { sessionId: "session_1", inputId: "input_1", event: cancelled }
       }
-      if (
-        url === "http://api.test/sessions/session_1/inputs/input_1/cancel" &&
-        init?.method === "POST"
-      ) {
-        return jsonResponse({
-          sessionId: "session_1",
-          inputId: "input_1",
-          event: cancelled,
-        })
-      }
-      return errorResponse(404)
-    })
-    vi.stubGlobal("fetch", fetchMock)
+      return notFound()
+    }
 
     await useAppStore.getState().selectSession("session_1")
-    const source = FakeEventSource.instances[0]
-    emitSnapshot(source)
-    source?.emit(
-      "session.event",
+    const stream = fakeRef.current.streams[0]
+    emitSnapshot(stream)
+    stream?.emitEvent(
       createEventEnvelope({
         sessionId: "session_1",
         seq: 2,
@@ -405,73 +347,53 @@ describe("cancel queued input", () => {
 
     await useAppStore.getState().cancelQueuedInput("input_1")
 
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://api.test/sessions/session_1/inputs/input_1/cancel",
-      expect.objectContaining({
-        method: "POST",
-        body: JSON.stringify({ reason: "user_cancel" }),
-      }),
-    )
+    expect(fakeRef.current.requests).toContainEqual({
+      method: "session/input/cancel",
+      params: {
+        sessionId: "session_1",
+        inputId: "input_1",
+        reason: "user_cancel",
+      },
+    })
     expect(useAppStore.getState().inFlightActions.size).toBe(0)
     expect(
       projectExecutionView(useAppStore.getState().execution).queuedInputIds,
     ).toContain("input_1")
 
     // The ordered stream owns the queue transition.
-    source?.emit("session.event", cancelled)
+    stream?.emitEvent(cancelled)
     expect(
       projectExecutionView(useAppStore.getState().execution).queuedInputIds,
     ).not.toContain("input_1")
   })
 
-  it("treats 409 as a stale queue row: refreshes detail without an error banner", async () => {
-    const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
-      const url = String(input)
-      if (url === "http://api.test/sessions/session_1") {
-        return jsonResponse({ session: sessionDetail })
+  it("treats a conflict as a stale queue row: no error banner", async () => {
+    fakeRef.current.respond = (method) => {
+      if (method === "session/input/cancel") {
+        throw new ApiRequestError(
+          "Input input_1 is already started.",
+          "conflict",
+        )
       }
-      if (
-        url === "http://api.test/sessions/session_1/inputs/input_1/cancel" &&
-        init?.method === "POST"
-      ) {
-        return conflictResponse()
-      }
-      return errorResponse(404)
-    })
-    vi.stubGlobal("fetch", fetchMock)
+      return notFound()
+    }
 
     await useAppStore.getState().selectSession("session_1")
-    emitSnapshot(FakeEventSource.instances[0])
+    emitSnapshot(fakeRef.current.streams[0])
 
     await useAppStore.getState().cancelQueuedInput("input_1")
 
     expect(useAppStore.getState().message).toBeUndefined()
-    expect(detailCallCount(fetchMock)).toBe(0)
     expect(useAppStore.getState().inFlightActions.size).toBe(0)
   })
 
   it("surfaces non-conflict failures through the message banner", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: unknown, init?: RequestInit) => {
-        const url = String(input)
-        if (url === "http://api.test/sessions/session_1") {
-          return jsonResponse({ session: sessionDetail })
-        }
-        if (
-          url === "http://api.test/sessions/session_1/inputs/input_1/cancel" &&
-          init?.method === "POST"
-        ) {
-          return new Response(
-            JSON.stringify({
-              error: { code: "internal_error", message: "boom" },
-            }),
-            { status: 500 },
-          )
-        }
-        return errorResponse(404)
-      }),
-    )
+    fakeRef.current.respond = (method) => {
+      if (method === "session/input/cancel") {
+        throw new ApiRequestError("boom", "internal_error")
+      }
+      return notFound()
+    }
 
     await useAppStore.getState().selectSession("session_1")
     await useAppStore.getState().cancelQueuedInput("input_1")
@@ -491,35 +413,30 @@ describe("delete session", () => {
     }
   }
 
-  function stubDeleteFetch(sessionsAfterDelete: unknown[]) {
-    return vi.fn(async (input: unknown, init?: RequestInit) => {
-      const url = String(input)
-      if (init?.method === "DELETE") {
-        return jsonResponse({ sessionId: url.split("/").at(-1) })
+  function respondToDelete(sessionsAfterDelete: unknown[]) {
+    return (method: string, params: unknown) => {
+      if (method === "session/delete") {
+        return { sessionId: (params as { sessionId: string }).sessionId }
       }
-      if (url === "http://api.test/sessions?limit=30") {
-        return jsonResponse({ sessions: sessionsAfterDelete })
+      if (method === "session/list") {
+        return { sessions: sessionsAfterDelete }
       }
-      if (url === "http://api.test/sessions/session_1") {
-        return jsonResponse({ session: sessionDetail })
-      }
-      return errorResponse(404)
-    })
+      return notFound()
+    }
   }
 
   it("removes the session from state", async () => {
-    const fetchMock = stubDeleteFetch([summary("session_2")])
-    vi.stubGlobal("fetch", fetchMock)
+    fakeRef.current.respond = respondToDelete([summary("session_2")])
     useAppStore.setState({
       sessions: [summary("session_1"), summary("session_2")],
     })
 
     await useAppStore.getState().deleteSession("session_1")
 
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://api.test/sessions/session_1",
-      expect.objectContaining({ method: "DELETE" }),
-    )
+    expect(fakeRef.current.requests).toContainEqual({
+      method: "session/delete",
+      params: { sessionId: "session_1" },
+    })
     expect(
       useAppStore.getState().sessions.map((session) => session.id),
     ).toEqual(["session_2"])
@@ -527,12 +444,12 @@ describe("delete session", () => {
   })
 
   it("clears the selection when the selected session is deleted", async () => {
-    vi.stubGlobal("fetch", stubDeleteFetch([]))
+    fakeRef.current.respond = respondToDelete([])
 
     await useAppStore.getState().selectSession("session_1")
-    emitSnapshot(FakeEventSource.instances[0])
+    emitSnapshot(fakeRef.current.streams[0])
     expect(useAppStore.getState().selectedSession?.id).toBe("session_1")
-    const source = FakeEventSource.instances[0]
+    const stream = fakeRef.current.streams[0]
 
     await useAppStore.getState().deleteSession("session_1")
 
@@ -542,14 +459,14 @@ describe("delete session", () => {
       projectExecutionView(useAppStore.getState().execution).entries,
     ).toEqual([])
     expect(useAppStore.getState().sessions).toEqual([])
-    expect(source?.closed).toBe(true)
+    expect(stream?.closed).toBe(true)
   })
 
   it("keeps the selection when another session is deleted", async () => {
-    vi.stubGlobal("fetch", stubDeleteFetch([summary("session_1")]))
+    fakeRef.current.respond = respondToDelete([summary("session_1")])
 
     await useAppStore.getState().selectSession("session_1")
-    emitSnapshot(FakeEventSource.instances[0])
+    emitSnapshot(fakeRef.current.streams[0])
     await useAppStore.getState().deleteSession("session_2")
 
     expect(useAppStore.getState().selectedSession?.id).toBe("session_1")
@@ -608,27 +525,19 @@ describe("fork session", () => {
         },
       }),
     ]
-    const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
-      const url = String(input)
-      if (url === "http://api.test/sessions/session_1") {
-        return jsonResponse({ session: activeSession })
-      }
-      if (
-        url === "http://api.test/sessions/session_1/fork" &&
-        init?.method === "POST"
-      ) {
-        return jsonResponse({
+    fakeRef.current.respond = (method) => {
+      if (method === "session/fork") {
+        return {
           session: forkedSession,
           historyEndSeqExclusive: 2,
           events: forkEvents,
-        })
+        }
       }
-      if (url === "http://api.test/sessions?limit=30") {
-        return jsonResponse({ sessions: [forkedSession, activeSession] })
+      if (method === "session/list") {
+        return { sessions: [forkedSession, activeSession] }
       }
-      return errorResponse(404)
-    })
-    vi.stubGlobal("fetch", fetchMock)
+      return notFound()
+    }
     useAppStore.setState({
       modelSelections: {
         session_1: { provider: "openai", model: "gpt-test", effort: "high" },
@@ -636,10 +545,9 @@ describe("fork session", () => {
     })
 
     await useAppStore.getState().selectSession("session_1")
-    const source = FakeEventSource.instances[0]
-    emitSnapshot(source, activeSession)
-    source?.emit(
-      "session.event",
+    const stream = fakeRef.current.streams[0]
+    emitSnapshot(stream, activeSession)
+    stream?.emitEvent(
       createEventEnvelope({
         sessionId: "session_1",
         seq: 2,
@@ -654,8 +562,7 @@ describe("fork session", () => {
         },
       }),
     )
-    source?.emit(
-      "session.event",
+    stream?.emitEvent(
       createEventEnvelope({
         sessionId: "session_1",
         seq: 3,
@@ -668,22 +575,23 @@ describe("fork session", () => {
 
     await useAppStore.getState().forkSession("input_1", "edit", "replacement")
 
-    expect(
-      fetchMock.mock.calls.some(([input]) => String(input).endsWith("/cancel")),
-    ).toBe(false)
-    const forkCall = fetchMock.mock.calls.find(([input]) =>
-      String(input).endsWith("/fork"),
-    )
-    expect(JSON.parse(String(forkCall?.[1]?.body))).toEqual({
-      atInputId: "input_1",
-      reason: "edit",
-      content: { kind: "text", text: "replacement" },
-      modelSelection: {
-        provider: "openai",
-        model: "gpt-test",
-        effort: "high",
+    expect(fakeRef.current.requestsFor("session/input/cancel")).toEqual([])
+    expect(fakeRef.current.requestsFor("session/fork")).toEqual([
+      {
+        method: "session/fork",
+        params: {
+          sessionId: "session_1",
+          atInputId: "input_1",
+          reason: "edit",
+          content: { kind: "text", text: "replacement" },
+          modelSelection: {
+            provider: "openai",
+            model: "gpt-test",
+            effort: "high",
+          },
+        },
       },
-    })
+    ])
     expect(useAppStore.getState().selectedSession).toEqual(forkedSession)
     expect(useAppStore.getState().selection.sessionId).toBe("session_fork")
     expect(useAppStore.getState().modelSelections.session_fork).toEqual({
@@ -701,35 +609,29 @@ describe("fork session", () => {
         text: "replacement",
       }),
     ])
-    expect(source?.closed).toBe(true)
-    expect(FakeEventSource.instances[1]?.url).toBe(
-      "http://api.test/sessions/session_fork/events?after=2",
-    )
+    expect(stream?.closed).toBe(true)
+    const forkStream = fakeRef.current.streams[1]
+    expect(forkStream?.sessionId).toBe("session_fork")
+    expect(forkStream?.after).toBe(2)
   })
 })
 
 describe("project state", () => {
-  it("loads projects, falls back to the first project, and tolerates 404", async () => {
+  it("loads projects, falls back to the first project, and tolerates failures", async () => {
     window.localStorage.clear()
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: unknown) => {
-        if (String(input) === "http://api.test/projects") {
-          return jsonResponse({ projects: ["/p/a", "/p/old"] })
-        }
-        return errorResponse(404)
-      }),
-    )
+    fakeRef.current.respond = (method) => {
+      if (method === "project/list") {
+        return { projects: ["/p/a", "/p/old"] }
+      }
+      return notFound()
+    }
 
     await useAppStore.getState().loadProjects()
 
     expect(useAppStore.getState().projects).toEqual(["/p/a", "/p/old"])
     expect(useAppStore.getState().currentProject).toBe("/p/a")
 
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => errorResponse(404)),
-    )
+    fakeRef.current.respond = () => notFound()
     await useAppStore.getState().loadProjects()
 
     expect(useAppStore.getState().projects).toEqual(["/p/a", "/p/old"])
@@ -739,15 +641,12 @@ describe("project state", () => {
   it("prefers a remembered project that is still registered", async () => {
     window.localStorage.clear()
     window.localStorage.setItem("yakitori.project", "/p/old")
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: unknown) => {
-        if (String(input) === "http://api.test/projects") {
-          return jsonResponse({ projects: ["/p/a", "/p/old"] })
-        }
-        return errorResponse(404)
-      }),
-    )
+    fakeRef.current.respond = (method) => {
+      if (method === "project/list") {
+        return { projects: ["/p/a", "/p/old"] }
+      }
+      return notFound()
+    }
 
     await useAppStore.getState().loadProjects()
 
@@ -756,14 +655,12 @@ describe("project state", () => {
 
   it("selectProject persists the choice and filters session loads", async () => {
     window.localStorage.clear()
-    const fetchMock = vi.fn(async (input: unknown) => {
-      const url = String(input)
-      if (url.startsWith("http://api.test/sessions?")) {
-        return jsonResponse({ sessions: [] })
+    fakeRef.current.respond = (method) => {
+      if (method === "session/list") {
+        return { sessions: [] }
       }
-      return errorResponse(404)
-    })
-    vi.stubGlobal("fetch", fetchMock)
+      return notFound()
+    }
     useAppStore.setState({
       projects: ["/p/a", "/p/b"],
       currentProject: "/p/a",
@@ -773,48 +670,41 @@ describe("project state", () => {
 
     expect(useAppStore.getState().currentProject).toBe("/p/b")
     expect(window.localStorage.getItem("yakitori.project")).toBe("/p/b")
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://api.test/sessions?limit=30&workingDirectory=%2Fp%2Fb",
-      expect.objectContaining({ method: "GET" }),
-    )
+    expect(fakeRef.current.requestsFor("session/list")).toEqual([
+      {
+        method: "session/list",
+        params: { limit: 30, workingDirectory: "/p/b" },
+      },
+    ])
     expect(useAppStore.getState().sessions).toEqual([])
   })
 
   it("keeps the latest same-project session list response", async () => {
-    let resolveFirst: ((response: Response) => void) | undefined
-    let resolveSecond: ((response: Response) => void) | undefined
-    const first = new Promise<Response>((resolve) => {
+    let resolveFirst: ((value: unknown) => void) | undefined
+    let resolveSecond: ((value: unknown) => void) | undefined
+    const first = new Promise((resolve) => {
       resolveFirst = resolve
     })
-    const second = new Promise<Response>((resolve) => {
+    const second = new Promise((resolve) => {
       resolveSecond = resolve
     })
     let requestCount = 0
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: unknown) => {
-        if (!String(input).startsWith("http://api.test/sessions?")) {
-          return errorResponse(404)
-        }
-        requestCount += 1
-        return requestCount === 1 ? first : second
-      }),
-    )
+    fakeRef.current.respond = (method) => {
+      if (method !== "session/list") return notFound()
+      requestCount += 1
+      return requestCount === 1 ? first : second
+    }
     useAppStore.setState({ currentProject: "/p/a" })
 
     const slow = useAppStore.getState().loadSessions()
     const fast = useAppStore.getState().loadSessions()
-    resolveSecond?.(
-      jsonResponse({
-        sessions: [{ ...sessionDetail, id: "session_new" }],
-      }),
-    )
+    resolveSecond?.({
+      sessions: [{ ...sessionDetail, id: "session_new" }],
+    })
     await fast
-    resolveFirst?.(
-      jsonResponse({
-        sessions: [{ ...sessionDetail, id: "session_old" }],
-      }),
-    )
+    resolveFirst?.({
+      sessions: [{ ...sessionDetail, id: "session_old" }],
+    })
     await slow
 
     expect(
@@ -824,23 +714,22 @@ describe("project state", () => {
 
   it("addProject updates the list and selects the resolved path", async () => {
     window.localStorage.clear()
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: unknown, init?: RequestInit) => {
-        const url = String(input)
-        if (url === "http://api.test/projects" && init?.method === "POST") {
-          return jsonResponse({ projects: ["/p/a", "/private/p/b"] })
-        }
-        if (url.startsWith("http://api.test/sessions?")) {
-          return jsonResponse({ sessions: [] })
-        }
-        return errorResponse(404)
-      }),
-    )
+    fakeRef.current.respond = (method) => {
+      if (method === "project/add") {
+        return { projects: ["/p/a", "/private/p/b"] }
+      }
+      if (method === "session/list") {
+        return { sessions: [] }
+      }
+      return notFound()
+    }
     useAppStore.setState({ projects: ["/p/a"], currentProject: "/p/a" })
 
     await useAppStore.getState().addProject(" /p/b ")
 
+    expect(fakeRef.current.requestsFor("project/add")).toEqual([
+      { method: "project/add", params: { path: "/p/b" } },
+    ])
     expect(useAppStore.getState().projects).toEqual(["/p/a", "/private/p/b"])
     expect(useAppStore.getState().currentProject).toBe("/private/p/b")
   })
@@ -852,28 +741,28 @@ describe("project state", () => {
       seq: 1,
       event: { type: EventType.SessionCreated, data: {} },
     })
-    const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
-      const url = String(input)
-      if (url === "http://api.test/sessions" && init?.method === "POST") {
-        return jsonResponse({ session: sessionDetail, event: created })
+    fakeRef.current.respond = (method) => {
+      if (method === "session/create") {
+        return { session: sessionDetail, event: created }
       }
-      if (url.startsWith("http://api.test/sessions?")) {
-        return jsonResponse({ sessions: [sessionDetail] })
+      if (method === "session/list") {
+        return { sessions: [sessionDetail] }
       }
-      return errorResponse(404)
-    })
-    vi.stubGlobal("fetch", fetchMock)
+      return notFound()
+    }
     useAppStore.setState({ projects: ["/p/a"], currentProject: "/p/a" })
 
     await useAppStore.getState().createSession()
 
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://api.test/sessions",
-      expect.objectContaining({
-        method: "POST",
-        body: expect.stringContaining('"workingDirectory":"/p/a"'),
-      }),
-    )
+    expect(fakeRef.current.requestsFor("session/create")).toEqual([
+      {
+        method: "session/create",
+        params: {
+          title: expect.stringContaining("Session"),
+          workingDirectory: "/p/a",
+        },
+      },
+    ])
     expect(useAppStore.getState().selectedSession?.id).toBe("session_1")
   })
 })
@@ -954,47 +843,44 @@ describe("model selection", () => {
     })
   })
 
-  it("loads providers and tolerates a 404 from older servers", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: unknown) => {
-        if (String(input) === "http://api.test/providers") {
-          return jsonResponse({
-            providers: [
-              {
-                name: "faux",
-                defaultModel: "scripted",
-                models: [
-                  {
-                    id: "scripted",
-                    displayName: "scripted",
-                    instructionProfileId: "default",
-                  },
-                ],
-              },
-              {
-                name: "anthropic",
-                models: [
-                  {
-                    id: "claude-sonnet-4-6",
-                    displayName: "Claude Sonnet 4.6",
-                    instructionProfileId: "anthropic",
-                  },
-                ],
-              },
-            ],
-            defaultProvider: "faux",
-            defaultModel: "scripted",
-            userPreference: {
-              provider: "anthropic",
-              model: "claude-sonnet-4-6",
-              effort: "high",
+  it("loads providers and tolerates a failure from the server", async () => {
+    fakeRef.current.respond = (method) => {
+      if (method === "provider/list") {
+        return {
+          providers: [
+            {
+              name: "faux",
+              defaultModel: "scripted",
+              models: [
+                {
+                  id: "scripted",
+                  displayName: "scripted",
+                  instructionProfileId: "default",
+                },
+              ],
             },
-          })
+            {
+              name: "anthropic",
+              models: [
+                {
+                  id: "claude-sonnet-4-6",
+                  displayName: "Claude Sonnet 4.6",
+                  instructionProfileId: "anthropic",
+                },
+              ],
+            },
+          ],
+          defaultProvider: "faux",
+          defaultModel: "scripted",
+          userPreference: {
+            provider: "anthropic",
+            model: "claude-sonnet-4-6",
+            effort: "high",
+          },
         }
-        return errorResponse(404)
-      }),
-    )
+      }
+      return notFound()
+    }
 
     await useAppStore.getState().loadProviders()
 
@@ -1029,10 +915,7 @@ describe("model selection", () => {
       effort: "high",
     })
 
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => errorResponse(404)),
-    )
+    fakeRef.current.respond = () => notFound()
     await useAppStore.getState().loadProviders()
 
     expect(useAppStore.getState().providers).toHaveLength(2)
@@ -1041,37 +924,7 @@ describe("model selection", () => {
 
   it("sends the saved modelSelection with admitted input", async () => {
     window.localStorage.clear()
-    const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
-      const url = String(input)
-      if (url === "http://api.test/sessions/session_1/inputs") {
-        const body = JSON.parse(String(init?.body)) as { requestId: string }
-        return jsonResponse({
-          requestId: body.requestId,
-          inputId: "input_1",
-          event: createEventEnvelope({
-            sessionId: "session_1",
-            seq: 2,
-            event: {
-              type: EventType.InputAdmitted,
-              data: {
-                requestId: body.requestId,
-                inputId: "input_1",
-                role: InputRole.User,
-                content: { kind: "text", text: "hello" },
-              },
-            },
-          }),
-        })
-      }
-      if (url === "http://api.test/sessions/session_1") {
-        return jsonResponse({ session: sessionDetail })
-      }
-      if (url.startsWith("http://api.test/sessions?")) {
-        return jsonResponse({ sessions: [] })
-      }
-      return errorResponse(404)
-    })
-    vi.stubGlobal("fetch", fetchMock)
+    fakeRef.current.respond = admissionResponder()
     useAppStore.setState({
       selection: { sessionId: "session_1" },
       modelSelections: {
@@ -1085,11 +938,10 @@ describe("model selection", () => {
 
     await useAppStore.getState().admitInput("hello")
 
-    const admitCall = fetchMock.mock.calls.find(([input]) =>
-      String(input).endsWith("/inputs"),
-    )
-    expect(admitCall).toBeDefined()
-    expect(JSON.parse(String(admitCall?.[1]?.body))).toMatchObject({
+    const admissions = fakeRef.current.requestsFor("session/input")
+    expect(admissions).toHaveLength(1)
+    expect(admissions[0]?.params).toMatchObject({
+      sessionId: "session_1",
       content: { kind: "text", text: "hello" },
       modelSelection: {
         provider: "openai",
@@ -1102,7 +954,7 @@ describe("model selection", () => {
 
   it("clears an attachment-only draft after admission", async () => {
     window.localStorage.clear()
-    vi.stubGlobal("fetch", admissionFetchMock())
+    fakeRef.current.respond = admissionResponder()
     const attachment = {
       name: "screen.png",
       mediaType: "image/png" as const,
@@ -1125,8 +977,7 @@ describe("model selection", () => {
 
   it("uses a picker choice immediately for the pill, admission, and user preference", async () => {
     window.localStorage.clear()
-    const fetchMock = admissionFetchMock()
-    vi.stubGlobal("fetch", fetchMock)
+    fakeRef.current.respond = admissionResponder()
     useAppStore.setState({
       selection: { sessionId: "session_1" },
       defaultProvider: "openai",
@@ -1158,35 +1009,16 @@ describe("model selection", () => {
 
     await useAppStore.getState().admitInput("hello")
 
-    const bodies = fetchMock.mock.calls.map(([, init]) =>
-      JSON.parse(String(init?.body ?? "{}")),
-    )
-    expect(bodies).toContainEqual(picked)
-    expect(bodies).toContainEqual(
+    const params = fakeRef.current.requests.map((request) => request.params)
+    expect(params).toContainEqual(picked)
+    expect(params).toContainEqual(
       expect.objectContaining({ modelSelection: picked }),
     )
   })
 
   it("restores old session current from its last turn without leaking across sessions", async () => {
     window.localStorage.clear()
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: unknown) => {
-        if (String(input) === "http://api.test/sessions/session_1") {
-          return jsonResponse({
-            session: {
-              ...sessionDetail,
-              currentModel: {
-                provider: "codex",
-                model: "gpt-5.6-sol",
-                effort: "high",
-              },
-            },
-          })
-        }
-        return errorResponse(404)
-      }),
-    )
+    fakeRef.current.respond = () => notFound()
     useAppStore.setState({
       modelSelections: {},
       userPreference: {
@@ -1198,7 +1030,7 @@ describe("model selection", () => {
     })
 
     await useAppStore.getState().selectSession("session_1")
-    emitSnapshot(FakeEventSource.instances[0], {
+    emitSnapshot(fakeRef.current.streams[0], {
       ...sessionDetail,
       currentModel: {
         provider: "codex",
@@ -1253,12 +1085,7 @@ describe("model selection", () => {
 
   it("restores the Session model before admitting its next input", async () => {
     window.localStorage.clear()
-    const fetchMock = admissionFetchMock({
-      provider: "codex",
-      model: "gpt-5.6-sol",
-      effort: "high",
-    })
-    vi.stubGlobal("fetch", fetchMock)
+    fakeRef.current.respond = admissionResponder()
     useAppStore.setState({
       modelSelections: {},
       userPreference: {
@@ -1268,7 +1095,7 @@ describe("model selection", () => {
     })
 
     await useAppStore.getState().selectSession("session_1")
-    emitSnapshot(FakeEventSource.instances[0], {
+    emitSnapshot(fakeRef.current.streams[0], {
       ...sessionDetail,
       currentModel: {
         provider: "codex",
@@ -1278,10 +1105,8 @@ describe("model selection", () => {
     })
     await useAppStore.getState().admitInput("restored")
 
-    const admitCall = fetchMock.mock.calls.find(([input]) =>
-      String(input).endsWith("/inputs"),
-    )
-    expect(JSON.parse(String(admitCall?.[1]?.body))).toMatchObject({
+    const admissions = fakeRef.current.requestsFor("session/input")
+    expect(admissions[0]?.params).toMatchObject({
       modelSelection: {
         provider: "codex",
         model: "gpt-5.6-sol",
@@ -1292,10 +1117,7 @@ describe("model selection", () => {
 
   it("keeps a failed preference write scoped to the current Session", async () => {
     window.localStorage.clear()
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => errorResponse(500)),
-    )
+    fakeRef.current.respond = () => notFound()
     useAppStore.setState({
       selection: { sessionId: "session_1" },
       userPreference: { provider: "faux", model: "scripted" },
@@ -1322,7 +1144,7 @@ describe("model selection", () => {
 
   it("unlocks admission when the user picks a model during restoration", async () => {
     window.localStorage.clear()
-    vi.stubGlobal("fetch", admissionFetchMock())
+    fakeRef.current.respond = admissionResponder()
     useAppStore.setState({ modelSelections: {} })
 
     await useAppStore.getState().selectSession("session_1")
@@ -1337,18 +1159,15 @@ describe("model selection", () => {
   })
 
   it("ignores a stale preference write failure after a newer choice", async () => {
-    let resolveFirst: ((response: Response) => void) | undefined
-    const first = new Promise<Response>((resolve) => {
+    let resolveFirst: ((value: unknown) => void) | undefined
+    const first = new Promise((resolve) => {
       resolveFirst = resolve
     })
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (_input: unknown, init?: RequestInit) => {
-        const body = JSON.parse(String(init?.body)) as { model: string }
-        if (body.model === "first") return await first
-        return jsonResponse({ userPreference: body })
-      }),
-    )
+    fakeRef.current.respond = (method, params) => {
+      if (method !== "userPreference/write") return notFound()
+      if ((params as { model: string }).model === "first") return first
+      return { userPreference: params }
+    }
     useAppStore.setState({
       selection: { sessionId: "session_1" },
       modelSelections: {},
@@ -1368,7 +1187,7 @@ describe("model selection", () => {
         model: "second",
       })
     })
-    resolveFirst?.(errorResponse(500))
+    resolveFirst?.(Promise.reject(new ApiRequestError("write failed")))
     await vi.waitFor(() => {
       expect(useAppStore.getState().busy).toBe(false)
     })
@@ -1382,37 +1201,7 @@ describe("model selection", () => {
 
   it("stamps the user preference on a new session's first input", async () => {
     window.localStorage.clear()
-    const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
-      const url = String(input)
-      if (url === "http://api.test/sessions/session_1/inputs") {
-        const body = JSON.parse(String(init?.body)) as { requestId: string }
-        return jsonResponse({
-          requestId: body.requestId,
-          inputId: "input_1",
-          event: createEventEnvelope({
-            sessionId: "session_1",
-            seq: 2,
-            event: {
-              type: EventType.InputAdmitted,
-              data: {
-                requestId: body.requestId,
-                inputId: "input_1",
-                role: InputRole.User,
-                content: { kind: "text", text: "hello" },
-              },
-            },
-          }),
-        })
-      }
-      if (url === "http://api.test/sessions/session_1") {
-        return jsonResponse({ session: sessionDetail })
-      }
-      if (url.startsWith("http://api.test/sessions?")) {
-        return jsonResponse({ sessions: [] })
-      }
-      return errorResponse(404)
-    })
-    vi.stubGlobal("fetch", fetchMock)
+    fakeRef.current.respond = admissionResponder()
     useAppStore.setState({
       selection: { sessionId: "session_1" },
       modelSelections: {},
@@ -1427,10 +1216,8 @@ describe("model selection", () => {
 
     await useAppStore.getState().admitInput("hello")
 
-    const admitCall = fetchMock.mock.calls.find(([input]) =>
-      String(input).endsWith("/inputs"),
-    )
-    expect(JSON.parse(String(admitCall?.[1]?.body))).toMatchObject({
+    const admissions = fakeRef.current.requestsFor("session/input")
+    expect(admissions[0]?.params).toMatchObject({
       modelSelection: {
         provider: "anthropic",
         model: "claude-sonnet-4-6",
@@ -1440,23 +1227,14 @@ describe("model selection", () => {
   })
 })
 
-function detailCallCount(fetchMock: ReturnType<typeof vi.fn>): number {
-  return fetchMock.mock.calls.filter(
-    ([input]) => String(input) === "http://api.test/sessions/session_1",
-  ).length
-}
-
-function admissionFetchMock(currentModel?: ModelSelection) {
-  return vi.fn(async (input: unknown, init?: RequestInit) => {
-    const url = String(input)
-    if (url === "http://api.test/user-preference") {
-      return jsonResponse({
-        userPreference: JSON.parse(String(init?.body)) as unknown,
-      })
+function admissionResponder() {
+  return (method: string, params: unknown) => {
+    if (method === "userPreference/write") {
+      return { userPreference: params }
     }
-    if (url === "http://api.test/sessions/session_1/inputs") {
-      const body = JSON.parse(String(init?.body)) as { requestId: string }
-      return jsonResponse({
+    if (method === "session/input") {
+      const body = params as { requestId: string }
+      return {
         requestId: body.requestId,
         inputId: "input_1",
         event: createEventEnvelope({
@@ -1472,42 +1250,11 @@ function admissionFetchMock(currentModel?: ModelSelection) {
             },
           },
         }),
-      })
+      }
     }
-    if (url === "http://api.test/sessions/session_1") {
-      return jsonResponse({
-        session: {
-          ...sessionDetail,
-          ...(currentModel === undefined ? {} : { currentModel }),
-        },
-      })
+    if (method === "session/list") {
+      return { sessions: [] }
     }
-    if (url.startsWith("http://api.test/sessions?")) {
-      return jsonResponse({ sessions: [] })
-    }
-    return errorResponse(404)
-  })
-}
-
-function jsonResponse(body: unknown): Response {
-  return new Response(JSON.stringify(body), { status: 200 })
-}
-
-function errorResponse(status: number): Response {
-  return new Response(
-    JSON.stringify({ error: { code: "not_found", message: "not found" } }),
-    { status },
-  )
-}
-
-function conflictResponse(): Response {
-  return new Response(
-    JSON.stringify({
-      error: {
-        code: "conflict",
-        message: "Input input_1 is already started.",
-      },
-    }),
-    { status: 409 },
-  )
+    return notFound()
+  }
 }

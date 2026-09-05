@@ -10,18 +10,10 @@ import {
 import { createRequestId } from "../../kernel/ids.ts"
 import type { LiveSessionEvent } from "../../runtime/live-events.ts"
 import type {
-  ApiAdmitInputResponse,
-  ApiCompactSessionResponse,
-  ApiCreateSessionResponse,
-  ApiForkSessionResponse,
-  ApiListProjectsResponse,
-  ApiListProvidersResponse,
-  ApiListSessionsResponse,
   ApiPendingPermission,
   ApiProviderSummary,
   ApiSessionDetail,
   ApiSessionSummary,
-  ApiUpdateUserModelPreferenceResponse,
   ApiUserModelPreference,
 } from "../../server/protocol.ts"
 import { acknowledgeAdmission, reserveAdmission } from "../admission-outbox.ts"
@@ -34,10 +26,9 @@ import {
 } from "../execution-view.ts"
 import {
   ApiRequestError,
-  cancelSessionInput,
-  openSessionEventStream,
-  requestJson,
-} from "../lib/api-client.ts"
+  getAppRpcClient,
+  type SessionStream,
+} from "../lib/rpc-client.ts"
 
 type SessionSelection = {
   readonly revision: number
@@ -69,7 +60,7 @@ export type AppStoreData = {
   sessionSelectionIntentRevision: number
   selectedSession: ApiSessionDetail | undefined
   sessions: ApiSessionSummary[]
-  stream: EventSource | undefined
+  stream: SessionStream | undefined
   currentProject: string | undefined
 }
 
@@ -190,8 +181,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
     closeStream()
 
     try {
-      const source = openSessionEventStream(
-        get().apiBase,
+      const source = getAppRpcClient(get().apiBase).openSessionStream(
         selection.sessionId,
         after,
         {
@@ -269,6 +259,15 @@ export const useAppStore = create<AppStore>()((set, get) => {
                 : {}),
             }))
           },
+          onError: (error) => {
+            if (get().stream !== source || !isCurrentSelection(selection)) {
+              return
+            }
+            set({
+              stream: undefined,
+              message: errorMessage(error, "Could not open event stream."),
+            })
+          },
         },
       )
       set({ stream: source })
@@ -311,9 +310,13 @@ export const useAppStore = create<AppStore>()((set, get) => {
       let applied = false
       const completed = await runTask(
         async () => {
-          const response = await requestJson<ApiListSessionsResponse>(
-            get().apiBase,
-            `/sessions?limit=30${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}${workingDirectory === undefined ? "" : `&workingDirectory=${encodeURIComponent(workingDirectory)}`}`,
+          const response = await getAppRpcClient(get().apiBase).request(
+            "session/list",
+            {
+              limit: 30,
+              ...(cursor === undefined ? {} : { cursor }),
+              ...(workingDirectory === undefined ? {} : { workingDirectory }),
+            },
           )
           if (
             get().currentProject !== workingDirectory ||
@@ -338,9 +341,9 @@ export const useAppStore = create<AppStore>()((set, get) => {
 
     loadProjects: async () => {
       try {
-        const response = await requestJson<ApiListProjectsResponse>(
-          get().apiBase,
-          "/projects",
+        const response = await getAppRpcClient(get().apiBase).request(
+          "project/list",
+          {},
         )
         const projects = [...response.projects]
         const current = get().currentProject
@@ -356,17 +359,17 @@ export const useAppStore = create<AppStore>()((set, get) => {
           ...(currentProject === undefined ? {} : { currentProject }),
         })
       } catch {
-        // Older servers without the projects route return 404; project state
-        // stays empty and the switcher stays hidden.
+        // Servers without the project registry answer method-not-found;
+        // project state stays empty and the switcher stays hidden.
       }
     },
 
     loadProviders: async () => {
       const apiBase = get().apiBase
       try {
-        const response = await requestJson<ApiListProvidersResponse>(
-          apiBase,
-          "/providers",
+        const response = await getAppRpcClient(apiBase).request(
+          "provider/list",
+          {},
         )
         set({
           providers: [...response.providers],
@@ -375,8 +378,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
           userPreference: response.userPreference,
         })
       } catch {
-        // Older servers without the providers route return 404; the model
-        // selector stays hidden.
+        // Servers without a provider catalog answer method-not-found; the
+        // model selector stays hidden.
       }
     },
 
@@ -385,20 +388,17 @@ export const useAppStore = create<AppStore>()((set, get) => {
       set({ sessionSelectionIntentRevision: intentRevision })
       await runTask(
         async () => {
-          const response = await requestJson<ApiCreateSessionResponse>(
-            get().apiBase,
-            "/sessions",
+          const currentProject = get().currentProject
+          const response = await getAppRpcClient(get().apiBase).request(
+            "session/create",
             {
-              method: "POST",
-              body: {
-                title: `Session ${new Date().toLocaleTimeString([], {
-                  hour: "2-digit",
-                  minute: "2-digit",
-                })}`,
-                ...(get().currentProject === undefined
-                  ? {}
-                  : { workingDirectory: get().currentProject }),
-              },
+              title: `Session ${new Date().toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit",
+              })}`,
+              ...(currentProject === undefined
+                ? {}
+                : { workingDirectory: currentProject }),
             },
           )
 
@@ -444,26 +444,23 @@ export const useAppStore = create<AppStore>()((set, get) => {
 
       await runTask(
         async () => {
-          const response = await requestJson<ApiForkSessionResponse>(
-            get().apiBase,
-            `/sessions/${encodeURIComponent(sourceSelection.sessionId)}/fork`,
+          const response = await getAppRpcClient(get().apiBase).request(
+            "session/fork",
             {
-              method: "POST",
-              body: {
-                atInputId,
-                reason,
-                ...(content === undefined
-                  ? {}
-                  : {
-                      content: {
-                        kind: "text",
-                        text: content,
-                      },
-                    }),
-                ...(reason !== "edit" || sourceModelSelection === undefined
-                  ? {}
-                  : { modelSelection: sourceModelSelection }),
-              },
+              sessionId: sourceSelection.sessionId,
+              atInputId,
+              reason,
+              ...(content === undefined
+                ? {}
+                : {
+                    content: {
+                      kind: "text" as const,
+                      text: content,
+                    },
+                  }),
+              ...(reason !== "edit" || sourceModelSelection === undefined
+                ? {}
+                : { modelSelection: sourceModelSelection }),
             },
           )
           if (
@@ -515,11 +512,9 @@ export const useAppStore = create<AppStore>()((set, get) => {
         inFlightActions: new Set(state.inFlightActions).add(key),
       }))
       await runTask(async () => {
-        await requestJson(
-          get().apiBase,
-          `/sessions/${encodeURIComponent(sessionId)}`,
-          { method: "DELETE" },
-        )
+        await getAppRpcClient(get().apiBase).request("session/delete", {
+          sessionId,
+        })
         if (get().selection.sessionId === sessionId) {
           closeStream()
           set((state) => ({
@@ -562,10 +557,9 @@ export const useAppStore = create<AppStore>()((set, get) => {
       if (trimmed === "") return
       await runTask(async () => {
         const previous = get().projects
-        const response = await requestJson<ApiListProjectsResponse>(
-          get().apiBase,
-          "/projects",
-          { method: "POST", body: { path: trimmed } },
+        const response = await getAppRpcClient(get().apiBase).request(
+          "project/add",
+          { path: trimmed },
         )
         const projects = [...response.projects]
         set({ projects })
@@ -615,17 +609,16 @@ export const useAppStore = create<AppStore>()((set, get) => {
 
       // The compact directive takes a dedicated lane: no admission outbox,
       // no model selection — the server admits it as a runtime-role Input.
-      // A per-invocation requestId keeps a retried POST from admitting a
+      // A per-invocation requestId keeps a retried call from admitting a
       // duplicate compact directive.
       if (text === COMPACT_DIRECTIVE) {
         await runTask(
           async () => {
-            const response = await requestJson<ApiCompactSessionResponse>(
-              get().apiBase,
-              `/sessions/${encodeURIComponent(selection.sessionId)}/compact`,
+            const response = await getAppRpcClient(get().apiBase).request(
+              "session/compact",
               {
-                method: "POST",
-                body: JSON.stringify({ requestId: createRequestId() }),
+                sessionId: selection.sessionId,
+                requestId: createRequestId(),
               },
             )
             if (response.event.sessionId !== selection.sessionId) {
@@ -669,22 +662,19 @@ export const useAppStore = create<AppStore>()((set, get) => {
             ...(attachments.length === 0 ? {} : { attachments }),
           })
           if (!isCurrentSelection(selection)) return
-          const response = await requestJson<ApiAdmitInputResponse>(
-            get().apiBase,
-            `/sessions/${encodeURIComponent(selection.sessionId)}/inputs`,
+          const response = await getAppRpcClient(get().apiBase).request(
+            "session/input",
             {
-              method: "POST",
-              body: {
-                requestId: pendingAdmission.requestId,
-                content: {
-                  kind: "text",
-                  text,
-                  ...(attachments.length === 0 ? {} : { attachments }),
-                },
-                ...(admittedModelSelection === undefined
-                  ? {}
-                  : { modelSelection: admittedModelSelection }),
+              sessionId: selection.sessionId,
+              requestId: pendingAdmission.requestId,
+              content: {
+                kind: "text",
+                text,
+                ...(attachments.length === 0 ? {} : { attachments }),
               },
+              ...(admittedModelSelection === undefined
+                ? {}
+                : { modelSelection: admittedModelSelection }),
             },
           )
           if (
@@ -728,11 +718,11 @@ export const useAppStore = create<AppStore>()((set, get) => {
       }))
       await runTask(
         async () => {
-          await requestJson(
-            get().apiBase,
-            `/sessions/${encodeURIComponent(selection.sessionId)}/turns/${encodeURIComponent(turnId)}/cancel`,
-            { method: "POST", body: { reason: "user_cancel" } },
-          )
+          await getAppRpcClient(get().apiBase).request("session/turn/cancel", {
+            sessionId: selection.sessionId,
+            turnId,
+            reason: "user_cancel",
+          })
         },
         () => isCurrentSelection(selection),
       )
@@ -754,13 +744,21 @@ export const useAppStore = create<AppStore>()((set, get) => {
       await runTask(
         async () => {
           try {
-            await cancelSessionInput(
-              get().apiBase,
-              selection.sessionId,
-              inputId,
+            await getAppRpcClient(get().apiBase).request(
+              "session/input/cancel",
+              {
+                sessionId: selection.sessionId,
+                inputId,
+                reason: "user_cancel",
+              },
             )
           } catch (error) {
-            if (!(error instanceof ApiRequestError && error.status === 409)) {
+            if (
+              !(
+                error instanceof ApiRequestError &&
+                error.code === "conflict"
+              )
+            ) {
               throw error
             }
           }
@@ -774,7 +772,9 @@ export const useAppStore = create<AppStore>()((set, get) => {
       })
     },
 
-    resolvePermission: async (turnId, permissionRequestId, behavior) => {
+    // The answer channel correlates by permissionRequestId alone; the turnId
+    // stays in the signature because the approval UI addresses a Turn.
+    resolvePermission: async (_turnId, permissionRequestId, behavior) => {
       const selection = currentSelection()
       if (!selection) return
       const key = `permission:${permissionRequestId}`
@@ -789,16 +789,14 @@ export const useAppStore = create<AppStore>()((set, get) => {
       }))
       const completed = await runTask(
         async () => {
-          await requestJson(
-            get().apiBase,
-            `/sessions/${encodeURIComponent(selection.sessionId)}/turns/${encodeURIComponent(turnId)}/permissions/${encodeURIComponent(permissionRequestId)}/resolve`,
+          // Answering the server→client request replaces the old resolve
+          // POST; the confirmation still arrives through the event stream.
+          getAppRpcClient(get().apiBase).answerPermission(
+            permissionRequestId,
             {
-              method: "POST",
-              body: {
-                behavior,
-                reason: {
-                  kind: behavior === "allow" ? "user_allowed" : "user_denied",
-                },
+              behavior,
+              reason: {
+                kind: behavior === "allow" ? "user_allowed" : "user_denied",
               },
             },
           )
@@ -848,12 +846,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
       if (selection === undefined) return
       void runTask(
         async () => {
-          const response =
-            await requestJson<ApiUpdateUserModelPreferenceResponse>(
-              apiBase,
-              "/user-preference",
-              { method: "PUT", body: selection },
-            )
+          const response = await getAppRpcClient(apiBase).request(
+            "userPreference/write",
+            selection,
+          )
           if (apiBase !== get().apiBase) return
           if (!sameModelSelection(get().modelSelections[sessionId], selection))
             return

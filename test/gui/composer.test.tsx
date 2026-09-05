@@ -7,13 +7,37 @@ import {
   createExecutionViewState,
   reduceExecutionView,
 } from "../../src/gui/execution-view.ts"
+import { ApiRequestError } from "../../src/gui/lib/rpc-client.ts"
 import {
   createInitialAppState,
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
 import { createEventEnvelope, EventType } from "../../src/kernel/events.ts"
+import { FakeRpcClient } from "./fake-rpc-client.ts"
+
+const fakeRef = vi.hoisted(() => ({
+  current: undefined as unknown as FakeRpcClient,
+}))
+
+vi.mock("../../src/gui/lib/rpc-client.ts", async (importOriginal) => {
+  const original =
+    await importOriginal<
+      typeof import("../../src/gui/lib/rpc-client.ts")
+    >()
+  return {
+    ...original,
+    getAppRpcClient: () => fakeRef.current,
+  }
+})
 
 beforeEach(() => {
+  fakeRef.current = new FakeRpcClient()
+  fakeRef.current.respond = (method, params) => {
+    if (method === "userPreference/write") {
+      return { userPreference: params }
+    }
+    throw new ApiRequestError("not found", "not_found")
+  }
   useAppStore.setState(createInitialAppState())
   Object.defineProperty(window, "yakitoriDesktop", {
     configurable: true,
@@ -25,13 +49,6 @@ beforeEach(() => {
       openUrl: vi.fn(async () => {}),
     },
   })
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async (_input: unknown, init?: RequestInit) => {
-      const userPreference = JSON.parse(String(init?.body ?? "{}")) as unknown
-      return new Response(JSON.stringify({ userPreference }), { status: 200 })
-    }),
-  )
 })
 
 afterEach(() => {
@@ -373,17 +390,16 @@ describe("model selector", () => {
       session_1: { provider: "openai", model: "gpt-5.1-codex", effort: "low" },
     })
     await waitFor(() => {
-      expect(fetch).toHaveBeenCalledWith(
-        expect.stringMatching(/\/user-preference$/),
-        expect.objectContaining({
-          method: "PUT",
-          body: JSON.stringify({
+      expect(fakeRef.current.requestsFor("userPreference/write")).toEqual([
+        {
+          method: "userPreference/write",
+          params: {
             provider: "openai",
             model: "gpt-5.1-codex",
             effort: "low",
-          }),
-        }),
-      )
+          },
+        },
+      ])
     })
     expect(
       JSON.parse(
