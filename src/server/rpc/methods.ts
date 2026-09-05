@@ -29,7 +29,6 @@ import {
   type ApiReadSessionRequest,
   type ApiReadSessionResponse,
   type ApiResolvePermissionRequest,
-  type ApiResolvePermissionResponse,
   type ApiUpdateUserModelPreferenceResponse,
   type ApiUserModelPreference,
 } from "../protocol.ts"
@@ -92,6 +91,20 @@ export type SessionPermissionRequestedNotification = Readonly<
 >
 
 export type SessionTransientNotification = LiveSessionEvent
+
+// The session/permission/request server→client method (Codex parity:
+// approvals are correlated RPCs, not POST + notification). Params carry the
+// same tool detail as the permission.requested transient; the response result
+// is the resolve body the old REST route accepted.
+export const sessionPermissionRequestMethod = "session/permission/request"
+
+export type SessionPermissionRequestParams = Readonly<
+  { sessionId: string } & ApiPendingPermission
+>
+
+export type SessionPermissionRequestResult = Readonly<
+  Pick<ApiResolvePermissionRequest, "behavior" | "reason">
+>
 
 export type RpcMethodOutcome = Readonly<{
   result: unknown
@@ -336,11 +349,6 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
     sessionScope,
     (handlers, params) => handlers.cancelTurn(params),
   ),
-  handlerEntry<ApiResolvePermissionResponse>(
-    "session/permission/resolve",
-    sessionScope,
-    (handlers, params) => handlers.resolvePermission(params),
-  ),
   {
     method: "session/subscribe",
     scope: sessionScope,
@@ -444,7 +452,6 @@ export type RpcMethodParams = Readonly<{
   "session/input": ApiAdmitInputRequest
   "session/input/cancel": ApiCancelInputRequest
   "session/turn/cancel": ApiCancelTurnRequest
-  "session/permission/resolve": ApiResolvePermissionRequest
   "session/subscribe": SessionSubscribeParams
   "session/unsubscribe": SessionUnsubscribeParams
   "project/list": Readonly<Record<string, never>>
@@ -464,7 +471,6 @@ export type RpcMethodResponses = Readonly<{
   "session/input": ApiAdmitInputResponse
   "session/input/cancel": ApiCancelInputResponse
   "session/turn/cancel": ApiCancelTurnResponse
-  "session/permission/resolve": ApiResolvePermissionResponse
   "session/subscribe": SessionSubscribeResponse
   "session/unsubscribe": Readonly<Record<string, never>>
   "project/list": ApiListProjectsResponse

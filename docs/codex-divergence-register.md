@@ -1682,6 +1682,33 @@ startup-time registration. Awaiting a product decision.
 
 ## Progress log
 
+### 2026-09-05
+
+- Landed the C8-D1 cutover: the GUI now speaks only the RPC protocol.
+  `src/gui/lib/rpc-client.ts` is a browser WebSocket JSON-RPC client
+  (initialize handshake, id-correlated requests with `error.data.code`
+  preserved, notification dispatch, bounded-backoff auto-reconnect that
+  re-subscribes each session with its last received durable seq), and
+  `app-store.ts` maps every former REST call onto the method table.
+- Permission approval became a correlated server→client request, Codex-style:
+  the `permission.requested` publication registers one deduped
+  `session/permission/request` per `sessionId:permissionRequestId` and sends
+  it to every subscribed connection; the client's response resolves through
+  `handlers.resolvePermission`, while malformed, errored, or undelivered
+  answers fail closed as a denial. Still-pending permissions re-send their
+  answer channel on (re)subscribe after `session/replayComplete`, and a
+  subscribe prunes pending entries the snapshot no longer lists with the
+  turn-transition abort marker. The `session/permission/resolve` client
+  method is gone.
+- Removed the REST+SSE surface from `src/server/http.ts`: all `/sessions*`,
+  `/projects`, `/providers`, and `/user-preference` routes plus
+  `streamSessionEvents` are deleted. The HTTP layer keeps `/health`, the
+  rollout-assets binary route, static GUI assets with the SPA fallback, and
+  CORS. Load-bearing handler contracts from the old HTTP tests moved to
+  RPC-level integration tests over real handlers
+  (`test/server/rpc/session-methods.test.ts`), including an end-to-end
+  permission answer through a real `PermissionGate`.
+
 ### 2026-09-04
 
 - Audited the C8 host boundary against Codex with grok-build as contrast.

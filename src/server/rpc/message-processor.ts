@@ -34,7 +34,7 @@ import {
   type RpcMethodOutcome,
   rpcMethods,
 } from "./methods.ts"
-import { PendingServerRequests } from "./pending-requests.ts"
+import { PendingServerRequests, type PendingServerRequest } from "./pending-requests.ts"
 import { RequestSerializationQueues } from "./serialization.ts"
 import {
   createSessionSubscriptions,
@@ -116,6 +116,9 @@ export class MessageProcessor {
       eventHub,
       notify: (connectionId, method, params) =>
         this.notify(connectionId, method, params),
+      sendRequest: (connectionId, request) =>
+        this.sendServerRequest(connectionId, request),
+      pendingRequests: this.pendingServerRequests,
       reportOperationalFailure: this.reporter,
     })
     this.methods = new Map(rpcMethods.map((entry) => [entry.method, entry]))
@@ -401,6 +404,21 @@ export class MessageProcessor {
       return
     }
     this.emitMessage(connection, { method, params })
+  }
+
+  // Server→client requests are not notifications: they bypass the opt-out
+  // list so an approval prompt always reaches subscribed clients.
+  private sendServerRequest(
+    connectionId: number,
+    request: PendingServerRequest,
+  ): void {
+    const connection = this.connections.get(connectionId)
+    if (connection === undefined) return
+    this.emitMessage(connection, {
+      id: request.id,
+      method: request.method,
+      ...(request.params === undefined ? {} : { params: request.params }),
+    })
   }
 
   private emitMessage(

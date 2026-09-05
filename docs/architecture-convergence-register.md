@@ -21,29 +21,14 @@ owning boundary moves once.
 
 | Order | Outcome | Owning areas | Severity driver |
 | --- | --- | --- | --- |
-| 1 | C8-D1 host methods and WebSocket transport; GUI cutover; REST+SSE removal | `src/server/*`, `src/gui` | C8-D1; changes the client contract |
-| 2 | C8-D2 first-class Project entity | `src/server/*`, session storage | C8-D2 |
-| 3 | Production exports narrowed, test support separated | runtime and server public surfaces | Hygiene; churns exports, so it runs last |
+| 1 | C8-D2 first-class Project entity | `src/server/*`, session storage | C8-D2 |
+| 2 | Production exports narrowed, test support separated | runtime and server public surfaces | Hygiene; churns exports, so it runs last |
 
-The next piece of work is Stage 6 (C8 host methods, transport, and GUI
-cutover). The former Agent-lifecycle stage is resolved by the Session-owned
-status, per-root AgentControl, durable spawn graph, lazy identity restoration,
-and retryable completion/message delivery. Mate's production mutation surface
-remains limited to create/list/read for the current single-Mate product.
-
-## Stage 6 — C8 host methods, transport, and GUI cutover
-
-Continues C8-D1. Defines the typed method surface (`<resource>/<method>`,
-`*Params`/`*Response`/`*Notification`, cursor pagination) over the existing
-handlers, adds the initialize handshake and per-Session subscription
-notifications, introduces the WebSocket transport with Codex's asymmetric
-backpressure, migrates the GUI client, and removes REST+SSE.
-
-### Done when
-
-- The GUI speaks only the RPC protocol; REST routes and the SSE endpoint are
-  deleted; permission resolve is a server→client request answered over the
-  same channel; a second concurrent client can subscribe to a Session.
+The next piece of work is Stage 7 (C8-D2 project entity). The former
+Agent-lifecycle stage is resolved by the Session-owned status, per-root
+AgentControl, durable spawn graph, lazy identity restoration, and retryable
+completion/message delivery. Mate's production mutation surface remains
+limited to create/list/read for the current single-Mate product.
 
 ## Stage 7 — C8 project entity
 
@@ -126,11 +111,11 @@ The following are constraints, not future modules:
   flushes pending transient publications before terminal Turn disposition.
   Durable and transient publications share one per-Session delivery owner, so
   subscribers observe their original publish order without assigning transient
-  sequence numbers. SSE replay-complete marks only the snapshot's durable
-  watermark; post-snapshot deliveries drain afterward in arrival order. During
-  that drain, display events are reconciled against the snapshot and later
-  durable Turn facts, so a terminal snapshot cannot be followed by its stale
-  buffered delta.
+  sequence numbers. The `session/replayComplete` notification marks only the
+  snapshot's durable watermark; post-snapshot deliveries drain afterward in
+  arrival order. During that drain, display events are reconciled against the
+  snapshot and later durable Turn facts, so a terminal snapshot cannot be
+  followed by its stale buffered delta.
   Active activity is derived from all open entries rather than transferred by
   the latest event, so parallel tools and permissions remain accurate.
 - Effective session model, session usage totals (including compaction), and
@@ -139,8 +124,10 @@ The following are constraints, not future modules:
   Tool recovery uses durable model call/result items and terminal completion
   snapshots, never a persisted display-start event.
 - Still-pending permission requests replay as `permission.requested` after
-  `session.replay-complete` on every SSE (re)connect; resolving stays a POST
-  whose confirmation arrives through the stream.
+  the `session/replayComplete` notification on every (re)subscribe, and the
+  same replay re-sends their answer channel: resolving a permission is the
+  response to the `session/permission/request` server→client request, and the
+  confirmation still arrives through the event stream.
 - Durable Turn terminals, completed-item snapshots, approval resolutions, and
   recovery facts are closed. Permission waiting is transient active-Turn
   state; recovery cannot grant or deny a permission after the Turn.

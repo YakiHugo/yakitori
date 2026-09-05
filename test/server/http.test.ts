@@ -1,7 +1,6 @@
 import {
   mkdir,
   mkdtemp,
-  realpath,
   rm,
   symlink,
   writeFile,
@@ -10,38 +9,18 @@ import type { AddressInfo } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { ThreadManager } from "../../src/core/thread-manager.ts"
-import {
-  createEventEnvelope,
-  type EventEnvelope,
-  EventType,
-} from "../../src/kernel/events.ts"
-import { createInputId, createSessionId } from "../../src/kernel/ids.ts"
-import { createSessionEventHub } from "../../src/server/event-hub.ts"
-import type { SessionEventHub } from "../../src/server/event-hub.ts"
-import { createThreadServerHandlers } from "../../src/server/handlers.ts"
 import {
   createYakitoriHttpServer,
   type YakitoriHttpServerOptions,
   type YakitoriStaticAssets,
 } from "../../src/server/http.ts"
-import type { OperationalFailure } from "../../src/server/operational-errors.ts"
-import { createProjectRegistry } from "../../src/server/project-registry.ts"
+import { ApiErrorCode } from "../../src/server/protocol.ts"
 import { createRequestGate } from "../../src/server/request-gate.ts"
-import {
-  type ApiAdmitInputResponse,
-  type ApiCancelInputResponse,
-  type ApiCreateSessionResponse,
-  ApiErrorCode,
-  type ApiForkSessionResponse,
-  type ApiListProvidersResponse,
-  type ApiListSessionsResponse,
-  type ApiReadSessionResponse,
-  type ApiUpdateUserModelPreferenceResponse,
-} from "../../src/server/protocol.ts"
-import { createUserConfigStore } from "../../src/server/user-config.ts"
-import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
-import { MemoryThreadStore } from "../core/memory-thread-store.ts"
+import { createFakeHandlers } from "./rpc/testkit.ts"
+
+// The REST+SSE API is gone: /rpc (WebSocket JSON-RPC) is the only API
+// channel. These tests pin the remaining HTTP surface — health, static GUI
+// assets with the SPA fallback, CORS — and that the old routes stay gone.
 
 describe("HTTP server", () => {
   it("requires an injected runtime instead of opening persistence implicitly", () => {
@@ -50,183 +29,51 @@ describe("HTTP server", () => {
     ).toThrow("createYakitoriApplication")
   })
 
-  it("adapts session handlers to JSON routes", async () => {
+  it("answers the health probe", async () => {
     await withHttpServer(async (baseUrl) => {
-      const created = await postJson<ApiCreateSessionResponse>(
-        `${baseUrl}/sessions`,
-        {
-          title: "HTTP slice",
-        },
-      )
+      const response = await fetch(`${baseUrl}/health`)
 
-      expect(created.status).toBe(201)
-      expect(created.body.session).toMatchObject({
-        id: created.body.event.sessionId,
-        title: "HTTP slice",
-      })
-
-      const listed = await getJson<ApiListSessionsResponse>(
-        `${baseUrl}/sessions?limit=10`,
-      )
-
-      expect(listed.status).toBe(200)
-      expect(listed.body.sessions).toEqual([
-        expect.objectContaining({
-          id: created.body.session.id,
-          title: "HTTP slice",
-        }),
-      ])
+      expect(response.status).toBe(200)
+      expect(await response.json()).toEqual({ ok: true })
     })
   })
 
-  it("routes session deletion", async () => {
+  it("returns explicit JSON errors for removed API routes", async () => {
     await withHttpServer(async (baseUrl) => {
-      const created = await postJson<ApiCreateSessionResponse>(
-        `${baseUrl}/sessions`,
-        {},
-      )
-      const sessionId = created.body.session.id
-
-      const deleted = await fetch(`${baseUrl}/sessions/${sessionId}`, {
-        method: "DELETE",
-      })
-      expect(deleted.status).toBe(200)
-      expect(await deleted.json()).toEqual({ sessionId })
-
-      const read = await fetch(`${baseUrl}/sessions/${sessionId}`)
-      expect(read.status).toBe(404)
-
-      const invalid = await fetch(`${baseUrl}/sessions/session_bad`, {
-        method: "DELETE",
-      })
-      expect(invalid.status).toBe(400)
-      expect(await invalid.json()).toMatchObject({
-        error: { code: ApiErrorCode.InvalidInput },
-      })
-
-      const missing = await fetch(`${baseUrl}/sessions/${createSessionId()}`, {
-        method: "DELETE",
-      })
-      expect(missing.status).toBe(404)
-      expect(await missing.json()).toMatchObject({
-        error: { code: ApiErrorCode.NotFound },
-      })
-    })
-  })
-
-  it("routes pure undo forks and validates fork semantics", async () => {
-    await withHttpServer(async (baseUrl) => {
-      const created = await postJson<ApiCreateSessionResponse>(
-        `${baseUrl}/sessions`,
-        { title: "Fork route" },
-      )
-      const admitted = await postJson<ApiAdmitInputResponse>(
-        `${baseUrl}/sessions/${created.body.session.id}/inputs`,
-        {
-          requestId: "request_http_fork",
-          content: { kind: "text", text: "undo this" },
-        },
-      )
-      await postJson(
-        `${baseUrl}/sessions/${created.body.session.id}/inputs/${admitted.body.inputId}/cancel`,
-        {},
-      )
-      const forkUrl = `${baseUrl}/sessions/${created.body.session.id}/fork`
-
-      for (const invalid of [
-        { atInputId: admitted.body.inputId, reason: "redo" },
-        { atInputId: admitted.body.inputId, reason: "edit" },
-        {
-          atInputId: admitted.body.inputId,
-          reason: "undo",
-          content: { kind: "text", text: "not allowed" },
-        },
-        {
-          atInputId: admitted.body.inputId,
-          reason: "undo",
-          modelSelection: { provider: "openai", model: "gpt-test" },
-        },
-      ]) {
-        const rejected = await postJson(forkUrl, invalid)
-        expect(rejected.status).toBe(400)
-        expect(rejected.body).toMatchObject({
-          error: { code: ApiErrorCode.InvalidInput },
+      for (const [method, path] of [
+        ["GET", "/sessions"],
+        ["POST", "/sessions"],
+        ["GET", "/sessions/session_1"],
+        ["DELETE", "/sessions/session_1"],
+        ["GET", "/sessions/session_1/events?after=0"],
+        ["POST", "/sessions/session_1/inputs"],
+        ["POST", "/sessions/session_1/compact"],
+        ["POST", "/sessions/session_1/turns/turn_1/cancel"],
+        [
+          "POST",
+          "/sessions/session_1/turns/turn_1/permissions/perm_1/resolve",
+        ],
+        ["GET", "/projects"],
+        ["POST", "/projects"],
+        ["GET", "/providers"],
+        ["PUT", "/user-preference"],
+      ] as const) {
+        const response = await fetch(`${baseUrl}${path}`, { method })
+        expect(response.status, `${method} ${path}`).toBe(404)
+        expect(await response.json()).toEqual({
+          error: {
+            code: ApiErrorCode.NotFound,
+            message: "Route not found.",
+          },
         })
       }
-
-      const forked = await postJson<ApiForkSessionResponse>(forkUrl, {
-        atInputId: admitted.body.inputId,
-        reason: "undo",
-      })
-      expect(forked.status).toBe(201)
-      expect(forked.body.session).toMatchObject({
-        parentSessionId: created.body.session.id,
-        forkedFromInputId: admitted.body.inputId,
-        forkReason: "undo",
-        title: "Fork route",
-        counts: { inputs: 0, pendingInputs: 0, turns: 0 },
-      })
-      expect(forked.body.events).toEqual([
-        expect.objectContaining({
-          sessionId: forked.body.session.id,
-          type: EventType.SessionCreated,
-        }),
-      ])
-
-      const source = await getJson<ApiReadSessionResponse>(
-        `${baseUrl}/sessions/${created.body.session.id}`,
-      )
-      expect(source.body.session.counts).toMatchObject({
-        inputs: 1,
-        pendingInputs: 0,
-        turns: 1,
-      })
-    })
-  })
-
-  it("returns explicit JSON errors for invalid requests", async () => {
-    await withHttpServer(async (baseUrl) => {
-      const response = await fetch(`${baseUrl}/sessions`, {
-        method: "POST",
-        body: "{",
-      })
-
-      expect(response.status).toBe(400)
-      expect(await response.json()).toEqual({
-        error: {
-          code: ApiErrorCode.InvalidInput,
-          message: "Request body must be valid JSON.",
-        },
-      })
-
-      const invalidPath = await fetch(`${baseUrl}/sessions/%E0%A4%A`)
-      expect(invalidPath.status).toBe(400)
-      expect(await invalidPath.json()).toEqual({
-        error: {
-          code: ApiErrorCode.InvalidInput,
-          message: "Request path is invalid.",
-        },
-      })
-
-      const invalidSessionId = await fetch(`${baseUrl}/sessions/session_bad`)
-      expect(invalidSessionId.status).toBe(400)
-      expect(await invalidSessionId.json()).toMatchObject({
-        error: {
-          code: ApiErrorCode.InvalidInput,
-        },
-      })
     })
   })
 
   it("rejects non-loopback CORS origins", async () => {
     await withHttpServer(async (baseUrl) => {
-      const rejected = await fetch(`${baseUrl}/sessions`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Origin: "https://example.com",
-        },
-        body: "{}",
+      const rejected = await fetch(`${baseUrl}/health`, {
+        headers: { Origin: "https://example.com" },
       })
 
       expect(rejected.status).toBe(403)
@@ -238,750 +85,78 @@ describe("HTTP server", () => {
         },
       })
 
-      const allowed = await fetch(`${baseUrl}/sessions`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Origin: "http://127.0.0.1:5173",
-        },
-        body: "{}",
+      const allowed = await fetch(`${baseUrl}/health`, {
+        headers: { Origin: "http://127.0.0.1:5173" },
       })
 
-      expect(allowed.status).toBe(201)
+      expect(allowed.status).toBe(200)
       expect(allowed.headers.get("access-control-allow-origin")).toBe(
         "http://127.0.0.1:5173",
       )
     })
   })
 
-  it("rejects non-finite JSON and malformed parent session ids", async () => {
+  it("answers CORS preflights", async () => {
     await withHttpServer(async (baseUrl) => {
-      const nonFinite = await fetch(`${baseUrl}/sessions`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: '{"metadata":{"bad":1e999}}',
+      const response = await fetch(`${baseUrl}/health`, {
+        method: "OPTIONS",
+        headers: { Origin: "http://localhost:5173" },
       })
 
-      expect(nonFinite.status).toBe(400)
-      expect(await nonFinite.json()).toMatchObject({
-        error: {
-          code: ApiErrorCode.InvalidInput,
-        },
-      })
-
-      const invalidParent = await postJson(`${baseUrl}/sessions`, {
-        parentSessionId: "session_bad",
-      })
-
-      expect(invalidParent.status).toBe(400)
-      expect(invalidParent.body).toMatchObject({
-        error: {
-          code: ApiErrorCode.InvalidInput,
-        },
-      })
-    })
-  })
-
-  it("streams durable session events after replay", async () => {
-    await withHttpServer(async (baseUrl) => {
-      const created = await postJson<ApiCreateSessionResponse>(
-        `${baseUrl}/sessions`,
-        {},
-      )
-      const abort = new AbortController()
-      const stream = await fetch(
-        `${baseUrl}/sessions/${created.body.session.id}/events?after=1`,
-        {
-          signal: abort.signal,
-        },
-      )
-
-      expect(stream.status).toBe(200)
-      expect(stream.headers.get("content-type")).toContain("text/event-stream")
-
-      const nextEvent = readNextSessionEvent(stream)
-      const admitted = await postJson(
-        `${baseUrl}/sessions/${created.body.session.id}/inputs`,
-        {
-          requestId: "request_http-stream",
-          content: {
-            kind: "text",
-            text: "tail this",
-          },
-        },
-      )
-
-      expect(admitted.status).toBe(201)
-      const event = await nextEvent
-      abort.abort()
-
-      expect(event).toMatchObject({
-        seq: 2,
-        type: EventType.InputAdmitted,
-        data: {
-          content: {
-            kind: "text",
-            text: "tail this",
-          },
-        },
-      })
-    })
-  })
-
-  it("replays durable session events when the stream opens", async () => {
-    await withHttpServer(async (baseUrl) => {
-      const created = await postJson<ApiCreateSessionResponse>(
-        `${baseUrl}/sessions`,
-        {},
-      )
-      const abort = new AbortController()
-      const stream = await fetch(
-        `${baseUrl}/sessions/${created.body.session.id}/events?after=0`,
-        {
-          signal: abort.signal,
-        },
-      )
-
-      expect(stream.status).toBe(200)
-      const text = await readSseUntilReplayComplete(stream)
-      abort.abort()
-
-      expect(text).toContain("event: session.snapshot")
-      expect(text).toContain('"pendingInputs":[]')
-      expect(text).toContain('"type":"session.created"')
-      expect(text.indexOf("event: session.snapshot")).toBeLessThan(
-        text.indexOf("event: session.event"),
-      )
-      expect(text.indexOf("event: session.event")).toBeLessThan(
-        text.indexOf("event: session.replay-complete"),
+      expect(response.status).toBe(204)
+      expect(response.headers.get("access-control-allow-origin")).toBe(
+        "http://localhost:5173",
       )
     })
   })
 
-  it("drains post-snapshot durable backlog after replay-complete", async () => {
-    const eventHub = createSessionEventHub()
-    let resolveReplayStarted: (() => void) | undefined
-    let resolveFinishReplay: (() => void) | undefined
-    const replayStarted = new Promise<void>((resolve) => {
-      resolveReplayStarted = resolve
+  it("holds its request gate token until a response finishes", async () => {
+    const gate = createRequestGate()
+    const endCalled = deferred<void>()
+    let releaseResponse: (() => void) | undefined
+    const server = createYakitoriHttpServer({
+      handlers: createFakeHandlers(),
+      requestGate: gate,
     })
-    const finishReplay = new Promise<void>((resolve) => {
-      resolveFinishReplay = resolve
-    })
-    const replayRequests: unknown[] = []
-    const buffered = createEventEnvelope({
-      sessionId: "session_1",
-      seq: 2,
-      event: {
-        type: EventType.InputAdmitted,
-        data: {
-          requestId: "request_buffered",
-          inputId: createInputId(),
-          role: "user",
-          content: { kind: "text", text: "during replay" },
-        },
-      },
-    })
-    const handlers = {
-      ...createTestHandlers(),
-      async readSession() {
-        return {
-          ok: true as const,
-          status: 200,
-          body: {
-            session: {
-              id: "session_1",
-              conversationId: "session_1",
-              seq: 1,
-              createdAt: "2026-01-01T00:00:00.000Z",
-              updatedAt: "2026-01-01T00:00:00.000Z",
-              pendingInputs: [],
-              pendingPermissions: [],
-              counts: {
-                inputs: 0,
-                pendingInputs: 0,
-                turns: 0,
-                items: 0,
-                permissions: 0,
-                tools: 0,
-              },
-            },
-          },
+    server.prependListener("request", (_request, response) => {
+      const originalEnd = response.end.bind(response)
+      response.end = ((...args: unknown[]) => {
+        releaseResponse = () => {
+          Reflect.apply(originalEnd, response, args)
         }
-      },
-      async readSessionEvents(input: unknown) {
-        replayRequests.push(input)
-        resolveReplayStarted?.()
-        await finishReplay
-        return { ok: true as const, status: 200, body: { events: [] } }
-      },
-    }
+        endCalled.resolve()
+        return response
+      }) as typeof response.end
+    })
 
-    await withListeningServer(
-      createYakitoriHttpServer({ handlers, eventHub }),
-      async (baseUrl) => {
-        const abort = new AbortController()
-        const responsePromise = fetch(
-          `${baseUrl}/sessions/session_1/events?after=0`,
-          { signal: abort.signal },
-        )
-        await replayStarted
-        eventHub.publishDurable([buffered])
-        resolveFinishReplay?.()
-        const response = await responsePromise
-        const text = await readSseUntil(response, JSON.stringify(buffered))
-        abort.abort()
+    await withListeningServer(server, async (baseUrl) => {
+      const response = fetch(`${baseUrl}/health`)
+      await endCalled.promise
+      gate.close()
+      let drained = false
+      const shutdown = gate.shutdown().then(() => {
+        drained = true
+      })
+      await Promise.resolve()
 
-        expect(text.indexOf("event: session.replay-complete")).toBeLessThan(
-          text.indexOf(`data: ${JSON.stringify(buffered)}`),
-        )
-        expect(replayRequests).toEqual([
-          { sessionId: "session_1", after: 0, through: 1, limit: 500 },
-        ])
-      },
-    )
+      expect(drained).toBe(false)
+
+      releaseResponse?.()
+      expect((await response).status).toBe(200)
+      await shutdown
+      expect(drained).toBe(true)
+    })
   })
 
-  it("preserves transient-before-terminal order across replay handoff", async () => {
-    const eventHub = createSessionEventHub()
-    let resolveReplayStarted: (() => void) | undefined
-    let resolveFinishReplay: (() => void) | undefined
-    const replayStarted = new Promise<void>((resolve) => {
-      resolveReplayStarted = resolve
-    })
-    const finishReplay = new Promise<void>((resolve) => {
-      resolveFinishReplay = resolve
-    })
-    const itemCompleted = createEventEnvelope({
-      sessionId: "session_1",
-      seq: 2,
-      event: {
-        type: EventType.ItemCompleted,
-        data: {
-          turnId: "turn_1",
-          item: { type: "agent_message", itemId: "item_1", content: [] },
-        },
-      },
-    })
-    const turnCompleted = createEventEnvelope({
-      sessionId: "session_1",
-      seq: 3,
-      event: {
-        type: EventType.TurnCompleted,
-        data: {
-          turnId: "turn_1",
-          outcome: { status: "interrupted", reason: "user stop" },
-        },
-      },
-    })
-    const handlers = {
-      ...createTestHandlers(),
-      async readSession() {
-        return {
-          ok: true as const,
-          status: 200,
-          body: {
-            session: {
-              id: "session_1",
-              conversationId: "session_1",
-              seq: 1,
-              createdAt: "2026-01-01T00:00:00.000Z",
-              updatedAt: "2026-01-01T00:00:00.000Z",
-              activeTurnId: "turn_1",
-              pendingInputs: [],
-              pendingPermissions: [],
-              counts: {
-                inputs: 1,
-                pendingInputs: 0,
-                turns: 1,
-                items: 1,
-                permissions: 0,
-                tools: 0,
-              },
-            },
-          },
-        }
-      },
-      async readSessionEvents() {
-        resolveReplayStarted?.()
-        await finishReplay
-        return { ok: true as const, status: 200, body: { events: [] } }
-      },
-    }
-
-    await withListeningServer(
-      createYakitoriHttpServer({ handlers, eventHub }),
-      async (baseUrl) => {
-        const abort = new AbortController()
-        const responsePromise = fetch(
-          `${baseUrl}/sessions/session_1/events?after=0`,
-          { signal: abort.signal },
-        )
-        await replayStarted
-        eventHub.publishTransient({
-          type: "assistant.delta",
-          sessionId: "session_1",
-          turnId: "turn_1",
-          itemId: "item_1",
-          delta: "partial",
-          createdAt: "2026-08-28T00:00:00.000Z",
-        })
-        eventHub.publishDurable([itemCompleted, turnCompleted])
-        resolveFinishReplay?.()
-
-        const response = await responsePromise
-        const text = await readSseUntil(response, JSON.stringify(turnCompleted))
-        abort.abort()
-        const replayCompleteAt = text.indexOf("event: session.replay-complete")
-        const deltaAt = text.indexOf('"type":"assistant.delta"')
-        const itemCompletedAt = text.indexOf(JSON.stringify(itemCompleted))
-        const turnCompletedAt = text.indexOf(JSON.stringify(turnCompleted))
-        expect(replayCompleteAt).toBeLessThan(deltaAt)
-        expect(deltaAt).toBeLessThan(itemCompletedAt)
-        expect(itemCompletedAt).toBeLessThan(turnCompletedAt)
-      },
-    )
-  })
-
-  it("drops buffered display events for a Turn already terminal in the snapshot", async () => {
-    const eventHub = createSessionEventHub()
-    let resolveReplayStarted: (() => void) | undefined
-    let resolveFinishReplay: (() => void) | undefined
-    const replayStarted = new Promise<void>((resolve) => {
-      resolveReplayStarted = resolve
-    })
-    const finishReplay = new Promise<void>((resolve) => {
-      resolveFinishReplay = resolve
-    })
-    const terminal = createEventEnvelope({
-      sessionId: "session_1",
-      seq: 3,
-      event: {
-        type: EventType.TurnCompleted,
-        data: {
-          turnId: "turn_1",
-          outcome: { status: "interrupted", reason: "user stop" },
-        },
-      },
-    })
-    const handlers = {
-      ...createTestHandlers(),
-      async readSession() {
-        return {
-          ok: true as const,
-          status: 200,
-          body: {
-            session: {
-              id: "session_1",
-              conversationId: "session_1",
-              seq: 3,
-              createdAt: "2026-01-01T00:00:00.000Z",
-              updatedAt: "2026-01-01T00:00:00.000Z",
-              pendingInputs: [],
-              pendingPermissions: [],
-              counts: {
-                inputs: 1,
-                pendingInputs: 0,
-                turns: 1,
-                items: 0,
-                permissions: 0,
-                tools: 0,
-              },
-            },
-          },
-        }
-      },
-      async readSessionEvents() {
-        resolveReplayStarted?.()
-        await finishReplay
-        return {
-          ok: true as const,
-          status: 200,
-          body: { events: [terminal] },
-        }
-      },
-    }
-
-    await withListeningServer(
-      createYakitoriHttpServer({ handlers, eventHub }),
-      async (baseUrl) => {
-        const abort = new AbortController()
-        const responsePromise = fetch(
-          `${baseUrl}/sessions/session_1/events?after=0`,
-          { signal: abort.signal },
-        )
-        await replayStarted
-        eventHub.publishTransient({
-          type: "item.started",
-          sessionId: "session_1",
-          turnId: "turn_1",
-          item: { type: "agent_message", itemId: "item_1" },
-          createdAt: "2026-08-28T00:00:00.000Z",
-        })
-        eventHub.publishTransient({
-          type: "assistant.delta",
-          sessionId: "session_1",
-          turnId: "turn_1",
-          itemId: "item_1",
-          delta: "stale partial",
-          createdAt: "2026-08-28T00:00:00.001Z",
-        })
-        eventHub.publishTransient({
-          type: "session.usage",
-          sessionId: "session_1",
-          turnId: "turn_1",
-          usage: { inputTokens: 10, outputTokens: 2 },
-          createdAt: "2026-08-28T00:00:00.002Z",
-        })
-        resolveFinishReplay?.()
-
-        const response = await responsePromise
-        const text = await readSseUntil(response, '"type":"session.usage"')
-        abort.abort()
-        expect(text).toContain(JSON.stringify(terminal))
-        expect(text).not.toContain('"type":"item.started"')
-        expect(text).not.toContain('"type":"assistant.delta"')
-      },
-    )
-  })
-
-  it("replays pending permission requests after replay-complete", async () => {
-    const pendingPermission = {
-      permissionRequestId: "permission_pending_1",
-      turnId: "turn_1",
-      toolCallId: "call_1",
-      action: "run_command",
-      subject: "pnpm test",
-      createdAt: "2026-08-27T00:00:00.000Z",
-    }
-    const handlers = {
-      ...createTestHandlers(),
-      async readSession() {
-        return {
-          ok: true as const,
-          status: 200,
-          body: {
-            session: {
-              id: "session_1",
-              conversationId: "session_1",
-              seq: 1,
-              createdAt: "2026-01-01T00:00:00.000Z",
-              updatedAt: "2026-01-01T00:00:00.000Z",
-              pendingInputs: [],
-              pendingPermissions: [pendingPermission],
-              counts: {
-                inputs: 0,
-                pendingInputs: 0,
-                turns: 0,
-                items: 0,
-                permissions: 1,
-                tools: 0,
-              },
-            },
-          },
-        }
-      },
-      async readSessionEvents() {
-        return { ok: true as const, status: 200, body: { events: [] } }
-      },
-    }
-
-    await withListeningServer(
-      createYakitoriHttpServer({ handlers }),
-      async (baseUrl) => {
-        const abort = new AbortController()
-        const response = await fetch(
-          `${baseUrl}/sessions/session_1/events?after=0`,
-          { signal: abort.signal },
-        )
-        if (!response.body) throw new Error("Expected a streaming body.")
-        const reader = response.body.getReader()
-        const decoder = new TextDecoder()
-        let buffer = ""
-        await withTimeout(async () => {
-          while (!buffer.includes("permission.requested")) {
-            const chunk = await reader.read()
-            if (chunk.done) throw new Error("SSE stream ended before replay.")
-            buffer += decoder.decode(chunk.value, { stream: true })
-          }
-        })
-        abort.abort()
-
-        const replayCompleteAt = buffer.indexOf(
-          "event: session.replay-complete",
-        )
-        const requestedAt = buffer.indexOf("event: session.transient")
-        expect(replayCompleteAt).toBeGreaterThanOrEqual(0)
-        expect(requestedAt).toBeGreaterThan(replayCompleteAt)
-        expect(buffer).toContain(
-          JSON.stringify({
-            type: "permission.requested",
-            sessionId: "session_1",
-            ...pendingPermission,
-          }),
-        )
-      },
-    )
-  })
-
-  it("resumes streams after the latest query or Last-Event-ID cursor", async () => {
+  it("returns the JSON 404 for unknown paths without static assets", async () => {
     await withHttpServer(async (baseUrl) => {
-      const created = await postJson<ApiCreateSessionResponse>(
-        `${baseUrl}/sessions`,
-        {},
-      )
-      const inputsUrl = `${baseUrl}/sessions/${created.body.session.id}/inputs`
-      await postJson(inputsUrl, {
-        requestId: "request_http-resume-1",
-        content: { kind: "text", text: "first" },
-      })
-      await postJson(inputsUrl, {
-        requestId: "request_http-resume-2",
-        content: { kind: "text", text: "second" },
-      })
+      const response = await fetch(`${baseUrl}/`)
 
-      for (const cursors of [
-        { after: 1, lastEventId: 2 },
-        { after: 2, lastEventId: 1 },
-      ]) {
-        const abort = new AbortController()
-        const stream = await fetch(
-          `${baseUrl}/sessions/${created.body.session.id}/events?after=${cursors.after}`,
-          {
-            headers: {
-              "Last-Event-ID": String(cursors.lastEventId),
-            },
-            signal: abort.signal,
-          },
-        )
-        const event = await readNextSessionEvent(stream)
-        abort.abort()
-
-        expect(event).toMatchObject({
-          seq: 4,
-          type: EventType.TurnStarted,
-          data: {
-            turnId: "request_http-resume-1",
-          },
-        })
-      }
-    })
-  })
-
-  it("rejects every malformed session event cursor", async () => {
-    await withHttpServer(async (baseUrl) => {
-      const created = await postJson<ApiCreateSessionResponse>(
-        `${baseUrl}/sessions`,
-        {},
-      )
-
-      for (const cursors of [
-        { after: "1.5", lastEventId: "2", invalidField: "after" },
-        {
-          after: "1",
-          lastEventId: "not-a-sequence",
-          invalidField: "Last-Event-ID",
-        },
-        {
-          after: "9007199254740992",
-          lastEventId: "1",
-          invalidField: "after",
-        },
-        {
-          after: "1",
-          lastEventId: "9007199254740992",
-          invalidField: "Last-Event-ID",
-        },
-      ]) {
-        const abort = new AbortController()
-        const response = await fetch(
-          `${baseUrl}/sessions/${created.body.session.id}/events?after=${cursors.after}`,
-          {
-            headers: {
-              "Last-Event-ID": cursors.lastEventId,
-            },
-            signal: abort.signal,
-          },
-        )
-
-        try {
-          expect(response.status).toBe(400)
-          expect(await response.json()).toEqual({
-            error: {
-              code: ApiErrorCode.InvalidInput,
-              message: `${cursors.invalidField} must be a non-negative integer sequence.`,
-            },
-          })
-        } finally {
-          abort.abort()
-        }
-      }
-    })
-  })
-
-  it("serves sessions through an injected JSONL store", async () => {
-    await withJsonlHttpServer(async (baseUrl) => {
-      const created = await postJson<ApiCreateSessionResponse>(
-        `${baseUrl}/sessions`,
-        {
-          title: "JSONL session",
-        },
-      )
-      const listed = await getJson<ApiListSessionsResponse>(
-        `${baseUrl}/sessions?limit=10`,
-      )
-
-      expect(created.status).toBe(201)
-      expect(listed.status).toBe(200)
-      expect(listed.body.sessions).toEqual([
-        expect.objectContaining({
-          id: created.body.session.id,
-          title: "JSONL session",
-        }),
-      ])
-    })
-  })
-
-  it("deduplicates retried admissions through an injected JSONL store", async () => {
-    await withJsonlHttpServer(async (baseUrl) => {
-      const created = await postJson<ApiCreateSessionResponse>(
-        `${baseUrl}/sessions`,
-        {},
-      )
-      const url = `${baseUrl}/sessions/${created.body.session.id}/inputs`
-      const request = {
-        requestId: "request_http-retry",
-        content: {
-          kind: "text",
-          text: "persist once",
-        },
-      }
-
-      const first = await postJson<ApiAdmitInputResponse>(url, request)
-      const replayed = await postJson<ApiAdmitInputResponse>(url, request)
-      const changed = await postJson(url, {
-        ...request,
-        content: {
-          kind: "text",
-          text: "persist something else",
-        },
-      })
-      const read = await getJson<ApiReadSessionResponse>(
-        `${baseUrl}/sessions/${created.body.session.id}`,
-      )
-
-      expect(first.status).toBe(201)
-      expect(first.body.requestId).toBe(request.requestId)
-      expect(replayed.status).toBe(200)
-      expect(replayed.body).toEqual(first.body)
-      expect(changed.status).toBe(409)
-      expect(changed.body).toMatchObject({
+      expect(response.status).toBe(404)
+      expect(await response.json()).toEqual({
         error: {
-          code: ApiErrorCode.Conflict,
-        },
-      })
-      expect(read.body.session.seq).toBe(5)
-      expect(read.body.session.counts.inputs).toBe(1)
-    })
-  })
-
-  it("rejects cancellation because live Sessions have no pending input queue", async () => {
-    await withHttpServer(async (baseUrl) => {
-      const created = await postJson<ApiCreateSessionResponse>(
-        `${baseUrl}/sessions`,
-        {},
-      )
-      const sessionId = created.body.session.id
-      const admitted = await postJson<ApiAdmitInputResponse>(
-        `${baseUrl}/sessions/${sessionId}/inputs`,
-        {
-          requestId: "request_http-cancel-input",
-          content: {
-            kind: "text",
-            text: "cancel me",
-          },
-        },
-      )
-      expect(admitted.status).toBe(201)
-
-      const cancelUrl = `${baseUrl}/sessions/${sessionId}/inputs/${admitted.body.inputId}/cancel`
-      const cancelled = await postJson<ApiCancelInputResponse>(cancelUrl, {
-        reason: "user_cancel",
-      })
-
-      expect(cancelled.status).toBe(409)
-      expect(cancelled.body).toMatchObject({
-        error: { code: ApiErrorCode.Conflict },
-      })
-
-      const again = await postJson(cancelUrl, {})
-      expect(again.status).toBe(409)
-      expect(again.body).toMatchObject({
-        error: {
-          code: ApiErrorCode.Conflict,
-        },
-      })
-
-      const missing = await postJson(
-        `${baseUrl}/sessions/${sessionId}/inputs/${createInputId()}/cancel`,
-        {},
-      )
-      expect(missing.status).toBe(409)
-      expect(missing.body).toMatchObject({
-        error: {
-          code: ApiErrorCode.Conflict,
-        },
-      })
-
-      const malformed = await postJson(
-        `${baseUrl}/sessions/${sessionId}/inputs/input_bad/cancel`,
-        {},
-      )
-      expect(malformed.status).toBe(400)
-      expect(malformed.body).toMatchObject({
-        error: {
-          code: ApiErrorCode.InvalidInput,
-        },
-      })
-
-      const oversizedReason = await postJson(cancelUrl, {
-        reason: "x".repeat(513),
-      })
-      expect(oversizedReason.status).toBe(400)
-      expect(oversizedReason.body).toMatchObject({
-        error: {
-          code: ApiErrorCode.InvalidInput,
-        },
-      })
-    })
-  })
-
-  it("bounds the cancel-turn reason like the cancel-input reason", async () => {
-    await withHttpServer(async (baseUrl) => {
-      const created = await postJson<ApiCreateSessionResponse>(
-        `${baseUrl}/sessions`,
-        {},
-      )
-      const sessionId = created.body.session.id
-      const cancelUrl = `${baseUrl}/sessions/${sessionId}/turns/turn_test/cancel`
-
-      const oversizedReason = await postJson(cancelUrl, {
-        reason: "x".repeat(513),
-      })
-      expect(oversizedReason.status).toBe(400)
-      expect(oversizedReason.body).toMatchObject({
-        error: {
-          code: ApiErrorCode.InvalidInput,
-        },
-      })
-
-      const wrongType = await postJson(cancelUrl, { reason: 42 })
-      expect(wrongType.status).toBe(400)
-      expect(wrongType.body).toMatchObject({
-        error: {
-          code: ApiErrorCode.InvalidInput,
+          code: ApiErrorCode.NotFound,
+          message: "Route not found.",
         },
       })
     })
@@ -1031,35 +206,23 @@ describe("HTTP static assets", () => {
     })
   })
 
-  it("keeps JSON errors for API-shaped paths", async () => {
+  it("keeps JSON 404s for removed API routes even with static assets", async () => {
     await withStaticHttpServer(async (baseUrl) => {
-      const malformed = await fetch(`${baseUrl}/sessions/unknown`)
-      expect(malformed.status).toBe(400)
-      expect(malformed.headers.get("content-type")).toContain(
-        "application/json",
-      )
-      expect(await malformed.json()).toMatchObject({
-        error: {
-          code: ApiErrorCode.InvalidInput,
-        },
-      })
-
-      const missing = await fetch(`${baseUrl}/sessions/${createSessionId()}`)
-      expect(missing.status).toBe(404)
-      expect(await missing.json()).toMatchObject({
-        error: {
-          code: ApiErrorCode.NotFound,
-        },
-      })
-
-      const unknownApiPath = await fetch(`${baseUrl}/sessions/unknown/extra`)
-      expect(unknownApiPath.status).toBe(404)
-      expect(await unknownApiPath.json()).toEqual({
-        error: {
-          code: ApiErrorCode.NotFound,
-          message: "Route not found.",
-        },
-      })
+      for (const [method, path] of [
+        ["GET", "/sessions"],
+        ["POST", "/sessions"],
+        ["GET", "/sessions/unknown"],
+        ["GET", "/sessions/unknown/events"],
+        ["GET", "/projects"],
+        ["GET", "/providers"],
+        ["PUT", "/user-preference"],
+      ] as const) {
+        const response = await fetch(`${baseUrl}${path}`, { method })
+        expect(response.status, `${method} ${path}`).toBe(404)
+        expect(response.headers.get("content-type")).toContain(
+          "application/json",
+        )
+      }
 
       const post = await fetch(`${baseUrl}/missing-page`, { method: "POST" })
       expect(post.status).toBe(404)
@@ -1143,325 +306,19 @@ describe("HTTP static assets", () => {
       expect(response.headers.get("content-type")).toContain("application/json")
     })
   })
-
-  it("returns the JSON 404 for unknown paths without static assets", async () => {
-    await withHttpServer(async (baseUrl) => {
-      const response = await fetch(`${baseUrl}/`)
-
-      expect(response.status).toBe(404)
-      expect(await response.json()).toEqual({
-        error: {
-          code: ApiErrorCode.NotFound,
-          message: "Route not found.",
-        },
-      })
-    })
-  })
-
-  it("serves project routes from the configured registry", async () => {
-    const rootDir = await mkdtemp(join(tmpdir(), "yakitori-http-projects-"))
-    const projectA = join(rootDir, "project-a")
-    const projectB = join(rootDir, "project-b")
-    await mkdir(projectA)
-    await mkdir(projectB)
-    try {
-      const projectRegistry = createProjectRegistry({
-        registryPath: join(rootDir, "projects.json"),
-        defaultProject: await realpath(projectA),
-      })
-
-      await withListeningServer(
-        createYakitoriHttpServer({
-          handlers: createTestHandlers(),
-          projectRegistry,
-        }),
-        async (baseUrl) => {
-          const listed = await getJson<{ projects: string[] }>(
-            `${baseUrl}/projects`,
-          )
-          expect(listed.status).toBe(200)
-          expect(listed.body.projects).toEqual([await realpath(projectA)])
-
-          const added = await postJson<{ projects: string[] }>(
-            `${baseUrl}/projects`,
-            { path: projectB },
-          )
-          expect(added.status).toBe(200)
-          expect(added.body.projects).toEqual([
-            await realpath(projectA),
-            await realpath(projectB),
-          ])
-
-          for (const invalid of [{}, { path: "  " }, { path: 42 }]) {
-            const rejected = await postJson(`${baseUrl}/projects`, invalid)
-            expect(rejected.status).toBe(400)
-            expect(rejected.body).toMatchObject({
-              error: { code: ApiErrorCode.InvalidInput },
-            })
-          }
-
-          const nonexistent = await postJson(`${baseUrl}/projects`, {
-            path: join(projectB, "missing"),
-          })
-          expect(nonexistent.status).toBe(400)
-          expect(nonexistent.body).toMatchObject({
-            error: {
-              code: ApiErrorCode.InvalidInput,
-              message: expect.stringContaining("Workspace path does not exist"),
-            },
-          })
-        },
-      )
-    } finally {
-      await rm(rootDir, { recursive: true, force: true })
-    }
-  })
-
-  it("keeps project routes at 404 without a registry", async () => {
-    await withHttpServer(async (baseUrl) => {
-      const listed = await fetch(`${baseUrl}/projects`)
-      expect(listed.status).toBe(404)
-
-      const added = await postJson(`${baseUrl}/projects`, { path: "/tmp" })
-      expect(added.status).toBe(404)
-    })
-  })
-
-  it("serves the provider catalog from the configured option", async () => {
-    const providers: ApiListProvidersResponse = {
-      providers: [
-        {
-          name: "faux",
-          defaultModel: "scripted",
-          models: [
-            {
-              id: "scripted",
-              displayName: "scripted",
-              instructionProfileId: "default",
-            },
-          ],
-        },
-        {
-          name: "openai",
-          models: [
-            {
-              id: "gpt-5.1-codex",
-              displayName: "GPT-5.1 Codex",
-              instructionProfileId: "codex",
-              efforts: ["low", "medium", "high"],
-            },
-          ],
-        },
-      ],
-      defaultProvider: "faux",
-      defaultModel: "scripted",
-    }
-
-    await withListeningServer(
-      createYakitoriHttpServer({
-        handlers: createTestHandlers(),
-        providers: async () => providers,
-      }),
-      async (baseUrl) => {
-        const listed = await getJson<ApiListProvidersResponse>(
-          `${baseUrl}/providers`,
-        )
-        expect(listed.status).toBe(200)
-        expect(listed.body).toEqual(providers)
-      },
-    )
-  })
-
-  it("reports an unexpected request failure before returning 500", async () => {
-    const cause = new Error("catalog unavailable")
-    const failures: OperationalFailure[] = []
-    await withListeningServer(
-      createYakitoriHttpServer({
-        handlers: createTestHandlers(),
-        providers: async () => Promise.reject(cause),
-        reportOperationalFailure(failure) {
-          failures.push(failure)
-        },
-      }),
-      async (baseUrl) => {
-        const response = await fetch(`${baseUrl}/providers`)
-
-        expect(response.status).toBe(500)
-        expect(failures).toEqual([
-          {
-            component: "http-server",
-            operation: "handle-request",
-            cause,
-          },
-        ])
-      },
-    )
-  })
-
-  it("holds its request gate token until an error response finishes", async () => {
-    const gate = createRequestGate()
-    const endCalled = deferred<void>()
-    let releaseResponse: (() => void) | undefined
-    const server = createYakitoriHttpServer({
-      handlers: createTestHandlers(),
-      providers: async () => Promise.reject(new Error("catalog unavailable")),
-      requestGate: gate,
-      reportOperationalFailure: () => {},
-    })
-    server.prependListener("request", (_request, response) => {
-      const originalEnd = response.end.bind(response)
-      response.end = ((...args: unknown[]) => {
-        releaseResponse = () => {
-          Reflect.apply(originalEnd, response, args)
-        }
-        endCalled.resolve()
-        return response
-      }) as typeof response.end
-    })
-
-    await withListeningServer(server, async (baseUrl) => {
-      const response = fetch(`${baseUrl}/providers`)
-      await endCalled.promise
-      gate.close()
-      let drained = false
-      const shutdown = gate.shutdown().then(() => {
-        drained = true
-      })
-      await Promise.resolve()
-
-      expect(drained).toBe(false)
-
-      releaseResponse?.()
-      expect((await response).status).toBe(500)
-      await shutdown
-      expect(drained).toBe(true)
-    })
-  })
-
-  it("keeps the providers route at 404 without a catalog", async () => {
-    await withHttpServer(async (baseUrl) => {
-      const listed = await fetch(`${baseUrl}/providers`)
-      expect(listed.status).toBe(404)
-    })
-  })
-
-  it("validates and persists user model preferences", async () => {
-    const rootDir = await mkdtemp(join(tmpdir(), "yakitori-http-config-"))
-    try {
-      const userConfig = createUserConfigStore({
-        configPath: join(rootDir, "config.toml"),
-      })
-      await withListeningServer(
-        createYakitoriHttpServer({
-          handlers: createTestHandlers(),
-          userConfig,
-          availableProviders: ["anthropic", "faux"],
-        }),
-        async (baseUrl) => {
-          for (const invalid of [
-            { provider: "", model: "claude-custom" },
-            { provider: "anthropic", model: "" },
-            { provider: "anthropic", model: "claude-custom", effort: " " },
-            { provider: "missing", model: "arbitrary-slug" },
-          ]) {
-            const response = await putJson(
-              `${baseUrl}/user-preference`,
-              invalid,
-            )
-            expect(response.status).toBe(400)
-            expect(response.body).toMatchObject({
-              error: { code: ApiErrorCode.InvalidInput },
-            })
-          }
-
-          const accepted = await putJson<ApiUpdateUserModelPreferenceResponse>(
-            `${baseUrl}/user-preference`,
-            {
-              provider: "anthropic",
-              model: "unknown-but-valid-slug",
-              effort: "high",
-            },
-          )
-          expect(accepted).toEqual({
-            status: 200,
-            body: {
-              userPreference: {
-                provider: "anthropic",
-                model: "unknown-but-valid-slug",
-                effort: "high",
-              },
-            },
-          })
-          await expect(userConfig.read()).resolves.toEqual(
-            accepted.body.userPreference,
-          )
-        },
-      )
-    } finally {
-      await rm(rootDir, { recursive: true, force: true })
-    }
-  })
-
-  it("keeps the user preference route at 404 without a store", async () => {
-    await withHttpServer(async (baseUrl) => {
-      const response = await putJson(`${baseUrl}/user-preference`, {
-        provider: "faux",
-        model: "scripted",
-      })
-      expect(response.status).toBe(404)
-    })
-  })
 })
 
 async function withHttpServer(
   run: (baseUrl: string) => Promise<void>,
   options?: { readonly staticAssets?: YakitoriStaticAssets },
 ): Promise<void> {
-  const eventHub = createSessionEventHub()
   await withListeningServer(
     createYakitoriHttpServer({
-      handlers: createTestHandlers(eventHub),
-      eventHub,
+      handlers: createFakeHandlers(),
       ...options,
     }),
     run,
   )
-}
-
-function createTestHandlers(eventHub?: SessionEventHub) {
-  const store = new MemoryThreadStore()
-  const manager = new ThreadManager({
-    store,
-    createTurnProcessor: () => ({
-      prepare(_snapshot, input) {
-        const selection = { provider: "faux", model: "scripted" }
-        return {
-          turnId: input.submissionId,
-          selection,
-          configuration: SessionConfiguration.create({
-            selection,
-            workspaceRoot: process.cwd(),
-            enabledTools: [],
-            approvalPolicy: "always_approve",
-            promptCacheKey: input.submissionId,
-          }).snapshot,
-        }
-      },
-      start() {
-        return { completion: Promise.resolve(), abort() {} }
-      },
-    }),
-  })
-  return createThreadServerHandlers({
-    manager,
-    store,
-    sessionDefaults: {
-      workingDirectory: process.cwd(),
-      mateId: "mate_test",
-      mateRevisionId: "mate_revision_test",
-    },
-    ...(eventHub === undefined ? {} : { eventHub }),
-  })
 }
 
 async function withStaticHttpServer(
@@ -1483,12 +340,6 @@ async function withStaticHttpServer(
   } finally {
     await rm(rootDir, { recursive: true, force: true })
   }
-}
-
-async function withJsonlHttpServer(
-  run: (baseUrl: string) => Promise<void>,
-): Promise<void> {
-  await withHttpServer(run)
 }
 
 async function withListeningServer(
@@ -1517,20 +368,6 @@ async function withListeningServer(
   }
 }
 
-async function postJson<T = unknown>(url: string, body: unknown) {
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-  })
-  return {
-    status: response.status,
-    body: (await response.json()) as T,
-  }
-}
-
 function deferred<T>(): {
   readonly promise: Promise<T>
   readonly resolve: (value: T) => void
@@ -1544,100 +381,6 @@ function deferred<T>(): {
     resolve(value) {
       resolvePromise?.(value)
     },
-  }
-}
-
-async function putJson<T = unknown>(url: string, body: unknown) {
-  const response = await fetch(url, {
-    method: "PUT",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-  })
-  return {
-    status: response.status,
-    body: (await response.json()) as T,
-  }
-}
-
-async function getJson<T>(url: string) {
-  const response = await fetch(url)
-  return {
-    status: response.status,
-    body: (await response.json()) as T,
-  }
-}
-
-async function readNextSessionEvent(
-  response: Response,
-): Promise<EventEnvelope> {
-  if (!response.body) throw new Error("Expected a streaming response body.")
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ""
-
-  return await withTimeout(async () => {
-    while (true) {
-      const chunk = await reader.read()
-      if (chunk.done) throw new Error("SSE stream ended before an event.")
-      buffer += decoder.decode(chunk.value, { stream: true })
-
-      const event = parseSseEvent(buffer)
-      if (event) return event
-    }
-  })
-}
-
-async function readSseUntilReplayComplete(response: Response): Promise<string> {
-  return readSseUntil(response, "event: session.replay-complete")
-}
-
-async function readSseUntil(
-  response: Response,
-  marker: string,
-): Promise<string> {
-  if (!response.body) throw new Error("Expected a streaming response body.")
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ""
-
-  return await withTimeout(async () => {
-    while (!buffer.includes(marker)) {
-      const chunk = await reader.read()
-      if (chunk.done) throw new Error("SSE stream ended during replay.")
-      buffer += decoder.decode(chunk.value, { stream: true })
-    }
-    return buffer
-  })
-}
-
-function parseSseEvent(buffer: string): EventEnvelope | undefined {
-  const block = buffer.split("\n\n").find((candidate) => {
-    return candidate.includes("event: session.event")
-  })
-  const data = block
-    ?.split("\n")
-    .find((line) => line.startsWith("data: "))
-    ?.slice("data: ".length)
-
-  if (data === undefined) return undefined
-  return JSON.parse(data) as EventEnvelope
-}
-
-async function withTimeout<T>(run: () => Promise<T>): Promise<T> {
-  let timeout: ReturnType<typeof setTimeout> | undefined
-  try {
-    return await Promise.race([
-      run(),
-      new Promise<T>((_, reject) => {
-        timeout = setTimeout(() => {
-          reject(new Error("Timed out waiting for SSE event."))
-        }, 1_000)
-      }),
-    ])
-  } finally {
-    if (timeout) clearTimeout(timeout)
   }
 }
 

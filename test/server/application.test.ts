@@ -40,6 +40,53 @@ async function listen(server: HttpServer): Promise<string> {
   return `http://${address.address}:${address.port}`
 }
 
+// Minimal JSON-RPC client for the /rpc WebSocket channel: the REST routes
+// these tests used are gone.
+async function rpcRequest<T>(
+  baseUrl: string,
+  method: string,
+  params: unknown,
+): Promise<T> {
+  const ws = new WebSocket(`${baseUrl.replace(/^http/, "ws")}/rpc`)
+  const call = (id: number, requestMethod: string, requestParams: unknown) =>
+    new Promise<T>((resolve, reject) => {
+      const onMessage = (data: WebSocket.RawData) => {
+        const frame = JSON.parse(data.toString()) as {
+          id?: number
+          result?: unknown
+          error?: { message: string }
+        }
+        if (frame.id !== id) return
+        ws.off("message", onMessage)
+        if (frame.error !== undefined) {
+          reject(new Error(frame.error.message))
+          return
+        }
+        resolve(frame.result as T)
+      }
+      ws.on("message", onMessage)
+      ws.send(JSON.stringify({ id, method: requestMethod, params: requestParams }))
+    })
+  try {
+    await new Promise<void>((resolve, reject) => {
+      ws.once("open", resolve)
+      ws.once("error", reject)
+    })
+    await call(1, "initialize", {
+      clientInfo: { name: "application-test", version: "0.0.0" },
+      capabilities: {},
+    })
+    return await call(2, method, params)
+  } finally {
+    // node:http counts the upgraded socket as an open connection, so the
+    // caller's server.close() cannot finish until this close completes.
+    await new Promise<void>((resolve) => {
+      ws.once("close", resolve)
+      ws.close()
+    })
+  }
+}
+
 function testApplicationOptions(input: {
   readonly rootDir: string
   readonly workspace: string
@@ -1439,9 +1486,11 @@ describe("application composition", () => {
       const server = application.createHttpServer()
       try {
         const baseUrl = await listen(server)
-        const response = await fetch(`${baseUrl}/providers`)
-        expect(response.status).toBe(200)
-        const body = (await response.json()) as ApiListProvidersResponse
+        const body = await rpcRequest<ApiListProvidersResponse>(
+          baseUrl,
+          "provider/list",
+          {},
+        )
 
         expect(body.defaultProvider).toBe("openai")
         expect(body.defaultModel).toBe("gpt-custom-9")
@@ -1517,16 +1566,20 @@ describe("application composition", () => {
       const firstServer = first.createHttpServer()
       try {
         const baseUrl = await listen(firstServer)
-        const updated = await fetch(`${baseUrl}/user-preference`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
+        const updated = await rpcRequest<{ userPreference: unknown }>(
+          baseUrl,
+          "userPreference/write",
+          {
             provider: "faux",
             model: "arbitrary-model-slug",
             speed: "priority",
-          }),
+          },
+        )
+        expect(updated.userPreference).toEqual({
+          provider: "faux",
+          model: "arbitrary-model-slug",
+          speed: "priority",
         })
-        expect(updated.status).toBe(200)
       } finally {
         await closeServer(firstServer)
         await first.close()
@@ -1536,9 +1589,11 @@ describe("application composition", () => {
       const secondServer = second.createHttpServer()
       try {
         const baseUrl = await listen(secondServer)
-        const response = await fetch(`${baseUrl}/providers`)
-        expect(response.status).toBe(200)
-        const body = (await response.json()) as ApiListProvidersResponse
+        const body = await rpcRequest<ApiListProvidersResponse>(
+          baseUrl,
+          "provider/list",
+          {},
+        )
         expect(body.userPreference).toEqual({
           provider: "faux",
           model: "arbitrary-model-slug",
@@ -1573,8 +1628,11 @@ describe("application composition", () => {
       const server = application.createHttpServer()
       try {
         const baseUrl = await listen(server)
-        const response = await fetch(`${baseUrl}/providers`)
-        const body = (await response.json()) as ApiListProvidersResponse
+        const body = await rpcRequest<ApiListProvidersResponse>(
+          baseUrl,
+          "provider/list",
+          {},
+        )
 
         expect(
           body.providers.find((provider) => provider.name === "faux"),
@@ -1728,8 +1786,13 @@ describe("codex login registration", () => {
     const server = application.createHttpServer()
     try {
       const baseUrl = await listen(server)
-      const response = await fetch(`${baseUrl}/providers`)
-      return (await response.json()) as ApiListProvidersResponse
+      // Await, not return: the finally below closes the server, and returning
+      // a pending promise would tear it down before the RPC completes.
+      return await rpcRequest<ApiListProvidersResponse>(
+        baseUrl,
+        "provider/list",
+        {},
+      )
     } finally {
       await new Promise<void>((resolve, reject) => {
         server.close((error) => {
