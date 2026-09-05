@@ -1,13 +1,14 @@
+import { realpath } from "node:fs/promises"
+import { basename, isAbsolute, normalize } from "node:path"
 import {
   isYakitoriError,
   type StoredEventEnvelope,
+  YakitoriErrorCode,
 } from "../../kernel/index.ts"
 import type { LiveSessionEvent } from "../../runtime/live-events.ts"
 import type { ServerHandlers } from "../handlers.ts"
 import { requireUserModelPreference } from "../http.ts"
-import type { ProjectRegistry } from "../project-registry.ts"
 import {
-  type ApiAddProjectResponse,
   type ApiAdmitInputRequest,
   type ApiAdmitInputResponse,
   type ApiCancelInputRequest,
@@ -15,6 +16,7 @@ import {
   type ApiCancelTurnRequest,
   type ApiCancelTurnResponse,
   type ApiCompactSessionResponse,
+  type ApiCreateProjectResponse,
   type ApiCreateSessionRequest,
   type ApiCreateSessionResponse,
   type ApiDeleteSessionResponse,
@@ -26,12 +28,19 @@ import {
   type ApiListProvidersResponse,
   type ApiListSessionsResponse,
   type ApiPendingPermission,
+  type ApiReadProjectResponse,
   type ApiReadSessionRequest,
   type ApiReadSessionResponse,
   type ApiResolvePermissionRequest,
+  type ApiUpdateProjectResponse,
   type ApiUpdateUserModelPreferenceResponse,
   type ApiUserModelPreference,
 } from "../protocol.ts"
+import {
+  InvalidProjectCursorError,
+  ProjectMoveOutcome,
+  type ProjectStore,
+} from "../sqlite-project-store.ts"
 import type { UserConfigStore } from "../user-config.ts"
 import { INTERNAL_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND } from "./messages.ts"
 import type { RequestSerializationScope } from "./serialization.ts"
@@ -60,6 +69,7 @@ export type SessionListParams = Readonly<{
   cursor?: string
   limit?: number
   workingDirectory?: string
+  projectId?: string
 }>
 
 export type SessionSubscribeParams = Readonly<{
@@ -71,7 +81,31 @@ export type SessionSubscribeResponse = ApiReadSessionResponse
 
 export type SessionUnsubscribeParams = Readonly<{ sessionId: string }>
 
-export type ProjectAddParams = Readonly<{ path: string }>
+export type ProjectListParams = Readonly<{
+  cursor?: string
+  limit?: number
+}>
+
+export type ProjectReadParams = Readonly<{ projectId: string }>
+
+export type ProjectCreateParams = Readonly<{
+  name?: string
+  roots: readonly string[]
+  idempotencyKey?: string
+}>
+
+export type ProjectUpdateParams = Readonly<{
+  projectId: string
+  name?: string
+  metadata?: Readonly<Record<string, string>>
+}>
+
+export type ProjectMoveParams = Readonly<{
+  projectId: string
+  toPosition: number
+}>
+
+export type ProjectDeleteParams = Readonly<{ projectId: string }>
 
 // Server→client notification payloads. Each event notification carries its
 // durable cursor, so re-subscribe takes `after` and no cursor frame exists.
@@ -91,6 +125,17 @@ export type SessionPermissionRequestedNotification = Readonly<
 >
 
 export type SessionTransientNotification = LiveSessionEvent
+
+// Broadcast to every initialized connection when a Project changes; no-op
+// updates suppress it, matching Codex's ProjectChangedNotification.
+export const projectChangedMethod = "project/changed"
+
+export type ProjectChangeType = "created" | "updated" | "deleted"
+
+export type ProjectChangedNotification = Readonly<{
+  projectId: string
+  changeType: ProjectChangeType
+}>
 
 // The session/permission/request server→client method (Codex parity:
 // approvals are correlated RPCs, not POST + notification). Params carry the
@@ -120,10 +165,12 @@ export type RpcMethodContext = Readonly<{
   connectionId: number
   handlers: ServerHandlers
   subscriptions: SessionSubscriptions
-  projectRegistry: ProjectRegistry | undefined
+  projectStore: ProjectStore | undefined
   providers: (() => Promise<ApiListProvidersResponse>) | undefined
   userConfig: UserConfigStore | undefined
   availableProviders: readonly string[] | undefined
+  // Emits a server→client notification to every initialized connection.
+  broadcastNotification(method: string, params: unknown): void
 }>
 
 export type RpcMethodDefinition = Readonly<{
@@ -239,13 +286,192 @@ function parseSessionUnsubscribeParams(
   return { sessionId }
 }
 
-function parseProjectAddParams(params: unknown): ProjectAddParams {
-  const record = requireParamsRecord(params, "project/add")
-  const path = record.path
-  if (typeof path !== "string" || path.trim() === "") {
-    throw invalidParams("path must be a non-empty string.")
+function parseProjectListParams(params: unknown): ProjectListParams {
+  // Missing params are an empty page request, matching session/list.
+  const record = requireParamsRecord(params ?? {}, "project/list")
+  const cursor = record.cursor
+  if (cursor !== undefined && typeof cursor !== "string") {
+    throw invalidParams("cursor must be a string.")
   }
-  return { path }
+  const limit = record.limit
+  if (
+    limit !== undefined &&
+    (typeof limit !== "number" ||
+      !Number.isInteger(limit) ||
+      limit < 1 ||
+      limit > 100)
+  ) {
+    throw invalidParams("limit must be an integer from 1 to 100.")
+  }
+  return {
+    ...(cursor === undefined ? {} : { cursor }),
+    ...(limit === undefined ? {} : { limit }),
+  }
+}
+
+function parseProjectIdParams(
+  params: unknown,
+  method: string,
+): Readonly<{ projectId: string }> {
+  const record = requireParamsRecord(params, method)
+  const projectId = record.projectId
+  if (typeof projectId !== "string" || projectId.trim() === "") {
+    throw invalidParams("projectId must be a non-empty string.")
+  }
+  return { projectId }
+}
+
+function parseProjectCreateParams(params: unknown): ProjectCreateParams {
+  const record = requireParamsRecord(params, "project/create")
+  const roots = record.roots
+  if (
+    !Array.isArray(roots) ||
+    roots.length === 0 ||
+    !roots.every((root) => typeof root === "string" && root.trim() !== "")
+  ) {
+    throw invalidParams("roots must be a non-empty array of absolute paths.")
+  }
+  const name = record.name
+  if (name !== undefined && typeof name !== "string") {
+    throw invalidParams("name must be a string.")
+  }
+  const idempotencyKey = record.idempotencyKey
+  if (idempotencyKey !== undefined && typeof idempotencyKey !== "string") {
+    throw invalidParams("idempotencyKey must be a string.")
+  }
+  return {
+    roots: roots as string[],
+    ...(name === undefined ? {} : { name: name.trim() }),
+    ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+  }
+}
+
+function parseProjectUpdateParams(params: unknown): ProjectUpdateParams {
+  const { projectId } = parseProjectIdParams(params, "project/update")
+  const record = requireParamsRecord(params, "project/update")
+  const name = record.name
+  if (name !== undefined && (typeof name !== "string" || name.trim() === "")) {
+    throw invalidParams("name must be a non-empty string.")
+  }
+  const metadata = record.metadata
+  if (metadata !== undefined && !isStringRecord(metadata)) {
+    throw invalidParams("metadata must be an object with string values.")
+  }
+  return {
+    projectId,
+    ...(name === undefined ? {} : { name: name.trim() }),
+    ...(metadata === undefined ? {} : { metadata }),
+  }
+}
+
+function parseProjectMoveParams(params: unknown): ProjectMoveParams {
+  const { projectId } = parseProjectIdParams(params, "project/move")
+  const record = requireParamsRecord(params, "project/move")
+  const toPosition = record.toPosition
+  if (
+    typeof toPosition !== "number" ||
+    !Number.isInteger(toPosition) ||
+    toPosition < 0
+  ) {
+    throw invalidParams("toPosition must be a non-negative integer.")
+  }
+  return { projectId, toPosition }
+}
+
+function isStringRecord(
+  value: unknown,
+): value is Readonly<Record<string, string>> {
+  return (
+    isRecord(value) &&
+    Object.values(value).every((entry) => typeof entry === "string")
+  )
+}
+
+// Logical dedupe first, then a realpath pass: distinct paths that resolve to
+// the same directory are rejected (Codex validate_roots). Roots that do not
+// exist keep their logical path — canonicalization is best-effort.
+async function canonicalizeProjectRoots(
+  roots: readonly string[],
+): Promise<string[]> {
+  const logical = new Set<string>()
+  const canonical = new Set<string>()
+  const result: string[] = []
+  for (const root of roots) {
+    if (!isAbsolute(root)) {
+      throw invalidParams(`Project root must be an absolute path: ${root}`)
+    }
+    const normalized = normalize(root)
+    if (logical.has(normalized)) {
+      throw invalidParams(`Duplicate project root: ${normalized}`)
+    }
+    logical.add(normalized)
+    let resolved: string | undefined
+    try {
+      resolved = await realpath(normalized)
+    } catch {
+      resolved = undefined
+    }
+    if (resolved !== undefined) {
+      if (canonical.has(resolved)) {
+        throw invalidParams(`Duplicate resolved project root: ${normalized}`)
+      }
+      canonical.add(resolved)
+    }
+    result.push(normalized)
+  }
+  return result
+}
+
+function requireProjectStore(context: RpcMethodContext, method: string) {
+  if (context.projectStore === undefined) throw unavailable(method)
+  return context.projectStore
+}
+
+function projectNotFound(projectId: string): RpcMethodError {
+  return new RpcMethodError(
+    INTERNAL_ERROR,
+    `Project ${projectId} was not found.`,
+    { code: ApiErrorCode.NotFound, details: { projectId } },
+  )
+}
+
+// Store failures map onto the same wire shape as adaptHandlerResult: input
+// and cursor problems are INVALID_PARAMS, everything else keeps its
+// ApiErrorCode in error.data under INTERNAL_ERROR.
+function mapProjectStoreError(error: unknown): never {
+  if (error instanceof InvalidProjectCursorError) {
+    throw new RpcMethodError(INVALID_PARAMS, error.message, {
+      code: ApiErrorCode.InvalidCursor,
+    })
+  }
+  if (isYakitoriError(error)) {
+    if (error.code === YakitoriErrorCode.InvalidArgument) {
+      throw new RpcMethodError(INVALID_PARAMS, error.message, {
+        code: ApiErrorCode.InvalidInput,
+        ...(error.details === undefined ? {} : { details: error.details }),
+      })
+    }
+    if (error.code === YakitoriErrorCode.InvalidState) {
+      throw new RpcMethodError(INTERNAL_ERROR, error.message, {
+        code: ApiErrorCode.Conflict,
+        ...(error.details === undefined ? {} : { details: error.details }),
+      })
+    }
+  }
+  throw error
+}
+
+function notifyProjectChanged(
+  context: RpcMethodContext,
+  projectId: string,
+  changeType: ProjectChangeType,
+): () => Promise<void> {
+  return async () => {
+    context.broadcastNotification(projectChangedMethod, {
+      projectId,
+      changeType,
+    } satisfies ProjectChangedNotification)
+  }
 }
 
 function requireParamsRecord(
@@ -375,32 +601,156 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
   {
     method: "project/list",
     scope: () => ({ kind: "globalSharedRead", name: "projects" }),
-    async invoke(_params, context) {
-      if (context.projectRegistry === undefined) {
-        throw unavailable("project/list")
+    async invoke(params, context) {
+      const store = requireProjectStore(context, "project/list")
+      const request = parseProjectListParams(params)
+      try {
+        const page = await store.listProjects(request)
+        return {
+          result: {
+            projects: page.projects,
+            ...(page.nextCursor === undefined
+              ? {}
+              : { nextCursor: page.nextCursor }),
+          } satisfies ApiListProjectsResponse,
+        }
+      } catch (error) {
+        mapProjectStoreError(error)
       }
-      const projects = await context.projectRegistry.list()
-      return { result: { projects } satisfies ApiListProjectsResponse }
     },
   },
   {
-    method: "project/add",
+    method: "project/read",
+    scope: () => ({ kind: "globalSharedRead", name: "projects" }),
+    async invoke(params, context) {
+      const store = requireProjectStore(context, "project/read")
+      const request = parseProjectIdParams(params, "project/read")
+      try {
+        const project = await store.readProject(request.projectId)
+        if (project === undefined) throw projectNotFound(request.projectId)
+        return { result: { project } satisfies ApiReadProjectResponse }
+      } catch (error) {
+        mapProjectStoreError(error)
+      }
+    },
+  },
+  {
+    method: "project/create",
     scope: () => ({ kind: "global", name: "projects" }),
     async invoke(params, context) {
-      if (context.projectRegistry === undefined) {
-        throw unavailable("project/add")
-      }
-      const request = parseProjectAddParams(params)
+      const store = requireProjectStore(context, "project/create")
+      const request = parseProjectCreateParams(params)
+      const roots = await canonicalizeProjectRoots(request.roots)
       try {
-        const projects = await context.projectRegistry.add(request.path)
-        return { result: { projects } satisfies ApiAddProjectResponse }
-      } catch (error) {
-        // resolveWorkspaceDirectory rejects invalid paths with a plain Error;
-        // anything else is an unexpected registry failure.
-        if (error instanceof Error && !isYakitoriError(error)) {
-          throw invalidParams(error.message)
+        const created = await store.createProject({
+          name: request.name ?? basename(roots[0] ?? ""),
+          roots,
+          ...(request.idempotencyKey === undefined
+            ? {}
+            : { idempotencyKey: request.idempotencyKey }),
+        })
+        return {
+          result: {
+            project: created.project,
+          } satisfies ApiCreateProjectResponse,
+          ...(created.created
+            ? {
+                afterResponse: notifyProjectChanged(
+                  context,
+                  created.project.id,
+                  "created",
+                ),
+              }
+            : {}),
         }
-        throw error
+      } catch (error) {
+        mapProjectStoreError(error)
+      }
+    },
+  },
+  {
+    method: "project/update",
+    scope: () => ({ kind: "global", name: "projects" }),
+    async invoke(params, context) {
+      const store = requireProjectStore(context, "project/update")
+      const request = parseProjectUpdateParams(params)
+      try {
+        const updated = await store.updateProject(request.projectId, {
+          ...(request.name === undefined ? {} : { name: request.name }),
+          ...(request.metadata === undefined
+            ? {}
+            : { metadata: request.metadata }),
+        })
+        if (updated === undefined) throw projectNotFound(request.projectId)
+        return {
+          result: {
+            project: updated.project,
+          } satisfies ApiUpdateProjectResponse,
+          // No-op updates suppress the notification, Codex-style.
+          ...(updated.changed
+            ? {
+                afterResponse: notifyProjectChanged(
+                  context,
+                  request.projectId,
+                  "updated",
+                ),
+              }
+            : {}),
+        }
+      } catch (error) {
+        mapProjectStoreError(error)
+      }
+    },
+  },
+  {
+    method: "project/move",
+    scope: () => ({ kind: "global", name: "projects" }),
+    async invoke(params, context) {
+      const store = requireProjectStore(context, "project/move")
+      const request = parseProjectMoveParams(params)
+      try {
+        const outcome = await store.moveProject(
+          request.projectId,
+          request.toPosition,
+        )
+        if (outcome === undefined) throw projectNotFound(request.projectId)
+        return {
+          result: {},
+          ...(outcome === ProjectMoveOutcome.Moved
+            ? {
+                afterResponse: notifyProjectChanged(
+                  context,
+                  request.projectId,
+                  "updated",
+                ),
+              }
+            : {}),
+        }
+      } catch (error) {
+        mapProjectStoreError(error)
+      }
+    },
+  },
+  {
+    method: "project/delete",
+    scope: () => ({ kind: "global", name: "projects" }),
+    async invoke(params, context) {
+      const store = requireProjectStore(context, "project/delete")
+      const request = parseProjectIdParams(params, "project/delete")
+      try {
+        if (!(await store.deleteProject(request.projectId))) {
+          throw projectNotFound(request.projectId)
+        }
+        return {
+          result: {},
+          afterResponse: notifyProjectChanged(
+            context,
+            request.projectId,
+            "deleted",
+          ),
+        }
+      } catch (error) {
+        mapProjectStoreError(error)
       }
     },
   },
@@ -454,8 +804,12 @@ export type RpcMethodParams = Readonly<{
   "session/turn/cancel": ApiCancelTurnRequest
   "session/subscribe": SessionSubscribeParams
   "session/unsubscribe": SessionUnsubscribeParams
-  "project/list": Readonly<Record<string, never>>
-  "project/add": ProjectAddParams
+  "project/list": ProjectListParams
+  "project/read": ProjectReadParams
+  "project/create": ProjectCreateParams
+  "project/update": ProjectUpdateParams
+  "project/move": ProjectMoveParams
+  "project/delete": ProjectDeleteParams
   "provider/list": Readonly<Record<string, never>>
   "userPreference/write": ApiUserModelPreference
 }>
@@ -474,7 +828,11 @@ export type RpcMethodResponses = Readonly<{
   "session/subscribe": SessionSubscribeResponse
   "session/unsubscribe": Readonly<Record<string, never>>
   "project/list": ApiListProjectsResponse
-  "project/add": ApiAddProjectResponse
+  "project/read": ApiReadProjectResponse
+  "project/create": ApiCreateProjectResponse
+  "project/update": ApiUpdateProjectResponse
+  "project/move": Readonly<Record<string, never>>
+  "project/delete": Readonly<Record<string, never>>
   "provider/list": ApiListProvidersResponse
   "userPreference/write": ApiUpdateUserModelPreferenceResponse
 }>

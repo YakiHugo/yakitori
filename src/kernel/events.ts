@@ -366,6 +366,7 @@ export type SessionCreatedEvent = {
   readonly data: {
     readonly title?: string
     readonly workingDirectory?: string
+    readonly projectId?: string
     readonly mateId?: string
     readonly mateRevisionId?: string
     readonly conversationId?: string
@@ -772,6 +773,7 @@ function requireKernelEvent(value: unknown): asserts value is KernelEvent {
           onlyKeys(data, [
             "title",
             "workingDirectory",
+            "projectId",
             "mateId",
             "mateRevisionId",
             "conversationId",
@@ -1624,6 +1626,7 @@ function optionalFieldsAreValid(data: Record<string, unknown>): boolean {
   for (const key of [
     "title",
     "workingDirectory",
+    "projectId",
     "mateId",
     "mateRevisionId",
     "conversationId",

@@ -37,6 +37,11 @@ import type {
   RuntimePermissionRequest,
 } from "../runtime/permission-gate.ts"
 import {
+  consoleOperationalFailureReporter,
+  type OperationalFailureReporter,
+  reportOperationalFailure,
+} from "./operational-errors.ts"
+import {
   type ApiAdmitInputResponse,
   type ApiCancelInputResponse,
   type ApiCancelTurnResponse,
@@ -53,11 +58,7 @@ import {
   type ApiSessionDetail,
   type ApiSessionSummary,
 } from "./protocol.ts"
-import {
-  consoleOperationalFailureReporter,
-  type OperationalFailureReporter,
-  reportOperationalFailure,
-} from "./operational-errors.ts"
+import type { ProjectStore } from "./sqlite-project-store.ts"
 
 export type SessionCreateDefaults = {
   readonly workingDirectory: string
@@ -89,6 +90,8 @@ export type ThreadServerHandlerOptions = {
   readonly maxInputBytes?: number
   readonly availableProviders?: readonly string[]
   readonly rolloutAssets?: RolloutAssets
+  // Enables projectId on session create/list and orphan suppression on reads.
+  readonly projectStore?: ProjectStore
   readonly reportOperationalFailure?: OperationalFailureReporter
 }
 
@@ -353,6 +356,16 @@ export function createThreadServerHandlers(
           requireCreateSessionRequest(input),
           options.sessionDefaults,
         )
+        if (request.projectId !== undefined) {
+          const project = await options.projectStore?.readProject(
+            request.projectId,
+          )
+          if (project === undefined) {
+            throw invalidInput("projectId must name an existing project.", {
+              field: "projectId",
+            })
+          }
+        }
         const thread = await options.manager.createThread({
           ...request,
           ...(request.parentSessionId === undefined
@@ -374,7 +387,7 @@ export function createThreadServerHandlers(
         publishedThrough.set(thread.id, event.seq)
         options.eventHub?.publishDurable([event])
         return ok(201, {
-          session: mapStoredThread(stored, thread, options),
+          session: await mapStoredThread(stored, thread, options),
           event,
         })
       } catch (error) {
@@ -385,11 +398,25 @@ export function createThreadServerHandlers(
     async listSessions(input = {}) {
       try {
         const request = requireListSessionsRequest(input)
+        if (request.projectId !== undefined) {
+          const project = await options.projectStore?.readProject(
+            request.projectId,
+          )
+          if (project === undefined) {
+            // Orphan-on-delete at the read path: a filter naming a deleted (or
+            // never known) project matches nothing, since orphaned Sessions
+            // read as having no project.
+            return ok(200, { sessions: [] })
+          }
+        }
         const result = await options.manager.listThreads({
           limit: request.limit,
           ...(request.workingDirectory === undefined
             ? {}
             : { workingDirectory: request.workingDirectory }),
+          ...(request.projectId === undefined
+            ? {}
+            : { projectId: request.projectId }),
           ...(request.cursor === undefined
             ? {}
             : {
@@ -397,11 +424,15 @@ export function createThreadServerHandlers(
                   request.cursor,
                   request.limit,
                   request.workingDirectory,
+                  request.projectId,
                 ),
               }),
         })
+        const liveProjects = await liveProjectIds(options, result.threads)
         return ok(200, {
-          sessions: result.threads.map(mapThreadSummary),
+          sessions: result.threads.map((thread) =>
+            mapThreadSummary(thread, liveProjects),
+          ),
           ...(result.nextCursor === undefined
             ? {}
             : {
@@ -409,6 +440,7 @@ export function createThreadServerHandlers(
                   result.nextCursor,
                   request.limit,
                   request.workingDirectory,
+                  request.projectId,
                 ),
               }),
         })
@@ -425,7 +457,7 @@ export function createThreadServerHandlers(
           throw notFound(`Session ${sessionId} was not found.`, { sessionId })
         }
         return ok(200, {
-          session: mapStoredThread(
+          session: await mapStoredThread(
             stored,
             options.manager.getThread(sessionId),
             options,
@@ -529,7 +561,7 @@ export function createThreadServerHandlers(
         publishedThrough.set(forked.thread.id, threadSeq(stored))
         options.eventHub?.publishDurable(events)
         return ok(201, {
-          session: mapStoredThread(stored, forked.thread, options),
+          session: await mapStoredThread(stored, forked.thread, options),
           historyEndSeqExclusive:
             (forked.result.historyEndSeqExclusive ?? 1) + 1,
           events,
@@ -775,7 +807,10 @@ export function createThreadServerHandlers(
   }
 }
 
-function mapThreadSummary(thread: ThreadSummary): ApiSessionSummary {
+function mapThreadSummary(
+  thread: ThreadSummary,
+  liveProjects: ReadonlySet<string> | undefined,
+): ApiSessionSummary {
   return {
     id: thread.id,
     conversationId: thread.conversationId,
@@ -786,6 +821,10 @@ function mapThreadSummary(thread: ThreadSummary): ApiSessionSummary {
     ...(thread.workingDirectory === undefined
       ? {}
       : { workingDirectory: thread.workingDirectory }),
+    ...(thread.projectId === undefined ||
+    (liveProjects !== undefined && !liveProjects.has(thread.projectId))
+      ? {}
+      : { projectId: thread.projectId }),
     ...(thread.mateId === undefined ? {} : { mateId: thread.mateId }),
     ...(thread.mateRevisionId === undefined
       ? {}
@@ -803,11 +842,11 @@ function mapThreadSummary(thread: ThreadSummary): ApiSessionSummary {
   }
 }
 
-function mapStoredThread(
+async function mapStoredThread(
   stored: StoredThread,
   live: AgentThread | undefined,
   options: ThreadServerHandlerOptions,
-): ApiSessionDetail {
+): Promise<ApiSessionDetail> {
   const rollout = stored.rollout.map((record) => record.item)
   const contexts = rollout.filter(
     (item): item is Extract<RolloutItem, { readonly type: "turn_context" }> =>
@@ -843,8 +882,9 @@ function mapStoredThread(
     ...stored.metadata,
     seq: Math.max(0, threadSeq(stored) - 1),
   }
+  const liveProjects = await liveProjectIds(options, [stored.metadata])
   return {
-    ...mapThreadSummary(summary),
+    ...mapThreadSummary(summary, liveProjects),
     ...(live?.snapshot().activeTurnId === undefined
       ? {}
       : { activeTurnId: live.snapshot().activeTurnId }),
@@ -865,6 +905,31 @@ function mapStoredThread(
       tools,
     },
   }
+}
+
+// Resolves which of the referenced projectIds still exist. Returns undefined
+// when no project store is configured (projectIds then pass through); with a
+// store, an id absent from the result reads as no project — the append-only
+// orphan-on-delete contract, deliberately replacing Codex's `ON DELETE SET
+// NULL` UPDATE, which a JSONL rollout cannot perform.
+async function liveProjectIds(
+  options: ThreadServerHandlerOptions,
+  threads: readonly { readonly projectId?: string }[],
+): Promise<Set<string> | undefined> {
+  const store = options.projectStore
+  if (store === undefined) return undefined
+  const ids = [
+    ...new Set(
+      threads.flatMap((thread) =>
+        thread.projectId === undefined ? [] : [thread.projectId],
+      ),
+    ),
+  ]
+  const live = new Set<string>()
+  for (const id of ids) {
+    if ((await store.readProject(id)) !== undefined) live.add(id)
+  }
+  return live
 }
 
 function mapRolloutEvent(
@@ -890,6 +955,9 @@ function mapRolloutEvent(
           ...(metadata.workingDirectory === undefined
             ? {}
             : { workingDirectory: metadata.workingDirectory }),
+          ...(metadata.projectId === undefined
+            ? {}
+            : { projectId: metadata.projectId }),
           ...(metadata.mateId === undefined ? {} : { mateId: metadata.mateId }),
           ...(metadata.mateRevisionId === undefined
             ? {}
@@ -1114,6 +1182,7 @@ function requireCreateSessionRequest(input: unknown) {
   return {
     ...optionalStringField(record, "title"),
     ...optionalStringField(record, "workingDirectory"),
+    ...optionalStringField(record, "projectId"),
     ...optionalStringField(record, "mateId"),
     ...optionalStringField(record, "mateRevisionId"),
     ...optionalSessionIdField(record, "parentSessionId"),
@@ -1125,6 +1194,7 @@ async function applySessionCreateDefaults(
   request: {
     readonly title?: string
     readonly workingDirectory?: string
+    readonly projectId?: string
     readonly mateId?: string
     readonly mateRevisionId?: string
     readonly parentSessionId?: string
@@ -1198,11 +1268,13 @@ function requireListSessionsRequest(input: unknown) {
     record.workingDirectory,
     "workingDirectory",
   )
+  const projectId = requireOptionalString(record.projectId, "projectId")
 
   return {
     limit,
     ...(cursor === undefined ? {} : { cursor }),
     ...(workingDirectory === undefined ? {} : { workingDirectory }),
+    ...(projectId === undefined ? {} : { projectId }),
   }
 }
 
@@ -1677,6 +1749,7 @@ function encodeSessionListCursor(
   anchor: string,
   limit: number,
   workingDirectory: string | undefined,
+  projectId: string | undefined,
 ): string {
   return Buffer.from(
     JSON.stringify({
@@ -1686,6 +1759,7 @@ function encodeSessionListCursor(
       limit,
       anchor,
       ...(workingDirectory === undefined ? {} : { workingDirectory }),
+      ...(projectId === undefined ? {} : { projectId }),
     }),
     "utf8",
   ).toString("base64url")
@@ -1695,6 +1769,7 @@ function decodeSessionListCursor(
   cursor: string,
   limit: number,
   workingDirectory: string | undefined,
+  projectId: string | undefined,
 ): string {
   const payload = parseCursorPayload(cursor)
   if (
@@ -1703,6 +1778,7 @@ function decodeSessionListCursor(
     payload.order === sessionListOrder &&
     payload.limit === limit &&
     payload.workingDirectory === workingDirectory &&
+    payload.projectId === projectId &&
     typeof payload.anchor === "string"
   ) {
     return payload.anchor

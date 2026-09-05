@@ -1,11 +1,11 @@
 import { mkdir, realpath, stat } from "node:fs/promises"
-import { join } from "node:path"
+import { basename, join } from "node:path"
 import packageJson from "../../package.json" with { type: "json" }
 import {
-  JsonlThreadStore,
   createSqliteAgentGraphStore,
-  ThreadManager,
+  JsonlThreadStore,
   type SqliteAgentGraphStore,
+  ThreadManager,
   type ThreadStore,
 } from "../core/index.ts"
 import { createRolloutAssets } from "../kernel/index.ts"
@@ -18,31 +18,31 @@ import {
   type SqliteMateStore,
 } from "../mates/index.ts"
 import {
+  type AgentRuntime,
+  type ApprovalPolicy,
   acquireRuntimeLock,
   type CodexLogin,
-  createAnthropicProvider,
   createAgentRuntime,
-  type AgentRuntime,
+  createAnthropicProvider,
   createCodexProvider,
   createDefaultTools,
-  createOpenAIProvider,
   createModelProvider,
-  createProviderContinuationScope,
+  createOpenAIProvider,
   createPermissionGate,
+  createProviderContinuationScope,
   createProviderRegistry,
   createToolRegistry,
   createTurnProcessor,
   createUserShellEnv,
   GROK_API_BASE_URL,
-  ModelStopReason,
-  type ApprovalPolicy,
-  type RuntimeLock,
   type ModelProvider,
+  ModelStopReason,
+  type RuntimeLock,
   readCodexLogin,
   resolveGrokAccessToken,
   resolveModel,
-  type StreamFn,
   type ShellEnvironmentPolicy,
+  type StreamFn,
   type UserShellEnv,
 } from "../runtime/index.ts"
 import { createSessionEventHub } from "./event-hub.ts"
@@ -58,13 +58,16 @@ import {
   type OperationalFailureReporter,
   reportOperationalFailure,
 } from "./operational-errors.ts"
-import type { RequestGate } from "./request-gate.ts"
-import { createProjectRegistry } from "./project-registry.ts"
 import type {
   ApiListProvidersResponse,
   ApiProviderModel,
   ApiProviderSummary,
 } from "./protocol.ts"
+import type { RequestGate } from "./request-gate.ts"
+import {
+  createSqliteProjectStore,
+  type SqliteProjectStore,
+} from "./sqlite-project-store.ts"
 import { createUserConfigStore } from "./user-config.ts"
 
 const defaultMateProfile = {
@@ -90,6 +93,7 @@ export type YakitoriApplicationOptions = {
   readonly activeMateId?: string
   readonly guiStaticDir?: string
   readonly mateDatabasePath?: string
+  readonly projectDatabasePath?: string
   readonly rootDir?: string
   readonly sessionStoreRoot?: string
   readonly workspace?: string
@@ -111,6 +115,7 @@ export type YakitoriApplication = {
   readonly handlers: ServerHandlers
   readonly mateKernel: MateKernel
   readonly mateDatabasePath: string
+  readonly projectStore: SqliteProjectStore
   readonly threadManager: ThreadManager
   readonly threadStore: ThreadStore
   readonly rolloutAssets: ReturnType<typeof createRolloutAssets>
@@ -139,6 +144,8 @@ export async function createYakitoriApplication(
     options.sessionStoreRoot ?? join(rootDir, "sessions")
   const mateDatabasePath =
     options.mateDatabasePath ?? join(rootDir, "mates.sqlite")
+  const projectDatabasePath =
+    options.projectDatabasePath ?? join(rootDir, "projects.sqlite")
   const workspace = await resolveWorkspaceDirectory(
     options.workspace ?? process.env.YAKITORI_WORKSPACE ?? process.cwd(),
   )
@@ -152,6 +159,7 @@ export async function createYakitoriApplication(
   let agentRuntimeForCleanup: AgentRuntime | undefined
   let agentGraphStoreForCleanup: SqliteAgentGraphStore | undefined
   let mateStore: SqliteMateStore | undefined
+  let projectStoreForCleanup: SqliteProjectStore | undefined
 
   try {
     await mkdir(configuredSessionStoreRoot, { recursive: true })
@@ -166,10 +174,11 @@ export async function createYakitoriApplication(
       reportOperationalFailure: reporter,
     })
     const permissionGate = createPermissionGate()
-    const projectRegistry = createProjectRegistry({
-      defaultProject: workspace,
-      reportOperationalFailure: reporter,
+    const ownedProjectStore = createSqliteProjectStore({
+      databasePath: projectDatabasePath,
     })
+    projectStoreForCleanup = ownedProjectStore
+    await ensureWorkspaceProject(ownedProjectStore, workspace)
     const userConfig = createUserConfigStore({
       reportOperationalFailure: reporter,
       ...(options.userConfigPath === undefined
@@ -316,6 +325,7 @@ export async function createYakitoriApplication(
       store: threadStore,
       eventHub,
       sessionDefaults,
+      projectStore: ownedProjectStore,
       resolvePermission: (input) => permissionGate.resolve(input),
       listPendingPermissions: (sessionId) => permissionGate.list(sessionId),
       availableProviders: providerRegistry.providers,
@@ -328,6 +338,7 @@ export async function createYakitoriApplication(
       handlers,
       mateKernel,
       mateDatabasePath,
+      projectStore: ownedProjectStore,
       threadManager,
       threadStore,
       rolloutAssets,
@@ -343,7 +354,7 @@ export async function createYakitoriApplication(
         return createYakitoriHttpServer({
           eventHub,
           handlers,
-          projectRegistry,
+          projectStore: ownedProjectStore,
           providers,
           userConfig,
           availableProviders: providerRegistry.providers,
@@ -364,6 +375,7 @@ export async function createYakitoriApplication(
           threadManager,
           handlers.close,
           ownedMateStore.close,
+          ownedProjectStore.close,
           agentRuntime.close,
           agentGraphStore.close,
           runtimeLock,
@@ -377,6 +389,7 @@ export async function createYakitoriApplication(
         threadManagerForCleanup,
         undefined,
         mateStore?.close,
+        projectStoreForCleanup?.close,
         agentRuntimeForCleanup?.close,
         agentGraphStoreForCleanup?.close,
         runtimeLock,
@@ -629,6 +642,7 @@ async function closeApplicationResources(
   threadManager: ThreadManager | undefined,
   closeHandlers: (() => Promise<void>) | undefined,
   closeMateStore: (() => void) | undefined,
+  closeProjectStore: (() => void) | undefined,
   closeAgentRuntime: (() => Promise<void>) | undefined,
   closeAgentGraphStore: (() => void) | undefined,
   runtimeLock: RuntimeLock | undefined,
@@ -655,6 +669,11 @@ async function closeApplicationResources(
     errors.push(error)
   }
   try {
+    closeProjectStore?.()
+  } catch (error) {
+    errors.push(error)
+  }
+  try {
     closeAgentGraphStore?.()
   } catch (error) {
     errors.push(error)
@@ -667,6 +686,32 @@ async function closeApplicationResources(
   if (errors.length > 0) {
     throw new AggregateError(errors, "Failed to close Yakitori application.")
   }
+}
+
+// The workspace root is always a project (C8-D2 startup default), preserving
+// the flat registry's "workspace is always listed" behavior. Idempotent by
+// root membership; no idempotency key, because a user-deleted workspace
+// project is recreated on the next start rather than reported as deleted.
+async function ensureWorkspaceProject(
+  store: SqliteProjectStore,
+  workspace: string,
+): Promise<void> {
+  let cursor: string | undefined
+  for (;;) {
+    const page = await store.listProjects({
+      limit: 100,
+      ...(cursor === undefined ? {} : { cursor }),
+    })
+    if (page.projects.some((project) => project.roots.includes(workspace))) {
+      return
+    }
+    if (page.nextCursor === undefined) break
+    cursor = page.nextCursor
+  }
+  await store.createProject({
+    name: basename(workspace) || workspace,
+    roots: [workspace],
+  })
 }
 
 export async function resolveWorkspaceDirectory(

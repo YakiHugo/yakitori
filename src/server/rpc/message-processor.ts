@@ -5,17 +5,17 @@ import {
   type OperationalFailureReporter,
   reportOperationalFailure,
 } from "../operational-errors.ts"
-import type { ProjectRegistry } from "../project-registry.ts"
 import { ApiErrorCode, type ApiListProvidersResponse } from "../protocol.ts"
+import type { ProjectStore } from "../sqlite-project-store.ts"
 import type { UserConfigStore } from "../user-config.ts"
-import { ConnectionRpcGate } from "./connection-gate.ts"
 import { RpcConnectionState } from "./connection.ts"
+import { ConnectionRpcGate } from "./connection-gate.ts"
 import {
   errorResponse,
   INTERNAL_ERROR,
   INVALID_REQUEST,
-  JsonRpcParseError,
   type JsonRpcMessage,
+  JsonRpcParseError,
   type JsonRpcRequest,
   METHOD_NOT_FOUND,
   parseJsonRpcMessage,
@@ -28,13 +28,16 @@ import {
   type InitializeParams,
   type InitializeResponse,
   parseInitializeParams,
-  RpcMethodError,
   type RpcMethodContext,
   type RpcMethodDefinition,
+  RpcMethodError,
   type RpcMethodOutcome,
   rpcMethods,
 } from "./methods.ts"
-import { PendingServerRequests, type PendingServerRequest } from "./pending-requests.ts"
+import {
+  type PendingServerRequest,
+  PendingServerRequests,
+} from "./pending-requests.ts"
 import { RequestSerializationQueues } from "./serialization.ts"
 import {
   createSessionSubscriptions,
@@ -46,7 +49,7 @@ import {
 export type MessageProcessorOptions = Readonly<{
   handlers: ServerHandlers
   eventHub?: SessionEventHub
-  projectRegistry?: ProjectRegistry
+  projectStore?: ProjectStore
   providers?: () => Promise<ApiListProvidersResponse>
   userConfig?: UserConfigStore
   availableProviders?: readonly string[]
@@ -82,7 +85,7 @@ export class MessageProcessor {
   readonly pendingServerRequests = new PendingServerRequests()
 
   private readonly handlers: ServerHandlers
-  private readonly projectRegistry: ProjectRegistry | undefined
+  private readonly projectStore: ProjectStore | undefined
   private readonly providers:
     | (() => Promise<ApiListProvidersResponse>)
     | undefined
@@ -100,7 +103,7 @@ export class MessageProcessor {
 
   constructor(options: MessageProcessorOptions) {
     this.handlers = options.handlers
-    this.projectRegistry = options.projectRegistry
+    this.projectStore = options.projectStore
     this.providers = options.providers
     this.userConfig = options.userConfig
     this.availableProviders = options.availableProviders
@@ -263,10 +266,12 @@ export class MessageProcessor {
       connectionId,
       handlers: this.handlers,
       subscriptions: this.subscriptions,
-      projectRegistry: this.projectRegistry,
+      projectStore: this.projectStore,
       providers: this.providers,
       userConfig: this.userConfig,
       availableProviders: this.availableProviders,
+      broadcastNotification: (method, params) =>
+        this.broadcastNotification(method, params),
     }
     const runUnderGate = async (): Promise<void> => {
       try {
@@ -404,6 +409,15 @@ export class MessageProcessor {
       return
     }
     this.emitMessage(connection, { method, params })
+  }
+
+  // Resource-wide notifications (project/changed) go to every initialized
+  // connection, honoring each connection's notification opt-outs.
+  broadcastNotification(method: string, params: unknown): void {
+    for (const [connectionId, connection] of this.connections) {
+      if (!connection.state.initialized) continue
+      this.notify(connectionId, method, params)
+    }
   }
 
   // Server→client requests are not notifications: they bypass the opt-out

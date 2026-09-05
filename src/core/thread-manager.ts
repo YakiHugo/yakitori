@@ -19,6 +19,7 @@ export type CreateThreadInput = {
   readonly threadId?: string
   readonly title?: string
   readonly workingDirectory?: string
+  readonly projectId?: string
   readonly mateId?: string
   readonly mateRevisionId?: string
   readonly parentThreadId?: string
@@ -110,6 +111,9 @@ export class ThreadManager {
         ...(input.workingDirectory === undefined
           ? {}
           : { workingDirectory: input.workingDirectory }),
+        ...(input.projectId === undefined
+          ? {}
+          : { projectId: input.projectId }),
         ...(input.mateId === undefined ? {} : { mateId: input.mateId }),
         ...(input.mateRevisionId === undefined
           ? {}

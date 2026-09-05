@@ -1,5 +1,6 @@
 import { constants } from "node:fs"
 import {
+  type FileHandle,
   mkdir,
   open,
   readdir,
@@ -8,12 +9,12 @@ import {
   rm,
   stat,
   truncate,
-  type FileHandle,
 } from "node:fs/promises"
 import { basename, dirname, join, resolve } from "node:path"
 // Node has no advisory file-lock API; fs-ext supplies the same OS flock
 // ownership boundary that Codex uses for cross-process rollout writers.
 import { flock } from "fs-ext"
+import { createYakitoriError, YakitoriErrorCode } from "../kernel/errors.ts"
 import {
   EventType,
   isJsonObject,
@@ -23,7 +24,6 @@ import {
   isSessionConfigurationSnapshot,
   isTokenUsage,
 } from "../kernel/events.ts"
-import { createYakitoriError, YakitoriErrorCode } from "../kernel/errors.ts"
 import { isStorageKey } from "../kernel/ids.ts"
 import type {
   HistoryPosition,
@@ -472,8 +472,10 @@ export class JsonlThreadStore implements ThreadStore {
     const matching = summaries
       .filter(
         (thread) =>
-          input.workingDirectory === undefined ||
-          thread.workingDirectory === input.workingDirectory,
+          (input.workingDirectory === undefined ||
+            thread.workingDirectory === input.workingDirectory) &&
+          (input.projectId === undefined ||
+            thread.projectId === input.projectId),
       )
       .sort(
         (left, right) =>
@@ -1275,6 +1277,7 @@ function isThreadMetadata(value: unknown): value is ThreadMetadata {
       "updatedAt",
       "title",
       "workingDirectory",
+      "projectId",
       "mateId",
       "mateRevisionId",
       "parentThreadId",
@@ -1291,6 +1294,7 @@ function isThreadMetadata(value: unknown): value is ThreadMetadata {
     typeof value.updatedAt === "string" &&
     optionalString(value.title) &&
     optionalString(value.workingDirectory) &&
+    optionalString(value.projectId) &&
     optionalString(value.mateId) &&
     optionalString(value.mateRevisionId) &&
     optionalString(value.parentThreadId) &&

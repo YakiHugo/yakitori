@@ -21,22 +21,14 @@ owning boundary moves once.
 
 | Order | Outcome | Owning areas | Severity driver |
 | --- | --- | --- | --- |
-| 1 | C8-D2 first-class Project entity | `src/server/*`, session storage | C8-D2 |
-| 2 | Production exports narrowed, test support separated | runtime and server public surfaces | Hygiene; churns exports, so it runs last |
+| 1 | Production exports narrowed, test support separated | runtime and server public surfaces | Hygiene; churns exports, so it runs last |
 
-The next piece of work is Stage 7 (C8-D2 project entity). The former
+The next piece of work is Stage 4 (production surface cleanup). The C8-D2
+project entity has landed. The former
 Agent-lifecycle stage is resolved by the Session-owned status, per-root
 AgentControl, durable spawn graph, lazy identity restoration, and retryable
 completion/message delivery. Mate's production mutation surface remains
 limited to create/list/read for the current single-Mate product.
-
-## Stage 7 — C8 project entity
-
-Decision C8-D2: replace `ProjectRegistry`'s flat path list with the Codex
-Project entity (id/name/roots/metadata/position, idempotency keys that
-survive deletion, sessions linked with orphan-on-delete, `position|id` keyset
-pagination, no-op update suppression), stored in the existing SQLite pattern
-and exposed through the Stage 6 protocol methods.
 
 ## Stage 4 — Production surface cleanup
 

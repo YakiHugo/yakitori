@@ -13,7 +13,7 @@ import {
   EventType,
   InputRole,
 } from "../../src/kernel/events.ts"
-import type { ApiSessionDetail } from "../../src/server/protocol.ts"
+import type { ApiProject, ApiSessionDetail } from "../../src/server/protocol.ts"
 import { FakeRpcClient, type FakeSessionStream } from "./fake-rpc-client.ts"
 
 const fakeRef = vi.hoisted(() => ({
@@ -22,9 +22,7 @@ const fakeRef = vi.hoisted(() => ({
 
 vi.mock("../../src/gui/lib/rpc-client.ts", async (importOriginal) => {
   const original =
-    await importOriginal<
-      typeof import("../../src/gui/lib/rpc-client.ts")
-    >()
+    await importOriginal<typeof import("../../src/gui/lib/rpc-client.ts")>()
   return {
     ...original,
     getAppRpcClient: () => fakeRef.current,
@@ -58,6 +56,18 @@ function emitSnapshot(
 
 function notFound(): never {
   throw new ApiRequestError("not found", "not_found")
+}
+
+function makeProject(id: string, root: string, name = ""): ApiProject {
+  return {
+    id,
+    name,
+    roots: [root],
+    metadata: {},
+    position: 0,
+    createdAt: 0,
+    updatedAt: 0,
+  }
 }
 
 beforeEach(() => {
@@ -617,40 +627,70 @@ describe("fork session", () => {
 })
 
 describe("project state", () => {
+  const projectA = makeProject("project_a", "/p/a", "Alpha")
+  const projectB = makeProject("project_b", "/p/b")
+
   it("loads projects, falls back to the first project, and tolerates failures", async () => {
     window.localStorage.clear()
     fakeRef.current.respond = (method) => {
       if (method === "project/list") {
-        return { projects: ["/p/a", "/p/old"] }
+        return { projects: [projectA, projectB] }
       }
       return notFound()
     }
 
     await useAppStore.getState().loadProjects()
 
-    expect(useAppStore.getState().projects).toEqual(["/p/a", "/p/old"])
-    expect(useAppStore.getState().currentProject).toBe("/p/a")
+    expect(useAppStore.getState().projects).toEqual([projectA, projectB])
+    expect(useAppStore.getState().currentProject).toBe("project_a")
 
     fakeRef.current.respond = () => notFound()
     await useAppStore.getState().loadProjects()
 
-    expect(useAppStore.getState().projects).toEqual(["/p/a", "/p/old"])
+    expect(useAppStore.getState().projects).toEqual([projectA, projectB])
     expect(useAppStore.getState().message).toBeUndefined()
   })
 
   it("prefers a remembered project that is still registered", async () => {
     window.localStorage.clear()
-    window.localStorage.setItem("yakitori.project", "/p/old")
+    window.localStorage.setItem("yakitori.project", "project_b")
     fakeRef.current.respond = (method) => {
       if (method === "project/list") {
-        return { projects: ["/p/a", "/p/old"] }
+        return { projects: [projectA, projectB] }
       }
       return notFound()
     }
 
     await useAppStore.getState().loadProjects()
 
-    expect(useAppStore.getState().currentProject).toBe("/p/old")
+    expect(useAppStore.getState().currentProject).toBe("project_b")
+  })
+
+  it("refreshes the project list on project/changed notifications", async () => {
+    window.localStorage.clear()
+    let listed = [projectA]
+    fakeRef.current.respond = (method) => {
+      if (method === "project/list") return { projects: listed }
+      if (method === "provider/list") {
+        return { providers: [], defaultProvider: "faux", defaultModel: "m" }
+      }
+      if (method === "session/list") return { sessions: [] }
+      return notFound()
+    }
+
+    await useAppStore.getState().boot()
+    expect(useAppStore.getState().projects).toEqual([projectA])
+
+    listed = [projectA, projectB]
+    fakeRef.current.requests.length = 0
+    fakeRef.current.emitProjectChanged({
+      projectId: "project_b",
+      changeType: "created",
+    })
+    await vi.waitFor(() => {
+      expect(useAppStore.getState().projects).toEqual([projectA, projectB])
+    })
+    expect(fakeRef.current.requestsFor("project/list")).toHaveLength(1)
   })
 
   it("selectProject persists the choice and filters session loads", async () => {
@@ -662,18 +702,18 @@ describe("project state", () => {
       return notFound()
     }
     useAppStore.setState({
-      projects: ["/p/a", "/p/b"],
-      currentProject: "/p/a",
+      projects: [projectA, projectB],
+      currentProject: "project_a",
     })
 
-    await useAppStore.getState().selectProject("/p/b")
+    await useAppStore.getState().selectProject("project_b")
 
-    expect(useAppStore.getState().currentProject).toBe("/p/b")
-    expect(window.localStorage.getItem("yakitori.project")).toBe("/p/b")
+    expect(useAppStore.getState().currentProject).toBe("project_b")
+    expect(window.localStorage.getItem("yakitori.project")).toBe("project_b")
     expect(fakeRef.current.requestsFor("session/list")).toEqual([
       {
         method: "session/list",
-        params: { limit: 30, workingDirectory: "/p/b" },
+        params: { limit: 30, projectId: "project_b" },
       },
     ])
     expect(useAppStore.getState().sessions).toEqual([])
@@ -694,7 +734,7 @@ describe("project state", () => {
       requestCount += 1
       return requestCount === 1 ? first : second
     }
-    useAppStore.setState({ currentProject: "/p/a" })
+    useAppStore.setState({ currentProject: "project_a" })
 
     const slow = useAppStore.getState().loadSessions()
     const fast = useAppStore.getState().loadSessions()
@@ -712,29 +752,35 @@ describe("project state", () => {
     ).toEqual(["session_new"])
   })
 
-  it("addProject updates the list and selects the resolved path", async () => {
+  it("addProject creates the project and selects it", async () => {
     window.localStorage.clear()
     fakeRef.current.respond = (method) => {
-      if (method === "project/add") {
-        return { projects: ["/p/a", "/private/p/b"] }
+      if (method === "project/create") {
+        return { project: projectB }
+      }
+      if (method === "project/list") {
+        return { projects: [projectA, projectB] }
       }
       if (method === "session/list") {
         return { sessions: [] }
       }
       return notFound()
     }
-    useAppStore.setState({ projects: ["/p/a"], currentProject: "/p/a" })
+    useAppStore.setState({
+      projects: [projectA],
+      currentProject: "project_a",
+    })
 
     await useAppStore.getState().addProject(" /p/b ")
 
-    expect(fakeRef.current.requestsFor("project/add")).toEqual([
-      { method: "project/add", params: { path: "/p/b" } },
+    expect(fakeRef.current.requestsFor("project/create")).toEqual([
+      { method: "project/create", params: { roots: ["/p/b"] } },
     ])
-    expect(useAppStore.getState().projects).toEqual(["/p/a", "/private/p/b"])
-    expect(useAppStore.getState().currentProject).toBe("/private/p/b")
+    expect(useAppStore.getState().projects).toEqual([projectA, projectB])
+    expect(useAppStore.getState().currentProject).toBe("project_b")
   })
 
-  it("createSession sends the current project as workingDirectory", async () => {
+  it("createSession sends the current project id and its first root", async () => {
     window.localStorage.clear()
     const created = createEventEnvelope({
       sessionId: "session_1",
@@ -750,7 +796,10 @@ describe("project state", () => {
       }
       return notFound()
     }
-    useAppStore.setState({ projects: ["/p/a"], currentProject: "/p/a" })
+    useAppStore.setState({
+      projects: [projectA],
+      currentProject: "project_a",
+    })
 
     await useAppStore.getState().createSession()
 
@@ -759,6 +808,7 @@ describe("project state", () => {
         method: "session/create",
         params: {
           title: expect.stringContaining("Session"),
+          projectId: "project_a",
           workingDirectory: "/p/a",
         },
       },

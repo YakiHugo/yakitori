@@ -7,27 +7,24 @@ import {
 import { extname, join, resolve, sep } from "node:path"
 import { pipeline } from "node:stream/promises"
 import type { RolloutAssets } from "../kernel/index.ts"
-import {
-  createSessionEventHub,
-  type SessionEventHub,
-} from "./event-hub.ts"
+import { createSessionEventHub, type SessionEventHub } from "./event-hub.ts"
 import type { ServerHandlers } from "./handlers.ts"
-import type { ProjectRegistry } from "./project-registry.ts"
+import {
+  consoleOperationalFailureReporter,
+  type OperationalFailureReporter,
+  reportOperationalFailure,
+} from "./operational-errors.ts"
 import {
   ApiErrorCode,
   type ApiHandlerResult,
   type ApiListProvidersResponse,
   type ApiUserModelPreference,
 } from "./protocol.ts"
-import type { UserConfigStore } from "./user-config.ts"
-import {
-  consoleOperationalFailureReporter,
-  type OperationalFailureReporter,
-  reportOperationalFailure,
-} from "./operational-errors.ts"
 import { createRequestGate, type RequestGate } from "./request-gate.ts"
 import { MessageProcessor } from "./rpc/message-processor.ts"
 import { attachWebsocketRpcTransport } from "./rpc/websocket-transport.ts"
+import type { ProjectStore } from "./sqlite-project-store.ts"
+import type { UserConfigStore } from "./user-config.ts"
 
 export type YakitoriStaticAssets = {
   readonly directory: string
@@ -36,7 +33,7 @@ export type YakitoriStaticAssets = {
 type YakitoriHttpServerCommonOptions = {
   readonly eventHub?: SessionEventHub
   readonly staticAssets?: YakitoriStaticAssets
-  readonly projectRegistry?: ProjectRegistry
+  readonly projectStore?: ProjectStore
   readonly providers?: () => Promise<ApiListProvidersResponse>
   readonly userConfig?: UserConfigStore
   readonly availableProviders?: readonly string[]
@@ -64,7 +61,7 @@ export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
     options.eventHub ??
     createSessionEventHub({ reportOperationalFailure: reporter })
   const handlers = options.handlers
-  const projectRegistry = options.projectRegistry
+  const projectStore = options.projectStore
   const providers = options.providers
   const userConfig = options.userConfig
   const availableProviders = options.availableProviders
@@ -111,7 +108,7 @@ export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
       handlers,
       eventHub,
       reportOperationalFailure: reporter,
-      ...(projectRegistry === undefined ? {} : { projectRegistry }),
+      ...(projectStore === undefined ? {} : { projectStore }),
       ...(providers === undefined ? {} : { providers }),
       ...(userConfig === undefined ? {} : { userConfig }),
       ...(availableProviders === undefined ? {} : { availableProviders }),

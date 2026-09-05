@@ -43,6 +43,7 @@ export type ApiHandlerResult<T> =
 export type ApiCreateSessionRequest = {
   readonly title?: string
   readonly workingDirectory?: string
+  readonly projectId?: string
   readonly mateId?: string
   readonly mateRevisionId?: string
   readonly parentSessionId?: string
@@ -90,11 +91,32 @@ export type ApiDeleteSessionResponse = {
 }
 
 export type ApiListProjectsResponse = {
-  readonly projects: readonly string[]
+  readonly projects: readonly ApiProject[]
+  readonly nextCursor?: string
 }
 
-export type ApiAddProjectResponse = {
-  readonly projects: readonly string[]
+// The C8-D2 Project entity. Timestamps are integer milliseconds, matching
+// Yakitori's other API conventions; Codex's app-server wire uses Unix seconds.
+export type ApiProject = {
+  readonly id: string
+  readonly name: string
+  readonly roots: readonly string[]
+  readonly metadata: Readonly<Record<string, string>>
+  readonly position: number
+  readonly createdAt: number
+  readonly updatedAt: number
+}
+
+export type ApiReadProjectResponse = {
+  readonly project: ApiProject
+}
+
+export type ApiCreateProjectResponse = {
+  readonly project: ApiProject
+}
+
+export type ApiUpdateProjectResponse = {
+  readonly project: ApiProject
 }
 
 export type ApiProviderModel = {
@@ -217,6 +239,9 @@ export type ApiSessionSummary = {
   readonly updatedAt: string
   readonly title?: string
   readonly workingDirectory?: string
+  // Set when the Session belongs to a live Project; omitted for orphaned
+  // projectIds (orphan-on-delete, see ThreadMetadata.projectId).
+  readonly projectId?: string
   readonly mateId?: string
   readonly mateRevisionId?: string
   readonly parentSessionId?: string

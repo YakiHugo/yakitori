@@ -107,7 +107,7 @@ change that decision.
 | C7-D1 | Immediate process teardown versus active-Turn drain and explicit force | Converge | Follow Codex; implemented 2026-09-02 |
 | C7-D2 | Silent detached failures versus owner-local observation | Converge | Follow Codex ownership semantics through a thin Yakitori reporter; implemented 2026-09-02 |
 | C8-D1 | Ad-hoc REST+SSE versus Codex's single-channel JSON-RPC host protocol | Converge | Product decision 2026-09-04; staged implementation tracked in the convergence register |
-| C8-D2 | Flat project path registry versus a first-class Project entity | Converge | Product decision 2026-09-04 |
+| C8-D2 | Flat project path registry versus a first-class Project entity | Converge | Product decision 2026-09-04; implemented 2026-09-05 |
 | C8-D3 | Single-layer user config versus provenance-tracked layered configuration | Open | Owns C5-D7; requirements-stack adoption is a separate enterprise question |
 | C8-D4 | Static-only catalog and zero credential surface versus provider discovery plus auth presentation | Open | Owns the C4-D3 fallback clause and the C4-D6 rate-limit presentation remainder |
 
@@ -1624,8 +1624,8 @@ user naming, an opaque client metadata bag, manual ordering, multi-root
 membership, and membership independent of cwd. cwd filtering remains
 available alongside project filtering.
 
-Yakitori's `ProjectRegistry` is a flat JSON path list with list/add only, and
-session working directories are not constrained by it. Yakitori replaces it
+Yakitori's `ProjectRegistry` was a flat JSON path list with list/add only, and
+session working directories were not constrained by it. Yakitori replaced it
 with the Codex entity shape, stored in the existing SQLite pattern used by
 the Mate and agent-graph stores, exposed through the C8-D1 protocol methods
 (`project/list|read|create|update|move|delete` with `project/changed`
@@ -1684,6 +1684,27 @@ startup-time registration. Awaiting a product decision.
 
 ### 2026-09-05
 
+- Landed the C8-D2 project entity, a clean break from the flat
+  `projects.json` registry (deleted, no migration per the dev-stage
+  repository rule). `src/server/sqlite-project-store.ts` keeps `projects`,
+  `project_roots` (cascading), and `project_idempotency_keys` (deliberately
+  not cascading, so a repeated create reports a key that refers to a deleted
+  project) in a node:sqlite database beside the other stores, with
+  `project_<uuid>` ids, `MAX(position)+1` appends, no-op-detecting updates,
+  dense-renumbering moves, and a strict `<position>|<id>` keyset cursor. The
+  RPC surface is `project/list|read|create|update|move|delete` with a
+  `project/changed` broadcast to all initialized connections
+  (`MessageProcessor.broadcastNotification`), created/updated/deleted change
+  types, and notification suppression on no-op updates. Wire timestamps are
+  milliseconds (Codex uses seconds; Yakitori's other APIs are ms). Sessions
+  carry an optional `projectId` in the rollout meta; because the rollout is
+  append-only, orphan-on-delete lives in the read path (a session whose
+  projectId no longer exists reads as having no project, and filtering by a
+  deleted project matches nothing) instead of Codex's `ON DELETE SET NULL`
+  UPDATE. The server workspace root becomes a project on startup when none
+  exists for it. The GUI switcher lists entity projects by name (root path
+  fallback), creates via `project/create`, filters `session/list` by
+  `projectId`, and refreshes on `project/changed`.
 - Landed the C8-D1 cutover: the GUI now speaks only the RPC protocol.
   `src/gui/lib/rpc-client.ts` is a browser WebSocket JSON-RPC client
   (initialize handshake, id-correlated requests with `error.data.code`
