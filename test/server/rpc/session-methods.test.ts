@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
@@ -15,12 +15,13 @@ import {
   createThreadServerHandlers,
   type ThreadServerHandlers,
 } from "../../../src/server/handlers.ts"
-import { createProjectRegistry } from "../../../src/server/project-registry.ts"
 import type {
   ApiCreateSessionResponse,
   ApiForkSessionResponse,
+  ApiListProjectsResponse,
   ApiListProvidersResponse,
   ApiListSessionsResponse,
+  ApiProject,
   ApiReadSessionResponse,
 } from "../../../src/server/protocol.ts"
 import { MessageProcessor } from "../../../src/server/rpc/message-processor.ts"
@@ -30,6 +31,11 @@ import {
   type JsonRpcErrorResponse,
   type JsonRpcResponse,
 } from "../../../src/server/rpc/messages.ts"
+import {
+  createSqliteProjectStore,
+  type ProjectStore,
+  type SqliteProjectStore,
+} from "../../../src/server/sqlite-project-store.ts"
 import { createUserConfigStore } from "../../../src/server/user-config.ts"
 import { MemoryThreadStore } from "../../core/memory-thread-store.ts"
 import {
@@ -47,6 +53,7 @@ function createRealHandlers(
   permissionGate = createPermissionGate({
     publish: (event) => eventHub.publishTransient(event),
   }),
+  projectStore?: ProjectStore,
 ): ThreadServerHandlers {
   const store = new MemoryThreadStore()
   const manager = new ThreadManager({
@@ -82,6 +89,7 @@ function createRealHandlers(
     eventHub,
     resolvePermission: (input) => permissionGate.resolve(input),
     listPendingPermissions: (sessionId) => permissionGate.list(sessionId),
+    ...(projectStore === undefined ? {} : { projectStore }),
   })
 }
 
@@ -97,7 +105,7 @@ function realSetup(
   handlers: ThreadServerHandlers
 } {
   const eventHub = createSessionEventHub()
-  const handlers = createRealHandlers(eventHub)
+  const handlers = createRealHandlers(eventHub, undefined, options.projectStore)
   const processor = new MessageProcessor({ handlers, eventHub, ...options })
   const connection = openTestConnection(processor)
   return { processor, connection, eventHub, handlers }
@@ -157,16 +165,20 @@ describe("session methods over real handlers", () => {
     const created = await createSession(connection)
     const sessionId = created.session.id
 
-    expect(
-      await rpc(connection, "session/delete", { sessionId }),
-    ).toEqual({ sessionId })
+    expect(await rpc(connection, "session/delete", { sessionId })).toEqual({
+      sessionId,
+    })
 
-    expect(await rpcError(connection, "session/read", { sessionId })).toMatchObject({
+    expect(
+      await rpcError(connection, "session/read", { sessionId }),
+    ).toMatchObject({
       code: INTERNAL_ERROR,
       data: { code: "not_found" },
     })
     expect(
-      await rpcError(connection, "session/delete", { sessionId: "session_bad" }),
+      await rpcError(connection, "session/delete", {
+        sessionId: "session_bad",
+      }),
     ).toMatchObject({
       code: INVALID_PARAMS,
       data: { code: "invalid_input" },
@@ -288,11 +300,9 @@ describe("session methods over real handlers", () => {
       data: { code: "conflict" },
     })
 
-    const read = await rpc<ApiReadSessionResponse>(
-      connection,
-      "session/read",
-      { sessionId },
-    )
+    const read = await rpc<ApiReadSessionResponse>(connection, "session/read", {
+      sessionId,
+    })
     expect(read.session.seq).toBe(5)
     expect(read.session.counts.inputs).toBe(1)
   })
@@ -432,61 +442,309 @@ describe("session methods over real handlers", () => {
     // order, and nothing at or below the cursor.
     expect(replayed.length).toBeGreaterThan(0)
     expect(replayed).toEqual(
-      Array.from(
-        { length: replayed.length },
-        (_, index) => index + 3,
-      ),
+      Array.from({ length: replayed.length }, (_, index) => index + 3),
     )
     expect(replayed.at(-1)).toBe(snapshot.session.seq)
   })
 })
 
-describe("registry and config methods", () => {
-  it("serves project/list and project/add from the configured registry", async () => {
-    const rootDir = await mkdtemp(join(tmpdir(), "yakitori-rpc-projects-"))
-    const projectA = join(rootDir, "project-a")
-    const projectB = join(rootDir, "project-b")
+describe("project methods over a real store", () => {
+  function projectSetup(): {
+    processor: MessageProcessor
+    connection: TestConnection
+    projectStore: SqliteProjectStore
+  } {
+    const projectStore = createSqliteProjectStore({ databasePath: ":memory:" })
+    const { processor, connection } = realSetup({ projectStore })
+    return { processor, connection, projectStore }
+  }
+
+  it("runs the project lifecycle and broadcasts project/changed", async () => {
+    const { processor, connection, projectStore } = projectSetup()
     try {
-      await mkdir(projectA)
-      await mkdir(projectB)
-      const projectRegistry = createProjectRegistry({
-        registryPath: join(rootDir, "projects.json"),
-        defaultProject: await realpath(projectA),
-      })
-      const { connection } = realSetup({ projectRegistry })
       await initializeConnection(connection)
+      const observer = openTestConnection(processor)
+      await initializeConnection(observer)
+
+      const created = await rpc<{ project: ApiProject }>(
+        connection,
+        "project/create",
+        { roots: ["/work/alpha"] },
+      )
+      expect(created.project).toMatchObject({
+        name: "alpha",
+        roots: ["/work/alpha"],
+        metadata: {},
+        position: 0,
+      })
+      expect(created.project.id).toMatch(/^project_/)
+      // The broadcast lands after the create response and reaches every
+      // initialized connection.
+      await observer.waitForFrame(
+        (frame) => "method" in frame && frame.method === "project/changed",
+      )
+      expect(
+        observer.notifications("project/changed").map((frame) => frame.params),
+      ).toEqual([{ projectId: created.project.id, changeType: "created" }])
 
       expect(
-        await rpc<{ projects: string[] }>(connection, "project/list", {}),
-      ).toEqual({ projects: [await realpath(projectA)] })
-
-      expect(
-        await rpc<{ projects: string[] }>(connection, "project/add", {
-          path: projectB,
+        await rpc(connection, "project/read", {
+          projectId: created.project.id,
         }),
-      ).toEqual({ projects: [await realpath(projectA), await realpath(projectB)] })
+      ).toEqual(created)
 
-      for (const invalid of [{}, { path: "  " }, { path: 42 }]) {
-        const error = await rpcError(connection, "project/add", invalid)
+      // A no-op update returns the project but suppresses the notification.
+      const noop = await rpc<{ project: ApiProject }>(
+        connection,
+        "project/update",
+        { projectId: created.project.id, name: "alpha" },
+      )
+      expect(noop.project).toEqual(created.project)
+      // A real update notifies.
+      await rpc(connection, "project/update", {
+        projectId: created.project.id,
+        name: "renamed",
+        metadata: { tier: "one" },
+      })
+
+      const second = await rpc<{ project: ApiProject }>(
+        connection,
+        "project/create",
+        { name: "second", roots: ["/work/beta"] },
+      )
+      await rpc(connection, "project/move", {
+        projectId: second.project.id,
+        toPosition: 0,
+      })
+      await rpc(connection, "project/delete", { projectId: second.project.id })
+
+      expect(
+        observer.notifications("project/changed").map((frame) => frame.params),
+      ).toEqual([
+        { projectId: created.project.id, changeType: "created" },
+        { projectId: created.project.id, changeType: "updated" },
+        { projectId: second.project.id, changeType: "created" },
+        { projectId: second.project.id, changeType: "updated" },
+        { projectId: second.project.id, changeType: "deleted" },
+      ])
+
+      const listed = await rpc<ApiListProjectsResponse>(
+        connection,
+        "project/list",
+        {},
+      )
+      expect(listed.projects.map((project) => project.name)).toEqual([
+        "renamed",
+      ])
+
+      const missing = await rpcError(connection, "project/read", {
+        projectId: second.project.id,
+      })
+      expect(missing).toMatchObject({
+        code: INTERNAL_ERROR,
+        data: { code: "not_found" },
+      })
+    } finally {
+      projectStore.close()
+    }
+  })
+
+  it("paginates project/list and rejects malformed cursors", async () => {
+    const { connection, projectStore } = projectSetup()
+    try {
+      await initializeConnection(connection)
+      for (const name of ["a", "b", "c"]) {
+        await rpc(connection, "project/create", {
+          name,
+          roots: [`/work/${name}`],
+        })
+      }
+
+      const first = await rpc<ApiListProjectsResponse>(
+        connection,
+        "project/list",
+        { limit: 2 },
+      )
+      expect(first.projects.map((project) => project.name)).toEqual(["a", "b"])
+      expect(first.nextCursor).toBeDefined()
+
+      const second = await rpc<ApiListProjectsResponse>(
+        connection,
+        "project/list",
+        { limit: 2, cursor: first.nextCursor },
+      )
+      expect(second.projects.map((project) => project.name)).toEqual(["c"])
+      expect(second.nextCursor).toBeUndefined()
+
+      const badCursor = await rpcError(connection, "project/list", {
+        cursor: "not-a-cursor",
+      })
+      expect(badCursor).toMatchObject({
+        code: INVALID_PARAMS,
+        data: { code: "invalid_cursor" },
+      })
+    } finally {
+      projectStore.close()
+    }
+  })
+
+  it("replays idempotent creates and reports keys of deleted projects", async () => {
+    const { processor, connection, projectStore } = projectSetup()
+    try {
+      await initializeConnection(connection)
+      const observer = openTestConnection(processor)
+      await initializeConnection(observer)
+
+      const created = await rpc<{ project: ApiProject }>(
+        connection,
+        "project/create",
+        { roots: ["/work/alpha"], idempotencyKey: "gui-add-1" },
+      )
+      const replayed = await rpc<{ project: ApiProject }>(
+        connection,
+        "project/create",
+        { roots: ["/work/other"], idempotencyKey: "gui-add-1" },
+      )
+      expect(replayed.project).toEqual(created.project)
+      // An idempotent replay is not a creation: no second notification.
+      expect(observer.notifications("project/changed")).toHaveLength(1)
+
+      await rpc(connection, "project/delete", {
+        projectId: created.project.id,
+      })
+      const error = await rpcError(connection, "project/create", {
+        roots: ["/work/alpha"],
+        idempotencyKey: "gui-add-1",
+      })
+      expect(error).toMatchObject({
+        code: INTERNAL_ERROR,
+        data: { code: "conflict" },
+      })
+      expect(error.message).toContain(
+        "idempotency key refers to deleted project",
+      )
+    } finally {
+      projectStore.close()
+    }
+  })
+
+  it("validates roots and names at the boundary", async () => {
+    const { connection, projectStore } = projectSetup()
+    try {
+      await initializeConnection(connection)
+      for (const params of [
+        {},
+        { roots: [] },
+        { roots: ["relative/path"] },
+        { roots: ["/work/a", "/work/a"] },
+        { name: "   ", roots: ["/work/a"] },
+      ]) {
+        const error = await rpcError(connection, "project/create", params)
         expect(error).toMatchObject({
           code: INVALID_PARAMS,
           data: { code: "invalid_input" },
         })
       }
-
-      const nonexistent = await rpcError(connection, "project/add", {
-        path: join(projectB, "missing"),
-      })
-      expect(nonexistent).toMatchObject({
-        code: INVALID_PARAMS,
-        data: { code: "invalid_input" },
-      })
-      expect(nonexistent.message).toContain("Workspace path does not exist")
+      // Distinct paths that resolve to the same directory are duplicates.
+      const rootDir = await mkdtemp(join(tmpdir(), "yakitori-rpc-projects-"))
+      try {
+        const linked = join(rootDir, "linked")
+        await mkdir(join(rootDir, "real"))
+        await symlink(join(rootDir, "real"), linked)
+        const error = await rpcError(connection, "project/create", {
+          roots: [join(rootDir, "real"), linked],
+        })
+        expect(error).toMatchObject({
+          code: INVALID_PARAMS,
+          data: { code: "invalid_input" },
+        })
+        expect(error.message).toContain("Duplicate resolved project root")
+      } finally {
+        await rm(rootDir, { recursive: true, force: true })
+      }
     } finally {
-      await rm(rootDir, { recursive: true, force: true })
+      projectStore.close()
     }
   })
 
+  it("links sessions to projects with orphan-on-delete reads", async () => {
+    const { connection, projectStore } = projectSetup()
+    try {
+      await initializeConnection(connection)
+      const created = await rpc<{ project: ApiProject }>(
+        connection,
+        "project/create",
+        { roots: ["/work/alpha"] },
+      )
+      const projectId = created.project.id
+
+      const session = await createSession(connection, { projectId })
+      expect(session.session.projectId).toBe(projectId)
+      expect(session.event).toMatchObject({
+        type: "session.created",
+        data: { projectId },
+      })
+
+      const unknown = await rpcError(connection, "session/create", {
+        projectId: "project_00000000-0000-0000-0000-000000000000",
+      })
+      expect(unknown).toMatchObject({
+        code: INVALID_PARAMS,
+        data: { code: "invalid_input" },
+      })
+
+      const filtered = await rpc<ApiListSessionsResponse>(
+        connection,
+        "session/list",
+        { projectId },
+      )
+      expect(filtered.sessions.map((entry) => entry.id)).toEqual([
+        session.session.id,
+      ])
+
+      const other = await rpc<{ project: ApiProject }>(
+        connection,
+        "project/create",
+        { roots: ["/work/beta"] },
+      )
+      const empty = await rpc<ApiListSessionsResponse>(
+        connection,
+        "session/list",
+        { projectId: other.project.id },
+      )
+      expect(empty.sessions).toEqual([])
+
+      // Orphan-on-delete: the append-only rollout keeps the stored projectId,
+      // but the read path treats it as no project.
+      await rpc(connection, "project/delete", { projectId })
+      const read = await rpc<ApiReadSessionResponse>(
+        connection,
+        "session/read",
+        { sessionId: session.session.id },
+      )
+      expect(read.session.projectId).toBeUndefined()
+      const unfiltered = await rpc<ApiListSessionsResponse>(
+        connection,
+        "session/list",
+        {},
+      )
+      expect(unfiltered.sessions).toEqual([
+        expect.objectContaining({ id: session.session.id }),
+      ])
+      expect(unfiltered.sessions[0]?.projectId).toBeUndefined()
+      const orphanedFilter = await rpc<ApiListSessionsResponse>(
+        connection,
+        "session/list",
+        { projectId },
+      )
+      expect(orphanedFilter.sessions).toEqual([])
+    } finally {
+      projectStore.close()
+    }
+  })
+})
+
+describe("provider and config methods", () => {
   it("serves provider/list from the configured catalog", async () => {
     const providers: ApiListProvidersResponse = {
       providers: [
@@ -554,7 +812,11 @@ describe("registry and config methods", () => {
         { provider: "anthropic", model: "claude-custom", effort: " " },
         { provider: "missing", model: "arbitrary-slug" },
       ]) {
-        const error = await rpcError(connection, "userPreference/write", invalid)
+        const error = await rpcError(
+          connection,
+          "userPreference/write",
+          invalid,
+        )
         expect(error).toMatchObject({
           code: INVALID_PARAMS,
           data: { code: "invalid_input" },
@@ -620,7 +882,10 @@ describe("permission requests over real handlers", () => {
         "method" in frame &&
         "id" in frame &&
         frame.method === "session/permission/request",
-    ) as unknown as { id: string | number; params: { permissionRequestId: string } }
+    ) as unknown as {
+      id: string | number
+      params: { permissionRequestId: string }
+    }
     const permissionRequestId = request.params.permissionRequestId
 
     connection.sendRaw(

@@ -22,6 +22,10 @@ export type ThreadMetadata = {
   readonly updatedAt: string
   readonly title?: string
   readonly workingDirectory?: string
+  // Optional owning Project (C8-D2). The rollout is append-only, so deleting
+  // a project cannot rewrite this field; the server read path treats a
+  // projectId that no longer exists as absent (orphan-on-delete).
+  readonly projectId?: string
   readonly mateId?: string
   readonly mateRevisionId?: string
   readonly parentThreadId?: string

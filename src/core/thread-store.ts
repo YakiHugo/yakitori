@@ -50,6 +50,7 @@ export type ThreadStoreListInput = {
   readonly cursor?: string
   readonly limit?: number
   readonly workingDirectory?: string
+  readonly projectId?: string
 }
 
 export type ThreadStoreListResult = {

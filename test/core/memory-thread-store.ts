@@ -235,8 +235,10 @@ export class MemoryThreadStore implements ThreadStore {
     const threads: ThreadSummary[] = [...this.#threads.values()]
       .filter(
         (thread) =>
-          input.workingDirectory === undefined ||
-          thread.metadata.workingDirectory === input.workingDirectory,
+          (input.workingDirectory === undefined ||
+            thread.metadata.workingDirectory === input.workingDirectory) &&
+          (input.projectId === undefined ||
+            thread.metadata.projectId === input.projectId),
       )
       .map((thread) => ({
         ...thread.metadata,

@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest"
-import type { UserConfigStore } from "../../../src/server/user-config.ts"
 import {
   INTERNAL_ERROR,
   INVALID_PARAMS,
@@ -9,6 +8,12 @@ import {
   SERVER_OVERLOADED,
 } from "../../../src/server/rpc/messages.ts"
 import { ServerRequestRejectedError } from "../../../src/server/rpc/pending-requests.ts"
+import {
+  createSqliteProjectStore,
+  type Project,
+  type ProjectStore,
+} from "../../../src/server/sqlite-project-store.ts"
+import type { UserConfigStore } from "../../../src/server/user-config.ts"
 import {
   createFakeHandlers,
   createTestProcessor,
@@ -211,16 +216,10 @@ describe("method dispatch", () => {
   })
 
   it("serves project and provider methods from the injected dependencies", async () => {
-    const projects: string[] = []
+    const projectStore = createSqliteProjectStore({ databasePath: ":memory:" })
     const { processor } = createTestProcessor({
       handlers: createFakeHandlers(),
-      projectRegistry: {
-        list: async () => projects,
-        add: async (path) => {
-          projects.push(path)
-          return projects
-        },
-      },
+      projectStore,
       providers: async () => ({
         providers: [{ name: "fake", models: [] }],
         defaultProvider: "fake",
@@ -234,13 +233,19 @@ describe("method dispatch", () => {
       { result: { projects: [] } },
     )
     await expect(
-      connection.sendRequest("project/add", { path: "/workspace/a" }),
-    ).resolves.toMatchObject({ result: { projects: ["/workspace/a"] } })
+      connection.sendRequest("project/create", { roots: ["/workspace/a"] }),
+    ).resolves.toMatchObject({
+      result: { project: { name: "a", roots: ["/workspace/a"] } },
+    })
+    await expect(connection.sendRequest("project/list")).resolves.toMatchObject(
+      { result: { projects: [{ name: "a", roots: ["/workspace/a"] }] } },
+    )
     await expect(
       connection.sendRequest("provider/list"),
     ).resolves.toMatchObject({
       result: { defaultProvider: "fake" },
     })
+    projectStore.close()
   })
 
   it("reports methods whose dependency is not configured as not found", async () => {
@@ -421,31 +426,32 @@ describe("serialization scopes", () => {
   })
 
   it("runs session/list without waiting on a project write", async () => {
-    const addGate = deferred<void>()
-    let addCalled = false
+    const createGate = deferred<void>()
+    let createCalled = false
     const { processor } = createTestProcessor({
       handlers: createFakeHandlers(),
-      projectRegistry: {
-        list: async () => [],
-        add: async (path) => {
-          addCalled = true
-          await addGate.promise
-          return [path]
+      projectStore: createFakeProjectStore({
+        createProject: async (input) => {
+          createCalled = true
+          await createGate.promise
+          return { project: fakeProject(input), created: true }
         },
-      },
+      }),
     })
     const connection = openTestConnection(processor)
     await initializeConnection(connection)
 
-    const add = connection.sendRequest("project/add", { path: "/workspace/a" })
-    await waitForCondition(() => addCalled)
+    const create = connection.sendRequest("project/create", {
+      roots: ["/workspace/a"],
+    })
+    await waitForCondition(() => createCalled)
 
-    // session/list is unserialized: it does not queue behind the project add.
+    // session/list is unserialized: it does not queue behind the project write.
     const list = await connection.sendRequest("session/list")
     expect(list).toMatchObject({ result: { sessions: [] } })
 
-    addGate.resolve()
-    await add
+    createGate.resolve()
+    await create
   })
 
   it("runs two session/create requests concurrently", async () => {
@@ -475,36 +481,38 @@ describe("serialization scopes", () => {
     expect(started).toBe(2)
   })
 
-  it("excludes a project list while a project add is in flight", async () => {
-    const addGate = deferred<void>()
-    let addCalled = false
+  it("excludes a project list while a project write is in flight", async () => {
+    const createGate = deferred<void>()
+    let createCalled = false
     let listCalled = false
     const { processor } = createTestProcessor({
       handlers: createFakeHandlers(),
-      projectRegistry: {
-        list: async () => {
+      projectStore: createFakeProjectStore({
+        listProjects: async () => {
           listCalled = true
-          return []
+          return { projects: [] }
         },
-        add: async (path) => {
-          addCalled = true
-          await addGate.promise
-          return [path]
+        createProject: async (input) => {
+          createCalled = true
+          await createGate.promise
+          return { project: fakeProject(input), created: true }
         },
-      },
+      }),
     })
     const connection = openTestConnection(processor)
     await initializeConnection(connection)
 
-    const add = connection.sendRequest("project/add", { path: "/workspace/a" })
-    await waitForCondition(() => addCalled)
+    const create = connection.sendRequest("project/create", {
+      roots: ["/workspace/a"],
+    })
+    await waitForCondition(() => createCalled)
     const list = connection.sendRequest("project/list")
     await flush()
     // Both methods share the projects queue key: the read waits for the write.
     expect(listCalled).toBe(false)
 
-    addGate.resolve()
-    await add
+    createGate.resolve()
+    await create
     await list
     expect(listCalled).toBe(true)
   })
@@ -703,3 +711,35 @@ describe("inbound overload bound", () => {
     await Promise.all(admitted)
   })
 })
+
+function fakeProject(input: {
+  readonly name?: string
+  readonly roots: readonly string[]
+}): Project {
+  return {
+    id: "project_00000000-0000-0000-0000-000000000000",
+    name: input.name ?? "fake",
+    roots: input.roots,
+    metadata: {},
+    position: 0,
+    createdAt: 0,
+    updatedAt: 0,
+  }
+}
+
+function createFakeProjectStore(
+  overrides: Partial<ProjectStore> = {},
+): ProjectStore {
+  const base: ProjectStore = {
+    listProjects: async () => ({ projects: [] }),
+    readProject: async () => undefined,
+    createProject: async (input) => ({
+      project: fakeProject(input),
+      created: true,
+    }),
+    updateProject: async () => undefined,
+    moveProject: async () => undefined,
+    deleteProject: async () => false,
+  }
+  return { ...base, ...overrides }
+}

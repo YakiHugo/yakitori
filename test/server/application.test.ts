@@ -65,7 +65,9 @@ async function rpcRequest<T>(
         resolve(frame.result as T)
       }
       ws.on("message", onMessage)
-      ws.send(JSON.stringify({ id, method: requestMethod, params: requestParams }))
+      ws.send(
+        JSON.stringify({ id, method: requestMethod, params: requestParams }),
+      )
     })
   try {
     await new Promise<void>((resolve, reject) => {
@@ -110,6 +112,32 @@ function testApplicationOptions(input: {
 }
 
 describe("application composition", () => {
+  it("creates the workspace default project once across restarts", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const application = await createYakitoriApplication(
+        testApplicationOptions({ rootDir, workspace }),
+      )
+      const firstPage = await application.projectStore.listProjects()
+      expect(firstPage.projects).toHaveLength(1)
+      expect(firstPage.projects[0]).toMatchObject({
+        name: application.workspace.split("/").at(-1),
+        roots: [application.workspace],
+        position: 0,
+      })
+      await application.close()
+
+      const restarted = await createYakitoriApplication(
+        testApplicationOptions({ rootDir, workspace }),
+      )
+      try {
+        const secondPage = await restarted.projectStore.listProjects()
+        expect(secondPage.projects).toEqual(firstPage.projects)
+      } finally {
+        await restarted.close()
+      }
+    })
+  })
+
   it("runs spawn_agent through a real child Thread", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
       let notificationRequest: ModelRequest | undefined
