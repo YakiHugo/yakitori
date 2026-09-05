@@ -3,6 +3,7 @@ import type { StoredEventEnvelope } from "../../kernel/index.ts"
 import type { LiveSessionEvent } from "../../runtime/live-events.ts"
 import type { ApiErrorCode } from "../../server/protocol.ts"
 import type {
+  ProjectChangedNotification,
   RpcMethodParams,
   RpcMethodResponses,
   SessionEventNotification,
@@ -67,6 +68,11 @@ export type AppRpcClient = {
     after: number,
     handlers: SessionStreamHandlers,
   ): SessionStream
+  // Registers a listener for server-broadcast project/changed notifications;
+  // returns the unsubscribe function.
+  subscribeToProjectChanges(
+    listener: (notification: ProjectChangedNotification) => void,
+  ): () => void
   // Answers the pending session/permission/request for this permission;
   // throws when no answer channel is open (e.g. already answered, or the
   // request pruned while disconnected).
@@ -120,6 +126,9 @@ export function createAppRpcClient(options: {
   // permissionRequestId; ids are process-global on the server, so a responder
   // stays valid across reconnects until answered or pruned.
   const permissionResponders = new Map<string, { readonly id: number }>()
+  const projectChangeListeners = new Set<
+    (notification: ProjectChangedNotification) => void
+  >()
 
   function send(frame: unknown): void {
     socket?.send(JSON.stringify(frame))
@@ -265,7 +274,10 @@ export function createAppRpcClient(options: {
       return
     }
     const params = message.params as SessionPermissionRequestParams | undefined
-    if (params === undefined || typeof params.permissionRequestId !== "string") {
+    if (
+      params === undefined ||
+      typeof params.permissionRequestId !== "string"
+    ) {
       send({
         id: message.id,
         error: { code: -32602, message: "Invalid permission request." },
@@ -277,10 +289,7 @@ export function createAppRpcClient(options: {
     permissionResponders.set(params.permissionRequestId, { id: message.id })
   }
 
-  function onNotification(message: {
-    method: string
-    params?: unknown
-  }): void {
+  function onNotification(message: { method: string; params?: unknown }): void {
     if (message.method === "session/event") {
       const params = message.params as SessionEventNotification
       const record = streams.get(params.sessionId)
@@ -305,6 +314,11 @@ export function createAppRpcClient(options: {
       const record = streams.get(params.sessionId)
       if (record === undefined || record.closed) return
       record.handlers.onReplayComplete()
+      return
+    }
+    if (message.method === "project/changed") {
+      const params = message.params as ProjectChangedNotification
+      for (const listener of projectChangeListeners) listener(params)
     }
   }
 
@@ -358,6 +372,12 @@ export function createAppRpcClient(options: {
 
   return {
     request,
+    subscribeToProjectChanges(listener) {
+      projectChangeListeners.add(listener)
+      return () => {
+        projectChangeListeners.delete(listener)
+      }
+    },
     openSessionStream(sessionId, after, handlers) {
       const record: StreamRecord = {
         sessionId,

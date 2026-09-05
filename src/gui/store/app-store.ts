@@ -11,6 +11,7 @@ import { createRequestId } from "../../kernel/ids.ts"
 import type { LiveSessionEvent } from "../../runtime/live-events.ts"
 import type {
   ApiPendingPermission,
+  ApiProject,
   ApiProviderSummary,
   ApiSessionDetail,
   ApiSessionSummary,
@@ -26,6 +27,7 @@ import {
 } from "../execution-view.ts"
 import {
   ApiRequestError,
+  type AppRpcClient,
   getAppRpcClient,
   type SessionStream,
 } from "../lib/rpc-client.ts"
@@ -53,7 +55,7 @@ export type AppStoreData = {
   // persistence or attachment-lifecycle authority.
   promptDraft: string | undefined
   promptAttachments: readonly ImageAttachment[]
-  projects: string[]
+  projects: ApiProject[]
   providers: ApiProviderSummary[]
   userPreference: ApiUserModelPreference | undefined
   selection: { readonly sessionId?: string }
@@ -61,6 +63,7 @@ export type AppStoreData = {
   selectedSession: ApiSessionDetail | undefined
   sessions: ApiSessionSummary[]
   stream: SessionStream | undefined
+  // The selected Project id (entity-based since the C8-D2 cutover).
   currentProject: string | undefined
 }
 
@@ -76,7 +79,7 @@ export type AppStoreActions = {
     reason: "undo" | "edit",
     content?: string,
   ): Promise<void>
-  selectProject(path: string): Promise<void>
+  selectProject(projectId: string): Promise<void>
   addProject(path: string): Promise<void>
   selectSession(sessionId: string): Promise<void>
   admitInput(
@@ -131,6 +134,7 @@ let activeTaskCount = 0
 
 export const useAppStore = create<AppStore>()((set, get) => {
   let sessionListRevision = 0
+  let projectChangesSubscribedClient: AppRpcClient | undefined
   const runTask = async (
     task: () => Promise<void>,
     isCurrent: () => boolean = () => true,
@@ -283,6 +287,13 @@ export const useAppStore = create<AppStore>()((set, get) => {
 
     boot: async () => {
       const intentRevision = get().sessionSelectionIntentRevision
+      const client = getAppRpcClient(get().apiBase)
+      if (projectChangesSubscribedClient !== client) {
+        projectChangesSubscribedClient = client
+        client.subscribeToProjectChanges(() => {
+          void get().loadProjects()
+        })
+      }
       await get().loadProviders()
       await get().loadProjects()
       const loaded = await get().loadSessions()
@@ -306,7 +317,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
       const requestRevision = ++sessionListRevision
       const existingSessions = get().sessions
       const cursor = input.append ? get().nextCursor : undefined
-      const workingDirectory = get().currentProject
+      const projectId = get().currentProject
       let applied = false
       const completed = await runTask(
         async () => {
@@ -315,11 +326,11 @@ export const useAppStore = create<AppStore>()((set, get) => {
             {
               limit: 30,
               ...(cursor === undefined ? {} : { cursor }),
-              ...(workingDirectory === undefined ? {} : { workingDirectory }),
+              ...(projectId === undefined ? {} : { projectId }),
             },
           )
           if (
-            get().currentProject !== workingDirectory ||
+            get().currentProject !== projectId ||
             sessionListRevision !== requestRevision
           ) {
             return
@@ -333,7 +344,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
           applied = true
         },
         () =>
-          get().currentProject === workingDirectory &&
+          get().currentProject === projectId &&
           sessionListRevision === requestRevision,
       )
       return completed && applied
@@ -349,17 +360,14 @@ export const useAppStore = create<AppStore>()((set, get) => {
         const current = get().currentProject
         const remembered = window.localStorage.getItem("yakitori.project")
         const currentProject =
-          current !== undefined && projects.includes(current)
+          current !== undefined && projects.some((p) => p.id === current)
             ? current
-            : remembered !== null && projects.includes(remembered)
+            : remembered !== null && projects.some((p) => p.id === remembered)
               ? remembered
-              : projects[0]
-        set({
-          projects,
-          ...(currentProject === undefined ? {} : { currentProject }),
-        })
+              : projects[0]?.id
+        set({ projects, currentProject })
       } catch {
-        // Servers without the project registry answer method-not-found;
+        // Servers without the project store answer method-not-found;
         // project state stays empty and the switcher stays hidden.
       }
     },
@@ -388,7 +396,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
       set({ sessionSelectionIntentRevision: intentRevision })
       await runTask(
         async () => {
-          const currentProject = get().currentProject
+          const project = get().projects.find(
+            (candidate) => candidate.id === get().currentProject,
+          )
+          const firstRoot = project?.roots[0]
           const response = await getAppRpcClient(get().apiBase).request(
             "session/create",
             {
@@ -396,9 +407,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
                 hour: "2-digit",
                 minute: "2-digit",
               })}`,
-              ...(currentProject === undefined
+              ...(project === undefined ? {} : { projectId: project.id }),
+              ...(firstRoot === undefined
                 ? {}
-                : { workingDirectory: currentProject }),
+                : { workingDirectory: firstRoot }),
             },
           )
 
@@ -534,10 +546,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
       })
     },
 
-    selectProject: async (path) => {
-      if (get().currentProject === path) return
-      set({ currentProject: path })
-      window.localStorage.setItem("yakitori.project", path)
+    selectProject: async (projectId) => {
+      if (get().currentProject === projectId) return
+      set({ currentProject: projectId })
+      window.localStorage.setItem("yakitori.project", projectId)
       closeStream()
       set((state) => ({
         selection: {},
@@ -556,19 +568,12 @@ export const useAppStore = create<AppStore>()((set, get) => {
       const trimmed = path.trim()
       if (trimmed === "") return
       await runTask(async () => {
-        const previous = get().projects
         const response = await getAppRpcClient(get().apiBase).request(
-          "project/add",
-          { path: trimmed },
+          "project/create",
+          { roots: [trimmed] },
         )
-        const projects = [...response.projects]
-        set({ projects })
-        // The response carries only the list; the previously unknown entry is
-        // the server's resolved realpath for the added project.
-        const added = projects.find(
-          (candidate) => !previous.includes(candidate),
-        )
-        await get().selectProject(added ?? trimmed)
+        await get().loadProjects()
+        await get().selectProject(response.project.id)
       })
     },
 
@@ -754,10 +759,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
             )
           } catch (error) {
             if (
-              !(
-                error instanceof ApiRequestError &&
-                error.code === "conflict"
-              )
+              !(error instanceof ApiRequestError && error.code === "conflict")
             ) {
               throw error
             }
@@ -791,15 +793,12 @@ export const useAppStore = create<AppStore>()((set, get) => {
         async () => {
           // Answering the server→client request replaces the old resolve
           // POST; the confirmation still arrives through the event stream.
-          getAppRpcClient(get().apiBase).answerPermission(
-            permissionRequestId,
-            {
-              behavior,
-              reason: {
-                kind: behavior === "allow" ? "user_allowed" : "user_denied",
-              },
+          getAppRpcClient(get().apiBase).answerPermission(permissionRequestId, {
+            behavior,
+            reason: {
+              kind: behavior === "allow" ? "user_allowed" : "user_denied",
             },
-          )
+          })
         },
         () => isCurrentSelection(selection),
       )

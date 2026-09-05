@@ -6,7 +6,10 @@ import { ApiRequestError } from "../../src/gui/lib/rpc-client.ts"
 import type { StoredEventEnvelope } from "../../src/kernel/index.ts"
 import type { LiveSessionEvent } from "../../src/runtime/live-events.ts"
 import type { ApiReadSessionResponse } from "../../src/server/protocol.ts"
-import type { SessionPermissionRequestResult } from "../../src/server/rpc/methods.ts"
+import type {
+  ProjectChangedNotification,
+  SessionPermissionRequestResult,
+} from "../../src/server/rpc/methods.ts"
 
 // Test double for the GUI's RPC channel: subscriptions are driven explicitly
 // (emit* mirrors the server's notifications), requests route through a
@@ -58,6 +61,9 @@ export class FakeRpcClient {
     readonly permissionRequestId: string
     readonly result: SessionPermissionRequestResult
   }[] = []
+  readonly projectChangeListeners: ((
+    notification: ProjectChangedNotification,
+  ) => void)[] = []
 
   // Per-test responder; the default mirrors a route that does not exist.
   respond: (method: string, params: unknown) => unknown = () => {
@@ -86,6 +92,22 @@ export class FakeRpcClient {
   ): void {
     if (this.answerError !== undefined) throw this.answerError
     this.answeredPermissions.push({ permissionRequestId, result })
+  }
+
+  subscribeToProjectChanges(
+    listener: (notification: ProjectChangedNotification) => void,
+  ): () => void {
+    this.projectChangeListeners.push(listener)
+    return () => {
+      const index = this.projectChangeListeners.indexOf(listener)
+      if (index >= 0) this.projectChangeListeners.splice(index, 1)
+    }
+  }
+
+  emitProjectChanged(notification: ProjectChangedNotification): void {
+    for (const listener of [...this.projectChangeListeners]) {
+      listener(notification)
+    }
   }
 
   close(): void {}
