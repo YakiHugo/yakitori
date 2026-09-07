@@ -68,6 +68,10 @@ export class PendingServerRequests {
   private nextId = 0
   private readonly pending = new Map<RequestId, PendingEntry>()
 
+  get size(): number {
+    return this.pending.size
+  }
+
   register(request: {
     sessionId: string
     method: string

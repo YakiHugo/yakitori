@@ -9,7 +9,7 @@ import {
 } from "../../src/kernel/errors.ts"
 import { createRolloutAssets } from "../../src/kernel/rollout-assets.ts"
 import { isKernelEvent } from "../../src/kernel/events.ts"
-import { createFauxProvider } from "../../src/runtime/faux-provider.ts"
+import { createFauxProvider } from "../support/faux-provider.ts"
 import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
 import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
 import { createSessionEventHub } from "../../src/server/event-hub.ts"
@@ -23,6 +23,90 @@ afterEach(async () => {
 })
 
 describe("thread server handlers", () => {
+  it("searches durable visible history after a Session is closed", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "yakitori-handler-search-"))
+    const store = new MemoryThreadStore()
+    const provider = createFauxProvider([
+      { content: [{ type: "text", text: "Final NEEDLE response" }] },
+    ])
+    const manager = new ThreadManager({
+      store,
+      createTurnProcessor: () =>
+        createTurnProcessor({
+          stream: provider.stream,
+          toolRegistry: createToolRegistry([]),
+          loadProjectInstructions: async () => undefined,
+        }),
+    })
+    const handlers = createThreadServerHandlers({ manager, store })
+    cleanups.push(async () => {
+      await manager.shutdown()
+      await handlers.close()
+      await rm(workspace, { recursive: true, force: true })
+    })
+    const created = await handlers.createSession({
+      title: "searchable task",
+      workingDirectory: workspace,
+      mateId: "mate_test",
+      mateRevisionId: "mate_revision_test",
+    })
+    if (!created.ok) throw new Error(created.body.error.message)
+    const sessionId = created.body.session.id
+    const admitted = await handlers.admitInput({
+      sessionId,
+      requestId: "request_search",
+      content: { kind: "text", text: "A needle in user text" },
+    })
+    if (!admitted.ok) throw new Error(admitted.body.error.message)
+    await waitForValue(() =>
+      manager.getThread(sessionId)?.status === "idle" ? true : undefined,
+    )
+    const closed = await handlers.closeSession({ sessionId })
+    if (!closed.ok) throw new Error(closed.body.error.message)
+    expect(manager.getThread(sessionId)).toBeUndefined()
+
+    const searched = await handlers.searchSessions({
+      searchTerm: "NeEdLe",
+      limit: 10,
+    })
+    if (!searched.ok) throw new Error(searched.body.error.message)
+    expect(searched.body.data).toEqual([
+      expect.objectContaining({
+        session: expect.objectContaining({ id: sessionId }),
+        snippet: "A needle in user text",
+      }),
+    ])
+
+    const firstPage = await handlers.searchSessionOccurrences({
+      sessionId,
+      searchTerm: "needle",
+      limit: 1,
+    })
+    if (!firstPage.ok) throw new Error(firstPage.body.error.message)
+    expect(firstPage.body.data).toEqual([
+      expect.objectContaining({
+        itemId: admitted.body.inputId,
+        snippet: "A needle in user text",
+        snippetMatchRange: { start: 2, end: 8 },
+      }),
+    ])
+    expect(firstPage.body.nextCursor).toBeTypeOf("string")
+    const secondPage = await handlers.searchSessionOccurrences({
+      sessionId,
+      searchTerm: "needle",
+      limit: 1,
+      cursor: firstPage.body.nextCursor,
+    })
+    if (!secondPage.ok) throw new Error(secondPage.body.error.message)
+    expect(secondPage.body.data).toEqual([
+      expect.objectContaining({
+        snippet: "Final NEEDLE response",
+        snippetMatchRange: { start: 6, end: 12 },
+      }),
+    ])
+    expect(secondPage.body.nextCursor).toBeUndefined()
+  })
+
   it("sums billing usage across Turns while keeping the latest active context", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "yakitori-handler-usage-"))
     const store = new MemoryThreadStore()

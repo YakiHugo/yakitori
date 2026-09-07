@@ -23,6 +23,8 @@ import type {
   ApiListSessionsResponse,
   ApiProject,
   ApiReadSessionResponse,
+  ApiSearchSessionOccurrencesResponse,
+  ApiSearchSessionsResponse,
 } from "../../../src/server/protocol.ts"
 import { MessageProcessor } from "../../../src/server/rpc/message-processor.ts"
 import {
@@ -139,6 +141,39 @@ async function createSession(
 }
 
 describe("session methods over real handlers", () => {
+  it("searches task summaries and visible message occurrences", async () => {
+    const { connection } = realSetup()
+    await initializeConnection(connection)
+    const created = await createSession(connection, { title: "Needle task" })
+    await rpc(connection, "session/input", {
+      sessionId: created.session.id,
+      requestId: "request_search_rpc",
+      content: { kind: "text", text: "needle message" },
+    })
+
+    const tasks = await rpc<ApiSearchSessionsResponse>(
+      connection,
+      "session/search",
+      { searchTerm: "NEEDLE" },
+    )
+    expect(tasks.data).toEqual([
+      expect.objectContaining({
+        session: expect.objectContaining({ id: created.session.id }),
+      }),
+    ])
+    const occurrences = await rpc<ApiSearchSessionOccurrencesResponse>(
+      connection,
+      "session/searchOccurrences",
+      { sessionId: created.session.id, searchTerm: "needle" },
+    )
+    expect(occurrences.data).toEqual([
+      expect.objectContaining({
+        snippet: "needle message",
+        snippetMatchRange: { start: 0, end: 6 },
+      }),
+    ])
+  })
+
   it("creates and lists sessions", async () => {
     const { connection } = realSetup()
     await initializeConnection(connection)

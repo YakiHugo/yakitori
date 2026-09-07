@@ -45,6 +45,13 @@ import type {
   ThreadStoreListInput,
   ThreadStoreListResult,
 } from "./thread-store.ts"
+import {
+  compareThreadSummaries,
+  firstVisibleThreadMatch,
+  startAfterThreadCursor,
+  threadCursor,
+  visibleThreadSearchOccurrences,
+} from "./thread-search.ts"
 
 type PendingWrite = {
   readonly entry: StoredRolloutItem
@@ -477,24 +484,94 @@ export class JsonlThreadStore implements ThreadStore {
           (input.projectId === undefined ||
             thread.projectId === input.projectId),
       )
-      .sort(
-        (left, right) =>
-          right.updatedAt.localeCompare(left.updatedAt) ||
-          right.id.localeCompare(left.id),
-      )
-    const cursorIndex =
-      input.cursor === undefined
-        ? -1
-        : matching.findIndex((thread) => thread.id === input.cursor)
-    const start = cursorIndex + 1
+      .sort(compareThreadSummaries)
+    const start = startAfterThreadCursor(matching, input.cursor)
     const limit = input.limit ?? 50
     const threads = matching.slice(start, start + limit)
     const last = threads.at(-1)
     return {
       threads: structuredClone(threads),
       ...(last !== undefined && start + limit < matching.length
-        ? { nextCursor: last.id }
+        ? { nextCursor: threadCursor(last) }
         : {}),
+    }
+  }
+
+  async searchThreads(input: {
+    readonly searchTerm: string
+    readonly cursor?: string
+    readonly limit: number
+  }) {
+    await this.#ready
+    const files = await readdir(this.#threadsDirectory)
+    const candidates = (
+      await Promise.all(
+        files
+          .filter((file) => file.endsWith(".json"))
+          .map(async (file) => {
+            try {
+              const metadata = await this.#readMetadata(basename(file, ".json"))
+              const rollout = await this.#materialize(metadata.rolloutId, new Set())
+              return {
+                stored: { metadata, rollout },
+                summary: {
+                  ...metadata,
+                  seq: rollout.filter(
+                    (entry) => entry.item.type !== "session_meta",
+                  ).length,
+                },
+              }
+            } catch {
+              return undefined
+            }
+          }),
+      )
+    )
+      .filter((candidate): candidate is NonNullable<typeof candidate> => candidate !== undefined)
+      .sort((left, right) => compareThreadSummaries(left.summary, right.summary))
+    const start = startAfterThreadCursor(
+      candidates.map(({ summary }) => summary),
+      input.cursor,
+    )
+    const matches: Array<{
+      summary: ThreadSummary
+      snippet: string
+    }> = []
+    let lastScanned: ThreadSummary | undefined
+    let index = start
+    for (; index < candidates.length && matches.length < input.limit; index += 1) {
+      const candidate = candidates[index]
+      if (candidate === undefined) continue
+      lastScanned = candidate.summary
+      const snippet = firstVisibleThreadMatch(candidate.stored, input.searchTerm)
+      if (snippet !== undefined) matches.push({ summary: candidate.summary, snippet })
+    }
+    return {
+      matches: structuredClone(matches),
+      ...(index < candidates.length && lastScanned !== undefined
+        ? { nextCursor: threadCursor(lastScanned) }
+        : {}),
+    }
+  }
+
+  async searchThreadOccurrences(input: {
+    readonly threadId: string
+    readonly searchTerm: string
+    readonly cursor?: string
+    readonly limit: number
+  }) {
+    const stored = await this.readThread(input.threadId)
+    if (stored === undefined) return undefined
+    const offset = input.cursor === undefined ? 0 : Number(input.cursor)
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      throw new Error("Thread occurrence cursor is invalid.")
+    }
+    const all = visibleThreadSearchOccurrences(stored, input.searchTerm)
+    const occurrences = all.slice(offset, offset + input.limit)
+    const nextOffset = offset + occurrences.length
+    return {
+      occurrences,
+      ...(nextOffset < all.length ? { nextCursor: String(nextOffset) } : {}),
     }
   }
 

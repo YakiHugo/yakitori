@@ -13,6 +13,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
+import { ContextManager } from "../../src/core/context-manager.ts"
 import { createRolloutAssets } from "../../src/kernel/rollout-assets.ts"
 import { YakitoriErrorCode } from "../../src/kernel/errors.ts"
 import type {
@@ -31,6 +32,160 @@ afterEach(async () => {
 })
 
 describe("JsonlThreadStore", () => {
+  it.each([
+    0, 1, 2, 3, 4,
+  ])("recovers a coherent context after %i checkpoint records reach disk", async (persistedCheckpointRecords) => {
+    const { root, store } = await createStore()
+    const threadId = "thread_checkpoint"
+    await store.createThread(metadata(threadId))
+    const original = response("turn_old", "old history")
+    const replacement = response("turn_compact", "checkpoint")
+    await store.appendItems(threadId, [
+      original,
+      {
+        type: "model_context",
+        settings: { provider: "codex", model: "old", compactionHash: "one" },
+      },
+      {
+        type: "world_state",
+        turnId: "turn_old",
+        full: true,
+        state: { environment: { cwd: "/old" } },
+      },
+      { type: "token_count", turnId: "turn_old", activeContextTokens: 9_999 },
+    ])
+    const prefixLength = (await store.readThread(threadId))?.rollout.length
+    if (prefixLength === undefined) throw new Error("missing initial rollout")
+    await store.appendItems(threadId, [
+      {
+        type: "compacted",
+        turnId: "turn_compact",
+        replacement: [replacement.item],
+        summary: "checkpoint",
+      },
+      {
+        type: "world_state",
+        turnId: "turn_compact",
+        full: true,
+        state: { environment: { cwd: "/new" } },
+      },
+      { type: "token_count", turnId: "turn_compact", activeContextTokens: 30 },
+      {
+        type: "item_completed",
+        turnId: "turn_compact",
+        item: {
+          type: "context_compaction",
+          itemId: "checkpoint_item",
+          status: "completed",
+        },
+      },
+    ])
+    await store.shutdownThread(threadId)
+    const path = join(root, "rollouts", threadId, "rollout.jsonl")
+    const lines = (await readFile(path, "utf8")).trimEnd().split("\n")
+    const count = prefixLength + persistedCheckpointRecords
+    // Crash image: complete records followed by an interrupted next write.
+    await writeFile(
+      path,
+      `${lines.slice(0, count).join("\n")}\n${lines[count]?.slice(0, 12) ?? ""}`,
+    )
+    const recoveredStore = new JsonlThreadStore({ root })
+    const recovered = await recoveredStore.resumeThread(threadId)
+    if (recovered === undefined) throw new Error("missing recovered rollout")
+    const context = ContextManager.fromStoredThread(recovered).snapshot()
+    expect(context.history).toEqual([
+      persistedCheckpointRecords === 0 ? original.item : replacement.item,
+    ])
+    expect(context.worldStateBaseline).toEqual(
+      persistedCheckpointRecords === 0
+        ? { environment: { cwd: "/old" } }
+        : persistedCheckpointRecords === 1
+          ? undefined
+          : { environment: { cwd: "/new" } },
+    )
+    expect(context.activeContextTokens).toBe(
+      persistedCheckpointRecords === 0
+        ? 9_999
+        : persistedCheckpointRecords < 3
+          ? undefined
+          : 30,
+    )
+    expect(context.previousModel?.compactionHash).toBe("one")
+    expect(
+      recovered.rollout.some(({ item }) => item.type === "item_completed"),
+    ).toBe(persistedCheckpointRecords === 4)
+    await recoveredStore.shutdownThread(threadId)
+  })
+  it("restores latest context usage and invalidates it when history is replaced", async () => {
+    const { store } = await createStore()
+    await store.createThread(metadata("thread_tokens"))
+    await store.appendItems("thread_tokens", [
+      { type: "token_count", turnId: "turn_one", activeContextTokens: 500 },
+      { type: "token_count", turnId: "turn_one", activeContextTokens: 900 },
+    ])
+    await store.shutdownThread("thread_tokens")
+    const before = await store.resumeThread("thread_tokens")
+    if (before === undefined) throw new Error("missing stored thread")
+    expect(
+      ContextManager.fromStoredThread(before).snapshot().activeContextTokens,
+    ).toBe(900)
+    await store.appendItems("thread_tokens", [
+      {
+        type: "compacted",
+        turnId: "turn_two",
+        replacement: [],
+        summary: "checkpoint",
+      },
+    ])
+    await store.shutdownThread("thread_tokens")
+    const replaced = await store.resumeThread("thread_tokens")
+    if (replaced === undefined) throw new Error("missing stored thread")
+    expect(
+      ContextManager.fromStoredThread(replaced).snapshot().activeContextTokens,
+    ).toBeUndefined()
+    await store.appendItems("thread_tokens", [
+      { type: "token_count", turnId: "turn_two", activeContextTokens: 0 },
+    ])
+    await store.shutdownThread("thread_tokens")
+    const after = await store.readThread("thread_tokens")
+    if (after === undefined) throw new Error("missing stored thread")
+    expect(
+      ContextManager.fromStoredThread(after).snapshot().activeContextTokens,
+    ).toBe(0)
+  })
+
+  it("restores and replaces the auto-compaction prefill estimate", async () => {
+    const { store } = await createStore()
+    await store.createThread(metadata("thread_prefill"))
+    await store.appendItems("thread_prefill", [
+      {
+        type: "token_count",
+        turnId: "turn_one",
+        activeContextTokens: 900,
+        autoCompactPrefillTokens: 800,
+        autoCompactPrefillEstimated: true,
+      },
+      {
+        type: "token_count",
+        turnId: "turn_one",
+        activeContextTokens: 950,
+        autoCompactPrefillTokens: 820,
+      },
+    ])
+    await store.shutdownThread("thread_prefill")
+    const stored = await store.resumeThread("thread_prefill")
+    if (stored === undefined) throw new Error("missing stored prefill")
+    expect(ContextManager.fromStoredThread(stored).snapshot()).toMatchObject({
+      activeContextTokens: 950,
+      autoCompactPrefillTokens: 820,
+    })
+    expect(
+      ContextManager.fromStoredThread(stored).snapshot()
+        .autoCompactPrefillEstimated,
+    ).toBeUndefined()
+    await store.shutdownThread("thread_prefill")
+  })
+
   it("persists ordered rollout items and resumes a single live writer", async () => {
     const { store } = await createStore()
     await store.createThread(metadata("thread_root"))

@@ -32,6 +32,11 @@ import {
   type ApiReadSessionRequest,
   type ApiReadSessionResponse,
   type ApiResolvePermissionRequest,
+  type ApiSearchSessionOccurrencesRequest,
+  type ApiSearchSessionOccurrencesResponse,
+  type ApiSearchSessionsRequest,
+  type ApiSearchSessionsResponse,
+  type ApiServerDiagnostics,
   type ApiUpdateProjectResponse,
   type ApiUpdateUserModelPreferenceResponse,
   type ApiUserModelPreference,
@@ -169,6 +174,7 @@ export type RpcMethodContext = Readonly<{
   providers: (() => Promise<ApiListProvidersResponse>) | undefined
   userConfig: UserConfigStore | undefined
   availableProviders: readonly string[] | undefined
+  diagnostics(): Readonly<Record<string, number>>
   // Emits a server→client notification to every initialized connection.
   broadcastNotification(method: string, params: unknown): void
 }>
@@ -528,11 +534,40 @@ function handlerEntry<TResult>(
 }
 
 export const rpcMethods: readonly RpcMethodDefinition[] = [
+  {
+    method: "server/diagnostics",
+    experimental: true,
+    scope: () => undefined,
+    async invoke(_params, context) {
+      const memory = process.memoryUsage()
+      return {
+        result: {
+          process: {
+            id: process.pid,
+            uptimeSeconds: process.uptime(),
+            residentMemoryBytes: memory.rss,
+            heapUsedBytes: memory.heapUsed,
+          },
+          gauges: context.diagnostics(),
+        } satisfies ApiServerDiagnostics,
+      }
+    },
+  },
   handlerEntry<ApiListSessionsResponse>(
     "session/list",
     // Unserialized, mirroring Codex's thread/list.
     () => undefined,
     (handlers, params) => handlers.listSessions(params),
+  ),
+  handlerEntry<ApiSearchSessionsResponse>(
+    "session/search",
+    () => undefined,
+    (handlers, params) => handlers.searchSessions(params),
+  ),
+  handlerEntry<ApiSearchSessionOccurrencesResponse>(
+    "session/searchOccurrences",
+    sessionScope,
+    (handlers, params) => handlers.searchSessionOccurrences(params),
   ),
   handlerEntry<ApiCreateSessionResponse>(
     "session/create",
@@ -544,6 +579,11 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
     "session/read",
     sessionScope,
     (handlers, params) => handlers.readSession(params),
+  ),
+  handlerEntry<ApiDeleteSessionResponse>(
+    "session/close",
+    sessionScope,
+    (handlers, params) => handlers.closeSession(params),
   ),
   handlerEntry<ApiDeleteSessionResponse>(
     "session/delete",
@@ -793,10 +833,14 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
 // handlers own their validation.
 export type RpcMethodParams = Readonly<{
   initialize: InitializeParams
+  "server/diagnostics": Readonly<Record<string, never>>
   "session/list": SessionListParams
+  "session/search": ApiSearchSessionsRequest
+  "session/searchOccurrences": ApiSearchSessionOccurrencesRequest
   "session/create": ApiCreateSessionRequest
   "session/read": ApiReadSessionRequest
   "session/delete": ApiReadSessionRequest
+  "session/close": ApiReadSessionRequest
   "session/fork": ApiForkSessionRequest & Readonly<{ sessionId: string }>
   "session/compact": Readonly<{ sessionId: string; requestId?: string }>
   "session/input": ApiAdmitInputRequest
@@ -816,10 +860,14 @@ export type RpcMethodParams = Readonly<{
 
 export type RpcMethodResponses = Readonly<{
   initialize: InitializeResponse
+  "server/diagnostics": ApiServerDiagnostics
   "session/list": ApiListSessionsResponse
+  "session/search": ApiSearchSessionsResponse
+  "session/searchOccurrences": ApiSearchSessionOccurrencesResponse
   "session/create": ApiCreateSessionResponse
   "session/read": ApiReadSessionResponse
   "session/delete": ApiDeleteSessionResponse
+  "session/close": ApiDeleteSessionResponse
   "session/fork": ApiForkSessionResponse
   "session/compact": ApiCompactSessionResponse
   "session/input": ApiAdmitInputResponse

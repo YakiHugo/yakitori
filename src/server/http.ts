@@ -42,6 +42,7 @@ type YakitoriHttpServerCommonOptions = {
   readonly requestGate?: RequestGate
   readonly messageProcessor?: MessageProcessor
   readonly userAgent?: string
+  readonly diagnostics?: () => Readonly<Record<string, number>>
 }
 
 export type YakitoriHttpServerOptions = YakitoriHttpServerCommonOptions & {
@@ -115,6 +116,9 @@ export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
       ...(options.userAgent === undefined
         ? {}
         : { userAgent: options.userAgent }),
+      ...(options.diagnostics === undefined
+        ? {}
+        : { diagnostics: options.diagnostics }),
     })
   attachWebsocketRpcTransport(server, {
     processor: messageProcessor,

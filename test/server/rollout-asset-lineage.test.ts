@@ -13,7 +13,7 @@ import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
 import { createRolloutAssets } from "../../src/kernel/rollout-assets.ts"
-import { createFauxProvider } from "../../src/runtime/faux-provider.ts"
+import { createFauxProvider } from "../support/faux-provider.ts"
 import {
   createYakitoriApplication,
   type YakitoriApplication,

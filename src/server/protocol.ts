@@ -78,6 +78,37 @@ export type ApiListSessionsResponse = {
   readonly nextCursor?: string
 }
 
+export type ApiSearchSessionsRequest = {
+  readonly searchTerm: string
+  readonly limit?: number
+  readonly cursor?: string
+}
+
+export type ApiSearchSessionsResponse = {
+  readonly data: readonly Readonly<{
+    session: ApiSessionSummary
+    snippet: string
+  }>[]
+  readonly nextCursor?: string
+}
+
+export type ApiSearchSessionOccurrencesRequest = {
+  readonly sessionId: string
+  readonly searchTerm: string
+  readonly limit?: number
+  readonly cursor?: string
+}
+
+export type ApiSearchSessionOccurrencesResponse = {
+  readonly data: readonly Readonly<{
+    turnId: string
+    itemId: string
+    snippet: string
+    snippetMatchRange: Readonly<{ start: number; end: number }>
+  }>[]
+  readonly nextCursor?: string
+}
+
 export type ApiReadSessionRequest = {
   readonly sessionId: string
 }
@@ -134,6 +165,18 @@ export type ApiProviderModel = {
 
 export type ApiProviderSummary = {
   readonly name: string
+  readonly availability?: "available" | "requires_login"
+  readonly credentialKind?: "api_key" | "oauth"
+  readonly rateLimits?:
+    | Readonly<{ status: "unavailable" }>
+    | Readonly<{
+        status: "available"
+        buckets: readonly Readonly<{
+          name: string
+          usedPercent: number
+          resetsAt?: number
+        }>[]
+      }>
   readonly defaultModel?: string
   readonly models: readonly ApiProviderModel[]
 }
@@ -155,6 +198,16 @@ export type ApiListProvidersResponse = {
 export type ApiUpdateUserModelPreferenceResponse = {
   readonly userPreference: ApiUserModelPreference
 }
+
+export type ApiServerDiagnostics = Readonly<{
+  process: Readonly<{
+    id: number
+    uptimeSeconds: number
+    residentMemoryBytes: number
+    heapUsedBytes: number
+  }>
+  gauges: Readonly<Record<string, number>>
+}>
 
 export type ApiAdmitInputRequest = {
   readonly sessionId: string

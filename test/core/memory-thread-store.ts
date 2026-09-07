@@ -13,6 +13,13 @@ import type {
   ThreadStore,
   ThreadStoreListInput,
 } from "../../src/core/thread-store.ts"
+import {
+  compareThreadSummaries,
+  firstVisibleThreadMatch,
+  startAfterThreadCursor,
+  threadCursor,
+  visibleThreadSearchOccurrences,
+} from "../../src/core/thread-search.ts"
 
 type Writer = {
   readonly pending: RolloutItem[]
@@ -244,18 +251,72 @@ export class MemoryThreadStore implements ThreadStore {
         ...thread.metadata,
         seq: thread.rollout.length,
       }))
-      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
-    const start =
-      input.cursor === undefined
-        ? 0
-        : threads.findIndex((thread) => thread.id === input.cursor) + 1
+      .sort(compareThreadSummaries)
+    const start = startAfterThreadCursor(threads, input.cursor)
     const page = threads.slice(start, start + limit)
     const last = page.at(-1)
     return {
       threads: structuredClone(page),
       ...(last !== undefined && start + limit < threads.length
-        ? { nextCursor: last.id }
+        ? { nextCursor: threadCursor(last) }
         : {}),
+    }
+  }
+
+  async searchThreads(input: {
+    readonly searchTerm: string
+    readonly cursor?: string
+    readonly limit: number
+  }) {
+    const candidates = [...this.#threads.values()]
+      .map((stored) => ({
+        stored,
+        summary: {
+          ...stored.metadata,
+          seq: stored.rollout.length,
+        },
+      }))
+      .sort((left, right) => compareThreadSummaries(left.summary, right.summary))
+    const start = startAfterThreadCursor(
+      candidates.map(({ summary }) => summary),
+      input.cursor,
+    )
+    const matches: Array<{ summary: ThreadSummary; snippet: string }> = []
+    let lastScanned: ThreadSummary | undefined
+    let index = start
+    for (; index < candidates.length && matches.length < input.limit; index += 1) {
+      const candidate = candidates[index]
+      if (candidate === undefined) continue
+      lastScanned = candidate.summary
+      const snippet = firstVisibleThreadMatch(candidate.stored, input.searchTerm)
+      if (snippet !== undefined) matches.push({ summary: candidate.summary, snippet })
+    }
+    return {
+      matches: structuredClone(matches),
+      ...(index < candidates.length && lastScanned !== undefined
+        ? { nextCursor: threadCursor(lastScanned) }
+        : {}),
+    }
+  }
+
+  async searchThreadOccurrences(input: {
+    readonly threadId: string
+    readonly searchTerm: string
+    readonly cursor?: string
+    readonly limit: number
+  }) {
+    const stored = this.#threads.get(input.threadId)
+    if (stored === undefined) return undefined
+    const offset = input.cursor === undefined ? 0 : Number(input.cursor)
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      throw new Error("Thread occurrence cursor is invalid.")
+    }
+    const all = visibleThreadSearchOccurrences(stored, input.searchTerm)
+    const occurrences = all.slice(offset, offset + input.limit)
+    const nextOffset = offset + occurrences.length
+    return {
+      occurrences: structuredClone(occurrences),
+      ...(nextOffset < all.length ? { nextCursor: String(nextOffset) } : {}),
     }
   }
 

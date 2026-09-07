@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { createFauxProvider } from "../../src/runtime/faux-provider.ts"
+import { createFauxProvider } from "../support/faux-provider.ts"
 import { ModelStopReason } from "../../src/runtime/model.ts"
 import {
   createYakitoriApplication,
@@ -13,7 +13,9 @@ import type { ApiHandlerResult } from "../../src/server/protocol.ts"
 describe("live file observations", () => {
   it("restores a durable read after application restart before editing", async () => {
     const rootDir = await mkdtemp(join(tmpdir(), "yakitori-observation-"))
-    const workspace = await mkdtemp(join(tmpdir(), "yakitori-observation-work-"))
+    const workspace = await mkdtemp(
+      join(tmpdir(), "yakitori-observation-work-"),
+    )
     const path = join(workspace, "value.txt")
     await writeFile(path, "value = 1\n")
     const options = {

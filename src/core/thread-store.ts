@@ -5,6 +5,7 @@ import type {
   ThreadMetadata,
   ThreadSummary,
 } from "./rollout.ts"
+import type { ThreadSearchOccurrence } from "./thread-search.ts"
 
 export const PersistContext = {
   Standard: "standard",
@@ -58,6 +59,29 @@ export type ThreadStoreListResult = {
   readonly nextCursor?: string
 }
 
+export type ThreadStoreSearchInput = Readonly<{
+  searchTerm: string
+  cursor?: string
+  limit: number
+}>
+
+export type ThreadStoreSearchResult = Readonly<{
+  matches: readonly Readonly<{ summary: ThreadSummary; snippet: string }>[]
+  nextCursor?: string
+}>
+
+export type ThreadStoreOccurrenceSearchInput = Readonly<{
+  threadId: string
+  searchTerm: string
+  cursor?: string
+  limit: number
+}>
+
+export type ThreadStoreOccurrenceSearchResult = Readonly<{
+  occurrences: readonly ThreadSearchOccurrence[]
+  nextCursor?: string
+}>
+
 // Storage-neutral rollout boundary. Implementations own their live single
 // writer, retry buffer, reference-backed fork positions, and projections.
 export type ThreadStore = {
@@ -74,5 +98,9 @@ export type ThreadStore = {
   readThread(threadId: string): Promise<StoredThread | undefined>
   listThreadIds(): Promise<readonly string[]>
   listThreads(input?: ThreadStoreListInput): Promise<ThreadStoreListResult>
+  searchThreads(input: ThreadStoreSearchInput): Promise<ThreadStoreSearchResult>
+  searchThreadOccurrences(
+    input: ThreadStoreOccurrenceSearchInput,
+  ): Promise<ThreadStoreOccurrenceSearchResult | undefined>
   deleteThread(threadId: string): Promise<void>
 }
