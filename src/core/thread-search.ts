@@ -26,7 +26,8 @@ export function firstVisibleThreadMatch(
   ]
   for (const candidate of candidates) {
     const match = literalMatches(candidate.text, searchTerm)[0]
-    if (match !== undefined) return snippetForMatch(candidate.text, match).snippet
+    if (match !== undefined)
+      return snippetForMatch(candidate.text, match).snippet
   }
   return undefined
 }
@@ -115,8 +116,12 @@ function visibleSearchMessages(
         .map((block) => block.text)
         .join("\n"),
     )
-    if (text === "") continue
     const state = assistantTurns.get(envelope.turnId) ?? { lastToolSeq: -1 }
+    if (text === "") {
+      delete state.finalText
+      assistantTurns.set(envelope.turnId, state)
+      continue
+    }
     state.finalText = {
       seq: record.seq,
       turnId: envelope.turnId,
@@ -133,10 +138,12 @@ function visibleSearchMessages(
         ? [state.finalText]
         : [],
   )
-  return [...users, ...finalAssistants].sort((left, right) => left.seq - right.seq)
+  return [...users, ...finalAssistants].sort(
+    (left, right) => left.seq - right.seq,
+  )
 }
 
-function markdownVisibleText(markdown: string): string {
+export function markdownVisibleText(markdown: string): string {
   const withoutFences = markdown.replace(/^\s*```[^\n]*$/gm, "")
   return decodeMarkdownEntities(
     withoutFences
@@ -150,8 +157,7 @@ function markdownVisibleText(markdown: string): string {
       .replace(/(\*\*|__|~~|\*|_)/g, "")
       .replace(/\\([\\`*{}[\]()#+.!_-])/g, "$1")
       .replace(/<[^>]+>/g, "")
-      .replace(/[ \t]+/g, " ")
-      .replace(/\n{3,}/g, "\n\n")
+      .replace(/\s+/gu, " ")
       .trim(),
   )
 }
@@ -164,29 +170,40 @@ function decodeMarkdownEntities(value: string): string {
     lt: "<",
     quot: '"',
   }
-  return value.replace(/&(?:#(\d+)|#x([0-9a-f]+)|([a-z]+));/gi, (entity, decimal, hex, name) => {
-    if (typeof decimal === "string") return String.fromCodePoint(Number(decimal))
-    if (typeof hex === "string") return String.fromCodePoint(Number.parseInt(hex, 16))
-    return named[String(name).toLowerCase()] ?? entity
-  })
+  return value.replace(
+    /&(?:#(\d+)|#x([0-9a-f]+)|([a-z]+));/gi,
+    (entity, decimal, hex, name) => {
+      if (typeof decimal === "string")
+        return String.fromCodePoint(Number(decimal))
+      if (typeof hex === "string")
+        return String.fromCodePoint(Number.parseInt(hex, 16))
+      return named[String(name).toLowerCase()] ?? entity
+    },
+  )
 }
 
-function literalMatches(
+export function literalMatches(
   text: string,
   searchTerm: string,
+  limit = Number.POSITIVE_INFINITY,
 ): readonly Readonly<{ start: number; end: number }>[] {
   const matcher = new RegExp(escapeRegularExpression(searchTerm), "giu")
-  return [...text.matchAll(matcher)].map((match) => ({
-    start: match.index,
-    end: match.index + match[0].length,
-  }))
+  const matches: Array<Readonly<{ start: number; end: number }>> = []
+  for (const match of text.matchAll(matcher)) {
+    matches.push({
+      start: match.index,
+      end: match.index + match[0].length,
+    })
+    if (matches.length >= limit) break
+  }
+  return matches
 }
 
 function escapeRegularExpression(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 }
 
-function snippetForMatch(
+export function snippetForMatch(
   text: string,
   match: Readonly<{ start: number; end: number }>,
 ): Readonly<{
@@ -204,7 +221,7 @@ function snippetForMatch(
   }
 }
 
-function parseThreadCursor(cursor: string): Readonly<{
+export function parseThreadCursor(cursor: string): Readonly<{
   updatedAt: string
   id: string
 }> {

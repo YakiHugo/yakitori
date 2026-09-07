@@ -13,7 +13,11 @@ import { MemoryThreadStore } from "./memory-thread-store.ts"
 describe("thread search projection", () => {
   it("searches rendered user text and only terminal assistant answers", () => {
     const stored = thread([
-      response("turn_user", "user", "Please [read](https://example.com) **docs**."),
+      response(
+        "turn_user",
+        "user",
+        "Please [read](https://example.com) **docs**.",
+      ),
       {
         type: "agent_message",
         messageId: "mailbox",
@@ -46,6 +50,38 @@ describe("thread search projection", () => {
       expect(occurrence.snippet).not.toContain("https://")
       expect(occurrence.snippet).not.toContain("**")
     }
+  })
+
+  it("normalizes rendered line breaks and clears an earlier answer when the final response has no text", () => {
+    const rendered = thread([
+      response("turn_rendered", "assistant", "😀 **Final**  \nneedle"),
+      completed("turn_rendered"),
+    ])
+    expect(visibleThreadSearchOccurrences(rendered, "Final needle")).toEqual([
+      expect.objectContaining({
+        snippet: "😀 Final needle",
+        snippetMatchRange: { start: 3, end: 15 },
+      }),
+    ])
+
+    const steered = thread([
+      response("turn_steered", "assistant", "stale needle"),
+      response("turn_steered", "user", "continue"),
+      {
+        type: "response_item",
+        item: {
+          ...envelope("turn_steered", "assistant", ""),
+          id: "item_turn_steered_final_reasoning",
+          item: {
+            role: "assistant",
+            content: [{ type: "reasoning", text: "done" }],
+          },
+        },
+      },
+      completed("turn_steered"),
+    ])
+
+    expect(firstVisibleThreadMatch(steered, "stale needle")).toBeUndefined()
   })
 
   it("continues after a deleted cursor anchor without duplicating the first page", async () => {

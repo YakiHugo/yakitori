@@ -12,16 +12,16 @@ import {
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
-import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
 import { ContextManager } from "../../src/core/context-manager.ts"
-import { createRolloutAssets } from "../../src/kernel/rollout-assets.ts"
-import { YakitoriErrorCode } from "../../src/kernel/errors.ts"
+import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
 import type {
   ResponseItemEnvelope,
   RolloutItem,
   ThreadMetadata,
 } from "../../src/core/rollout.ts"
 import type { CreateThreadMetadata } from "../../src/core/thread-store.ts"
+import { YakitoriErrorCode } from "../../src/kernel/errors.ts"
+import { createRolloutAssets } from "../../src/kernel/rollout-assets.ts"
 
 const roots: string[] = []
 
@@ -889,6 +889,81 @@ describe("JsonlThreadStore", () => {
     await expect(restarted.readThread("thread_broken_rollout")).rejects.toThrow(
       "invalid local ordering",
     )
+    await expect(
+      restarted.searchThreads({ searchTerm: "healthy", limit: 10 }),
+    ).rejects.toThrow("Cannot search 1 unreadable Thread projection")
+  })
+
+  it("persists and incrementally pages the visible-history search projection", async () => {
+    const { root, store } = await createStore()
+    await store.createThread(metadata("thread_search_projection"))
+    await store.appendItems("thread_search_projection", [
+      response("turn_search_one", "needle needle needle"),
+      terminal("turn_search_one"),
+    ])
+
+    const first = await store.searchThreadOccurrences({
+      threadId: "thread_search_projection",
+      searchTerm: "needle",
+      limit: 2,
+    })
+    expect(first?.occurrences).toHaveLength(2)
+    expect(first?.nextCursor).toBeDefined()
+
+    await store.appendItems("thread_search_projection", [
+      response("turn_search_two", "later needle"),
+      terminal("turn_search_two"),
+      {
+        type: "response_item",
+        item: {
+          id: "message_turn_cleared_text",
+          turnId: "turn_cleared",
+          createdAt: new Date().toISOString(),
+          item: {
+            role: "assistant",
+            content: [{ type: "text", text: "discarded answer" }],
+          },
+        },
+      },
+      {
+        type: "response_item",
+        item: {
+          id: "message_turn_cleared_reasoning",
+          turnId: "turn_cleared",
+          createdAt: new Date().toISOString(),
+          item: {
+            role: "assistant",
+            content: [{ type: "reasoning", text: "done" }],
+          },
+        },
+      },
+      terminal("turn_cleared"),
+    ])
+    const second = await store.searchThreadOccurrences({
+      threadId: "thread_search_projection",
+      searchTerm: "needle",
+      limit: 2,
+      ...(first?.nextCursor === undefined ? {} : { cursor: first.nextCursor }),
+    })
+    expect(second?.occurrences.map(({ turnId }) => turnId)).toEqual([
+      "turn_search_one",
+      "turn_search_two",
+    ])
+    expect(second?.nextCursor).toBeUndefined()
+    await expect(
+      store.searchThreads({ searchTerm: "discarded answer", limit: 1 }),
+    ).resolves.toEqual({ matches: [] })
+    await store.shutdownThread("thread_search_projection")
+
+    await expect(
+      access(join(root, "thread-search.sqlite")),
+    ).resolves.toBeUndefined()
+    const restarted = new JsonlThreadStore({ root })
+    await expect(
+      restarted.searchThreads({ searchTerm: "later needle", limit: 1 }),
+    ).resolves.toMatchObject({
+      matches: [{ summary: { id: "thread_search_projection" } }],
+    })
   })
 
   it("waits for storage coordination during startup instead of rejecting readiness", async () => {

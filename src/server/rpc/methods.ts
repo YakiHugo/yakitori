@@ -561,7 +561,7 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
   ),
   handlerEntry<ApiSearchSessionsResponse>(
     "session/search",
-    () => undefined,
+    () => ({ kind: "global", name: "session-search" }),
     (handlers, params) => handlers.searchSessions(params),
   ),
   handlerEntry<ApiSearchSessionOccurrencesResponse>(

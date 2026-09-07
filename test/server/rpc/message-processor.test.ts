@@ -510,6 +510,36 @@ describe("serialization scopes", () => {
     expect(started).toBe(2)
   })
 
+  it("serializes global Session searches", async () => {
+    const firstSearch = deferred<void>()
+    let calls = 0
+    const { processor } = createTestProcessor({
+      handlers: createFakeHandlers({
+        searchSessions: async () => {
+          calls += 1
+          if (calls === 1) await firstSearch.promise
+          return okResult({ data: [] })
+        },
+      }),
+    })
+    const connection = openTestConnection(processor)
+    await initializeConnection(connection)
+
+    const first = connection.sendRequest("session/search", {
+      searchTerm: "first",
+    })
+    await waitForCondition(() => calls === 1)
+    const second = connection.sendRequest("session/search", {
+      searchTerm: "second",
+    })
+    await flush()
+    expect(calls).toBe(1)
+
+    firstSearch.resolve()
+    await Promise.all([first, second])
+    expect(calls).toBe(2)
+  })
+
   it("excludes a project list while a project write is in flight", async () => {
     const createGate = deferred<void>()
     let createCalled = false
