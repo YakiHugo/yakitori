@@ -446,6 +446,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
           userPreference: state.userPreference,
           defaultProvider: state.defaultProvider,
           defaultModel: state.defaultModel,
+          providers: state.providers,
         }),
         state.providers,
       )
@@ -655,6 +656,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
             userPreference: state.userPreference,
             defaultProvider: state.defaultProvider,
             defaultModel: state.defaultModel,
+            providers: state.providers,
           })
           const admittedModelSelection = normalizeKimiModelSelection(
             modelSelection,
@@ -867,13 +869,36 @@ export function resolveEffectiveModel(input: {
   readonly userPreference: ApiUserModelPreference | undefined
   readonly defaultProvider: string | undefined
   readonly defaultModel: string | undefined
+  readonly providers: readonly ApiProviderSummary[]
 }): ModelSelection | undefined {
-  if (input.sessionCurrent !== undefined) return input.sessionCurrent
-  if (input.userPreference !== undefined) return input.userPreference
+  if (isAvailableModel(input.sessionCurrent, input.providers)) {
+    return input.sessionCurrent
+  }
+  if (isAvailableModel(input.userPreference, input.providers)) {
+    return input.userPreference
+  }
   if (input.defaultProvider === undefined || input.defaultModel === undefined) {
     return undefined
   }
-  return { provider: input.defaultProvider, model: input.defaultModel }
+  const fallback = {
+    provider: input.defaultProvider,
+    model: input.defaultModel,
+  }
+  return isAvailableModel(fallback, input.providers) ? fallback : undefined
+}
+
+function isAvailableModel(
+  selection: ModelSelection | undefined,
+  providers: readonly ApiProviderSummary[],
+): selection is ModelSelection {
+  if (selection === undefined) return false
+  if (providers.length === 0) return true
+  const provider = providers.find((entry) => entry.name === selection.provider)
+  return (
+    provider !== undefined &&
+    provider.availability !== "requires_login" &&
+    provider.models.some((model) => model.id === selection.model)
+  )
 }
 
 export function normalizeKimiModelSelection(

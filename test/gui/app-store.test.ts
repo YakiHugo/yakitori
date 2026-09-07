@@ -13,7 +13,11 @@ import {
   EventType,
   InputRole,
 } from "../../src/kernel/events.ts"
-import type { ApiProject, ApiSessionDetail } from "../../src/server/protocol.ts"
+import type {
+  ApiProject,
+  ApiProviderSummary,
+  ApiSessionDetail,
+} from "../../src/server/protocol.ts"
 import { FakeRpcClient, type FakeSessionStream } from "./fake-rpc-client.ts"
 
 const fakeRef = vi.hoisted(() => ({
@@ -81,6 +85,37 @@ afterEach(() => {
 })
 
 describe("app store event stream", () => {
+  it("falls back from stale selections to the available default model", () => {
+    const providers: readonly ApiProviderSummary[] = [
+      {
+        name: "codex",
+        availability: "requires_login" as const,
+        models: [],
+      },
+      {
+        name: "faux",
+        availability: "available" as const,
+        defaultModel: "scripted",
+        models: [
+          {
+            id: "scripted",
+            displayName: "Scripted",
+            instructionProfileId: "default",
+          },
+        ],
+      },
+    ]
+    expect(
+      resolveEffectiveModel({
+        sessionCurrent: { provider: "codex", model: "stale-session" },
+        userPreference: { provider: "codex", model: "stale-preference" },
+        defaultProvider: "faux",
+        defaultModel: "scripted",
+        providers,
+      }),
+    ).toEqual({ provider: "faux", model: "scripted" })
+  })
+
   it("streams durable execution events into the store", async () => {
     useAppStore.setState({ sessions: [sessionDetail] })
     await useAppStore.getState().selectSession("session_1")
@@ -1054,6 +1089,7 @@ describe("model selection", () => {
         userPreference: useAppStore.getState().userPreference,
         defaultProvider: "openai",
         defaultModel: "gpt-5.6-sol",
+        providers: useAppStore.getState().providers,
       }),
     ).toEqual(picked)
 
@@ -1106,6 +1142,7 @@ describe("model selection", () => {
         userPreference: state.userPreference,
         defaultProvider: state.defaultProvider,
         defaultModel: state.defaultModel,
+        providers: state.providers,
       }),
     ).toEqual({
       provider: "codex",
@@ -1118,6 +1155,7 @@ describe("model selection", () => {
         userPreference: state.userPreference,
         defaultProvider: state.defaultProvider,
         defaultModel: state.defaultModel,
+        providers: state.providers,
       }),
     ).toEqual({ provider: "faux", model: "new-global-default" })
     expect(

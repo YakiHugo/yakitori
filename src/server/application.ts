@@ -82,11 +82,13 @@ import type {
 import type { RequestGate } from "./request-gate.ts"
 import {
   createSqliteProjectStore,
+  type ProjectStore,
   type SqliteProjectStore,
 } from "./sqlite-project-store.ts"
 import {
   type ConfigurationSnapshot,
   createUserConfigStore,
+  type UserConfigStore,
 } from "./user-config.ts"
 
 const defaultMateProfile = {
@@ -205,6 +207,36 @@ export async function createYakitoriApplication(
         ? {}
         : { configPath: options.userConfigPath }),
     })
+    const routedUserConfig: UserConfigStore = {
+      read: () => userConfig.read(),
+      readConfiguration: async (input = {}) => {
+        if (input.cwd === undefined) return userConfig.readConfiguration(input)
+        const root = await resolveProjectConfigRoot(
+          ownedProjectStore,
+          input.cwd,
+        )
+        return createSessionUserConfig(root).readConfiguration(input)
+      },
+      readSnapshot: async (input = {}) => {
+        if (input.cwd === undefined) return userConfig.readSnapshot(input)
+        const root = await resolveProjectConfigRoot(
+          ownedProjectStore,
+          input.cwd,
+        )
+        return createSessionUserConfig(root).readSnapshot(input)
+      },
+      write: (preference) => userConfig.write(preference),
+      writeValue: (input) => userConfig.writeValue(input),
+    }
+    function createSessionUserConfig(root: string): UserConfigStore {
+      return createUserConfigStore({
+        reportOperationalFailure: reporter,
+        workspaceRoot: root,
+        ...(options.userConfigPath === undefined
+          ? {}
+          : { configPath: options.userConfigPath }),
+      })
+    }
     const userConfiguration = await userConfig.readConfiguration()
     const configuredShellEnvironmentPolicy =
       options.shellEnvironmentPolicy ?? userConfiguration.shellEnvironmentPolicy
@@ -309,9 +341,6 @@ export async function createYakitoriApplication(
     agentGraphStoreForCleanup = agentGraphStore
     let threadManager: ThreadManager
     const agentRuntime = createAgentRuntime({
-      ...(userConfiguration.rolloutBudget === undefined
-        ? {}
-        : { rolloutBudget: userConfiguration.rolloutBudget }),
       graphStore: agentGraphStore,
       getThreadManager: () => threadManager,
       onBackgroundError: (error, threadId, operation) => {
@@ -332,15 +361,12 @@ export async function createYakitoriApplication(
       maxResidentSubagentThreads: 3,
       createTurnProcessor: async (stored) => {
         const workingDirectory = stored.metadata.workingDirectory ?? workspace
-        const sessionUserConfig = containsDirectory(workspace, workingDirectory)
-          ? userConfig
-          : createUserConfigStore({
-              reportOperationalFailure: reporter,
-              workspaceRoot: workingDirectory,
-              ...(options.userConfigPath === undefined
-                ? {}
-                : { configPath: options.userConfigPath }),
-            })
+        const configRoot = await resolveProjectConfigRoot(
+          ownedProjectStore,
+          workingDirectory,
+          stored.metadata.projectId,
+        )
+        const sessionUserConfig = createSessionUserConfig(configRoot)
         const config = await sessionUserConfig.readSnapshot({
           cwd: workingDirectory,
         })
@@ -377,8 +403,9 @@ export async function createYakitoriApplication(
           throw error
         }
         let processor: ReturnType<typeof createTurnProcessor>
+        let hookRunner: ReturnType<typeof createHookRunner> | undefined
         try {
-          const hookRunner =
+          hookRunner =
             sessionConfiguration.hooks === undefined
               ? undefined
               : createHookRunner(sessionConfiguration.hooks)
@@ -423,7 +450,10 @@ export async function createYakitoriApplication(
                     isSubagent: isSubagentThread(stored),
                   },
                 }),
-            agentControl: agentRuntime.registerThread(stored),
+            agentControl: agentRuntime.registerThread(
+              stored,
+              sessionConfiguration.rolloutBudget,
+            ),
             rolloutAssets,
             approvalPolicy,
             onOperationalFailure: (failure) => {
@@ -437,7 +467,11 @@ export async function createYakitoriApplication(
           })
         } catch (error) {
           unsubscribe()
-          await Promise.allSettled([toolRegistry.dispose(), mcpManager.close()])
+          await Promise.allSettled([
+            hookRunner?.dispose(),
+            toolRegistry.dispose(),
+            mcpManager.close(),
+          ])
           throw error
         }
         mcpManagers.add(mcpManager)
@@ -450,10 +484,14 @@ export async function createYakitoriApplication(
           async dispose() {
             unsubscribe()
             mcpManagers.delete(mcpManager)
-            const results = await Promise.allSettled([
+            const processorResult = await Promise.allSettled([
               processor.dispose?.(),
+            ])
+            const resourceResults = await Promise.allSettled([
+              hookRunner?.dispose(),
               mcpManager.close(),
             ])
+            const results = [...processorResult, ...resourceResults]
             const errors = results.flatMap((result) =>
               result.status === "rejected" ? [result.reason] : [],
             )
@@ -522,7 +560,7 @@ export async function createYakitoriApplication(
           handlers,
           projectStore: ownedProjectStore,
           providers,
-          userConfig,
+          userConfig: routedUserConfig,
           availableProviders: providerRegistry.providers,
           rolloutAssets,
           reportOperationalFailure: reporter,
@@ -620,6 +658,43 @@ function containsDirectory(root: string, directory: string): boolean {
       !pathFromRoot.startsWith(`..${sep}`) &&
       !isAbsolute(pathFromRoot))
   )
+}
+
+async function resolveProjectConfigRoot(
+  projectStore: ProjectStore,
+  cwd: string,
+  projectId?: string,
+): Promise<string> {
+  const canonicalCwd = await realpath(cwd)
+  if (projectId !== undefined) {
+    const project = await projectStore.readProject(projectId)
+    const root =
+      project === undefined
+        ? undefined
+        : closestRoot(project.roots, canonicalCwd)
+    return root ?? canonicalCwd
+  }
+
+  const roots: string[] = []
+  let cursor: string | undefined
+  do {
+    const page = await projectStore.listProjects({
+      limit: 100,
+      ...(cursor === undefined ? {} : { cursor }),
+    })
+    roots.push(...page.projects.flatMap((project) => project.roots))
+    cursor = page.nextCursor
+  } while (cursor !== undefined)
+  return closestRoot(roots, canonicalCwd) ?? canonicalCwd
+}
+
+function closestRoot(
+  roots: readonly string[],
+  cwd: string,
+): string | undefined {
+  return roots
+    .filter((root) => containsDirectory(root, cwd))
+    .sort((left, right) => resolve(right).length - resolve(left).length)[0]
 }
 
 function isSubagentThread(stored: StoredThread): boolean {

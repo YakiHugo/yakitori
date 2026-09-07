@@ -43,6 +43,7 @@ describe("agent runtime", () => {
     }
     try {
       const root = await manager.createThread({
+        projectId: "project_test",
         initialContext: {
           sourceThreadId: "source",
           previousModel,
@@ -69,6 +70,9 @@ describe("agent runtime", () => {
       })
       await control.bind(root.id, TARGET).wait(1_000)
       const context = manager.getThread(child.agentId)?.snapshot().context
+      expect(
+        manager.getThread(child.agentId)?.snapshot().metadata.projectId,
+      ).toBe("project_test")
       expect(context?.previousModel).toEqual(previousModel)
       if (forkTurns === "all") expect(context?.activeContextTokens).toBe(12_345)
       else {
@@ -105,17 +109,17 @@ describe("agent runtime", () => {
     const runtime = createAgentRuntime({
       graphStore: graph.store,
       getThreadManager: () => manager,
-      rolloutBudget: {
-        limitTokens: 50,
-        reminderAtRemainingTokens: [25],
-        samplingTokenWeight: 1,
-        prefillTokenWeight: 1,
-      },
     })
+    const rolloutBudget = {
+      limitTokens: 50,
+      reminderAtRemainingTokens: [25],
+      samplingTokenWeight: 1,
+      prefillTokenWeight: 1,
+    }
     manager = new ThreadManager({
       store,
       createTurnProcessor(stored) {
-        const control = runtime.registerThread(stored)
+        const control = runtime.registerThread(stored, rolloutBudget)
         controls.set(stored.metadata.id, control)
         return createTurnProcessor({
           stream: provider.stream,
@@ -268,23 +272,33 @@ describe("agent runtime", () => {
       graphStore: graph.store,
       getThreadManager: () => secondManager,
     })
+    const recoveredBudget = {
+      limitTokens: 1,
+      reminderAtRemainingTokens: [],
+      samplingTokenWeight: 1,
+      prefillTokenWeight: 1,
+    }
     secondManager = new ThreadManager({
       store,
       createTurnProcessor(stored) {
-        const control = secondRuntime.registerThread(stored)
+        const control = secondRuntime.registerThread(stored, recoveredBudget)
         if (stored.metadata.id === root.id) secondControl = control
         return immediateProcessor()
       },
     })
     await secondManager.resumeThread(root.id)
     if (secondControl === undefined) throw new Error("missing restored control")
-    await secondControl.bind(root.id, TARGET).list()
-    await secondControl.bind(root.id, TARGET).wait(1_000)
+    const restoredControl = secondControl
+    await restoredControl.bind(root.id, TARGET).list()
+    await restoredControl.bind(root.id, TARGET).wait(1_000)
 
     expect(await notificationCount(store, root.id)).toBe(1)
-    await expect(secondControl.bind(root.id, TARGET).list()).resolves.toEqual([
-      expect.objectContaining({ agentId: child.agentId }),
-    ])
+    await expect(restoredControl.bind(root.id, TARGET).list()).resolves.toEqual(
+      [expect.objectContaining({ agentId: child.agentId })],
+    )
+    expect(() =>
+      restoredControl.rolloutBudget.recordUsage({ outputTokens: 2 }),
+    ).toThrow("Session rollout token budget exceeded")
     await secondRuntime.close()
     await secondManager.shutdown()
   })

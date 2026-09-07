@@ -309,7 +309,13 @@ export class ThreadManager {
         await this.#store.deleteThread(target.id)
         throw new Error("ThreadManager shut down while forking a Thread.")
       }
-      return { thread: await this.#installStored(result.thread), result }
+      try {
+        return { thread: await this.#installStored(result.thread), result }
+      } catch (error) {
+        await this.#store.discardThread(target.id).catch(() => undefined)
+        await this.#store.deleteThread(target.id)
+        throw error
+      }
     })
   }
 
@@ -403,7 +409,10 @@ export class ThreadManager {
       this.#discarding.has(threadId) ||
       this.#closingThreads.has(threadId)
     ) {
-      await processor.dispose?.()
+      await Promise.allSettled([
+        processor.dispose?.(),
+        this.#store.discardThread(threadId),
+      ])
       this.#requireOpen()
       throw new Error(`Thread ${threadId} cannot be installed.`)
     }

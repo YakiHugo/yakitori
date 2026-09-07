@@ -20,13 +20,15 @@ import {
 import { estimateHistoryTokens } from "./model-request-budget.ts"
 
 export type AgentRuntime = Readonly<{
-  registerThread(stored: StoredThread): AgentControl
+  registerThread(
+    stored: StoredThread,
+    rolloutBudget?: RolloutBudgetConfig,
+  ): AgentControl
   discardThread(threadId: string): Promise<void>
   close(): Promise<void>
 }>
 
 export function createAgentRuntime(input: {
-  readonly rolloutBudget?: RolloutBudgetConfig
   readonly graphStore: AgentGraphStore
   readonly getThreadManager: () => ThreadManager
   readonly maxDepth?: number
@@ -61,6 +63,9 @@ export function createAgentRuntime(input: {
           ...(parentMetadata.workingDirectory === undefined
             ? {}
             : { workingDirectory: parentMetadata.workingDirectory }),
+          ...(parentMetadata.projectId === undefined
+            ? {}
+            : { projectId: parentMetadata.projectId }),
           ...(parentMetadata.mateId === undefined
             ? {}
             : { mateId: parentMetadata.mateId }),
@@ -196,13 +201,14 @@ export function createAgentRuntime(input: {
     },
   }
 
-  function controlForRoot(rootThreadId: string): AgentControl {
+  function controlForRoot(
+    rootThreadId: string,
+    rolloutBudget?: RolloutBudgetConfig,
+  ): AgentControl {
     const existing = controls.get(rootThreadId)
     if (existing !== undefined) return existing
     const created = createAgentControl({
-      ...(input.rolloutBudget === undefined
-        ? {}
-        : { rolloutBudget: input.rolloutBudget }),
+      ...(rolloutBudget === undefined ? {} : { rolloutBudget }),
       rootSessionId: rootThreadId,
       adapter,
       restoreAgents: async () => {
@@ -268,7 +274,7 @@ export function createAgentRuntime(input: {
   }
 
   return {
-    registerThread(stored) {
+    registerThread(stored, rolloutBudget) {
       const registration = readAgentRegistration(stored.metadata)
       const rootThreadId = registration?.rootSessionId ?? stored.metadata.id
       const knownRoot = threadRoots.get(stored.metadata.id)
@@ -278,7 +284,7 @@ export function createAgentRuntime(input: {
         )
       }
       threadRoots.set(stored.metadata.id, rootThreadId)
-      const control = controlForRoot(rootThreadId)
+      const control = controlForRoot(rootThreadId, rolloutBudget)
       if (
         registration !== undefined &&
         !provisionalThreads.has(stored.metadata.id)

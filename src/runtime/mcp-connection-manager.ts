@@ -39,30 +39,64 @@ type Connection = Readonly<{
 }>
 
 export function createMcpConnectionManager(
-  options: { readonly restartDelayMs?: number } = {},
+  options: {
+    readonly restartDelayMs?: number
+    readonly maxRestartDelayMs?: number
+    readonly maxRestartAttempts?: number
+  } = {},
 ): McpConnectionManager {
   const connections = new Map<string, Connection>()
   const failures = new Map<string, string>()
   const configuredServers = new Map<string, McpServerConfig>()
   const restartTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  const restartAttempts = new Map<string, number>()
+  const generations = new Map<string, number>()
+  const connecting = new Map<
+    string,
+    Readonly<{
+      fingerprint: string
+      generation: number
+      promise: Promise<void>
+    }>
+  >()
+  const clients = new Set<StdioMcpClient>()
   const listeners = new Set<
     (serverName: string, tools: readonly RuntimeTool[]) => void
   >()
   const restartDelayMs = options.restartDelayMs ?? 250
+  const maxRestartDelayMs = options.maxRestartDelayMs ?? 30_000
+  const maxRestartAttempts = options.maxRestartAttempts ?? 5
   let closed = false
 
   const publish = (name: string, tools: readonly RuntimeTool[]) => {
     for (const listener of listeners) listener(name, tools)
   }
 
-  const scheduleRestart = (name: string, identity: string) => {
+  const scheduleRestart = (
+    name: string,
+    identity: string,
+    generation: number,
+  ) => {
     if (closed || restartTimers.has(name)) return
+    const attempt = (restartAttempts.get(name) ?? 0) + 1
+    if (attempt > maxRestartAttempts) return
+    restartAttempts.set(name, attempt)
+    const delay = Math.min(
+      restartDelayMs * 2 ** Math.max(0, attempt - 1),
+      maxRestartDelayMs,
+    )
     const timer = setTimeout(() => {
       restartTimers.delete(name)
       const config = configuredServers.get(name)
-      if (config === undefined || fingerprint(config) !== identity) return
-      void connect(name, config, identity)
-    }, restartDelayMs)
+      if (
+        config === undefined ||
+        fingerprint(config) !== identity ||
+        generations.get(name) !== generation
+      ) {
+        return
+      }
+      void connect(name, config, identity, generation)
+    }, delay)
     timer.unref()
     restartTimers.set(name, timer)
   }
@@ -71,19 +105,44 @@ export function createMcpConnectionManager(
     name: string,
     config: McpServerConfig,
     identity: string,
+    generation: number,
+  ): Promise<void> => {
+    const active = connecting.get(name)
+    if (active?.generation === generation) return active.promise
+    const promise = connectOnce(name, config, identity, generation)
+    connecting.set(name, { fingerprint: identity, generation, promise })
+    await promise.finally(() => {
+      if (connecting.get(name)?.promise === promise) connecting.delete(name)
+    })
+  }
+
+  const connectOnce = async (
+    name: string,
+    config: McpServerConfig,
+    identity: string,
+    generation: number,
   ): Promise<void> => {
     const client = new StdioMcpClient(name, config, (error) => {
+      clients.delete(client)
       const current = connections.get(name)
-      if (current?.client !== client) return
+      if (current?.client !== client || generations.get(name) !== generation) {
+        return
+      }
       connections.delete(name)
       failures.set(name, error.message)
       publish(name, [])
-      scheduleRestart(name, identity)
+      scheduleRestart(name, identity, generation)
     })
+    clients.add(client)
     try {
       const descriptions = await client.start()
-      if (closed || configuredServers.get(name) !== config) {
+      if (
+        closed ||
+        generations.get(name) !== generation ||
+        fingerprint(configuredServers.get(name) ?? {}) !== identity
+      ) {
         await client.close()
+        clients.delete(client)
         return
       }
       const tools = descriptions.map((tool) => runtimeTool(name, client, tool))
@@ -91,9 +150,11 @@ export function createMcpConnectionManager(
       failures.delete(name)
       publish(name, tools)
     } catch (error) {
-      failures.set(name, error instanceof Error ? error.message : String(error))
       await client.close()
-      scheduleRestart(name, identity)
+      clients.delete(client)
+      if (generations.get(name) !== generation) return
+      failures.set(name, error instanceof Error ? error.message : String(error))
+      scheduleRestart(name, identity, generation)
     }
   }
 
@@ -105,7 +166,6 @@ export function createMcpConnectionManager(
       )
       const keep = new Set(enabled.map(([name]) => name))
       for (const [name, timer] of restartTimers) {
-        if (keep.has(name)) continue
         clearTimeout(timer)
         restartTimers.delete(name)
       }
@@ -116,6 +176,8 @@ export function createMcpConnectionManager(
       )
       for (const name of [...connections.keys()]) {
         if (!keep.has(name)) {
+          const removed = connections.get(name)
+          if (removed !== undefined) clients.delete(removed.client)
           connections.delete(name)
           publish(name, [])
         }
@@ -125,6 +187,10 @@ export function createMcpConnectionManager(
       }
       for (const name of [...configuredServers.keys()]) {
         if (!keep.has(name)) configuredServers.delete(name)
+        if (!keep.has(name)) {
+          generations.set(name, (generations.get(name) ?? 0) + 1)
+          restartAttempts.delete(name)
+        }
       }
 
       for (const [name, config] of enabled) {
@@ -135,11 +201,20 @@ export function createMcpConnectionManager(
         if (current?.fingerprint === identity && current.client.isRunning()) {
           continue
         }
+        const pending = connecting.get(name)
+        if (pending?.fingerprint === identity) {
+          await pending.promise
+          continue
+        }
+        restartAttempts.delete(name)
+        const generation = (generations.get(name) ?? 0) + 1
+        generations.set(name, generation)
         if (current !== undefined) {
           await current.client.close()
+          clients.delete(current.client)
           connections.delete(name)
         }
-        await connect(name, config, identity)
+        await connect(name, config, identity, generation)
       }
     },
     tools() {
@@ -172,13 +247,16 @@ export function createMcpConnectionManager(
       closed = true
       for (const timer of restartTimers.values()) clearTimeout(timer)
       restartTimers.clear()
-      await Promise.all(
-        [...connections.values()].map((connection) =>
-          connection.client.close(),
-        ),
+      await Promise.all([...clients].map((client) => client.close()))
+      await Promise.allSettled(
+        [...connecting.values()].map((connection) => connection.promise),
       )
       connections.clear()
       configuredServers.clear()
+      connecting.clear()
+      generations.clear()
+      failures.clear()
+      clients.clear()
       listeners.clear()
     },
   }

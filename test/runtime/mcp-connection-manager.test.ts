@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
@@ -82,6 +82,73 @@ describe("MCP connection manager", () => {
       ])
     } finally {
       unsubscribe()
+      await manager.close()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it("cancels a queued restart when an explicit update reconnects", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yakitori-mcp-"))
+    const script = join(root, "generation.mjs")
+    const starts = join(root, "starts.txt")
+    const marker = join(root, "marker")
+    await writeFile(
+      script,
+      [
+        "import {appendFileSync,existsSync,writeFileSync} from 'node:fs';",
+        `appendFileSync(${JSON.stringify(starts)},'start\\n');`,
+        `const first=!existsSync(${JSON.stringify(marker)}); if(first)writeFileSync(${JSON.stringify(marker)},'');`,
+        "import readline from 'node:readline'; const rl=readline.createInterface({input:process.stdin});",
+        "rl.on('line',(line)=>{const m=JSON.parse(line);if(m.id===undefined)return;const result=m.method==='tools/list'?{tools:[]}:{};process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result})+'\\n',()=>{if(first&&m.method==='tools/list')process.exit(0)});});",
+      ].join("\n"),
+    )
+    const manager = createMcpConnectionManager({ restartDelayMs: 200 })
+    try {
+      const config = { demo: { command: process.execPath, args: [script] } }
+      await manager.update(config)
+      await expect.poll(() => manager.status()[0]?.state).toBe("failed")
+      await manager.update(config)
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      await expect(readFile(starts, "utf8")).resolves.toBe("start\nstart\n")
+    } finally {
+      await manager.close()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it("bounds automatic restart attempts", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yakitori-mcp-"))
+    const script = join(root, "always-exit.mjs")
+    const starts = join(root, "starts.txt")
+    await writeFile(
+      script,
+      [
+        "import {appendFileSync} from 'node:fs';",
+        `appendFileSync(${JSON.stringify(starts)},'start\\n');`,
+        "import readline from 'node:readline'; const rl=readline.createInterface({input:process.stdin});",
+        "rl.on('line',(line)=>{const m=JSON.parse(line);if(m.id===undefined)return;const result=m.method==='tools/list'?{tools:[]}:{};process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result})+'\\n',()=>{if(m.method==='tools/list')process.exit(0)});});",
+      ].join("\n"),
+    )
+    const manager = createMcpConnectionManager({
+      restartDelayMs: 1,
+      maxRestartDelayMs: 2,
+      maxRestartAttempts: 2,
+    })
+    try {
+      await manager.update({
+        demo: { command: process.execPath, args: [script] },
+      })
+      await expect
+        .poll(
+          async () =>
+            (await readFile(starts, "utf8")).trim().split("\n").length,
+        )
+        .toBe(3)
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect((await readFile(starts, "utf8")).trim().split("\n")).toHaveLength(
+        3,
+      )
+    } finally {
       await manager.close()
       await rm(root, { recursive: true, force: true })
     }

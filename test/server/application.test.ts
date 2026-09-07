@@ -28,6 +28,7 @@ import {
   type ApiHandlerResult,
   type ApiListProvidersResponse,
 } from "../../src/server/protocol.ts"
+import type { ConfigurationSnapshot } from "../../src/server/user-config.ts"
 
 async function listen(server: HttpServer): Promise<string> {
   await new Promise<void>((resolve) => {
@@ -1148,6 +1149,78 @@ describe("application composition", () => {
           "Use the Session project instructions.",
         )
       } finally {
+        await application.close()
+      }
+    })
+  })
+
+  it("uses the owning Project root for an outside-workspace Session and config/read", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const projectRoot = join(rootDir, "other-project")
+      const nested = join(projectRoot, "packages", "app")
+      const configPath = join(rootDir, "config.toml")
+      await mkdir(join(projectRoot, ".yakitori"), { recursive: true })
+      await mkdir(nested, { recursive: true })
+      await writeFile(
+        configPath,
+        [
+          `[projects.${JSON.stringify(projectRoot)}]`,
+          'trust_level = "trusted"',
+        ].join("\n"),
+      )
+      await writeFile(
+        join(projectRoot, ".yakitori", "config.toml"),
+        'instructions = "Use the outside Project configuration."\n',
+      )
+      let request: ModelRequest | undefined
+      const application = await createYakitoriApplication({
+        rootDir,
+        workspace,
+        userConfigPath: configPath,
+        stream: async function* (received) {
+          request = received
+          yield {
+            type: "response",
+            response: {
+              stopReason: ModelStopReason.EndTurn,
+              content: [{ type: "text", text: "done" }],
+            },
+          }
+        },
+      })
+      const server = application.createHttpServer()
+      try {
+        const project = await application.projectStore.createProject({
+          name: "other-project",
+          roots: [await realpath(projectRoot)],
+        })
+        const created = await application.handlers.createSession({
+          projectId: project.project.id,
+          workingDirectory: nested,
+        })
+        expectOk(created)
+        const admitted = await application.handlers.admitInput({
+          sessionId: created.body.session.id,
+          requestId: "request_outside_project_config",
+          content: { kind: "text", text: "run" },
+        })
+        expectOk(admitted)
+        await waitForThreadIdle(application, created.body.session.id)
+        expect(request?.system.map((section) => section.text)).toContain(
+          "Use the outside Project configuration.",
+        )
+
+        const baseUrl = await listen(server)
+        const snapshot = await rpcRequest<ConfigurationSnapshot>(
+          baseUrl,
+          "config/read",
+          { cwd: nested },
+        )
+        expect(snapshot.configuration.baseInstructions).toBe(
+          "Use the outside Project configuration.",
+        )
+      } finally {
+        await closeServer(server)
         await application.close()
       }
     })
