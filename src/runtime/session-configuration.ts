@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto"
 import type {
   ApprovalPolicy,
+  AutoCompactTokenLimitScope,
   ModelSelection,
   SessionConfigurationSnapshot,
   TurnExecutionContext,
@@ -9,8 +10,6 @@ import type {
 import { isSessionConfigurationSnapshot } from "../kernel/index.ts"
 import {
   createSessionExecutionPolicy,
-  deriveCompactionContextBytes,
-  deriveModelVisibleContextBytes,
   SessionExecutionPolicyDefaults,
   type SessionExecutionPolicy,
 } from "./limits.ts"
@@ -54,6 +53,10 @@ export type ResolvedStepConfiguration = Readonly<{
   approvalPolicy: ApprovalPolicy
   executionPolicy: SessionExecutionPolicy
   modelCapacity?: ResolvedModelCapacity
+  autoCompact: Readonly<{
+    limitTokens?: number
+    scope: AutoCompactTokenLimitScope
+  }>
 }>
 
 export type TurnContext = Readonly<{
@@ -78,6 +81,8 @@ export class SessionConfiguration {
       readonly baseInstructions?: string
       readonly executionPolicy?: SessionExecutionPolicy
       readonly modelContextWindowTokens?: number
+      readonly modelAutoCompactTokenLimit?: number
+      readonly modelAutoCompactTokenLimitScope?: AutoCompactTokenLimitScope
     },
     models?: ModelsManager,
   ): SessionConfiguration {
@@ -92,8 +97,9 @@ export class SessionConfiguration {
       throw new Error("promptCacheKey must be non-empty.")
     }
     validateContextWindowOverride(model, input.modelContextWindowTokens, models)
+    validateAutoCompactTokenLimit(input.modelAutoCompactTokenLimit)
     return new SessionConfiguration({
-      schemaVersion: 4,
+      schemaVersion: 5,
       workspaceRoot: input.workspaceRoot,
       promptCacheKey: input.promptCacheKey,
       defaultTarget: { ...input.selection },
@@ -106,6 +112,11 @@ export class SessionConfiguration {
       ...(input.modelContextWindowTokens === undefined
         ? {}
         : { modelContextWindowTokens: input.modelContextWindowTokens }),
+      ...(input.modelAutoCompactTokenLimit === undefined
+        ? {}
+        : { modelAutoCompactTokenLimit: input.modelAutoCompactTokenLimit }),
+      modelAutoCompactTokenLimitScope:
+        input.modelAutoCompactTokenLimitScope ?? "total",
     })
   }
 
@@ -128,6 +139,7 @@ export class SessionConfiguration {
       snapshot.modelContextWindowTokens,
       models,
     )
+    validateAutoCompactTokenLimit(snapshot.modelAutoCompactTokenLimit)
     return new SessionConfiguration({
       ...snapshot,
       defaultTarget: { ...snapshot.defaultTarget },
@@ -183,8 +195,41 @@ export class SessionConfiguration {
       executionPolicy: requireSessionExecutionPolicy(
         this.snapshot.executionPolicyDefaults,
       ),
+      autoCompact: resolveAutoCompact(
+        model,
+        modelCapacity,
+        this.snapshot.modelAutoCompactTokenLimit,
+        this.snapshot.modelAutoCompactTokenLimitScope,
+      ),
       ...(modelCapacity === undefined ? {} : { modelCapacity }),
     }
+  }
+}
+
+function validateAutoCompactTokenLimit(limit: number | undefined): void {
+  if (limit !== undefined && (!Number.isSafeInteger(limit) || limit <= 0)) {
+    throw new Error(
+      "model_auto_compact_token_limit must be a positive integer.",
+    )
+  }
+}
+
+function resolveAutoCompact(
+  model: ResolvedModel,
+  capacity: ResolvedModelCapacity | undefined,
+  configuredLimit: number | undefined,
+  scope: AutoCompactTokenLimitScope,
+): ResolvedStepConfiguration["autoCompact"] {
+  const limits = [
+    capacity === undefined
+      ? undefined
+      : Math.floor(capacity.contextWindowTokens * 0.9),
+    model.autoCompactTokenLimit,
+    configuredLimit,
+  ].filter((limit): limit is number => limit !== undefined)
+  return {
+    ...(limits.length === 0 ? {} : { limitTokens: Math.min(...limits) }),
+    scope,
   }
 }
 
@@ -348,26 +393,7 @@ export function stepExecutionLimits(
   configuration: ResolvedStepConfiguration,
 ): TurnExecutionLimits {
   const executionPolicy = configuration.executionPolicy
-  const modelVisibleContextBytes =
-    configuration.modelCapacity === undefined ||
-    executionPolicy.modelVisibleContextBytes !==
-      SessionExecutionPolicyDefaults.modelVisibleContextBytes
-      ? executionPolicy.modelVisibleContextBytes
-      : deriveModelVisibleContextBytes(
-          configuration.modelCapacity.effectiveContextWindowTokens,
-        )
-  const compaction = deriveCompactionContextBytes({
-    modelVisibleContextBytes,
-    triggerRatio: executionPolicy.compactionTriggerRatio,
-    retainRatio: executionPolicy.compactionRetainRatio,
-  })
   return {
-    modelCallsPerTurn: executionPolicy.modelCallsPerTurn,
-    toolCallsPerTurn: executionPolicy.toolCallsPerTurn,
-    modelVisibleMessageBlocks: executionPolicy.modelVisibleMessageBlocks,
-    modelVisibleContextBytes,
-    compactionTriggerContextBytes: compaction.triggerBytes,
-    compactionRetainContextBytes: compaction.retainBytes,
     modelVisibleToolResultBytes: executionPolicy.modelVisibleToolResultBytes,
     modelVisibleToolResultLines: executionPolicy.modelVisibleToolResultLines,
     assistantResponseBytes: executionPolicy.assistantResponseBytes,

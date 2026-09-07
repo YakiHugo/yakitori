@@ -5,7 +5,7 @@ import type {
 } from "../kernel/events.ts"
 import { createItemId, createSessionId, createTurnId } from "../kernel/ids.ts"
 import { AgentThread } from "./agent-thread.ts"
-import type { StoredThread } from "./rollout.ts"
+import type { ModelContextSettings, StoredThread } from "./rollout.ts"
 import { Session, type TurnProcessor } from "./session.ts"
 import { SessionStatus } from "./session-io.ts"
 import type {
@@ -29,6 +29,8 @@ export type CreateThreadInput = {
     sourceThreadId: string
     messages: readonly ModelMessage[]
     worldStateBaseline?: JsonObject
+    previousModel?: ModelContextSettings
+    activeContextTokens?: number
   }>
 }
 
@@ -130,6 +132,14 @@ export class ThreadManager {
           const seedTurnId = createTurnId()
           const createdAt = new Date().toISOString()
           await this.#store.appendItems(threadId, [
+            ...(initialContext.previousModel === undefined
+              ? []
+              : [
+                  {
+                    type: "model_context" as const,
+                    settings: initialContext.previousModel,
+                  },
+                ]),
             ...initialContext.messages.map((message) => ({
               type: "response_item" as const,
               item: {
@@ -152,6 +162,15 @@ export class ThreadManager {
                     turnId: seedTurnId,
                     full: true,
                     state: initialContext.worldStateBaseline,
+                  },
+                ]),
+            ...(initialContext.activeContextTokens === undefined
+              ? []
+              : [
+                  {
+                    type: "token_count" as const,
+                    turnId: seedTurnId,
+                    activeContextTokens: initialContext.activeContextTokens,
                   },
                 ]),
           ])

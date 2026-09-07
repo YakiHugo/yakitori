@@ -55,7 +55,14 @@ export type TurnContextItem = {
   readonly selection: ModelSelection
 }
 
+export type ModelContextSettings = Readonly<{
+  provider: string
+  model: string
+  compactionHash?: string
+}>
+
 export type RolloutItem =
+  | { readonly type: "model_context"; readonly settings: ModelContextSettings }
   | { readonly type: "session_meta"; readonly metadata: ThreadMetadata }
   | { readonly type: "response_item"; readonly item: ResponseItemEnvelope }
   | { readonly type: "turn_context"; readonly context: TurnContextItem }
@@ -92,6 +99,16 @@ export type RolloutItem =
       readonly turnId: string
       readonly full: boolean
       readonly state: JsonObject
+    }
+  | {
+      readonly type: "token_count"
+      readonly turnId: string
+      readonly activeContextTokens: number
+      readonly autoCompactPrefillTokens?: number
+      readonly autoCompactPrefillEstimated?: boolean
+      readonly historyAnchorItemId?: string
+      readonly provider?: string
+      readonly model?: string
     }
   | {
       readonly type: "compacted"

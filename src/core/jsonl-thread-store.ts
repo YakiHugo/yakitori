@@ -1343,6 +1343,19 @@ function isRolloutItem(value: unknown): value is RolloutItem {
       isModelSelection(value.context.selection)
     )
   }
+  if (value.type === "model_context") {
+    return (
+      hasOnlyKeys(value, ["type", "settings"]) &&
+      isRecord(value.settings) &&
+      hasOnlyKeys(value.settings, ["provider", "model", "compactionHash"]) &&
+      typeof value.settings.provider === "string" &&
+      value.settings.provider.length > 0 &&
+      typeof value.settings.model === "string" &&
+      value.settings.model.length > 0 &&
+      (value.settings.compactionHash === undefined ||
+        typeof value.settings.compactionHash === "string")
+    )
+  }
   if (value.type === "turn_started") {
     return (
       hasOnlyKeys(value, [
@@ -1407,6 +1420,34 @@ function isRolloutItem(value: unknown): value is RolloutItem {
       typeof value.summary === "string" &&
       Array.isArray(value.replacement) &&
       value.replacement.every(isResponseItem)
+    )
+  }
+  if (value.type === "token_count") {
+    return (
+      hasOnlyKeys(value, [
+        "type",
+        "turnId",
+        "activeContextTokens",
+        "autoCompactPrefillTokens",
+        "autoCompactPrefillEstimated",
+        "historyAnchorItemId",
+        "provider",
+        "model",
+      ]) &&
+      typeof value.turnId === "string" &&
+      typeof value.activeContextTokens === "number" &&
+      Number.isSafeInteger(value.activeContextTokens) &&
+      value.activeContextTokens >= 0 &&
+      (value.autoCompactPrefillTokens === undefined ||
+        (typeof value.autoCompactPrefillTokens === "number" &&
+          Number.isSafeInteger(value.autoCompactPrefillTokens) &&
+          value.autoCompactPrefillTokens >= 0)) &&
+      (value.autoCompactPrefillEstimated === undefined ||
+        typeof value.autoCompactPrefillEstimated === "boolean") &&
+      (value.historyAnchorItemId === undefined ||
+        typeof value.historyAnchorItemId === "string") &&
+      (value.provider === undefined || typeof value.provider === "string") &&
+      (value.model === undefined || typeof value.model === "string")
     )
   }
   return false

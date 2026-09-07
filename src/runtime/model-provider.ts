@@ -27,6 +27,7 @@ export type ModelProviderInfo = Readonly<{
 }>
 
 export type ModelClientSession = {
+  readonly remoteCompaction?: boolean
   readonly stream: StreamFn
   close(): void | Promise<void>
 }
@@ -34,6 +35,7 @@ export type ModelClientSession = {
 // Session-scoped transport owner. It retains provider clients while every
 // startTurn call creates a fresh Turn-scoped connection/retry state owner.
 export type ModelClient = {
+  hasProvider(provider: string): boolean
   models(provider: string): ModelsManager
   startTurn(provider: string): ModelClientSession
   close(): void | Promise<void>
@@ -92,17 +94,37 @@ export function createModelProvider(input: {
     createClient() {
       return {
         startTurn() {
-          const stream = withRetries(
-            withStreamIdleTimeout(
-              input.stream,
-              input.info.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS,
-            ),
-            input.info.retry,
+          const timedStream = withStreamIdleTimeout(
+            input.stream,
+            input.info.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS,
           )
+          const stream = withRetries(timedStream, input.info.retry)
+          // Codex remote v2 permits at most two stream retries, including
+          // failures after provisional output. No history is installed yet.
+          const remoteStream = withRetries(timedStream, {
+            ...input.info.retry,
+            maxAttempts: Math.min(input.info.retry?.maxAttempts ?? 4, 3),
+            rateLimitMaxAttempts: Math.min(
+              input.info.retry?.rateLimitMaxAttempts ?? 2,
+              3,
+            ),
+            retryOnlyBeforeOutput: false,
+          })
           return {
+            remoteCompaction: input.info.capabilities.remoteCompaction,
             stream(request) {
               requireTargetProvider(input.info.id, request.target)
-              return stream({
+              if (
+                request.compaction === "remote_v2" &&
+                !input.info.capabilities.remoteCompaction
+              ) {
+                throw new Error(
+                  `Provider ${input.info.id} does not support remote compaction.`,
+                )
+              }
+              return (
+                request.compaction === "remote_v2" ? remoteStream : stream
+              )({
                 ...request,
                 continuationScope,
               })

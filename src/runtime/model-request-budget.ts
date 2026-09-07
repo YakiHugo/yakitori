@@ -1,12 +1,10 @@
-import { createHash } from "node:crypto"
-import type { ProviderUsageBaseline } from "../kernel/events.ts"
 import { readImageDimensions } from "../kernel/image-metadata.ts"
 import { nativeDeferredToolProtocol } from "./deferred-tool-loading.ts"
 import {
   DEFAULT_MODEL_MAX_OUTPUT_TOKENS,
   type ModelImageBlock,
+  type ModelMessage,
   type ModelRequest,
-  type ModelUsage,
 } from "./model.ts"
 
 const HIGH_DETAIL_IMAGE_TOKENS = 2_000
@@ -25,8 +23,6 @@ export type ModelRequestBudget = Readonly<{
   requiredContextTokens: number
 }>
 
-export type ModelUsageBaseline = ProviderUsageBaseline
-
 export function estimateModelRequestBudget(
   request: ModelRequest,
 ): ModelRequestBudget {
@@ -38,8 +34,9 @@ export function estimateModelRequestBudget(
     }),
   )
   const systemTokens = estimateTextTokens(JSON.stringify(request.system))
-  const messageTokens = estimateTextTokens(
-    JSON.stringify(request.messages, omitImagePayload),
+  const messageTokens = request.messages.reduce(
+    (total, message) => total + estimateMessageTextTokens(message),
+    0,
   )
   const budgetedTools =
     nativeDeferredToolProtocol(request) === undefined
@@ -73,80 +70,52 @@ export function estimateModelRequestBudget(
   }
 }
 
-export function effectiveRequestInputTokens(input: {
-  readonly request: ModelRequest
-  readonly contextWindowId: string
-  readonly budget: ModelRequestBudget
-  readonly baseline?: ModelUsageBaseline
-}): number {
-  const baseline = input.baseline
-  if (
-    baseline === undefined ||
-    !canReuseUsageBaseline(baseline, input.request, input.contextWindowId) ||
-    input.budget.estimatedInputTokens < baseline.estimatedInputTokens
-  ) {
-    return input.budget.estimatedInputTokens
-  }
-  const estimatedDelta =
-    input.budget.estimatedInputTokens - baseline.estimatedInputTokens
-  return Math.max(
-    input.budget.estimatedInputTokens,
-    baseline.providerInputTokens + estimatedDelta,
-  )
-}
-
-export function createModelUsageBaseline(input: {
-  readonly request: ModelRequest
-  readonly contextWindowId: string
-  readonly budget: ModelRequestBudget
-  readonly usage: ModelUsage
-}): ModelUsageBaseline | undefined {
-  const providerInputTokens = input.usage.inputTokens
-  if (providerInputTokens === undefined) return undefined
-  return {
-    provider: input.request.target.provider,
-    model: input.request.target.model,
-    contextWindowId: input.contextWindowId,
-    systemRevisions: systemRevisions(input.request),
-    toolContractDigest: digest(JSON.stringify(input.request.tools)),
-    messagePrefixDigests: input.request.messages.map(messageDigest),
-    providerInputTokens,
-    estimatedInputTokens: input.budget.estimatedInputTokens,
-  }
-}
-
-function canReuseUsageBaseline(
-  baseline: ModelUsageBaseline,
-  request: ModelRequest,
-  contextWindowId: string,
-): boolean {
-  return (
-    baseline.provider === request.target.provider &&
-    baseline.model === request.target.model &&
-    baseline.contextWindowId === contextWindowId &&
-    arraysEqual(baseline.systemRevisions, systemRevisions(request)) &&
-    baseline.toolContractDigest === digest(JSON.stringify(request.tools)) &&
-    baseline.messagePrefixDigests.length <= request.messages.length &&
-    baseline.messagePrefixDigests.every(
-      (digest, index) => digest === messageDigest(request.messages[index]),
-    )
-  )
-}
-
-function messageDigest(message: ModelRequest["messages"][number] | undefined) {
-  return digest(JSON.stringify(message))
-}
-
-function digest(value: string): string {
-  return createHash("sha256").update(value).digest("hex")
-}
-
-function systemRevisions(request: ModelRequest): readonly string[] {
-  return request.system.map((section) => `${section.id}:${section.revision}`)
-}
-
 function estimateTextTokens(text: string): number {
   return Math.ceil(Buffer.byteLength(text, "utf8") / APPROX_BYTES_PER_TOKEN)
+}
+
+// Only history added since the provider's last measured response needs a
+// local estimate. Image payload bytes are transport data, not text tokens.
+export function estimateHistoryTokens(
+  messages: readonly ModelMessage[],
+): number {
+  return messages.reduce(
+    (total, message) =>
+      total +
+      estimateMessageTextTokens(message) +
+      (message.role === "user"
+        ? (message.images ?? []).reduce(
+            (tokens, image) => tokens + estimateImageTokens(image),
+            0,
+          )
+        : 0),
+    0,
+  )
+}
+
+function estimateMessageTextTokens(message: ModelMessage): number {
+  if (message.role !== "assistant")
+    return estimateTextTokens(JSON.stringify(message, omitImagePayload))
+  const native = message.content.filter((block) => block.type === "compaction")
+  if (native.length === 0) return estimateTextTokens(JSON.stringify(message))
+  // Codex estimates the decoded payload minus encryption overhead, rather
+  // than charging base64 and IR provenance as model-visible text.
+  const nativeTokens = native.reduce(
+    (total, block) =>
+      total +
+      Math.ceil(
+        Math.max(0, Math.floor((block.encryptedContent.length * 3) / 4) - 650) /
+          4,
+      ),
+    0,
+  )
+  const content = message.content.filter((block) => block.type !== "compaction")
+  return (
+    nativeTokens +
+    (content.length === 0
+      ? 0
+      : estimateTextTokens(JSON.stringify({ ...message, content })))
+  )
 }
 
 function omitImagePayload(_key: string, value: unknown): unknown {
@@ -163,7 +132,7 @@ function omitImagePayload(_key: string, value: unknown): unknown {
   return value
 }
 
-function estimateImageTokens(image: ModelImageBlock): number {
+export function estimateImageTokens(image: ModelImageBlock): number {
   if ((image.detail ?? "high") !== "original") {
     return HIGH_DETAIL_IMAGE_TOKENS
   }
@@ -176,14 +145,4 @@ function estimateImageTokens(image: ModelImageBlock): number {
   const patchesWide = Math.ceil(dimensions.width / ORIGINAL_IMAGE_PATCH_SIZE)
   const patchesHigh = Math.ceil(dimensions.height / ORIGINAL_IMAGE_PATCH_SIZE)
   return Math.min(patchesWide * patchesHigh, ORIGINAL_IMAGE_MAX_PATCHES)
-}
-
-function arraysEqual(
-  left: readonly string[],
-  right: readonly string[],
-): boolean {
-  return (
-    left.length === right.length &&
-    left.every((value, index) => value === right[index])
-  )
 }

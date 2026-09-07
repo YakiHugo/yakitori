@@ -1,12 +1,35 @@
 import { describe, expect, it } from "vitest"
 import type { ModelRequest } from "../../src/runtime/model.ts"
 import {
-  createModelUsageBaseline,
-  effectiveRequestInputTokens,
+  estimateHistoryTokens,
   estimateModelRequestBudget,
 } from "../../src/runtime/model-request-budget.ts"
 
 describe("complete model request budgeting", () => {
+  it("estimates newly added images without counting their base64 transport bytes", () => {
+    const message = {
+      role: "user" as const,
+      content: [{ type: "text" as const, text: "inspect" }],
+      images: [
+        {
+          type: "image" as const,
+          mediaType: "image/png" as const,
+          data: "AAAA",
+        },
+      ],
+    }
+    const largeTransport = {
+      ...message,
+      images: message.images.map((image) => ({
+        ...image,
+        data: "AAAA".repeat(100_000),
+      })),
+    }
+    expect(estimateHistoryTokens([message])).toBeGreaterThanOrEqual(2_000)
+    expect(estimateHistoryTokens([largeTransport])).toBe(
+      estimateHistoryTokens([message]),
+    )
+  })
   it("counts system, tools, output reserve, and detail-aware images", () => {
     const high = estimateModelRequestBudget(requestWithImage("high"))
     const original = estimateModelRequestBudget(requestWithImage("original"))
@@ -26,72 +49,6 @@ describe("complete model request budgeting", () => {
     expect(original.requiredContextTokens).toBe(
       original.estimatedInputTokens + 4_096,
     )
-  })
-
-  it("uses provider input usage plus only the estimated request delta", () => {
-    const firstRequest = requestWithImage("high")
-    const firstBudget = estimateModelRequestBudget(firstRequest)
-    const baseline = createModelUsageBaseline({
-      request: firstRequest,
-      contextWindowId: "window_1",
-      budget: firstBudget,
-      usage: { inputTokens: firstBudget.estimatedInputTokens + 500 },
-    })
-    if (baseline === undefined) throw new Error("missing baseline")
-    const nextRequest = {
-      ...firstRequest,
-      messages: [
-        ...firstRequest.messages,
-        {
-          role: "user" as const,
-          content: [{ type: "text" as const, text: "next" }],
-        },
-      ],
-    }
-    const nextBudget = estimateModelRequestBudget(nextRequest)
-
-    expect(
-      effectiveRequestInputTokens({
-        request: nextRequest,
-        contextWindowId: "window_1",
-        budget: nextBudget,
-        baseline,
-      }),
-    ).toBe(
-      baseline.providerInputTokens +
-        nextBudget.estimatedInputTokens -
-        firstBudget.estimatedInputTokens,
-    )
-    expect(
-      effectiveRequestInputTokens({
-        request: nextRequest,
-        contextWindowId: "window_2",
-        budget: nextBudget,
-        baseline,
-      }),
-    ).toBe(nextBudget.estimatedInputTokens)
-
-    const replacedPrefixRequest = {
-      ...nextRequest,
-      messages: [
-        {
-          role: "user" as const,
-          content: [{ type: "text" as const, text: "replacement prefix" }],
-        },
-        ...nextRequest.messages.slice(1),
-      ],
-    }
-    const replacedPrefixBudget = estimateModelRequestBudget(
-      replacedPrefixRequest,
-    )
-    expect(
-      effectiveRequestInputTokens({
-        request: replacedPrefixRequest,
-        contextWindowId: "window_1",
-        budget: replacedPrefixBudget,
-        baseline,
-      }),
-    ).toBe(replacedPrefixBudget.estimatedInputTokens)
   })
 
   it("does not charge native deferred definitions to the initial prompt", () => {

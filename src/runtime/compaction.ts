@@ -1,39 +1,30 @@
-import type { TokenUsage } from "../kernel/index.ts"
-import { isAbortError } from "./errors.ts"
-import {
-  type ModelMessage,
-  type ModelRequest,
-  type ModelResponse,
-  ModelStopReason,
-  type ModelSystemSection,
-  type ModelTarget,
-  type ModelTextBlock,
-  type StreamFn,
+import { ModelResponseError } from "./errors.ts"
+import { estimateHistoryTokens } from "./model-request-budget.ts"
+import type {
+  ModelMessage,
+  ModelRequest,
+  ModelSystemSection,
+  ModelTarget,
 } from "./model.ts"
-import { estimateModelRequestBudget } from "./model-request-budget.ts"
 
-export const COMPACTION_SYSTEM_PROMPT = `You are compressing a coding-agent conversation into a checkpoint for your future self. The earlier turns you see will be replaced by the checkpoint you write; the complete history remains on disk but will leave your context.
-
-Write the checkpoint with exactly these sections, in this order:
-
-Goal — what the user is trying to accomplish.
-Progress — what is done so far, including key decisions and why they were made.
-Files — exact paths read or modified, and why each one matters.
-Errors — failures encountered and how they were resolved, or that they are still open.
-User messages — every message the user sent, in order, as close to verbatim as possible. Corrections and rejections of earlier approaches matter most.
-Next steps — the concrete work that remains, in order. When the conversation was interrupted mid-task, quote the immediate next action verbatim.
-
-Rules:
-- Use precise file paths, commands, and identifiers; avoid vague references.
-- The checkpoint must be self-contained: it must make sense without the conversation it replaces.
-- No pleasantries, preamble, or meta-commentary; output only the checkpoint.`
-
-const TWO_PASS_MAX_INTERMEDIATE_CHARS = 12_000
+// Local compaction keeps the base instructions and appends a user request,
+// following Codex. User-message retention is enforced separately by code.
+const LOCAL_COMPACTION_PROMPT = `Write a concise checkpoint for the model that will continue this task. Include completed work and decisions, important constraints and user preferences, remaining actions, and the concrete paths, data, or references needed to proceed. Incorporate any earlier checkpoint into this summary. Return the checkpoint without continuing the task.`
 
 // Matches provider messages for an over-long request (Anthropic "prompt is
 // too long", OpenAI "context_length_exceeded" style text, HTTP 413). Used to
 // retry compaction with a smaller source instead of giving up.
 export function isContextOverflowError(error: unknown): boolean {
+  if (
+    error instanceof ModelResponseError &&
+    ([
+      "context_length_exceeded",
+      "context_window_exceeded",
+      "prompt_too_long",
+    ].includes(error.providerError?.code ?? "") ||
+      error.providerError?.details?.status === 413)
+  )
+    return true
   const message = (
     error instanceof Error ? error.message : String(error)
   ).toLowerCase()
@@ -48,65 +39,55 @@ export function isContextOverflowError(error: unknown): boolean {
   )
 }
 
-export type CompactionResult = {
-  readonly summary: string
-  readonly usage?: TokenUsage
+export function canRetryCompactionWithCurrentModel(error: unknown): boolean {
+  if (!(error instanceof ModelResponseError)) return false
+  const details = error.providerError?.details
+  const status = details?.status
+  return (
+    isContextOverflowError(error) ||
+    details?.retryable === true ||
+    (typeof status === "number" && status >= 400 && status !== 401) ||
+    [
+      "invalid_request_error",
+      "model_not_found",
+      "context_length_exceeded",
+      "rate_limit_exceeded",
+      "usage_limit_reached",
+      "server_error",
+      "server_overloaded",
+    ].includes(error.providerError?.code ?? "")
+  )
 }
 
-export async function runTwoPassCompaction(input: {
-  readonly source: readonly { readonly messages: readonly ModelMessage[] }[]
-  readonly target: ModelTarget
-  readonly baseInstructions: ModelSystemSection
-  readonly cacheKey?: string
-  readonly capacityTokens?: number
-  readonly signal?: AbortSignal
-  readonly compact: (request: ModelRequest) => Promise<CompactionResult>
-}): Promise<CompactionResult | undefined> {
-  const splitIndex = twoPassSplitIndex(input)
-  if (splitIndex === undefined) return undefined
-  const first = await input.compact(
-    buildCompactionRequest({
-      source: input.source.slice(0, splitIndex),
-      target: input.target,
-      baseInstructions: input.baseInstructions,
-      ...(input.cacheKey === undefined ? {} : { cacheKey: input.cacheKey }),
-      ...(input.signal === undefined ? {} : { signal: input.signal }),
-    }),
-  )
-  const intermediate = intermediateCheckpoint(first.summary)
-  const carrier = {
-    messages: [
-      {
-        role: "user" as const,
-        content: [
-          {
-            type: "text" as const,
-            text: `<intermediate_compaction>\n${intermediate}\n</intermediate_compaction>`,
-          },
-        ],
-      },
-    ],
-  }
-  const secondRequest = buildCompactionRequest({
-    source: [carrier, ...input.source.slice(splitIndex)],
-    target: input.target,
-    baseInstructions: input.baseInstructions,
-    ...(input.cacheKey === undefined ? {} : { cacheKey: input.cacheKey }),
-    ...(input.signal === undefined ? {} : { signal: input.signal }),
-    instruction: twoPassFinalInstruction(),
-  })
-  if (
-    input.capacityTokens !== undefined &&
-    estimateModelRequestBudget(secondRequest).requiredContextTokens >
-      input.capacityTokens
+// Match Codex's remote preflight: only shrink consecutive tool outputs at the
+// end of history. Never remove a user request or cross the preceding model item.
+export function trimRemoteCompactionToolTail(
+  messages: readonly ModelMessage[],
+  baseInstructions: string,
+  contextWindowTokens: number | undefined,
+): ModelMessage[] {
+  const result = [...messages]
+  if (contextWindowTokens === undefined) return result
+  let tokens =
+    estimateHistoryTokens(result) +
+    Math.ceil(Buffer.byteLength(baseInstructions) / 4)
+  for (
+    let index = result.length - 1;
+    index >= 0 && tokens > contextWindowTokens;
+    index -= 1
   ) {
-    throw new Error("Compaction context length exceeds the maximum context.")
+    const item = result[index]
+    if (item?.role !== "tool") break
+    const replacement: ModelMessage = {
+      ...item,
+      content: "Tool output omitted to fit the context window.",
+      ...(item.toolSearch === undefined ? {} : { toolSearch: { tools: [] } }),
+    }
+    tokens +=
+      estimateHistoryTokens([replacement]) - estimateHistoryTokens([item])
+    result[index] = replacement
   }
-  const second = await input.compact(secondRequest)
-  return {
-    summary: second.summary,
-    ...aggregateCompactionUsage(first.usage, second.usage),
-  }
+  return result
 }
 
 export function buildCompactionRequest(input: {
@@ -120,14 +101,8 @@ export function buildCompactionRequest(input: {
   return {
     target: input.target,
     ...(input.cacheKey === undefined ? {} : { cacheKey: input.cacheKey }),
-    system: [
-      input.baseInstructions,
-      {
-        id: "compaction.instructions",
-        revision: "1",
-        text: COMPACTION_SYSTEM_PROMPT,
-      },
-    ],
+    compaction: "local",
+    system: [input.baseInstructions],
     messages: [
       ...input.source.flatMap((group) => group.messages),
       {
@@ -135,7 +110,7 @@ export function buildCompactionRequest(input: {
         content: [
           {
             type: "text",
-            text: input.instruction ?? compactionInstruction(),
+            text: input.instruction ?? LOCAL_COMPACTION_PROMPT,
           },
         ],
       },
@@ -144,171 +119,4 @@ export function buildCompactionRequest(input: {
     toolWireProtocol: "eager",
     ...(input.signal === undefined ? {} : { signal: input.signal }),
   }
-}
-
-// Compaction is housekeeping: the summary stream is drained locally because
-// clients learn progress from the context_compaction item lifecycle, not from
-// text snapshots. Fail loudly so the caller can fall back to dropped history.
-export async function runCompaction(input: {
-  readonly stream: StreamFn
-  readonly request: ModelRequest
-}): Promise<CompactionResult> {
-  let terminal: ModelResponse | undefined
-  try {
-    for await (const event of input.stream(input.request)) {
-      if (event.type !== "response") continue
-      if (terminal !== undefined) {
-        throw new Error("Model stream emitted more than one terminal response.")
-      }
-      terminal = event.response
-    }
-  } catch (error) {
-    if (isAbortError(error) || input.request.signal?.aborted) {
-      throw createAbortError()
-    }
-    throw error
-  }
-  if (terminal === undefined) {
-    throw new Error("Model stream ended without a terminal response.")
-  }
-  if (terminal.stopReason === ModelStopReason.Error) {
-    throw new Error(terminal.error?.message ?? "Model returned an error.")
-  }
-  if (terminal.stopReason === ModelStopReason.Length) {
-    throw new Error(
-      "Compaction was truncated at the model output limit; checkpoint was not recorded.",
-    )
-  }
-  if (
-    terminal.stopReason === ModelStopReason.Aborted ||
-    input.request.signal?.aborted
-  ) {
-    throw createAbortError()
-  }
-  const summary = terminal.content
-    .filter((block): block is ModelTextBlock => block.type === "text")
-    .map((block) => block.text)
-    .join("")
-    .trim()
-  if (summary.length === 0) {
-    throw new Error("Compaction produced an empty checkpoint.")
-  }
-  return {
-    summary,
-    ...(terminal.usage === undefined
-      ? {}
-      : {
-          usage: {
-            inputTokens: terminal.usage.inputTokens ?? 0,
-            outputTokens: terminal.usage.outputTokens ?? 0,
-            ...(terminal.usage.cacheReadInputTokens === undefined
-              ? {}
-              : {
-                  cacheReadInputTokens: terminal.usage.cacheReadInputTokens,
-                }),
-            ...(terminal.usage.cacheWriteInputTokens === undefined
-              ? {}
-              : {
-                  cacheWriteInputTokens: terminal.usage.cacheWriteInputTokens,
-                }),
-          },
-        }),
-  }
-}
-
-function compactionInstruction(): string {
-  return "Write the checkpoint for the conversation above now. If the conversation contains an earlier checkpoint, fold it into the new one; the new checkpoint must be self-contained and supersede it."
-}
-
-function intermediateCheckpoint(summary: string): string {
-  if (summary.length <= TWO_PASS_MAX_INTERMEDIATE_CHARS) return summary
-  const marker = "\n[NOTE_1 truncated at the intermediate checkpoint limit]"
-  return `${summary.slice(0, TWO_PASS_MAX_INTERMEDIATE_CHARS - marker.length)}${marker}`
-}
-
-function twoPassFinalInstruction(): string {
-  return "Write the final self-contained checkpoint now. The preceding <intermediate_compaction> message is NOTE_1, the compressed record of the complete earlier prefix; the messages after it are the untouched later tail. Merge both into one checkpoint using the required sections. Preserve every material fact, user correction, decision, file path, error, and next step from NOTE_1; do not omit the earlier prefix merely because it is compressed. If NOTE_1 contains a truncation marker, record that limitation explicitly."
-}
-
-function twoPassSplitIndex(input: {
-  readonly source: readonly { readonly messages: readonly ModelMessage[] }[]
-  readonly target: ModelTarget
-  readonly baseInstructions: ModelSystemSection
-  readonly cacheKey?: string
-  readonly capacityTokens?: number
-  readonly signal?: AbortSignal
-}): number | undefined {
-  const { source } = input
-  if (source.length < 2) return undefined
-  if (input.capacityTokens !== undefined) {
-    for (let splitIndex = source.length - 1; splitIndex >= 1; splitIndex -= 1) {
-      const request = buildCompactionRequest({
-        source: source.slice(0, splitIndex),
-        target: input.target,
-        baseInstructions: input.baseInstructions,
-        ...(input.cacheKey === undefined ? {} : { cacheKey: input.cacheKey }),
-        ...(input.signal === undefined ? {} : { signal: input.signal }),
-      })
-      if (
-        estimateModelRequestBudget(request).requiredContextTokens <=
-        input.capacityTokens
-      ) {
-        return splitIndex
-      }
-    }
-    return undefined
-  }
-  const weights = source.map((group) =>
-    Buffer.byteLength(JSON.stringify(group.messages), "utf8"),
-  )
-  const target = weights.reduce((total, weight) => total + weight, 0) * 0.95
-  let accumulated = 0
-  for (const [index, weight] of weights.entries()) {
-    accumulated += weight
-    if (accumulated >= target) {
-      return Math.min(Math.max(index + 1, 1), source.length - 1)
-    }
-  }
-  return source.length - 1
-}
-
-function aggregateCompactionUsage(
-  first: TokenUsage | undefined,
-  second: TokenUsage | undefined,
-): { readonly usage?: TokenUsage } {
-  if (first === undefined && second === undefined) return {}
-  return {
-    usage: {
-      inputTokens: (first?.inputTokens ?? 0) + (second?.inputTokens ?? 0),
-      outputTokens: (first?.outputTokens ?? 0) + (second?.outputTokens ?? 0),
-      ...sumOptionalUsage(
-        "cacheReadInputTokens",
-        first?.cacheReadInputTokens,
-        second?.cacheReadInputTokens,
-      ),
-      ...sumOptionalUsage(
-        "cacheWriteInputTokens",
-        first?.cacheWriteInputTokens,
-        second?.cacheWriteInputTokens,
-      ),
-    },
-  }
-}
-
-function sumOptionalUsage<
-  Key extends "cacheReadInputTokens" | "cacheWriteInputTokens",
->(
-  key: Key,
-  first: number | undefined,
-  second: number | undefined,
-): Partial<Record<Key, number>> {
-  return first === undefined && second === undefined
-    ? {}
-    : ({ [key]: (first ?? 0) + (second ?? 0) } as Partial<Record<Key, number>>)
-}
-
-function createAbortError(): Error {
-  const error = new Error("Compaction was aborted.")
-  error.name = "AbortError"
-  return error
 }

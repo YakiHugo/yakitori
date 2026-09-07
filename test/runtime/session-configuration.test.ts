@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest"
-import { createSessionExecutionPolicy } from "../../src/runtime/limits.ts"
 import {
   createTurnContext,
   SessionConfiguration,
@@ -60,17 +59,32 @@ describe("session configuration", () => {
       effectiveContextWindowPercent: 95,
       effectiveContextWindowTokens: 258_400,
     })
+    expect(configuration.autoCompact).toEqual({
+      limitTokens: 244_800,
+      scope: "total",
+    })
     expect(turn.execution).toMatchObject({
       instructionProfileId: "codex",
       baseInstructionsRevision: configuration.baseInstructions.revision,
       modelInstructionsRevision: configuration.modelInstructions.revision,
       modelContextWindowTokens: 272_000,
       effectiveModelContextWindowTokens: 258_400,
-      executionPolicy: {
-        modelVisibleContextBytes: 1_033_600,
-        compactionTriggerContextBytes: 826_880,
-        compactionRetainContextBytes: 165_376,
-      },
+    })
+  })
+
+  it("caps an explicit auto-compaction limit at 90% of the selected window", () => {
+    const configured = resolveSessionConfiguration({
+      selection: { provider: "codex", model: "gpt-5.6-sol" },
+      workspaceRoot: "/workspace",
+      enabledTools: [],
+      approvalPolicy: "always_approve",
+      modelContextWindowTokens: 600_000,
+      modelAutoCompactTokenLimit: 700_000,
+      modelAutoCompactTokenLimitScope: "body_after_prefix",
+    })
+    expect(configured.autoCompact).toEqual({
+      limitTokens: 540_000,
+      scope: "body_after_prefix",
     })
   })
 
@@ -98,27 +112,6 @@ describe("session configuration", () => {
         modelContextWindowTokens: 900_000,
       }),
     ).toThrow("exceeds codex/gpt-5.6-sol maximum of 872000")
-  })
-
-  it("keeps an explicit byte budget instead of replacing it from capacity", () => {
-    const configuration = resolveSessionConfiguration({
-      selection: { provider: "codex", model: "gpt-5.6-sol" },
-      workspaceRoot: "/workspace",
-      enabledTools: [],
-      approvalPolicy: "always_approve",
-      executionPolicy: createSessionExecutionPolicy({
-        modelVisibleContextBytes: 123_456,
-      }),
-    })
-    const turn = createTurnContext({
-      requestSettings: configuration,
-      mateId: "mate_1",
-      mateRevisionId: "mate_revision_1",
-    })
-
-    expect(turn.execution.executionPolicy.modelVisibleContextBytes).toBe(
-      123_456,
-    )
   })
 
   it("restores the exact persisted base instructions instead of re-resolving them", () => {

@@ -15,12 +15,6 @@ export function testTurnExecutionContext(
     enabledTools: [],
     approvalPolicy: "always_approve",
     executionPolicy: {
-      modelCallsPerTurn: 16,
-      toolCallsPerTurn: 32,
-      modelVisibleMessageBlocks: 200,
-      modelVisibleContextBytes: 256_000,
-      compactionTriggerContextBytes: 204_800,
-      compactionRetainContextBytes: 40_960,
       modelVisibleToolResultBytes: 50_000,
       modelVisibleToolResultLines: 2_000,
       assistantResponseBytes: 256_000,

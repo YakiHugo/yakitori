@@ -7,6 +7,7 @@ import { agentStatusFromStoredThread } from "../core/session.ts"
 import type { ThreadManager } from "../core/thread-manager.ts"
 import type { ModelSelection } from "../kernel/events.ts"
 import { createSessionId } from "../kernel/ids.ts"
+import type { RolloutBudgetConfig } from "./rollout-budget.ts"
 import {
   type AgentControl,
   type AgentControlAdapter,
@@ -16,6 +17,8 @@ import {
   type ForkTurns,
 } from "./agent-control.ts"
 
+import { estimateHistoryTokens } from "./model-request-budget.ts"
+
 export type AgentRuntime = Readonly<{
   registerThread(stored: StoredThread): AgentControl
   discardThread(threadId: string): Promise<void>
@@ -23,6 +26,7 @@ export type AgentRuntime = Readonly<{
 }>
 
 export function createAgentRuntime(input: {
+  readonly rolloutBudget?: RolloutBudgetConfig
   readonly graphStore: AgentGraphStore
   readonly getThreadManager: () => ThreadManager
   readonly maxDepth?: number
@@ -81,6 +85,15 @@ export function createAgentRuntime(input: {
                 initialContext: {
                   sourceThreadId: request.forkedContext.sourceSessionId,
                   messages: request.forkedContext.messages,
+                  ...(request.forkedContext.previousModel === undefined
+                    ? {}
+                    : { previousModel: request.forkedContext.previousModel }),
+                  ...(request.forkedContext.activeContextTokens === undefined
+                    ? {}
+                    : {
+                        activeContextTokens:
+                          request.forkedContext.activeContextTokens,
+                      }),
                   ...(request.forkedContext.worldState === undefined
                     ? {}
                     : {
@@ -187,6 +200,9 @@ export function createAgentRuntime(input: {
     const existing = controls.get(rootThreadId)
     if (existing !== undefined) return existing
     const created = createAgentControl({
+      ...(input.rolloutBudget === undefined
+        ? {}
+        : { rolloutBudget: input.rolloutBudget }),
       rootSessionId: rootThreadId,
       adapter,
       restoreAgents: async () => {
@@ -405,6 +421,11 @@ function captureForkContext(
     return {
       sourceSessionId,
       messages,
+      ...(snapshot.previousModel === undefined
+        ? {}
+        : { previousModel: snapshot.previousModel }),
+      activeContextTokens:
+        snapshot.activeContextTokens ?? estimateHistoryTokens(messages),
       ...(snapshot.worldStateBaseline === undefined
         ? {}
         : { worldState: snapshot.worldStateBaseline }),
@@ -416,9 +437,14 @@ function captureForkContext(
       : [],
   )
   const start = starts.at(-forkTurns) ?? starts[0]
+  const retained = start === undefined ? [] : messages.slice(start)
   return {
     sourceSessionId,
-    messages: start === undefined ? [] : messages.slice(start),
+    messages: retained,
+    ...(snapshot.previousModel === undefined
+      ? {}
+      : { previousModel: snapshot.previousModel }),
+    activeContextTokens: estimateHistoryTokens(retained),
   }
 }
 

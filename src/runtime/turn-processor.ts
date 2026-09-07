@@ -21,11 +21,14 @@ import {
 import type { AgentControl, BoundAgentControl } from "./agent-control.ts"
 import {
   buildCompactionRequest,
+  canRetryCompactionWithCurrentModel,
   isContextOverflowError,
-  runTwoPassCompaction,
+  trimRemoteCompactionToolTail,
 } from "./compaction.ts"
 import { observeEnvironment } from "./environment-context.ts"
-import { isAbortError } from "./errors.ts"
+import { isAbortError, ModelResponseError } from "./errors.ts"
+import { HookEvent, type HookRunner } from "./hooks.ts"
+import type { RolloutBudget } from "./rollout-budget.ts"
 import {
   createRunnerTimingPolicy,
   createSessionExecutionPolicy,
@@ -42,9 +45,16 @@ import {
   type StreamFn,
 } from "./model.ts"
 import type { ModelClient } from "./model-provider.ts"
-import { createCompactionReplacementHistory } from "./model-context.ts"
+import {
+  createCompactionReplacementHistory,
+  retainCompactionUserMessages,
+  retainRemoteCompactionMessages,
+} from "./model-context.ts"
 import { adaptImagesForModel } from "./model-images.ts"
-import { estimateModelRequestBudget } from "./model-request-budget.ts"
+import {
+  estimateHistoryTokens,
+  estimateModelRequestBudget,
+} from "./model-request-budget.ts"
 import { createPermissionGate, type PermissionGate } from "./permission-gate.ts"
 import {
   createProjectInstructionsLoader,
@@ -55,6 +65,7 @@ import {
   createTurnContext,
   SessionConfiguration,
 } from "./session-configuration.ts"
+import { loadSkillsCatalog } from "./skills.ts"
 import {
   createToolExecutionGate,
   type ToolExecutionGate,
@@ -92,12 +103,21 @@ export type TurnProcessorOptions = {
   readonly approvalPolicy?: ApprovalPolicy
   readonly baseInstructions?: string
   readonly modelContextWindowTokens?: number
+  readonly modelAutoCompactTokenLimit?: number
+  readonly modelAutoCompactTokenLimitScope?: import("../kernel/index.ts").AutoCompactTokenLimitScope
   readonly loadProjectInstructions?: typeof loadProjectInstructions
   readonly resolveShellName?: () => Promise<string>
   readonly now?: () => Date
   readonly rolloutAssets?: RolloutAssets
   readonly onOperationalFailure?: TurnProcessorOperationalFailureReporter
   readonly agentControl?: AgentControl
+  readonly hookRunner?: HookRunner
+  readonly sessionHookContext?: Readonly<{
+    sessionId: string
+    workspaceRoot: string
+    source: "startup" | "resume"
+    isSubagent: boolean
+  }>
 }
 
 export type TurnProcessorOperationalFailure = Readonly<{
@@ -106,6 +126,7 @@ export type TurnProcessorOperationalFailure = Readonly<{
     | "close-model-session"
     | "close-model-stream"
     | "compact"
+    | "execute-hook"
     | "execute-tool"
   cause: unknown
 }>
@@ -113,11 +134,6 @@ export type TurnProcessorOperationalFailure = Readonly<{
 export type TurnProcessorOperationalFailureReporter = (
   failure: TurnProcessorOperationalFailure,
 ) => void | Promise<void>
-
-type CompactionState = {
-  consecutiveFailures: number
-  failedHistoryLength: number | undefined
-}
 
 export function createTurnProcessor(
   options: TurnProcessorOptions,
@@ -135,19 +151,78 @@ export function createTurnProcessor(
   const model = options.model ?? "scripted"
   const projectInstructionLoader =
     options.loadProjectInstructions ?? createProjectInstructionsLoader()
-  const compactionState: CompactionState = {
-    consecutiveFailures: 0,
-    failedHistoryLength: undefined,
-  }
   const toolExecutionGate = createToolExecutionGate()
+  let sessionHooksStarted = false
+  let startHooksPromise: Promise<void> | undefined
+
+  const ensureSessionHooks = (
+    runtime: TurnRuntime,
+    turnId: string,
+    signal: AbortSignal,
+  ): Promise<void> => {
+    if (options.hookRunner === undefined || options.sessionHookContext === undefined) {
+      return Promise.resolve()
+    }
+    if (sessionHooksStarted) return Promise.resolve()
+    if (startHooksPromise !== undefined) return startHooksPromise
+    const context = options.sessionHookContext
+    const run = async () => {
+      const events = [
+        context.isSubagent ? HookEvent.SubagentStart : HookEvent.SessionStart,
+      ]
+      for (const event of events) {
+        const outcome = await options.hookRunner?.run({
+          event,
+          payload: {
+            session_id: context.sessionId,
+            source: context.source,
+          },
+          cwd: context.workspaceRoot,
+          signal,
+        })
+        if (outcome?.continue === false) {
+          throw new Error(outcome.reason ?? `${event} hook blocked the Session.`)
+        }
+        await recordHookContext(runtime, turnId, outcome?.additionalContext ?? [])
+      }
+      sessionHooksStarted = true
+    }
+    startHooksPromise = run().catch((error) => {
+      startHooksPromise = undefined
+      throw error
+    })
+    return startHooksPromise
+  }
 
   return {
     async dispose() {
-      const results = await Promise.allSettled([
+      const lifecycle = async () => {
+        if (
+          !sessionHooksStarted ||
+          options.hookRunner === undefined ||
+          options.sessionHookContext === undefined
+        ) {
+          return
+        }
+        const context = options.sessionHookContext
+        const events = context.isSubagent ? [] : [HookEvent.SessionEnd]
+        for (const event of events) {
+          await options.hookRunner.run({
+            event,
+            payload: {
+              session_id: context.sessionId,
+              reason: "shutdown",
+            },
+            cwd: context.workspaceRoot,
+          })
+        }
+      }
+      const lifecycleResults = await Promise.allSettled([lifecycle()])
+      const resourceResults = await Promise.allSettled([
         Promise.resolve().then(() => options.modelClient?.close()),
         Promise.resolve().then(() => toolRegistry.dispose()),
       ])
-      const errors = results.flatMap((result) =>
+      const errors = [...lifecycleResults, ...resourceResults].flatMap((result) =>
         result.status === "rejected" ? [result.reason] : [],
       )
       if (errors.length > 0) {
@@ -187,6 +262,18 @@ export function createTurnProcessor(
                       modelContextWindowTokens:
                         options.modelContextWindowTokens,
                     }),
+                ...(options.modelAutoCompactTokenLimit === undefined
+                  ? {}
+                  : {
+                      modelAutoCompactTokenLimit:
+                        options.modelAutoCompactTokenLimit,
+                    }),
+                ...(options.modelAutoCompactTokenLimitScope === undefined
+                  ? {}
+                  : {
+                      modelAutoCompactTokenLimitScope:
+                        options.modelAutoCompactTokenLimitScope,
+                    }),
               },
               models,
             )
@@ -225,26 +312,31 @@ export function createTurnProcessor(
       const signal = AbortSignal.any([control.signal, forcedAbort.signal])
       let activeStream: AsyncIterator<ModelStreamEvent> | undefined
       let closeModelSession: (() => Promise<void>) | undefined
-      const completion = executeTurn({
+      const completion = ensureSessionHooks(
         runtime,
-        input,
-        context,
-        control,
+        input.submissionId,
         signal,
-        toolRegistry,
-        permissionGate,
-        runtimeTiming,
-        projectInstructionLoader,
-        compactionState,
-        toolExecutionGate,
-        options,
-        setActiveStream(stream) {
-          activeStream = stream
-        },
-        setCloseModelSession(close) {
-          closeModelSession = close
-        },
-      })
+      ).then(() =>
+        executeTurn({
+          runtime,
+          input,
+          context,
+          control,
+          signal,
+          toolRegistry,
+          permissionGate,
+          runtimeTiming,
+          projectInstructionLoader,
+          toolExecutionGate,
+          options,
+          setActiveStream(stream) {
+            activeStream = stream
+          },
+          setCloseModelSession(close) {
+            closeModelSession = close
+          },
+        }),
+      )
       return {
         completion,
         abort() {
@@ -277,7 +369,6 @@ async function executeTurn(input: {
   readonly permissionGate: PermissionGate
   readonly runtimeTiming: RunnerTimingPolicy
   readonly projectInstructionLoader: typeof loadProjectInstructions
-  readonly compactionState: CompactionState
   readonly toolExecutionGate: ToolExecutionGate
   readonly options: TurnProcessorOptions
   readonly setActiveStream: (
@@ -291,6 +382,7 @@ async function executeTurn(input: {
   const models = input.options.modelClient?.models(
     input.context.selection.provider,
   )
+  await models?.refresh()
   const requestSettings = SessionConfiguration.restore(
     input.context.configuration,
     models,
@@ -319,7 +411,52 @@ async function executeTurn(input: {
     throw new Error("Turn has no model stream.")
   }
   try {
-    await executeTurnModelLoop(input, turn, stream)
+    const promptHook = await input.options.hookRunner?.run({
+      event: HookEvent.UserPromptSubmit,
+      payload: {
+        session_id: metadata.id,
+        turn_id: input.input.submissionId,
+        prompt: input.input.content.text,
+      },
+      cwd: requireValue(metadata.workingDirectory, "Working directory"),
+      signal: input.signal,
+    })
+    if (promptHook?.continue === false) {
+      throw new Error(
+        promptHook.reason ?? "UserPromptSubmit hook blocked the Turn.",
+      )
+    }
+    await recordHookContext(
+      input.runtime,
+      input.input.submissionId,
+      promptHook?.additionalContext ?? [],
+    )
+    await executeTurnModelLoop(
+      input,
+      turn,
+      stream,
+      modelSession?.remoteCompaction ?? false,
+    )
+  } catch (error) {
+    if (input.signal.aborted || isAbortError(error)) {
+      try {
+        await input.options.hookRunner?.run({
+          event: HookEvent.Interrupt,
+          payload: {
+            session_id: metadata.id,
+            turn_id: input.input.submissionId,
+            reason: error instanceof Error ? error.message : String(error),
+          },
+          cwd: requireValue(metadata.workingDirectory, "Working directory"),
+        })
+      } catch (cause) {
+        reportOperationalFailure(input.options.onOperationalFailure, {
+          operation: "execute-hook",
+          cause,
+        })
+      }
+    }
+    throw error
   } finally {
     try {
       await closeModelSession()
@@ -333,15 +470,33 @@ async function executeTurnModelLoop(
   input: Parameters<typeof executeTurn>[0],
   turn: ReturnType<typeof createTurnContext>,
   stream: StreamFn,
+  remoteCompaction: boolean,
 ): Promise<void> {
   const metadata = input.runtime.snapshot().metadata
   const usages: ModelUsage[] = []
   let modelCalls = 0
-  let toolCalls = 0
-  while (modelCalls < turn.execution.executionPolicy.modelCallsPerTurn) {
+  let compactedAtModelCall = -1
+  for (;;) {
     let step: StepContext | undefined
     try {
       throwIfAborted(input.signal)
+      const budget = input.options.agentControl?.rolloutBudget
+      budget?.assertAvailable()
+      const reminder = budget?.pendingReminder(metadata.id)
+      if (reminder !== undefined) {
+        await input.runtime.recordConversationItems([
+          envelope(input.input.submissionId, {
+            role: "developer",
+            content: [
+              {
+                type: "text",
+                text: `<rollout_budget>\nShared session budget remaining: ${reminder.remainingTokens} weighted tokens.\n</rollout_budget>`,
+              },
+            ],
+          }),
+        ])
+        budget?.markDelivered(metadata.id, reminder)
+      }
       await recordSteering(input.runtime, input.control.takeSteering())
       step = captureStepContext({
         registry: input.toolRegistry,
@@ -356,6 +511,10 @@ async function executeTurnModelLoop(
         workspaceRoot,
         workingDirectory: configuration.workspaceRoot,
       })
+      const skills = await loadSkillsCatalog({
+        workspaceRoot,
+        workingDirectory: configuration.workspaceRoot,
+      })
       const environment = observeEnvironment({
         workspaceRoot,
         workingDirectory: configuration.workspaceRoot,
@@ -367,6 +526,23 @@ async function executeTurnModelLoop(
           : { now: input.options.now() }),
       })
       const beforeStep = input.runtime.snapshot()
+      const currentInputIndex = beforeStep.context.history.findIndex(
+        (entry) => entry.turnId === input.input.submissionId,
+      )
+      const compactionHistory =
+        modelCalls === 0 && currentInputIndex >= 0
+          ? beforeStep.context.history.slice(0, currentInputIndex)
+          : beforeStep.context.history
+      const admission = assessModelRequest({
+        history: compactionHistory,
+        activeContextTokens: beforeStep.context.activeContextTokens,
+        autoCompactPrefillTokens: beforeStep.context.autoCompactPrefillTokens,
+        historyAnchorItemId:
+          beforeStep.context.contextTokenHistoryAnchorItemId,
+        baselineProvider: beforeStep.context.contextTokenProvider,
+        baselineModel: beforeStep.context.contextTokenModel,
+        step,
+      })
       const priorModelId = previousModelId(
         beforeStep.context.history,
         input.context,
@@ -384,6 +560,7 @@ async function executeTurnModelLoop(
           : { previousModelId: priorModelId }),
         environment,
         ...(projectInstructions === undefined ? {} : { projectInstructions }),
+        ...(skills === undefined ? {} : { skills }),
         ...(input.options.agentControl === undefined
           ? {}
           : {
@@ -392,6 +569,116 @@ async function executeTurnModelLoop(
               ),
             }),
       })
+      const foreignCheckpoint = beforeStep.context.history
+        .flatMap(({ item }) => (item.role === "assistant" ? item.content : []))
+        .find(
+          (block) =>
+            block.type === "compaction" &&
+            block.provider !== step?.target.provider,
+        )
+      const previousModel = beforeStep.context.previousModel
+      const sourceSelection =
+        foreignCheckpoint?.type === "compaction"
+          ? {
+              provider: foreignCheckpoint.provider,
+              model: foreignCheckpoint.model,
+            }
+          : previousModel !== undefined &&
+              (previousModel.provider === step.target.provider ||
+                input.options.modelClient?.hasProvider(
+                  previousModel.provider,
+                )) &&
+              modelCalls === 0 &&
+              compactedAtModelCall !== modelCalls
+            ? { provider: previousModel.provider, model: previousModel.model }
+            : undefined
+      if (sourceSelection !== undefined) {
+        const client = input.options.modelClient
+        if (client === undefined && foreignCheckpoint !== undefined) {
+          throw new Error(
+            "Cross-provider continuation requires the native checkpoint's provider client.",
+          )
+        }
+        const sourceModels = client?.models(sourceSelection.provider)
+        await sourceModels?.refresh()
+        const {
+          modelContextWindowTokens: _contextWindowOverride,
+          ...sourceSnapshot
+        } = input.context.configuration
+        const sourceConfiguration = SessionConfiguration.restore(
+          {
+            ...(sourceSelection.provider === step.target.provider
+              ? input.context.configuration
+              : sourceSnapshot),
+            defaultTarget: sourceSelection,
+          },
+          sourceModels,
+        ).resolveStep(sourceSelection, sourceModels)
+        const oldWindow =
+          sourceConfiguration.modelCapacity?.effectiveContextWindowTokens
+        const newWindow =
+          configuration.modelCapacity?.effectiveContextWindowTokens
+        const activeTokens = admission.activeTokens
+        const hashChanged =
+          previousModel?.provider === step.target.provider &&
+          previousModel.compactionHash !== undefined &&
+          step.modelInfo.compactionHash !== undefined &&
+          previousModel.compactionHash !== step.modelInfo.compactionHash
+        const downshift =
+          (sourceSelection.model !== step.target.model ||
+            sourceSelection.provider !== step.target.provider) &&
+          oldWindow !== undefined &&
+          newWindow !== undefined &&
+          oldWindow > newWindow &&
+          (activeTokens >= newWindow ||
+            (configuration.autoCompact.scope === "total" &&
+              configuration.autoCompact.limitTokens !== undefined &&
+              activeTokens > configuration.autoCompact.limitTokens))
+        if (foreignCheckpoint !== undefined || hashChanged || downshift) {
+          const sourceSession = client?.startTurn(sourceSelection.provider)
+          try {
+            const sourceStep = captureStepContext({
+              registry: input.toolRegistry,
+              configuration: sourceConfiguration,
+            })
+            try {
+              await compactLiveHistory({
+                runtime: input.runtime,
+                turnId: input.input.submissionId,
+                step: sourceStep,
+                worldState,
+                history: compactionHistory,
+                injectWorldState: modelCalls !== 0,
+                stream: sourceSession?.stream ?? stream,
+                remoteCompaction:
+                  sourceSelection.provider === step.target.provider &&
+                  (sourceSession?.remoteCompaction ?? false),
+                ...(sourceSelection.provider === step.target.provider &&
+                step.target.provider === "codex" &&
+                sourceSelection.model !== step.target.model &&
+                remoteCompaction
+                  ? { fallback: { step, stream } }
+                  : {}),
+                signal: input.signal,
+                rolloutAssets: input.options.rolloutAssets,
+                usages,
+                rolloutBudget: budget,
+                onOperationalFailure: input.options.onOperationalFailure,
+                ...(input.options.hookRunner === undefined
+                  ? {}
+                  : { hookRunner: input.options.hookRunner }),
+                setActiveStream: input.setActiveStream,
+              })
+            } finally {
+              await sourceStep.toolRouter.release()
+            }
+          } finally {
+            await sourceSession?.close()
+          }
+          compactedAtModelCall = modelCalls
+          continue
+        }
+      }
       const worldDiff = diffWorldState(
         beforeStep.context.worldStateBaseline,
         worldState,
@@ -440,45 +727,54 @@ async function executeTurnModelLoop(
         toolWireProtocol: step.toolWireProtocol,
         signal: input.signal,
       }
-      const admission = assessModelRequest({
-        request,
-        rawMessages: messages,
-        step,
-      })
-      if (
-        input.compactionState.failedHistoryLength !==
-        beforeStep.context.history.length
-      ) {
-        input.compactionState.consecutiveFailures = 0
-        input.compactionState.failedHistoryLength = undefined
-      }
-      if (
-        admission.shouldCompact &&
-        input.compactionState.consecutiveFailures < 3
-      ) {
+      if (admission.shouldCompact && compactedAtModelCall !== modelCalls) {
         const compacted = await compactLiveHistory({
           runtime: input.runtime,
           turnId: input.input.submissionId,
           step,
           worldState,
-          history: beforeStep.context.history,
-          contextRevision: beforeStep.contextRevision,
+          history: compactionHistory,
+          injectWorldState: modelCalls !== 0,
           stream,
+          remoteCompaction,
           signal: input.signal,
           rolloutAssets: input.options.rolloutAssets,
           usages,
-          compactionState: input.compactionState,
+          rolloutBudget: budget,
           onOperationalFailure: input.options.onOperationalFailure,
+          ...(input.options.hookRunner === undefined
+            ? {}
+            : { hookRunner: input.options.hookRunner }),
           setActiveStream: input.setActiveStream,
         })
-        if (compacted) continue
-      }
-      if (admission.exceedsHardLimit) {
+        if (compacted) {
+          compactedAtModelCall = modelCalls
+          continue
+        }
         throw new Error(
-          "The complete model request exceeds the context window.",
+          "Context limit reached with no history available to compact.",
         )
       }
+      if (modelCalls === 0) {
+        await input.runtime.recordModelContext({
+          provider: step.target.provider,
+          model: step.target.model,
+          ...(step.modelInfo.compactionHash === undefined
+            ? {}
+            : { compactionHash: step.modelInfo.compactionHash }),
+        })
+      }
       const responseItemId = `message_${globalThis.crypto.randomUUID()}`
+      const estimatedInputTokens = estimateModelRequestBudget(
+        request,
+      ).estimatedInputTokens
+      let sampledContext:
+        | Readonly<{
+            activeContextTokens: number
+            inputTokens: number
+            estimatedPrefill: boolean
+          }>
+        | undefined
       const response = await consumeModelStream({
         request,
         stream,
@@ -488,10 +784,23 @@ async function executeTurnModelLoop(
         emitModelStream: (event) => input.runtime.emitModelStream(event),
         assistantResponseBytes: step.executionPolicy.assistantResponseBytes,
         onOperationalFailure: input.options.onOperationalFailure,
-        onUsage(usage) {
+        async onUsage(usage) {
           usages.push(usage)
           const aggregate = aggregateTokenUsage(usages)
           if (aggregate !== undefined) input.runtime.recordUsage(aggregate)
+          const contextTokens =
+            usage.activeContextTokens ??
+            (usage.inputTokens === undefined
+              ? undefined
+              : usage.inputTokens + (usage.outputTokens ?? 0))
+          if (contextTokens !== undefined) {
+            sampledContext = {
+              activeContextTokens: contextTokens,
+              inputTokens: usage.inputTokens ?? estimatedInputTokens,
+              estimatedPrefill: usage.inputTokens === undefined,
+            }
+          }
+          budget?.recordUsage(usage)
         },
         setActiveStream: input.setActiveStream,
       })
@@ -503,7 +812,7 @@ async function executeTurnModelLoop(
         throw new Error("Model response was truncated by length.")
       }
       if (response.stopReason === ModelStopReason.Error) {
-        throw new Error(response.error?.message ?? "Model returned an error.")
+        throw new ModelResponseError(response.error)
       }
       if (response.stopReason === ModelStopReason.Aborted) {
         throw abortError()
@@ -550,12 +859,21 @@ async function executeTurnModelLoop(
           completedResponseItems(responseItem),
         )
       }
+      if (sampledContext !== undefined) {
+        const historyAnchorItemId = input.runtime
+          .snapshot()
+          .context.history.at(-1)?.id
+        if (historyAnchorItemId !== undefined) {
+          await input.runtime.recordContextTokens({
+            ...sampledContext,
+            historyAnchorItemId,
+            provider: step.target.provider,
+            model: step.target.model,
+          })
+        }
+      }
 
       if (response.stopReason === ModelStopReason.ToolUse) {
-        if (toolCalls + calls.length > step.executionPolicy.toolCallsPerTurn) {
-          throw new Error("Turn exceeded its tool call budget.")
-        }
-        toolCalls += calls.length
         const results = await executeToolCalls({
           calls,
           threadId: metadata.id,
@@ -574,6 +892,9 @@ async function executeTurnModelLoop(
           visibleFileObservations,
           toolExecutionGate: input.toolExecutionGate,
           onOperationalFailure: input.options.onOperationalFailure,
+          ...(input.options.hookRunner === undefined
+            ? {}
+            : { hookRunner: input.options.hookRunner }),
           ...(input.options.agentControl === undefined
             ? {}
             : {
@@ -614,12 +935,50 @@ async function executeTurnModelLoop(
         await recordSteering(input.runtime, completion.inputs)
         continue
       }
+      const stopHook = await input.options.hookRunner?.run({
+        event:
+          input.options.sessionHookContext?.isSubagent === true
+            ? HookEvent.SubagentStop
+            : HookEvent.Stop,
+        payload: {
+          session_id: metadata.id,
+          turn_id: input.input.submissionId,
+        },
+        cwd: workspaceRoot,
+        signal: input.signal,
+      })
+      if (stopHook?.continue === false) {
+        await recordHookContext(input.runtime, input.input.submissionId, [
+          ...(stopHook.additionalContext ?? []),
+          stopHook.reason ?? "Stop hook requested another model step.",
+        ])
+        continue
+      }
+      await recordHookContext(
+        input.runtime,
+        input.input.submissionId,
+        stopHook?.additionalContext ?? [],
+      )
       return
+    } catch (error) {
+      if (!input.signal.aborted && isContextOverflowError(error)) {
+        const capacity =
+          step?.configuration.modelCapacity?.effectiveContextWindowTokens
+        if (capacity !== undefined && step !== undefined)
+          await input.runtime.recordContextTokens({
+            activeContextTokens: capacity,
+            historyAnchorItemId:
+              input.runtime.snapshot().context.history.at(-1)?.id ??
+              input.input.submissionId,
+            provider: step.target.provider,
+            model: step.target.model,
+          })
+      }
+      throw error
     } finally {
       await step?.toolRouter.release()
     }
   }
-  throw new Error("Turn exceeded its model call budget.")
 }
 
 async function consumeModelStream(input: {
@@ -633,7 +992,7 @@ async function consumeModelStream(input: {
   readonly onOperationalFailure:
     | TurnProcessorOperationalFailureReporter
     | undefined
-  readonly onUsage: (usage: ModelUsage) => void
+  readonly onUsage: (usage: ModelUsage) => void | Promise<void>
   readonly setActiveStream: (
     stream: AsyncIterator<ModelStreamEvent> | undefined,
   ) => void
@@ -653,6 +1012,7 @@ async function consumeModelStream(input: {
       const event = next.value
       if (event.type !== "response") {
         if (input.request.signal?.aborted) throw abortError()
+        if (input.request.compaction === "remote_v2") continue
         if (utf8Bytes(event.text) > input.assistantResponseBytes) {
           throw new Error(
             "Model stream update exceeded the configured byte limit.",
@@ -673,7 +1033,7 @@ async function consumeModelStream(input: {
       }
       terminal = event.response
       if (event.response.usage !== undefined)
-        input.onUsage(event.response.usage)
+        await input.onUsage(event.response.usage)
     }
   } catch (error) {
     if (input.request.signal?.aborted || isAbortError(error)) {
@@ -700,56 +1060,73 @@ async function consumeModelStream(input: {
 }
 
 function assessModelRequest(input: {
-  readonly request: ModelRequest
-  readonly rawMessages: readonly ModelMessage[]
+  readonly history: readonly ResponseItemEnvelope[]
+  readonly activeContextTokens: number | undefined
+  readonly autoCompactPrefillTokens: number | undefined
+  readonly historyAnchorItemId: string | undefined
+  readonly baselineProvider: string | undefined
+  readonly baselineModel: string | undefined
   readonly step: StepContext
-}): { readonly shouldCompact: boolean; readonly exceedsHardLimit: boolean } {
-  const limits = input.step.executionPolicy
-  const messageBytes = utf8Bytes(JSON.stringify(input.rawMessages))
-  const messageBlocks = input.rawMessages.reduce(
-    (count, message) =>
-      count +
-      (typeof message.content === "string" ? 1 : message.content.length) +
-      (message.role === "user" ? (message.images?.length ?? 0) : 0),
-    0,
-  )
-  const requestTokens = estimateModelRequestBudget(
-    input.request,
-  ).requiredContextTokens
-  const contextTokens =
-    input.step.configuration.modelCapacity?.effectiveContextWindowTokens
-  const tokenTrigger =
-    contextTokens === undefined
-      ? undefined
-      : Math.floor(
-          contextTokens *
-            input.step.configuration.executionPolicy.compactionTriggerRatio,
+}): Readonly<{ shouldCompact: boolean; activeTokens: number }> {
+  const anchorIndex =
+    input.historyAnchorItemId === undefined
+      ? -1
+      : input.history.findIndex(
+          (item) => item.id === input.historyAnchorItemId,
         )
+  const hasAnchoredMeasurement =
+    input.activeContextTokens !== undefined &&
+    anchorIndex >= 0
+  const baselineMatches =
+    hasAnchoredMeasurement &&
+    input.baselineProvider === input.step.target.provider &&
+    input.baselineModel === input.step.target.model
+  const estimatedHistoryTokens = estimateHistoryTokens(
+    input.history.map(({ item }) => item),
+  )
+  const anchoredTokens = hasAnchoredMeasurement
+    ? input.activeContextTokens +
+      estimateHistoryTokens(
+        input.history.slice(anchorIndex + 1).map(({ item }) => item),
+      )
+    : undefined
+  // A foreign model's measurement is not a calibrated prefix for the target
+  // tokenizer, but it remains a conservative high-water mark for downshifts.
+  const requestTokens = baselineMatches
+    ? (anchoredTokens ?? estimatedHistoryTokens)
+    : Math.max(estimatedHistoryTokens, anchoredTokens ?? 0)
+  const fullContextLimit =
+    input.step.configuration.modelCapacity?.effectiveContextWindowTokens
+  const scopeTokens =
+    input.step.configuration.autoCompact.scope === "body_after_prefix"
+      ? baselineMatches && input.autoCompactPrefillTokens !== undefined
+        ? Math.max(0, requestTokens - input.autoCompactPrefillTokens)
+        : 0
+      : requestTokens
+  const autoCompactLimit = input.step.configuration.autoCompact.limitTokens
   return {
+    activeTokens: requestTokens,
     shouldCompact:
-      (limits.compactionTriggerContextBytes !== undefined &&
-        messageBytes >= limits.compactionTriggerContextBytes) ||
-      (tokenTrigger !== undefined && requestTokens >= tokenTrigger) ||
-      messageBlocks > limits.modelVisibleMessageBlocks,
-    exceedsHardLimit:
-      messageBytes > limits.modelVisibleContextBytes ||
-      messageBlocks > limits.modelVisibleMessageBlocks ||
-      (contextTokens !== undefined && requestTokens > contextTokens),
+      (autoCompactLimit !== undefined && scopeTokens >= autoCompactLimit) ||
+      (fullContextLimit !== undefined && requestTokens >= fullContextLimit),
   }
 }
 
 async function compactLiveHistory(input: {
+  readonly remoteCompaction?: boolean
+  readonly fallback?: Readonly<{ step: StepContext; stream: StreamFn }>
+  readonly injectWorldState?: boolean
   readonly runtime: TurnRuntime
   readonly turnId: string
   readonly step: StepContext
   readonly worldState: WorldState
   readonly history: readonly ResponseItemEnvelope[]
-  readonly contextRevision: number
   readonly stream: StreamFn
   readonly signal: AbortSignal
   readonly rolloutAssets: RolloutAssets | undefined
   readonly usages: ModelUsage[]
-  readonly compactionState: CompactionState
+  readonly rolloutBudget: RolloutBudget | undefined
+  readonly hookRunner?: HookRunner
   readonly onOperationalFailure:
     | TurnProcessorOperationalFailureReporter
     | undefined
@@ -757,71 +1134,91 @@ async function compactLiveHistory(input: {
     stream: AsyncIterator<ModelStreamEvent> | undefined,
   ) => void
 }): Promise<boolean> {
-  const groups: Array<{
-    readonly turnId: string
-    readonly items: ResponseItemEnvelope[]
-  }> = []
-  for (const item of input.history) {
-    const group = groups.at(-1)
-    if (group?.turnId === item.turnId) group.items.push(item)
-    else groups.push({ turnId: item.turnId, items: [item] })
+  let compactionStep = input.step
+  let compactionStream = input.stream
+  let usedFallback = false
+  let fallbackSourceError: unknown
+  let source = input.history.map((item) => item.item)
+  if (source.length === 0) return false
+  if (input.remoteCompaction) {
+    source = trimRemoteCompactionToolTail(
+      source,
+      compactionStep.configuration.baseInstructions.text,
+      compactionStep.configuration.modelCapacity?.effectiveContextWindowTokens,
+    )
   }
-  const currentIndex = groups.findIndex(
-    (group) => group.turnId === input.turnId,
+
+  const preHook = await input.hookRunner?.run({
+    event: HookEvent.PreCompact,
+    matcher: input.remoteCompaction ? "remote" : "local",
+    payload: {
+      session_id: input.runtime.snapshot().metadata.id,
+      turn_id: input.turnId,
+      trigger: "auto",
+      custom_instructions: null,
+    },
+    cwd: input.step.configuration.workspaceRoot,
+    signal: input.signal,
+  })
+  if (preHook?.continue === false) {
+    throw new Error(preHook.reason ?? "PreCompact hook blocked compaction.")
+  }
+  await recordHookContext(
+    input.runtime,
+    input.turnId,
+    preHook?.additionalContext ?? [],
   )
-  const historyEnd = currentIndex < 0 ? groups.length : currentIndex
-  const historyGroups = groups.slice(0, historyEnd)
-  const retainBytes =
-    input.step.executionPolicy.compactionRetainContextBytes ?? 0
-  let retainedBytes = utf8Bytes(JSON.stringify(groups.slice(historyEnd)))
-  let keepFromIndex = historyGroups.length
-  for (let index = historyGroups.length - 1; index >= 0; index -= 1) {
-    if (retainedBytes >= retainBytes) break
-    const group = historyGroups[index]
-    if (group === undefined) break
-    retainedBytes += utf8Bytes(JSON.stringify(group.items))
-    keepFromIndex = index
-  }
-  let sourceGroups = historyGroups.slice(0, keepFromIndex)
-  if (sourceGroups.length === 0) {
-    return false
-  }
 
   const compactionItem: StartedExecutionItem = {
     type: "context_compaction",
     itemId: `compaction_${globalThis.crypto.randomUUID()}`,
   }
   input.runtime.emitItemStarted(compactionItem)
+  let completed = false
 
   try {
     const compact = async (request: ModelRequest) => {
       const response = await consumeModelStream({
         request,
-        stream: input.stream,
+        stream: compactionStream,
         threadId: input.runtime.snapshot().metadata.id,
         turnId: input.turnId,
         assistantResponseBytes:
-          input.step.configuration.executionPolicy.compactionSummaryBytes,
+          compactionStep.executionPolicy.assistantResponseBytes,
         onOperationalFailure: input.onOperationalFailure,
         onUsage(usage) {
           input.usages.push(usage)
           const aggregate = aggregateTokenUsage(input.usages)
           if (aggregate !== undefined) input.runtime.recordUsage(aggregate)
+          input.rolloutBudget?.recordUsage(usage)
         },
         setActiveStream: input.setActiveStream,
       })
       if (response.stopReason === ModelStopReason.Error) {
-        throw new Error(response.error?.message ?? "Model returned an error.")
+        throw new ModelResponseError(response.error)
       }
       if (response.stopReason === ModelStopReason.Length) {
         throw new Error("Compaction was truncated by the model output limit.")
       }
       if (response.stopReason === ModelStopReason.Aborted) throw abortError()
-      const summary = response.content
-        .flatMap((block) => (block.type === "text" ? [block.text] : []))
-        .join("")
-        .trim()
-      if (summary.length === 0) {
+      const nativeItems = response.content.filter(
+        (block) => block.type === "compaction",
+      )
+      if (
+        input.remoteCompaction &&
+        (nativeItems.length !== 1 || response.providerRequestId === undefined)
+      ) {
+        throw new Error(
+          "Remote compaction requires exactly one native compaction item and a completed response id.",
+        )
+      }
+      const summary = input.remoteCompaction
+        ? ""
+        : response.content
+            .flatMap((block) => (block.type === "text" ? [block.text] : []))
+            .join("")
+            .trim()
+      if (!input.remoteCompaction && summary.length === 0) {
         throw new Error("Compaction produced an empty checkpoint.")
       }
       const usage =
@@ -830,71 +1227,82 @@ async function compactLiveHistory(input: {
           : aggregateTokenUsage([response.usage])
       return {
         summary,
+        native: input.remoteCompaction ? nativeItems[0] : undefined,
         ...(usage === undefined ? {} : { usage }),
       }
     }
-    const capacity =
-      input.step.configuration.modelCapacity?.effectiveContextWindowTokens
     let result: Awaited<ReturnType<typeof compact>> | undefined
-    let attempts = 0
     while (result === undefined) {
-      const hydratedSource = await Promise.all(
-        sourceGroups.map(async (group) => ({
-          messages: await resolveRolloutAssetImages(
-            adaptImagesForModel(
-              limitToolResults(
-                completeToolCallHistory(group.items.map((item) => item.item)),
-                input.step.executionPolicy.modelVisibleToolResultBytes,
-                input.step.executionPolicy.modelVisibleToolResultLines,
-              ),
-              input.step.target,
-              input.step.modelInfo,
-            ).messages,
-            input.rolloutAssets,
+      const messages = await resolveRolloutAssetImages(
+        adaptImagesForModel(
+          limitToolResults(
+            completeToolCallHistory(source),
+            compactionStep.executionPolicy.modelVisibleToolResultBytes,
+            compactionStep.executionPolicy.modelVisibleToolResultLines,
           ),
-        })),
+          compactionStep.target,
+          compactionStep.modelInfo,
+        ).messages,
+        input.rolloutAssets,
       )
       try {
-        const request = buildCompactionRequest({
-          source: hydratedSource,
-          target: input.step.target,
-          baseInstructions: input.step.configuration.baseInstructions,
-          cacheKey: input.step.configuration.promptCacheKey,
-          signal: input.signal,
-        })
-        result =
-          capacity !== undefined &&
-          estimateModelRequestBudget(request).requiredContextTokens > capacity
-            ? await runTwoPassCompaction({
-                source: hydratedSource,
-                target: input.step.target,
-                baseInstructions: input.step.configuration.baseInstructions,
-                cacheKey: input.step.configuration.promptCacheKey,
-                capacityTokens: capacity,
+        result = await compact(
+          input.remoteCompaction
+            ? {
+                compaction: "remote_v2",
+                target: compactionStep.target,
+                cacheKey: compactionStep.configuration.promptCacheKey,
+                system: [compactionStep.configuration.baseInstructions],
+                messages,
+                tools: compactionStep.toolRouter.modelDefinitions,
+                toolWireProtocol: compactionStep.toolWireProtocol,
                 signal: input.signal,
-                compact,
-              })
-            : await compact(request)
-        if (result === undefined) {
-          throw new Error("Compaction context length exceeds the model window.")
-        }
+              }
+            : buildCompactionRequest({
+                source: [{ messages }],
+                target: compactionStep.target,
+                baseInstructions: compactionStep.configuration.baseInstructions,
+                cacheKey: compactionStep.configuration.promptCacheKey,
+                signal: input.signal,
+              }),
+        )
       } catch (error) {
         if (input.signal.aborted || isAbortError(error)) throw error
-        attempts += 1
-        const reducedLength = Math.ceil(sourceGroups.length / 2)
         if (
-          !isContextOverflowError(error) ||
-          attempts >= 3 ||
-          reducedLength === sourceGroups.length
+          input.remoteCompaction &&
+          !usedFallback &&
+          input.fallback !== undefined &&
+          canRetryCompactionWithCurrentModel(error)
         ) {
-          throw error
+          usedFallback = true
+          fallbackSourceError = error
+          compactionStep = input.fallback.step
+          compactionStream = input.fallback.stream
+          source = trimRemoteCompactionToolTail(
+            input.history.map(({ item }) => item),
+            compactionStep.configuration.baseInstructions.text,
+            compactionStep.configuration.modelCapacity
+              ?.effectiveContextWindowTokens,
+          )
+          continue
         }
-        sourceGroups = sourceGroups.slice(0, reducedLength)
+        if (usedFallback && fallbackSourceError !== undefined) {
+          throw fallbackSourceError
+        }
+        if (
+          input.remoteCompaction ||
+          !isContextOverflowError(error) ||
+          source.length <= 1
+        )
+          throw error
+        // Codex retries local compaction by dropping the oldest input item.
+        // The live history stays intact until a complete checkpoint is ready.
+        source = source.slice(1)
       }
     }
     if (
       utf8Bytes(result.summary) >
-      input.step.configuration.executionPolicy.compactionSummaryBytes
+      compactionStep.executionPolicy.assistantResponseBytes
     ) {
       throw new Error(
         "Compaction checkpoint exceeded its configured byte limit.",
@@ -909,58 +1317,94 @@ async function compactLiveHistory(input: {
     }
     const generated = createCompactionReplacementHistory({
       summary: result.summary,
-      worldStateFragments: fullWorldState.fragments,
+      ...(input.injectWorldState === false
+        ? {}
+        : { worldStateFragments: fullWorldState.fragments }),
     }).map((message) => envelope(input.turnId, message))
-    const retained = groups
-      .slice(sourceGroups.length)
-      .flatMap((group) => group.items)
-      .filter((item) => !isWorldStateMessage(item.item))
-    const replacement = [...generated, ...retained]
-    const sourceBytes = utf8Bytes(
-      JSON.stringify(sourceGroups.flatMap((group) => group.items)),
-    )
-    if (utf8Bytes(JSON.stringify(generated)) >= sourceBytes) {
-      await input.runtime.recordItemCompletions([
-        completeCompactionItem(
-          compactionItem,
-          "failed",
-          new Error("Compaction did not reduce the retained history."),
-        ),
-      ])
-      input.compactionState.consecutiveFailures += 1
-      input.compactionState.failedHistoryLength = input.history.length
-      return false
-    }
+    const retained = input.remoteCompaction
+      ? retainRemoteCompactionMessages(input.history)
+      : retainCompactionUserMessages(input.history)
+    // Keep the checkpoint last and inject current context before the last
+    // real user message, matching Codex's inline compaction placement.
+    const summaryItem =
+      result.native === undefined
+        ? generated.at(-1)
+        : envelope(input.turnId, {
+            role: "assistant",
+            content: [result.native],
+          })
+    if (summaryItem === undefined)
+      throw new Error("Missing compaction checkpoint.")
+    const replacement = [
+      ...retained.slice(0, -1),
+      ...generated.slice(0, -1),
+      ...retained.slice(-1),
+      summaryItem,
+    ]
     await input.runtime.replaceConversationHistory({
       replacement,
       summary: result.summary,
-      baseContextRevision: input.contextRevision,
       baseHistoryLength: input.history.length,
+      ...(input.injectWorldState === false
+        ? {}
+        : {
+            worldState: {
+              state: fullWorldState.state,
+              snapshot: fullWorldState.snapshot,
+            },
+          }),
     })
-    await input.runtime.recordWorldStateUpdate([], {
-      full: true,
-      state: fullWorldState.state,
-      snapshot: fullWorldState.snapshot,
+    const estimatedContextTokens = estimateModelRequestBudget({
+      target: compactionStep.target,
+      system: [compactionStep.configuration.baseInstructions],
+      messages: input.runtime
+        .snapshot()
+        .context.history.map((item) => item.item),
+      tools: [],
+      toolWireProtocol: "eager",
+    }).estimatedInputTokens
+    await input.runtime.recordContextTokens({
+      activeContextTokens: estimatedContextTokens,
+      inputTokens: estimatedContextTokens,
+      estimatedPrefill: true,
+      historyAnchorItemId:
+        input.runtime.snapshot().context.history.at(-1)?.id ?? input.turnId,
+      provider: compactionStep.target.provider,
+      model: compactionStep.target.model,
     })
     await input.runtime.recordItemCompletions([
       completeCompactionItem(compactionItem, "completed"),
     ])
-    input.compactionState.consecutiveFailures = 0
-    input.compactionState.failedHistoryLength = undefined
+    completed = true
+    const postHook = await input.hookRunner?.run({
+      event: HookEvent.PostCompact,
+      matcher: input.remoteCompaction ? "remote" : "local",
+      payload: {
+        session_id: input.runtime.snapshot().metadata.id,
+        turn_id: input.turnId,
+        trigger: "auto",
+      },
+      cwd: input.step.configuration.workspaceRoot,
+      signal: input.signal,
+    })
+    if (postHook?.continue === false) {
+      throw new Error(postHook.reason ?? "PostCompact hook blocked the Turn.")
+    }
+    await recordHookContext(
+      input.runtime,
+      input.turnId,
+      postHook?.additionalContext ?? [],
+    )
+    input.rolloutBudget?.rearm(input.runtime.snapshot().metadata.id)
     return true
   } catch (error) {
     if (input.signal.aborted || isAbortError(error)) throw abortError()
-    await input.runtime.recordItemCompletions([
-      completeCompactionItem(compactionItem, "failed", error),
-    ])
-    input.compactionState.consecutiveFailures += 1
-    input.compactionState.failedHistoryLength = input.history.length
-    if (isContextOverflowError(error)) return false
-    reportOperationalFailure(input.onOperationalFailure, {
-      operation: "compact",
-      cause: error,
-    })
-    return false
+    if (!completed) {
+      await input.runtime.recordItemCompletions([
+        completeCompactionItem(compactionItem, "failed", error),
+      ])
+    }
+    throw error
   }
 }
 
@@ -983,6 +1427,7 @@ type ToolExecutionScope = {
     | TurnProcessorOperationalFailureReporter
     | undefined
   readonly agentControl?: BoundAgentControl
+  readonly hookRunner?: HookRunner
 }
 
 type PreparedToolCall = {
@@ -994,6 +1439,8 @@ type PreparedToolCall = {
   readonly item: ToolExecutionItem
   readonly permission?: ToolPermissionRequest
   readonly preparationError?: unknown
+  readonly hookBlockedReason?: string
+  readonly hookContext?: readonly string[]
 }
 
 async function executeToolCalls(
@@ -1007,12 +1454,35 @@ async function executeToolCalls(
 > {
   const prepared = await Promise.all(
     input.calls.map(async (call): Promise<PreparedToolCall> => {
-      const invocation = input.toolPlan.resolveInvocation(call.name, call.input)
-      const descriptor = input.toolPlan.describeExecution(
+      let invocation = input.toolPlan.resolveInvocation(call.name, call.input)
+      let descriptor = input.toolPlan.describeExecution(
         invocation.name,
         invocation.input,
       )
       try {
+        const hookOutcome = await input.hookRunner?.run({
+          event: HookEvent.PreToolUse,
+          matcher: invocation.name,
+          payload: {
+            session_id: input.threadId,
+            turn_id: input.turnId,
+            tool_name: invocation.name,
+            tool_use_id: call.id,
+            tool_input: invocation.input,
+          },
+          cwd: input.workspaceRoot,
+          signal: input.signal,
+        })
+        if (hookOutcome?.updatedInput !== undefined) {
+          invocation = input.toolPlan.resolveInvocation(
+            call.name,
+            hookOutcome.updatedInput,
+          )
+          descriptor = input.toolPlan.describeExecution(
+            invocation.name,
+            invocation.input,
+          )
+        }
         const requirement = await input.toolPlan.approvalRequirement(
           invocation.name,
           invocation.input,
@@ -1034,6 +1504,17 @@ async function executeToolCalls(
             ...descriptor,
           },
           ...(permission === undefined ? {} : { permission }),
+          ...(hookOutcome?.continue === false
+            ? {
+                hookBlockedReason:
+                  hookOutcome.reason ??
+                  "PreToolUse hook blocked the tool call.",
+              }
+            : {}),
+          ...(hookOutcome === undefined ||
+          hookOutcome.additionalContext.length === 0
+            ? {}
+            : { hookContext: hookOutcome.additionalContext }),
         }
       } catch (error) {
         return {
@@ -1186,10 +1667,46 @@ async function executePreparedTool(
   reservation: ToolExecutionReservation,
 ): Promise<ToolExecutionResult> {
   try {
+    const hookContext = [...(prepared.hookContext ?? [])]
     if (prepared.preparationError !== undefined) {
       throw prepared.preparationError
     }
+    if (prepared.hookBlockedReason !== undefined) {
+      reservation.cancel()
+      return {
+        ok: false,
+        code: "hook_blocked",
+        message: prepared.hookBlockedReason,
+        content: `hook_blocked: ${prepared.hookBlockedReason}`,
+      }
+    }
     if (prepared.permission !== undefined) {
+      const permissionHook = await input.hookRunner?.run({
+        event: HookEvent.PermissionRequest,
+        matcher: prepared.invocation.name,
+        payload: {
+          session_id: input.threadId,
+          turn_id: input.turnId,
+          tool_name: prepared.invocation.name,
+          tool_use_id: prepared.call.id,
+          tool_input: prepared.invocation.input,
+          permission_mode: input.approvalPolicy,
+        },
+        cwd: input.workspaceRoot,
+        signal: input.signal,
+      })
+      hookContext.push(...(permissionHook?.additionalContext ?? []))
+      if (permissionHook?.continue === false) {
+        reservation.cancel()
+        const message =
+          permissionHook.reason ?? "PermissionRequest hook denied the tool."
+        return {
+          ok: false,
+          code: "permission_denied",
+          message,
+          content: message,
+        }
+      }
       const outcome = await input.permissionGate.request({
         sessionId: input.threadId,
         turnId: input.turnId,
@@ -1242,6 +1759,31 @@ async function executePreparedTool(
             : { agentControl: input.agentControl }),
         },
       )
+      const postHook = await input.hookRunner?.run({
+        event: HookEvent.PostToolUse,
+        matcher: prepared.invocation.name,
+        payload: {
+          session_id: input.threadId,
+          turn_id: input.turnId,
+          tool_name: prepared.invocation.name,
+          tool_use_id: prepared.call.id,
+          tool_input: prepared.invocation.input,
+          tool_response: result.output ?? result.content,
+        },
+        cwd: input.workspaceRoot,
+        signal: input.signal,
+      })
+      if (postHook?.continue === false) {
+        const reason =
+          postHook.reason ?? "PostToolUse hook rejected the tool result."
+        return {
+          ok: false,
+          code: "hook_blocked",
+          message: reason,
+          content: `hook_blocked: ${reason}`,
+          ...(result.output === undefined ? {} : { output: result.output }),
+        }
+      }
       if (input.toolPlan.get(prepared.invocation.name)?.effect !== "observe") {
         const observations = toolFileObservations(
           prepared.invocation.name,
@@ -1251,7 +1793,13 @@ async function executePreparedTool(
           input.visibleFileObservations.apply(observation)
         }
       }
-      return result
+      hookContext.push(...(postHook?.additionalContext ?? []))
+      return hookContext.length === 0
+        ? result
+        : {
+            ...result,
+            content: `${result.content}\n\n<hook_context>\n${hookContext.join("\n\n")}\n</hook_context>`,
+          }
     })
   } catch (error) {
     reservation.cancel()
@@ -1337,6 +1885,26 @@ async function recordSteering(
   await runtime.recordConversationItems(
     steering.map((item) => inputEnvelope(item, item.submissionId)),
   )
+}
+
+async function recordHookContext(
+  runtime: TurnRuntime,
+  turnId: string,
+  context: readonly string[],
+): Promise<void> {
+  const content = context.filter((entry) => entry.trim() !== "")
+  if (content.length === 0) return
+  await runtime.recordConversationItems([
+    envelope(turnId, {
+      role: "developer",
+      content: [
+        {
+          type: "text",
+          text: `<hook_context>\n${content.join("\n\n")}\n</hook_context>`,
+        },
+      ],
+    }),
+  ])
 }
 
 function inputEnvelope(input: TurnInput, turnId: string): ResponseItemEnvelope {
@@ -1478,6 +2046,7 @@ function completeToolCallHistory(
       pending = pending.filter(({ id }) => id !== message.toolCallId)
       continue
     }
+    if (message.role === "tool") continue
     if (pending.length > 0) flushMissing()
     completed.push(message)
     if (message.role === "assistant") {
@@ -1529,13 +2098,6 @@ function baseModelId(context: TurnContextItem): string | undefined {
   return provenance.type === "model"
     ? `${provenance.provider}/${provenance.model}`
     : undefined
-}
-
-function isWorldStateMessage(message: ModelMessage): boolean {
-  return (
-    (message.role === "user" || message.role === "developer") &&
-    message.context?.type === "world_state"
-  )
 }
 
 function reportOperationalFailure(

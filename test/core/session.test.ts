@@ -751,7 +751,6 @@ describe("live Session actor", () => {
           await runtime.replaceConversationHistory({
             replacement: [],
             summary: "checkpoint",
-            baseContextRevision: snapshot.contextRevision,
             baseHistoryLength: snapshot.context.history.length,
           })
         },
