@@ -1,9 +1,25 @@
-import { randomUUID } from "node:crypto"
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises"
+import { createHash, randomUUID } from "node:crypto"
+import {
+  mkdir,
+  readFile,
+  realpath,
+  rename,
+  unlink,
+  writeFile,
+} from "node:fs/promises"
 import { homedir } from "node:os"
-import { dirname, isAbsolute, join, resolve } from "node:path"
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { parse, stringify, type TomlTable } from "smol-toml"
 import type { ShellEnvironmentPolicy } from "../runtime/user-shell-env.ts"
+import type { RolloutBudgetConfig } from "../runtime/rollout-budget.ts"
+import {
+  HookEvent,
+  type HookConfiguration,
+  type HookHandler,
+  type HookMatcherGroup,
+} from "../runtime/hooks.ts"
+import type { McpServerConfig } from "../runtime/mcp-config.ts"
+import type { AutoCompactTokenLimitScope } from "../kernel/events.ts"
 import {
   consoleOperationalFailureReporter,
   type OperationalFailureReporter,
@@ -13,41 +29,108 @@ import type { ApiUserModelPreference } from "./protocol.ts"
 
 export type UserConfigStore = {
   read(): Promise<ApiUserModelPreference | undefined>
-  readConfiguration(): Promise<UserConfiguration>
+  readConfiguration(input?: ConfigReadInput): Promise<UserConfiguration>
+  readSnapshot(input?: ConfigReadInput): Promise<ConfigurationSnapshot>
   write(preference: ApiUserModelPreference): Promise<ApiUserModelPreference>
+  writeValue(input: ConfigValueWrite): Promise<ConfigurationSnapshot>
+}
+
+export type ConfigReadInput = Readonly<{ cwd?: string }>
+
+export type ConfigLayerSource = "user" | "project"
+
+export type ConfigLayerSnapshot = Readonly<{
+  source: ConfigLayerSource
+  path: string
+  version: string
+  disabledReason?: string
+}>
+
+export type ConfigOrigin = Readonly<{
+  source: ConfigLayerSource
+  path: string
+  version: string
+}>
+
+export type ConfigurationSnapshot = Readonly<{
+  configuration: UserConfiguration
+  effective: TomlTable
+  origins: Readonly<Record<string, ConfigOrigin>>
+  layers: readonly ConfigLayerSnapshot[]
+}>
+
+export type ConfigValueWrite = Readonly<{
+  keyPath: readonly string[]
+  value: unknown
+  expectedVersion?: string
+}>
+
+export class ConfigVersionConflictError extends Error {
+  constructor() {
+    super("Configuration was modified since last read. Fetch it and retry.")
+    this.name = "ConfigVersionConflictError"
+  }
 }
 
 export type UserConfiguration = Readonly<{
+  rolloutBudget?: RolloutBudgetConfig
   preference?: ApiUserModelPreference
   baseInstructions?: string
   modelContextWindowTokens?: number
+  modelAutoCompactTokenLimit?: number
+  modelAutoCompactTokenLimitScope?: AutoCompactTokenLimitScope
   shellEnvironmentPolicy?: Partial<ShellEnvironmentPolicy>
+  mcpServers?: Readonly<Record<string, McpServerConfig>>
+  hooks?: HookConfiguration
 }>
 
 export function createUserConfigStore(
   options: {
     readonly configPath?: string
+    readonly workspaceRoot?: string
     readonly reportOperationalFailure?: OperationalFailureReporter
   } = {},
 ): UserConfigStore {
   const configPath = options.configPath ?? defaultUserConfigPath()
   const reporter =
     options.reportOperationalFailure ?? consoleOperationalFailureReporter
+  const workspaceRoot = options.workspaceRoot
   let pendingWrite = Promise.resolve()
 
   return {
     async read() {
-      const document = await readConfigDocument(configPath, reporter)
-      return document?.configuration.preference
+      return (await readConfigurationSnapshot(configPath, reporter, {}))
+        .configuration.preference
     },
-    async readConfiguration() {
-      const document = await readConfigDocument(configPath, reporter)
-      return document?.configuration ?? {}
+    async readConfiguration(input = {}) {
+      return (
+        await readConfigurationSnapshot(configPath, reporter, {
+          ...input,
+          ...(workspaceRoot === undefined ? {} : { workspaceRoot }),
+        })
+      ).configuration
+    },
+    async readSnapshot(input = {}) {
+      return readConfigurationSnapshot(configPath, reporter, {
+        ...input,
+        ...(workspaceRoot === undefined ? {} : { workspaceRoot }),
+      })
     },
     write(preference) {
       const write = pendingWrite.then(
         () => writePreference(configPath, preference, reporter),
         () => writePreference(configPath, preference, reporter),
+      )
+      pendingWrite = write.then(
+        () => undefined,
+        () => undefined,
+      )
+      return write
+    },
+    writeValue(input) {
+      const write = pendingWrite.then(
+        () => writeConfigValue(configPath, input, reporter, workspaceRoot),
+        () => writeConfigValue(configPath, input, reporter, workspaceRoot),
       )
       pendingWrite = write.then(
         () => undefined,
@@ -104,9 +187,86 @@ async function writePreference(
   return preference
 }
 
+async function writeConfigValue(
+  configPath: string,
+  input: ConfigValueWrite,
+  reporter: OperationalFailureReporter,
+  workspaceRoot: string | undefined,
+): Promise<ConfigurationSnapshot> {
+  if (
+    input.keyPath.length === 0 ||
+    input.keyPath.some((segment) => segment.trim() === "")
+  ) {
+    throw new Error("Configuration keyPath must contain non-empty segments.")
+  }
+  const document = await readConfigDocument(configPath, reporter)
+  const version = document?.version ?? fingerprint("")
+  if (
+    input.expectedVersion !== undefined &&
+    input.expectedVersion !== version
+  ) {
+    throw new ConfigVersionConflictError()
+  }
+  const value = structuredClone(document?.value ?? {})
+  let target = value
+  for (const segment of input.keyPath.slice(0, -1)) {
+    const current = target[segment]
+    if (current !== undefined && !isTomlTable(current)) {
+      throw new Error(
+        `Configuration path ${input.keyPath.join(".")} crosses a non-table value.`,
+      )
+    }
+    const next: TomlTable = current ?? {}
+    target[segment] = next
+    target = next
+  }
+  const leaf = input.keyPath.at(-1)
+  if (leaf === undefined) throw new Error("Configuration keyPath is empty.")
+  target[leaf] = input.value as TomlTable[string]
+  const content = stringify(value)
+
+  // Check again immediately before the atomic rename. The in-process queue
+  // serializes Yakitori writers; the version catches edits from another
+  // process or editor between read and write.
+  const current = await readFile(configPath, "utf8").catch((error) => {
+    if (isMissingFile(error)) return ""
+    throw error
+  })
+  if (fingerprint(current) !== version) throw new ConfigVersionConflictError()
+  await writeAtomically(configPath, content)
+  return readConfigurationSnapshot(configPath, reporter, {
+    ...(workspaceRoot === undefined ? {} : { workspaceRoot }),
+  })
+}
+
+async function writeAtomically(path: string, content: string): Promise<void> {
+  await mkdir(dirname(path), { recursive: true })
+  const temporary = `${path}.${randomUUID()}.tmp`
+  try {
+    await writeFile(temporary, content, "utf8")
+    await rename(temporary, path)
+  } catch (error) {
+    try {
+      await unlink(temporary)
+    } catch (cleanupError) {
+      if (!isMissingFile(cleanupError)) {
+        throw new AggregateError(
+          [error, cleanupError],
+          "Config write and temporary-file cleanup both failed.",
+          { cause: error },
+        )
+      }
+    }
+    throw error
+  }
+}
+
 type ConfigDocument = {
   readonly configuration: UserConfiguration
+  readonly content: string
+  readonly path: string
   readonly value: TomlTable
+  readonly version: string
 }
 
 async function readConfigDocument(
@@ -124,7 +284,10 @@ async function readConfigDocument(
   try {
     const value = parse(content, { integersAsBigInt: "asNeeded" })
     return {
+      content,
+      path: configPath,
       value,
+      version: fingerprint(content),
       // Relative paths in config resolve against the config file's
       // directory, not the server process cwd.
       configuration: await configurationFromConfig(value, dirname(configPath)),
@@ -132,6 +295,9 @@ async function readConfigDocument(
   } catch (error) {
     if (
       error instanceof ModelInstructionsConfigError ||
+      error instanceof AutoCompactConfigError ||
+      error instanceof ExtensionConfigError ||
+      error instanceof RolloutBudgetConfigError ||
       error instanceof ShellEnvironmentPolicyConfigError
     ) {
       throw error
@@ -145,6 +311,186 @@ async function readConfigDocument(
   }
 }
 
+type LoadedConfigLayer = Readonly<{
+  source: ConfigLayerSource
+  path: string
+  content: string
+  value: TomlTable
+  version: string
+  disabledReason?: string
+}>
+
+async function readConfigurationSnapshot(
+  configPath: string,
+  reporter: OperationalFailureReporter,
+  input: ConfigReadInput & Readonly<{ workspaceRoot?: string }>,
+): Promise<ConfigurationSnapshot> {
+  const user = await readConfigDocument(configPath, reporter)
+  const layers: LoadedConfigLayer[] = [
+    {
+      source: "user",
+      path: configPath,
+      content: user?.content ?? "",
+      value: user?.value ?? {},
+      version: user?.version ?? fingerprint(""),
+    },
+  ]
+
+  if (input.cwd !== undefined) {
+    const workspaceRoot = await realpath(input.workspaceRoot ?? input.cwd)
+    const cwd = await realpath(input.cwd)
+    requireInside(workspaceRoot, cwd, "Configuration cwd")
+    const trusted = await trustedProjectPaths(user?.value ?? {})
+    for (const directory of directoriesFromRoot(workspaceRoot, cwd)) {
+      const projectPath = join(directory, ".yakitori", "config.toml")
+      const layer = await readProjectLayer(projectPath, trusted, reporter)
+      if (layer !== undefined) layers.push(layer)
+    }
+  }
+
+  const origins: Record<string, ConfigOrigin> = {}
+  let effective: TomlTable = {}
+  for (const layer of layers) {
+    if (layer.disabledReason !== undefined) continue
+    effective = mergeTables(effective, layer.value)
+    recordOrigins(layer.value, "", layer, origins)
+  }
+  const instructionOrigin = origins.model_instructions_file
+  const configuration = await configurationFromConfig(
+    effective,
+    instructionOrigin === undefined
+      ? dirname(configPath)
+      : dirname(instructionOrigin.path),
+  )
+  return {
+    configuration,
+    effective,
+    origins,
+    layers: layers.map(({ source, path, version, disabledReason }) => ({
+      source,
+      path,
+      version,
+      ...(disabledReason === undefined ? {} : { disabledReason }),
+    })),
+  }
+}
+
+async function readProjectLayer(
+  path: string,
+  trustedPaths: ReadonlySet<string>,
+  reporter: OperationalFailureReporter,
+): Promise<LoadedConfigLayer | undefined> {
+  let content: string
+  try {
+    content = await readFile(path, "utf8")
+  } catch (error) {
+    if (isMissingFile(error)) return undefined
+    throw error
+  }
+  const projectDirectory = dirname(dirname(path))
+  const trusted = [...trustedPaths].some(
+    (candidate) =>
+      projectDirectory === candidate ||
+      projectDirectory.startsWith(`${candidate}${sep}`),
+  )
+  if (!trusted) {
+    return {
+      source: "project",
+      path,
+      content,
+      value: {},
+      version: fingerprint(content),
+      disabledReason: "project is not trusted",
+    }
+  }
+  let value: TomlTable
+  try {
+    value = parse(content, { integersAsBigInt: "asNeeded" })
+  } catch (cause) {
+    reportOperationalFailure(reporter, {
+      component: "project-config",
+      operation: "parse",
+      cause,
+    })
+    throw cause
+  }
+  return {
+    source: "project",
+    path,
+    content,
+    value,
+    version: fingerprint(content),
+  }
+}
+
+async function trustedProjectPaths(
+  value: TomlTable,
+): Promise<ReadonlySet<string>> {
+  const projects = value.projects
+  if (!isTomlTable(projects)) return new Set()
+  return new Set(
+    await Promise.all(
+      Object.entries(projects).flatMap(([path, entry]) =>
+        isTomlTable(entry) && entry.trust_level === "trusted"
+          ? [realpath(resolve(path)).catch(() => resolve(path))]
+          : [],
+      ),
+    ),
+  )
+}
+
+function directoriesFromRoot(root: string, cwd: string): readonly string[] {
+  const directories = [cwd]
+  let current = cwd
+  while (current !== root) {
+    current = dirname(current)
+    directories.push(current)
+  }
+  return directories.reverse()
+}
+
+function requireInside(root: string, path: string, label: string): void {
+  const child = relative(root, path)
+  if (child === "" || (!child.startsWith(`..${sep}`) && child !== "..")) return
+  throw new Error(`${label} is outside the workspace: ${path}`)
+}
+
+function mergeTables(base: TomlTable, overlay: TomlTable): TomlTable {
+  const merged: TomlTable = { ...base }
+  for (const [key, value] of Object.entries(overlay)) {
+    const previous = merged[key]
+    merged[key] =
+      isTomlTable(previous) && isTomlTable(value)
+        ? mergeTables(previous, value)
+        : structuredClone(value)
+  }
+  return merged
+}
+
+function recordOrigins(
+  value: TomlTable,
+  prefix: string,
+  layer: LoadedConfigLayer,
+  origins: Record<string, ConfigOrigin>,
+): void {
+  for (const [key, entry] of Object.entries(value)) {
+    const path = prefix === "" ? key : `${prefix}.${key}`
+    if (isTomlTable(entry)) {
+      recordOrigins(entry, path, layer, origins)
+      continue
+    }
+    origins[path] = {
+      source: layer.source,
+      path: layer.path,
+      version: layer.version,
+    }
+  }
+}
+
+function fingerprint(content: string): string {
+  return createHash("sha256").update(content).digest("hex")
+}
+
 async function configurationFromConfig(
   value: TomlTable,
   baseDirectory: string,
@@ -155,6 +501,9 @@ async function configurationFromConfig(
     baseDirectory,
   )
   const shellEnvironmentPolicy = shellEnvironmentPolicyFromConfig(value)
+  const rolloutBudget = rolloutBudgetFromConfig(value)
+  const mcpServers = mcpServersFromConfig(value)
+  const hooks = hooksFromConfig(value)
   const modelContextWindowTokens = value.model_context_window
   if (
     modelContextWindowTokens !== undefined &&
@@ -164,13 +513,288 @@ async function configurationFromConfig(
   ) {
     throw new Error("model_context_window must be a positive integer.")
   }
+  const modelAutoCompactTokenLimit = value.model_auto_compact_token_limit
+  if (
+    modelAutoCompactTokenLimit !== undefined &&
+    (typeof modelAutoCompactTokenLimit !== "number" ||
+      !Number.isSafeInteger(modelAutoCompactTokenLimit) ||
+      modelAutoCompactTokenLimit <= 0)
+  ) {
+    throw new AutoCompactConfigError(
+      "model_auto_compact_token_limit must be a positive integer.",
+    )
+  }
+  const modelAutoCompactTokenLimitScope =
+    value.model_auto_compact_token_limit_scope
+  if (
+    modelAutoCompactTokenLimitScope !== undefined &&
+    modelAutoCompactTokenLimitScope !== "total" &&
+    modelAutoCompactTokenLimitScope !== "body_after_prefix"
+  ) {
+    throw new AutoCompactConfigError(
+      'model_auto_compact_token_limit_scope must be "total" or "body_after_prefix".',
+    )
+  }
   return {
     ...(preference === undefined ? {} : { preference }),
+    ...(rolloutBudget === undefined ? {} : { rolloutBudget }),
     ...(baseInstructions === undefined ? {} : { baseInstructions }),
     ...(modelContextWindowTokens === undefined
       ? {}
       : { modelContextWindowTokens }),
+    ...(modelAutoCompactTokenLimit === undefined
+      ? {}
+      : { modelAutoCompactTokenLimit }),
+    ...(modelAutoCompactTokenLimitScope === undefined
+      ? {}
+      : { modelAutoCompactTokenLimitScope }),
     ...(shellEnvironmentPolicy === undefined ? {} : { shellEnvironmentPolicy }),
+    ...(mcpServers === undefined ? {} : { mcpServers }),
+    ...(hooks === undefined ? {} : { hooks }),
+  }
+}
+
+class AutoCompactConfigError extends Error {}
+class RolloutBudgetConfigError extends Error {}
+class ExtensionConfigError extends Error {}
+
+function mcpServersFromConfig(
+  value: TomlTable,
+): Readonly<Record<string, McpServerConfig>> | undefined {
+  const configured = value.mcp_servers
+  if (configured === undefined) return undefined
+  if (!isTomlTable(configured)) {
+    throw new ExtensionConfigError("mcp_servers must be a table.")
+  }
+  return Object.fromEntries(
+    Object.entries(configured).map(([name, entry]) => {
+      if (!/^[A-Za-z0-9_-]+$/.test(name) || !isTomlTable(entry)) {
+        throw new ExtensionConfigError(
+          `Invalid MCP server configuration: ${name}`,
+        )
+      }
+      if (typeof entry.command !== "string" || entry.command.trim() === "") {
+        throw new ExtensionConfigError(
+          `mcp_servers.${name}.command is required.`,
+        )
+      }
+      const args = stringArrayValue(entry.args, `mcp_servers.${name}.args`)
+      const env = stringMapValue(entry.env, `mcp_servers.${name}.env`)
+      if (entry.cwd !== undefined && typeof entry.cwd !== "string") {
+        throw new ExtensionConfigError(
+          `mcp_servers.${name}.cwd must be a string.`,
+        )
+      }
+      if (entry.enabled !== undefined && typeof entry.enabled !== "boolean") {
+        throw new ExtensionConfigError(
+          `mcp_servers.${name}.enabled must be a boolean.`,
+        )
+      }
+      const startupTimeoutMs = entry.startup_timeout_ms
+      if (
+        startupTimeoutMs !== undefined &&
+        (typeof startupTimeoutMs !== "number" ||
+          !Number.isSafeInteger(startupTimeoutMs) ||
+          startupTimeoutMs <= 0)
+      ) {
+        throw new ExtensionConfigError(
+          `mcp_servers.${name}.startup_timeout_ms must be a positive integer.`,
+        )
+      }
+      return [
+        name,
+        {
+          command: entry.command,
+          ...(args === undefined ? {} : { args }),
+          ...(entry.cwd === undefined ? {} : { cwd: entry.cwd }),
+          ...(env === undefined ? {} : { env }),
+          ...(entry.enabled === undefined ? {} : { enabled: entry.enabled }),
+          ...(startupTimeoutMs === undefined ? {} : { startupTimeoutMs }),
+        },
+      ]
+    }),
+  )
+}
+
+function hooksFromConfig(value: TomlTable): HookConfiguration | undefined {
+  const configured = value.hooks
+  if (configured === undefined) return undefined
+  if (!isTomlTable(configured)) {
+    throw new ExtensionConfigError("hooks must be a table.")
+  }
+  const events = Object.values(HookEvent)
+  const result: Partial<Record<HookEvent, readonly HookMatcherGroup[]>> = {}
+  for (const [name, groups] of Object.entries(configured)) {
+    if (!events.includes(name as HookEvent)) continue
+    if (!Array.isArray(groups)) {
+      throw new ExtensionConfigError(
+        `hooks.${name} must be an array of tables.`,
+      )
+    }
+    result[name as HookEvent] = groups.map((group, groupIndex) => {
+      if (!isTomlTable(group) || !Array.isArray(group.hooks)) {
+        throw new ExtensionConfigError(
+          `hooks.${name}[${String(groupIndex)}] must contain hooks.`,
+        )
+      }
+      if (group.matcher !== undefined && typeof group.matcher !== "string") {
+        throw new ExtensionConfigError(
+          `hooks.${name}.matcher must be a string.`,
+        )
+      }
+      return {
+        ...(group.matcher === undefined ? {} : { matcher: group.matcher }),
+        hooks: group.hooks.map((handler, handlerIndex) =>
+          hookHandlerFromConfig(
+            handler,
+            `${name}[${String(groupIndex)}].hooks[${String(handlerIndex)}]`,
+          ),
+        ),
+      }
+    })
+  }
+  return result
+}
+
+function hookHandlerFromConfig(value: unknown, path: string): HookHandler {
+  if (!isTomlTable(value) || value.type !== "command") {
+    throw new ExtensionConfigError(`hooks.${path} must be a command hook.`)
+  }
+  if (typeof value.command !== "string" || value.command.trim() === "") {
+    throw new ExtensionConfigError(`hooks.${path}.command is required.`)
+  }
+  const timeoutMs = value.timeout_ms
+  if (
+    timeoutMs !== undefined &&
+    (typeof timeoutMs !== "number" ||
+      !Number.isSafeInteger(timeoutMs) ||
+      timeoutMs <= 0)
+  ) {
+    throw new ExtensionConfigError(`hooks.${path}.timeout_ms is invalid.`)
+  }
+  if (value.async !== undefined && typeof value.async !== "boolean") {
+    throw new ExtensionConfigError(`hooks.${path}.async must be a boolean.`)
+  }
+  if (
+    value.trusted_hash !== undefined &&
+    typeof value.trusted_hash !== "string"
+  ) {
+    throw new ExtensionConfigError(
+      `hooks.${path}.trusted_hash must be a string.`,
+    )
+  }
+  return {
+    type: "command",
+    command: value.command,
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    ...(value.async === undefined ? {} : { async: value.async }),
+    ...(value.trusted_hash === undefined
+      ? {}
+      : { trustedHash: value.trusted_hash }),
+  }
+}
+
+function stringArrayValue(
+  value: unknown,
+  path: string,
+): readonly string[] | undefined {
+  if (value === undefined) return undefined
+  if (
+    !Array.isArray(value) ||
+    !value.every((entry) => typeof entry === "string")
+  ) {
+    throw new ExtensionConfigError(`${path} must be an array of strings.`)
+  }
+  return value
+}
+
+function stringMapValue(
+  value: unknown,
+  path: string,
+): Readonly<Record<string, string>> | undefined {
+  if (value === undefined) return undefined
+  if (
+    !isTomlTable(value) ||
+    !Object.values(value).every((entry) => typeof entry === "string")
+  ) {
+    throw new ExtensionConfigError(`${path} must be a string table.`)
+  }
+  return value as Record<string, string>
+}
+
+function rolloutBudgetFromConfig(
+  value: TomlTable,
+): RolloutBudgetConfig | undefined {
+  const features = value.features
+  if (features === undefined) return undefined
+  if (!isTomlTable(features))
+    throw new RolloutBudgetConfigError("features must be a table.")
+  const config = features.rollout_budget
+  if (config === undefined || config === false) return undefined
+  if (!isTomlTable(config))
+    throw new RolloutBudgetConfigError(
+      "features.rollout_budget must be a table with a limit when enabled.",
+    )
+  if (config.enabled === false) return undefined
+  if (config.enabled !== true)
+    throw new RolloutBudgetConfigError(
+      "features.rollout_budget.enabled must be a boolean.",
+    )
+  const allowed = new Set([
+    "enabled",
+    "limit_tokens",
+    "reminder_at_remaining_tokens",
+    "sampling_token_weight",
+    "prefill_token_weight",
+  ])
+  for (const key of Object.keys(config)) {
+    if (!allowed.has(key))
+      throw new RolloutBudgetConfigError(`Unknown rollout_budget field: ${key}`)
+  }
+  const limitTokens = config.limit_tokens
+  if (
+    typeof limitTokens !== "number" ||
+    !Number.isSafeInteger(limitTokens) ||
+    limitTokens <= 0
+  ) {
+    throw new RolloutBudgetConfigError(
+      "rollout_budget.limit_tokens must be a positive integer.",
+    )
+  }
+  const thresholds = config.reminder_at_remaining_tokens
+  if (
+    !Array.isArray(thresholds) ||
+    !thresholds.every(
+      (value): value is number =>
+        typeof value === "number" &&
+        Number.isSafeInteger(value) &&
+        value > 0 &&
+        value < limitTokens,
+    )
+  ) {
+    throw new RolloutBudgetConfigError(
+      "rollout_budget.reminder_at_remaining_tokens must contain positive integers below limit_tokens.",
+    )
+  }
+  const samplingTokenWeight = config.sampling_token_weight ?? 1
+  const prefillTokenWeight = config.prefill_token_weight ?? 1
+  if (
+    typeof samplingTokenWeight !== "number" ||
+    !Number.isFinite(samplingTokenWeight) ||
+    samplingTokenWeight < 0 ||
+    typeof prefillTokenWeight !== "number" ||
+    !Number.isFinite(prefillTokenWeight) ||
+    prefillTokenWeight < 0
+  ) {
+    throw new RolloutBudgetConfigError(
+      "Rollout token weights must be finite and non-negative.",
+    )
+  }
+  return {
+    limitTokens,
+    reminderAtRemainingTokens: thresholds,
+    samplingTokenWeight,
+    prefillTokenWeight,
   }
 }
 

@@ -294,6 +294,18 @@ describe("method dispatch", () => {
     const userConfig: UserConfigStore = {
       read: async () => undefined,
       readConfiguration: async () => ({}),
+      readSnapshot: async () => ({
+        configuration: {},
+        effective: {},
+        origins: {},
+        layers: [],
+      }),
+      writeValue: async () => ({
+        configuration: {},
+        effective: {},
+        origins: {},
+        layers: [],
+      }),
       write: async (preference) => {
         written.push(preference)
         return preference
@@ -322,6 +334,18 @@ describe("method dispatch", () => {
     const userConfig: UserConfigStore = {
       read: async () => undefined,
       readConfiguration: async () => ({}),
+      readSnapshot: async () => ({
+        configuration: {},
+        effective: {},
+        origins: {},
+        layers: [],
+      }),
+      writeValue: async () => ({
+        configuration: {},
+        effective: {},
+        origins: {},
+        layers: [],
+      }),
       write: async (preference) => preference,
     }
     const { processor } = createTestProcessor({
@@ -417,6 +441,18 @@ describe("serialization scopes", () => {
     const userConfig: UserConfigStore = {
       read: async () => undefined,
       readConfiguration: async () => ({}),
+      readSnapshot: async () => ({
+        configuration: {},
+        effective: {},
+        origins: {},
+        layers: [],
+      }),
+      writeValue: async () => ({
+        configuration: {},
+        effective: {},
+        origins: {},
+        layers: [],
+      }),
       write: async (preference) => {
         await writeGate.promise
         return preference

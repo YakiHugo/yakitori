@@ -1,4 +1,11 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { parse } from "smol-toml"
@@ -33,6 +40,132 @@ describe("user config", () => {
         preference: { provider: "codex", model: "gpt-5.6-sol" },
         modelContextWindowTokens: 600_000,
       })
+    })
+  })
+
+  it("reads the auto-compaction token limit and scope", async () => {
+    await withConfigPath(async (configPath) => {
+      await writeFile(
+        configPath,
+        [
+          "model_auto_compact_token_limit = 120000",
+          'model_auto_compact_token_limit_scope = "body_after_prefix"',
+          "",
+        ].join("\n"),
+      )
+
+      await expect(
+        createUserConfigStore({ configPath }).readConfiguration(),
+      ).resolves.toEqual({
+        modelAutoCompactTokenLimit: 120_000,
+        modelAutoCompactTokenLimitScope: "body_after_prefix",
+      })
+    })
+  })
+
+  it.each([
+    "model_auto_compact_token_limit = 0",
+    'model_auto_compact_token_limit_scope = "prefix"',
+  ])("rejects invalid auto-compaction configuration: %s", async (line) => {
+    await withConfigPath(async (configPath) => {
+      await writeFile(configPath, `${line}\n`)
+      await expect(
+        createUserConfigStore({ configPath }).readConfiguration(),
+      ).rejects.toThrow("model_auto_compact_token_limit")
+    })
+  })
+
+  it("loads an explicitly enabled shared rollout budget", async () => {
+    await withConfigPath(async (configPath) => {
+      await writeFile(
+        configPath,
+        `[features.rollout_budget]\nenabled = true\nlimit_tokens = 1000\nreminder_at_remaining_tokens = [500, 100]\nprefill_token_weight = 0.5\n`,
+      )
+      expect(
+        (await createUserConfigStore({ configPath }).readConfiguration())
+          .rolloutBudget,
+      ).toEqual({
+        limitTokens: 1000,
+        reminderAtRemainingTokens: [500, 100],
+        samplingTokenWeight: 1,
+        prefillTokenWeight: 0.5,
+      })
+    })
+  })
+
+  it("loads MCP servers and Codex-style command hooks", async () => {
+    await withConfigPath(async (configPath) => {
+      await writeFile(
+        configPath,
+        [
+          "[mcp_servers.local]",
+          'command = "node"',
+          'args = ["server.mjs"]',
+          'cwd = "tools"',
+          "startup_timeout_ms = 2500",
+          "",
+          "[mcp_servers.local.env]",
+          'MCP_MODE = "test"',
+          "",
+          "[[hooks.PreToolUse]]",
+          'matcher = "exec_.*"',
+          "",
+          "[[hooks.PreToolUse.hooks]]",
+          'type = "command"',
+          'command = "./check-tool.sh"',
+          "timeout_ms = 1200",
+          "async = false",
+          'trusted_hash = "sha256"',
+          "",
+        ].join("\n"),
+      )
+
+      await expect(
+        createUserConfigStore({ configPath }).readConfiguration(),
+      ).resolves.toMatchObject({
+        mcpServers: {
+          local: {
+            command: "node",
+            args: ["server.mjs"],
+            cwd: "tools",
+            env: { MCP_MODE: "test" },
+            startupTimeoutMs: 2500,
+          },
+        },
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: "exec_.*",
+              hooks: [
+                {
+                  type: "command",
+                  command: "./check-tool.sh",
+                  timeoutMs: 1200,
+                  async: false,
+                  trustedHash: "sha256",
+                },
+              ],
+            },
+          ],
+        },
+      })
+    })
+  })
+
+  it.each([
+    "limit_tokens = 0\nreminder_at_remaining_tokens = []",
+    "limit_tokens = 10\nreminder_at_remaining_tokens = [10]",
+    "limit_tokens = 10",
+    "limit_tokens = 10\nreminder_at_remaining_tokens = []\nsampling_token_weight = -1",
+  ])("rejects an invalid enabled budget instead of silently disabling it: %s", async (settings) => {
+    await withConfigPath(async (configPath) => {
+      await writeFile(
+        configPath,
+        `[features.rollout_budget]\nenabled = true\n${settings}\n`,
+      )
+      await expect(
+        createUserConfigStore({ configPath }).readConfiguration(),
+      ).rejects.toThrow()
     })
   })
 
@@ -156,6 +289,113 @@ describe("user config", () => {
         ui: { theme: "dark" },
         catalog: [{ name: "custom", models: ["first", "second"] }],
       })
+    })
+  })
+
+  it("merges trusted project layers root-to-cwd and reports leaf provenance", async () => {
+    await withConfigPath(async (configPath) => {
+      const workspace = join(dirname(configPath), "workspace")
+      const nested = join(workspace, "packages", "app")
+      await mkdir(join(workspace, ".yakitori"), { recursive: true })
+      await mkdir(join(nested, ".yakitori"), { recursive: true })
+      await writeFile(
+        configPath,
+        [
+          'provider = "codex"',
+          'model = "user-model"',
+          `[projects."${workspace}"]`,
+          'trust_level = "trusted"',
+          "",
+        ].join("\n"),
+      )
+      await writeFile(
+        join(workspace, ".yakitori", "config.toml"),
+        'model = "root-model"\n',
+      )
+      await writeFile(
+        join(nested, ".yakitori", "config.toml"),
+        'effort = "high"\n',
+      )
+      const snapshot = await createUserConfigStore({
+        configPath,
+        workspaceRoot: workspace,
+      }).readSnapshot({ cwd: nested })
+
+      expect(snapshot.configuration.preference).toEqual({
+        provider: "codex",
+        model: "root-model",
+        effort: "high",
+      })
+      expect(snapshot.layers).toHaveLength(3)
+      expect(snapshot.origins.model).toMatchObject({
+        source: "project",
+        path: await realpath(join(workspace, ".yakitori", "config.toml")),
+      })
+      expect(snapshot.origins.effort).toMatchObject({
+        source: "project",
+        path: await realpath(join(nested, ".yakitori", "config.toml")),
+      })
+    })
+  })
+
+  it("loads untrusted project config as disabled without applying it", async () => {
+    await withConfigPath(async (configPath) => {
+      const workspace = join(dirname(configPath), "workspace")
+      await mkdir(join(workspace, ".yakitori"), { recursive: true })
+      await writeFile(configPath, 'provider = "codex"\nmodel = "user-model"\n')
+      await writeFile(
+        join(workspace, ".yakitori", "config.toml"),
+        'model = "project-model"\n',
+      )
+      const snapshot = await createUserConfigStore({
+        configPath,
+        workspaceRoot: workspace,
+      }).readSnapshot({ cwd: workspace })
+
+      expect(snapshot.configuration.preference?.model).toBe("user-model")
+      expect(snapshot.layers[1]).toMatchObject({
+        source: "project",
+        disabledReason: "project is not trusted",
+      })
+    })
+  })
+
+  it("does not parse malformed project config before trust is established", async () => {
+    await withConfigPath(async (configPath) => {
+      const workspace = join(dirname(configPath), "workspace")
+      await mkdir(join(workspace, ".yakitori"), { recursive: true })
+      await writeFile(configPath, 'provider = "codex"\nmodel = "user-model"\n')
+      await writeFile(
+        join(workspace, ".yakitori", "config.toml"),
+        "this is not valid = [toml",
+      )
+
+      const snapshot = await createUserConfigStore({
+        configPath,
+        workspaceRoot: workspace,
+      }).readSnapshot({ cwd: workspace })
+
+      expect(snapshot.configuration.preference?.model).toBe("user-model")
+      expect(snapshot.layers[1]?.disabledReason).toBe("project is not trusted")
+    })
+  })
+
+  it("rejects a stale user-layer fingerprint instead of overwriting it", async () => {
+    await withConfigPath(async (configPath) => {
+      await writeFile(configPath, 'provider = "codex"\nmodel = "one"\n')
+      const store = createUserConfigStore({ configPath })
+      const version = (await store.readSnapshot()).layers[0]?.version
+      expect(version).toBeTypeOf("string")
+      await writeFile(configPath, 'provider = "codex"\nmodel = "external"\n')
+
+      await expect(
+        store.writeValue({
+          keyPath: ["model"],
+          value: "ours",
+          ...(version === undefined ? {} : { expectedVersion: version }),
+        }),
+      ).rejects.toThrow("modified since last read")
+      expect(await readFile(configPath, "utf8")).toContain('model = "external"')
     })
   })
 
