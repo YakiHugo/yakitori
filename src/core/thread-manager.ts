@@ -52,6 +52,7 @@ export type ThreadManagerOptions = {
     threadId: string,
     operation: string,
   ) => void
+  readonly maxResidentSubagentThreads?: number
 }
 
 export class ThreadManager {
@@ -69,6 +70,11 @@ export class ThreadManager {
   readonly #runningTurnCountListeners = new Set<(count: number) => void>()
   readonly #loads = new Map<string, Promise<AgentThread | undefined>>()
   readonly #starting = new Set<Promise<unknown>>()
+  readonly #closingThreads = new Set<string>()
+  readonly #lastUsed = new Map<string, number>()
+  readonly #maxResidentSubagentThreads: number
+  #useSequence = 0
+  #residencyMaintenance: Promise<void> = Promise.resolve()
   readonly #discarding = new Set<string>()
   #closing = false
   #shutdownPromise: Promise<void> | undefined
@@ -78,6 +84,15 @@ export class ThreadManager {
     this.#createTurnProcessor = options.createTurnProcessor
     this.#onPersistenceError = options.onPersistenceError
     this.#onBackgroundError = options.onBackgroundError
+    this.#maxResidentSubagentThreads =
+      options.maxResidentSubagentThreads ?? Number.POSITIVE_INFINITY
+    if (
+      this.#maxResidentSubagentThreads !== Number.POSITIVE_INFINITY &&
+      (!Number.isSafeInteger(this.#maxResidentSubagentThreads) ||
+        this.#maxResidentSubagentThreads <= 0)
+    ) {
+      throw new Error("maxResidentSubagentThreads must be a positive integer.")
+    }
   }
 
   get runningTurnCount(): number {
@@ -89,6 +104,10 @@ export class ThreadManager {
     ).length
   }
 
+  get residentThreadCount(): number {
+    return this.#threads.size
+  }
+
   subscribeRunningTurnCount(listener: (count: number) => void): () => void {
     this.#runningTurnCountListeners.add(listener)
     return () => this.#runningTurnCountListeners.delete(listener)
@@ -96,7 +115,9 @@ export class ThreadManager {
 
   getThread(threadId: string): AgentThread | undefined {
     const thread = this.#threads.get(threadId)
-    return thread?.status === "shutdown" ? undefined : thread
+    if (thread === undefined || thread.status === "shutdown") return undefined
+    this.#lastUsed.set(threadId, ++this.#useSequence)
+    return thread
   }
 
   createThread(input: CreateThreadInput = {}): Promise<AgentThread> {
@@ -198,6 +219,9 @@ export class ThreadManager {
     if (this.#discarding.has(threadId)) {
       return Promise.reject(new Error(`Thread ${threadId} is being discarded.`))
     }
+    if (this.#closingThreads.has(threadId)) {
+      return Promise.reject(new Error(`Thread ${threadId} is being closed.`))
+    }
     const live = this.getThread(threadId)
     if (live !== undefined) return Promise.resolve(live)
     const loading = this.#loads.get(threadId)
@@ -205,10 +229,17 @@ export class ThreadManager {
     const load = this.#trackStarting(async () => {
       const stored = await this.#store.resumeThread(threadId)
       if (stored === undefined) return undefined
-      if (this.#closing || this.#discarding.has(threadId)) {
+      if (
+        this.#closing ||
+        this.#discarding.has(threadId) ||
+        this.#closingThreads.has(threadId)
+      ) {
         await this.#store.discardThread(threadId)
         if (this.#closing) {
           throw new Error("ThreadManager shut down while resuming a Thread.")
+        }
+        if (this.#closingThreads.has(threadId)) {
+          throw new Error(`Thread ${threadId} was closed while resuming.`)
         }
         throw new Error(`Thread ${threadId} was discarded while resuming.`)
       }
@@ -296,6 +327,21 @@ export class ThreadManager {
     }
   }
 
+  async closeThread(threadId: string): Promise<boolean> {
+    this.#closingThreads.add(threadId)
+    try {
+      await this.#loads.get(threadId)?.catch(() => undefined)
+      const live = this.#threads.get(threadId)
+      if (live === undefined)
+        return (await this.#store.readThread(threadId)) !== undefined
+      await live.shutdownAndWait()
+      this.#removeInstalledThread(threadId, live)
+      return true
+    } finally {
+      this.#closingThreads.delete(threadId)
+    }
+  }
+
   beginShutdown(): void {
     this.#closing = true
   }
@@ -311,6 +357,7 @@ export class ThreadManager {
     while (this.#starting.size > 0) {
       await Promise.allSettled([...this.#starting])
     }
+    await this.#residencyMaintenance
     const threads = [...this.#threads.values()]
     await Promise.all(threads.map((thread) => thread.shutdownAndWait()))
     for (const thread of threads) this.#removeInstalledThread(thread.id, thread)
@@ -321,6 +368,9 @@ export class ThreadManager {
     const threadId = stored.metadata.id
     if (this.#discarding.has(threadId)) {
       throw new Error(`Thread ${threadId} is being discarded.`)
+    }
+    if (this.#closingThreads.has(threadId)) {
+      throw new Error(`Thread ${threadId} is being closed.`)
     }
     const existing = this.getThread(threadId)
     if (existing !== undefined) return existing
@@ -350,11 +400,15 @@ export class ThreadManager {
       throw error
     }
     this.#threads.set(threadId, thread)
+    this.#lastUsed.set(threadId, ++this.#useSequence)
     this.#threadStatusSubscriptions.set(
       threadId,
       thread.subscribeStatus((status) => {
         if (this.#threads.get(threadId) !== thread) return
         this.#updateRunningThread(threadId, status === SessionStatus.Active)
+        if (status === SessionStatus.Idle && isTerminalAgentThread(thread)) {
+          this.#scheduleSubagentEviction(thread)
+        }
       }),
     )
     this.#updateRunningThread(threadId, thread.status === SessionStatus.Active)
@@ -365,12 +419,65 @@ export class ThreadManager {
         this.#reportBackgroundError(error, threadId, "session-termination")
       },
     )
+    this.#scheduleSubagentEviction(thread, threadId)
     return thread
+  }
+
+  #scheduleSubagentEviction(
+    thread: AgentThread,
+    protectedThreadId?: string,
+  ): void {
+    if (this.#closing) return
+    const rootThreadId = subagentRootThreadId(thread)
+    if (rootThreadId === undefined) return
+    const maintenance = this.#residencyMaintenance.then(() =>
+      this.#evictIdleSubagents(rootThreadId, protectedThreadId),
+    )
+    this.#residencyMaintenance = maintenance.catch((error) => {
+      this.#reportBackgroundError(
+        error,
+        thread.id,
+        "evict-idle-subagent",
+      )
+    })
+  }
+
+  async #evictIdleSubagents(
+    rootThreadId: string,
+    protectedThreadId: string | undefined,
+  ): Promise<void> {
+    const subagents = [...this.#threads.values()].filter(
+      (thread) => subagentRootThreadId(thread) === rootThreadId,
+    )
+    const candidates = [...this.#threads.values()]
+      .filter(
+        (thread) =>
+          thread.id !== protectedThreadId &&
+          subagentRootThreadId(thread) === rootThreadId &&
+          thread.status === SessionStatus.Idle &&
+          isTerminalAgentThread(thread),
+      )
+      .sort(
+        (left, right) =>
+          (this.#lastUsed.get(left.id) ?? 0) -
+          (this.#lastUsed.get(right.id) ?? 0),
+      )
+    let residentCount = subagents.length
+    for (const candidate of candidates) {
+      if (residentCount <= this.#maxResidentSubagentThreads) break
+      try {
+        await this.closeThread(candidate.id)
+        residentCount -= 1
+      } catch (error) {
+        this.#reportBackgroundError(error, candidate.id, "evict-idle-subagent")
+      }
+    }
   }
 
   #removeInstalledThread(threadId: string, thread: AgentThread): void {
     if (this.#threads.get(threadId) !== thread) return
     this.#threads.delete(threadId)
+    this.#lastUsed.delete(threadId)
     this.#threadStatusSubscriptions.get(threadId)?.()
     this.#threadStatusSubscriptions.delete(threadId)
     this.#updateRunningThread(threadId, false)
@@ -422,4 +529,24 @@ export class ThreadManager {
   #requireOpen(): void {
     if (this.#closing) throw new Error("ThreadManager is shut down.")
   }
+}
+
+function subagentRootThreadId(thread: AgentThread): string | undefined {
+  const agent = thread.snapshot().metadata.metadata?.agent
+  if (
+    !isRecord(agent) ||
+    agent.kind !== "subagent" ||
+    typeof agent.rootThreadId !== "string"
+  ) {
+    return undefined
+  }
+  return agent.rootThreadId
+}
+
+function isTerminalAgentThread(thread: AgentThread): boolean {
+  return thread.agentStatus === "interrupted" || typeof thread.agentStatus === "object"
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
 }

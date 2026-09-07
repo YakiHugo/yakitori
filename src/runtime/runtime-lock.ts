@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto"
-import { link, mkdir, open, readFile, rm, stat } from "node:fs/promises"
+import { mkdir, open, readFile } from "node:fs/promises"
 import { join } from "node:path"
+import { flock } from "fs-ext"
 
 export type RuntimeLock = {
   readonly path: string
@@ -17,48 +18,39 @@ export type RuntimeLockInfo = {
 
 export async function acquireRuntimeLock(
   storeDir: string,
-  options: {
-    readonly pid?: number
-    readonly isProcessAlive?: (pid: number) => boolean
-  } = {},
+  options: { readonly pid?: number } = {},
 ): Promise<RuntimeLock> {
   await mkdir(storeDir, { recursive: true })
   const path = join(storeDir, "runtime.lock")
   const ownerPid = options.pid ?? process.pid
-  const isProcessAlive = options.isProcessAlive ?? defaultIsProcessAlive
   const startedAt = new Date().toISOString()
   const token = randomUUID()
-  const payload = `${ownerPid}\n${startedAt}\n${token}\n`
+  const file = await open(path, "a+", 0o600)
 
-  for (;;) {
-    try {
-      await publishRuntimeLock(path, payload, token)
-      break
-    } catch (error) {
-      if (!isAlreadyExists(error)) throw error
-    }
-
+  try {
+    await flockPromise(file.fd, "exnb")
+  } catch (error) {
+    await file.close()
+    if (!isLockConflict(error)) throw error
     const existing = await readRuntimeLock(path)
-    if (!existing) {
-      if (!(await pathExists(path))) continue
-      throw new Error(
-        "Runtime lock is incomplete or invalid; refusing to reclaim a possibly active owner.",
-      )
-    }
-    if (isProcessAlive(existing.ownerPid)) {
-      throw new Error(
-        `Runtime lock is held by live process ${existing.ownerPid} (started ${existing.startedAt}).`,
-      )
-    }
-
-    // Stale lock: reclaim after proving the previous owner is dead.
-    const confirmed = await readRuntimeLock(path)
-    if (confirmed?.token !== existing.token) continue
-    await rm(path, { force: true })
+    throw new Error(
+      existing === undefined
+        ? "Runtime lock is held by another live process."
+        : `Runtime lock is held by live process ${existing.ownerPid} (started ${existing.startedAt}).`,
+    )
   }
 
-  if ((await readRuntimeLock(path))?.token !== token) {
-    throw new Error("Runtime lock ownership changed during acquisition.")
+  try {
+    await file.truncate(0)
+    await file.writeFile(`${ownerPid}\n${startedAt}\n${token}\n`, "utf8")
+    await file.sync()
+  } catch (error) {
+    try {
+      await flockPromise(file.fd, "un")
+    } finally {
+      await file.close()
+    }
+    throw error
   }
 
   let released = false
@@ -69,9 +61,10 @@ export async function acquireRuntimeLock(
     async release() {
       if (released) return
       released = true
-      const current = await readRuntimeLock(path)
-      if (current?.token === token) {
-        await rm(path, { force: true })
+      try {
+        await flockPromise(file.fd, "un")
+      } finally {
+        await file.close()
       }
     },
   }
@@ -94,49 +87,23 @@ async function readRuntimeLock(
   return { ownerPid, startedAt, token }
 }
 
-async function publishRuntimeLock(
-  path: string,
-  payload: string,
-  token: string,
+function flockPromise(
+  fileDescriptor: number,
+  operation: "exnb" | "un",
 ): Promise<void> {
-  const tempPath = `${path}.${token}.tmp`
-  try {
-    const handle = await open(tempPath, "wx")
-    try {
-      await handle.writeFile(payload, "utf8")
-      await handle.sync()
-    } finally {
-      await handle.close()
-    }
-    await link(tempPath, path)
-  } finally {
-    await rm(tempPath, { force: true })
-  }
+  return new Promise((resolve, reject) => {
+    flock(fileDescriptor, operation, (error) => {
+      if (error === null) resolve()
+      else reject(error)
+    })
+  })
 }
 
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    await stat(path)
-    return true
-  } catch {
-    return false
-  }
-}
-
-function defaultIsProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch {
-    return false
-  }
-}
-
-function isAlreadyExists(error: unknown): boolean {
+function isLockConflict(error: unknown): boolean {
   return (
-    typeof error === "object" &&
-    error !== null &&
+    error instanceof Error &&
     "code" in error &&
-    (error as { code: unknown }).code === "EEXIST"
+    ((error as NodeJS.ErrnoException).code === "EAGAIN" ||
+      (error as NodeJS.ErrnoException).code === "EWOULDBLOCK")
   )
 }

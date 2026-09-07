@@ -10,6 +10,152 @@ import { SessionConfiguration } from "../../src/runtime/session-configuration.ts
 import { MemoryThreadStore } from "./memory-thread-store.ts"
 
 describe("live Session actor", () => {
+  it("closes a live Session without deleting its resumable rollout", async () => {
+    const store = new MemoryThreadStore()
+    const manager = createManager({ run: async () => undefined }, store)
+    const thread = await manager.createThread()
+    await thread.startIfIdle({
+      submissionId: "turn_before_close",
+      content: { kind: "text", text: "persist me" },
+    })
+    await nextEventOfType(thread, "turn.completed")
+
+    expect(await manager.closeThread(thread.id)).toBe(true)
+    expect(manager.residentThreadCount).toBe(0)
+    expect(await store.readThread(thread.id)).toBeDefined()
+
+    const resumed = await manager.resumeThread(thread.id)
+    expect(resumed?.snapshot().context.history).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          item: expect.objectContaining({ role: "user" }),
+        }),
+      ]),
+    )
+    await manager.shutdown()
+  })
+
+  it("evicts the least recently used completed subagent runtime", async () => {
+    const store = new MemoryThreadStore()
+    const manager = new ThreadManager({
+      store,
+      maxResidentSubagentThreads: 1,
+      createTurnProcessor: () =>
+        withPreparation({ run: async () => undefined }),
+    })
+    const root = await manager.createThread()
+    const first = await manager.createThread(subagentInput(root.id, "first"))
+    await first.startIfIdle({
+      submissionId: "turn_first_child",
+      content: { kind: "text", text: "finish" },
+    })
+    await nextEventOfType(first, "turn.completed")
+    const second = await manager.createThread(subagentInput(root.id, "second"))
+
+    await waitForValue(() =>
+      manager.getThread(first.id) === undefined ? true : undefined,
+    )
+    expect(manager.getThread(second.id)).toBe(second)
+    expect(await store.readThread(first.id)).toBeDefined()
+    expect(manager.residentThreadCount).toBe(2)
+    await manager.shutdown()
+  })
+
+  it("does not count user forks as resident subagents", async () => {
+    const manager = new ThreadManager({
+      store: new MemoryThreadStore(),
+      maxResidentSubagentThreads: 1,
+      createTurnProcessor: () =>
+        withPreparation({ run: async () => undefined }),
+    })
+    const root = await manager.createThread()
+    const firstFork = await manager.createThread({ parentThreadId: root.id })
+    await firstFork.startIfIdle({ content: { kind: "text", text: "done" } })
+    await nextEventOfType(firstFork, "turn.completed")
+    const secondFork = await manager.createThread({ parentThreadId: root.id })
+    await Promise.resolve()
+
+    expect(manager.getThread(firstFork.id)).toBe(firstFork)
+    expect(manager.getThread(secondFork.id)).toBe(secondFork)
+    expect(manager.residentThreadCount).toBe(3)
+    await manager.shutdown()
+  })
+
+  it("rechecks the resident cap when concurrent subagents become idle", async () => {
+    const release = deferred<void>()
+    const manager = new ThreadManager({
+      store: new MemoryThreadStore(),
+      maxResidentSubagentThreads: 1,
+      createTurnProcessor: () =>
+        withPreparation({
+          async run() {
+            await release.promise
+          },
+        }),
+    })
+    const root = await manager.createThread()
+    const first = await manager.createThread(subagentInput(root.id, "first"))
+    const second = await manager.createThread(subagentInput(root.id, "second"))
+    await first.startIfIdle({ content: { kind: "text", text: "first" } })
+    await second.startIfIdle({ content: { kind: "text", text: "second" } })
+
+    release.resolve()
+    await nextEventOfType(first, "turn.completed")
+    await nextEventOfType(second, "turn.completed")
+    await waitForValue(() =>
+      manager.residentThreadCount === 2 ? true : undefined,
+    )
+
+    expect(
+      [first.id, second.id].filter(
+        (threadId) => manager.getThread(threadId) !== undefined,
+      ),
+    ).toHaveLength(1)
+    await manager.shutdown()
+  })
+
+  it("applies the resident subagent cap independently to each root", async () => {
+    const manager = new ThreadManager({
+      store: new MemoryThreadStore(),
+      maxResidentSubagentThreads: 1,
+      createTurnProcessor: () =>
+        withPreparation({ run: async () => undefined }),
+    })
+    const firstRoot = await manager.createThread()
+    const secondRoot = await manager.createThread()
+    const firstChild = await manager.createThread(
+      subagentInput(firstRoot.id, "first"),
+    )
+    const secondChild = await manager.createThread(
+      subagentInput(secondRoot.id, "second"),
+    )
+
+    expect(manager.getThread(firstChild.id)).toBe(firstChild)
+    expect(manager.getThread(secondChild.id)).toBe(secondChild)
+    expect(manager.residentThreadCount).toBe(4)
+    await manager.shutdown()
+  })
+
+  it("lets close win against an in-progress resume", async () => {
+    const store = new MemoryThreadStore()
+    const manager = createManager({ run: async () => undefined }, store)
+    const thread = await manager.createThread()
+    await manager.closeThread(thread.id)
+    const releaseResume = deferred<void>()
+    store.resumeBarrier = releaseResume.promise
+
+    const resumed = manager.resumeThread(thread.id)
+    const closed = manager.closeThread(thread.id)
+    releaseResume.resolve()
+
+    await expect(resumed).rejects.toThrow("closed while resuming")
+    await expect(closed).resolves.toBe(true)
+    expect(manager.getThread(thread.id)).toBeUndefined()
+    store.resumeBarrier = undefined
+    await expect(manager.resumeThread(thread.id)).resolves.toBeDefined()
+    await manager.shutdown()
+  })
+
   it("reports active Turn ownership synchronously enough for shutdown", async () => {
     const mayFinish = deferred<void>()
     const counts: number[] = []
@@ -790,6 +936,34 @@ function createManager(
     store,
     createTurnProcessor: () => withPreparation(processor),
   })
+}
+
+async function waitForValue<T>(read: () => T | undefined): Promise<T> {
+  const deadline = Date.now() + 2_000
+  for (;;) {
+    const value = read()
+    if (value !== undefined) return value
+    if (Date.now() >= deadline) throw new Error("Timed out waiting for value.")
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+}
+
+function subagentInput(rootThreadId: string, taskName: string) {
+  return {
+    parentThreadId: rootThreadId,
+    metadata: {
+      agent: {
+        version: 1,
+        kind: "subagent",
+        rootThreadId,
+        parentThreadId: rootThreadId,
+        taskName,
+        path: taskName,
+        agentType: "general",
+        depth: 1,
+      },
+    },
+  }
 }
 
 type TestProcessor = {
