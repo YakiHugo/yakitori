@@ -41,6 +41,10 @@ export function ModelSelector() {
 
   if (sessionId === undefined || providers.length === 0) return null
 
+  const availableProviders = providers.filter(
+    (provider) => provider.availability !== "requires_login",
+  )
+
   const effective = normalizeKimiModelSelection(
     resolveEffectiveModel({
       sessionCurrent,
@@ -130,7 +134,7 @@ export function ModelSelector() {
       {open ? (
         <div className="absolute bottom-full left-0 z-10 mb-1 w-64 space-y-1 rounded-md border bg-popover p-2 text-sm shadow-md">
           <div className="px-2 text-xs text-muted-foreground">模型</div>
-          {[...providers]
+          {[...availableProviders]
             .sort((left, right) => {
               // The configured default provider leads, like codex pinning the
               // active model's group on top.
