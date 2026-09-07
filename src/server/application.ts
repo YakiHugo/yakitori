@@ -1,10 +1,19 @@
 import { mkdir, realpath, stat } from "node:fs/promises"
-import { basename, join } from "node:path"
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path"
 import packageJson from "../../package.json" with { type: "json" }
 import {
   createSqliteAgentGraphStore,
   JsonlThreadStore,
   type SqliteAgentGraphStore,
+  type StoredThread,
   ThreadManager,
   type ThreadStore,
 } from "../core/index.ts"
@@ -26,6 +35,9 @@ import {
   createAnthropicProvider,
   createCodexProvider,
   createDefaultTools,
+  createDiscoveringModelsManager,
+  createHookRunner,
+  createMcpConnectionManager,
   createModelProvider,
   createOpenAIProvider,
   createPermissionGate,
@@ -35,10 +47,14 @@ import {
   createTurnProcessor,
   createUserShellEnv,
   GROK_API_BASE_URL,
+  discoverCodexModels,
+  discoverOpenAiCompatibleModels,
   type ModelProvider,
+  type McpConnectionManager,
   ModelStopReason,
   type RuntimeLock,
   readCodexLogin,
+  resolveCodexAccessToken,
   resolveGrokAccessToken,
   resolveModel,
   type ShellEnvironmentPolicy,
@@ -68,7 +84,10 @@ import {
   createSqliteProjectStore,
   type SqliteProjectStore,
 } from "./sqlite-project-store.ts"
-import { createUserConfigStore } from "./user-config.ts"
+import {
+  type ConfigurationSnapshot,
+  createUserConfigStore,
+} from "./user-config.ts"
 
 const defaultMateProfile = {
   instructions:
@@ -189,18 +208,19 @@ export async function createYakitoriApplication(
     const userConfiguration = await userConfig.readConfiguration()
     const configuredShellEnvironmentPolicy =
       options.shellEnvironmentPolicy ?? userConfiguration.shellEnvironmentPolicy
-    const userShellEnv =
+    const defaultUserShellEnv =
       options.userShellEnv ??
       createUserShellEnv({
         ...(configuredShellEnvironmentPolicy === undefined
           ? {}
           : { shellEnvironmentPolicy: configuredShellEnvironmentPolicy }),
       })
-    const createTrustedTools = () =>
+    const createTrustedTools = (userShellEnv: UserShellEnv) =>
       createDefaultTools({
         userShellEnv,
         execCommandLog: (message) => console.log(message),
       })
+    const mcpManagers = new Set<McpConnectionManager>()
     const activeMate = await resolveActiveMate(mateKernel, activeMateId)
     const sessionDefaults: SessionCreateDefaults = {
       workingDirectory: workspace,
@@ -218,21 +238,54 @@ export async function createYakitoriApplication(
       reportOperationalFailure: reporter,
     })
     const providerRegistry = createProviderRegistry(provider.providers)
+    const injectedProviderNames = new Set([
+      ...Object.keys(options.providerStreams ?? {}),
+      ...(options.stream === undefined ? [] : [provider.provider]),
+    ])
     // Auto-registered providers pick the model per request, so only the
     // primary provider carries its configured default model. The payload is
     // assembled per request: the model directory resolves lazily.
     const modelDirectory =
       options.modelDirectory ?? createModelDirectory(providerRegistry)
+    const unavailableModelDirectory: ModelDirectory = {
+      async listModels() {
+        return []
+      },
+    }
     const providers = async (): Promise<ApiListProvidersResponse> => {
+      const credentialStates = await providerCredentialStates()
+      const names = [
+        ...new Set([...providerRegistry.providers, "codex", "grok", "kimi"]),
+      ]
       const [summaries, userPreference] = await Promise.all([
         Promise.all(
-          providerRegistry.providers.map((name) =>
-            providerSummary(
-              modelDirectory,
+          names.map((name) => {
+            const state = credentialStates[name]
+            const registered = providerRegistry.providers.includes(name)
+            const usesInjectedTransport = injectedProviderNames.has(name)
+            const available =
+              registered &&
+              (usesInjectedTransport ||
+                (state?.availability ?? "available") === "available")
+            return providerSummary(
+              available ? modelDirectory : unavailableModelDirectory,
               name,
-              name === provider.provider ? provider.model : undefined,
-            ),
-          ),
+              available && name === provider.provider
+                ? provider.model
+                : undefined,
+              {
+                availability: available ? "available" : "requires_login",
+                ...(!available ||
+                usesInjectedTransport ||
+                state?.credentialKind === undefined
+                  ? {}
+                  : { credentialKind: state.credentialKind }),
+                ...(state?.rateLimits === undefined
+                  ? {}
+                  : { rateLimits: state.rateLimits }),
+              },
+            )
+          }),
         ),
         userConfig.read(),
       ])
@@ -243,12 +296,6 @@ export async function createYakitoriApplication(
         ...(userPreference === undefined ? {} : { userPreference }),
       }
     }
-    const modelContextWindowTokens =
-      options.modelContextWindowTokens ??
-      userConfiguration.modelContextWindowTokens
-    const baseInstructions =
-      options.baseInstructions ?? userConfiguration.baseInstructions
-
     const threadStore = new JsonlThreadStore({ root: sessionStoreRoot })
     await threadStore.initialize()
     const rolloutAssets = createRolloutAssets(sessionStoreRoot, {
@@ -262,6 +309,9 @@ export async function createYakitoriApplication(
     agentGraphStoreForCleanup = agentGraphStore
     let threadManager: ThreadManager
     const agentRuntime = createAgentRuntime({
+      ...(userConfiguration.rolloutBudget === undefined
+        ? {}
+        : { rolloutBudget: userConfiguration.rolloutBudget }),
       graphStore: agentGraphStore,
       getThreadManager: () => threadManager,
       onBackgroundError: (error, threadId, operation) => {
@@ -276,31 +326,146 @@ export async function createYakitoriApplication(
     agentRuntimeForCleanup = agentRuntime
     threadManager = new ThreadManager({
       store: threadStore,
-      createTurnProcessor: (stored) =>
-        createTurnProcessor({
-          modelClient: providerRegistry.createClient(),
-          provider: provider.provider,
-          model: provider.model,
-          ...(baseInstructions === undefined ? {} : { baseInstructions }),
-          ...(modelContextWindowTokens === undefined
-            ? {}
-            : { modelContextWindowTokens }),
-          permissionGate,
-          resolveShellName: () => userShellEnv.shellName(),
-          // Each Session owns both its external catalog and process manager.
-          toolRegistry: createToolRegistry(createTrustedTools()),
-          agentControl: agentRuntime.registerThread(stored),
-          rolloutAssets,
-          approvalPolicy,
-          onOperationalFailure: (failure) => {
-            reportOperationalFailure(reporter, {
-              component: "turn-processor",
-              operation: failure.operation,
-              cause: failure.cause,
-              sessionId: stored.metadata.id,
+      // Codex bounds only resumable subagent residency. Yakitori's existing
+      // live-tree limit is four agents including the root, so at most three
+      // completed child runtimes stay resident; rollouts remain resumable.
+      maxResidentSubagentThreads: 3,
+      createTurnProcessor: async (stored) => {
+        const workingDirectory = stored.metadata.workingDirectory ?? workspace
+        const sessionUserConfig = containsDirectory(workspace, workingDirectory)
+          ? userConfig
+          : createUserConfigStore({
+              reportOperationalFailure: reporter,
+              workspaceRoot: workingDirectory,
+              ...(options.userConfigPath === undefined
+                ? {}
+                : { configPath: options.userConfigPath }),
             })
+        const config = await sessionUserConfig.readSnapshot({
+          cwd: workingDirectory,
+        })
+        const sessionConfiguration = config.configuration
+        const shellEnvironmentPolicy =
+          options.shellEnvironmentPolicy ??
+          sessionConfiguration.shellEnvironmentPolicy
+        const baseInstructions =
+          options.baseInstructions ?? sessionConfiguration.baseInstructions
+        const modelContextWindowTokens =
+          options.modelContextWindowTokens ??
+          sessionConfiguration.modelContextWindowTokens
+        const sessionShellEnv =
+          options.userShellEnv ??
+          createUserShellEnv({
+            ...(shellEnvironmentPolicy === undefined
+              ? {}
+              : { shellEnvironmentPolicy }),
+          })
+        const toolRegistry = createToolRegistry(
+          createTrustedTools(sessionShellEnv),
+        )
+        const mcpManager = createMcpConnectionManager()
+        const unsubscribe = mcpManager.subscribe((name, tools) => {
+          toolRegistry.replaceExternalSource(`mcp:${name}`, tools)
+        })
+        try {
+          await mcpManager.update(
+            resolveSessionMcpServers(config, workingDirectory),
+          )
+        } catch (error) {
+          unsubscribe()
+          await Promise.allSettled([toolRegistry.dispose(), mcpManager.close()])
+          throw error
+        }
+        let processor: ReturnType<typeof createTurnProcessor>
+        try {
+          const hookRunner =
+            sessionConfiguration.hooks === undefined
+              ? undefined
+              : createHookRunner(sessionConfiguration.hooks)
+          processor = createTurnProcessor({
+            modelClient: providerRegistry.createClient(),
+            provider: provider.provider,
+            model: provider.model,
+            ...(baseInstructions === undefined ? {} : { baseInstructions }),
+            ...(modelContextWindowTokens === undefined
+              ? {}
+              : { modelContextWindowTokens }),
+            ...(sessionConfiguration.modelAutoCompactTokenLimit === undefined
+              ? {}
+              : {
+                  modelAutoCompactTokenLimit:
+                    sessionConfiguration.modelAutoCompactTokenLimit,
+                }),
+            ...(sessionConfiguration.modelAutoCompactTokenLimitScope ===
+            undefined
+              ? {}
+              : {
+                  modelAutoCompactTokenLimitScope:
+                    sessionConfiguration.modelAutoCompactTokenLimitScope,
+                }),
+            permissionGate,
+            resolveShellName: () => sessionShellEnv.shellName(),
+            // Each Session owns both its external catalog and process manager.
+            toolRegistry,
+            ...(hookRunner === undefined ? {} : { hookRunner }),
+            ...(hookRunner === undefined ||
+            stored.metadata.workingDirectory === undefined
+              ? {}
+              : {
+                  sessionHookContext: {
+                    sessionId: stored.metadata.id,
+                    workspaceRoot: stored.metadata.workingDirectory,
+                    source: stored.rollout.some(
+                      ({ item }) => item.type === "turn_started",
+                    )
+                      ? "resume"
+                      : "startup",
+                    isSubagent: isSubagentThread(stored),
+                  },
+                }),
+            agentControl: agentRuntime.registerThread(stored),
+            rolloutAssets,
+            approvalPolicy,
+            onOperationalFailure: (failure) => {
+              reportOperationalFailure(reporter, {
+                component: "turn-processor",
+                operation: failure.operation,
+                cause: failure.cause,
+                sessionId: stored.metadata.id,
+              })
+            },
+          })
+        } catch (error) {
+          unsubscribe()
+          await Promise.allSettled([toolRegistry.dispose(), mcpManager.close()])
+          throw error
+        }
+        mcpManagers.add(mcpManager)
+        return {
+          prepare: processor.prepare,
+          ...(processor.prepareSteering === undefined
+            ? {}
+            : { prepareSteering: processor.prepareSteering }),
+          start: processor.start,
+          async dispose() {
+            unsubscribe()
+            mcpManagers.delete(mcpManager)
+            const results = await Promise.allSettled([
+              processor.dispose?.(),
+              mcpManager.close(),
+            ])
+            const errors = results.flatMap((result) =>
+              result.status === "rejected" ? [result.reason] : [],
+            )
+            if (errors.length > 0) {
+              throw new AggregateError(
+                errors,
+                `Failed to dispose Session ${stored.metadata.id}.`,
+              )
+            }
           },
-        }),
+        }
+      },
       onPersistenceError: (error, threadId) => {
         reportOperationalFailure(reporter, {
           component: "thread-store",
@@ -362,6 +527,18 @@ export async function createYakitoriApplication(
           rolloutAssets,
           reportOperationalFailure: reporter,
           userAgent: serverUserAgent,
+          diagnostics: () => {
+            const mcp = [...mcpManagers].flatMap((manager) => manager.status())
+            return {
+              resident_threads: threadManager.residentThreadCount,
+              active_turns: threadManager.runningTurnCount,
+              mcp_ready_servers: mcp.filter((entry) => entry.state === "ready")
+                .length,
+              mcp_failed_servers: mcp.filter(
+                (entry) => entry.state === "failed",
+              ).length,
+            }
+          },
           ...httpOptions,
           ...(options.guiStaticDir === undefined
             ? {}
@@ -369,7 +546,7 @@ export async function createYakitoriApplication(
         })
       },
       probeUserShellEnv() {
-        return userShellEnv.probe()
+        return defaultUserShellEnv.probe()
       },
       async close() {
         closePromise ??= closeApplicationResources(
@@ -406,6 +583,54 @@ export async function createYakitoriApplication(
   }
 }
 
+function resolveSessionMcpServers(
+  snapshot: ConfigurationSnapshot,
+  workingDirectory: string,
+): Readonly<
+  Record<string, import("../runtime/mcp-connection-manager.ts").McpServerConfig>
+> {
+  return Object.fromEntries(
+    Object.entries(snapshot.configuration.mcpServers ?? {}).map(
+      ([name, config]) => {
+        const origin = snapshot.origins[`mcp_servers.${name}.cwd`]
+        const baseDirectory =
+          origin === undefined ? workingDirectory : dirname(origin.path)
+        return [
+          name,
+          {
+            ...config,
+            cwd:
+              config.cwd === undefined
+                ? workingDirectory
+                : isAbsolute(config.cwd)
+                  ? config.cwd
+                  : resolve(baseDirectory, config.cwd),
+          },
+        ]
+      },
+    ),
+  )
+}
+
+function containsDirectory(root: string, directory: string): boolean {
+  const pathFromRoot = relative(root, directory)
+  return (
+    pathFromRoot === "" ||
+    (pathFromRoot !== ".." &&
+      !pathFromRoot.startsWith(`..${sep}`) &&
+      !isAbsolute(pathFromRoot))
+  )
+}
+
+function isSubagentThread(stored: StoredThread): boolean {
+  const agent = stored.metadata.metadata?.agent
+  return isRecord(agent) && agent.kind === "subagent"
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
 function resolveApprovalPolicy(value: string | undefined): ApprovalPolicy {
   if (value === undefined || value === "always_approve") {
     return "always_approve"
@@ -418,6 +643,10 @@ async function providerSummary(
   directory: ModelDirectory,
   name: string,
   configuredModel: string | undefined,
+  state: Pick<
+    ApiProviderSummary,
+    "availability" | "credentialKind" | "rateLimits"
+  > = {},
 ): Promise<ApiProviderSummary> {
   const models: ApiProviderModel[] = (await directory.listModels(name)).map(
     (entry) => ({
@@ -437,7 +666,7 @@ async function providerSummary(
         : { imageDetailModes: entry.imageDetailModes }),
     }),
   )
-  if (configuredModel === undefined) return { name, models }
+  if (configuredModel === undefined) return { name, models, ...state }
   // The configured default always comes first; one outside the directory is
   // synthesized so the running configuration stays selectable.
   const listed = models.find(
@@ -457,7 +686,50 @@ async function providerSummary(
           ...models,
         ]
       : [listed, ...models.filter((entry) => entry !== listed)]
-  return { name, defaultModel: configuredModel, models: ordered }
+  return { name, defaultModel: configuredModel, models: ordered, ...state }
+}
+
+async function providerCredentialStates(): Promise<
+  Readonly<
+    Record<
+      string,
+      Readonly<{
+        availability: "available" | "requires_login"
+        credentialKind?: "api_key" | "oauth"
+        rateLimits: Readonly<{ status: "unavailable" }>
+      }>
+    >
+  >
+> {
+  const codexLogin = await readCodexLogin().catch(() => undefined)
+  const grokAvailable =
+    process.env.XAI_API_KEY !== undefined ||
+    (await resolveGrokAccessToken()
+      .then(() => true)
+      .catch(() => false))
+  return {
+    codex: {
+      availability:
+        codexLogin?.kind === "chatgpt" ? "available" : "requires_login",
+      ...(codexLogin?.kind !== "chatgpt" ? {} : { credentialKind: "oauth" }),
+      rateLimits: { status: "unavailable" },
+    },
+    grok: {
+      availability: grokAvailable ? "available" : "requires_login",
+      ...(grokAvailable
+        ? { credentialKind: process.env.XAI_API_KEY ? "api_key" : "oauth" }
+        : {}),
+      rateLimits: { status: "unavailable" },
+    },
+    kimi: {
+      availability:
+        process.env.KIMI_API_KEY === undefined ? "requires_login" : "available",
+      ...(process.env.KIMI_API_KEY === undefined
+        ? {}
+        : { credentialKind: "api_key" }),
+      rateLimits: { status: "unavailable" },
+    },
+  }
 }
 
 async function configureProviders(input: {
@@ -485,7 +757,12 @@ async function configureProviders(input: {
       )
     }
   }
-  providers.grok ??= createGrokProvider()
+  const grokAvailable =
+    process.env.XAI_API_KEY !== undefined ||
+    (await resolveGrokAccessToken()
+      .then(() => true)
+      .catch(() => false))
+  if (grokAvailable) providers.grok ??= createGrokProvider()
   await registerCodexLogin(providers, input.reportOperationalFailure)
 
   const model =
@@ -544,6 +821,9 @@ async function configureProviders(input: {
       `YAKITORI_MODEL is required when YAKITORI_PROVIDER=${input.provider}.`,
     )
   }
+  if (!grokAvailable) {
+    await resolveGrokAccessToken()
+  }
   providers.grok = createGrokProvider()
   return { provider: input.provider, model, providers }
 }
@@ -594,6 +874,18 @@ function createApiKeyProvider(
       baseURL,
       apiKey,
     ),
+    ...(provider === "kimi"
+      ? {
+          models: createDiscoveringModelsManager({
+            provider,
+            discover: () =>
+              discoverOpenAiCompatibleModels({
+                baseUrl: `${KIMI_CODE_API_BASE_URL}/v1`,
+                accessToken: apiKey,
+              }),
+          }),
+        }
+      : {}),
   })
 }
 
@@ -620,6 +912,19 @@ async function registerCodexLogin(
     providers.codex ??= createModelProvider({
       info: providerInfo("codex", "openai_responses"),
       stream: createCodexProvider(),
+      models: createDiscoveringModelsManager({
+        provider: "codex",
+        async discover() {
+          const token = await resolveCodexAccessToken()
+          return discoverCodexModels({
+            baseUrl: "https://chatgpt.com/backend-api/codex",
+            accessToken: token.accessToken,
+            ...(token.accountId === undefined
+              ? {}
+              : { accountId: token.accountId }),
+          })
+        },
+      }),
     })
     return
   }
@@ -809,6 +1114,17 @@ function createGrokProvider(): ModelProvider {
   return createModelProvider({
     info: providerInfo("grok", "openai_responses"),
     stream,
+    models: createDiscoveringModelsManager({
+      provider: "grok",
+      async discover() {
+        const accessToken =
+          process.env.XAI_API_KEY ?? (await resolveGrokAccessToken())
+        return discoverOpenAiCompatibleModels({
+          baseUrl: GROK_API_BASE_URL,
+          accessToken,
+        })
+      },
+    }),
   })
 }
 
@@ -819,7 +1135,7 @@ function providerInfo(
   return {
     id,
     wireApi,
-    capabilities: { remoteCompaction: false },
+    capabilities: { remoteCompaction: id === "codex" },
   }
 }
 

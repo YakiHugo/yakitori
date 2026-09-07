@@ -10,6 +10,22 @@ import { SessionConfiguration } from "../../src/runtime/session-configuration.ts
 import { MemoryThreadStore } from "./memory-thread-store.ts"
 
 describe("live Session actor", () => {
+  it("removes a newly created Thread when async processor setup fails", async () => {
+    const store = new MemoryThreadStore()
+    const manager = new ThreadManager({
+      store,
+      async createTurnProcessor() {
+        throw new Error("processor setup failed")
+      },
+    })
+
+    await expect(manager.createThread()).rejects.toThrow(
+      "processor setup failed",
+    )
+    await expect(store.listThreads()).resolves.toMatchObject({ threads: [] })
+    await manager.shutdown()
+  })
+
   it("closes a live Session without deleting its resumable rollout", async () => {
     const store = new MemoryThreadStore()
     const manager = createManager({ run: async () => undefined }, store)
