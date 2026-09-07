@@ -1,22 +1,18 @@
 import { spawn } from "node:child_process"
-import { createHash, randomBytes } from "node:crypto"
-import {
-  mkdir,
-  readdir,
-  realpath,
-  rename,
-  rm,
-  stat,
-  writeFile,
-} from "node:fs/promises"
-import { homedir, userInfo } from "node:os"
+import { realpath, stat } from "node:fs/promises"
+import { userInfo } from "node:os"
 import { basename, delimiter, join } from "node:path"
 
 const PROBE_TIMEOUT_MS = 5_000
 const PROBE_CAPTURE_BYTES = 1024 * 1024
 const PROBE_FORCE_COMPLETION_MS = 100
 const PROBE_SENTINEL = "__YAKITORI_ENV_START_7F31B6A9__"
-const SNAPSHOT_TTL_MS = 3 * 24 * 60 * 60 * 1000
+// Executor safety bounds follow Codex v2: bound cached shell state and retry
+// failed startup scripts without retrying on every tool invocation.
+const MAX_SNAPSHOT_BYTES = 512 * 1024
+const MAX_CACHED_SNAPSHOTS = 16
+const MAX_SNAPSHOT_ATTEMPTS = 3
+const SNAPSHOT_RETRY_MS = 1_000
 const SUPPORTED_SHELLS = new Set(["zsh", "bash", "sh"])
 const NON_INHERITABLE_ENV_NAMES = new Set([
   "ELECTRON_RUN_AS_NODE",
@@ -56,8 +52,13 @@ export type UserShellEnv = {
   commandEnvironment(cwd: string): Promise<CommandEnvironment>
   probe(): Promise<"ready" | "unavailable">
   shellName(): Promise<string>
-  shellSnapshot(): Promise<string | undefined>
+  shellSnapshot(cwd: string): Promise<ShellSnapshot | undefined>
 }
+
+export type ShellSnapshot = Readonly<{
+  state: string
+  environment: NodeJS.ProcessEnv
+}>
 
 export type ShellProbeResult = {
   readonly exitCode: number | null
@@ -69,21 +70,19 @@ export type ShellProbeResult = {
 export function createUserShellEnv(
   options: {
     readonly appEnv?: NodeJS.ProcessEnv
-    readonly homeDir?: string
     readonly now?: () => number
     readonly resolveShell?: () => Promise<ResolvedCommandShell>
     readonly runCapture?: (
       shell: string,
       command: string,
       login: boolean,
+      cwd?: string,
     ) => Promise<ShellProbeResult>
     readonly shellEnvironmentPolicy?: Partial<ShellEnvironmentPolicy>
     readonly log?: (message: string) => void
   } = {},
 ): UserShellEnv {
   const appEnv = { ...(options.appEnv ?? process.env) }
-  const homeDir =
-    options.homeDir ?? process.env.YAKITORI_HOME ?? join(homedir(), ".yakitori")
   const now = options.now ?? Date.now
   const shellEnvironmentPolicy = resolveShellEnvironmentPolicy(
     options.shellEnvironmentPolicy,
@@ -92,56 +91,78 @@ export function createUserShellEnv(
   const captureEnv = applyShellEnvironmentPolicy(appEnv, shellEnvironmentPolicy)
   const runCapture =
     options.runCapture ??
-    ((shell, command, login) =>
-      runShellProbe(shell, command, captureEnv, login))
+    ((shell, command, login, cwd) =>
+      runShellProbe(shell, command, captureEnv, login, cwd))
   const log = options.log ?? ((message: string) => console.log(message))
   const shellPromise = resolveShell()
   const fallback = Object.freeze(captureEnv)
   let probed: Readonly<NodeJS.ProcessEnv> | undefined
   let probePromise: Promise<"ready" | "unavailable"> | undefined
-  let snapshotPromise: Promise<string | undefined> | undefined
+  const snapshots = new Map<
+    string,
+    {
+      attempts: number
+      retryAt: number
+      promise: Promise<ShellSnapshot | undefined>
+    }
+  >()
 
   return {
     async shellName() {
       return basename((await shellPromise).shell)
     },
-    async shellSnapshot() {
-      snapshotPromise ??= captureShellSnapshot({
-        resolved: await shellPromise,
-        homeDir,
-        now,
-        runCapture,
-        log,
-      })
-      const path = await snapshotPromise
-      if (path === undefined) return undefined
-      // The TTL must hold for long-lived processes too, and a deleted
-      // snapshot must regenerate; both reduce to one stat per call.
-      const info = await stat(path).catch(() => undefined)
-      if (info?.isFile() === true && now() - info.mtimeMs < SNAPSHOT_TTL_MS) {
-        return path
+    async shellSnapshot(cwd) {
+      const resolved = await shellPromise
+      const cached = snapshots.get(cwd)
+      if (cached !== undefined) {
+        const result = await cached.promise
+        if (
+          result !== undefined ||
+          cached.attempts >= MAX_SNAPSHOT_ATTEMPTS ||
+          now() < cached.retryAt
+        )
+          return result
+        // Another caller may already have started the retry while we awaited.
+        if (snapshots.get(cwd) !== cached) return snapshots.get(cwd)?.promise
       }
-      snapshotPromise = captureShellSnapshot({
-        resolved: await shellPromise,
-        homeDir,
-        now,
-        runCapture,
-        log,
-      })
-      return snapshotPromise
+      const entry = {
+        attempts: (cached?.attempts ?? 0) + 1,
+        retryAt: Number.POSITIVE_INFINITY,
+        promise: captureShellSnapshot(
+          resolved,
+          cwd,
+          runCapture,
+          shellEnvironmentPolicy,
+          log,
+        ),
+      }
+      snapshots.delete(cwd)
+      snapshots.set(cwd, entry)
+      if (snapshots.size > MAX_CACHED_SNAPSHOTS) {
+        const oldest = snapshots.keys().next().value
+        if (oldest !== undefined) snapshots.delete(oldest)
+      }
+      const result = await entry.promise
+      if (result === undefined) entry.retryAt = now() + SNAPSHOT_RETRY_MS
+      return result
     },
     async commandEnvironment(cwd) {
       const resolved = await shellPromise
+      const env: NodeJS.ProcessEnv = {
+        ...(probed ?? fallback),
+        TERM: "dumb",
+        NO_COLOR: "1",
+        FORCE_COLOR: "0",
+        PWD: cwd,
+      }
+      // These hooks are inputs to snapshot capture. Passing them to the real
+      // command would source startup files again after policy filtering.
+      delete env.BASH_ENV
+      delete env.ENV
       return {
         shell: resolved.shell,
         warnings: resolved.warnings,
-        env: {
-          ...(probed ?? fallback),
-          TERM: "dumb",
-          NO_COLOR: "1",
-          FORCE_COLOR: "0",
-          PWD: cwd,
-        },
+        env,
       }
     },
     async probe() {
@@ -381,6 +402,7 @@ async function runShellProbe(
   command: string,
   env: NodeJS.ProcessEnv,
   login: boolean,
+  cwd?: string,
 ): Promise<ShellProbeResult> {
   return new Promise((resolve) => {
     let child: ReturnType<typeof spawn>
@@ -390,6 +412,7 @@ async function runShellProbe(
         [...(login ? ["-l"] : []), "-c", shellProbeCommand(command)],
         {
           detached: true,
+          cwd,
           env,
           stdio: ["ignore", "pipe", "ignore"],
           windowsHide: true,
@@ -489,29 +512,66 @@ function signalProbe(child: ReturnType<typeof spawn>): void {
   }
 }
 
-// The snapshot captures only alias and function definitions. Environment
-// variables are deliberately excluded: the merged env from
-// `commandEnvironment` owns them, so sourcing rc-file exports here would
-// reintroduce variables that `shell_environment_policy` filtered out. rc
-// exports therefore remain unavailable to model commands, as before. The
-// login shell sources the interactive rc file once at generation time, so rc
-// side effects (banners, hooks) never reach per-command shells.
-function snapshotSpec(
-  shellName: string,
-): { readonly header: string; readonly dumpCommand: string } | undefined {
-  switch (shellName) {
+// Capture definitions and exports separately, as in Codex v2. rc-file exports
+// must pass policy after startup; restoring an export script would bypass it.
+async function captureShellSnapshot(
+  resolved: ResolvedCommandShell,
+  cwd: string,
+  runCapture: (
+    shell: string,
+    command: string,
+    login: boolean,
+    cwd?: string,
+  ) => Promise<ShellProbeResult>,
+  policy: ShellEnvironmentPolicy,
+  log: (message: string) => void,
+): Promise<ShellSnapshot | undefined> {
+  const name = basename(resolved.shell).toLowerCase()
+  let script: string
+  switch (name) {
     case "zsh":
-      return {
-        header: "",
-        dumpCommand: `[ -r "\${ZDOTDIR:-$HOME}/.zshrc" ] && source "\${ZDOTDIR:-$HOME}/.zshrc" >/dev/null 2>&1; typeset -f; alias -L`,
-      }
+      script = `[ -r "\${ZDOTDIR:-$HOME}/.zshrc" ] && . "\${ZDOTDIR:-$HOME}/.zshrc" >/dev/null 2>&1; builtin printf '\\0'; builtin typeset -f; builtin alias -L; builtin alias -gL; builtin alias -sL`
+      break
     case "bash":
-      return {
-        header: "shopt -s expand_aliases\n",
-        dumpCommand: `[ -r "$HOME/.bashrc" ] && source "$HOME/.bashrc" >/dev/null 2>&1; declare -f; alias -p`,
-      }
+      script = `[ -z "$BASH_ENV" ] && [ -r "$HOME/.bashrc" ] && . "$HOME/.bashrc" >/dev/null 2>&1; builtin printf '\\0'; builtin declare -f; builtin alias -p`
+      break
+    case "sh":
+      script = `[ -n "$ENV" ] && [ -r "$ENV" ] && . "$ENV" >/dev/null 2>&1; printf '\\0'; if command -v typeset >/dev/null 2>&1; then typeset -f; fi; alias`
+      break
     default:
       return undefined
+  }
+  const capture = await runCapture(
+    resolved.shell,
+    `${script}; printf '\\0'; /usr/bin/env -0`,
+    true,
+    cwd,
+  )
+  const start = capture.stdout.indexOf(0)
+  const separator = capture.stdout.indexOf(0, start + 1)
+  if (
+    capture.exitCode !== 0 ||
+    capture.truncated === true ||
+    capture.stdout.length > MAX_SNAPSHOT_BYTES ||
+    start < 0 ||
+    separator < 0
+  ) {
+    log(
+      `exec_command shell snapshot: unavailable (${probeFailureReason(capture)})`,
+    )
+    return undefined
+  }
+  const environment = applyShellEnvironmentPolicy(
+    parseNullEnvironment(capture.stdout.subarray(separator + 1)) ?? {},
+    { ...policy, inherit: "all" },
+  )
+  delete environment.PWD
+  delete environment.OLDPWD
+  delete environment.BASH_ENV
+  delete environment.ENV
+  return {
+    state: capture.stdout.subarray(start + 1, separator).toString("utf8"),
+    environment,
   }
 }
 
@@ -519,112 +579,37 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`
 }
 
-// Aliases expand only when the command text is parsed after the definitions
-// exist, so the snapshot is sourced and the command re-parsed via eval.
+// State stays in executor memory and travels in bounded environment values,
+// rather than a potentially oversized argv string or a file containing secrets.
 export function wrapWithShellSnapshot(
-  snapshotPath: string,
+  snapshot: ShellSnapshot,
   command: string,
-): string {
-  return `source ${shellQuote(snapshotPath)} 2>/dev/null || true\neval ${shellQuote(command)}`
-}
-
-async function captureShellSnapshot(input: {
-  readonly resolved: ResolvedCommandShell
-  readonly homeDir: string
-  readonly now: () => number
-  readonly runCapture: (
-    shell: string,
-    command: string,
-    login: boolean,
-  ) => Promise<ShellProbeResult>
-  readonly log: (message: string) => void
-}): Promise<string | undefined> {
-  const name = basename(input.resolved.shell).toLowerCase()
-  const spec = snapshotSpec(name)
-  if (spec === undefined) return undefined
-  const key = createHash("sha256")
-    .update(input.resolved.shell)
-    .digest("hex")
-    .slice(0, 8)
-  const directory = join(input.homeDir, "shell-snapshots")
-  const target = join(directory, `${name}-${key}.sh`)
-
-  const existing = await stat(target).catch(() => undefined)
-  if (
-    existing?.isFile() === true &&
-    input.now() - existing.mtimeMs < SNAPSHOT_TTL_MS
-  ) {
-    return target
+  environment: NodeJS.ProcessEnv,
+): Readonly<{ command: string; env: NodeJS.ProcessEnv }> {
+  const env: NodeJS.ProcessEnv = {
+    ...environment,
+    ...snapshot.environment,
+    PWD: environment.PWD,
+    TERM: environment.TERM,
+    NO_COLOR: environment.NO_COLOR,
+    FORCE_COLOR: environment.FORCE_COLOR,
   }
-
-  const capture = await input.runCapture(
-    input.resolved.shell,
-    spec.dumpCommand,
-    true,
-  )
-  if (capture.exitCode !== 0 || capture.truncated === true) {
-    input.log(
-      `exec_command shell snapshot: unavailable (${probeFailureReason(capture)})`,
-    )
-    return undefined
+  const keys: string[] = []
+  let remaining = snapshot.state
+  while (remaining.length > 0) {
+    // 15k UTF-16 code units fit below Codex's 60 KiB per-value boundary.
+    let end = Math.min(15 * 1024, remaining.length)
+    const last = remaining.charCodeAt(end - 1)
+    if (last >= 0xd800 && last <= 0xdbff) end -= 1
+    const key = `__YAKITORI_SHELL_SNAPSHOT_STATE_${keys.length}`
+    env[key] = remaining.slice(0, end)
+    keys.push(key)
+    remaining = remaining.slice(end)
   }
-  const content = `# Yakitori shell snapshot for ${input.resolved.shell}.\n# Reused across sessions for up to three days; delete this file to regenerate.\n${spec.header}${capture.stdout.toString("utf8").trim()}\n`
-
-  // A filesystem failure must degrade to plain exec, never fail the command.
-  const temporary = join(
-    directory,
-    `.${name}-${process.pid}-${randomBytes(4).toString("hex")}.tmp`,
-  )
-  try {
-    await mkdir(directory, { recursive: true })
-    await writeFile(temporary, content, { mode: 0o600 })
-    const validation = await input.runCapture(
-      input.resolved.shell,
-      `source ${shellQuote(temporary)}`,
-      false,
-    )
-    if (validation.exitCode !== 0) {
-      input.log(
-        `exec_command shell snapshot: validation failed (${probeFailureReason(validation)})`,
-      )
-      return undefined
-    }
-    await rename(temporary, target)
-    await removeStaleSnapshots(directory, input.now, input.log)
-    return target
-  } catch (error) {
-    input.log(
-      `exec_command shell snapshot: unavailable (${error instanceof Error ? error.message : String(error)})`,
-    )
-    return undefined
-  } finally {
-    await rm(temporary, { force: true }).catch(() => {})
-  }
-}
-
-async function removeStaleSnapshots(
-  directory: string,
-  now: () => number,
-  log: (message: string) => void,
-): Promise<void> {
-  let entries: string[]
-  try {
-    entries = await readdir(directory)
-  } catch (error) {
-    log(
-      `exec_command shell snapshot: cleanup could not list ${directory} (${error instanceof Error ? error.message : String(error)})`,
-    )
-    return
-  }
-  for (const entry of entries) {
-    if (!entry.endsWith(".sh") && !entry.endsWith(".tmp")) continue
-    const path = join(directory, entry)
-    const info = await stat(path).catch(() => undefined)
-    if (info === undefined || now() - info.mtimeMs < SNAPSHOT_TTL_MS) continue
-    await rm(path, { force: true }).catch((error: unknown) => {
-      log(
-        `exec_command shell snapshot: cleanup could not remove ${path} (${error instanceof Error ? error.message : String(error)})`,
-      )
-    })
-  }
+  const expansion = keys.map((key) => `\${${key}}`).join("")
+  const restore =
+    keys.length === 0
+      ? ""
+      : `if ! eval "unset ${keys.join(" ")}\n${expansion}"; then printf 'Failed to restore shell snapshot\n' >&2; fi\n`
+  return { command: `${restore}eval ${shellQuote(command)}`, env }
 }
