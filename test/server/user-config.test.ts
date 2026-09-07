@@ -1,6 +1,7 @@
 import {
   mkdir,
   mkdtemp,
+  open,
   readFile,
   realpath,
   rm,
@@ -8,6 +9,7 @@ import {
 } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
+import { flock } from "fs-ext"
 import { parse } from "smol-toml"
 import { describe, expect, it } from "vitest"
 import type { OperationalFailure } from "../../src/server/operational-errors.ts"
@@ -360,6 +362,54 @@ describe("user config", () => {
     })
   })
 
+  it("lets an explicit untrusted child override a trusted parent", async () => {
+    await withConfigPath(async (configPath) => {
+      const workspace = join(dirname(configPath), "workspace")
+      const child = join(workspace, "vendor", "untrusted")
+      await mkdir(join(child, ".yakitori"), { recursive: true })
+      await writeFile(
+        configPath,
+        [
+          `[projects."${workspace}"]`,
+          'trust_level = "trusted"',
+          "",
+          `[projects."${child}"]`,
+          'trust_level = "untrusted"',
+          "",
+        ].join("\n"),
+      )
+      await writeFile(
+        join(child, ".yakitori", "config.toml"),
+        'model = "untrusted-model"\n',
+      )
+
+      const snapshot = await createUserConfigStore({
+        configPath,
+        workspaceRoot: workspace,
+      }).readSnapshot({ cwd: child })
+
+      expect(snapshot.configuration.preference).toBeUndefined()
+      expect(snapshot.layers.at(-1)?.disabledReason).toBe(
+        "project is explicitly untrusted",
+      )
+    })
+  })
+
+  it("rejects relative project trust paths", async () => {
+    await withConfigPath(async (configPath) => {
+      const workspace = join(dirname(configPath), "workspace")
+      await mkdir(workspace, { recursive: true })
+      await writeFile(configPath, '[projects."."]\ntrust_level = "trusted"\n')
+
+      await expect(
+        createUserConfigStore({
+          configPath,
+          workspaceRoot: workspace,
+        }).readSnapshot({ cwd: workspace }),
+      ).rejects.toThrow("Project trust path must be absolute")
+    })
+  })
+
   it("does not parse malformed project config before trust is established", async () => {
     await withConfigPath(async (configPath) => {
       const workspace = join(dirname(configPath), "workspace")
@@ -396,6 +446,117 @@ describe("user config", () => {
         }),
       ).rejects.toThrow("modified since last read")
       expect(await readFile(configPath, "utf8")).toContain('model = "external"')
+    })
+  })
+
+  it("holds the OS config lock across the complete write", async () => {
+    await withConfigPath(async (configPath) => {
+      await writeFile(configPath, 'provider = "codex"\nmodel = "one"\n')
+      const externalLock = await open(
+        `${configPath}.yakitori.lock`,
+        "a+",
+        0o600,
+      )
+      let locked = false
+      try {
+        await flockAsync(externalLock.fd, "ex")
+        locked = true
+        let settled = false
+        const write = createUserConfigStore({ configPath })
+          .writeValue({ keyPath: ["model"], value: "two" })
+          .finally(() => {
+            settled = true
+          })
+
+        await new Promise((resolvePromise) => setImmediate(resolvePromise))
+        expect(settled).toBe(false)
+
+        await flockAsync(externalLock.fd, "un")
+        locked = false
+        await expect(write).resolves.toMatchObject({
+          effective: { model: "two" },
+        })
+      } finally {
+        if (locked) await flockAsync(externalLock.fd, "un")
+        await externalLock.close()
+      }
+    })
+  })
+
+  it("rejects prototype-bearing key paths without changing Object.prototype", async () => {
+    await withConfigPath(async (configPath) => {
+      const store = createUserConfigStore({ configPath })
+
+      await expect(
+        store.writeValue({
+          keyPath: ["__proto__", "yakitoriPolluted"],
+          value: true,
+        }),
+      ).rejects.toThrow("invalid segment")
+      expect(Object.hasOwn(Object.prototype, "yakitoriPolluted")).toBe(false)
+    })
+  })
+
+  it("does not traverse inherited properties while writing a config path", async () => {
+    await withConfigPath(async (configPath) => {
+      await createUserConfigStore({ configPath }).writeValue({
+        keyPath: ["toString", "enabled"],
+        value: true,
+      })
+
+      expect(parse(await readFile(configPath, "utf8"))).toEqual({
+        toString: { enabled: true },
+      })
+    })
+  })
+
+  it("represents large TOML integers exactly on the JSON wire", async () => {
+    await withConfigPath(async (configPath) => {
+      await writeFile(configPath, "extension_counter = 9007199254740993\n")
+
+      const snapshot = await createUserConfigStore({
+        configPath,
+      }).readSnapshot()
+
+      expect(snapshot.effective.extension_counter).toBe("9007199254740993")
+      expect(() => JSON.stringify(snapshot)).not.toThrow()
+    })
+  })
+
+  it("returns the requested project scope after a user config write", async () => {
+    await withConfigPath(async (configPath) => {
+      const workspace = join(dirname(configPath), "workspace")
+      await mkdir(join(workspace, ".yakitori"), { recursive: true })
+      await writeFile(
+        configPath,
+        [
+          'provider = "codex"',
+          'model = "user-model"',
+          `[projects."${workspace}"]`,
+          'trust_level = "trusted"',
+          "",
+        ].join("\n"),
+      )
+      await writeFile(
+        join(workspace, ".yakitori", "config.toml"),
+        'model = "project-model"\n',
+      )
+
+      const snapshot = await createUserConfigStore({
+        configPath,
+        workspaceRoot: workspace,
+      }).writeValue({
+        keyPath: ["ui", "theme"],
+        value: "dark",
+        cwd: workspace,
+      })
+
+      expect(snapshot.layers).toHaveLength(2)
+      expect(snapshot.configuration.preference).toEqual({
+        provider: "codex",
+        model: "project-model",
+      })
+      expect(snapshot.origins.model?.source).toBe("project")
     })
   })
 
@@ -453,4 +614,16 @@ async function withConfigPath(
   } finally {
     await rm(directory, { recursive: true, force: true })
   }
+}
+
+function flockAsync(
+  fileDescriptor: number,
+  operation: "ex" | "un",
+): Promise<void> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    flock(fileDescriptor, operation, (error) => {
+      if (error === null) resolvePromise()
+      else rejectPromise(error)
+    })
+  })
 }

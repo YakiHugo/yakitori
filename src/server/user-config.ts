@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto"
 import {
   mkdir,
+  open,
   readFile,
   realpath,
   rename,
@@ -9,17 +10,25 @@ import {
 } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
-import { parse, stringify, type TomlTable } from "smol-toml"
-import type { ShellEnvironmentPolicy } from "../runtime/user-shell-env.ts"
-import type { RolloutBudgetConfig } from "../runtime/rollout-budget.ts"
+import { flock } from "fs-ext"
 import {
-  HookEvent,
+  parse,
+  stringify,
+  type TomlTable,
+  type TomlTableWithoutBigInt,
+  type TomlValue,
+  type TomlValueWithoutBigInt,
+} from "smol-toml"
+import type { AutoCompactTokenLimitScope } from "../kernel/events.ts"
+import {
   type HookConfiguration,
+  HookEvent,
   type HookHandler,
   type HookMatcherGroup,
 } from "../runtime/hooks.ts"
 import type { McpServerConfig } from "../runtime/mcp-config.ts"
-import type { AutoCompactTokenLimitScope } from "../kernel/events.ts"
+import type { RolloutBudgetConfig } from "../runtime/rollout-budget.ts"
+import type { ShellEnvironmentPolicy } from "../runtime/user-shell-env.ts"
 import {
   consoleOperationalFailureReporter,
   type OperationalFailureReporter,
@@ -54,7 +63,9 @@ export type ConfigOrigin = Readonly<{
 
 export type ConfigurationSnapshot = Readonly<{
   configuration: UserConfiguration
-  effective: TomlTable
+  // JSON has no bigint representation. TOML integers outside its safe range
+  // are exposed as exact base-10 strings on the RPC wire.
+  effective: TomlTableWithoutBigInt
   origins: Readonly<Record<string, ConfigOrigin>>
   layers: readonly ConfigLayerSnapshot[]
 }>
@@ -63,6 +74,7 @@ export type ConfigValueWrite = Readonly<{
   keyPath: readonly string[]
   value: unknown
   expectedVersion?: string
+  cwd?: string
 }>
 
 export class ConfigVersionConflictError extends Error {
@@ -118,8 +130,14 @@ export function createUserConfigStore(
     },
     write(preference) {
       const write = pendingWrite.then(
-        () => writePreference(configPath, preference, reporter),
-        () => writePreference(configPath, preference, reporter),
+        () =>
+          withConfigWriteLock(configPath, () =>
+            writePreference(configPath, preference, reporter),
+          ),
+        () =>
+          withConfigWriteLock(configPath, () =>
+            writePreference(configPath, preference, reporter),
+          ),
       )
       pendingWrite = write.then(
         () => undefined,
@@ -129,8 +147,14 @@ export function createUserConfigStore(
     },
     writeValue(input) {
       const write = pendingWrite.then(
-        () => writeConfigValue(configPath, input, reporter, workspaceRoot),
-        () => writeConfigValue(configPath, input, reporter, workspaceRoot),
+        () =>
+          withConfigWriteLock(configPath, () =>
+            writeConfigValue(configPath, input, reporter, workspaceRoot),
+          ),
+        () =>
+          withConfigWriteLock(configPath, () =>
+            writeConfigValue(configPath, input, reporter, workspaceRoot),
+          ),
       )
       pendingWrite = write.then(
         () => undefined,
@@ -195,9 +219,12 @@ async function writeConfigValue(
 ): Promise<ConfigurationSnapshot> {
   if (
     input.keyPath.length === 0 ||
-    input.keyPath.some((segment) => segment.trim() === "")
+    input.keyPath.some(
+      (segment) =>
+        segment.trim() === "" || unsafeConfigPathSegments.has(segment),
+    )
   ) {
-    throw new Error("Configuration keyPath must contain non-empty segments.")
+    throw new Error("Configuration keyPath contains an invalid segment.")
   }
   const document = await readConfigDocument(configPath, reporter)
   const version = document?.version ?? fingerprint("")
@@ -210,7 +237,7 @@ async function writeConfigValue(
   const value = structuredClone(document?.value ?? {})
   let target = value
   for (const segment of input.keyPath.slice(0, -1)) {
-    const current = target[segment]
+    const current = Object.hasOwn(target, segment) ? target[segment] : undefined
     if (current !== undefined && !isTomlTable(current)) {
       throw new Error(
         `Configuration path ${input.keyPath.join(".")} crosses a non-table value.`,
@@ -236,6 +263,43 @@ async function writeConfigValue(
   await writeAtomically(configPath, content)
   return readConfigurationSnapshot(configPath, reporter, {
     ...(workspaceRoot === undefined ? {} : { workspaceRoot }),
+    ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
+  })
+}
+
+const unsafeConfigPathSegments = new Set([
+  "__proto__",
+  "constructor",
+  "prototype",
+])
+
+async function withConfigWriteLock<T>(
+  configPath: string,
+  write: () => Promise<T>,
+): Promise<T> {
+  await mkdir(dirname(configPath), { recursive: true })
+  const lock = await open(`${configPath}.yakitori.lock`, "a+", 0o600)
+  try {
+    await flockPromise(lock.fd, "ex")
+    try {
+      return await write()
+    } finally {
+      await flockPromise(lock.fd, "un")
+    }
+  } finally {
+    await lock.close()
+  }
+}
+
+function flockPromise(
+  fileDescriptor: number,
+  operation: "ex" | "un",
+): Promise<void> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    flock(fileDescriptor, operation, (error) => {
+      if (error === null) resolvePromise()
+      else rejectPromise(error)
+    })
   })
 }
 
@@ -335,15 +399,15 @@ async function readConfigurationSnapshot(
       version: user?.version ?? fingerprint(""),
     },
   ]
+  const trust = await projectTrustPaths(user?.value ?? {})
 
   if (input.cwd !== undefined) {
     const workspaceRoot = await realpath(input.workspaceRoot ?? input.cwd)
     const cwd = await realpath(input.cwd)
     requireInside(workspaceRoot, cwd, "Configuration cwd")
-    const trusted = await trustedProjectPaths(user?.value ?? {})
     for (const directory of directoriesFromRoot(workspaceRoot, cwd)) {
       const projectPath = join(directory, ".yakitori", "config.toml")
-      const layer = await readProjectLayer(projectPath, trusted, reporter)
+      const layer = await readProjectLayer(projectPath, trust, reporter)
       if (layer !== undefined) layers.push(layer)
     }
   }
@@ -364,7 +428,7 @@ async function readConfigurationSnapshot(
   )
   return {
     configuration,
-    effective,
+    effective: jsonSafeTomlTable(effective),
     origins,
     layers: layers.map(({ source, path, version, disabledReason }) => ({
       source,
@@ -377,7 +441,7 @@ async function readConfigurationSnapshot(
 
 async function readProjectLayer(
   path: string,
-  trustedPaths: ReadonlySet<string>,
+  projectTrust: ReadonlyMap<string, ProjectTrustLevel>,
   reporter: OperationalFailureReporter,
 ): Promise<LoadedConfigLayer | undefined> {
   let content: string
@@ -388,19 +452,18 @@ async function readProjectLayer(
     throw error
   }
   const projectDirectory = dirname(dirname(path))
-  const trusted = [...trustedPaths].some(
-    (candidate) =>
-      projectDirectory === candidate ||
-      projectDirectory.startsWith(`${candidate}${sep}`),
-  )
-  if (!trusted) {
+  const trustLevel = projectTrustLevel(projectDirectory, projectTrust)
+  if (trustLevel !== "trusted") {
     return {
       source: "project",
       path,
       content,
       value: {},
       version: fingerprint(content),
-      disabledReason: "project is not trusted",
+      disabledReason:
+        trustLevel === "untrusted"
+          ? "project is explicitly untrusted"
+          : "project is not trusted",
     }
   }
   let value: TomlTable
@@ -423,20 +486,56 @@ async function readProjectLayer(
   }
 }
 
-async function trustedProjectPaths(
+type ProjectTrustLevel = "trusted" | "untrusted"
+
+async function projectTrustPaths(
   value: TomlTable,
-): Promise<ReadonlySet<string>> {
+): Promise<ReadonlyMap<string, ProjectTrustLevel>> {
   const projects = value.projects
-  if (!isTomlTable(projects)) return new Set()
-  return new Set(
+  if (!isTomlTable(projects)) return new Map()
+  return new Map(
     await Promise.all(
       Object.entries(projects).flatMap(([path, entry]) =>
-        isTomlTable(entry) && entry.trust_level === "trusted"
-          ? [realpath(resolve(path)).catch(() => resolve(path))]
+        isTomlTable(entry) &&
+        (entry.trust_level === "trusted" || entry.trust_level === "untrusted")
+          ? [normalizeProjectTrustPath(path, entry.trust_level)]
           : [],
       ),
     ),
   )
+}
+
+async function normalizeProjectTrustPath(
+  path: string,
+  trustLevel: ProjectTrustLevel,
+): Promise<readonly [string, ProjectTrustLevel]> {
+  if (!isAbsolute(path)) {
+    throw new ExtensionConfigError(
+      `Project trust path must be absolute: ${path}`,
+    )
+  }
+  const normalized = await realpath(path).catch((error) => {
+    if (isMissingFile(error)) return resolve(path)
+    throw error
+  })
+  return [normalized, trustLevel]
+}
+
+function projectTrustLevel(
+  projectDirectory: string,
+  projectTrust: ReadonlyMap<string, ProjectTrustLevel>,
+): ProjectTrustLevel | undefined {
+  let match: { path: string; level: ProjectTrustLevel } | undefined
+  for (const [candidate, level] of projectTrust) {
+    if (
+      (projectDirectory === candidate ||
+        projectDirectory.startsWith(`${candidate}${sep}`)) &&
+      (match === undefined || candidate.length > match.path.length)
+    ) {
+      match = { path: candidate, level }
+    }
+  }
+  return match?.level
 }
 
 function directoriesFromRoot(root: string, cwd: string): readonly string[] {
@@ -485,6 +584,23 @@ function recordOrigins(
       version: layer.version,
     }
   }
+}
+
+function jsonSafeTomlTable(value: TomlTable): TomlTableWithoutBigInt {
+  return Object.fromEntries(
+    Object.entries(value).map(([key, entry]) => [
+      key,
+      jsonSafeTomlValue(entry),
+    ]),
+  )
+}
+
+function jsonSafeTomlValue(value: TomlValue): TomlValueWithoutBigInt {
+  if (typeof value === "bigint") return value.toString(10)
+  if (Array.isArray(value)) return value.map(jsonSafeTomlValue)
+  if (value instanceof Date) return value
+  if (isTomlTable(value)) return jsonSafeTomlTable(value)
+  return value
 }
 
 function fingerprint(content: string): string {

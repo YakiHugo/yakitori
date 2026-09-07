@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
@@ -873,6 +873,26 @@ describe("provider and config methods", () => {
         },
       })
       await expect(userConfig.read()).resolves.toEqual(accepted.userPreference)
+    } finally {
+      await rm(rootDir, { recursive: true, force: true })
+    }
+  })
+
+  it("serializes large config integers across config/read", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "yakitori-rpc-config-"))
+    try {
+      const configPath = join(rootDir, "config.toml")
+      await writeFile(configPath, "extension_counter = 9007199254740993\n")
+      const { connection } = realSetup({
+        userConfig: createUserConfigStore({ configPath }),
+      })
+      await initializeConnection(connection)
+
+      const snapshot = await rpc<{
+        effective: { extension_counter: string }
+      }>(connection, "config/read", {})
+
+      expect(snapshot.effective.extension_counter).toBe("9007199254740993")
     } finally {
       await rm(rootDir, { recursive: true, force: true })
     }

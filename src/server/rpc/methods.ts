@@ -47,8 +47,8 @@ import {
   type ProjectStore,
 } from "../sqlite-project-store.ts"
 import {
-  ConfigVersionConflictError,
   type ConfigurationSnapshot,
+  ConfigVersionConflictError,
   type UserConfigStore,
 } from "../user-config.ts"
 import { INTERNAL_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND } from "./messages.ts"
@@ -122,6 +122,7 @@ export type ConfigWriteParams = Readonly<{
   keyPath: readonly string[]
   value: unknown
   expectedVersion?: string
+  cwd?: string
 }>
 
 // Server→client notification payloads. Each event notification carries its
@@ -843,16 +844,24 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
         !Array.isArray(record.keyPath) ||
         record.keyPath.length === 0 ||
         !record.keyPath.every(
-          (segment) => typeof segment === "string" && segment.trim() !== "",
+          (segment) =>
+            typeof segment === "string" &&
+            segment.trim() !== "" &&
+            segment !== "__proto__" &&
+            segment !== "constructor" &&
+            segment !== "prototype",
         )
       ) {
-        throw invalidParams("keyPath must contain non-empty strings.")
+        throw invalidParams("keyPath contains an invalid segment.")
       }
       if (
         record.expectedVersion !== undefined &&
         typeof record.expectedVersion !== "string"
       ) {
         throw invalidParams("expectedVersion must be a string when provided.")
+      }
+      if (record.cwd !== undefined && typeof record.cwd !== "string") {
+        throw invalidParams("cwd must be a string when provided.")
       }
       try {
         return {
@@ -862,6 +871,7 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
             ...(record.expectedVersion === undefined
               ? {}
               : { expectedVersion: record.expectedVersion }),
+            ...(record.cwd === undefined ? {} : { cwd: record.cwd }),
           }),
         }
       } catch (error) {
