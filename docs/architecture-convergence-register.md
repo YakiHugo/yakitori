@@ -1,7 +1,7 @@
 # Architecture Convergence Register
 
-This register contains only unfinished architecture work. Code, public types,
-and focused tests are authoritative for behavior that has already landed.
+This register records the accepted Codex-convergence batch and its completion.
+Code, public types, and focused tests are authoritative for landed behavior.
 
 Yakitori has no production users or compatibility obligation yet. Prefer a
 clean schema break or deletion over compatibility code unless a real
@@ -12,58 +12,45 @@ Primary references are `.references/public/codex` and
 record the alternatives and ask for a product decision instead of silently
 synthesizing a third architecture.
 
-## Delivery order
+## Accepted scope — completed 2026-09-07
 
-Stages are ordered by severity: user-visible correctness defects first, then
-recovery correctness, then failure observability, then contained contract
-fixes, then hygiene. Same-module problems are grouped into one stage so the
-owning boundary moves once.
+The user selected Codex for context admission, compaction, rollout budgets,
+model switching, local configuration, MCP, skills, hooks, runtime residency,
+locking, diagnostics, and history search. Yakitori keeps its tagged
+multi-provider history IR where Codex's Responses-only representation cannot
+carry Grok and Kimi history. Plugin distribution, connectors, enterprise
+administrator constraints, persistent colleague Mates, and Rooms remain
+outside this batch.
 
-| Order | Outcome | Owning areas | Severity driver |
-| --- | --- | --- | --- |
-| 1 | Production exports narrowed, test support separated | runtime and server public surfaces | Hygiene; churns exports, so it runs last |
+The implementation is split into reviewable ownership layers:
 
-The next piece of work is Stage 4 (production surface cleanup). The C8-D2
-project entity has landed. The former
-Agent-lifecycle stage is resolved by the Session-owned status, per-root
-AgentControl, durable spawn graph, lazy identity restoration, and retryable
-completion/message delivery. Mate's production mutation surface remains
-limited to create/list/read for the current single-Mate product.
+- context uses provider/model-attributed usage baselines, estimates complete
+  history when a matching baseline is unavailable, and treats local capacity
+  as an early warning before provider overflow enters the compaction path;
+- Codex native and local compaction replace history inside the existing IR,
+  preserve user input and environment baselines, and retain the original
+  failure when a model fallback also fails;
+- one root AgentControl owns the optional shared rollout budget and bounded
+  child execution, while model switches compact only when provider metadata
+  establishes a compatibility or capacity boundary;
+- local user/project configuration records provenance and fingerprints,
+  checks project trust before parsing executable settings, and protects user
+  writes with optimistic version checks under an OS advisory transaction lock;
+- each Session resolves its own configuration and owns its Hook runner, MCP
+  processes, and live external-tool catalog; failed MCP processes reconnect
+  and republish tools;
+- Codex, Grok, and Kimi expose only executable model choices, use authenticated
+  discovery with bundled metadata fallback, and report provider limits as
+  unavailable unless an authoritative source supplies them;
+- completed child runtimes are evicted per root, close/resume is serialized,
+  and one OS advisory lock owns a store across processes;
+- diagnostics expose content-free process gauges, while durable search uses
+  visible text and stable cursor semantics in the ThreadStore;
+- test-only providers live under `test/support`, and unused production barrels
+  have been removed.
 
-## Stage 4 — Production surface cleanup
-
-Run this only after the preceding owners stabilize, so cleanup does not
-churn exports that are about to move again.
-
-### Current behavior
-
-Some runtime and server barrels expose test-oriented constructors and
-fixtures. `runtime/faux-provider.ts` is a test harness exported from the
-runtime surface. It is distinct from the application's production faux
-scenario stream, which currently supports the development default and must
-not be removed by name association alone.
-
-Several modules contain similar `isRecord`-style validation helpers. Most
-sit at different trust boundaries and do not justify a universal shared
-guard.
-
-### Work
-
-- Move test-only providers, constructors, and fixtures to explicit
-  test-support entry points.
-- Remove unused barrel exports after checking production, dynamic-import,
-  persisted, and test consumers.
-- Keep validation local when schemas or trust boundaries differ; share a
-  guard only when more than one real caller enforces the same durable
-  contract.
-- Delete dead code and vacuous tests discovered by the export audit.
-
-### Done when
-
-- Production entry points expose only supported runtime contracts.
-- Test support is importable without widening production APIs.
-- No development feature is deleted merely because it resembles a test
-  fixture.
+The complete batch is covered by `pnpm check`; renderer availability was also
+verified in a browser and the Electron sidecar bundle was built.
 
 ## Resolved work that must stay resolved
 
