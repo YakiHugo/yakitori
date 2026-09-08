@@ -45,7 +45,9 @@ export type ForkThreadInput = {
 
 export type ThreadManagerOptions = {
   readonly store: ThreadStore
-  readonly createTurnProcessor: (stored: StoredThread) => TurnProcessor
+  readonly createTurnProcessor: (
+    stored: StoredThread,
+  ) => TurnProcessor | Promise<TurnProcessor>
   readonly onPersistenceError?: (error: unknown, threadId: string) => void
   readonly onBackgroundError?: (
     error: unknown,
@@ -57,7 +59,9 @@ export type ThreadManagerOptions = {
 
 export class ThreadManager {
   readonly #store: ThreadStore
-  readonly #createTurnProcessor: (stored: StoredThread) => TurnProcessor
+  readonly #createTurnProcessor: (
+    stored: StoredThread,
+  ) => TurnProcessor | Promise<TurnProcessor>
   readonly #onPersistenceError?:
     | ((error: unknown, threadId: string) => void)
     | undefined
@@ -210,7 +214,12 @@ export class ThreadManager {
         await this.#store.deleteThread(threadId)
         throw new Error("ThreadManager shut down while creating a Thread.")
       }
-      return this.#installStored(stored)
+      try {
+        return await this.#installStored(stored)
+      } catch (error) {
+        await this.#store.deleteThread(threadId)
+        throw error
+      }
     })
   }
 
@@ -300,7 +309,13 @@ export class ThreadManager {
         await this.#store.deleteThread(target.id)
         throw new Error("ThreadManager shut down while forking a Thread.")
       }
-      return { thread: this.#installStored(result.thread), result }
+      try {
+        return { thread: await this.#installStored(result.thread), result }
+      } catch (error) {
+        await this.#store.discardThread(target.id).catch(() => undefined)
+        await this.#store.deleteThread(target.id)
+        throw error
+      }
     })
   }
 
@@ -363,7 +378,7 @@ export class ThreadManager {
     for (const thread of threads) this.#removeInstalledThread(thread.id, thread)
   }
 
-  #installStored(stored: StoredThread): AgentThread {
+  async #installStored(stored: StoredThread): Promise<AgentThread> {
     this.#requireOpen()
     const threadId = stored.metadata.id
     if (this.#discarding.has(threadId)) {
@@ -374,13 +389,40 @@ export class ThreadManager {
     }
     const existing = this.getThread(threadId)
     if (existing !== undefined) return existing
+    let processor: TurnProcessor
+    try {
+      processor = await this.#createTurnProcessor(stored)
+    } catch (error) {
+      try {
+        await this.#store.discardThread(threadId)
+      } catch (discardError) {
+        this.#reportBackgroundError(
+          discardError,
+          threadId,
+          "discard-failed-installation",
+        )
+      }
+      throw error
+    }
+    if (
+      this.#closing ||
+      this.#discarding.has(threadId) ||
+      this.#closingThreads.has(threadId)
+    ) {
+      await Promise.allSettled([
+        processor.dispose?.(),
+        this.#store.discardThread(threadId),
+      ])
+      this.#requireOpen()
+      throw new Error(`Thread ${threadId} cannot be installed.`)
+    }
     let thread: AgentThread
     try {
       thread = new AgentThread(
         new Session({
           stored,
           store: this.#store,
-          processor: this.#createTurnProcessor(stored),
+          processor,
           ...(this.#onPersistenceError === undefined
             ? {}
             : {
@@ -390,13 +432,25 @@ export class ThreadManager {
         }),
       )
     } catch (error) {
-      void this.#store.discardThread(threadId).catch((discardError) => {
+      const cleanup = await Promise.allSettled([
+        processor.dispose?.(),
+        this.#store.discardThread(threadId),
+      ])
+      const [disposed, discarded] = cleanup
+      if (disposed?.status === "rejected") {
         this.#reportBackgroundError(
-          discardError,
+          disposed.reason,
+          threadId,
+          "dispose-failed-installation",
+        )
+      }
+      if (discarded?.status === "rejected") {
+        this.#reportBackgroundError(
+          discarded.reason,
           threadId,
           "discard-failed-installation",
         )
-      })
+      }
       throw error
     }
     this.#threads.set(threadId, thread)
@@ -434,11 +488,7 @@ export class ThreadManager {
       this.#evictIdleSubagents(rootThreadId, protectedThreadId),
     )
     this.#residencyMaintenance = maintenance.catch((error) => {
-      this.#reportBackgroundError(
-        error,
-        thread.id,
-        "evict-idle-subagent",
-      )
+      this.#reportBackgroundError(error, thread.id, "evict-idle-subagent")
     })
   }
 
@@ -544,7 +594,10 @@ function subagentRootThreadId(thread: AgentThread): string | undefined {
 }
 
 function isTerminalAgentThread(thread: AgentThread): boolean {
-  return thread.agentStatus === "interrupted" || typeof thread.agentStatus === "object"
+  return (
+    thread.agentStatus === "interrupted" ||
+    typeof thread.agentStatus === "object"
+  )
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

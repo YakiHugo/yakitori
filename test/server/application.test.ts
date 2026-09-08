@@ -15,7 +15,7 @@ import packageJson from "../../package.json" with { type: "json" }
 import { MateEventType, MateLifecycle } from "../../src/mates/events.ts"
 import { createMateKernel } from "../../src/mates/mate-kernel.ts"
 import { createSqliteMateStore } from "../../src/mates/sqlite-mate-store.ts"
-import { createFauxProvider } from "../../src/runtime/faux-provider.ts"
+import { createFauxProvider } from "../support/faux-provider.ts"
 import { type ModelRequest, ModelStopReason } from "../../src/runtime/model.ts"
 import { listCatalogModels } from "../../src/runtime/model-catalog.ts"
 import {
@@ -28,6 +28,7 @@ import {
   type ApiHandlerResult,
   type ApiListProvidersResponse,
 } from "../../src/server/protocol.ts"
+import type { ConfigurationSnapshot } from "../../src/server/user-config.ts"
 
 async function listen(server: HttpServer): Promise<string> {
   await new Promise<void>((resolve) => {
@@ -1098,6 +1099,188 @@ describe("application composition", () => {
     })
   })
 
+  it("loads trusted project instructions from each Session working directory", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const nested = join(workspace, "packages", "app")
+      const configPath = join(rootDir, "config.toml")
+      await mkdir(join(workspace, ".yakitori"), { recursive: true })
+      await mkdir(nested, { recursive: true })
+      await writeFile(
+        configPath,
+        [
+          `[projects.${JSON.stringify(workspace)}]`,
+          'trust_level = "trusted"',
+        ].join("\n"),
+      )
+      await writeFile(
+        join(workspace, ".yakitori", "config.toml"),
+        'instructions = "Use the Session project instructions."\n',
+      )
+      let request: ModelRequest | undefined
+      const application = await createYakitoriApplication({
+        rootDir,
+        workspace,
+        userConfigPath: configPath,
+        stream: async function* (received) {
+          request = received
+          yield {
+            type: "response",
+            response: {
+              stopReason: ModelStopReason.EndTurn,
+              content: [{ type: "text", text: "done" }],
+            },
+          }
+        },
+      })
+      try {
+        const created = await application.handlers.createSession({
+          workingDirectory: nested,
+        })
+        expectOk(created)
+        const admitted = await application.handlers.admitInput({
+          sessionId: created.body.session.id,
+          requestId: "request_project_config",
+          content: { kind: "text", text: "run" },
+        })
+        expectOk(admitted)
+        await waitForThreadIdle(application, created.body.session.id)
+
+        expect(request?.system.map((section) => section.text)).toContain(
+          "Use the Session project instructions.",
+        )
+      } finally {
+        await application.close()
+      }
+    })
+  })
+
+  it("uses the owning Project root for an outside-workspace Session and config/read", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const projectRoot = join(rootDir, "other-project")
+      const nested = join(projectRoot, "packages", "app")
+      const configPath = join(rootDir, "config.toml")
+      await mkdir(join(projectRoot, ".yakitori"), { recursive: true })
+      await mkdir(nested, { recursive: true })
+      await writeFile(
+        configPath,
+        [
+          `[projects.${JSON.stringify(projectRoot)}]`,
+          'trust_level = "trusted"',
+        ].join("\n"),
+      )
+      await writeFile(
+        join(projectRoot, ".yakitori", "config.toml"),
+        'instructions = "Use the outside Project configuration."\n',
+      )
+      let request: ModelRequest | undefined
+      const application = await createYakitoriApplication({
+        rootDir,
+        workspace,
+        userConfigPath: configPath,
+        stream: async function* (received) {
+          request = received
+          yield {
+            type: "response",
+            response: {
+              stopReason: ModelStopReason.EndTurn,
+              content: [{ type: "text", text: "done" }],
+            },
+          }
+        },
+      })
+      const server = application.createHttpServer()
+      try {
+        const project = await application.projectStore.createProject({
+          name: "other-project",
+          roots: [await realpath(projectRoot)],
+        })
+        const created = await application.handlers.createSession({
+          projectId: project.project.id,
+          workingDirectory: nested,
+        })
+        expectOk(created)
+        const admitted = await application.handlers.admitInput({
+          sessionId: created.body.session.id,
+          requestId: "request_outside_project_config",
+          content: { kind: "text", text: "run" },
+        })
+        expectOk(admitted)
+        await waitForThreadIdle(application, created.body.session.id)
+        expect(request?.system.map((section) => section.text)).toContain(
+          "Use the outside Project configuration.",
+        )
+
+        const baseUrl = await listen(server)
+        const snapshot = await rpcRequest<ConfigurationSnapshot>(
+          baseUrl,
+          "config/read",
+          { cwd: nested },
+        )
+        expect(snapshot.configuration.baseInstructions).toBe(
+          "Use the outside Project configuration.",
+        )
+      } finally {
+        await closeServer(server)
+        await application.close()
+      }
+    })
+  })
+
+  it("resolves an MCP cwd relative to the configuration file that defines it", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const configPath = join(rootDir, "config.toml")
+      const projectConfigDirectory = join(workspace, ".yakitori")
+      const mcpDirectory = join(projectConfigDirectory, "tools")
+      const script = join(rootDir, "cwd-mcp.mjs")
+      const observedCwd = join(rootDir, "mcp-cwd.txt")
+      await mkdir(mcpDirectory, { recursive: true })
+      await writeFile(
+        script,
+        [
+          "import { writeFileSync } from 'node:fs';",
+          "import readline from 'node:readline';",
+          "writeFileSync(process.argv[2], process.cwd());",
+          "const rl=readline.createInterface({input:process.stdin});",
+          "rl.on('line',(line)=>{const m=JSON.parse(line); if(m.id===undefined)return;",
+          "const result=m.method==='tools/list'?{tools:[]}:{};",
+          "process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result})+'\\n');});",
+        ].join("\n"),
+      )
+      await writeFile(
+        configPath,
+        [
+          `[projects.${JSON.stringify(workspace)}]`,
+          'trust_level = "trusted"',
+        ].join("\n"),
+      )
+      await writeFile(
+        join(projectConfigDirectory, "config.toml"),
+        [
+          "[mcp_servers.cwd_probe]",
+          `command = ${JSON.stringify(process.execPath)}`,
+          `args = [${JSON.stringify(script)}, ${JSON.stringify(observedCwd)}]`,
+          'cwd = "tools"',
+        ].join("\n"),
+      )
+
+      const application = await createYakitoriApplication({
+        ...testApplicationOptions({ rootDir, workspace }),
+        userConfigPath: configPath,
+      })
+      try {
+        const created = await application.handlers.createSession({
+          workingDirectory: workspace,
+        })
+        expectOk(created)
+        expect(await readFile(observedCwd, "utf8")).toBe(
+          await realpath(mcpDirectory),
+        )
+      } finally {
+        await application.close()
+      }
+    })
+  })
+
   it("pins an injected provider and model into the Turn execution context", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const provider = createFauxProvider([
@@ -1215,7 +1398,7 @@ describe("application composition", () => {
     })
   })
 
-  it("registers the lazy Grok CLI provider when another provider is primary", async () => {
+  it("rejects Grok selection when no executable transport is configured", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const previousApiKey = process.env.XAI_API_KEY
       const previousCredentials = process.env.GROK_CREDENTIALS
@@ -1236,29 +1419,7 @@ describe("application composition", () => {
           content: { kind: "text", text: "use grok" },
           modelSelection: { provider: "grok", model: "grok-4.5" },
         })
-        expectOk(admitted)
-        await waitForThreadIdle(application, created.body.session.id)
-
-        const stored = await application.threadStore.readThread(
-          created.body.session.id,
-        )
-        expect(
-          stored?.rollout.find((entry) => entry.item.type === "turn_context")
-            ?.item,
-        ).toMatchObject({
-          context: { selection: { provider: "grok", model: "grok-4.5" } },
-        })
-        expect(
-          stored?.rollout.find(
-            (entry) =>
-              entry.item.type === "turn_completed" &&
-              entry.item.outcome === "failed",
-          )?.item,
-        ).toMatchObject({
-          error: {
-            message: expect.stringContaining("Grok credentials not found"),
-          },
-        })
+        expectError(admitted, 400, ApiErrorCode.InvalidInput)
       } finally {
         await application.close()
         if (previousApiKey === undefined) delete process.env.XAI_API_KEY
@@ -1478,6 +1639,7 @@ describe("application composition", () => {
         stream: createFauxProvider([]).stream,
         provider: "openai",
         model: "gpt-custom-9",
+        providerStreams: { grok: createFauxProvider([]).stream },
         modelDirectory: {
           async listModels(provider) {
             if (provider === "openai") {
@@ -1527,6 +1689,7 @@ describe("application composition", () => {
           body.providers.find((provider) => provider.name === "openai"),
         ).toEqual({
           name: "openai",
+          availability: "available",
           defaultModel: "gpt-custom-9",
           models: [
             {
@@ -1553,6 +1716,8 @@ describe("application composition", () => {
           body.providers.find((provider) => provider.name === "grok"),
         ).toEqual({
           name: "grok",
+          availability: "available",
+          rateLimits: { status: "unavailable" },
           models: [
             {
               id: "grok-code-fast-1",
@@ -1666,6 +1831,7 @@ describe("application composition", () => {
           body.providers.find((provider) => provider.name === "faux"),
         ).toEqual({
           name: "faux",
+          availability: "available",
           defaultModel: "scripted",
           models: [
             {
@@ -1779,7 +1945,13 @@ describe("application composition", () => {
 })
 
 describe("codex login registration", () => {
-  const touchedEnv = ["CODEX_HOME", "OPENAI_API_KEY"] as const
+  const touchedEnv = [
+    "CODEX_HOME",
+    "OPENAI_API_KEY",
+    "XAI_API_KEY",
+    "KIMI_API_KEY",
+    "GROK_CREDENTIALS",
+  ] as const
   let savedEnv: Record<(typeof touchedEnv)[number], string | undefined>
 
   beforeEach(() => {
@@ -1787,6 +1959,12 @@ describe("codex login registration", () => {
       touchedEnv.map((key) => [key, process.env[key]]),
     ) as typeof savedEnv
     delete process.env.OPENAI_API_KEY
+    delete process.env.XAI_API_KEY
+    delete process.env.KIMI_API_KEY
+    process.env.GROK_CREDENTIALS = join(
+      process.env.CODEX_HOME ?? tmpdir(),
+      "missing-grok-auth.json",
+    )
   })
 
   afterEach(() => {
@@ -1808,6 +1986,7 @@ describe("codex login registration", () => {
       await writeFile(join(codexHome, "auth.json"), JSON.stringify(login))
     }
     process.env.CODEX_HOME = codexHome
+    process.env.GROK_CREDENTIALS = join(codexHome, "missing-grok-auth.json")
     const application = await createYakitoriApplication(
       testApplicationOptions({ rootDir, workspace }),
     )
@@ -1865,6 +2044,10 @@ describe("codex login registration", () => {
         instructionProfileId: "codex",
         efforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
       })
+      expect(codex).toMatchObject({
+        availability: "available",
+        credentialKind: "oauth",
+      })
     })
   })
 
@@ -1879,9 +2062,9 @@ describe("codex login registration", () => {
       expect(
         body.providers.some((provider) => provider.name === "openai"),
       ).toBe(true)
-      expect(body.providers.some((provider) => provider.name === "codex")).toBe(
-        false,
-      )
+      expect(
+        body.providers.find((provider) => provider.name === "codex"),
+      ).toMatchObject({ availability: "requires_login" })
     })
   })
 
@@ -1897,21 +2080,43 @@ describe("codex login registration", () => {
       expect(
         body.providers.filter((provider) => provider.name === "openai"),
       ).toHaveLength(1)
-      expect(body.providers.some((provider) => provider.name === "codex")).toBe(
-        false,
-      )
+      expect(
+        body.providers.find((provider) => provider.name === "codex"),
+      ).toMatchObject({ availability: "requires_login" })
     })
   })
 
-  it("registers neither codex nor openai without a login or env key", async () => {
+  it("presents Codex, Grok, and Kimi login state without registering a transport", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const body = await providersWithLogin(rootDir, workspace, undefined)
 
       expect(
-        body.providers.some(
-          (provider) => provider.name === "codex" || provider.name === "openai",
-        ),
+        body.providers.some((provider) => provider.name === "openai"),
       ).toBe(false)
+      expect(
+        Object.fromEntries(
+          body.providers
+            .filter((provider) =>
+              ["codex", "grok", "kimi"].includes(provider.name),
+            )
+            .map((provider) => [provider.name, provider.availability]),
+        ),
+      ).toEqual({
+        codex: "requires_login",
+        grok: "requires_login",
+        kimi: "requires_login",
+      })
+      expect(
+        body.providers
+          .filter((provider) =>
+            ["codex", "grok", "kimi"].includes(provider.name),
+          )
+          .every(
+            (provider) =>
+              provider.models.length === 0 &&
+              provider.rateLimits?.status === "unavailable",
+          ),
+      ).toBe(true)
     })
   })
 })

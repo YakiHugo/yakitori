@@ -21,9 +21,7 @@ const fakeRef = vi.hoisted(() => ({
 
 vi.mock("../../src/gui/lib/rpc-client.ts", async (importOriginal) => {
   const original =
-    await importOriginal<
-      typeof import("../../src/gui/lib/rpc-client.ts")
-    >()
+    await importOriginal<typeof import("../../src/gui/lib/rpc-client.ts")>()
   return {
     ...original,
     getAppRpcClient: () => fakeRef.current,
@@ -370,6 +368,28 @@ describe("model selector", () => {
     expect(screen.getByText("速度")).toBeDefined()
     expect(screen.getByRole("button", { name: "标准" })).toBeDefined()
     expect(screen.getByRole("button", { name: "快速" })).toBeDefined()
+  })
+
+  it("does not offer providers that require login", async () => {
+    const user = userEvent.setup()
+    window.localStorage.clear()
+    const state = selectModelState()
+    useAppStore.setState({
+      ...state,
+      providers: state.providers.map((provider) =>
+        provider.name === "codex"
+          ? { ...provider, availability: "requires_login" as const }
+          : provider,
+      ),
+      modelSelections: {},
+    })
+    render(<Composer />)
+
+    await user.click(screen.getByRole("button", { name: "Select model" }))
+
+    expect(screen.queryByText("codex")).toBeNull()
+    expect(screen.queryByRole("button", { name: "GPT-5.6 Sol" })).toBeNull()
+    expect(screen.getByText("openai")).toBeDefined()
   })
 
   it("persists a clicked model per session, keeping a supported effort", async () => {

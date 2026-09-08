@@ -42,6 +42,7 @@ describe("Turn processor", () => {
   it("runs pre/post tool hooks around the approved tool invocation", async () => {
     const events: string[] = []
     const hookRunner: HookRunner = {
+      async dispose() {},
       async run(request) {
         events.push(request.event)
         if (request.event === HookEvent.PreToolUse) {

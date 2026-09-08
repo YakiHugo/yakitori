@@ -10,6 +10,22 @@ import { SessionConfiguration } from "../../src/runtime/session-configuration.ts
 import { MemoryThreadStore } from "./memory-thread-store.ts"
 
 describe("live Session actor", () => {
+  it("removes a newly created Thread when async processor setup fails", async () => {
+    const store = new MemoryThreadStore()
+    const manager = new ThreadManager({
+      store,
+      async createTurnProcessor() {
+        throw new Error("processor setup failed")
+      },
+    })
+
+    await expect(manager.createThread()).rejects.toThrow(
+      "processor setup failed",
+    )
+    await expect(store.listThreads()).resolves.toMatchObject({ threads: [] })
+    await manager.shutdown()
+  })
+
   it("closes a live Session without deleting its resumable rollout", async () => {
     const store = new MemoryThreadStore()
     const manager = createManager({ run: async () => undefined }, store)
@@ -784,6 +800,36 @@ describe("live Session actor", () => {
 
     await manager.discardThread(source.id)
     expect(await store.readThread(source.id)).toBeUndefined()
+    await manager.shutdown()
+  })
+
+  it("deletes a fork rollout when processor setup fails", async () => {
+    const store = new MemoryThreadStore()
+    let processors = 0
+    const manager = new ThreadManager({
+      store,
+      createTurnProcessor() {
+        processors += 1
+        if (processors === 2) throw new Error("processor setup failed")
+        return withPreparation({ run: async () => undefined })
+      },
+    })
+    const source = await manager.createThread()
+    await source.startIfIdle({
+      submissionId: "turn_source",
+      content: { kind: "text", text: "source" },
+    })
+    await nextEventOfType(source, "turn.completed")
+
+    await expect(
+      manager.forkThread({
+        sourceThreadId: source.id,
+        beforeTurnId: "turn_source",
+      }),
+    ).rejects.toThrow("processor setup failed")
+    expect(
+      (await manager.listThreads()).threads.map((thread) => thread.id),
+    ).toEqual([source.id])
     await manager.shutdown()
   })
 

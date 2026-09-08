@@ -55,6 +55,7 @@ export function Composer() {
       userPreference,
       defaultProvider,
       defaultModel,
+      providers,
     }),
     providers,
   )

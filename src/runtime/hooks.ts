@@ -53,11 +53,17 @@ export type HookOutcome = Readonly<{
 
 export type HookRunner = Readonly<{
   run(request: HookRequest): Promise<HookOutcome>
+  dispose(): Promise<void>
 }>
 
 export function createHookRunner(configuration: HookConfiguration): HookRunner {
+  const shutdown = new AbortController()
+  const asynchronousRuns = new Set<Promise<void>>()
+  let disposePromise: Promise<void> | undefined
+
   return {
     async run(request) {
+      if (shutdown.signal.aborted) throw new Error("Hook runner is disposed.")
       const groups = configuration[request.event] ?? []
       const handlers = groups.flatMap((group) =>
         matches(group.matcher, request.matcher) ? group.hooks : [],
@@ -65,8 +71,18 @@ export function createHookRunner(configuration: HookConfiguration): HookRunner {
       const outcomes: HookOutcome[] = []
       for (const handler of handlers) {
         if (!hasTrustedHash(handler)) continue
-        if (handler.async === true) {
-          void runCommandHook(handler, request).catch(() => undefined)
+        if (handler.async === true && request.event !== HookEvent.SessionEnd) {
+          const run = runCommandHook(handler, {
+            ...request,
+            signal:
+              request.signal === undefined
+                ? shutdown.signal
+                : AbortSignal.any([request.signal, shutdown.signal]),
+          })
+            .then(() => undefined)
+            .catch(() => undefined)
+          asynchronousRuns.add(run)
+          void run.finally(() => asynchronousRuns.delete(run))
           continue
         }
         outcomes.push(await runCommandHook(handler, request))
@@ -83,6 +99,13 @@ export function createHookRunner(configuration: HookConfiguration): HookRunner {
         ),
         ...(updatedInput === undefined ? {} : { updatedInput }),
       }
+    },
+    dispose() {
+      disposePromise ??= (async () => {
+        shutdown.abort()
+        await Promise.allSettled([...asynchronousRuns])
+      })()
+      return disposePromise
     },
   }
 }
@@ -127,24 +150,41 @@ async function runCommandHook(
   const timeoutMs = handler.timeoutMs ?? 10_000
   const result = await new Promise<Readonly<{ code: number | null }>>(
     (resolve, reject) => {
+      let terminationError: Error | undefined
+      let forceKill: ReturnType<typeof setTimeout> | undefined
       const timeout = setTimeout(() => {
-        child.kill("SIGKILL")
-        reject(
-          new Error(`${request.event} hook timed out after ${timeoutMs}ms.`),
+        terminationError = new Error(
+          `${request.event} hook timed out after ${timeoutMs}ms.`,
         )
+        child.kill("SIGKILL")
       }, timeoutMs)
       timeout.unref()
       const onAbort = () => {
+        terminationError = new DOMException(
+          "The operation was aborted.",
+          "AbortError",
+        )
         child.kill("SIGTERM")
-        reject(new DOMException("The operation was aborted.", "AbortError"))
+        forceKill = setTimeout(() => {
+          if (child.exitCode === null) child.kill("SIGKILL")
+        }, 1_000)
+        forceKill.unref()
       }
       request.signal?.addEventListener("abort", onAbort, { once: true })
-      child.once("error", reject)
+      child.once("error", (error) => {
+        clearTimeout(timeout)
+        if (forceKill !== undefined) clearTimeout(forceKill)
+        request.signal?.removeEventListener("abort", onAbort)
+        reject(error)
+      })
       child.once("exit", (code) => {
         clearTimeout(timeout)
+        if (forceKill !== undefined) clearTimeout(forceKill)
         request.signal?.removeEventListener("abort", onAbort)
-        resolve({ code })
+        if (terminationError !== undefined) reject(terminationError)
+        else resolve({ code })
       })
+      if (request.signal?.aborted === true) onAbort()
     },
   )
   if (result.code === 2) {
