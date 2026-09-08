@@ -42,6 +42,25 @@ An `Open` row is not a recommendation to copy Codex or retain Yakitori. Before
 implementation work crosses that boundary, record the alternatives and ask
 for a product decision as required by `AGENTS.md`.
 
+## Accepted follow-up decisions — 2026-09-07
+
+The user selected Codex for C2-D3/D5/D6/D7, local single-user configuration
+(C8-D3, including C5-D7), and the remaining C7/C9 audits. C5-D6 includes MCP,
+skills, and hooks; plugin distribution and connectors remain deferred. C8-D4
+covers Grok, Codex, and Kimi. Enterprise administrator requirements,
+persistent colleague Mates, and Rooms are outside this implementation scope.
+
+Compaction and model switching use Yakitori's existing tagged multi-provider
+IR. Provider-native results enter that same history representation; there is
+no parallel history protocol. The local capacity estimator is an early warning
+and recovery trigger, while the provider remains authoritative for actual
+capacity. The accepted batch and its review fixes are complete.
+
+Detailed older audit descriptions below preserve the comparison baseline and
+decision rationale. They are not evidence of current runtime behavior when
+they describe a pre-convergence implementation; code and focused tests remain
+authoritative.
+
 ## Module audit order
 
 The order follows ownership dependencies rather than UI visibility. A later
@@ -51,14 +70,14 @@ change that decision.
 | ID | Major module | Yakitori owners | Principal Codex owners | Status |
 | --- | --- | --- | --- | --- |
 | C1 | Session/Turn authority, durable protocol, persistence, and fork | `src/core/*`, legacy `src/kernel/*`, narrow recovery paths in `src/runtime/recovery.ts` | `core/session`, `core/codex_thread.rs`, `core/thread_manager.rs`, `history`, `rollout`, `thread-store` | Implemented |
-| C2 | Execution loop, model context, world state, and compaction | `src/runtime/session-runner.ts`, `compaction.ts`, `model-context.ts`, `world-state.ts` | `core/session/turn.rs`, `context_manager`, `compact*`, `session/world_state.rs` | Audited |
+| C2 | Execution loop, model context, world state, and compaction | `src/runtime/turn-processor.ts`, `compaction.ts`, `model-context.ts`, `world-state.ts` | `core/session/turn.rs`, `context_manager`, `compact*`, `session/world_state.rs` | Audited and implemented |
 | C3 | Tool catalog, execution, permissions, and sandboxing | `src/runtime/tools/*`, `permission-gate.ts`, `tool-permissions.ts` | `core/tools`, `tools`, `exec`, `execpolicy`, `sandboxing`, platform sandboxes | Audited; core implemented |
 | C4 | Provider transport, model catalog, credentials, retry, and usage | `src/runtime/*provider.ts`, catalog and credentials modules | `model-provider`, `model-provider-info`, `models-manager`, `codex-client`, `responses_retry` | Audited; core implemented |
-| C5 | Instructions, environment, shell, skills, plugins, MCP, and connectors | prompt, instruction, environment, and future extension owners | `agents_md_manager`, `context`, `skills`, `core-plugins`, `mcp`, `connectors`, `shell*` | Audited; shell/environment/instruction slices implemented |
+| C5 | Instructions, environment, shell, skills, plugins, MCP, and connectors | prompt, instruction, environment, skills, MCP, and hook owners | `agents_md_manager`, `context`, `skills`, `core-plugins`, `mcp`, `connectors`, `shell*` | Selected scope implemented |
 | C6 | Subagents, AgentControl, and Mate lifecycle | `src/runtime/agent-control.ts`, `agent-runtime.ts`, multi-agent tools, `src/mates/*` | `core/agent`, `agent-graph-store`, `agent-identity`, thread spawning | Audited; core implemented |
-| C7 | Process recovery, concurrency, failure reporting, and shutdown | runtime recovery/locks, server application and event hubs | core task/session lifecycle, app-server lifecycle, rollout writer recovery | Lifecycle slice audited and implemented |
-| C8 | Host protocol, configuration, projects, and model discovery | `src/server/*` excluding GUI consumers | `app-server`, `app-server-protocol`, `config` | Protocol and projects audited with accepted decisions 2026-09-04; configuration and model-discovery surfaces remain Open |
-| C9 | Observability, diagnostics, history search, and operational state | currently distributed | `otel`, `diagnostics`, `analytics`, `thread-store` search/projections | Unreviewed |
+| C7 | Process recovery, concurrency, failure reporting, and shutdown | runtime recovery/locks, server application and event hubs | core task/session lifecycle, app-server lifecycle, rollout writer recovery | Selected scope implemented |
+| C8 | Host protocol, configuration, projects, and model discovery | `src/server/*` excluding GUI consumers | `app-server`, `app-server-protocol`, `config` | Selected local scope implemented |
+| C9 | Observability, diagnostics, history search, and operational state | diagnostics RPC and durable ThreadStore projections | `diagnostics`, `thread-store` search/projections | Implemented |
 
 ## Decision summary
 
@@ -74,11 +93,11 @@ change that decision.
 | C1-D8 | Per-Session command serialization plus optimistic sequence checks versus actor mailbox serialization | Converge | Derived from accepted C1-D1 |
 | C2-D1 | Turn-owned request settings versus one request-scoped Step snapshot | Converge | Core Step ownership implemented 2026-09-03; extension fields arrive with C5 |
 | C2-D2 | Rebuild prompt from durable projection versus mutate a live ContextManager | Converge | Derived from accepted C1-D1; representation still depends on C1-D2 |
-| C2-D3 | Pre-send complete-request admission versus usage-driven compaction and provider admission | Open | Reliability contract and C4 usage semantics |
+| C2-D3 | Pre-send complete-request admission versus usage-driven compaction and provider admission | Converge | Codex selected; implemented 2026-09-07 |
 | C2-D4 | Next-Turn user queue versus in-Turn steering | Converge | Follow Codex `start` / `steer` semantics |
-| C2-D5 | Provider-neutral local prefix compaction versus provider-selected local/remote strategies | Open | C1-D2 and C4 provider capabilities |
-| C2-D6 | Fixed per-Turn call budgets versus an unbounded tool-follow-up loop with separate rollout budget | Open | Local safety policy; C6 rollout budget |
-| C2-D7 | Universal replay across model changes versus compatibility-aware pre-switch compaction | Open | C1-D2, C2-D1, and C4 model contracts |
+| C2-D5 | Provider-neutral local prefix compaction versus provider-selected local/remote strategies | Converge | Existing IR adapts Codex native/local compaction |
+| C2-D6 | Fixed per-Turn call budgets versus an unbounded tool-follow-up loop with separate rollout budget | Converge | Codex selected; root AgentControl owns the budget |
+| C2-D7 | Universal replay across model changes versus compatibility-aware pre-switch compaction | Converge | Provider-scoped compatibility implemented 2026-09-07 |
 | C3-D1 | Codex permission profiles and sandbox escalation versus unrestricted YOLO execution | Deliberate | Product requirement: the active execution mode grants full host access |
 | C3-D2 | `always_approve`/`auto_file_tools` versus Codex `on-request`/`never` semantics | Deliberate | Names describe Yakitori behavior; `never` remains reserved for deny-without-asking |
 | C3-D3 | Flat mutable tool maps versus typed source-aware Step routers | Converge | Follow Codex; implemented 2026-08-31 |
@@ -90,26 +109,28 @@ change that decision.
 | C4-D3 | Global static catalog lookups versus provider-scoped model managers | Converge | Follow Codex manager ownership; static managers remain the fallback when no authoritative discovery endpoint exists |
 | C4-D4 | Request-local credential reads versus provider-owned live auth recovery | Converge | Follow Codex/grok-build live-auth ownership; implemented for Codex login 2026-09-03 |
 | C4-D5 | Terminal-error retry versus output-aware physical attempt policy | Deliberate | Follow grok-build because multiple wire APIs share the boundary; implemented 2026-09-03 |
-| C4-D6 | One accumulated usage counter versus billing and active-context semantics | Converge | Follow both references; implemented 2026-09-03; rate-limit presentation remains C8/C9 work |
+| C4-D6 | One accumulated usage counter versus billing and active-context semantics | Converge | Usage implemented; authoritative-or-unavailable limits completed under C8-D4 |
 | C5-D1 | Model-facing shell selection parameter versus host-owned shell detection | Converge | Codex, Claude Code, grok-build, and opencode all keep shell identity out of the model tool schema; implemented 2026-09-03 |
 | C5-D2 | Env-only capture versus a login-shell snapshot sourced per exec command | Converge | Codex, Claude Code, and grok-build independently converge on snapshot plus source; cross-session snapshot reuse with TTL accepted as product decision 2026-09-03 |
 | C5-D3 | Environment context content: shell identity versus sandbox/network rendering | Converge | Shell identity follows Codex/Claude Code; permission-profile and network fields are Derived from the C3-D1 YOLO decision |
 | C5-D4 | Project-only AGENTS.md versus user-level plus project instruction layers | Converge | Follow Codex `$HOME`-level instructions, joined ahead of project documents |
-| C5-D5 | Trust gating for project instructions | Derived | C3-D1 YOLO makes instruction text non-privileged; does not extend to future project-layer hook/MCP configuration |
-| C5-D6 | MCP, skills, plugins, connectors, and user hooks | Open | Product sequencing; entry contracts already exist (C3 external registration, world-state sections) |
-| C5-D7 | Single-layer user config versus a layered config stack | Open | Deferred to C8; project-scoped keys arrive with the extension work that needs them |
+| C5-D5 | Trust gating for project instructions | Derived | Instruction text stays non-privileged; executable Hook/MCP project configuration is trust-gated |
+| C5-D6 | MCP, skills, plugins, connectors, and user hooks | Converge | MCP, skills, and hooks implemented; plugins/connectors excluded by decision |
+| C5-D7 | Single-layer user config versus a layered config stack | Converge | Implemented with C8-D3 for a local single-user product |
 | C6-D1 | Process-local task registry versus one per-root AgentControl over real child Threads | Converge | Follow Codex; implemented 2026-08-31 |
 | C6-D2 | Ephemeral child registry versus durable spawn topology and lazy identity restoration | Converge | Follow Codex V2 graph boundary; implemented 2026-08-31 |
 | C6-D3 | Volatile mailbox completion versus retry-safe model-visible inter-agent delivery | Converge | Child Session and rollout contract; implemented 2026-08-31 |
-| C6-D4 | Fresh/forked child context and bounded tree execution | Converge | Follow Codex; implemented subset excludes roles/residency |
+| C6-D4 | Fresh/forked child context and bounded tree execution | Converge | Context and per-root residency implemented; role catalogs remain outside scope |
 | C6-D5 | Codex tree control versus grok-build's global task/subagent coordinator | Deliberate | Codex selected for the coding-agent harness |
 | C6-D6 | Coding subagents versus persistent colleague Mates | Deliberate | Current single-Mate product boundary |
 | C7-D1 | Immediate process teardown versus active-Turn drain and explicit force | Converge | Follow Codex; implemented 2026-09-02 |
 | C7-D2 | Silent detached failures versus owner-local observation | Converge | Follow Codex ownership semantics through a thin Yakitori reporter; implemented 2026-09-02 |
+| C7-D3 | Unbounded resident runtimes versus bounded resumable subagent residency | Converge | Codex selected; implemented 2026-09-07 |
 | C8-D1 | Ad-hoc REST+SSE versus Codex's single-channel JSON-RPC host protocol | Converge | Product decision 2026-09-04; staged implementation tracked in the convergence register |
 | C8-D2 | Flat project path registry versus a first-class Project entity | Converge | Product decision 2026-09-04; implemented 2026-09-05 |
-| C8-D3 | Single-layer user config versus provenance-tracked layered configuration | Open | Owns C5-D7; requirements-stack adoption is a separate enterprise question |
-| C8-D4 | Static-only catalog and zero credential surface versus provider discovery plus auth presentation | Open | Owns the C4-D3 fallback clause and the C4-D6 rate-limit presentation remainder |
+| C8-D3 | Single-layer user config versus provenance-tracked layered configuration | Converge | Local single-user subset implemented 2026-09-07 |
+| C8-D4 | Static-only catalog and zero credential surface versus provider discovery plus auth presentation | Converge | Grok, Codex, and Kimi implemented 2026-09-07 |
+| C9-D1 | No process snapshot or history search versus content-free diagnostics and durable search projections | Converge | Implemented 2026-09-07 |
 
 ---
 
@@ -648,10 +669,10 @@ and multi-agent context are observed in the same iteration before the request
 is sent.
 
 The active Turn's selected model remains stable, matching Codex. A steered
-model selection is persisted as Session configuration for later Turns. MCP,
-approval-reviewer, service-tier, executor-capability, and telemetry fields do
-not yet have Yakitori product implementations; when added under C5/C9, they
-must extend this Step rather than create another request owner.
+model selection is persisted as Session configuration for later Turns. The
+Session-owned MCP catalog now enters the finalized Step router. Future
+approval-reviewer, service-tier, executor-capability, or telemetry fields must
+extend this Step rather than create another request owner.
 
 Evidence anchors:
 
@@ -691,66 +712,38 @@ Evidence anchors:
 
 ### C2-D3 — Context admission and compaction trigger
 
-Disposition: **Open; a reliability contract, not an accuracy contest.**
+Disposition: **Converge on Codex; implemented 2026-09-07.**
 
-Yakitori has two explicit stages:
+Provider-reported active-context usage drives the durable baseline and local
+estimates account only for history added after that measured prefix. The
+baseline records its provider, model, and covered history position; when those
+do not match, Yakitori estimates the complete history instead of reusing an
+unrelated scalar. Missing usage therefore degrades to a conservative estimate
+rather than silently dropping history from accounting.
 
-1. History selection applies message-block and serialized-byte caps. Old tool
-   results are truncated and then pruned before complete Turn groups become
-   compaction candidates.
-2. After system sections, messages, agent additions, image adaptation, and
-   tool schemas are assembled, `estimateModelRequestBudget` estimates the
-   complete request plus reserved output capacity. A matching provider-usage
-   baseline may calibrate an unchanged request prefix. The runner compacts or
-   rejects before sending when the effective model window would be exceeded.
-
-Codex tracks provider-reported active-context usage, an optional auto-compact
-scope, context-window limits, and estimated history tokens. It compacts before
-a Turn when prior usage/model switching requires it, and after a sampling
-request when follow-up work would cross the token limit. The current
-`run_turn` source explicitly notes that pre-Turn compaction does not yet
-estimate the pending context updates and fresh user input.
-
-Concrete consequence: Yakitori may reject an estimated request that a provider
-would have accepted, but it does not intentionally send a known-over-budget
-complete request. Codex uses stronger provider evidence for the prior active
-context and can rely on provider admission for the newly assembled request.
-These are different failure semantics; tokenizer accuracy alone does not
-settle the choice.
-
-The Yakitori `4 UTF-8 bytes/token` formula, image estimates, and output reserve
-are implementation safety estimates, not Codex or provider quotas. Catalog
-capacity still needs an authoritative source under C4.
+The local estimate is an early compaction warning, not final authority to
+reject work that the provider may accept. An actual provider overflow enters
+the same compaction and retry path. Configured total-context or
+body-after-prefix thresholds and the model catalog's capacity determine when
+to warn; none of these local values are presented as provider quotas.
 
 Evidence anchors:
 
-- Yakitori: `src/runtime/model-context.ts`,
-  `src/runtime/model-request-budget.ts`, request assembly and pre-send checks
-  in `src/runtime/session-runner.ts`.
+- Yakitori: `src/runtime/turn-processor.ts`,
+  `src/runtime/model-request-budget.ts`, and `src/core/context-manager.ts`.
 - Codex: `core/src/session/context_window.rs`,
   `core/src/context_manager/history.rs`, pre/post sampling compaction in
   `core/src/session/turn.rs`.
 
 ### C2-D4 — User input while a Turn is active
 
-Disposition: **Open; product-visible even though GUI is out of scope.**
+Disposition: **Converge on Codex; implemented.**
 
-Yakitori durably admits every normal user message as an `Input`. If a Turn is
-already active, the new Input remains in `pendingInputs`; the per-Session lane
-starts it as a new Turn only after the active Turn reaches a terminal state.
-The active loop can receive special inter-agent additions between model calls,
-but ordinary user input is not drained into that Turn.
-
-Codex supports explicit Turn-input modes. A steer submitted while a regular
-Turn is active enters its Turn-local pending input, is persisted into history
-after the current sampling/tool boundary, and can cause the same Turn to take a
-follow-up sample. Mailbox delivery has separate current-Turn/next-Turn rules.
-
-Concrete trigger: while a command/tool chain is running, the user sends “stop
-editing that file; inspect the logs instead.” Yakitori schedules a later Turn
-unless the user also interrupts; Codex can steer the active Turn at the next
-sampling boundary. This changes Turn identity, cancellation, usage attribution,
-and fork boundaries, so it is not a GUI-only feature.
+Input admitted while a Turn still accepts steering joins that Turn's ordered
+steering queue and becomes model-visible at the next sampling boundary. Once
+the active task atomically closes its input, later input starts a new Turn.
+Steering keeps the active Turn identity and persists through the same Session
+history owner.
 
 Evidence anchors:
 
@@ -760,42 +753,18 @@ Evidence anchors:
 
 ### C2-D5 — Compaction implementation and replacement contract
 
-Disposition: **Open; coupled to provider capabilities in C4.**
+Disposition: **Converge on Codex; implemented 2026-09-07.**
 
-Yakitori currently has one provider-neutral compaction implementation:
+Local compaction covers active-Turn history and retains recent real user
+submissions outside the generated summary. Codex-native remote compaction is
+available only through a provider that declares the capability. Its tagged
+result, replacement history, usage, environment baseline, and terminal event
+enter the same append-only multi-provider IR in one ordered persistence path.
 
-- summarize a continuous oldest history prefix at complete group boundaries;
-- use the active model through the ordinary provider-neutral `ModelRequest`;
-- split into two passes when the source cannot fit, or reduce the oldest
-  eligible prefix after overflow;
-- reject a replacement whose estimated future token cost is not smaller;
-- cap the summary with a local byte safety boundary;
-- atomically persist checkpoint coverage, exact replacement `ModelMessage`
-  history, world-state baseline, usage, and compaction-item completion;
-- retain the previous checkpoint when compaction fails, with a per-Session
-  failure circuit breaker.
-
-Codex selects among multiple implementations:
-
-- local summarization;
-- remote compaction variants when the provider supports them;
-- token-budget-specific context-window rollover;
-- manual, pre-Turn, mid-Turn, model-downshift, and comp-hash-change triggers;
-- optional reinjection of initial context before the last real user message for
-  inline compaction;
-- a replacement `ResponseItem` history plus `CompactedItem`, window ids,
-  world-state baseline, and reference `TurnContextItem`.
-
-Codex local compaction deliberately retains collected user messages alongside
-the summary. Yakitori's checkpoint prompt asks the model to reproduce user
-messages inside one summary and replaces the covered prefix with that summary
-plus current world-state fragments. These are materially different model
-history contracts.
-
-Remote compaction cannot be added as a thin alternative `compact()` function:
-the provider may own the replacement item shape, retained-message policy,
-usage, and continuation semantics. C1-D2 and C4 must first decide whether that
-provider-native result can become canonical Yakitori history.
+Cross-provider continuation converts a native checkpoint to a portable local
+summary through its owning provider. Failed compaction leaves the prior history
+intact. If the current-model fallback also fails, Yakitori preserves the
+original error that caused the fallback so recovery remains diagnosable.
 
 Evidence anchors:
 
@@ -808,23 +777,13 @@ Evidence anchors:
 
 ### C2-D6 — Bounded Turn work
 
-Disposition: **Open; the current numbers are local safety boundaries.**
+Disposition: **Converge on Codex; implemented 2026-09-07.**
 
-Yakitori persists Session execution defaults and freezes concrete Turn limits.
-The defaults stop a Turn after 16 model calls or 32 tool calls, and separately
-bound model-visible blocks/bytes, tool-result content, compaction summaries,
-and assistant output. Exceeding a call budget durably fails the Turn.
-
-Codex's ordinary model/tool follow-up loop does not expose equivalent fixed
-per-Turn model-call and tool-call quotas. It has targeted safety caps, output
-truncation, context limits, rate limits, and an optional rollout token budget
-whose scope includes multi-agent work, but those are different contracts.
-
-The Yakitori defaults must be described as locally selected resource-safety
-limits, never as product or provider quotas. Before accepting the divergence,
-the owner must document the concrete runaway/fairness scenario each persisted
-Session preference prevents and why the limit belongs in durable Session
-configuration rather than process policy.
+Fixed model-call and tool-call quotas no longer terminate an otherwise valid
+Turn. The root AgentControl owns one optional rollout token budget shared with
+its subagents, with user-configured thresholds and weights. Budget exhaustion
+stops further work through the normal agent lifecycle. It remains distinct
+from provider billing, model context capacity, and host process safety caps.
 
 Evidence anchors:
 
@@ -835,26 +794,15 @@ Evidence anchors:
 
 ### C2-D7 — Model-switch compatibility
 
-Disposition: **Open; coupled to C1-D2, C2-D1, and C4.**
+Disposition: **Converge on Codex; implemented 2026-09-07.**
 
-Yakitori lets each admitted Input select a provider/model. The next Turn
-rebuilds provider-neutral history and uses the new model's instruction profile
-and context capacity. It has no persisted compaction-compatibility hash and no
-special pre-switch compaction using the previous model.
-
-Codex records previous model settings and may compact before the new Turn when:
-
-- old and new models expose different compaction compatibility hashes; or
-- the new model has a smaller context window and current usage no longer fits.
-
-When supported, it attempts compaction with the previous model and can capture
-a current-model fallback Step. This treats some model histories as not safely
-interchangeable even when their item schema is shared.
-
-Yakitori's universal provider-neutral replay is therefore a stronger promise
-than Codex makes. C4 must establish whether provider/model adapters guarantee
-semantic replay of reasoning, tool calls, images, and compaction checkpoints,
-or whether Yakitori also needs an explicit compatibility boundary.
+Previous model settings are persisted and a switch compacts before sampling
+when provider-scoped compatibility hashes differ or the target context window
+is smaller than the active history. The previous provider/model owns that
+compaction where possible; a failed switch leaves the old settings intact so
+resume can retry safely. Hashes are never compared across providers, and
+unknown models retain conservative fallback metadata instead of claiming full
+capabilities.
 
 ### World-state mechanism — aligned
 
@@ -874,22 +822,6 @@ applies patches chronologically, and compaction establishes a new full
 baseline. Merge creation, application, and structural JSON equality share one
 owner. The breadth of world-state sections—MCP, plugins, permissions,
 collaboration, environments, and model messages—belongs to C3/C5/C6.
-
-### C2 follow-up decisions
-
-Before changing the execution loop across module boundaries, decide:
-
-1. Can model/provider/approval/tool capability change between samples in one
-   Turn, or is a Turn the durable immutable execution-policy unit?
-2. Is ordinary mid-Turn user steering required, and at which persisted
-   sampling boundary does it become model-visible?
-3. Is pre-send complete-request rejection part of Yakitori's reliability
-   promise even when it uses conservative estimates?
-4. Must provider-native remote compaction be supported, and if so, who owns its
-   replacement history contract?
-5. Are per-Turn model/tool call counts durable user/session policy or
-   process-local runaway protection?
-6. Which model/provider changes require compaction rather than direct replay?
 
 ---
 
@@ -1042,14 +974,13 @@ active scope, never by the production provider owner.
 
 There is still no parallel provider-native transcript. Incompatible reasoning
 is omitted from the new provider request while ordinary assistant text and
-tool history remain replayable. C2-D7 remains open because deciding whether a
-model switch must compact or may discard incompatible continuation state is a
-separate product behavior.
+tool history remain replayable. C2-D7 now compacts when provider-scoped
+compatibility or capacity metadata requires it.
 
 ### C4-D3 — Model manager ownership
 
-Disposition: **Converge on Codex's manager boundary; core implemented with
-static managers.**
+Disposition: **Converge on Codex's manager boundary; provider discovery and
+static fallback implemented.**
 
 Every registered provider now owns one `ModelsManager`. Session configuration,
 Turn resolution, context capacity, and the server model directory consult that
@@ -1116,10 +1047,9 @@ server projection.
 Provider request IDs are retained on the durable assistant envelope so an
 observed response can be correlated with provider diagnostics.
 
-Rate-limit/account quota snapshots are not inferred from token usage. Current
-SDK transports do not expose one stable cross-provider event contract, so C8
-and C9 must add provider-specific snapshots when they add host presentation and
-diagnostics rather than overloading `TokenUsage`.
+Rate-limit/account quota snapshots are not inferred from token usage.
+`provider/list` preserves the separate limit field and reports an explicit
+`unavailable` status while no authoritative provider-specific source exists.
 
 Evidence anchors:
 
@@ -1137,11 +1067,9 @@ Evidence anchors:
 
 ## C5 — Instructions, environment, shell, and the extension surface
 
-Status: audited for the instruction, environment, and shell boundaries.
-MCP, skills, plugins, connectors, and user hooks are recorded as Open product
-decisions; their runtime entry contracts already exist (C3 external tool
-registration, Step-snapshotted routers, and world-state sections) and no
-extension may bypass them.
+Status: audited and implemented for instructions, environment, shell, MCP,
+skills, hooks, and local configuration. Plugin distribution and connectors are
+outside the selected scope.
 
 ### First-principles problem
 
@@ -1243,39 +1171,54 @@ exceeds the saving.
 Disposition: **Derived.**
 
 Codex skips project documents for untrusted projects. Under C3-D1, Yakitori
-executes with full host authority and instruction text carries no execution
-privilege, so no trust gate applies to AGENTS.md content. This conclusion is
-scoped to instruction text only: if project-layer configuration later
-declares hooks or MCP servers (code execution paths), the trust boundary must
-be re-audited before such keys are accepted.
+executes with full host authority and instruction text carries no additional
+execution privilege, so AGENTS.md content keeps its existing behavior.
+Project-layer Hook and MCP settings can launch code and are therefore disabled
+until the canonical project root is trusted in user configuration. Trust is
+checked before TOML parsing, so malformed untrusted content cannot block
+startup.
 
 ### C5-D6 — Extension surface: MCP, skills, plugins, connectors, hooks
 
-Disposition: **Open; product sequencing.**
+Disposition: **Converge on Codex for MCP, skills, and hooks; implemented
+2026-09-07. Plugin distribution and connectors remain outside scope.**
 
-None exist in Yakitori today. The entry contracts are already built: external
-tool sources register through `registerExternal` / `replaceExternalSource`
-with namespaced identity, deferred exposure, readiness, and per-Step router
-snapshots (`src/runtime/tools/registry.ts`); model-visible catalogs attach as
-world-state sections. Codex-specific findings recorded for the future audit:
-MCP connections are owned by a manager that diffs connection identity and
-reuses live connections, with lazy-when-cached startup from a persisted tool
-catalog; skills are `SKILL.md` files discovered from user, repo, system, and
-plugin roots with a token-budgeted catalog section; connectors are
-ChatGPT-backend applications riding a reserved MCP server and are unlikely to
-map to Yakitori's multi-provider boundary; hooks follow the Claude Code
-eleven-event vocabulary with hash-pinned trust. Deciding whether and when
-each of these enters the single-Mate product remains with the user.
+Each Session owns its MCP manager and external tool source. The manager diffs
+server identity, initializes stdio connections, republishes tool catalogs, and
+reconnects after an unexpected exit; Session disposal closes the process and
+tool owner together. Relative MCP working directories resolve from the config
+layer that defined them.
+
+Skills are discovered from user and project roots, validated as YAML
+frontmatter, and exposed as a bounded catalog while their bodies remain
+on-demand file content. Hooks use Codex lifecycle names, matcher groups,
+timeouts, blocking outcomes, and hash-pinned trust. Root Session and subagent
+events are mutually exclusive at their proper lifecycle boundaries.
+
+Evidence anchors:
+
+- Yakitori: `src/runtime/mcp-config.ts`,
+  `src/runtime/mcp-connection-manager.ts`, `src/runtime/skills.ts`,
+  `src/runtime/hooks.ts`, `src/server/application.ts`, and the focused
+  `test/runtime/mcp-connection-manager.test.ts`,
+  `test/runtime/skills.test.ts`, `test/runtime/hooks.test.ts`, and
+  `test/server/application.test.ts` suites.
+- Codex: `core/src/mcp.rs`, `core/src/session/mcp_runtime.rs`,
+  `core/src/skills.rs`, `core/src/hook_runtime.rs`, `config/src/hook_config.rs`,
+  and their focused `core/tests/suite/mcp_*`, `skills*.rs`, and `hooks*.rs`
+  suites.
 
 ### C5-D7 — Configuration layering
 
-Disposition: **Open; deferred to C8.**
+Disposition: **Converge on Codex's local single-user subset; implemented
+2026-09-07 under C8-D3.**
 
-Yakitori has a single global `~/.yakitori/config.toml`. Layered configuration
-(project-scoped keys with trust rules) has no consumer until the C5-D6
-extension work lands, so building it now would be speculative. One contained
-fix lands with C5: `model_instructions_file` resolves relative to the config
-file's directory rather than the server process cwd.
+User configuration is followed by root-to-cwd `.yakitori/config.toml` layers.
+Every layer has a content fingerprint and each effective leaf records its
+source. Writes target the user layer, serialize in process, recheck the
+expected fingerprint under an OS advisory transaction lock, and atomically
+rename. Enterprise administrator
+requirements are absent because this product scope is local and single-user.
 
 Evidence anchors:
 
@@ -1298,10 +1241,9 @@ Evidence anchors:
 
 ## C6 — Subagents, AgentControl, and Mate lifecycle
 
-Status: audited. The core coding-subagent boundary is implemented. Role
-catalogs, runtime residency/eviction, and model-facing close/resume remain
-separate follow-up capabilities rather than hidden requirements of the core
-tree.
+Status: audited. The coding-subagent boundary, shared rollout budget, and
+per-root runtime residency are implemented. Role catalogs remain outside the
+selected scope.
 
 ### First-principles problem
 
@@ -1413,7 +1355,8 @@ selected Session mailbox contract.
 
 ### C6-D4 — Context, depth, and execution bounds
 
-Disposition: **Converge on the Codex direction; core subset implemented.**
+Disposition: **Converge on the Codex direction; implemented for the selected
+scope.**
 
 Both systems give a child its own context window and bounded execution.
 Yakitori supports fresh context or an explicit all/last-N parent snapshot,
@@ -1422,13 +1365,11 @@ uniqueness before asynchronous creation, and reserves concurrency before the
 first admission await. Children can delegate only within the configured tree
 depth.
 
-Codex additionally owns role definitions, nickname allocation, rollout
-budgets, environment inheritance, and V2 LRU runtime residency. grok-build
-adds agent definitions, personas, capability modes, foreground/background
-budgets, resume-from snapshots, and optional worktree isolation. Those are
-real product surfaces, not prerequisites for the core tree. Agent/role/tool
-catalog work belongs to C5, rollout-budget policy to C2-D6, and runtime
-residency plus explicit close/resume behavior to C7.
+The root AgentControl owns the shared optional rollout budget. Completed and
+interrupted child runtimes use a per-root LRU; active children and ordinary
+user forks are excluded. Grok-build's personas, capability modes,
+foreground/background task budgets, resume snapshots, and worktree isolation
+remain separate product surfaces.
 
 ### C6-D6 — Mate boundary
 
@@ -1454,9 +1395,8 @@ Evidence anchors:
 
 ## C7 — Process lifecycle and operational failure observation
 
-Status: the application-lifecycle slice is audited and implemented. Broader
-runtime concurrency, lock recovery, residency, and diagnostics remain future
-C7/C9 audit work.
+Status: audited and implemented for the selected local single-process product.
+Diagnostics and durable search are recorded under C9.
 
 ### C7-D1 — Shutdown ownership
 
@@ -1512,11 +1452,35 @@ Evidence anchors:
 - Codex: `app-server/src/lib.rs`, `app-server/src/connection_cleanup.rs`,
   `app-server/src/thread_processor.rs`, and `rollout/src/recorder.rs`.
 
+### C7-D3 — Runtime residency, close/resume, and store ownership
+
+Disposition: **Converge on Codex; implemented 2026-09-07.**
+
+A resident Session is an execution cache over a durable rollout. Closing it
+disposes its actor, model client, Hook runner, tool registry, and MCP processes
+while retaining resumable history. Close and resume share one serialized
+lifecycle so a completed close cannot leave a newly installed actor behind.
+
+Completed or interrupted child runtimes are evicted in least-recently-used
+order per root. The local limit of three follows the existing four-agent live
+tree boundary and is an implementation resource limit, not a product quota.
+The rollout store uses an OS advisory lock held for the owner's lifetime, which
+removes the stale-file check/delete race of a PID-only lock.
+
+Evidence anchors:
+
+- Yakitori: `src/core/thread-manager.ts`, `src/runtime/agent-control.ts`,
+  `src/runtime/runtime-lock.ts`, `src/server/application.ts`, and the focused
+  `test/core/session.test.ts`, `test/runtime/runtime-lock.test.ts`, and
+  `test/server/application.test.ts` suites.
+- Codex: `core/src/thread_manager.rs`, `thread-store/src/store.rs`,
+  `thread-store/src/local/live_writer.rs`, and
+  `thread-store/src/local/writer_lock.rs`.
+
 ## C8 — Host protocol, configuration, projects, and model discovery
 
-Status: the protocol and project boundaries are audited with accepted
-decisions C8-D1 and C8-D2 (2026-09-04). Configuration layering (C8-D3) and
-model discovery plus credential presentation (C8-D4) remain Open.
+Status: the selected local protocol, project, configuration, and provider
+directory boundaries are audited and implemented.
 
 ### First-principles problem
 
@@ -1640,7 +1604,8 @@ Evidence anchors:
 
 ### C8-D3 — Configuration layering and provenance
 
-Disposition: **Open.** Owns the C5-D7 decision.
+Disposition: **Converge on Codex's local single-user subset; implemented
+2026-09-07.**
 
 Codex runs two stacks: config layers merge last-writer-wins with per-leaf
 origin tracking and content fingerprints, while requirements (administrator
@@ -1652,17 +1617,16 @@ credentials or register local commands. Writes target only the user layer
 with optimistic concurrency on the layer fingerprint, and a write that is
 overridden by a higher layer reports `OkOverridden` with the effective value.
 
-Yakitori has a single user-level layer plus environment variables, read once
-at construction. Adoption is separable: provenance tracking and trusted
-project layers can land without the requirements stack, and the requirements
-stack only becomes load-bearing with enterprise management needs. Project
-layers with a trust gate become a safety requirement once C5-D6 lets project
-content configure hooks or MCP servers. Awaiting a product decision.
+Yakitori implements the user layer plus trusted root-to-cwd project layers,
+content fingerprints, per-leaf origins, and optimistic user-layer writes.
+Untrusted project layers remain visible with a disabled reason and are not
+parsed or executed. A Session resolves this stack from its own working
+directory when it is created or resumed. The enterprise requirements stack is
+intentionally absent.
 
 ### C8-D4 — Model discovery and credential presentation
 
-Disposition: **Open.** Owns the C4-D3 static-fallback clause and the C4-D6
-rate-limit presentation remainder.
+Disposition: **Converge for Grok, Codex, and Kimi; implemented 2026-09-07.**
 
 Codex seeds an in-memory catalog from a bundled static list so the picker
 works offline, refreshes from the provider's models endpoint under explicit
@@ -1676,11 +1640,70 @@ loopback listener, device code, host-supplied tokens refreshed through a
 server→client request on 401), logout, account read, and rate-limit
 notifications and reads.
 
-Yakitori today uses static per-provider managers only, and credentials are
-not exposed to clients at all — provider availability is inferred from
-startup-time registration. Awaiting a product decision.
+Yakitori gives authenticated Codex, Grok, and Kimi transports provider-owned
+model managers with single-flight cached discovery and bundled metadata
+fallback. Unknown remote slugs remain marked as fallback metadata until the
+provider supplies the full capability record.
+
+`provider/list` reports `available` only when the process has an executable
+transport; unavailable providers expose no selectable models, and the GUI
+hides them. Supported startup credentials are Codex ChatGPT OAuth, Grok API
+key or local Grok OAuth, and Kimi API key. Rate limits are kept separate from
+billing usage and reported as `unavailable` until an authoritative provider
+surface supplies them.
+
+## C9 — Diagnostics, operational state, and history search
+
+Status: audited and implemented for process-local diagnostics and durable
+history search.
+
+### C9-D1 — Content-free diagnostics and searchable history
+
+Disposition: **Converge on Codex; implemented 2026-09-07.**
+
+The experimental `server/diagnostics` RPC reports process identity, uptime,
+memory, RPC connections, in-flight work, pending server requests, resident
+Sessions, active Turns, and MCP ready/failed counts. It contains no
+conversation content and is not persisted or treated as billing telemetry.
+
+Search reads a durable ThreadStore projection rather than resident actors.
+The JSONL store maintains that projection incrementally in SQLite, so a query
+does not materialize every rollout into memory. It indexes visible user
+submissions and each Turn's final visible assistant message, normalizes
+Markdown to rendered text, excludes hidden agent messages, and returns UTF-16
+highlight ranges. Query-bound cursors carry stable ordering keys and every
+read is bounded to `limit + 1`, so deletion of a previous-page row does not
+restart pagination or turn result pagination into an unbounded result read.
+
+Evidence anchors:
+
+- Yakitori: `src/core/sqlite-thread-search-projection.ts`,
+  `src/core/jsonl-thread-store.ts`, `src/core/thread-search.ts`,
+  `src/server/rpc/methods.ts`, `src/server/rpc/message-processor.ts`, and the
+  focused `test/core/jsonl-thread-store.test.ts`,
+  `test/core/thread-search.test.ts`, and
+  `test/server/rpc/message-processor.test.ts` suites.
+- Codex: `app-server/src/request_processors/diagnostics.rs`,
+  `thread-store/src/local/search_threads.rs`,
+  `thread-store/src/local/thread_history/search.rs`, and
+  `rollout/src/search.rs`.
 
 ## Progress log
+
+### 2026-09-07
+
+- Completed C2-D3/D5/D6/D7: provider-attributed usage baselines, Codex-style
+  local/native compaction within the existing multi-provider IR, root-shared
+  rollout budgets, and compatibility-aware model switching.
+- Completed the selected C5/C8 scope: local layered configuration, MCP,
+  skills, hooks, and executable model discovery/presentation for Codex, Grok,
+  and Kimi. Plugin distribution, connectors, and enterprise requirements stay
+  outside scope.
+- Completed C7-D3 and C9-D1: serialized Session close/resume, per-root child
+  residency, OS advisory store locking, content-free diagnostics, and durable
+  visible-history search.
+- Removed test-only production exports and unused barrels after the behavior
+  owners stabilized.
 
 ### 2026-09-05
 

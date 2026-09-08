@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { createFauxProvider } from "../../src/runtime/faux-provider.ts"
+import { createFauxProvider } from "../support/faux-provider.ts"
 import {
   type ModelRequest,
   ModelStopReason,
