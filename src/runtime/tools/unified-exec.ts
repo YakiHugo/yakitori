@@ -193,19 +193,20 @@ export function createUnifiedExecTools(
       const environment = await userShellEnv.commandEnvironment(
         cwd.absolutePath,
       )
-      const snapshot = await userShellEnv.shellSnapshot()
+      const snapshot = await userShellEnv.shellSnapshot(cwd.absolutePath)
+      const prepared =
+        snapshot === undefined
+          ? { command: parsed.value.cmd, env: environment.env }
+          : wrapWithShellSnapshot(snapshot, parsed.value.cmd, environment.env)
       log(
         `exec_command start token=${firstCommandToken(parsed.value.cmd)} bytes=${Buffer.byteLength(parsed.value.cmd, "utf8")}`,
       )
       try {
         const output = await manager.exec({
-          command:
-            snapshot === undefined
-              ? parsed.value.cmd
-              : wrapWithShellSnapshot(snapshot, parsed.value.cmd),
+          command: prepared.command,
           cwd: cwd.absolutePath,
           shell: environment.shell,
-          env: environment.env,
+          env: prepared.env,
           tty: parsed.value.tty,
           yieldTimeMs: parsed.value.yieldTimeMs,
           maxOutputTokens: parsed.value.maxOutputTokens,
@@ -875,6 +876,15 @@ function shellArguments(shell: string, command: string): string[] {
   if (name === "powershell" || name === "powershell.exe" || name === "pwsh") {
     return ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command]
   }
+  // Do not let automatic startup files restore exports after policy filtering.
+  if (name === "bash")
+    return [
+      "--noprofile",
+      "--norc",
+      "-pc",
+      `set +o privileged\nshopt -s expand_aliases\n${command}`,
+    ]
+  if (name === "zsh") return ["-fc", `setopt RCS aliases\n${command}`]
   return ["-c", command]
 }
 

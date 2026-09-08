@@ -3,12 +3,12 @@ import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { createUserShellEnv } from "../../../src/runtime/user-shell-env.ts"
 import {
   createUnifiedExecProcessManager,
   createUnifiedExecTools,
   type UnifiedExecOutput,
 } from "../../../src/runtime/tools/unified-exec.ts"
+import { createUserShellEnv } from "../../../src/runtime/user-shell-env.ts"
 
 const context = { workspaceRoot: process.cwd() }
 
@@ -241,47 +241,80 @@ describe("unified exec tools", () => {
     await execCommand.dispose?.()
   })
 
-  it.skipIf(process.platform === "win32" || !existsSync("/bin/zsh"))(
-    "makes login-shell aliases and functions available through the snapshot",
-    async () => {
-      const home = await realpath(
-        await mkdtemp(join(tmpdir(), "yakitori-exec-snapshot-")),
+  it.each([
+    ["/bin/bash", false],
+    ["/bin/bash", true],
+    ["/bin/zsh", false],
+    ["/bin/zsh", true],
+  ] as const)("restores definitions and filtered profile exports in %s (tty=%s)", async (shell, tty) => {
+    if (process.platform === "win32" || !existsSync(shell)) return
+    const home = await realpath(
+      await mkdtemp(join(tmpdir(), "yakitori-exec-snapshot-")),
+    )
+    const startup = join(home, ".bash-env")
+    try {
+      const rc = shell.endsWith("zsh") ? ".zshrc" : ".bashrc"
+      await writeFile(
+        join(home, rc),
+        [
+          "alias yak_smoke_alias='printf alias-ran'",
+          "yak_smoke_fn() { printf fn-ran; }",
+          "export PRIVATE_TOKEN=profile-secret",
+          "export npm_config_registry=https://registry.example",
+          "export POLICY_VALUE=profile",
+          "export NODE_REPL_AUTH_TOKEN=internal-secret",
+          // Exceeds the per-value carrier bound and exercises chunked restoration.
+          `yak_large_fn() { printf '%s' '${"x".repeat(70_000)}'; }`,
+        ].join("\n"),
       )
+      await writeFile(startup, "export PRIVATE_TOKEN=startup-secret\n")
+      await writeFile(
+        join(home, ".zshenv"),
+        "export PRIVATE_TOKEN=startup-secret\n",
+      )
+      const userShellEnv = createUserShellEnv({
+        appEnv: {
+          HOME: home,
+          ZDOTDIR: home,
+          BASH_ENV: startup,
+          PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+        },
+        shellEnvironmentPolicy: {
+          exclude: ["PRIVATE_*"],
+          set: { POLICY_VALUE: "policy" },
+        },
+        resolveShell: async () => ({ shell, warnings: [] }),
+        log: () => {},
+      })
+      // Bash reads BASH_ENV instead of .bashrc when explicitly configured.
+      await writeFile(
+        startup,
+        `export PRIVATE_TOKEN=startup-secret\n. '${join(home, rc)}'\n`,
+      )
+      const [execCommand] = createUnifiedExecTools({ userShellEnv })
+      if (execCommand === undefined) throw new Error("missing exec_command")
       try {
-        await writeFile(
-          join(home, ".zshrc"),
-          "alias yak_smoke_alias='printf alias-ran'\nyak_smoke_fn() { printf fn-ran; }\n",
-        )
-        const userShellEnv = createUserShellEnv({
-          appEnv: {
-            HOME: home,
-            ZDOTDIR: home,
-            PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+        const result = await execCommand.execute(
+          {
+            cmd: `yak_smoke_alias; printf '|'; yak_smoke_fn; printf '|%s|%s|%s|%s|%s\\n' "$npm_config_registry" "$POLICY_VALUE" "\${PRIVATE_TOKEN-unset}" "\${NODE_REPL_AUTH_TOKEN-unset}" "$PWD"; yak_large_fn | wc -c; /usr/bin/env | /usr/bin/grep __YAKITORI_SHELL_SNAPSHOT_STATE_ || true`,
+            tty,
+            "yield-time_ms": 1_000,
           },
-          homeDir: home,
-          resolveShell: async () => ({ shell: "/bin/zsh", warnings: [] }),
-          log: () => {},
-        })
-        const [execCommand] = createUnifiedExecTools({ userShellEnv })
-        if (execCommand === undefined) throw new Error("missing exec_command")
-
-        const viaAlias = await execCommand.execute(
-          { cmd: "yak_smoke_alias", "yield-time_ms": 250 },
           { workspaceRoot: home },
         )
-        const viaFunction = await execCommand.execute(
-          { cmd: "yak_smoke_fn", "yield-time_ms": 250 },
-          { workspaceRoot: home },
+        const output = requireOutput(result).output
+        expect(output).toContain(
+          `alias-ran|fn-ran|https://registry.example|policy|unset|unset|${home}`,
         )
-
-        expect(requireOutput(viaAlias).output).toContain("alias-ran")
-        expect(requireOutput(viaFunction).output).toContain("fn-ran")
-        await execCommand.dispose?.()
+        expect(output).toContain("70000")
+        expect(output).not.toContain("__YAKITORI_SHELL_SNAPSHOT_STATE_")
       } finally {
-        await rm(home, { recursive: true, force: true })
+        await execCommand.dispose?.()
       }
-    },
-  )
+    } finally {
+      await rm(home, { recursive: true, force: true })
+    }
+  })
 
   it.each([
     false,
