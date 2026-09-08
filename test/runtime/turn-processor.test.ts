@@ -1,11 +1,13 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import type { SessionEvent } from "../../src/core/session-io.ts"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
-import { createFauxProvider } from "../../src/runtime/faux-provider.ts"
+import { createFauxProvider } from "../support/faux-provider.ts"
 import { createSessionExecutionPolicy } from "../../src/runtime/limits.ts"
+import { HookEvent, type HookRunner } from "../../src/runtime/hooks.ts"
+import type { RolloutBudgetConfig } from "../../src/runtime/rollout-budget.ts"
 import type { ModelStreamEvent, StreamFn } from "../../src/runtime/model.ts"
 import { ModelStopReason } from "../../src/runtime/model.ts"
 import type { ModelClient } from "../../src/runtime/model-provider.ts"
@@ -37,6 +39,360 @@ afterEach(async () => {
 })
 
 describe("Turn processor", () => {
+  it("runs pre/post tool hooks around the approved tool invocation", async () => {
+    const events: string[] = []
+    const hookRunner: HookRunner = {
+      async run(request) {
+        events.push(request.event)
+        if (request.event === HookEvent.PreToolUse) {
+          return {
+            continue: true,
+            additionalContext: [],
+            updatedInput: { value: "after-hook" },
+          }
+        }
+        if (request.event === HookEvent.PostToolUse) {
+          return {
+            continue: true,
+            additionalContext: ["post-hook context"],
+          }
+        }
+        return {
+          continue: true,
+          additionalContext: [],
+        }
+      },
+    }
+    const provider = createFauxProvider([
+      {
+        stopReason: ModelStopReason.ToolUse,
+        content: [
+          {
+            type: "tool_call",
+            id: "hooked_call",
+            name: "hooked",
+            input: { value: "before-hook" },
+          },
+        ],
+      },
+      {
+        assertRequest(request) {
+          expect(
+            request.messages.some(
+              (message) =>
+                message.role === "tool" &&
+                message.content.includes("post-hook context"),
+            ),
+          ).toBe(true)
+        },
+        content: [{ type: "text", text: "done" }],
+      },
+    ])
+    const runtime = await createRuntime(
+      provider.stream,
+      createToolRegistry([
+        {
+          toolName: plainToolName("hooked"),
+          description: "hooked tool",
+          inputSchema: { type: "object" },
+          effect: "mutate",
+          approvalRequirement: { kind: "none" },
+          async execute(input) {
+            expect(input).toEqual({ value: "after-hook" })
+            return { ok: true, output: "complete", content: "tool complete" }
+          },
+        },
+      ]),
+      {
+        hookRunner,
+        sessionHookContext: {
+          sessionId: "session_hooked",
+          workspaceRoot: process.cwd(),
+          source: "startup",
+          isSubagent: true,
+        },
+      },
+    )
+    const thread = await runtime.createThread()
+    await thread.startIfIdle({ content: { kind: "text", text: "run" } })
+    await expect.poll(() => thread.agentStatus).toEqual({ completed: "done" })
+    await runtime.manager.shutdown()
+    expect(events).toEqual([
+      HookEvent.SubagentStart,
+      HookEvent.UserPromptSubmit,
+      HookEvent.PreToolUse,
+      HookEvent.PostToolUse,
+      HookEvent.SubagentStop,
+    ])
+  })
+
+  it("applies a body-after-prefix limit to growth after the first sampled input", async () => {
+    const provider = createFauxProvider([
+      {
+        content: [{ type: "text", text: "first done" }],
+        usage: {
+          inputTokens: 800,
+          outputTokens: 200,
+          activeContextTokens: 1_000,
+        },
+      },
+      {
+        content: [{ type: "text", text: "second done" }],
+        usage: {
+          inputTokens: 1_000,
+          outputTokens: 100,
+          activeContextTokens: 1_100,
+        },
+      },
+      {
+        assertRequest(request) {
+          expect(request.compaction).toBe("local")
+          expect(JSON.stringify(request.messages)).not.toContain(
+            "third request",
+          )
+        },
+        content: [{ type: "text", text: "checkpoint" }],
+      },
+      {
+        content: [{ type: "text", text: "third done" }],
+        usage: {
+          inputTokens: 50,
+          outputTokens: 10,
+          activeContextTokens: 60,
+        },
+      },
+    ])
+    const runtime = await createRuntime(
+      provider.stream,
+      createToolRegistry([]),
+      {
+        modelContextWindowTokens: 2_000,
+        modelAutoCompactTokenLimit: 300,
+        modelAutoCompactTokenLimitScope: "body_after_prefix",
+      },
+    )
+    const thread = await runtime.createThread()
+    for (const text of ["first request", "second request", "third request"]) {
+      await thread.startIfIdle({ content: { kind: "text", text } })
+      await nextLifecycleEvent(thread)
+      await nextLifecycleEvent(thread)
+    }
+
+    expect(provider.callCount).toBe(4)
+    expect(thread.snapshot().context).toMatchObject({
+      activeContextTokens: 60,
+      autoCompactPrefillTokens: 50,
+    })
+  })
+
+  it("compacts a running tool chain while retaining user corrections outside the summary", async () => {
+    let effects = 0
+    const provider = createFauxProvider([
+      {
+        stopReason: ModelStopReason.ToolUse,
+        content: [
+          { type: "tool_call", id: "work_once", name: "work", input: {} },
+        ],
+        usage: { activeContextTokens: 59_000 },
+      },
+      {
+        assertRequest(request) {
+          expect(request.compaction === "local").toBe(true)
+          expect(
+            request.messages.some(
+              (message) =>
+                message.role === "tool" && message.content === "work completed",
+            ),
+          ).toBe(true)
+        },
+        content: [
+          { type: "text", text: "The work was performed. Report its result." },
+        ],
+      },
+      {
+        assertRequest(request) {
+          expect(
+            request.messages.some(
+              (message) =>
+                message.role === "user" &&
+                message.content.some(
+                  (block) =>
+                    block.text ===
+                    "Complete the work. Do not change the public API.",
+                ),
+            ),
+          ).toBe(true)
+          expect(
+            request.messages.some((message) => message.role === "tool"),
+          ).toBe(false)
+        },
+        content: [{ type: "text", text: "Finished without API changes." }],
+      },
+    ])
+    const runtime = await createRuntime(
+      provider.stream,
+      createToolRegistry([
+        {
+          toolName: plainToolName("work"),
+          description: "Perform work",
+          inputSchema: { type: "object" },
+          effect: "mutate",
+          approvalRequirement: { kind: "none" },
+          async execute() {
+            effects += 1
+            return { ok: true, output: effects, content: "work completed" }
+          },
+        },
+      ]),
+      { modelContextWindowTokens: 60_000 },
+    )
+    const thread = await runtime.createThread()
+    await thread.startIfIdle({
+      content: {
+        kind: "text",
+        text: "Complete the work. Do not change the public API.",
+      },
+    })
+    await expect
+      .poll(() => thread.agentStatus)
+      .toEqual({ completed: "Finished without API changes." })
+    expect(effects).toBe(1)
+    expect(
+      (await runtime.store.readThread(thread.id))?.rollout.some(
+        ({ item }) => item.type === "compacted",
+      ),
+    ).toBe(true)
+  })
+
+  it.each([
+    45, 100,
+  ])("accounts for compaction in the shared budget of %i tokens", async (limitTokens) => {
+    let calls = 0
+    const requests: string[] = []
+    const stream: StreamFn = async function* (request) {
+      calls += 1
+      requests.push(JSON.stringify(request.messages))
+      const compacting = request.compaction === "local"
+      yield {
+        type: "response",
+        response: {
+          stopReason: ModelStopReason.EndTurn,
+          content: [
+            {
+              type: "text",
+              text: compacting
+                ? "checkpoint"
+                : calls === 1
+                  ? "old ".repeat(9000)
+                  : "done",
+            },
+          ],
+          usage: {
+            outputTokens: compacting ? 40 : 10,
+            activeContextTokens: compacting ? 100 : calls === 1 ? 40_000 : 100,
+          },
+        },
+      }
+    }
+    const runtime = await createRuntime(
+      stream,
+      createToolRegistry([]),
+      {
+        modelContextWindowTokens: 60_000,
+        modelAutoCompactTokenLimit: 30_000,
+      },
+      (threadId) =>
+        rootOnlyAgentControl(threadId, undefined, {
+          limitTokens,
+          reminderAtRemainingTokens: [],
+          samplingTokenWeight: 1,
+          prefillTokenWeight: 1,
+        }),
+    )
+    const thread = await runtime.createThread()
+    await thread.startIfIdle({ content: { kind: "text", text: "First." } })
+    await nextLifecycleEvent(thread)
+    await nextLifecycleEvent(thread)
+    await thread.startIfIdle({ content: { kind: "text", text: "Continue." } })
+    await nextLifecycleEvent(thread)
+    await nextLifecycleEvent(thread)
+    if (limitTokens === 45) {
+      expect(thread.agentStatus).toEqual({
+        errored: "Session rollout token budget exceeded.",
+      })
+      expect(calls).toBe(2)
+      expect(
+        (await runtime.store.readThread(thread.id))?.rollout.some(
+          ({ item }) => item.type === "compacted",
+        ),
+      ).toBe(false)
+    } else {
+      expect(thread.agentStatus).toEqual({ completed: "done" })
+      expect(requests.at(-1)).toContain("50 weighted tokens")
+    }
+  })
+
+  it("continues tool follow-ups until the model completes the task", async () => {
+    let completedTools = 0
+    let samples = 0
+    const stream: StreamFn = async function* () {
+      samples += 1
+      if (completedTools === 40) {
+        yield responseEvent("All forty work items completed.")
+        return
+      }
+      yield {
+        type: "response",
+        response: {
+          stopReason: ModelStopReason.ToolUse,
+          content: [0, 1].map((index) => ({
+            type: "tool_call" as const,
+            id: `work_${samples}_${index}`,
+            name: "work",
+            input: {},
+          })),
+        },
+      }
+    }
+    const runtime = await createRuntime(
+      stream,
+      createToolRegistry([
+        {
+          toolName: plainToolName("work"),
+          description: "Complete a work item",
+          inputSchema: { type: "object" },
+          effect: "mutate",
+          approvalRequirement: { kind: "none" },
+          async execute() {
+            completedTools += 1
+            return { ok: true, output: completedTools, content: "complete" }
+          },
+        },
+      ]),
+    )
+    const thread = await runtime.createThread()
+    await thread.startIfIdle({
+      content: { kind: "text", text: "Complete forty work items." },
+    })
+    await nextLifecycleEvent(thread)
+    await nextLifecycleEvent(thread)
+
+    expect(completedTools).toBe(40)
+    const stored = await runtime.store.readThread(thread.id)
+    expect(
+      stored?.rollout.some(
+        ({ item }) =>
+          item.type === "response_item" &&
+          item.item.item.role === "assistant" &&
+          item.item.item.content.some(
+            (block) =>
+              block.type === "text" &&
+              block.text === "All forty work items completed.",
+          ),
+      ),
+    ).toBe(true)
+  })
+
   it("disposes tools when model-client cleanup fails", async () => {
     let toolDisposed = false
     const toolRegistry = createToolRegistry([
@@ -55,6 +411,7 @@ describe("Turn processor", () => {
       },
     ])
     const modelClient: ModelClient = {
+      hasProvider: (provider) => provider === "faux",
       models: () => createStaticModelsManager("faux"),
       startTurn() {
         throw new Error("unused")
@@ -226,6 +583,22 @@ describe("Turn processor", () => {
         outputTokens: 3,
         activeContextTokens: 9,
       },
+    })
+    const assistant = stored?.rollout.find(
+      (entry) =>
+        entry.item.type === "response_item" &&
+        entry.item.item.item.role === "assistant",
+    )
+    expect(
+      stored?.rollout.find((entry) => entry.item.type === "token_count")?.item,
+    ).toMatchObject({
+      type: "token_count",
+      historyAnchorItemId:
+        assistant?.item.type === "response_item"
+          ? assistant.item.item.id
+          : undefined,
+      provider: "faux",
+      model: "scripted",
     })
     expect(
       stored?.rollout.find(
@@ -675,8 +1048,10 @@ describe("Turn processor", () => {
 
   it("uses a provider ModelsManager for Step capabilities and capacity validation", async () => {
     const fallback = createStaticModelsManager("faux")
+    const refresh = vi.fn(async () => undefined)
     const models: ModelsManager = {
       provider: "faux",
+      refresh,
       listModels: fallback.listModels,
       resolve(selection) {
         return { ...fallback.resolve(selection), shellToolType: "disabled" }
@@ -691,6 +1066,7 @@ describe("Turn processor", () => {
       },
     }
     const modelClient: ModelClient = {
+      hasProvider: (provider) => provider === "faux",
       models: () => models,
       startTurn() {
         return {
@@ -717,6 +1093,7 @@ describe("Turn processor", () => {
     await thread.startIfIdle({ content: { kind: "text", text: "run" } })
     expect((await nextLifecycleEvent(thread))?.type).toBe("turn.started")
     expect((await nextLifecycleEvent(thread))?.type).toBe("turn.completed")
+    expect(refresh).toHaveBeenCalled()
 
     const invalid = await createRuntime(
       () => {
@@ -1498,6 +1875,7 @@ describe("Turn processor", () => {
     const closes: number[] = []
     let sessions = 0
     const modelClient: ModelClient = {
+      hasProvider: (provider) => provider === "faux",
       models: () => createStaticModelsManager("faux"),
       startTurn() {
         const index = sessions
@@ -1844,7 +2222,7 @@ describe("Turn processor", () => {
     expect(nextCalls).toBe(1)
   })
 
-  it("compacts actor-owned history before sending an over-budget request", async () => {
+  it("compacts actor-owned history at the reported context threshold", async () => {
     const oldText = "old context ".repeat(3_000)
     const compactionStarted = deferred<void>()
     const releaseCompaction = deferred<void>()
@@ -1868,6 +2246,7 @@ describe("Turn processor", () => {
           expect(request.target.model).toBe("model-b")
         },
         content: [{ type: "text", text: oldText }],
+        usage: { activeContextTokens: 40_000 },
       },
       {
         assertRequest(request) {
@@ -1901,11 +2280,8 @@ describe("Turn processor", () => {
       stream,
       createToolRegistry([]),
       {
-        executionPolicy: createSessionExecutionPolicy({
-          modelVisibleContextBytes: 60_000,
-          compactionTriggerRatio: 0.5,
-          compactionRetainRatio: 0,
-        }),
+        modelContextWindowTokens: 60_000,
+        modelAutoCompactTokenLimit: 30_000,
         model: "model-a",
       },
       (threadId) => {
@@ -1956,13 +2332,16 @@ describe("Turn processor", () => {
       -1
     expect(compactedAt).toBeGreaterThan(-1)
     expect(stored?.rollout[compactedAt + 1]?.item).toMatchObject({
-      type: "world_state",
-      full: true,
+      type: "token_count",
     })
     expect(stored?.rollout[compactedAt + 2]?.item).toMatchObject({
       type: "item_completed",
       item: { type: "context_compaction", status: "completed" },
     })
+    const afterCompletion = stored?.rollout.slice(compactedAt + 3)
+    expect(
+      afterCompletion?.find(({ item }) => item.type === "world_state")?.item,
+    ).toMatchObject({ type: "world_state", full: true })
   })
 
   it("applies tool-result visibility limits to compaction sources", async () => {
@@ -1991,14 +2370,11 @@ describe("Turn processor", () => {
           expect(result?.content).not.toContain(hiddenTail)
         },
         content: [{ type: "text", text: oldText }],
+        usage: { activeContextTokens: 40_000 },
       },
       {
         assertRequest(request) {
-          expect(
-            request.system.some(
-              (section) => section.id === "compaction.instructions",
-            ),
-          ).toBe(true)
+          expect(request.compaction === "local").toBe(true)
           const serialized = JSON.stringify(request.messages)
           expect(serialized).toContain("...[truncated")
           expect(serialized).not.toContain(hiddenTail)
@@ -2024,10 +2400,9 @@ describe("Turn processor", () => {
       },
     ])
     const runtime = await createRuntime(provider.stream, tools, {
+      modelContextWindowTokens: 60_000,
+      modelAutoCompactTokenLimit: 30_000,
       executionPolicy: createSessionExecutionPolicy({
-        modelVisibleContextBytes: 60_000,
-        compactionTriggerRatio: 0.5,
-        compactionRetainRatio: 0,
         modelVisibleToolResultLines: 1,
       }),
     })
@@ -2042,20 +2417,108 @@ describe("Turn processor", () => {
     expect(provider.callCount).toBe(4)
   })
 
-  it("rejects a complete request that cannot fit before calling the provider", async () => {
-    const provider = createFauxProvider([])
+  it("lets the provider admit fresh input despite a conservative local estimate", async () => {
+    const provider = createFauxProvider([
+      { content: [{ type: "text", text: "accepted" }] },
+    ])
+    const runtime = await createRuntime(
+      provider.stream,
+      createToolRegistry([]),
+      { modelContextWindowTokens: 100 },
+    )
+    const thread = await runtime.createThread()
+    await thread.startIfIdle({
+      content: { kind: "text", text: "too large for the local estimate" },
+    })
+    await nextLifecycleEvent(thread)
+    await nextLifecycleEvent(thread)
+    expect(thread.agentStatus).toEqual({ completed: "accepted" })
+  })
+
+  it("estimates the complete durable history when the provider omits usage", async () => {
+    const provider = createFauxProvider([
+      { content: [{ type: "text", text: "large history ".repeat(200) }] },
+      {
+        assertRequest(request) {
+          expect(request.compaction).toBe("local")
+        },
+        content: [{ type: "text", text: "checkpoint" }],
+      },
+      { content: [{ type: "text", text: "continued" }] },
+    ])
+    const runtime = await createRuntime(provider.stream, createToolRegistry([]), {
+      modelContextWindowTokens: 100,
+    })
+    const thread = await runtime.createThread()
+
+    for (const text of ["first", "second"]) {
+      await thread.startIfIdle({ content: { kind: "text", text } })
+      await nextLifecycleEvent(thread)
+      await nextLifecycleEvent(thread)
+    }
+
+    expect(provider.callCount).toBe(3)
+    expect(thread.agentStatus).toEqual({ completed: "continued" })
+  })
+
+  it.each([
+    "terminal",
+    "thrown",
+    "code",
+  ])("marks %s provider overflow for compaction on the next Turn", async (failure) => {
+    const provider = createFauxProvider([
+      {
+        content: [{ type: "text", text: "older context ".repeat(2000) }],
+        usage: { activeContextTokens: 1000 },
+      },
+      failure !== "thrown"
+        ? {
+            stopReason: ModelStopReason.Error,
+            error: {
+              code: "context_length_exceeded",
+              message:
+                failure === "code"
+                  ? "Input rejected"
+                  : "context length exceeded",
+            },
+          }
+        : { throwBefore: new Error("context length exceeded") },
+      {
+        assertRequest(request) {
+          expect(request.compaction === "local").toBe(true)
+        },
+        content: [{ type: "text", text: "checkpoint" }],
+      },
+      {
+        content: [{ type: "text", text: "continued" }],
+        usage: { activeContextTokens: 100 },
+      },
+    ])
     const runtime = await createRuntime(
       provider.stream,
       createToolRegistry([]),
       {
-        modelContextWindowTokens: 100,
+        modelContextWindowTokens: 60_000,
+        executionPolicy: createSessionExecutionPolicy({}),
       },
     )
     const thread = await runtime.createThread()
-    await thread.startIfIdle({ content: { kind: "text", text: "too large" } })
-    await nextLifecycleEvent(thread)
-    expect((await nextLifecycleEvent(thread))?.type).toBe("session.error")
-    expect(provider.callCount).toBe(0)
+    for (const text of ["first", "overflow"]) {
+      await thread.startIfIdle({ content: { kind: "text", text } })
+      await nextLifecycleEvent(thread)
+      await nextLifecycleEvent(thread)
+    }
+    expect(provider.callCount).toBe(2)
+    expect(thread.snapshot().context.activeContextTokens).toBe(60_000)
+    expect(thread.agentStatus).toEqual({
+      errored:
+        failure === "code" ? "Input rejected" : "context length exceeded",
+    })
+    await thread.startIfIdle({ content: { kind: "text", text: "continue" } })
+    await expect
+      .poll(() => thread.agentStatus)
+      .toEqual({ completed: "continued" })
+    expect(thread.snapshot().context.activeContextTokens).toBe(100)
   })
 
   it("retries provider-overflowed compaction with an older prefix", async () => {
@@ -2063,9 +2526,7 @@ describe("Turn processor", () => {
     let compactionCalls = 0
     const operationalFailures: TurnProcessorOperationalFailure[] = []
     const stream: StreamFn = async function* (request) {
-      const compacting = request.system.some(
-        (section) => section.id === "compaction.instructions",
-      )
+      const compacting = request.compaction === "local"
       if (compacting) {
         compactionCalls += 1
         if (compactionCalls === 1) {
@@ -2076,14 +2537,14 @@ describe("Turn processor", () => {
       }
       normalCalls += 1
       const text = normalCalls <= 2 ? "a".repeat(15_000) : "b".repeat(35_000)
-      yield responseEvent(normalCalls === 4 ? "done" : text)
+      yield responseEvent(
+        normalCalls === 4 ? "done" : text,
+        normalCalls === 3 ? 70_000 : 20_000,
+      )
     }
     const runtime = await createRuntime(stream, createToolRegistry([]), {
-      executionPolicy: createSessionExecutionPolicy({
-        modelVisibleContextBytes: 100_000,
-        compactionTriggerRatio: 0.6,
-        compactionRetainRatio: 0,
-      }),
+      modelContextWindowTokens: 100_000,
+      modelAutoCompactTokenLimit: 60_000,
       onOperationalFailure(failure) {
         operationalFailures.push(failure)
       },
@@ -2111,13 +2572,11 @@ describe("Turn processor", () => {
     let normalCalls = 0
     let returnCalls = 0
     const stream: StreamFn = (request) => {
-      const compacting = request.system.some(
-        (section) => section.id === "compaction.instructions",
-      )
+      const compacting = request.compaction === "local"
       if (!compacting) {
         return (async function* () {
           normalCalls += 1
-          yield responseEvent("old".repeat(12_000))
+          yield responseEvent("old".repeat(12_000), 40_000)
         })()
       }
       let nextCalls = 0
@@ -2152,11 +2611,8 @@ describe("Turn processor", () => {
       return iterator
     }
     const runtime = await createRuntime(stream, createToolRegistry([]), {
-      executionPolicy: createSessionExecutionPolicy({
-        modelVisibleContextBytes: 60_000,
-        compactionTriggerRatio: 0.5,
-        compactionRetainRatio: 0,
-      }),
+      modelContextWindowTokens: 60_000,
+      modelAutoCompactTokenLimit: 30_000,
     })
     const thread = await runtime.createThread()
     await thread.startIfIdle({ content: { kind: "text", text: "first" } })
@@ -2236,12 +2692,18 @@ async function nextLifecycleEvent(thread: {
   }
 }
 
-function responseEvent(text: string): ModelStreamEvent {
+function responseEvent(
+  text: string,
+  activeContextTokens?: number,
+): ModelStreamEvent {
   return {
     type: "response",
     response: {
       stopReason: ModelStopReason.EndTurn,
       content: [{ type: "text", text }],
+      ...(activeContextTokens === undefined
+        ? {}
+        : { usage: { activeContextTokens } }),
     },
   }
 }
@@ -2249,9 +2711,11 @@ function responseEvent(text: string): ModelStreamEvent {
 function rootOnlyAgentControl(
   rootSessionId: string,
   deliverMessage: import("../../src/runtime/agent-control.ts").AgentControlAdapter["deliverMessage"] = async () => {},
+  rolloutBudget?: RolloutBudgetConfig,
 ): AgentControl {
   return createAgentControl({
     rootSessionId,
+    ...(rolloutBudget === undefined ? {} : { rolloutBudget }),
     adapter: {
       async createChild() {
         throw new Error("unused")

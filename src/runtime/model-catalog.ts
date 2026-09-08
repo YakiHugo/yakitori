@@ -8,34 +8,38 @@ export type InstructionProfileId =
   | "kimi"
 
 export type ResolvedModel = Readonly<{
-  readonly provider: string
-  readonly model: string
-  readonly instructionProfileId: InstructionProfileId
-  readonly inputModalities: readonly ModelInputModality[]
-  readonly imageDetailModes: readonly ModelImageDetailMode[]
-  readonly shellToolType: ModelShellToolType
-  readonly applyPatchToolType?: ModelApplyPatchToolType
-  readonly fileEditingToolType: ModelFileEditingToolType
-  readonly supportsNativeToolSearch: boolean
-  readonly supportsCustomTools: boolean
-  readonly usedFallbackModelMetadata: boolean
+  autoCompactTokenLimit?: number
+  compactionHash?: string
+  provider: string
+  model: string
+  instructionProfileId: InstructionProfileId
+  inputModalities: readonly ModelInputModality[]
+  imageDetailModes: readonly ModelImageDetailMode[]
+  shellToolType: ModelShellToolType
+  applyPatchToolType?: ModelApplyPatchToolType
+  fileEditingToolType: ModelFileEditingToolType
+  supportsNativeToolSearch: boolean
+  supportsCustomTools: boolean
+  usedFallbackModelMetadata: boolean
 }>
 
-export type CatalogModel = {
-  readonly model: string
-  readonly instructionProfileId: InstructionProfileId
-  readonly shellToolType: ModelShellToolType
-  readonly applyPatchToolType?: ModelApplyPatchToolType
-  readonly fileEditingToolType: ModelFileEditingToolType
-  readonly supportsNativeToolSearch: boolean
-  readonly supportsCustomTools?: boolean
-  readonly displayName?: string
-  readonly effortStyle?: "none" | "levels"
-  readonly efforts?: readonly string[]
-  readonly speeds?: readonly string[]
-  readonly inputModalities: readonly ModelInputModality[]
-  readonly imageDetailModes: readonly ModelImageDetailMode[]
-}
+export type CatalogModel = Readonly<{
+  autoCompactTokenLimit?: number
+  compactionHash?: string
+  model: string
+  instructionProfileId: InstructionProfileId
+  shellToolType: ModelShellToolType
+  applyPatchToolType?: ModelApplyPatchToolType
+  fileEditingToolType: ModelFileEditingToolType
+  supportsNativeToolSearch: boolean
+  supportsCustomTools?: boolean
+  displayName?: string
+  effortStyle?: "none" | "levels"
+  efforts?: readonly string[]
+  speeds?: readonly string[]
+  inputModalities: readonly ModelInputModality[]
+  imageDetailModes: readonly ModelImageDetailMode[]
+}>
 
 export type ModelInputModality = "image" | "text" | "video"
 export type ModelImageDetailMode = "high" | "original"
@@ -65,6 +69,13 @@ export function listCatalogModels(provider: string): CatalogModel[] {
     .filter((entry) => entry.provider.toLowerCase() === normalized)
     .map((entry) => ({
       model: entry.model,
+      ...("autoCompactTokenLimit" in entry &&
+      typeof entry.autoCompactTokenLimit === "number"
+        ? { autoCompactTokenLimit: entry.autoCompactTokenLimit }
+        : {}),
+      ...("compactionHash" in entry && typeof entry.compactionHash === "string"
+        ? { compactionHash: entry.compactionHash }
+        : {}),
       instructionProfileId: requireInstructionProfileId(
         entry.instructionProfileId,
       ),
@@ -128,6 +139,13 @@ export function resolveModel(input: {
   if (entry !== undefined) {
     return {
       ...input,
+      ...("autoCompactTokenLimit" in entry &&
+      typeof entry.autoCompactTokenLimit === "number"
+        ? { autoCompactTokenLimit: entry.autoCompactTokenLimit }
+        : {}),
+      ...("compactionHash" in entry && typeof entry.compactionHash === "string"
+        ? { compactionHash: entry.compactionHash }
+        : {}),
       instructionProfileId: requireInstructionProfileId(
         entry.instructionProfileId,
       ),

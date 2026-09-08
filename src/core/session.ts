@@ -10,6 +10,7 @@ import { createTurnId } from "../kernel/ids.ts"
 import { fingerprintInputAdmission } from "../kernel/operation.ts"
 import { ContextManager, type ContextSnapshot } from "./context-manager.ts"
 import type {
+  ModelContextSettings,
   ResponseItemEnvelope,
   RolloutItem,
   StoredThread,
@@ -38,7 +39,6 @@ const gracefulInterruptionTimeoutMs = 100
 export type SessionSnapshot = {
   readonly metadata: ThreadMetadata
   readonly context: ContextSnapshot
-  readonly contextRevision: number
   readonly configuration?: SessionConfigurationSnapshot
   readonly activeTurnId?: string
 }
@@ -52,8 +52,19 @@ export type TurnControl = {
 }
 
 export type TurnRuntime = {
+  recordModelContext(settings: ModelContextSettings): Promise<void>
   snapshot(): SessionSnapshot
   recordUsage(usage: TokenUsage): void
+  recordContextTokens(
+    input: Readonly<{
+      activeContextTokens: number
+      inputTokens?: number
+      estimatedPrefill?: boolean
+      historyAnchorItemId: string
+      provider: string
+      model: string
+    }>,
+  ): Promise<void>
   emitModelStream(input: {
     readonly itemId: string
     readonly kind: "assistant" | "reasoning"
@@ -75,8 +86,8 @@ export type TurnRuntime = {
   replaceConversationHistory(input: {
     readonly replacement: readonly ResponseItemEnvelope[]
     readonly summary: string
-    readonly baseContextRevision: number
     readonly baseHistoryLength: number
+    readonly worldState?: Readonly<{ state: JsonObject; snapshot: JsonObject }>
   }): Promise<void>
 }
 
@@ -152,7 +163,6 @@ export class Session {
   readonly #onPersistenceError?: ((error: unknown) => void) | undefined
   #status: SessionStatus = SessionStatus.Idle
   #agentStatus: AgentStatus
-  #contextRevision = 0
   #activeTurn: ActiveTurn | undefined
   #closing = false
   readonly #submissionLoop: Promise<void>
@@ -210,7 +220,6 @@ export class Session {
     return {
       metadata: structuredClone(this.#metadata),
       context: this.#contextManager.snapshot(),
-      contextRevision: this.#contextRevision,
       ...(this.#configuration === undefined
         ? {}
         : { configuration: structuredClone(this.#configuration) }),
@@ -424,7 +433,6 @@ export class Session {
       inputItemId: inputItem.id,
     })
     this.#contextManager.record([inputItem])
-    this.#contextRevision += 1
     try {
       await this.#appendRollout([
         { type: "response_item", item: inputItem },
@@ -640,6 +648,11 @@ export class Session {
       }
     }
     return {
+      recordModelContext: async (settings) => {
+        requireLease()
+        await this.#appendRollout([{ type: "model_context", settings }])
+        this.#contextManager.setPreviousModel(settings)
+      },
       snapshot: () => {
         requireLease()
         return this.snapshot()
@@ -647,6 +660,31 @@ export class Session {
       recordUsage: (usage) => {
         requireActive()
         active.usage = structuredClone(usage)
+      },
+      recordContextTokens: async (input) => {
+        requireLease()
+        if (
+          !Number.isSafeInteger(input.activeContextTokens) ||
+          input.activeContextTokens < 0 ||
+          (input.inputTokens !== undefined &&
+            (!Number.isSafeInteger(input.inputTokens) || input.inputTokens < 0))
+          || input.historyAnchorItemId.trim().length === 0
+          || input.provider.trim().length === 0
+          || input.model.trim().length === 0
+        ) {
+          throw new Error(
+            "Active context tokens must be a non-negative integer.",
+          )
+        }
+        const next = this.#contextManager.contextTokensAfterUpdate(input)
+        await this.#appendRollout([
+          {
+            type: "token_count",
+            turnId: active.input.submissionId,
+            ...next,
+          },
+        ])
+        this.#contextManager.setContextTokens(next)
       },
       emitModelStream: (input) => {
         requireLease()
@@ -700,7 +738,6 @@ export class Session {
             items.map((item): RolloutItem => ({ type: "response_item", item })),
           )
           this.#contextManager.record(items)
-          this.#contextRevision += 1
         })
       },
       recordItemCompletions: async (items) => {
@@ -722,7 +759,6 @@ export class Session {
           requireLease()
           if (items.length > 0) {
             this.#contextManager.record(items)
-            this.#contextRevision += 1
           }
           this.#contextManager.setWorldStateBaseline(update.snapshot)
           await this.#appendRollout([
@@ -743,15 +779,18 @@ export class Session {
         await this.#withContextMutation(async () => {
           requireLease()
           const current = this.#contextManager.snapshot().history
-          const concurrentTail =
-            this.#contextRevision === input.baseContextRevision
-              ? []
-              : current.slice(input.baseHistoryLength)
+          // A pre-Turn checkpoint covers only the old prefix. Keep both the
+          // already admitted current input and messages appended meanwhile.
+          const concurrentTail = current.slice(input.baseHistoryLength)
           this.#contextManager.replace([
             ...input.replacement,
             ...concurrentTail,
           ])
-          this.#contextRevision += 1
+          if (input.worldState !== undefined) {
+            this.#contextManager.setWorldStateBaseline(
+              input.worldState.snapshot,
+            )
+          }
           await this.#appendRollout([
             {
               type: "compacted",
@@ -759,6 +798,16 @@ export class Session {
               replacement: [...input.replacement, ...concurrentTail],
               summary: input.summary,
             },
+            ...(input.worldState === undefined
+              ? []
+              : [
+                  {
+                    type: "world_state" as const,
+                    turnId: active.input.submissionId,
+                    full: true,
+                    state: input.worldState.state,
+                  },
+                ]),
           ])
         })
       },
@@ -923,7 +972,6 @@ export class Session {
           accepted = { envelope, items }
           this.#acceptedAgentMessages.set(messageId, accepted)
           this.#contextManager.record([envelope])
-          this.#contextRevision += 1
           try {
             accepted.throughSeq = await append
           } catch {

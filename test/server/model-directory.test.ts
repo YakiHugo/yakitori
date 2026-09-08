@@ -107,6 +107,7 @@ describe("model directory", () => {
         stream: async function* () {},
         models: {
           provider: "custom",
+          async refresh() {},
           async listModels() {
             return [
               {

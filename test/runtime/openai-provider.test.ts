@@ -14,6 +14,102 @@ import {
 } from "../../src/runtime/openai-provider.ts"
 
 describe("OpenAI Responses provider", () => {
+  it("sends the native compaction control and collects its streamed item before completion", async () => {
+    const client = new OpenAI({
+      apiKey: "test",
+      maxRetries: 0,
+      fetch: async (_url, init) => {
+        const body = JSON.parse(String(init?.body))
+        expect(body.input.at(-1)).toEqual({ type: "compaction_trigger" })
+        expect(body.tools).toEqual([])
+        const events = [
+          {
+            type: "response.output_item.done",
+            item: {
+              type: "compaction",
+              id: "cmp_stream",
+              encrypted_content: "ciphertext",
+              internal_chat_message_metadata_passthrough: { backend: "value" },
+            },
+          },
+          {
+            type: "response.completed",
+            response: responseFixture({ output: [] }),
+          },
+        ]
+        return new globalThis.Response(
+          events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""),
+          { headers: { "content-type": "text/event-stream" } },
+        )
+      },
+    })
+    const stream = createOpenAIProvider({
+      apiKey: "test",
+      model: "gpt-test",
+      client,
+    })
+    const events = []
+    for await (const event of stream(
+      requestFixture({
+        compaction: "remote_v2",
+        continuationScope: "account_one",
+      }),
+    ))
+      events.push(event)
+    expect(events).toMatchObject([
+      {
+        type: "response",
+        response: {
+          providerRequestId: "response_1",
+          content: [
+            {
+              type: "compaction",
+              id: "cmp_stream",
+              scope: "account_one",
+              encryptedContent: "ciphertext",
+              metadata: { backend: "value" },
+            },
+          ],
+        },
+      },
+    ])
+    const terminal = events.at(-1)
+    if (terminal?.type !== "response")
+      throw new Error("missing completed response")
+    const history = [
+      { role: "assistant" as const, content: terminal.response.content },
+    ]
+    expect(toOpenAIInput(history, true, "openai", "account_one")).toEqual([
+      {
+        type: "compaction",
+        id: "cmp_stream",
+        encrypted_content: "ciphertext",
+        internal_chat_message_metadata_passthrough: { backend: "value" },
+      },
+    ])
+    expect(() => toOpenAIInput(history, true, "grok", "account_one")).toThrow(
+      "another provider or account",
+    )
+    expect(() => toOpenAIInput(history, true, "openai", "account_two")).toThrow(
+      "another provider or account",
+    )
+  })
+  it("preserves authoritative weighted rollout units from the provider", () => {
+    const response = responseFixture({
+      usage: { input_tokens: 10, output_tokens: 4 },
+    })
+    if (response.usage === undefined) throw new Error("missing usage fixture")
+    Object.assign(response.usage, { codex_rollout_budget_units: 2.5 })
+    expect(fromOpenAIResponse(response).usage?.rolloutBudgetUnits).toBe(2.5)
+    Object.assign(response.usage, { codex_rollout_budget_units: null })
+    expect(
+      fromOpenAIResponse(response).usage?.rolloutBudgetUnits,
+    ).toBeUndefined()
+    Object.assign(response.usage, { codex_rollout_budget_units: "NaN" })
+    expect(() => fromOpenAIResponse(response)).toThrow(
+      "must be finite and non-negative",
+    )
+  })
   it("converts internal history and function tools", () => {
     expect(
       toOpenAIInput([
@@ -1053,7 +1149,7 @@ describe("OpenAI provider error classification", () => {
     ])
   })
 
-  it("keeps a 400 API error free of retry details", async () => {
+  it("preserves an invalid-request status without making it retryable", async () => {
     const error = new OpenAI.APIError(400, undefined, undefined, new Headers())
 
     const events = await collectWithThrowingClient(error)
@@ -1064,7 +1160,11 @@ describe("OpenAI provider error classification", () => {
         response: {
           stopReason: ModelStopReason.Error,
           content: [],
-          error: { code: "openai_error", message: error.message },
+          error: {
+            code: "openai_error",
+            message: error.message,
+            details: { status: 400 },
+          },
         },
       },
     ])

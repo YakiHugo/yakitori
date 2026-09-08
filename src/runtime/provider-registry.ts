@@ -47,7 +47,9 @@ export function createProviderRegistry(
       return requireProvider(provider).models
     },
     createClient() {
-      return createRegistryClient(requireProvider)
+      return createRegistryClient(requireProvider, (provider) =>
+        byId.has(provider),
+      )
     },
     stream(request) {
       return streamSingleRequest(
@@ -60,11 +62,13 @@ export function createProviderRegistry(
 
 function createRegistryClient(
   requireProvider: (provider: string) => ModelProvider,
+  hasProvider: (provider: string) => boolean,
 ): ModelClient {
   const clients = new Map<string, ModelProviderClient>()
   const turnSessions = new Set<ReturnType<ModelClient["startTurn"]>>()
   let closed = false
   return {
+    hasProvider,
     models(provider) {
       return requireProvider(provider).models
     },
@@ -78,6 +82,7 @@ function createRegistryClient(
       const session = client.startTurn()
       let closePromise: Promise<void> | undefined
       const ownedSession: ReturnType<ModelClient["startTurn"]> = {
+        remoteCompaction: session.remoteCompaction ?? false,
         stream(request) {
           if (request.target.provider !== provider) {
             throw new Error(

@@ -67,12 +67,17 @@ async function* streamOpenAI(
       {
         model: request.target.model || defaultModel,
         instructions: flattenModelSystem(request.system),
-        input: toOpenAIInput(
-          request.messages,
-          nativeDeferredLoading,
-          request.target.provider,
-          request.continuationScope,
-        ),
+        input: [
+          ...toOpenAIInput(
+            request.messages,
+            nativeDeferredLoading,
+            request.target.provider,
+            request.continuationScope,
+          ),
+          ...(request.compaction === "remote_v2"
+            ? [{ type: "compaction_trigger" as const }]
+            : []),
+        ],
         tools: toOpenAITools(request.tools, nativeDeferredLoading),
         parallel_tool_calls: true,
         max_output_tokens:
@@ -105,6 +110,7 @@ async function* streamOpenAI(
     )
     let text = ""
     let reasoning = ""
+    const compactionItems: Response["output"] = []
     for await (const event of stream) {
       if (request.signal?.aborted) {
         yield abortedResponse()
@@ -121,6 +127,13 @@ async function* streamOpenAI(
         continue
       }
       if (
+        event.type === "response.output_item.done" &&
+        event.item.type === "compaction"
+      ) {
+        compactionItems.push(event.item)
+        continue
+      }
+      if (
         event.type === "response.completed" ||
         event.type === "response.incomplete" ||
         event.type === "response.failed"
@@ -128,10 +141,21 @@ async function* streamOpenAI(
         yield {
           type: "response",
           response: fromOpenAIResponse(
-            event.response,
+            compactionItems.length === 0
+              ? event.response
+              : {
+                  ...event.response,
+                  output: [
+                    ...event.response.output.filter(
+                      (item) => item.type !== "compaction",
+                    ),
+                    ...compactionItems,
+                  ],
+                },
             customFallbackKeys,
             request.target.provider,
             request.continuationScope,
+            request.target.model,
           ),
         }
         return
@@ -275,6 +299,23 @@ export function toOpenAIInput(
       text = ""
     }
     for (const block of message.content) {
+      if (block.type === "compaction") {
+        flushText()
+        if (block.provider !== provider || block.scope !== continuationScope) {
+          throw new Error(
+            "Native compaction belongs to another provider or account; convert it through its owner before continuing.",
+          )
+        }
+        input.push({
+          type: "compaction",
+          encrypted_content: block.encryptedContent,
+          ...(block.id === undefined ? {} : { id: block.id }),
+          ...(block.metadata === undefined
+            ? {}
+            : { internal_chat_message_metadata_passthrough: block.metadata }),
+        })
+        continue
+      }
       if (block.type === "reasoning") {
         flushText()
         const reasoning = toOpenAIReasoningItem(
@@ -374,6 +415,7 @@ export function fromOpenAIResponse(
   customFallbackKeys: ReadonlyMap<string, string> = new Map(),
   provider = "openai",
   continuationScope?: string,
+  model = response.model,
 ): ModelResponse {
   if (response.status === "cancelled") {
     return { stopReason: ModelStopReason.Aborted, content: [] }
@@ -403,6 +445,30 @@ export function fromOpenAIResponse(
 
   const content: ModelContentBlock[] = []
   for (const item of response.output) {
+    if (item.type === "compaction") {
+      if (
+        continuationScope === undefined ||
+        item.encrypted_content.length === 0
+      ) {
+        throw new Error(
+          "Native compaction requires non-empty encrypted content and an account scope.",
+        )
+      }
+      const metadata =
+        "internal_chat_message_metadata_passthrough" in item
+          ? item.internal_chat_message_metadata_passthrough
+          : undefined
+      content.push({
+        type: "compaction",
+        provider,
+        model,
+        scope: continuationScope,
+        encryptedContent: item.encrypted_content,
+        id: item.id,
+        ...(isJsonObject(metadata) ? { metadata } : {}),
+      })
+      continue
+    }
     if (item.type === "reasoning") {
       const text = item.summary.map((summary) => summary.text).join("\n\n")
       content.push({
@@ -557,6 +623,16 @@ function toOpenAIReasoningItem(
   }
 }
 
+function parseRolloutBudgetUnits(value: unknown): number {
+  const units = typeof value === "number" ? value : Number.NaN
+  if (!Number.isFinite(units) || units < 0) {
+    throw new Error(
+      "Provider rollout budget units must be finite and non-negative.",
+    )
+  }
+  return units
+}
+
 function responseResult(
   response: Response,
   stopReason: ModelResponse["stopReason"],
@@ -570,6 +646,14 @@ function responseResult(
       ? {}
       : {
           usage: {
+            ...("codex_rollout_budget_units" in response.usage &&
+            response.usage.codex_rollout_budget_units != null
+              ? {
+                  rolloutBudgetUnits: parseRolloutBudgetUnits(
+                    response.usage.codex_rollout_budget_units,
+                  ),
+                }
+              : {}),
             inputTokens: response.usage.input_tokens,
             activeContextTokens: activeContextTokens(response.usage, provider),
             outputTokens: response.usage.output_tokens,
@@ -673,13 +757,11 @@ function retryableDetails(error: unknown): JsonObject | undefined {
 function providerErrorDetails(error: unknown): JsonObject | undefined {
   const retryable = retryableDetails(error)
   if (error instanceof OpenAI.APIError && typeof error.status === "number") {
-    if (retryable !== undefined || error.status === 401) {
-      const retryAfterMs = parseRetryAfterMs(error.headers)
-      return {
-        ...(retryable ?? {}),
-        status: error.status,
-        ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
-      }
+    const retryAfterMs = parseRetryAfterMs(error.headers)
+    return {
+      ...(retryable ?? {}),
+      status: error.status,
+      ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
     }
   }
   return retryable

@@ -1,10 +1,5 @@
 import { describe, expect, it } from "vitest"
 import {
-  createSessionExecutionPolicy,
-  deriveCompactionContextBytes,
-  deriveModelVisibleContextBytes,
-} from "../../src/runtime/limits.ts"
-import {
   catalogContextWindowTokens,
   catalogModelCapabilities,
   catalogModelCapacity,
@@ -162,35 +157,5 @@ describe("model catalog context windows", () => {
       supportsNativeToolSearch: false,
       usedFallbackModelMetadata: true,
     })
-  })
-})
-
-describe("deriveModelVisibleContextBytes", () => {
-  it("keeps the full tokenizer-free capacity estimate", () => {
-    expect(deriveModelVisibleContextBytes(200_000)).toBe(800_000)
-    expect(deriveModelVisibleContextBytes(1_000_000)).toBe(4_000_000)
-    expect(deriveModelVisibleContextBytes(8_000)).toBe(32_000)
-  })
-})
-
-describe("compaction context baseline", () => {
-  it("derives an 80% trigger and 16% verbatim tail by default", () => {
-    const limits = createSessionExecutionPolicy()
-    expect(
-      deriveCompactionContextBytes({
-        modelVisibleContextBytes: 1_000_000,
-        triggerRatio: limits.compactionTriggerRatio,
-        retainRatio: limits.compactionRetainRatio,
-      }),
-    ).toEqual({ triggerBytes: 800_000, retainBytes: 160_000 })
-  })
-
-  it("rejects a retention target that reaches the trigger", () => {
-    expect(() =>
-      createSessionExecutionPolicy({
-        compactionTriggerRatio: 0.8,
-        compactionRetainRatio: 0.8,
-      }),
-    ).toThrow("less than compactionTriggerRatio")
   })
 })

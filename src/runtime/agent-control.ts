@@ -1,5 +1,6 @@
 import type { ForkedModelContext } from "./model-context.ts"
 import type { AgentStatus } from "../core/session-io.ts"
+import { RolloutBudget, type RolloutBudgetConfig } from "./rollout-budget.ts"
 
 export type AgentType = "general" | "explore"
 export type ForkTurns = "none" | "all" | number
@@ -108,6 +109,7 @@ export type AgentUpdate = Readonly<{
 }>
 
 export type AgentControl = Readonly<{
+  rolloutBudget: RolloutBudget
   bind(sessionId: string, target: AgentModelTarget): BoundAgentControl
   registerAgent(input: AgentRegistration): void
   unregisterAgent(agentId: string): void
@@ -156,6 +158,7 @@ type InFlightSpawn = Readonly<{
 const ROOT_TASK_NAME = "root"
 
 export function createAgentControl(input: {
+  readonly rolloutBudget?: RolloutBudgetConfig
   readonly rootSessionId: string
   readonly adapter: AgentControlAdapter
   readonly maxDepth?: number
@@ -649,6 +652,7 @@ export function createAgentControl(input: {
 
   return {
     bind,
+    rolloutBudget: new RolloutBudget(input.rolloutBudget),
     registerAgent,
     unregisterAgent,
     runtimeContext(sessionId) {

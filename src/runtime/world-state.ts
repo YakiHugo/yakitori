@@ -15,12 +15,14 @@ import {
 } from "./environment-context.ts"
 import type { ProjectInstructions } from "./project-instructions.ts"
 import type { ResolvedStepConfiguration } from "./session-configuration.ts"
+import type { SkillsCatalog } from "./skills.ts"
 
 export const WorldStateSectionId = {
   Model: "model",
   ProjectInstructions: "project.instructions",
   Environment: "environment",
   MultiAgent: "multi_agent",
+  Skills: "skills",
 } as const
 
 export type PreviousSectionState<T> =
@@ -53,6 +55,7 @@ export function buildWorldStateFromSnapshot(input: {
   readonly environment: EnvironmentSnapshot
   readonly projectInstructions?: ProjectInstructions
   readonly multiAgent?: AgentRuntimeContext
+  readonly skills?: SkillsCatalog
 }): WorldState {
   return {
     sections: [
@@ -72,9 +75,57 @@ export function buildWorldStateFromSnapshot(input: {
             ),
           ]),
       projectInstructionsSection(input.projectInstructions),
+      skillsSection(input.skills),
       environmentSection(input.environment),
     ],
   }
+}
+
+function skillsSection(
+  catalog: SkillsCatalog | undefined,
+): ErasedWorldStateSection {
+  const snapshot: JsonObject = {
+    skills:
+      catalog?.skills.map((skill) => ({
+        name: skill.name,
+        description: skill.description,
+        path: skill.path,
+        scope: skill.scope,
+      })) ?? [],
+    truncated: catalog?.truncated ?? false,
+  }
+  return section({
+    id: WorldStateSectionId.Skills,
+    snapshot,
+    decode: jsonObjectSnapshot,
+    render(previous) {
+      if (previous.type === "known" && equalJson(previous.snapshot, snapshot)) {
+        return []
+      }
+      if (catalog === undefined) {
+        return previous.type === "known" &&
+          Array.isArray(previous.snapshot.skills) &&
+          previous.snapshot.skills.length > 0
+          ? [
+              fragment(
+                WorldStateSectionId.Skills,
+                "developer",
+                "<skills_update>No skills are currently available.</skills_update>",
+              ),
+            ]
+          : []
+      }
+      return [
+        fragment(
+          WorldStateSectionId.Skills,
+          "developer",
+          previous.type === "absent"
+            ? catalog.text
+            : `<skills_update>Replace the previous skills catalog with this catalog.\n\n${catalog.text}\n</skills_update>`,
+        ),
+      ]
+    },
+  })
 }
 
 function multiAgentSection(

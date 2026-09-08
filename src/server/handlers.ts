@@ -30,7 +30,7 @@ import {
   type TokenUsage,
   YakitoriErrorCode,
 } from "../kernel/index.ts"
-import { SessionExecutionPolicyDefaults } from "../runtime/limits.ts"
+import { DEFAULT_INPUT_ADMISSION_BYTES } from "../runtime/limits.ts"
 import { createCoalescingDeltaPublisher } from "../runtime/live-events.ts"
 import type {
   RuntimePermissionReason,
@@ -487,8 +487,7 @@ export function createThreadServerHandlers(
       try {
         const request = requireForkSessionRequest(
           input,
-          options.maxInputBytes ??
-            SessionExecutionPolicyDefaults.modelVisibleContextBytes,
+          options.maxInputBytes ?? DEFAULT_INPUT_ADMISSION_BYTES,
         )
         requireAvailableProvider(
           request.modelSelection?.provider,
@@ -575,8 +574,7 @@ export function createThreadServerHandlers(
       try {
         const request = requireAdmitInputRequest(
           input,
-          options.maxInputBytes ??
-            SessionExecutionPolicyDefaults.modelVisibleContextBytes,
+          options.maxInputBytes ?? DEFAULT_INPUT_ADMISSION_BYTES,
         )
         requireAvailableProvider(
           request.modelSelection?.provider,

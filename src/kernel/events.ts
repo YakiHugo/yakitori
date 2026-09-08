@@ -131,6 +131,18 @@ export type ModelReasoningBlock = {
   readonly providerMetadata?: JsonObject
 }
 
+// Opaque history owned by one provider/account. Convert it through that owner
+// before a cross-provider handoff; dropping it would silently lose context.
+export type ModelCompactionBlock = Readonly<{
+  type: "compaction"
+  provider: string
+  model: string
+  scope: string
+  encryptedContent: string
+  id?: string
+  metadata?: JsonObject
+}>
+
 export type ModelToolInputFormat = Readonly<{
   type: "grammar"
   syntax: "lark"
@@ -159,6 +171,7 @@ export type ModelToolCallBlock = {
 export type ModelContentBlock =
   | ModelTextBlock
   | ModelReasoningBlock
+  | ModelCompactionBlock
   | ModelToolCallBlock
 
 export type ModelHistoryContext = {
@@ -260,20 +273,6 @@ export type TokenUsage = {
   readonly activeContextTokens?: number
 }
 
-// Provider-reported input usage is authoritative only for the exact request
-// prefix that produced it. Persist the proof needed to reuse that calibration
-// without making request-budget diagnostics part of the GUI event protocol.
-export type ProviderUsageBaseline = {
-  readonly provider: string
-  readonly model: string
-  readonly contextWindowId: string
-  readonly systemRevisions: readonly string[]
-  readonly toolContractDigest: string
-  readonly messagePrefixDigests: readonly string[]
-  readonly providerInputTokens: number
-  readonly estimatedInputTokens: number
-}
-
 export type TurnMetrics = {
   readonly modelCalls: number
   readonly toolCalls: number
@@ -283,12 +282,6 @@ export type TurnMetrics = {
 }
 
 export type TurnExecutionLimits = {
-  readonly modelCallsPerTurn: number
-  readonly toolCallsPerTurn: number
-  readonly modelVisibleMessageBlocks: number
-  readonly modelVisibleContextBytes: number
-  readonly compactionTriggerContextBytes: number
-  readonly compactionRetainContextBytes: number
   readonly modelVisibleToolResultBytes: number
   readonly modelVisibleToolResultLines: number
   readonly assistantResponseBytes: number
@@ -315,22 +308,16 @@ export type BaseInstructionsSnapshot = {
 }
 
 export type SessionExecutionPolicyDefaultsSnapshot = {
-  readonly modelCallsPerTurn: number
-  readonly toolCallsPerTurn: number
-  readonly modelVisibleMessageBlocks: number
-  readonly modelVisibleContextBytes: number
-  readonly compactionTriggerRatio: number
-  readonly compactionRetainRatio: number
   readonly modelVisibleToolResultBytes: number
   readonly modelVisibleToolResultLines: number
-  readonly compactionSummaryBytes: number
   readonly assistantResponseBytes: number
 }
 
 export type ApprovalPolicy = "always_approve" | "auto_file_tools"
+export type AutoCompactTokenLimitScope = "body_after_prefix" | "total"
 
 export type SessionConfigurationSnapshot = {
-  readonly schemaVersion: 4
+  readonly schemaVersion: 5
   readonly workspaceRoot: string
   readonly promptCacheKey: string
   readonly defaultTarget: ModelSelection
@@ -339,6 +326,8 @@ export type SessionConfigurationSnapshot = {
   readonly approvalPolicy: ApprovalPolicy
   readonly executionPolicyDefaults: SessionExecutionPolicyDefaultsSnapshot
   readonly modelContextWindowTokens?: number
+  readonly modelAutoCompactTokenLimit?: number
+  readonly modelAutoCompactTokenLimitScope: AutoCompactTokenLimitScope
 }
 
 export type TurnExecutionContext = {
@@ -1426,6 +1415,24 @@ function isModelContentBlock(value: unknown): boolean {
         isJsonObject(value.providerMetadata))
     )
   }
+  if (value.type === "compaction") {
+    return (
+      onlyKeys(value, [
+        "type",
+        "provider",
+        "model",
+        "scope",
+        "encryptedContent",
+        "id",
+        "metadata",
+      ]) &&
+      [value.provider, value.model, value.scope, value.encryptedContent].every(
+        (field) => typeof field === "string" && field.length > 0,
+      ) &&
+      (value.id === undefined || isString(value.id)) &&
+      (value.metadata === undefined || isJsonObject(value.metadata))
+    )
+  }
   return (
     value.type === "tool_call" &&
     onlyKeys(value, [
@@ -1528,8 +1535,10 @@ export function isSessionConfigurationSnapshot(
       "approvalPolicy",
       "executionPolicyDefaults",
       "modelContextWindowTokens",
+      "modelAutoCompactTokenLimit",
+      "modelAutoCompactTokenLimitScope",
     ]) ||
-    value.schemaVersion !== 4 ||
+    value.schemaVersion !== 5 ||
     !isString(value.workspaceRoot) ||
     !isString(value.promptCacheKey) ||
     value.promptCacheKey.trim().length === 0 ||
@@ -1541,7 +1550,11 @@ export function isSessionConfigurationSnapshot(
       value.approvalPolicy !== "auto_file_tools") ||
     !isSessionExecutionPolicyDefaults(value.executionPolicyDefaults) ||
     (value.modelContextWindowTokens !== undefined &&
-      !isPositiveInteger(value.modelContextWindowTokens))
+      !isPositiveInteger(value.modelContextWindowTokens)) ||
+    (value.modelAutoCompactTokenLimit !== undefined &&
+      !isPositiveInteger(value.modelAutoCompactTokenLimit)) ||
+    (value.modelAutoCompactTokenLimitScope !== "total" &&
+      value.modelAutoCompactTokenLimitScope !== "body_after_prefix")
   ) {
     return false
   }
@@ -1587,24 +1600,13 @@ function isSessionExecutionPolicyDefaults(
     Object.values(value).every(
       (item) => typeof item === "number" && Number.isFinite(item) && item >= 0,
     ) &&
-    typeof value.compactionTriggerRatio === "number" &&
-    value.compactionTriggerRatio > 0 &&
-    value.compactionTriggerRatio <= 1 &&
-    typeof value.compactionRetainRatio === "number" &&
-    value.compactionRetainRatio < value.compactionTriggerRatio
+    true
   )
 }
 
 const sessionExecutionPolicyKeys = [
-  "modelCallsPerTurn",
-  "toolCallsPerTurn",
-  "modelVisibleMessageBlocks",
-  "modelVisibleContextBytes",
-  "compactionTriggerRatio",
-  "compactionRetainRatio",
   "modelVisibleToolResultBytes",
   "modelVisibleToolResultLines",
-  "compactionSummaryBytes",
   "assistantResponseBytes",
 ] as const
 

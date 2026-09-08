@@ -8,12 +8,167 @@ import { ThreadManager } from "../../src/core/thread-manager.ts"
 import type { AgentControl } from "../../src/runtime/agent-control.ts"
 import { createAgentRuntime } from "../../src/runtime/agent-runtime.ts"
 import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
+import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
+import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
+import { createFauxProvider } from "../support/faux-provider.ts"
 import { createSessionId } from "../../src/kernel/ids.ts"
 import { MemoryThreadStore } from "../core/memory-thread-store.ts"
 
 const TARGET = { provider: "faux", model: "scripted" }
 
 describe("agent runtime", () => {
+  it.each([
+    "all",
+    1,
+  ] as const)("carries model compatibility into a child with %s inherited history", async (forkTurns) => {
+    const store = new MemoryThreadStore()
+    const graph = memoryGraphStore()
+    const controls = new Map<string, AgentControl>()
+    let manager: ThreadManager
+    const runtime = createAgentRuntime({
+      graphStore: graph.store,
+      getThreadManager: () => manager,
+    })
+    manager = new ThreadManager({
+      store,
+      createTurnProcessor(stored) {
+        controls.set(stored.metadata.id, runtime.registerThread(stored))
+        return immediateProcessor()
+      },
+    })
+    const previousModel = {
+      provider: "codex",
+      model: "previous",
+      compactionHash: "compatibility-one",
+    }
+    try {
+      const root = await manager.createThread({
+        initialContext: {
+          sourceThreadId: "source",
+          previousModel,
+          activeContextTokens: 12_345,
+          messages: [
+            {
+              role: "user",
+              content: [{ type: "text", text: "original task" }],
+            },
+            {
+              role: "assistant",
+              content: [{ type: "text", text: "existing progress" }],
+            },
+          ],
+        },
+      })
+      const control = controls.get(root.id)
+      if (control === undefined) throw new Error("missing root control")
+      const child = await control.bind(root.id, TARGET).spawn({
+        taskName: "child",
+        message: "continue",
+        agentType: "general",
+        forkTurns,
+      })
+      await control.bind(root.id, TARGET).wait(1_000)
+      const context = manager.getThread(child.agentId)?.snapshot().context
+      expect(context?.previousModel).toEqual(previousModel)
+      if (forkTurns === "all") expect(context?.activeContextTokens).toBe(12_345)
+      else {
+        expect(context?.activeContextTokens).toBeGreaterThan(0)
+        expect(context?.activeContextTokens).toBeLessThan(12_345)
+      }
+      expect(
+        (await store.readThread(child.agentId))?.rollout.some(
+          ({ item }) =>
+            item.type === "model_context" &&
+            item.settings.compactionHash === "compatibility-one",
+        ),
+      ).toBe(true)
+    } finally {
+      await runtime.close()
+      await manager.shutdown()
+    }
+  })
+  it("shares rollout exhaustion across real parent and child Turns", async () => {
+    const store = new MemoryThreadStore()
+    const graph = memoryGraphStore()
+    const controls = new Map<string, AgentControl>()
+    const provider = createFauxProvider([
+      {
+        content: [{ type: "text", text: "root done" }],
+        usage: { outputTokens: 30 },
+      },
+      {
+        content: [{ type: "text", text: "child result" }],
+        usage: { outputTokens: 30 },
+      },
+    ])
+    let manager: ThreadManager
+    const runtime = createAgentRuntime({
+      graphStore: graph.store,
+      getThreadManager: () => manager,
+      rolloutBudget: {
+        limitTokens: 50,
+        reminderAtRemainingTokens: [25],
+        samplingTokenWeight: 1,
+        prefillTokenWeight: 1,
+      },
+    })
+    manager = new ThreadManager({
+      store,
+      createTurnProcessor(stored) {
+        const control = runtime.registerThread(stored)
+        controls.set(stored.metadata.id, control)
+        return createTurnProcessor({
+          stream: provider.stream,
+          agentControl: control,
+          toolRegistry: createToolRegistry([]),
+          loadProjectInstructions: async () => undefined,
+        })
+      },
+    })
+    try {
+      const root = await manager.createThread({
+        workingDirectory: process.cwd(),
+        mateId: "mate_test",
+        mateRevisionId: "mate_revision_test",
+      })
+      await root.startIfIdle({ content: { kind: "text", text: "Start." } })
+      await expect
+        .poll(() => root.agentStatus)
+        .toEqual({ completed: "root done" })
+      const control = controls.get(root.id)
+      if (control === undefined) throw new Error("missing root control")
+      const child = await control.bind(root.id, TARGET).spawn({
+        taskName: "child",
+        message: "Continue.",
+        agentType: "general",
+        forkTurns: "none",
+      })
+      await expect
+        .poll(() => manager.getThread(child.agentId)?.agentStatus)
+        .toEqual({
+          errored: "Session rollout token budget exceeded.",
+        })
+      expect(controls.get(child.agentId)?.rolloutBudget).toBe(
+        control.rolloutBudget,
+      )
+      expect(JSON.stringify(provider.requests[1]?.messages)).toContain(
+        "20 weighted tokens",
+      )
+      await root.startIfIdle({ content: { kind: "text", text: "Try again." } })
+      await expect
+        .poll(() => root.agentStatus)
+        .toEqual({ errored: "Session rollout token budget exceeded." })
+      expect(provider.callCount).toBe(2)
+      const childHistory = await store.readThread(child.agentId)
+      expect(JSON.stringify(childHistory?.rollout)).toContain(
+        '"outputTokens":30',
+      )
+    } finally {
+      await runtime.close()
+      await manager.shutdown()
+    }
+  })
+
   it("rolls back child registration when graph persistence fails", async () => {
     const graph = memoryGraphStore()
     const store = new MemoryThreadStore()

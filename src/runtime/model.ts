@@ -2,6 +2,7 @@ import type {
   JsonObject,
   ModelAssistantMessage,
   ModelContentBlock,
+  ModelCompactionBlock,
   ModelDeveloperMessage,
   ModelImageBlock,
   ModelMessage,
@@ -15,6 +16,7 @@ import type {
 } from "../kernel/index.ts"
 
 export type {
+  ModelCompactionBlock,
   ModelAssistantMessage,
   ModelContentBlock,
   ModelDeveloperMessage,
@@ -61,6 +63,8 @@ export type ModelSystemSection = {
 }
 
 export type ModelRequest = {
+  // Request-only control; the resulting native item enters normal history.
+  readonly compaction?: "local" | "remote_v2"
   readonly target: ModelTarget
   // Runtime-only fence for opaque provider continuation state. The provider
   // owner adds it immediately before transport serialization; Session target
@@ -83,16 +87,17 @@ export function flattenModelSystem(
   return sections.map((section) => section.text).join("\n\n")
 }
 
-export type ModelUsage = {
+export type ModelUsage = Readonly<{
+  rolloutBudgetUnits?: number
   // Billing counters accumulate across physical requests.
-  readonly inputTokens?: number
-  readonly outputTokens?: number
-  readonly cacheReadInputTokens?: number
-  readonly cacheWriteInputTokens?: number
+  inputTokens?: number
+  outputTokens?: number
+  cacheReadInputTokens?: number
+  cacheWriteInputTokens?: number
   // Provider-reported size of the model-visible prefix for this response.
   // Unlike billing counters, callers keep the latest value rather than sum it.
-  readonly activeContextTokens?: number
-}
+  activeContextTokens?: number
+}>
 
 export type ModelError = {
   readonly code: string

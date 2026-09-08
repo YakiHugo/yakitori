@@ -548,6 +548,11 @@ function toAnthropicAssistantBlock(
   provider: string,
   continuationScope?: string,
 ): ContentBlockParam | undefined {
+  if (block.type === "compaction") {
+    throw new Error(
+      "Native compaction must be converted by its owning provider before using Anthropic Messages.",
+    )
+  }
   if (block.type === "text") return { type: "text", text: block.text }
   if (block.type === "reasoning")
     return toAnthropicReasoningBlock(block, provider, continuationScope)
