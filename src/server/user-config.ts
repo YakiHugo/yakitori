@@ -28,6 +28,7 @@ import {
 } from "../runtime/hooks.ts"
 import type { McpServerConfig } from "../runtime/mcp-config.ts"
 import type { RolloutBudgetConfig } from "../runtime/rollout-budget.ts"
+import type { SkillConfiguration } from "../runtime/skills.ts"
 import type { ShellEnvironmentPolicy } from "../runtime/user-shell-env.ts"
 import {
   consoleOperationalFailureReporter,
@@ -94,6 +95,9 @@ export type UserConfiguration = Readonly<{
   shellEnvironmentPolicy?: Partial<ShellEnvironmentPolicy>
   mcpServers?: Readonly<Record<string, McpServerConfig>>
   hooks?: HookConfiguration
+  skills?: SkillConfiguration
+  projectRootMarkers?: readonly string[]
+  projectInstructionFilenames?: readonly string[]
 }>
 
 export function createUserConfigStore(
@@ -425,6 +429,10 @@ async function readConfigurationSnapshot(
     instructionOrigin === undefined
       ? dirname(configPath)
       : dirname(instructionOrigin.path),
+    {
+      paths: dirname(origins["skills.paths"]?.path ?? configPath),
+      config: dirname(origins["skills.config"]?.path ?? configPath),
+    },
   )
   return {
     configuration,
@@ -610,6 +618,7 @@ function fingerprint(content: string): string {
 async function configurationFromConfig(
   value: TomlTable,
   baseDirectory: string,
+  skillDirectories = { paths: baseDirectory, config: baseDirectory },
 ): Promise<UserConfiguration> {
   const preference = preferenceFromConfig(value)
   const baseInstructions = await baseInstructionsFromConfig(
@@ -620,6 +629,10 @@ async function configurationFromConfig(
   const rolloutBudget = rolloutBudgetFromConfig(value)
   const mcpServers = mcpServersFromConfig(value)
   const hooks = hooksFromConfig(value)
+  const instructionConfiguration = instructionsFromConfig(
+    value,
+    skillDirectories,
+  )
   const modelContextWindowTokens = value.model_context_window
   if (
     modelContextWindowTokens !== undefined &&
@@ -652,6 +665,7 @@ async function configurationFromConfig(
     )
   }
   return {
+    ...instructionConfiguration,
     ...(preference === undefined ? {} : { preference }),
     ...(rolloutBudget === undefined ? {} : { rolloutBudget }),
     ...(baseInstructions === undefined ? {} : { baseInstructions }),
@@ -668,6 +682,103 @@ async function configurationFromConfig(
     ...(mcpServers === undefined ? {} : { mcpServers }),
     ...(hooks === undefined ? {} : { hooks }),
   }
+}
+
+function instructionsFromConfig(
+  value: TomlTable,
+  directories: Readonly<{ paths: string; config: string }>,
+): Readonly<{
+  skills?: SkillConfiguration
+  projectRootMarkers?: readonly string[]
+  projectInstructionFilenames?: readonly string[]
+}> {
+  const readStringList = (
+    value: unknown,
+    field: string,
+  ): string[] | undefined => {
+    if (value === undefined) return undefined
+    if (!Array.isArray(value)) {
+      throw new ExtensionConfigError(
+        `${field} must be an array of nonempty strings.`,
+      )
+    }
+    return value.map((item) => {
+      if (typeof item !== "string" || item.trim() === "") {
+        throw new ExtensionConfigError(
+          `${field} must be an array of nonempty strings.`,
+        )
+      }
+      return item
+    })
+  }
+  const result: {
+    skills?: SkillConfiguration
+    projectRootMarkers?: string[]
+    projectInstructionFilenames?: string[]
+  } = {}
+  const markers = readStringList(
+    value.project_root_markers,
+    "project_root_markers",
+  )
+  const filenames = readStringList(
+    value.project_doc_fallback_filenames,
+    "project_doc_fallback_filenames",
+  )
+  for (const name of [...(markers ?? []), ...(filenames ?? [])]) {
+    if (name === "." || name === ".." || /[/\\]/.test(name)) {
+      throw new ExtensionConfigError(
+        "Instruction marker and fallback names must be single filenames.",
+      )
+    }
+  }
+  if (markers !== undefined) result.projectRootMarkers = markers
+  if (filenames !== undefined) result.projectInstructionFilenames = filenames
+
+  const configured = value.skills
+  if (configured === undefined) return result
+  if (!isTomlTable(configured))
+    throw new ExtensionConfigError("skills must be a table.")
+  const resolveSkillPath = (raw: string, baseDirectory: string) =>
+    raw.startsWith("~/")
+      ? resolve(homedir(), raw.slice(2))
+      : resolve(baseDirectory, raw)
+  const paths = readStringList(configured.paths, "skills.paths")?.map((raw) =>
+    resolveSkillPath(raw, directories.paths),
+  )
+  const rules = configured.config
+  if (rules !== undefined && !Array.isArray(rules)) {
+    throw new ExtensionConfigError("skills.config must be an array of tables.")
+  }
+  const config = (rules ?? []).map((rule) => {
+    if (!isTomlTable(rule) || typeof rule.enabled !== "boolean") {
+      throw new ExtensionConfigError(
+        "Each skills.config entry must be a table with a boolean enabled field.",
+      )
+    }
+    if (rule.name !== undefined) {
+      if (
+        typeof rule.name !== "string" ||
+        rule.name.trim() === "" ||
+        rule.path !== undefined
+      ) {
+        throw new ExtensionConfigError(
+          "A skills.config name selector requires a nonempty name and no path.",
+        )
+      }
+      return { name: rule.name, enabled: rule.enabled }
+    }
+    if (typeof rule.path !== "string" || rule.path.trim() === "") {
+      throw new ExtensionConfigError(
+        "A skills.config path selector requires a nonempty path.",
+      )
+    }
+    return {
+      path: resolveSkillPath(rule.path, directories.config),
+      enabled: rule.enabled,
+    }
+  })
+  result.skills = paths === undefined ? { config } : { paths, config }
+  return result
 }
 
 class AutoCompactConfigError extends Error {}

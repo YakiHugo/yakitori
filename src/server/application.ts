@@ -46,11 +46,11 @@ import {
   createToolRegistry,
   createTurnProcessor,
   createUserShellEnv,
-  GROK_API_BASE_URL,
   discoverCodexModels,
   discoverOpenAiCompatibleModels,
-  type ModelProvider,
+  GROK_API_BASE_URL,
   type McpConnectionManager,
+  type ModelProvider,
   ModelStopReason,
   type RuntimeLock,
   readCodexLogin,
@@ -410,6 +410,8 @@ export async function createYakitoriApplication(
               ? undefined
               : createHookRunner(sessionConfiguration.hooks)
           processor = createTurnProcessor({
+            readInstructionConfiguration: () =>
+              sessionUserConfig.readConfiguration({ cwd: workingDirectory }),
             modelClient: providerRegistry.createClient(),
             provider: provider.provider,
             model: provider.model,

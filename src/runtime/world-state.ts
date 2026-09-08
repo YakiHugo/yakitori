@@ -23,6 +23,8 @@ export const WorldStateSectionId = {
   Environment: "environment",
   MultiAgent: "multi_agent",
   Skills: "skills",
+  Permissions: "permissions",
+  Tools: "tools",
 } as const
 
 export type PreviousSectionState<T> =
@@ -74,11 +76,84 @@ export function buildWorldStateFromSnapshot(input: {
               ).has("spawn_agent"),
             ),
           ]),
+      permissionSection(input.configuration.approvalPolicy),
+      toolInstructionsSection(
+        input.enabledToolNames ?? new Set(input.configuration.enabledTools),
+      ),
       projectInstructionsSection(input.projectInstructions),
       skillsSection(input.skills),
       environmentSection(input.environment),
     ],
   }
+}
+
+function permissionSection(
+  policy: ResolvedStepConfiguration["approvalPolicy"],
+): ErasedWorldStateSection {
+  return section({
+    id: WorldStateSectionId.Permissions,
+    snapshot: policy,
+    decode: stringSnapshot,
+    render(previous) {
+      if (previous.type === "known" && previous.snapshot === policy) return []
+      const text =
+        policy === "always_approve"
+          ? "Tool approval requests are automatically approved. Commands run with the host user's authority and are not sandboxed. Follow the user's authorization and task scope."
+          : "File tools are automatically approved. Shell command execution requires approval through the tool permission gate. Submit the tool call to request approval; do not claim it ran before the result. Commands are not sandboxed."
+      return [
+        fragment(
+          WorldStateSectionId.Permissions,
+          "developer",
+          `<permissions_instructions>\n${text}\n</permissions_instructions>`,
+        ),
+      ]
+    },
+  })
+}
+
+function toolInstructionsSection(
+  names: ReadonlySet<string>,
+): ErasedWorldStateSection {
+  const guidance = [
+    names.has("read_file")
+      ? "Use read_file to read files; continue paginated or truncated instruction reads."
+      : "",
+    names.has("glob") ? "Use glob to locate files." : "",
+    names.has("grep") ? "Use grep for targeted text searches." : "",
+    names.has("apply_patch")
+      ? "Use apply_patch for source patches, following its schema."
+      : "",
+    names.has("edit_file") ? "Use edit_file for targeted replacements." : "",
+    names.has("write_file")
+      ? "Use write_file for intentional whole-file writes."
+      : "",
+    names.has("exec_command")
+      ? "Use exec_command for git, package managers, builds, and tests. Follow the current permission policy."
+      : "",
+    names.has("web_fetch")
+      ? "Use web_fetch to read a specific HTTP(S) URL; follow cross-origin redirects with a new call."
+      : "",
+    names.has("web_search")
+      ? "Use web_search for current information; read result pages with available URL-reading tools."
+      : "",
+  ]
+    .filter(Boolean)
+    .join("\n")
+  return section({
+    id: WorldStateSectionId.Tools,
+    snapshot: guidance,
+    decode: stringSnapshot,
+    render(previous) {
+      if (previous.type === "known" && previous.snapshot === guidance) return []
+      return [
+        fragment(
+          WorldStateSectionId.Tools,
+          "developer",
+          `<tool_instructions>\n${guidance}\n</tool_instructions>`,
+        ),
+      ]
+    },
+  })
 }
 
 function skillsSection(
@@ -93,6 +168,7 @@ function skillsSection(
         scope: skill.scope,
       })) ?? [],
     truncated: catalog?.truncated ?? false,
+    text: catalog?.text ?? "",
   }
   return section({
     id: WorldStateSectionId.Skills,

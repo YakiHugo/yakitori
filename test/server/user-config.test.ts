@@ -627,3 +627,44 @@ function flockAsync(
     })
   })
 }
+
+it("reloads skill selectors, additional paths, and project instruction discovery settings", async () => {
+  await withConfigPath(async (configPath) => {
+    const store = createUserConfigStore({ configPath })
+    await writeFile(
+      configPath,
+      'project_root_markers = [".project-root"]\nproject_doc_fallback_filenames = ["RULES.md"]\n[skills]\npaths = ["workflows"]\n[[skills.config]]\nname = "review"\nenabled = false\n',
+    )
+    const configuration = await store.readConfiguration()
+    expect(configuration.projectRootMarkers).toEqual([".project-root"])
+    expect(configuration.projectInstructionFilenames).toEqual(["RULES.md"])
+    expect(configuration.skills).toEqual({
+      paths: [join(dirname(configPath), "workflows")],
+      config: [{ name: "review", enabled: false }],
+    })
+    await writeFile(
+      configPath,
+      '[skills]\n[[skills.config]]\nname = "review"\nenabled = true\n',
+    )
+    expect((await store.readConfiguration()).skills?.config).toEqual([
+      { name: "review", enabled: true },
+    ])
+  })
+})
+
+it.each([
+  'name = "   "',
+  'path = ""',
+  'name = "review"\npath = "workflows/review/SKILL.md"',
+  "path = 42",
+  "",
+])("rejects invalid skill selectors without coercion: %s", async (selector) => {
+  await withConfigPath(async (configPath) => {
+    await writeFile(
+      configPath,
+      `[skills]\n[[skills.config]]\nenabled = true\n${selector}\n`,
+    )
+    const store = createUserConfigStore({ configPath })
+    await expect(store.readConfiguration()).rejects.toThrow("skills.config")
+  })
+})

@@ -28,7 +28,7 @@ import {
 import { observeEnvironment } from "./environment-context.ts"
 import { isAbortError, ModelResponseError } from "./errors.ts"
 import { HookEvent, type HookRunner } from "./hooks.ts"
-import type { RolloutBudget } from "./rollout-budget.ts"
+import type { InstructionDiagnostic } from "./instruction-files.ts"
 import {
   createRunnerTimingPolicy,
   createSessionExecutionPolicy,
@@ -44,13 +44,13 @@ import {
   type ModelUsage,
   type StreamFn,
 } from "./model.ts"
-import type { ModelClient } from "./model-provider.ts"
 import {
   createCompactionReplacementHistory,
   retainCompactionUserMessages,
   retainRemoteCompactionMessages,
 } from "./model-context.ts"
 import { adaptImagesForModel } from "./model-images.ts"
+import type { ModelClient } from "./model-provider.ts"
 import {
   estimateHistoryTokens,
   estimateModelRequestBudget,
@@ -60,12 +60,18 @@ import {
   createProjectInstructionsLoader,
   type loadProjectInstructions,
 } from "./project-instructions.ts"
+import type { RolloutBudget } from "./rollout-budget.ts"
 import {
   type ApprovalPolicy,
   createTurnContext,
   SessionConfiguration,
 } from "./session-configuration.ts"
-import { loadSkillsCatalog } from "./skills.ts"
+import {
+  createSkillsLoader,
+  loadExplicitSkillInstructions,
+  renderSkillsCatalog,
+  type SkillConfiguration,
+} from "./skills.ts"
 import {
   createToolExecutionGate,
   type ToolExecutionGate,
@@ -106,6 +112,13 @@ export type TurnProcessorOptions = {
   readonly modelAutoCompactTokenLimit?: number
   readonly modelAutoCompactTokenLimitScope?: import("../kernel/index.ts").AutoCompactTokenLimitScope
   readonly loadProjectInstructions?: typeof loadProjectInstructions
+  readonly readInstructionConfiguration?: () => Promise<
+    Readonly<{
+      skills?: SkillConfiguration
+      projectRootMarkers?: readonly string[]
+      projectInstructionFilenames?: readonly string[]
+    }>
+  >
   readonly resolveShellName?: () => Promise<string>
   readonly now?: () => Date
   readonly rolloutAssets?: RolloutAssets
@@ -122,6 +135,7 @@ export type TurnProcessorOptions = {
 
 export type TurnProcessorOperationalFailure = Readonly<{
   operation:
+    | "load-instructions"
     | "abort-model-stream"
     | "close-model-session"
     | "close-model-stream"
@@ -151,6 +165,7 @@ export function createTurnProcessor(
   const model = options.model ?? "scripted"
   const projectInstructionLoader =
     options.loadProjectInstructions ?? createProjectInstructionsLoader()
+  const skillsLoader = createSkillsLoader()
   const toolExecutionGate = createToolExecutionGate()
   let sessionHooksStarted = false
   let startHooksPromise: Promise<void> | undefined
@@ -160,7 +175,10 @@ export function createTurnProcessor(
     turnId: string,
     signal: AbortSignal,
   ): Promise<void> => {
-    if (options.hookRunner === undefined || options.sessionHookContext === undefined) {
+    if (
+      options.hookRunner === undefined ||
+      options.sessionHookContext === undefined
+    ) {
       return Promise.resolve()
     }
     if (sessionHooksStarted) return Promise.resolve()
@@ -181,9 +199,15 @@ export function createTurnProcessor(
           signal,
         })
         if (outcome?.continue === false) {
-          throw new Error(outcome.reason ?? `${event} hook blocked the Session.`)
+          throw new Error(
+            outcome.reason ?? `${event} hook blocked the Session.`,
+          )
         }
-        await recordHookContext(runtime, turnId, outcome?.additionalContext ?? [])
+        await recordHookContext(
+          runtime,
+          turnId,
+          outcome?.additionalContext ?? [],
+        )
       }
       sessionHooksStarted = true
     }
@@ -222,8 +246,8 @@ export function createTurnProcessor(
         Promise.resolve().then(() => options.modelClient?.close()),
         Promise.resolve().then(() => toolRegistry.dispose()),
       ])
-      const errors = [...lifecycleResults, ...resourceResults].flatMap((result) =>
-        result.status === "rejected" ? [result.reason] : [],
+      const errors = [...lifecycleResults, ...resourceResults].flatMap(
+        (result) => (result.status === "rejected" ? [result.reason] : []),
       )
       if (errors.length > 0) {
         throw new AggregateError(errors, "Failed to dispose Turn processor.")
@@ -327,6 +351,7 @@ export function createTurnProcessor(
           permissionGate,
           runtimeTiming,
           projectInstructionLoader,
+          skillsLoader,
           toolExecutionGate,
           options,
           setActiveStream(stream) {
@@ -368,6 +393,7 @@ async function executeTurn(input: {
   readonly toolRegistry: ToolRegistry
   readonly permissionGate: PermissionGate
   readonly runtimeTiming: RunnerTimingPolicy
+  readonly skillsLoader: ReturnType<typeof createSkillsLoader>
   readonly projectInstructionLoader: typeof loadProjectInstructions
   readonly toolExecutionGate: ToolExecutionGate
   readonly options: TurnProcessorOptions
@@ -476,6 +502,8 @@ async function executeTurnModelLoop(
   const usages: ModelUsage[] = []
   let modelCalls = 0
   let compactedAtModelCall = -1
+  const pendingSkillInputs = [input.input]
+  let previousDiagnostics = new Set<string>()
   for (;;) {
     let step: StepContext | undefined
     try {
@@ -497,7 +525,9 @@ async function executeTurnModelLoop(
         ])
         budget?.markDelivered(metadata.id, reminder)
       }
-      await recordSteering(input.runtime, input.control.takeSteering())
+      const steering = input.control.takeSteering()
+      await recordSteering(input.runtime, steering)
+      pendingSkillInputs.push(...steering)
       step = captureStepContext({
         registry: input.toolRegistry,
         configuration: turn.requestSettings,
@@ -507,14 +537,76 @@ async function executeTurnModelLoop(
       const workspaceRoot = await resolveWorkspaceRoot(
         configuration.workspaceRoot,
       )
+      const instructionConfiguration =
+        (await input.options.readInstructionConfiguration?.()) ?? {}
+      const diagnostics: InstructionDiagnostic[] = []
+      const discoveryInput = {
+        workingDirectory: configuration.workspaceRoot,
+        ...(instructionConfiguration.projectRootMarkers === undefined
+          ? {}
+          : {
+              projectRootMarkers: instructionConfiguration.projectRootMarkers,
+            }),
+      }
       const projectInstructions = await input.projectInstructionLoader({
-        workspaceRoot,
-        workingDirectory: configuration.workspaceRoot,
+        ...discoveryInput,
+        ...(instructionConfiguration.projectInstructionFilenames === undefined
+          ? {}
+          : {
+              fallbackFilenames:
+                instructionConfiguration.projectInstructionFilenames,
+            }),
+        onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
       })
-      const skills = await loadSkillsCatalog({
-        workspaceRoot,
-        workingDirectory: configuration.workspaceRoot,
+      const skillSnapshot = await input.skillsLoader({
+        ...discoveryInput,
+        ...(instructionConfiguration.skills === undefined
+          ? {}
+          : { configuration: instructionConfiguration.skills }),
       })
+      diagnostics.push(...skillSnapshot.diagnostics)
+      const currentDiagnostics = new Set<string>()
+      for (const diagnostic of diagnostics) {
+        const key = JSON.stringify(diagnostic)
+        if (currentDiagnostics.has(key)) continue
+        currentDiagnostics.add(key)
+        if (previousDiagnostics.has(key)) continue
+        const message = `${diagnostic.path}: ${diagnostic.message}`
+        input.runtime.emitWarning(message)
+        reportOperationalFailure(input.options.onOperationalFailure, {
+          operation: "load-instructions",
+          cause: new Error(message),
+        })
+      }
+      previousDiagnostics = currentDiagnostics
+      const skills = renderSkillsCatalog(skillSnapshot)
+      for (const submitted of pendingSkillInputs.splice(0)) {
+        const alreadyLoaded = input.runtime
+          .snapshot()
+          .context.history.some(
+            ({ item }) =>
+              (item.role === "user" || item.role === "developer") &&
+              item.context?.type === "skill_invocation" &&
+              item.context.inputId === submitted.submissionId,
+          )
+        if (alreadyLoaded) continue
+        const text = await loadExplicitSkillInstructions(
+          submitted.content.text,
+          skillSnapshot,
+          (message) => input.runtime.emitWarning(message),
+        )
+        if (text !== undefined)
+          await input.runtime.recordConversationItems([
+            envelope(submitted.submissionId, {
+              role: "user",
+              content: [{ type: "text", text }],
+              context: {
+                type: "skill_invocation",
+                inputId: submitted.submissionId,
+              },
+            }),
+          ])
+      }
       const environment = observeEnvironment({
         workspaceRoot,
         workingDirectory: configuration.workspaceRoot,
@@ -537,8 +629,7 @@ async function executeTurnModelLoop(
         history: compactionHistory,
         activeContextTokens: beforeStep.context.activeContextTokens,
         autoCompactPrefillTokens: beforeStep.context.autoCompactPrefillTokens,
-        historyAnchorItemId:
-          beforeStep.context.contextTokenHistoryAnchorItemId,
+        historyAnchorItemId: beforeStep.context.contextTokenHistoryAnchorItemId,
         baselineProvider: beforeStep.context.contextTokenProvider,
         baselineModel: beforeStep.context.contextTokenModel,
         step,
@@ -765,9 +856,8 @@ async function executeTurnModelLoop(
         })
       }
       const responseItemId = `message_${globalThis.crypto.randomUUID()}`
-      const estimatedInputTokens = estimateModelRequestBudget(
-        request,
-      ).estimatedInputTokens
+      const estimatedInputTokens =
+        estimateModelRequestBudget(request).estimatedInputTokens
       let sampledContext:
         | Readonly<{
             activeContextTokens: number
@@ -933,6 +1023,7 @@ async function executeTurnModelLoop(
       const completion = input.control.takeSteeringOrComplete()
       if (completion.type === "steering") {
         await recordSteering(input.runtime, completion.inputs)
+        pendingSkillInputs.push(...completion.inputs)
         continue
       }
       const stopHook = await input.options.hookRunner?.run({
@@ -1071,12 +1162,9 @@ function assessModelRequest(input: {
   const anchorIndex =
     input.historyAnchorItemId === undefined
       ? -1
-      : input.history.findIndex(
-          (item) => item.id === input.historyAnchorItemId,
-        )
+      : input.history.findIndex((item) => item.id === input.historyAnchorItemId)
   const hasAnchoredMeasurement =
-    input.activeContextTokens !== undefined &&
-    anchorIndex >= 0
+    input.activeContextTokens !== undefined && anchorIndex >= 0
   const baselineMatches =
     hasAnchoredMeasurement &&
     input.baselineProvider === input.step.target.provider &&
