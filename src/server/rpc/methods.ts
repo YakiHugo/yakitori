@@ -46,7 +46,11 @@ import {
   ProjectMoveOutcome,
   type ProjectStore,
 } from "../sqlite-project-store.ts"
-import type { UserConfigStore } from "../user-config.ts"
+import {
+  type ConfigurationSnapshot,
+  ConfigVersionConflictError,
+  type UserConfigStore,
+} from "../user-config.ts"
 import { INTERNAL_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND } from "./messages.ts"
 import type { RequestSerializationScope } from "./serialization.ts"
 import type { SessionSubscriptions } from "./subscriptions.ts"
@@ -111,6 +115,15 @@ export type ProjectMoveParams = Readonly<{
 }>
 
 export type ProjectDeleteParams = Readonly<{ projectId: string }>
+
+export type ConfigReadParams = Readonly<{ cwd?: string }>
+
+export type ConfigWriteParams = Readonly<{
+  keyPath: readonly string[]
+  value: unknown
+  expectedVersion?: string
+  cwd?: string
+}>
 
 // Server→client notification payloads. Each event notification carries its
 // durable cursor, so re-subscribe takes `after` and no cursor frame exists.
@@ -806,6 +819,72 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
     },
   },
   {
+    method: "config/read",
+    scope: () => ({ kind: "globalSharedRead", name: "config" }),
+    async invoke(params, context) {
+      if (context.userConfig === undefined) throw unavailable("config/read")
+      const record = requireParamsRecord(params ?? {}, "config/read")
+      if (record.cwd !== undefined && typeof record.cwd !== "string") {
+        throw invalidParams("cwd must be a string when provided.")
+      }
+      return {
+        result: await context.userConfig.readSnapshot(
+          record.cwd === undefined ? {} : { cwd: record.cwd },
+        ),
+      }
+    },
+  },
+  {
+    method: "config/write",
+    scope: () => ({ kind: "global", name: "config" }),
+    async invoke(params, context) {
+      if (context.userConfig === undefined) throw unavailable("config/write")
+      const record = requireParamsRecord(params, "config/write")
+      if (
+        !Array.isArray(record.keyPath) ||
+        record.keyPath.length === 0 ||
+        !record.keyPath.every(
+          (segment) =>
+            typeof segment === "string" &&
+            segment.trim() !== "" &&
+            segment !== "__proto__" &&
+            segment !== "constructor" &&
+            segment !== "prototype",
+        )
+      ) {
+        throw invalidParams("keyPath contains an invalid segment.")
+      }
+      if (
+        record.expectedVersion !== undefined &&
+        typeof record.expectedVersion !== "string"
+      ) {
+        throw invalidParams("expectedVersion must be a string when provided.")
+      }
+      if (record.cwd !== undefined && typeof record.cwd !== "string") {
+        throw invalidParams("cwd must be a string when provided.")
+      }
+      try {
+        return {
+          result: await context.userConfig.writeValue({
+            keyPath: record.keyPath as string[],
+            value: record.value,
+            ...(record.expectedVersion === undefined
+              ? {}
+              : { expectedVersion: record.expectedVersion }),
+            ...(record.cwd === undefined ? {} : { cwd: record.cwd }),
+          }),
+        }
+      } catch (error) {
+        if (error instanceof ConfigVersionConflictError) {
+          throw new RpcMethodError(-32009, error.message, {
+            code: ApiErrorCode.Conflict,
+          })
+        }
+        throw error
+      }
+    },
+  },
+  {
     method: "userPreference/write",
     scope: () => ({ kind: "global", name: "config" }),
     async invoke(params, context) {
@@ -855,6 +934,8 @@ export type RpcMethodParams = Readonly<{
   "project/move": ProjectMoveParams
   "project/delete": ProjectDeleteParams
   "provider/list": Readonly<Record<string, never>>
+  "config/read": ConfigReadParams
+  "config/write": ConfigWriteParams
   "userPreference/write": ApiUserModelPreference
 }>
 
@@ -882,5 +963,7 @@ export type RpcMethodResponses = Readonly<{
   "project/move": Readonly<Record<string, never>>
   "project/delete": Readonly<Record<string, never>>
   "provider/list": ApiListProvidersResponse
+  "config/read": ConfigurationSnapshot
+  "config/write": ConfigurationSnapshot
   "userPreference/write": ApiUpdateUserModelPreferenceResponse
 }>

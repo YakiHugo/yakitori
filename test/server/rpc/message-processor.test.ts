@@ -13,7 +13,10 @@ import {
   type Project,
   type ProjectStore,
 } from "../../../src/server/sqlite-project-store.ts"
-import type { UserConfigStore } from "../../../src/server/user-config.ts"
+import type {
+  ConfigValueWrite,
+  UserConfigStore,
+} from "../../../src/server/user-config.ts"
 import {
   createFakeHandlers,
   createTestProcessor,
@@ -289,11 +292,72 @@ describe("method dispatch", () => {
     expect(response).toMatchObject({ error: { code: METHOD_NOT_FOUND } })
   })
 
+  it("validates config/write key paths and forwards its cwd scope", async () => {
+    const writes: ConfigValueWrite[] = []
+    const emptySnapshot = {
+      configuration: {},
+      effective: {},
+      origins: {},
+      layers: [],
+    }
+    const userConfig: UserConfigStore = {
+      read: async () => undefined,
+      readConfiguration: async () => ({}),
+      readSnapshot: async () => emptySnapshot,
+      write: async (preference) => preference,
+      writeValue: async (input) => {
+        writes.push(input)
+        return emptySnapshot
+      },
+    }
+    const { processor } = createTestProcessor({
+      handlers: createFakeHandlers(),
+      userConfig,
+    })
+    const connection = openTestConnection(processor)
+    await initializeConnection(connection)
+
+    await expect(
+      connection.sendRequest("config/write", {
+        keyPath: ["model"],
+        value: "gpt-5.6-sol",
+        cwd: "/workspace/project",
+      }),
+    ).resolves.toHaveProperty("result")
+    expect(writes).toEqual([
+      {
+        keyPath: ["model"],
+        value: "gpt-5.6-sol",
+        cwd: "/workspace/project",
+      },
+    ])
+
+    await expect(
+      connection.sendRequest("config/write", {
+        keyPath: ["__proto__", "polluted"],
+        value: true,
+      }),
+    ).resolves.toMatchObject({ error: { code: INVALID_PARAMS } })
+    expect(writes).toHaveLength(1)
+  })
+
   it("writes the user preference through the config store", async () => {
     const written: unknown[] = []
     const userConfig: UserConfigStore = {
       read: async () => undefined,
       readConfiguration: async () => ({}),
+      readSnapshot: async () => ({
+        configuration: {},
+        effective: {},
+        origins: {},
+        layers: [],
+      }),
+      writeValue: async () => ({
+        configuration: {},
+        effective: {},
+        origins: {},
+        layers: [],
+      }),
       write: async (preference) => {
         written.push(preference)
         return preference
@@ -322,6 +386,18 @@ describe("method dispatch", () => {
     const userConfig: UserConfigStore = {
       read: async () => undefined,
       readConfiguration: async () => ({}),
+      readSnapshot: async () => ({
+        configuration: {},
+        effective: {},
+        origins: {},
+        layers: [],
+      }),
+      writeValue: async () => ({
+        configuration: {},
+        effective: {},
+        origins: {},
+        layers: [],
+      }),
       write: async (preference) => preference,
     }
     const { processor } = createTestProcessor({
@@ -417,6 +493,18 @@ describe("serialization scopes", () => {
     const userConfig: UserConfigStore = {
       read: async () => undefined,
       readConfiguration: async () => ({}),
+      readSnapshot: async () => ({
+        configuration: {},
+        effective: {},
+        origins: {},
+        layers: [],
+      }),
+      writeValue: async () => ({
+        configuration: {},
+        effective: {},
+        origins: {},
+        layers: [],
+      }),
       write: async (preference) => {
         await writeGate.promise
         return preference

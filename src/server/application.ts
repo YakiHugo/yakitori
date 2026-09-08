@@ -181,6 +181,7 @@ export async function createYakitoriApplication(
     await ensureWorkspaceProject(ownedProjectStore, workspace)
     const userConfig = createUserConfigStore({
       reportOperationalFailure: reporter,
+      workspaceRoot: workspace,
       ...(options.userConfigPath === undefined
         ? {}
         : { configPath: options.userConfigPath }),
