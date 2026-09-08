@@ -1,4 +1,11 @@
-import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises"
+import {
+  mkdir,
+  mkdtemp,
+  rm,
+  symlink,
+  utimes,
+  writeFile,
+} from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
@@ -165,7 +172,7 @@ describe("project instructions", () => {
     }
   })
 
-  it("serves a cached result without re-reading unchanged files", async () => {
+  it("refreshes a rewritten file even when size and mtime are preserved", async () => {
     const root = await mkdtemp(join(tmpdir(), "yakitori-instructions-"))
     try {
       const file = join(root, "AGENTS.md")
@@ -181,14 +188,66 @@ describe("project instructions", () => {
 
       expect((await loader(input))?.text).toContain("cached rules")
 
-      // Same size and same mtime: only a cache serves the old text.
+      // ctime distinguishes the rewrite even when the author restores mtime.
       await writeFile(file, "sneaky edits")
       await utimes(file, fixed, fixed)
 
-      expect((await loader(input))?.text).toContain("cached rules")
-      expect((await loader(input))?.text).not.toContain("sneaky edits")
+      expect((await loader(input))?.text).toContain("sneaky edits")
+      expect((await loader(input))?.text).not.toContain("cached rules")
     } finally {
       await rm(root, { recursive: true, force: true })
     }
   })
+})
+
+it("discovers marker roots and fallback files without splitting UTF-8 characters", async () => {
+  const root = await mkdtemp(join(tmpdir(), "yakitori-instruction-root-"))
+  try {
+    const cwd = join(root, "package")
+    await mkdir(cwd)
+    await writeFile(join(root, ".project-root"), "")
+    await writeFile(join(root, "RULES.md"), "中文规则")
+    const input = {
+      workingDirectory: cwd,
+      homeDir: join(root, "empty"),
+      projectRootMarkers: [".project-root"],
+      fallbackFilenames: ["RULES.md"],
+      maxBytes: 4,
+    }
+    const result = await loadProjectInstructions(input)
+    expect(result?.text).toContain("中")
+    expect(result?.text).not.toContain("�")
+    expect(
+      await loadProjectInstructions({ ...input, projectRootMarkers: [] }),
+    ).toBeUndefined()
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+it("reports user read failures with fallback and discards a failed project instruction set", async () => {
+  const root = await mkdtemp(join(tmpdir(), "yakitori-instruction-errors-"))
+  try {
+    const home = join(root, "home")
+    const workspace = join(root, "workspace")
+    const cwd = join(workspace, "nested")
+    await mkdir(home)
+    await mkdir(cwd, { recursive: true })
+    await symlink("AGENTS.override.md", join(home, "AGENTS.override.md"))
+    await writeFile(join(home, "AGENTS.md"), "USER FALLBACK")
+    await writeFile(join(workspace, "AGENTS.md"), "PARTIAL PROJECT")
+    await symlink("AGENTS.md", join(cwd, "AGENTS.md"))
+    const diagnostics: string[] = []
+    const result = await loadProjectInstructions({
+      workspaceRoot: workspace,
+      workingDirectory: cwd,
+      homeDir: home,
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.path),
+    })
+    expect(result?.text).toContain("USER FALLBACK")
+    expect(result?.text).not.toContain("PARTIAL PROJECT")
+    expect(diagnostics).toHaveLength(2)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 })

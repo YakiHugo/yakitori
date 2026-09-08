@@ -130,3 +130,29 @@ function user(id: string, text: string): ResponseItemEnvelope {
     item: { role: "user", content: [{ type: "text", text }] },
   }
 }
+
+it("retains selected skill identity through local and remote compaction", () => {
+  const message: ResponseItemEnvelope = {
+    ...user("skill", ""),
+    item: {
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: `<skill>${"rules ".repeat(60_000)}</skill>`,
+        },
+      ],
+      context: { type: "skill_invocation", inputId: "submission" },
+    },
+  }
+  for (const retain of [
+    retainCompactionUserMessages,
+    retainRemoteCompactionMessages,
+  ]) {
+    const retained = retain([message])
+    expect(retained).toHaveLength(1)
+    expect(retained[0]?.item).toMatchObject({
+      context: { type: "skill_invocation", inputId: "submission" },
+    })
+  }
+})

@@ -174,11 +174,13 @@ export type ModelContentBlock =
   | ModelCompactionBlock
   | ModelToolCallBlock
 
-export type ModelHistoryContext = {
-  readonly type: "world_state"
-  readonly sectionId: string
-  readonly revision: string
-}
+export type ModelHistoryContext =
+  | Readonly<{ type: "skill_invocation"; inputId: string }>
+  | Readonly<{
+      type: "world_state"
+      sectionId: string
+      revision: string
+    }>
 
 export type ModelUserMessage = {
   readonly role: "user"
@@ -1511,6 +1513,8 @@ function isModelImageBlock(value: unknown): boolean {
 }
 
 function isModelHistoryContext(value: unknown): boolean {
+  if (isRecord(value) && value.type === "skill_invocation")
+    return onlyKeys(value, ["type", "inputId"]) && isString(value.inputId)
   return (
     isRecord(value) &&
     onlyKeys(value, ["type", "sectionId", "revision"]) &&

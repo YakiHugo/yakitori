@@ -1,13 +1,15 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type { SessionEvent } from "../../src/core/session-io.ts"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
-import { createFauxProvider } from "../support/faux-provider.ts"
-import { createSessionExecutionPolicy } from "../../src/runtime/limits.ts"
+import {
+  type AgentControl,
+  createAgentControl,
+} from "../../src/runtime/agent-control.ts"
 import { HookEvent, type HookRunner } from "../../src/runtime/hooks.ts"
-import type { RolloutBudgetConfig } from "../../src/runtime/rollout-budget.ts"
+import { createSessionExecutionPolicy } from "../../src/runtime/limits.ts"
 import type { ModelStreamEvent, StreamFn } from "../../src/runtime/model.ts"
 import { ModelStopReason } from "../../src/runtime/model.ts"
 import type { ModelClient } from "../../src/runtime/model-provider.ts"
@@ -16,6 +18,7 @@ import {
   type ModelsManager,
 } from "../../src/runtime/models-manager.ts"
 import { createPermissionGate } from "../../src/runtime/permission-gate.ts"
+import type { RolloutBudgetConfig } from "../../src/runtime/rollout-budget.ts"
 import {
   createToolRegistry,
   plainToolName,
@@ -27,10 +30,7 @@ import {
   type TurnProcessorOptions,
 } from "../../src/runtime/turn-processor.ts"
 import { MemoryThreadStore } from "../core/memory-thread-store.ts"
-import {
-  type AgentControl,
-  createAgentControl,
-} from "../../src/runtime/agent-control.ts"
+import { createFauxProvider } from "../support/faux-provider.ts"
 
 const cleanups: Array<() => Promise<void>> = []
 
@@ -566,7 +566,7 @@ describe("Turn processor", () => {
 
     expect(
       thread.snapshot().context.history.map((item) => item.item.role),
-    ).toEqual(["user", "user", "assistant"])
+    ).toEqual(["user", "developer", "developer", "user", "assistant"])
     expect(thread.snapshot().configuration?.defaultTarget).toEqual({
       provider: "faux",
       model: "scripted",
@@ -668,7 +668,15 @@ describe("Turn processor", () => {
     expect(provider.callCount).toBe(2)
     expect(
       thread.snapshot().context.history.map((item) => item.item.role),
-    ).toEqual(["user", "user", "assistant", "tool", "assistant"])
+    ).toEqual([
+      "user",
+      "developer",
+      "developer",
+      "user",
+      "assistant",
+      "tool",
+      "assistant",
+    ])
     const rollout = (await runtime.store.readThread(thread.id))?.rollout ?? []
     expect(
       rollout.flatMap((entry) =>
@@ -2447,9 +2455,13 @@ describe("Turn processor", () => {
       },
       { content: [{ type: "text", text: "continued" }] },
     ])
-    const runtime = await createRuntime(provider.stream, createToolRegistry([]), {
-      modelContextWindowTokens: 100,
-    })
+    const runtime = await createRuntime(
+      provider.stream,
+      createToolRegistry([]),
+      {
+        modelContextWindowTokens: 100,
+      },
+    )
     const thread = await runtime.createThread()
 
     for (const text of ["first", "second"]) {
@@ -2635,6 +2647,60 @@ describe("Turn processor", () => {
       )?.item,
     ).toMatchObject({ usage: { inputTokens: 6, outputTokens: 1 } })
   })
+})
+
+it("injects explicit skills once per input and expands steering before the next model request", async () => {
+  const entered = deferred<void>()
+  const release = deferred<void>()
+  let calls = 0
+  const stream: StreamFn = async function* (request) {
+    calls++
+    const skills = request.messages.filter(
+      (message) =>
+        message.role === "user" && message.context?.type === "skill_invocation",
+    )
+    expect(skills).toHaveLength(calls === 1 ? 1 : 2)
+    expect(JSON.stringify(skills)).toContain("FIRST BODY")
+    if (calls === 1) {
+      entered.resolve()
+      await release.promise
+    } else expect(JSON.stringify(skills)).toContain("SECOND BODY")
+    yield responseEvent(calls === 1 ? "first" : "done")
+  }
+  const runtime = await createRuntime(stream)
+  for (const [name, body] of [
+    ["first", "FIRST BODY"],
+    ["second", "SECOND BODY"],
+  ]) {
+    const dir = join(runtime.root, ".agents", "skills", name ?? "")
+    await mkdir(dir, { recursive: true })
+    await writeFile(
+      join(dir, "SKILL.md"),
+      `---\nname: ${name}\ndescription: Test workflow\n---\n${body}`,
+    )
+  }
+  const thread = await runtime.createThread()
+  const started = await thread.startIfIdle({
+    content: { kind: "text", text: "$first" },
+  })
+  if (started.type !== "started") throw new Error("Turn did not start")
+  await entered.promise
+  await thread.steer(
+    { content: { kind: "text", text: "$second" } },
+    started.turnId,
+  )
+  release.resolve()
+  await expect.poll(() => thread.agentStatus).toEqual({ completed: "done" })
+  expect(calls).toBe(2)
+  const persisted = await runtime.store.readThread(thread.id)
+  expect(
+    persisted?.rollout.filter(
+      ({ item }) =>
+        item.type === "response_item" &&
+        item.item.item.role === "user" &&
+        item.item.item.context?.type === "skill_invocation",
+    ),
+  ).toHaveLength(2)
 })
 
 async function createRuntime(

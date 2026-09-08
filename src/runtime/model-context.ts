@@ -1,9 +1,9 @@
-import type { JsonObject, WorldStateFragment } from "../kernel/events.ts"
-import type { ModelMessage } from "./model.ts"
 import type {
   ModelContextSettings,
   ResponseItemEnvelope,
 } from "../core/rollout.ts"
+import type { JsonObject, WorldStateFragment } from "../kernel/events.ts"
+import type { ModelMessage } from "./model.ts"
 import { estimateImageTokens } from "./model-request-budget.ts"
 
 export type ForkedModelContext = Readonly<{
@@ -50,7 +50,8 @@ export function retainCompactionUserMessages(
   let remaining = 20_000
   for (const envelope of [...history].reverse()) {
     const message = envelope.item
-    if (message.role !== "user" || message.context !== undefined) continue
+    if (message.role !== "user" || message.context?.type === "world_state")
+      continue
     const text = message.content.map((block) => block.text).join("\n")
     if (
       text.length === 0 ||
@@ -63,7 +64,11 @@ export function retainCompactionUserMessages(
     const retainedText = truncateCompactionText(text, remaining)
     retained.push({
       ...envelope,
-      item: { role: "user", content: [{ type: "text", text: retainedText }] },
+      item: {
+        role: "user",
+        content: [{ type: "text", text: retainedText }],
+        ...(message.context === undefined ? {} : { context: message.context }),
+      },
     })
     remaining = Math.max(0, remaining - tokens)
   }
@@ -80,7 +85,8 @@ export function retainRemoteCompactionMessages(
   for (const envelope of [...history].reverse()) {
     if (remaining === 0) break
     const message = envelope.item
-    if (message.role !== "user" || message.context !== undefined) continue
+    if (message.role !== "user" || message.context?.type === "world_state")
+      continue
     const text = message.content.map((block) => block.text).join("\n")
     if (
       text.startsWith("<context_compacted>") ||
@@ -121,6 +127,9 @@ export function retainRemoteCompactionMessages(
         ...envelope,
         item: {
           role: "user",
+          ...(message.context === undefined
+            ? {}
+            : { context: message.context }),
           content:
             keptText.length === 0 ? [] : [{ type: "text", text: keptText }],
           ...(keptImages.length === 0 ? {} : { images: keptImages.reverse() }),

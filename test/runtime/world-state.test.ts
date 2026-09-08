@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest"
-import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
+import { applyJsonMergePatch } from "../../src/kernel/json-equality.ts"
 import type { ProjectInstructions } from "../../src/runtime/project-instructions.ts"
+import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
 import {
   buildWorldStateFromSnapshot,
   diffWorldState,
 } from "../../src/runtime/world-state.ts"
-import { applyJsonMergePatch } from "../../src/kernel/json-equality.ts"
 
 describe("world state", () => {
   it("emits one full baseline, no duplicate, then section patches", () => {
@@ -21,6 +21,8 @@ describe("world state", () => {
       },
     })
     expect(full?.fragments.map((fragment) => fragment.id)).toEqual([
+      "permissions",
+      "tools",
       "project.instructions",
       "environment",
     ])
@@ -153,13 +155,14 @@ function worldState(
   currentDate = "2026-08-21",
   enabledTools: readonly string[] = [],
   multiAgent?: Parameters<typeof buildWorldStateFromSnapshot>[0]["multiAgent"],
+  approvalPolicy: "always_approve" | "auto_file_tools" = "always_approve",
 ) {
   const sessionConfiguration = SessionConfiguration.create({
     promptCacheKey: "session-cache",
     selection: { provider: "codex", model: "gpt-5.6-sol" },
     workspaceRoot: "/workspace",
     enabledTools,
-    approvalPolicy: "always_approve",
+    approvalPolicy,
   })
   return buildWorldStateFromSnapshot({
     configuration: sessionConfiguration.resolveStep(
@@ -185,3 +188,23 @@ function projectInstructions(text: string): ProjectInstructions {
     text,
   }
 }
+
+it("updates permission guidance and removes disabled tool guidance", () => {
+  const initial = diffWorldState(
+    undefined,
+    worldState(undefined, "2026-08-21", ["exec_command"]),
+  )
+  expect(
+    initial?.fragments.find((fragment) => fragment.id === "tools")?.text,
+  ).toContain("exec_command")
+  const changed = diffWorldState(
+    initial?.snapshot,
+    worldState(undefined, "2026-08-21", [], undefined, "auto_file_tools"),
+  )
+  expect(
+    changed?.fragments.find((fragment) => fragment.id === "permissions")?.text,
+  ).toContain("requires approval")
+  expect(
+    changed?.fragments.find((fragment) => fragment.id === "tools")?.text,
+  ).not.toContain("exec_command")
+})
