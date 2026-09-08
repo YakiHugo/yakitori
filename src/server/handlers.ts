@@ -30,7 +30,6 @@ import {
   type TokenUsage,
   YakitoriErrorCode,
 } from "../kernel/index.ts"
-import { DEFAULT_INPUT_ADMISSION_BYTES } from "../runtime/limits.ts"
 import { createCoalescingDeltaPublisher } from "../runtime/live-events.ts"
 import type {
   RuntimePermissionReason,
@@ -55,10 +54,16 @@ import {
   type ApiReadSessionEventsResponse,
   type ApiReadSessionResponse,
   type ApiResolvePermissionResponse,
+  type ApiSearchSessionOccurrencesResponse,
+  type ApiSearchSessionsResponse,
   type ApiSessionDetail,
   type ApiSessionSummary,
 } from "./protocol.ts"
 import type { ProjectStore } from "./sqlite-project-store.ts"
+
+// Input payload allocation boundary for local RPC commands, independent of
+// model context capacity. Retains the existing 256 KiB admission bound.
+const DEFAULT_MAX_INPUT_BYTES = 256 * 1024
 
 export type SessionCreateDefaults = {
   readonly workingDirectory: string
@@ -102,8 +107,17 @@ export type ServerHandlers = {
   listSessions(
     input?: unknown,
   ): Promise<ApiHandlerResult<ApiListSessionsResponse>>
+  searchSessions(
+    input?: unknown,
+  ): Promise<ApiHandlerResult<ApiSearchSessionsResponse>>
+  searchSessionOccurrences(
+    input: unknown,
+  ): Promise<ApiHandlerResult<ApiSearchSessionOccurrencesResponse>>
   readSession(input: unknown): Promise<ApiHandlerResult<ApiReadSessionResponse>>
   deleteSession(
+    input: unknown,
+  ): Promise<ApiHandlerResult<ApiDeleteSessionResponse>>
+  closeSession(
     input: unknown,
   ): Promise<ApiHandlerResult<ApiDeleteSessionResponse>>
   forkSession(input: unknown): Promise<ApiHandlerResult<ApiForkSessionResponse>>
@@ -449,6 +463,89 @@ export function createThreadServerHandlers(
       }
     },
 
+    async searchSessions(input = {}) {
+      try {
+        const request = requireSearchSessionsRequest(input)
+        const storeCursor =
+          request.cursor === undefined
+            ? undefined
+            : decodeSearchCursor(
+                request.cursor,
+                "sessions",
+                request.searchTerm,
+                request.limit,
+              )
+        const result = await options.store.searchThreads({
+          searchTerm: request.searchTerm,
+          limit: request.limit,
+          ...(storeCursor === undefined ? {} : { cursor: storeCursor }),
+        })
+        const liveProjects = await liveProjectIds(
+          options,
+          result.matches.map(({ summary }) => summary),
+        )
+        return ok(200, {
+          data: result.matches.map(({ summary, snippet }) => ({
+            session: mapThreadSummary(summary, liveProjects),
+            snippet,
+          })),
+          ...(result.nextCursor === undefined
+            ? {}
+            : {
+                nextCursor: encodeSearchCursor(
+                  "sessions",
+                  request.searchTerm,
+                  request.limit,
+                  result.nextCursor,
+                ),
+              }),
+        })
+      } catch (error) {
+        return fail(error, reporter, "search-sessions")
+      }
+    },
+
+    async searchSessionOccurrences(input) {
+      try {
+        const request = requireSearchSessionOccurrencesRequest(input)
+        const storeCursor =
+          request.cursor === undefined
+            ? undefined
+            : decodeSearchCursor(
+                request.cursor,
+                `session-occurrences:${request.sessionId}`,
+                request.searchTerm,
+                request.limit,
+              )
+        const result = await options.store.searchThreadOccurrences({
+          threadId: request.sessionId,
+          searchTerm: request.searchTerm,
+          limit: request.limit,
+          ...(storeCursor === undefined ? {} : { cursor: storeCursor }),
+        })
+        if (result === undefined) {
+          throw notFound(`Session ${request.sessionId} was not found.`, {
+            sessionId: request.sessionId,
+          })
+        }
+        return ok(200, {
+          data: result.occurrences,
+          ...(result.nextCursor === undefined
+            ? {}
+            : {
+                nextCursor: encodeSearchCursor(
+                  `session-occurrences:${request.sessionId}`,
+                  request.searchTerm,
+                  request.limit,
+                  result.nextCursor,
+                ),
+              }),
+        })
+      } catch (error) {
+        return fail(error, reporter, "search-session-occurrences")
+      }
+    },
+
     async readSession(input) {
       try {
         const { sessionId } = requireReadSessionRequest(input)
@@ -483,11 +580,23 @@ export function createThreadServerHandlers(
       }
     },
 
+    async closeSession(input) {
+      try {
+        const { sessionId } = requireDeleteSessionRequest(input)
+        if (!(await options.manager.closeThread(sessionId))) {
+          throw notFound(`Session ${sessionId} was not found.`, { sessionId })
+        }
+        return ok(200, { sessionId })
+      } catch (error) {
+        return fail(error, reporter, "close-session")
+      }
+    },
+
     async forkSession(input) {
       try {
         const request = requireForkSessionRequest(
           input,
-          options.maxInputBytes ?? DEFAULT_INPUT_ADMISSION_BYTES,
+          options.maxInputBytes ?? DEFAULT_MAX_INPUT_BYTES,
         )
         requireAvailableProvider(
           request.modelSelection?.provider,
@@ -574,7 +683,7 @@ export function createThreadServerHandlers(
       try {
         const request = requireAdmitInputRequest(
           input,
-          options.maxInputBytes ?? DEFAULT_INPUT_ADMISSION_BYTES,
+          options.maxInputBytes ?? DEFAULT_MAX_INPUT_BYTES,
         )
         requireAvailableProvider(
           request.modelSelection?.provider,
@@ -1276,6 +1385,55 @@ function requireListSessionsRequest(input: unknown) {
   }
 }
 
+function requireSearchSessionsRequest(input: unknown) {
+  const record = requireRecord(
+    input,
+    "Session search request must be an object.",
+  )
+  const cursor = requireOptionalString(record.cursor, "cursor")
+  return {
+    searchTerm: requireSearchTerm(record.searchTerm),
+    limit: requireSearchLimit(record.limit),
+    ...(cursor === undefined ? {} : { cursor }),
+  }
+}
+
+function requireSearchSessionOccurrencesRequest(input: unknown) {
+  const record = requireRecord(
+    input,
+    "Session occurrence search request must be an object.",
+  )
+  const cursor = requireOptionalString(record.cursor, "cursor")
+  return {
+    sessionId: requireSessionId(record.sessionId, "sessionId"),
+    searchTerm: requireSearchTerm(record.searchTerm),
+    limit: requireSearchLimit(record.limit),
+    ...(cursor === undefined ? {} : { cursor }),
+  }
+}
+
+function requireSearchTerm(value: unknown): string {
+  if (typeof value === "string" && value.trim() !== "") return value.trim()
+  throw invalidInput("searchTerm must be a non-empty string.", {
+    field: "searchTerm",
+  })
+}
+
+function requireSearchLimit(value: unknown): number {
+  if (value === undefined) return 50
+  if (
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value > 0 &&
+    value <= 100
+  ) {
+    return value
+  }
+  throw invalidInput("Search limit must be an integer from 1 to 100.", {
+    limit: isJsonValue(value) ? value : null,
+  })
+}
+
 function requireReadSessionRequest(input: unknown) {
   const record = requireRecord(input, "Session read request must be an object.")
   return {
@@ -1761,6 +1919,37 @@ function encodeSessionListCursor(
     }),
     "utf8",
   ).toString("base64url")
+}
+
+function encodeSearchCursor(
+  resource: string,
+  searchTerm: string,
+  limit: number,
+  anchor: string,
+): string {
+  return Buffer.from(
+    JSON.stringify({ version: 1, resource, searchTerm, limit, anchor }),
+    "utf8",
+  ).toString("base64url")
+}
+
+function decodeSearchCursor(
+  cursor: string,
+  resource: string,
+  searchTerm: string,
+  limit: number,
+): string {
+  const payload = parseCursorPayload(cursor)
+  if (
+    payload.version === 1 &&
+    payload.resource === resource &&
+    payload.searchTerm === searchTerm &&
+    payload.limit === limit &&
+    typeof payload.anchor === "string"
+  ) {
+    return payload.anchor
+  }
+  throw invalidCursor("Search cursor does not match this request.", { cursor })
 }
 
 function decodeSessionListCursor(

@@ -56,6 +56,7 @@ export type MessageProcessorOptions = Readonly<{
   reportOperationalFailure?: OperationalFailureReporter
   userAgent?: string
   drainTimeoutMs?: number
+  diagnostics?: () => Readonly<Record<string, number>>
 }>
 
 export type ConnectionHandle = Readonly<{
@@ -94,6 +95,7 @@ export class MessageProcessor {
   private readonly reporter: OperationalFailureReporter
   private readonly userAgent: string
   private readonly drainTimeoutMs: number
+  private readonly diagnosticsSource: () => Readonly<Record<string, number>>
   private readonly serializationQueues = new RequestSerializationQueues()
   private readonly subscriptions: SessionSubscriptions
   private readonly methods: ReadonlyMap<string, RpcMethodDefinition>
@@ -111,6 +113,7 @@ export class MessageProcessor {
       options.reportOperationalFailure ?? consoleOperationalFailureReporter
     this.userAgent = options.userAgent ?? "yakitori"
     this.drainTimeoutMs = options.drainTimeoutMs ?? defaultDrainTimeoutMs
+    this.diagnosticsSource = options.diagnostics ?? (() => ({}))
     const eventHub =
       options.eventHub ??
       createSessionEventHub({ reportOperationalFailure: this.reporter })
@@ -270,6 +273,12 @@ export class MessageProcessor {
       providers: this.providers,
       userConfig: this.userConfig,
       availableProviders: this.availableProviders,
+      diagnostics: () => ({
+        ...this.diagnosticsSource(),
+        rpc_connections: this.connections.size,
+        rpc_inflight_requests: this.inflightClientRequests,
+        pending_server_requests: this.pendingServerRequests.size,
+      }),
       broadcastNotification: (method, params) =>
         this.broadcastNotification(method, params),
     }

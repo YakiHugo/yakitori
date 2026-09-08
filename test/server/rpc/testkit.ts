@@ -149,9 +149,12 @@ export function createFakeHandlers(
         event: makeTurnStarted("session_created", 1, "turn_1"),
       }),
     listSessions: async () => okResult({ sessions: [] }),
+    searchSessions: async () => okResult({ data: [] }),
+    searchSessionOccurrences: async () => okResult({ data: [] }),
     readSession: async () =>
       okResult({ session: makeSessionDetail("session_1") }),
     deleteSession: async () => okResult({ sessionId: "session_1" }),
+    closeSession: async () => okResult({ sessionId: "session_1" }),
     forkSession: async () =>
       okResult({
         session: makeSessionDetail("session_forked"),

@@ -117,6 +117,35 @@ describe("initialize handshake", () => {
 })
 
 describe("method dispatch", () => {
+  it("returns process-local content-free diagnostics", async () => {
+    const { processor } = createTestProcessor({
+      handlers: createFakeHandlers(),
+      diagnostics: () => ({ resident_threads: 2, active_turns: 1 }),
+    })
+    const connection = openTestConnection(processor)
+    await initializeConnection(connection, { experimentalApi: true })
+
+    const response = await connection.sendRequest("server/diagnostics", {})
+
+    expect(response).toMatchObject({
+      result: {
+        process: {
+          id: process.pid,
+          uptimeSeconds: expect.any(Number),
+          residentMemoryBytes: expect.any(Number),
+          heapUsedBytes: expect.any(Number),
+        },
+        gauges: {
+          resident_threads: 2,
+          active_turns: 1,
+          rpc_connections: 1,
+          rpc_inflight_requests: 1,
+          pending_server_requests: 0,
+        },
+      },
+    })
+  })
+
   it("dispatches a handler-backed method and returns its body", async () => {
     const seen: unknown[] = []
     const session = makeSessionDetail("session_1", { seq: 7 })
@@ -479,6 +508,36 @@ describe("serialization scopes", () => {
     expect(first).toHaveProperty("result")
     expect(second).toHaveProperty("result")
     expect(started).toBe(2)
+  })
+
+  it("serializes global Session searches", async () => {
+    const firstSearch = deferred<void>()
+    let calls = 0
+    const { processor } = createTestProcessor({
+      handlers: createFakeHandlers({
+        searchSessions: async () => {
+          calls += 1
+          if (calls === 1) await firstSearch.promise
+          return okResult({ data: [] })
+        },
+      }),
+    })
+    const connection = openTestConnection(processor)
+    await initializeConnection(connection)
+
+    const first = connection.sendRequest("session/search", {
+      searchTerm: "first",
+    })
+    await waitForCondition(() => calls === 1)
+    const second = connection.sendRequest("session/search", {
+      searchTerm: "second",
+    })
+    await flush()
+    expect(calls).toBe(1)
+
+    firstSearch.resolve()
+    await Promise.all([first, second])
+    expect(calls).toBe(2)
   })
 
   it("excludes a project list while a project write is in flight", async () => {
