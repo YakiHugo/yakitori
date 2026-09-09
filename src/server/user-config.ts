@@ -1,3 +1,4 @@
+import { mcpServersFromConfig } from "./mcp-configuration.ts"
 import { createHash, randomUUID } from "node:crypto"
 import {
   mkdir,
@@ -13,12 +14,14 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { flock } from "fs-ext"
 import {
   parse,
+  TomlError,
   stringify,
   type TomlTable,
   type TomlTableWithoutBigInt,
   type TomlValue,
   type TomlValueWithoutBigInt,
 } from "smol-toml"
+import { ConfigurationError } from "./config-errors.ts"
 import type { AutoCompactTokenLimitScope } from "../kernel/events.ts"
 import {
   type HookConfiguration,
@@ -30,11 +33,6 @@ import type { McpServerConfig } from "../runtime/mcp-config.ts"
 import type { RolloutBudgetConfig } from "../runtime/rollout-budget.ts"
 import type { SkillConfiguration } from "../runtime/skills.ts"
 import type { ShellEnvironmentPolicy } from "../runtime/user-shell-env.ts"
-import {
-  consoleOperationalFailureReporter,
-  type OperationalFailureReporter,
-  reportOperationalFailure,
-} from "./operational-errors.ts"
 import type { ApiUserModelPreference } from "./protocol.ts"
 
 export type UserConfigStore = {
@@ -104,30 +102,27 @@ export function createUserConfigStore(
   options: {
     readonly configPath?: string
     readonly workspaceRoot?: string
-    readonly reportOperationalFailure?: OperationalFailureReporter
   } = {},
 ): UserConfigStore {
   const configPath = options.configPath ?? defaultUserConfigPath()
-  const reporter =
-    options.reportOperationalFailure ?? consoleOperationalFailureReporter
   const workspaceRoot = options.workspaceRoot
   let pendingWrite = Promise.resolve()
 
   return {
     async read() {
-      return (await readConfigurationSnapshot(configPath, reporter, {}))
-        .configuration.preference
+      return (await readConfigurationSnapshot(configPath, {})).configuration
+        .preference
     },
     async readConfiguration(input = {}) {
       return (
-        await readConfigurationSnapshot(configPath, reporter, {
+        await readConfigurationSnapshot(configPath, {
           ...input,
           ...(workspaceRoot === undefined ? {} : { workspaceRoot }),
         })
       ).configuration
     },
     async readSnapshot(input = {}) {
-      return readConfigurationSnapshot(configPath, reporter, {
+      return readConfigurationSnapshot(configPath, {
         ...input,
         ...(workspaceRoot === undefined ? {} : { workspaceRoot }),
       })
@@ -136,11 +131,11 @@ export function createUserConfigStore(
       const write = pendingWrite.then(
         () =>
           withConfigWriteLock(configPath, () =>
-            writePreference(configPath, preference, reporter),
+            writePreference(configPath, preference),
           ),
         () =>
           withConfigWriteLock(configPath, () =>
-            writePreference(configPath, preference, reporter),
+            writePreference(configPath, preference),
           ),
       )
       pendingWrite = write.then(
@@ -153,11 +148,11 @@ export function createUserConfigStore(
       const write = pendingWrite.then(
         () =>
           withConfigWriteLock(configPath, () =>
-            writeConfigValue(configPath, input, reporter, workspaceRoot),
+            writeConfigValue(configPath, input, workspaceRoot),
           ),
         () =>
           withConfigWriteLock(configPath, () =>
-            writeConfigValue(configPath, input, reporter, workspaceRoot),
+            writeConfigValue(configPath, input, workspaceRoot),
           ),
       )
       pendingWrite = write.then(
@@ -179,46 +174,33 @@ function defaultUserConfigPath(): string {
 async function writePreference(
   configPath: string,
   preference: ApiUserModelPreference,
-  reporter: OperationalFailureReporter,
 ): Promise<ApiUserModelPreference> {
-  const document = await readConfigDocument(configPath, reporter)
-  const content = stringify({
+  const document = await readConfigDocument(configPath)
+  const value = {
     ...(document?.value ?? {}),
     provider: preference.provider,
     model: preference.model,
-    ...(preference.effort === undefined
-      ? { effort: undefined }
-      : { effort: preference.effort }),
-    ...(preference.speed === undefined
-      ? { speed: undefined }
-      : { speed: preference.speed }),
-  })
-  await mkdir(dirname(configPath), { recursive: true })
-  const temporary = `${configPath}.${randomUUID()}.tmp`
-  try {
-    await writeFile(temporary, content, "utf8")
-    await rename(temporary, configPath)
-  } catch (error) {
-    try {
-      await unlink(temporary)
-    } catch (cleanupError) {
-      if (!isMissingFile(cleanupError)) {
-        throw new AggregateError(
-          [error, cleanupError],
-          "User config write and temporary-file cleanup both failed.",
-          { cause: error },
-        )
-      }
-    }
-    throw error
+    effort: preference.effort,
+    speed: preference.speed,
   }
+  const content = stringify(value)
+  await configurationFromConfig(
+    parseConfigDocument(configPath, content).value,
+    dirname(configPath),
+  )
+  const current = await readFile(configPath, "utf8").catch((error) => {
+    if (isMissingFile(error)) return ""
+    throw error
+  })
+  if (fingerprint(current) !== (document?.version ?? fingerprint("")))
+    throw new ConfigVersionConflictError()
+  await writeAtomically(configPath, content)
   return preference
 }
 
 async function writeConfigValue(
   configPath: string,
   input: ConfigValueWrite,
-  reporter: OperationalFailureReporter,
   workspaceRoot: string | undefined,
 ): Promise<ConfigurationSnapshot> {
   if (
@@ -228,9 +210,11 @@ async function writeConfigValue(
         segment.trim() === "" || unsafeConfigPathSegments.has(segment),
     )
   ) {
-    throw new Error("Configuration keyPath contains an invalid segment.")
+    throw new ConfigurationError(
+      "Configuration keyPath contains an invalid segment.",
+    )
   }
-  const document = await readConfigDocument(configPath, reporter)
+  const document = await readConfigDocument(configPath)
   const version = document?.version ?? fingerprint("")
   if (
     input.expectedVersion !== undefined &&
@@ -243,7 +227,7 @@ async function writeConfigValue(
   for (const segment of input.keyPath.slice(0, -1)) {
     const current = Object.hasOwn(target, segment) ? target[segment] : undefined
     if (current !== undefined && !isTomlTable(current)) {
-      throw new Error(
+      throw new ConfigurationError(
         `Configuration path ${input.keyPath.join(".")} crosses a non-table value.`,
       )
     }
@@ -253,8 +237,19 @@ async function writeConfigValue(
   }
   const leaf = input.keyPath.at(-1)
   if (leaf === undefined) throw new Error("Configuration keyPath is empty.")
-  target[leaf] = input.value as TomlTable[string]
+  target[leaf] = configurationValue(input.value)
   const content = stringify(value)
+  const candidate = parseConfigDocument(configPath, content)
+  // Validate the user layer even when the selected project overrides its values.
+  await configurationFromConfig(candidate.value, dirname(configPath))
+  const snapshot = await readConfigurationSnapshot(
+    configPath,
+    {
+      ...(workspaceRoot === undefined ? {} : { workspaceRoot }),
+      ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
+    },
+    candidate,
+  )
 
   // Check again immediately before the atomic rename. The in-process queue
   // serializes Yakitori writers; the version catches edits from another
@@ -265,10 +260,7 @@ async function writeConfigValue(
   })
   if (fingerprint(current) !== version) throw new ConfigVersionConflictError()
   await writeAtomically(configPath, content)
-  return readConfigurationSnapshot(configPath, reporter, {
-    ...(workspaceRoot === undefined ? {} : { workspaceRoot }),
-    ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
-  })
+  return snapshot
 }
 
 const unsafeConfigPathSegments = new Set([
@@ -276,6 +268,31 @@ const unsafeConfigPathSegments = new Set([
   "constructor",
   "prototype",
 ])
+
+function configurationValue(value: unknown): TomlValue {
+  if (typeof value === "string" || typeof value === "boolean") return value
+  if (typeof value === "number" && Number.isFinite(value)) return value
+  if (Array.isArray(value)) return value.map(configurationValue)
+  if (
+    typeof value === "object" &&
+    value !== null &&
+    (Object.getPrototypeOf(value) === Object.prototype ||
+      Object.getPrototypeOf(value) === null)
+  ) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => {
+        if (unsafeConfigPathSegments.has(key))
+          throw new ConfigurationError(
+            "Configuration value contains an invalid key.",
+          )
+        return [key, configurationValue(entry)]
+      }),
+    )
+  }
+  throw new ConfigurationError(
+    "Configuration values must be TOML-compatible JSON values; null is not supported.",
+  )
+}
 
 async function withConfigWriteLock<T>(
   configPath: string,
@@ -330,7 +347,6 @@ async function writeAtomically(path: string, content: string): Promise<void> {
 }
 
 type ConfigDocument = {
-  readonly configuration: UserConfiguration
   readonly content: string
   readonly path: string
   readonly value: TomlTable
@@ -339,7 +355,6 @@ type ConfigDocument = {
 
 async function readConfigDocument(
   configPath: string,
-  reporter: OperationalFailureReporter,
 ): Promise<ConfigDocument | undefined> {
   let content: string
   try {
@@ -349,33 +364,24 @@ async function readConfigDocument(
     throw error
   }
 
+  return parseConfigDocument(configPath, content)
+}
+
+function parseConfigDocument(path: string, content: string): ConfigDocument {
   try {
-    const value = parse(content, { integersAsBigInt: "asNeeded" })
     return {
       content,
-      path: configPath,
-      value,
+      path,
+      value: parse(content, { integersAsBigInt: "asNeeded" }),
       version: fingerprint(content),
-      // Relative paths in config resolve against the config file's
-      // directory, not the server process cwd.
-      configuration: await configurationFromConfig(value, dirname(configPath)),
     }
-  } catch (error) {
-    if (
-      error instanceof ModelInstructionsConfigError ||
-      error instanceof AutoCompactConfigError ||
-      error instanceof ExtensionConfigError ||
-      error instanceof RolloutBudgetConfigError ||
-      error instanceof ShellEnvironmentPolicyConfigError
-    ) {
-      throw error
-    }
-    reportOperationalFailure(reporter, {
-      component: "user-config",
-      operation: "parse",
-      cause: error,
+  } catch (cause) {
+    if (!(cause instanceof TomlError)) throw cause
+    throw new ConfigurationError(`Invalid TOML in ${path}: ${cause.message}`, {
+      code: "syntax",
+      path,
+      cause,
     })
-    return undefined
   }
 }
 
@@ -390,10 +396,10 @@ type LoadedConfigLayer = Readonly<{
 
 async function readConfigurationSnapshot(
   configPath: string,
-  reporter: OperationalFailureReporter,
   input: ConfigReadInput & Readonly<{ workspaceRoot?: string }>,
+  candidate?: ConfigDocument,
 ): Promise<ConfigurationSnapshot> {
-  const user = await readConfigDocument(configPath, reporter)
+  const user = candidate ?? (await readConfigDocument(configPath))
   const layers: LoadedConfigLayer[] = [
     {
       source: "user",
@@ -411,7 +417,7 @@ async function readConfigurationSnapshot(
     requireInside(workspaceRoot, cwd, "Configuration cwd")
     for (const directory of directoriesFromRoot(workspaceRoot, cwd)) {
       const projectPath = join(directory, ".yakitori", "config.toml")
-      const layer = await readProjectLayer(projectPath, trust, reporter)
+      const layer = await readProjectLayer(projectPath, trust)
       if (layer !== undefined) layers.push(layer)
     }
   }
@@ -450,7 +456,6 @@ async function readConfigurationSnapshot(
 async function readProjectLayer(
   path: string,
   projectTrust: ReadonlyMap<string, ProjectTrustLevel>,
-  reporter: OperationalFailureReporter,
 ): Promise<LoadedConfigLayer | undefined> {
   let content: string
   try {
@@ -474,17 +479,7 @@ async function readProjectLayer(
           : "project is not trusted",
     }
   }
-  let value: TomlTable
-  try {
-    value = parse(content, { integersAsBigInt: "asNeeded" })
-  } catch (cause) {
-    reportOperationalFailure(reporter, {
-      component: "project-config",
-      operation: "parse",
-      cause,
-    })
-    throw cause
-  }
+  const { value } = parseConfigDocument(path, content)
   return {
     source: "project",
     path,
@@ -518,9 +513,7 @@ async function normalizeProjectTrustPath(
   trustLevel: ProjectTrustLevel,
 ): Promise<readonly [string, ProjectTrustLevel]> {
   if (!isAbsolute(path)) {
-    throw new ExtensionConfigError(
-      `Project trust path must be absolute: ${path}`,
-    )
+    throw new ConfigurationError(`Project trust path must be absolute: ${path}`)
   }
   const normalized = await realpath(path).catch((error) => {
     if (isMissingFile(error)) return resolve(path)
@@ -559,7 +552,7 @@ function directoriesFromRoot(root: string, cwd: string): readonly string[] {
 function requireInside(root: string, path: string, label: string): void {
   const child = relative(root, path)
   if (child === "" || (!child.startsWith(`..${sep}`) && child !== "..")) return
-  throw new Error(`${label} is outside the workspace: ${path}`)
+  throw new ConfigurationError(`${label} is outside the workspace: ${path}`)
 }
 
 function mergeTables(base: TomlTable, overlay: TomlTable): TomlTable {
@@ -640,7 +633,9 @@ async function configurationFromConfig(
       !Number.isSafeInteger(modelContextWindowTokens) ||
       modelContextWindowTokens <= 0)
   ) {
-    throw new Error("model_context_window must be a positive integer.")
+    throw new ConfigurationError(
+      "model_context_window must be a positive integer.",
+    )
   }
   const modelAutoCompactTokenLimit = value.model_auto_compact_token_limit
   if (
@@ -649,7 +644,7 @@ async function configurationFromConfig(
       !Number.isSafeInteger(modelAutoCompactTokenLimit) ||
       modelAutoCompactTokenLimit <= 0)
   ) {
-    throw new AutoCompactConfigError(
+    throw new ConfigurationError(
       "model_auto_compact_token_limit must be a positive integer.",
     )
   }
@@ -660,7 +655,7 @@ async function configurationFromConfig(
     modelAutoCompactTokenLimitScope !== "total" &&
     modelAutoCompactTokenLimitScope !== "body_after_prefix"
   ) {
-    throw new AutoCompactConfigError(
+    throw new ConfigurationError(
       'model_auto_compact_token_limit_scope must be "total" or "body_after_prefix".',
     )
   }
@@ -698,13 +693,13 @@ function instructionsFromConfig(
   ): string[] | undefined => {
     if (value === undefined) return undefined
     if (!Array.isArray(value)) {
-      throw new ExtensionConfigError(
+      throw new ConfigurationError(
         `${field} must be an array of nonempty strings.`,
       )
     }
     return value.map((item) => {
       if (typeof item !== "string" || item.trim() === "") {
-        throw new ExtensionConfigError(
+        throw new ConfigurationError(
           `${field} must be an array of nonempty strings.`,
         )
       }
@@ -726,7 +721,7 @@ function instructionsFromConfig(
   )
   for (const name of [...(markers ?? []), ...(filenames ?? [])]) {
     if (name === "." || name === ".." || /[/\\]/.test(name)) {
-      throw new ExtensionConfigError(
+      throw new ConfigurationError(
         "Instruction marker and fallback names must be single filenames.",
       )
     }
@@ -737,7 +732,7 @@ function instructionsFromConfig(
   const configured = value.skills
   if (configured === undefined) return result
   if (!isTomlTable(configured))
-    throw new ExtensionConfigError("skills must be a table.")
+    throw new ConfigurationError("skills must be a table.")
   const resolveSkillPath = (raw: string, baseDirectory: string) =>
     raw.startsWith("~/")
       ? resolve(homedir(), raw.slice(2))
@@ -747,11 +742,11 @@ function instructionsFromConfig(
   )
   const rules = configured.config
   if (rules !== undefined && !Array.isArray(rules)) {
-    throw new ExtensionConfigError("skills.config must be an array of tables.")
+    throw new ConfigurationError("skills.config must be an array of tables.")
   }
   const config = (rules ?? []).map((rule) => {
     if (!isTomlTable(rule) || typeof rule.enabled !== "boolean") {
-      throw new ExtensionConfigError(
+      throw new ConfigurationError(
         "Each skills.config entry must be a table with a boolean enabled field.",
       )
     }
@@ -761,14 +756,14 @@ function instructionsFromConfig(
         rule.name.trim() === "" ||
         rule.path !== undefined
       ) {
-        throw new ExtensionConfigError(
+        throw new ConfigurationError(
           "A skills.config name selector requires a nonempty name and no path.",
         )
       }
       return { name: rule.name, enabled: rule.enabled }
     }
     if (typeof rule.path !== "string" || rule.path.trim() === "") {
-      throw new ExtensionConfigError(
+      throw new ConfigurationError(
         "A skills.config path selector requires a nonempty path.",
       )
     }
@@ -781,93 +776,27 @@ function instructionsFromConfig(
   return result
 }
 
-class AutoCompactConfigError extends Error {}
-class RolloutBudgetConfigError extends Error {}
-class ExtensionConfigError extends Error {}
-
-function mcpServersFromConfig(
-  value: TomlTable,
-): Readonly<Record<string, McpServerConfig>> | undefined {
-  const configured = value.mcp_servers
-  if (configured === undefined) return undefined
-  if (!isTomlTable(configured)) {
-    throw new ExtensionConfigError("mcp_servers must be a table.")
-  }
-  return Object.fromEntries(
-    Object.entries(configured).map(([name, entry]) => {
-      if (!/^[A-Za-z0-9_-]+$/.test(name) || !isTomlTable(entry)) {
-        throw new ExtensionConfigError(
-          `Invalid MCP server configuration: ${name}`,
-        )
-      }
-      if (typeof entry.command !== "string" || entry.command.trim() === "") {
-        throw new ExtensionConfigError(
-          `mcp_servers.${name}.command is required.`,
-        )
-      }
-      const args = stringArrayValue(entry.args, `mcp_servers.${name}.args`)
-      const env = stringMapValue(entry.env, `mcp_servers.${name}.env`)
-      if (entry.cwd !== undefined && typeof entry.cwd !== "string") {
-        throw new ExtensionConfigError(
-          `mcp_servers.${name}.cwd must be a string.`,
-        )
-      }
-      if (entry.enabled !== undefined && typeof entry.enabled !== "boolean") {
-        throw new ExtensionConfigError(
-          `mcp_servers.${name}.enabled must be a boolean.`,
-        )
-      }
-      const startupTimeoutMs = entry.startup_timeout_ms
-      if (
-        startupTimeoutMs !== undefined &&
-        (typeof startupTimeoutMs !== "number" ||
-          !Number.isSafeInteger(startupTimeoutMs) ||
-          startupTimeoutMs <= 0)
-      ) {
-        throw new ExtensionConfigError(
-          `mcp_servers.${name}.startup_timeout_ms must be a positive integer.`,
-        )
-      }
-      return [
-        name,
-        {
-          command: entry.command,
-          ...(args === undefined ? {} : { args }),
-          ...(entry.cwd === undefined ? {} : { cwd: entry.cwd }),
-          ...(env === undefined ? {} : { env }),
-          ...(entry.enabled === undefined ? {} : { enabled: entry.enabled }),
-          ...(startupTimeoutMs === undefined ? {} : { startupTimeoutMs }),
-        },
-      ]
-    }),
-  )
-}
-
 function hooksFromConfig(value: TomlTable): HookConfiguration | undefined {
   const configured = value.hooks
   if (configured === undefined) return undefined
   if (!isTomlTable(configured)) {
-    throw new ExtensionConfigError("hooks must be a table.")
+    throw new ConfigurationError("hooks must be a table.")
   }
   const events = Object.values(HookEvent)
   const result: Partial<Record<HookEvent, readonly HookMatcherGroup[]>> = {}
   for (const [name, groups] of Object.entries(configured)) {
     if (!events.includes(name as HookEvent)) continue
     if (!Array.isArray(groups)) {
-      throw new ExtensionConfigError(
-        `hooks.${name} must be an array of tables.`,
-      )
+      throw new ConfigurationError(`hooks.${name} must be an array of tables.`)
     }
     result[name as HookEvent] = groups.map((group, groupIndex) => {
       if (!isTomlTable(group) || !Array.isArray(group.hooks)) {
-        throw new ExtensionConfigError(
+        throw new ConfigurationError(
           `hooks.${name}[${String(groupIndex)}] must contain hooks.`,
         )
       }
       if (group.matcher !== undefined && typeof group.matcher !== "string") {
-        throw new ExtensionConfigError(
-          `hooks.${name}.matcher must be a string.`,
-        )
+        throw new ConfigurationError(`hooks.${name}.matcher must be a string.`)
       }
       return {
         ...(group.matcher === undefined ? {} : { matcher: group.matcher }),
@@ -885,10 +814,10 @@ function hooksFromConfig(value: TomlTable): HookConfiguration | undefined {
 
 function hookHandlerFromConfig(value: unknown, path: string): HookHandler {
   if (!isTomlTable(value) || value.type !== "command") {
-    throw new ExtensionConfigError(`hooks.${path} must be a command hook.`)
+    throw new ConfigurationError(`hooks.${path} must be a command hook.`)
   }
   if (typeof value.command !== "string" || value.command.trim() === "") {
-    throw new ExtensionConfigError(`hooks.${path}.command is required.`)
+    throw new ConfigurationError(`hooks.${path}.command is required.`)
   }
   const timeoutMs = value.timeout_ms
   if (
@@ -897,18 +826,16 @@ function hookHandlerFromConfig(value: unknown, path: string): HookHandler {
       !Number.isSafeInteger(timeoutMs) ||
       timeoutMs <= 0)
   ) {
-    throw new ExtensionConfigError(`hooks.${path}.timeout_ms is invalid.`)
+    throw new ConfigurationError(`hooks.${path}.timeout_ms is invalid.`)
   }
   if (value.async !== undefined && typeof value.async !== "boolean") {
-    throw new ExtensionConfigError(`hooks.${path}.async must be a boolean.`)
+    throw new ConfigurationError(`hooks.${path}.async must be a boolean.`)
   }
   if (
     value.trusted_hash !== undefined &&
     typeof value.trusted_hash !== "string"
   ) {
-    throw new ExtensionConfigError(
-      `hooks.${path}.trusted_hash must be a string.`,
-    )
+    throw new ConfigurationError(`hooks.${path}.trusted_hash must be a string.`)
   }
   return {
     type: "command",
@@ -921,50 +848,22 @@ function hookHandlerFromConfig(value: unknown, path: string): HookHandler {
   }
 }
 
-function stringArrayValue(
-  value: unknown,
-  path: string,
-): readonly string[] | undefined {
-  if (value === undefined) return undefined
-  if (
-    !Array.isArray(value) ||
-    !value.every((entry) => typeof entry === "string")
-  ) {
-    throw new ExtensionConfigError(`${path} must be an array of strings.`)
-  }
-  return value
-}
-
-function stringMapValue(
-  value: unknown,
-  path: string,
-): Readonly<Record<string, string>> | undefined {
-  if (value === undefined) return undefined
-  if (
-    !isTomlTable(value) ||
-    !Object.values(value).every((entry) => typeof entry === "string")
-  ) {
-    throw new ExtensionConfigError(`${path} must be a string table.`)
-  }
-  return value as Record<string, string>
-}
-
 function rolloutBudgetFromConfig(
   value: TomlTable,
 ): RolloutBudgetConfig | undefined {
   const features = value.features
   if (features === undefined) return undefined
   if (!isTomlTable(features))
-    throw new RolloutBudgetConfigError("features must be a table.")
+    throw new ConfigurationError("features must be a table.")
   const config = features.rollout_budget
   if (config === undefined || config === false) return undefined
   if (!isTomlTable(config))
-    throw new RolloutBudgetConfigError(
+    throw new ConfigurationError(
       "features.rollout_budget must be a table with a limit when enabled.",
     )
   if (config.enabled === false) return undefined
   if (config.enabled !== true)
-    throw new RolloutBudgetConfigError(
+    throw new ConfigurationError(
       "features.rollout_budget.enabled must be a boolean.",
     )
   const allowed = new Set([
@@ -976,7 +875,7 @@ function rolloutBudgetFromConfig(
   ])
   for (const key of Object.keys(config)) {
     if (!allowed.has(key))
-      throw new RolloutBudgetConfigError(`Unknown rollout_budget field: ${key}`)
+      throw new ConfigurationError(`Unknown rollout_budget field: ${key}`)
   }
   const limitTokens = config.limit_tokens
   if (
@@ -984,7 +883,7 @@ function rolloutBudgetFromConfig(
     !Number.isSafeInteger(limitTokens) ||
     limitTokens <= 0
   ) {
-    throw new RolloutBudgetConfigError(
+    throw new ConfigurationError(
       "rollout_budget.limit_tokens must be a positive integer.",
     )
   }
@@ -999,7 +898,7 @@ function rolloutBudgetFromConfig(
         value < limitTokens,
     )
   ) {
-    throw new RolloutBudgetConfigError(
+    throw new ConfigurationError(
       "rollout_budget.reminder_at_remaining_tokens must contain positive integers below limit_tokens.",
     )
   }
@@ -1013,7 +912,7 @@ function rolloutBudgetFromConfig(
     !Number.isFinite(prefillTokenWeight) ||
     prefillTokenWeight < 0
   ) {
-    throw new RolloutBudgetConfigError(
+    throw new ConfigurationError(
       "Rollout token weights must be finite and non-negative.",
     )
   }
@@ -1031,9 +930,7 @@ function shellEnvironmentPolicyFromConfig(
   const configured = value.shell_environment_policy
   if (configured === undefined) return undefined
   if (!isTomlTable(configured)) {
-    throw new ShellEnvironmentPolicyConfigError(
-      "shell_environment_policy must be a table.",
-    )
+    throw new ConfigurationError("shell_environment_policy must be a table.")
   }
   const allowedFields = new Set([
     "inherit",
@@ -1046,7 +943,7 @@ function shellEnvironmentPolicyFromConfig(
     (field) => !allowedFields.has(field),
   )
   if (unknownField !== undefined) {
-    throw new ShellEnvironmentPolicyConfigError(
+    throw new ConfigurationError(
       `Unknown shell_environment_policy field: ${unknownField}`,
     )
   }
@@ -1057,7 +954,7 @@ function shellEnvironmentPolicyFromConfig(
     inherit !== "core" &&
     inherit !== "none"
   ) {
-    throw new ShellEnvironmentPolicyConfigError(
+    throw new ConfigurationError(
       'shell_environment_policy.inherit must be "all", "core", or "none".',
     )
   }
@@ -1066,7 +963,7 @@ function shellEnvironmentPolicyFromConfig(
     ignoreDefaultExcludes !== undefined &&
     typeof ignoreDefaultExcludes !== "boolean"
   ) {
-    throw new ShellEnvironmentPolicyConfigError(
+    throw new ConfigurationError(
       "shell_environment_policy.ignore_default_excludes must be a boolean.",
     )
   }
@@ -1074,7 +971,7 @@ function shellEnvironmentPolicyFromConfig(
   const includeOnly = stringArray(configured.include_only, "include_only")
   const set = configured.set
   if (set !== undefined && !isTomlTable(set)) {
-    throw new ShellEnvironmentPolicyConfigError(
+    throw new ConfigurationError(
       "shell_environment_policy.set must be a table.",
     )
   }
@@ -1084,7 +981,7 @@ function shellEnvironmentPolicyFromConfig(
       : Object.fromEntries(
           Object.entries(set).map(([name, entry]) => {
             if (typeof entry !== "string") {
-              throw new ShellEnvironmentPolicyConfigError(
+              throw new ConfigurationError(
                 `shell_environment_policy.set.${name} must be a string.`,
               )
             }
@@ -1109,7 +1006,7 @@ function stringArray(
     !Array.isArray(value) ||
     !value.every((entry) => typeof entry === "string")
   ) {
-    throw new ShellEnvironmentPolicyConfigError(
+    throw new ConfigurationError(
       `shell_environment_policy.${field} must be an array of strings.`,
     )
   }
@@ -1129,7 +1026,9 @@ async function baseInstructionsFromConfig(
     configuredPath !== undefined &&
     (typeof configuredPath !== "string" || configuredPath.trim() === "")
   ) {
-    throw new Error("model_instructions_file must be a non-empty string.")
+    throw new ConfigurationError(
+      "model_instructions_file must be a non-empty string.",
+    )
   }
   if (typeof configuredPath === "string") {
     const path = isAbsolute(configuredPath)
@@ -1139,39 +1038,31 @@ async function baseInstructionsFromConfig(
     try {
       content = await readFile(path, "utf8")
     } catch (cause) {
-      throw new ModelInstructionsConfigError(
+      if (
+        !(cause instanceof Error) ||
+        !("code" in cause) ||
+        !["ENOENT", "ENOTDIR", "EACCES", "EPERM", "EISDIR"].includes(
+          String(cause.code),
+        )
+      )
+        throw cause
+      throw new ConfigurationError(
         `Failed to read model instructions file ${path}.`,
-        { cause },
+        { cause, path },
       )
     }
     const text = content.trim()
     if (text.length === 0) {
-      throw new ModelInstructionsConfigError(
-        `Model instructions file is empty: ${path}.`,
-      )
+      throw new ConfigurationError(`Model instructions file is empty: ${path}.`)
     }
     return text
   }
   const instructions = value.instructions
   if (instructions === undefined) return undefined
   if (typeof instructions !== "string" || instructions.trim() === "") {
-    throw new Error("instructions must be a non-empty string.")
+    throw new ConfigurationError("instructions must be a non-empty string.")
   }
   return instructions.trim()
-}
-
-class ModelInstructionsConfigError extends Error {
-  constructor(message: string, options?: ErrorOptions) {
-    super(message, options)
-    this.name = "ModelInstructionsConfigError"
-  }
-}
-
-class ShellEnvironmentPolicyConfigError extends Error {
-  constructor(message: string) {
-    super(message)
-    this.name = "ShellEnvironmentPolicyConfigError"
-  }
 }
 
 function preferenceFromConfig(
@@ -1181,7 +1072,9 @@ function preferenceFromConfig(
   const model = value.model
   if (provider === undefined && model === undefined) return undefined
   if (provider === undefined || model === undefined) {
-    throw new Error("provider and model must be configured together.")
+    throw new ConfigurationError(
+      "provider and model must be configured together.",
+    )
   }
   if (
     typeof provider !== "string" ||
@@ -1189,7 +1082,9 @@ function preferenceFromConfig(
     provider.trim() === "" ||
     model.trim() === ""
   ) {
-    throw new Error("provider and model must be non-empty strings.")
+    throw new ConfigurationError(
+      "provider and model must be non-empty strings.",
+    )
   }
   const effort = value.effort
   const speed = value.speed
@@ -1198,7 +1093,9 @@ function preferenceFromConfig(
       (typeof effort !== "string" || effort.trim() === "")) ||
     (speed !== undefined && (typeof speed !== "string" || speed.trim() === ""))
   ) {
-    throw new Error("effort and speed must be non-empty when configured.")
+    throw new ConfigurationError(
+      "effort and speed must be non-empty when configured.",
+    )
   }
   return {
     provider,

@@ -46,11 +46,7 @@ import {
   ProjectMoveOutcome,
   type ProjectStore,
 } from "../sqlite-project-store.ts"
-import {
-  type ConfigurationSnapshot,
-  ConfigVersionConflictError,
-  type UserConfigStore,
-} from "../user-config.ts"
+import type { ConfigurationSnapshot, UserConfigStore } from "../user-config.ts"
 import { INTERNAL_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND } from "./messages.ts"
 import type { RequestSerializationScope } from "./serialization.ts"
 import type { SessionSubscriptions } from "./subscriptions.ts"
@@ -863,24 +859,15 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
       if (record.cwd !== undefined && typeof record.cwd !== "string") {
         throw invalidParams("cwd must be a string when provided.")
       }
-      try {
-        return {
-          result: await context.userConfig.writeValue({
-            keyPath: record.keyPath as string[],
-            value: record.value,
-            ...(record.expectedVersion === undefined
-              ? {}
-              : { expectedVersion: record.expectedVersion }),
-            ...(record.cwd === undefined ? {} : { cwd: record.cwd }),
-          }),
-        }
-      } catch (error) {
-        if (error instanceof ConfigVersionConflictError) {
-          throw new RpcMethodError(-32009, error.message, {
-            code: ApiErrorCode.Conflict,
-          })
-        }
-        throw error
+      return {
+        result: await context.userConfig.writeValue({
+          keyPath: record.keyPath as string[],
+          value: record.value,
+          ...(record.expectedVersion === undefined
+            ? {}
+            : { expectedVersion: record.expectedVersion }),
+          ...(record.cwd === undefined ? {} : { cwd: record.cwd }),
+        }),
       }
     },
   },

@@ -80,6 +80,24 @@ function frameIndex(connection: TestConnection, method: string): number {
 }
 
 describe("session/subscribe", () => {
+  it("does not retire another interaction using a permission snapshot", async () => {
+    const { processor } = subscribeSetup({ events: [], detail: { seq: 0 } })
+    const request = processor.pendingServerRequests.register({
+      sessionId,
+      method: "session/elicitation/request",
+    })
+    const connection = openTestConnection(processor)
+    await initializeConnection(connection)
+    await subscribe(connection)
+    await connection.waitForFrame(
+      (frame) => "method" in frame && frame.method === "session/replayComplete",
+    )
+    expect(
+      processor.pendingServerRequests.resolve(request.id, { action: "cancel" }),
+    ).toBe(true)
+    await expect(request.response).resolves.toEqual({ action: "cancel" })
+  })
+
   it("sends the snapshot response, replays durable events to the watermark, then marks replay complete", async () => {
     const events = [
       makeTurnStarted(sessionId, 1, "turn_1"),
@@ -584,7 +602,9 @@ describe("session/permission/request", () => {
     await initializeConnection(connection)
     await subscribeAndDrain(connection)
 
-    eventHub.publishTransient(makePermissionRequested(sessionId, "turn_1", "perm_1"))
+    eventHub.publishTransient(
+      makePermissionRequested(sessionId, "turn_1", "perm_1"),
+    )
     await connection.waitForFrame(
       (frame) =>
         "method" in frame &&
@@ -629,7 +649,9 @@ describe("session/permission/request", () => {
     await subscribeAndDrain(connectionA)
     await subscribeAndDrain(connectionB)
 
-    eventHub.publishTransient(makePermissionRequested(sessionId, "turn_1", "perm_1"))
+    eventHub.publishTransient(
+      makePermissionRequested(sessionId, "turn_1", "perm_1"),
+    )
     await connectionB.waitForFrame(
       (frame) =>
         "method" in frame &&
@@ -660,7 +682,9 @@ describe("session/permission/request", () => {
     await initializeConnection(connection)
     await subscribeAndDrain(connection)
 
-    eventHub.publishTransient(makePermissionRequested(sessionId, "turn_1", "perm_1"))
+    eventHub.publishTransient(
+      makePermissionRequested(sessionId, "turn_1", "perm_1"),
+    )
     await connection.waitForFrame(
       (frame) =>
         "method" in frame &&
@@ -689,7 +713,9 @@ describe("session/permission/request", () => {
     await initializeConnection(connection)
     await subscribeAndDrain(connection)
 
-    eventHub.publishTransient(makePermissionRequested(sessionId, "turn_1", "perm_1"))
+    eventHub.publishTransient(
+      makePermissionRequested(sessionId, "turn_1", "perm_1"),
+    )
     await connection.waitForFrame(
       (frame) =>
         "method" in frame &&

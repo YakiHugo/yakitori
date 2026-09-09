@@ -114,7 +114,7 @@ export type TurnProcessorOptions = {
   readonly modelAutoCompactTokenLimit?: number
   readonly modelAutoCompactTokenLimitScope?: import("../kernel/index.ts").AutoCompactTokenLimitScope
   readonly loadProjectInstructions?: typeof loadProjectInstructions
-  readonly readInstructionConfiguration?: () => Promise<
+  readonly prepareStepExtensions?: (signal: AbortSignal) => Promise<
     Readonly<{
       skills?: SkillConfiguration
       projectRootMarkers?: readonly string[]
@@ -530,6 +530,8 @@ async function executeTurnModelLoop(
       const steering = input.control.takeSteering()
       await recordSteering(input.runtime, steering)
       pendingSkillInputs.push(...steering)
+      const instructionConfiguration =
+        (await input.options.prepareStepExtensions?.(input.signal)) ?? {}
       step = captureStepContext({
         registry: input.toolRegistry,
         configuration: turn.requestSettings,
@@ -539,8 +541,6 @@ async function executeTurnModelLoop(
       const workspaceRoot = await resolveWorkspaceRoot(
         configuration.workspaceRoot,
       )
-      const instructionConfiguration =
-        (await input.options.readInstructionConfiguration?.()) ?? {}
       const diagnostics: InstructionDiagnostic[] = []
       const discoveryInput = {
         workingDirectory: configuration.workspaceRoot,

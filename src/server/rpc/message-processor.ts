@@ -1,3 +1,4 @@
+import { ConfigurationError } from "../config-errors.ts"
 import { createSessionEventHub, type SessionEventHub } from "../event-hub.ts"
 import type { ServerHandlers } from "../handlers.ts"
 import {
@@ -7,13 +8,17 @@ import {
 } from "../operational-errors.ts"
 import { ApiErrorCode, type ApiListProvidersResponse } from "../protocol.ts"
 import type { ProjectStore } from "../sqlite-project-store.ts"
-import type { UserConfigStore } from "../user-config.ts"
+import {
+  ConfigVersionConflictError,
+  type UserConfigStore,
+} from "../user-config.ts"
 import { RpcConnectionState } from "./connection.ts"
 import { ConnectionRpcGate } from "./connection-gate.ts"
 import {
   errorResponse,
   INTERNAL_ERROR,
   INVALID_REQUEST,
+  INVALID_PARAMS,
   type JsonRpcMessage,
   JsonRpcParseError,
   type JsonRpcRequest,
@@ -400,6 +405,18 @@ export class MessageProcessor {
   ): ReturnType<typeof errorResponse> {
     if (error instanceof RpcMethodError) {
       return errorResponse(id, error.rpcCode, error.message, error.data)
+    }
+    if (error instanceof ConfigVersionConflictError) {
+      return errorResponse(id, -32009, error.message, {
+        code: ApiErrorCode.Conflict,
+      })
+    }
+    if (error instanceof ConfigurationError) {
+      return errorResponse(id, INVALID_PARAMS, error.message, {
+        code: ApiErrorCode.InvalidInput,
+        configurationError: error.code,
+        ...(error.path === undefined ? {} : { path: error.path }),
+      })
     }
     reportOperationalFailure(this.reporter, {
       component: "message-processor",

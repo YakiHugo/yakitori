@@ -98,7 +98,10 @@ export function createSessionSubscriptions(
     }
     pendingPermissionRequests.set(key, request)
     const settle = (answer: SessionPermissionRequestResult): void => {
-      void settlePermissionRequest(key, params, answer).then(undefined, onSettleFailure)
+      void settlePermissionRequest(key, params, answer).then(
+        undefined,
+        onSettleFailure,
+      )
     }
     void registered.response.then(
       (result) => settle(parseAnswer(result)),
@@ -150,7 +153,11 @@ export function createSessionSubscriptions(
 
   function parseAnswer(result: unknown): SessionPermissionRequestResult {
     // Malformed answers fail closed, same as an errored response.
-    if (typeof result !== "object" || result === null || Array.isArray(result)) {
+    if (
+      typeof result !== "object" ||
+      result === null ||
+      Array.isArray(result)
+    ) {
       return failedAnswer("The permission answer was malformed.")
     }
     const behavior = (result as Record<string, unknown>).behavior
@@ -160,7 +167,11 @@ export function createSessionSubscriptions(
       return failedAnswer("The permission answer was malformed.")
     }
     const reason = (result as Record<string, unknown>).reason
-    if (typeof reason !== "object" || reason === null || Array.isArray(reason)) {
+    if (
+      typeof reason !== "object" ||
+      reason === null ||
+      Array.isArray(reason)
+    ) {
       return { behavior: decision }
     }
     const kind = (reason as Record<string, unknown>).kind
@@ -269,6 +280,9 @@ export function createSessionSubscriptions(
     for (const pending of options.pendingRequests.pendingForSession(
       input.sessionId,
     )) {
+      // Permission snapshots can only retire permission requests. Other
+      // interactions have their own owners and cancellation contracts.
+      if (pending.method !== "session/permission/request") continue
       const permissionRequestId =
         typeof pending.params === "object" &&
         pending.params !== null &&

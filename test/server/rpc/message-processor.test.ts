@@ -1,3 +1,10 @@
+import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import {
+  ConfigVersionConflictError,
+  createUserConfigStore,
+} from "../../../src/server/user-config.ts"
 import { describe, expect, it } from "vitest"
 import {
   INTERNAL_ERROR,
@@ -292,6 +299,44 @@ describe("method dispatch", () => {
     expect(response).toMatchObject({ error: { code: METHOD_NOT_FOUND } })
   })
 
+  it("reports configuration failures as actionable input errors without committing invalid values", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yakitori-rpc-config-"))
+    const configPath = join(root, "config.toml")
+    const content = 'provider = "codex"\nmodel = "original"\n'
+    await writeFile(configPath, content)
+    try {
+      const { processor } = createTestProcessor({
+        handlers: createFakeHandlers(),
+        userConfig: createUserConfigStore({ configPath }),
+      })
+      const connection = openTestConnection(processor)
+      await initializeConnection(connection)
+      await expect(
+        connection.sendRequest("config/write", {
+          keyPath: ["mcp_servers", "bad"],
+          value: { command: 42 },
+        }),
+      ).resolves.toMatchObject({
+        error: {
+          code: INVALID_PARAMS,
+          data: { code: "invalid_input", configurationError: "invalid_value" },
+        },
+      })
+      expect(await readFile(configPath, "utf8")).toBe(content)
+      await writeFile(configPath, "[malformed")
+      await expect(
+        connection.sendRequest("config/read", {}),
+      ).resolves.toMatchObject({
+        error: {
+          code: INVALID_PARAMS,
+          data: { configurationError: "syntax", path: configPath },
+        },
+      })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it("validates config/write key paths and forwards its cwd scope", async () => {
     const writes: ConfigValueWrite[] = []
     const emptySnapshot = {
@@ -339,6 +384,36 @@ describe("method dispatch", () => {
       }),
     ).resolves.toMatchObject({ error: { code: INVALID_PARAMS } })
     expect(writes).toHaveLength(1)
+  })
+
+  it("maps configuration conflicts consistently for both write entry points", async () => {
+    const failures: unknown[] = []
+    const conflict = async (): Promise<never> => {
+      throw new ConfigVersionConflictError()
+    }
+    const { processor } = createTestProcessor({
+      handlers: createFakeHandlers(),
+      userConfig: {
+        ...createUserConfigStore(),
+        write: conflict,
+        writeValue: conflict,
+      },
+      availableProviders: ["fake"],
+      reportOperationalFailure: (failure) => {
+        failures.push(failure)
+      },
+    })
+    const connection = openTestConnection(processor)
+    await initializeConnection(connection)
+    for (const [method, params] of [
+      ["userPreference/write", { provider: "fake", model: "fake-model" }],
+      ["config/write", { keyPath: ["ui", "theme"], value: "dark" }],
+    ] as const) {
+      expect(await connection.sendRequest(method, params)).toMatchObject({
+        error: { code: -32009, data: { code: "conflict" } },
+      })
+    }
+    expect(failures).toEqual([])
   })
 
   it("writes the user preference through the config store", async () => {

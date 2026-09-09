@@ -102,15 +102,16 @@ export async function mcpResult(
       `[${mediaType === "application/pdf" ? "Document" : "Image"} attached]`,
     )
   }
-  const content =
-    text.length > 0
-      ? text.join("\n")
-      : JSON.stringify(result?.structuredContent ?? value)
+  if (result?.structuredContent !== undefined)
+    text.push(JSON.stringify(result.structuredContent))
+  const content = text.join("\n")
   const output = {
     content: visible,
     ...(result?.structuredContent === undefined
       ? {}
       : { structuredContent: result.structuredContent }),
+    // MCP metadata belongs to the host/UI, never the model projection.
+    ...(result?._meta === undefined ? {} : { _meta: result._meta }),
   }
   const base: ToolExecutionResult =
     result?.isError === true
