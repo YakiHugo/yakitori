@@ -12,10 +12,57 @@ import { dirname, join } from "node:path"
 import { flock } from "fs-ext"
 import { parse } from "smol-toml"
 import { describe, expect, it } from "vitest"
-import type { OperationalFailure } from "../../src/server/operational-errors.ts"
+import { ConfigurationError } from "../../src/server/config-errors.ts"
 import { createUserConfigStore } from "../../src/server/user-config.ts"
 
 describe("user config", () => {
+  it("validates HTTP MCP configuration before committing it", async () => {
+    await withConfigPath(async (configPath) => {
+      const store = createUserConfigStore({ configPath })
+      await writeFile(configPath, 'instructions = "keep"\n')
+      const value = {
+        url: "https://example.com/mcp",
+        http_headers: { "X-Client": "yakitori" },
+        env_http_headers: { Authorization: "MCP_AUTH" },
+        enabled_tools: ["search"],
+        disabled_tools: ["delete"],
+        startup_timeout_ms: 1000,
+        tool_timeout_ms: 2000,
+      }
+      const saved = await store.writeValue({
+        keyPath: ["mcp_servers", "remote"],
+        value,
+      })
+      expect(saved.configuration.mcpServers?.remote).toEqual({
+        url: "https://example.com/mcp",
+        httpHeaders: { "X-Client": "yakitori" },
+        envHttpHeaders: { Authorization: "MCP_AUTH" },
+        enabledTools: ["search"],
+        disabledTools: ["delete"],
+        startupTimeoutMs: 1000,
+        toolTimeoutMs: 2000,
+      })
+      const content = await readFile(configPath, "utf8")
+      for (const invalid of [
+        { ...value, command: "node" },
+        { ...value, http_headers: { "bad header": "value" } },
+        { ...value, tool_timeout_ms: 0 },
+        { ...value, tool_timeout_ms: 2_147_483_648 },
+        { ...value, startup_timeout_ms: 2_147_483_648 },
+        { ...value, startup_timeout_ms: 4_294_967_296 },
+        { ...value, url: "file:///tmp/server" },
+      ]) {
+        await expect(
+          store.writeValue({
+            keyPath: ["mcp_servers", "remote"],
+            value: invalid,
+          }),
+        ).rejects.toBeInstanceOf(ConfigurationError)
+        expect(await readFile(configPath, "utf8")).toBe(content)
+      }
+    })
+  })
+
   it("omits the preference when the injected file is missing", async () => {
     await withConfigPath(async (configPath) => {
       const store = createUserConfigStore({ configPath })
@@ -560,47 +607,78 @@ describe("user config", () => {
     })
   })
 
-  it("reports and treats malformed TOML as an empty preference", async () => {
+  it("preserves malformed TOML when reading or changing preferences", async () => {
     await withConfigPath(async (configPath) => {
-      await writeFile(configPath, 'provider = "unterminated\nmodel = "x"\n')
-      const failures: OperationalFailure[] = []
-      const store = createUserConfigStore({
-        configPath,
-        reportOperationalFailure(failure) {
-          failures.push(failure)
-        },
+      const content = 'provider = "unterminated\nmodel = "x"\n'
+      await writeFile(configPath, content)
+      const store = createUserConfigStore({ configPath })
+      await expect(store.read()).rejects.toMatchObject({
+        name: "ConfigurationError",
+        code: "syntax",
+        path: configPath,
       })
-
-      await expect(store.read()).resolves.toBeUndefined()
-      expect(failures).toEqual([
-        {
-          component: "user-config",
-          operation: "parse",
-          cause: expect.any(Error),
-        },
-      ])
+      await expect(
+        store.write({ provider: "codex", model: "new" }),
+      ).rejects.toBeInstanceOf(ConfigurationError)
+      expect(await readFile(configPath, "utf8")).toBe(content)
     })
   })
 
-  it("rejects a non-positive model context window as malformed config", async () => {
+  it("reports invalid model metadata instead of returning default configuration", async () => {
     await withConfigPath(async (configPath) => {
       await writeFile(configPath, "model_context_window = 0\n")
-      const failures: OperationalFailure[] = []
-      const store = createUserConfigStore({
-        configPath,
-        reportOperationalFailure(failure) {
-          failures.push(failure)
-        },
+      await expect(
+        createUserConfigStore({ configPath }).readConfiguration(),
+      ).rejects.toMatchObject({
+        name: "ConfigurationError",
+        code: "invalid_value",
       })
+    })
+  })
 
-      await expect(store.readConfiguration()).resolves.toEqual({})
-      expect(failures).toEqual([
-        {
-          component: "user-config",
-          operation: "parse",
-          cause: expect.any(Error),
-        },
-      ])
+  it("rejects invalid candidate values before committing and permits repair of invalid existing values", async () => {
+    await withConfigPath(async (configPath) => {
+      const content = 'provider = "codex"\nmodel = "original"\n'
+      await writeFile(configPath, content)
+      const store = createUserConfigStore({ configPath })
+      await expect(
+        store.writeValue({
+          keyPath: ["mcp_servers", "demo"],
+          value: { command: 42 },
+        }),
+      ).rejects.toBeInstanceOf(ConfigurationError)
+      expect(await readFile(configPath, "utf8")).toBe(content)
+      await writeFile(
+        configPath,
+        `${content}[mcp_servers.demo]\ncommand = 42\n`,
+      )
+      await expect(
+        store.writeValue({
+          keyPath: ["mcp_servers", "demo", "command"],
+          value: "node",
+        }),
+      ).resolves.toMatchObject({
+        configuration: { mcpServers: { demo: { command: "node" } } },
+      })
+    })
+  })
+
+  it("validates the requested project scope before committing a user write", async () => {
+    await withConfigPath(async (configPath) => {
+      const root = join(dirname(configPath), "root")
+      const other = join(dirname(configPath), "other")
+      await mkdir(root)
+      await mkdir(other)
+      const content = 'provider = "codex"\nmodel = "original"\n'
+      await writeFile(configPath, content)
+      await expect(
+        createUserConfigStore({ configPath, workspaceRoot: root }).writeValue({
+          keyPath: ["model"],
+          value: "changed",
+          cwd: other,
+        }),
+      ).rejects.toThrow("outside the workspace")
+      expect(await readFile(configPath, "utf8")).toBe(content)
     })
   })
 })

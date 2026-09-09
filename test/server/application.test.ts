@@ -1219,6 +1219,19 @@ describe("application composition", () => {
         expect(snapshot.configuration.baseInstructions).toBe(
           "Use the outside Project configuration.",
         )
+        const written = await rpcRequest<ConfigurationSnapshot>(
+          baseUrl,
+          "config/write",
+          {
+            cwd: nested,
+            keyPath: ["ui", "theme"],
+            value: "dark",
+          },
+        )
+        expect(written.configuration.baseInstructions).toBe(
+          "Use the outside Project configuration.",
+        )
+        expect(written.effective.ui).toEqual({ theme: "dark" })
       } finally {
         await closeServer(server)
         await application.close()
@@ -1226,7 +1239,7 @@ describe("application composition", () => {
     })
   })
 
-  it("resolves an MCP cwd relative to the configuration file that defines it", async () => {
+  it("resolves MCP cwd by provenance and reloads changes before the next Step", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const configPath = join(rootDir, "config.toml")
       const projectConfigDirectory = join(workspace, ".yakitori")
@@ -1242,7 +1255,7 @@ describe("application composition", () => {
           "writeFileSync(process.argv[2], process.cwd());",
           "const rl=readline.createInterface({input:process.stdin});",
           "rl.on('line',(line)=>{const m=JSON.parse(line); if(m.id===undefined)return;",
-          "const result=m.method==='tools/list'?{tools:[]}:{};",
+          "const result=m.method==='tools/list'?{tools:[]}:{protocolVersion:m.params?.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'fixture',version:'1'}};",
           "process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result})+'\\n');});",
         ].join("\n"),
       )
@@ -1263,9 +1276,13 @@ describe("application composition", () => {
         ].join("\n"),
       )
 
+      const provider = createFauxProvider([
+        { content: [{ type: "text", text: "done" }] },
+      ])
       const application = await createYakitoriApplication({
         ...testApplicationOptions({ rootDir, workspace }),
         userConfigPath: configPath,
+        stream: provider.stream,
       })
       try {
         const created = await application.handlers.createSession({
@@ -1274,6 +1291,27 @@ describe("application composition", () => {
         expectOk(created)
         expect(await readFile(observedCwd, "utf8")).toBe(
           await realpath(mcpDirectory),
+        )
+        const nextDirectory = join(projectConfigDirectory, "next-tools")
+        await mkdir(nextDirectory)
+        const projectConfig = join(projectConfigDirectory, "config.toml")
+        await writeFile(
+          projectConfig,
+          (await readFile(projectConfig, "utf8")).replace(
+            'cwd = "tools"',
+            'cwd = "next-tools"',
+          ),
+        )
+        const admitted = await application.handlers.admitInput({
+          sessionId: created.body.session.id,
+          requestId: "request_mcp_reload",
+          content: { kind: "text", text: "run" },
+        })
+        expectOk(admitted)
+        await waitForThreadIdle(application, created.body.session.id)
+        expect(provider.callCount).toBe(1)
+        expect(await readFile(observedCwd, "utf8")).toBe(
+          await realpath(nextDirectory),
         )
       } finally {
         await application.close()

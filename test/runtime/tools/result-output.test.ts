@@ -48,6 +48,29 @@ const png = Buffer.from(
 )
 
 describe("tool result persistence and model projection", () => {
+  it("projects structured MCP results with text and keeps metadata host-only", async () => {
+    const ctx = await context()
+    const result = await mcpResult(
+      {
+        content: [{ type: "text", text: "Found one item" }],
+        structuredContent: { items: ["item-1"] },
+        _meta: { privateState: "host-only" },
+      },
+      ctx,
+    )
+    expect(result.output).toMatchObject({
+      _meta: { privateState: "host-only" },
+    })
+    const projected = await finalizeToolOutput(result, budget, ctx)
+    expect(projected.content).toBe('Found one item\n{"items":["item-1"]}')
+    expect(JSON.stringify(projected)).not.toContain("host-only")
+    const empty = await mcpResult(
+      { content: [], _meta: { privateState: "host-only" } },
+      ctx,
+    )
+    expect(empty.content).toBe("")
+  })
+
   it("retains full text for a second read while bounding the model preview", async () => {
     const ctx = await context()
     const full = Array.from({ length: 150 }, (_, index) => `row ${index}`).join(

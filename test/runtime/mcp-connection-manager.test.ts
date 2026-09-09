@@ -14,7 +14,7 @@ describe("MCP connection manager", () => {
         "import readline from 'node:readline';",
         "const rl=readline.createInterface({input:process.stdin});",
         "rl.on('line',(line)=>{const m=JSON.parse(line); if(m.id===undefined)return;",
-        "let result={}; if(m.method==='tools/list') result={tools:[{name:'echo',description:'Echo input',inputSchema:{type:'object'},annotations:{readOnlyHint:true}}]};",
+        "let result={protocolVersion:m.params?.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'fixture',version:'1'}}; if(m.method==='tools/list') result={tools:[{name:'echo',description:'Echo input',inputSchema:{type:'object'},annotations:{readOnlyHint:true}}]};",
         "if(m.method==='tools/call') result={content:[{type:'text',text:m.params.arguments.text}]};",
         "process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result})+'\\n');});",
       ].join("\n"),
@@ -52,7 +52,7 @@ describe("MCP connection manager", () => {
         "import readline from 'node:readline';",
         "const rl=readline.createInterface({input:process.stdin});",
         "rl.on('line',(line)=>{const m=JSON.parse(line); if(m.id===undefined)return;",
-        "let result={}; if(m.method==='tools/list') result={tools:[{name:'echo',inputSchema:{type:'object'}}]};",
+        "let result={protocolVersion:m.params?.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'fixture',version:'1'}}; if(m.method==='tools/list') result={tools:[{name:'echo',inputSchema:{type:'object'}}]};",
         "if(m.method==='tools/call') result={content:[{type:'text',text:'before restart'}]};",
         "process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result})+'\\n',()=>{if(m.method==='tools/call')process.exit(0)});});",
       ].join("\n"),
@@ -99,7 +99,7 @@ describe("MCP connection manager", () => {
         `appendFileSync(${JSON.stringify(starts)},'start\\n');`,
         `const first=!existsSync(${JSON.stringify(marker)}); if(first)writeFileSync(${JSON.stringify(marker)},'');`,
         "import readline from 'node:readline'; const rl=readline.createInterface({input:process.stdin});",
-        "rl.on('line',(line)=>{const m=JSON.parse(line);if(m.id===undefined)return;const result=m.method==='tools/list'?{tools:[]}:{};process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result})+'\\n',()=>{if(first&&m.method==='tools/list')process.exit(0)});});",
+        "rl.on('line',(line)=>{const m=JSON.parse(line);if(m.id===undefined)return;const result=m.method==='tools/list'?{tools:[]}:{protocolVersion:m.params?.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'fixture',version:'1'}};process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result})+'\\n',()=>{if(first&&m.method==='tools/list')process.exit(0)});});",
       ].join("\n"),
     )
     const manager = createMcpConnectionManager({ restartDelayMs: 200 })
@@ -126,7 +126,7 @@ describe("MCP connection manager", () => {
         "import {appendFileSync} from 'node:fs';",
         `appendFileSync(${JSON.stringify(starts)},'start\\n');`,
         "import readline from 'node:readline'; const rl=readline.createInterface({input:process.stdin});",
-        "rl.on('line',(line)=>{const m=JSON.parse(line);if(m.id===undefined)return;const result=m.method==='tools/list'?{tools:[]}:{};process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result})+'\\n',()=>{if(m.method==='tools/list')process.exit(0)});});",
+        "rl.on('line',(line)=>{const m=JSON.parse(line);if(m.id===undefined)return;const result=m.method==='tools/list'?{tools:[]}:{protocolVersion:m.params?.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'fixture',version:'1'}};process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result})+'\\n',()=>{if(m.method==='tools/list')process.exit(0)});});",
       ].join("\n"),
     )
     const manager = createMcpConnectionManager({

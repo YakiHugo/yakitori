@@ -201,7 +201,6 @@ export async function createYakitoriApplication(
     projectStoreForCleanup = ownedProjectStore
     await ensureWorkspaceProject(ownedProjectStore, workspace)
     const userConfig = createUserConfigStore({
-      reportOperationalFailure: reporter,
       workspaceRoot: workspace,
       ...(options.userConfigPath === undefined
         ? {}
@@ -226,11 +225,17 @@ export async function createYakitoriApplication(
         return createSessionUserConfig(root).readSnapshot(input)
       },
       write: (preference) => userConfig.write(preference),
-      writeValue: (input) => userConfig.writeValue(input),
+      writeValue: async (input) => {
+        if (input.cwd === undefined) return userConfig.writeValue(input)
+        const root = await resolveProjectConfigRoot(
+          ownedProjectStore,
+          input.cwd,
+        )
+        return createSessionUserConfig(root).writeValue(input)
+      },
     }
     function createSessionUserConfig(root: string): UserConfigStore {
       return createUserConfigStore({
-        reportOperationalFailure: reporter,
         workspaceRoot: root,
         ...(options.userConfigPath === undefined
           ? {}
@@ -389,19 +394,29 @@ export async function createYakitoriApplication(
         const toolRegistry = createToolRegistry(
           createTrustedTools(sessionShellEnv),
         )
-        const mcpManager = createMcpConnectionManager()
-        const unsubscribe = mcpManager.subscribe((name, tools) => {
-          toolRegistry.replaceExternalSource(`mcp:${name}`, tools)
+        const mcpManager = createMcpConnectionManager({
+          installTools: (name, tools) => {
+            toolRegistry.replaceExternalSource(`mcp:${name}`, tools)
+          },
+          onBackgroundError: (cause) =>
+            reportOperationalFailure(reporter, {
+              component: "mcp",
+              operation: "background",
+              cause,
+              sessionId: stored.metadata.id,
+            }),
         })
         try {
           await mcpManager.update(
             resolveSessionMcpServers(config, workingDirectory),
           )
         } catch (error) {
-          unsubscribe()
           await Promise.allSettled([toolRegistry.dispose(), mcpManager.close()])
           throw error
         }
+        let mcpConfiguration = JSON.stringify(
+          resolveSessionMcpServers(config, workingDirectory),
+        )
         let processor: ReturnType<typeof createTurnProcessor>
         let hookRunner: ReturnType<typeof createHookRunner> | undefined
         try {
@@ -410,8 +425,21 @@ export async function createYakitoriApplication(
               ? undefined
               : createHookRunner(sessionConfiguration.hooks)
           processor = createTurnProcessor({
-            readInstructionConfiguration: () =>
-              sessionUserConfig.readConfiguration({ cwd: workingDirectory }),
+            prepareStepExtensions: async (signal) => {
+              const snapshot = await sessionUserConfig.readSnapshot({
+                cwd: workingDirectory,
+              })
+              const servers = resolveSessionMcpServers(
+                snapshot,
+                workingDirectory,
+              )
+              const fingerprint = JSON.stringify(servers)
+              if (fingerprint !== mcpConfiguration) {
+                await mcpManager.update(servers, signal)
+                mcpConfiguration = fingerprint
+              }
+              return snapshot.configuration
+            },
             modelClient: providerRegistry.createClient(),
             provider: provider.provider,
             model: provider.model,
@@ -468,7 +496,6 @@ export async function createYakitoriApplication(
             },
           })
         } catch (error) {
-          unsubscribe()
           await Promise.allSettled([
             hookRunner?.dispose(),
             toolRegistry.dispose(),
@@ -484,7 +511,6 @@ export async function createYakitoriApplication(
             : { prepareSteering: processor.prepareSteering }),
           start: processor.start,
           async dispose() {
-            unsubscribe()
             mcpManagers.delete(mcpManager)
             const processorResult = await Promise.allSettled([
               processor.dispose?.(),
@@ -632,6 +658,7 @@ function resolveSessionMcpServers(
   return Object.fromEntries(
     Object.entries(snapshot.configuration.mcpServers ?? {}).map(
       ([name, config]) => {
+        if (!("command" in config)) return [name, config]
         const origin = snapshot.origins[`mcp_servers.${name}.cwd`]
         const baseDirectory =
           origin === undefined ? workingDirectory : dirname(origin.path)
