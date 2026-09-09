@@ -1,3 +1,5 @@
+import { prepareModelImage } from "./prepare-model-image.ts"
+import { finalizeToolOutput } from "./tools/result-output.ts"
 import type { ResponseItemEnvelope, TurnContextItem } from "../core/rollout.ts"
 import type {
   TurnControl,
@@ -798,11 +800,7 @@ async function executeTurnModelLoop(
       const durableMessages = completeToolCallHistory(
         input.runtime.snapshot().context.history.map(({ item }) => item),
       )
-      const messages = limitToolResults(
-        durableMessages,
-        step.executionPolicy.modelVisibleToolResultBytes,
-        step.executionPolicy.modelVisibleToolResultLines,
-      )
+      const messages = durableMessages
       const visibleFileObservations =
         createVisibleFileObservationsFromMessages(messages)
       const adapted = adaptImagesForModel(messages, step.target, step.modelInfo)
@@ -810,7 +808,7 @@ async function executeTurnModelLoop(
         target: step.target,
         cacheKey: configuration.promptCacheKey,
         system: [configuration.baseInstructions],
-        messages: await resolveRolloutAssetImages(
+        messages: await resolveRolloutAssetMedia(
           adapted.messages,
           input.options.rolloutAssets,
         ),
@@ -995,11 +993,30 @@ async function executeTurnModelLoop(
               }),
         })
         for (const { call, item, result } of results) {
-          const fileObservations = toolFileObservations(item.name, result)
+          const { toolContentTruncated, ...modelContent } =
+            await finalizeToolOutput(
+              result,
+              {
+                maxBytes: step.executionPolicy.modelVisibleToolResultBytes,
+                maxLines: step.executionPolicy.modelVisibleToolResultLines,
+              },
+              {
+                workspaceRoot,
+                rolloutId: metadata.rolloutId,
+                toolCallId: call.id,
+                ...(input.options.rolloutAssets === undefined
+                  ? {}
+                  : { rolloutAssets: input.options.rolloutAssets }),
+              },
+            )
+          const fileObservations =
+            toolContentTruncated !== true
+              ? toolFileObservations(item.name, result)
+              : []
           const resultItem = envelope(input.input.submissionId, {
             role: "tool",
             toolCallId: call.id,
-            content: result.content,
+            ...modelContent,
             ...(!result.ok ? { isError: true } : {}),
             ...(call.toolKind === "tool_search"
               ? {
@@ -1014,7 +1031,13 @@ async function executeTurnModelLoop(
           })
           await input.runtime.recordConversationItems([resultItem])
           await input.runtime.recordItemCompletions([
-            completeToolItem(toolPlan, item, resultItem.id, result),
+            completeToolItem(
+              toolPlan,
+              item,
+              resultItem.id,
+              result,
+              modelContent,
+            ),
           ])
         }
         continue
@@ -1321,13 +1344,9 @@ async function compactLiveHistory(input: {
     }
     let result: Awaited<ReturnType<typeof compact>> | undefined
     while (result === undefined) {
-      const messages = await resolveRolloutAssetImages(
+      const messages = await resolveRolloutAssetMedia(
         adaptImagesForModel(
-          limitToolResults(
-            completeToolCallHistory(source),
-            compactionStep.executionPolicy.modelVisibleToolResultBytes,
-            compactionStep.executionPolicy.modelVisibleToolResultLines,
-          ),
+          completeToolCallHistory(source),
           compactionStep.target,
           compactionStep.modelInfo,
         ).messages,
@@ -1690,12 +1709,33 @@ function completeToolItem(
   started: ToolExecutionItem,
   resultItemId: string,
   result: ToolExecutionResult,
+  modelContent: import("./tools/types.ts").ToolModelContent,
 ): CompletedExecutionItem {
   const completed = completeToolExecution(toolPlan, started, result)
   return {
     ...completed,
     resultItemId,
-    content: { kind: "text", text: result.content },
+    content: {
+      kind: "text",
+      text: modelContent.content,
+      ...(modelContent.images === undefined
+        ? {}
+        : {
+            attachments: modelContent.images.flatMap((image) =>
+              image.file === undefined
+                ? []
+                : [
+                    {
+                      name: image.file.path.split("/").at(-1) ?? "image",
+                      mediaType: image.mediaType,
+                      sizeBytes: image.sizeBytes,
+                      detail: image.detail ?? "high",
+                      file: image.file,
+                    },
+                  ],
+            ),
+          }),
+    },
     ...(result.output === undefined ? {} : { output: result.output }),
     ...(result.ok
       ? {}
@@ -1882,12 +1922,44 @@ async function executePreparedTool(
         }
       }
       hookContext.push(...(postHook?.additionalContext ?? []))
-      return hookContext.length === 0
-        ? result
-        : {
-            ...result,
-            content: `${result.content}\n\n<hook_context>\n${hookContext.join("\n\n")}\n</hook_context>`,
-          }
+      if (hookContext.length === 0) return result
+      const contextText = `<hook_context>\n${hookContext.join("\n\n")}\n</hook_context>`
+      const projectionContext = {
+        workspaceRoot: input.workspaceRoot,
+        rolloutId: input.rolloutId,
+        toolCallId: prepared.call.id,
+        ...(input.rolloutAssets === undefined
+          ? {}
+          : { rolloutAssets: input.rolloutAssets }),
+      }
+      return {
+        ...result,
+        content: `${result.content}\n\n${contextText}`,
+        presentation: {
+          async toModelContent(budget) {
+            // Auxiliary hook text may consume at most half the preview, leaving
+            // room for the tool's status and recovery metadata.
+            const hook = await finalizeToolOutput(
+              { ok: true, content: contextText, output: contextText },
+              {
+                maxBytes: Math.floor(budget.maxBytes / 2),
+                maxLines: Math.floor(budget.maxLines / 2),
+              },
+              projectionContext,
+              "hook-context.txt",
+            )
+            const body = await finalizeToolOutput(
+              result,
+              {
+                maxBytes: budget.maxBytes - utf8Bytes(hook.content) - 1,
+                maxLines: budget.maxLines - hook.content.split("\n").length,
+              },
+              projectionContext,
+            )
+            return { ...body, content: `${body.content}\n${hook.content}` }
+          },
+        },
+      }
     })
   } catch (error) {
     reservation.cancel()
@@ -1929,40 +2001,6 @@ function toolFileObservations(name: string, result: ToolExecutionResult) {
   return result.output === undefined
     ? []
     : grantsFromToolOutput(name, result.output)
-}
-
-function limitToolResults(
-  messages: readonly ModelMessage[],
-  maxBytes: number,
-  maxLines: number,
-): readonly ModelMessage[] {
-  return messages.map((message) => {
-    if (message.role !== "tool") return message
-    const lines = message.content.split("\n")
-    let content = message.content
-    let truncated = false
-    if (lines.length > maxLines) {
-      content = `${lines.slice(0, maxLines).join("\n")}\n...[truncated ${String(lines.length - maxLines)} lines]`
-      truncated = true
-    }
-    if (utf8Bytes(content) > maxBytes) {
-      const suffix = "\n...[truncated bytes]"
-      const visibleSuffix = truncateUtf8(suffix, maxBytes)
-      const targetBytes = Math.max(0, maxBytes - utf8Bytes(visibleSuffix))
-      content = `${truncateUtf8(content, targetBytes)}${visibleSuffix}`
-      truncated = true
-    }
-    if (!truncated) return message
-    return { ...message, content }
-  })
-}
-
-function truncateUtf8(value: string, maxBytes: number): string {
-  const bytes = Buffer.from(value)
-  if (bytes.byteLength <= maxBytes) return value
-  let end = maxBytes
-  while (end > 0 && (bytes[end] ?? 0) >> 6 === 0b10) end -= 1
-  return bytes.subarray(0, end).toString("utf8")
 }
 
 async function recordSteering(
@@ -2051,17 +2089,20 @@ function envelope(
   }
 }
 
-async function resolveRolloutAssetImages(
+async function resolveRolloutAssetMedia(
   messages: readonly ModelMessage[],
   rolloutAssets: RolloutAssets | undefined,
 ): Promise<readonly ModelMessage[]> {
   return Promise.all(
     messages.map(async (message): Promise<ModelMessage> => {
-      if (message.role !== "user" || message.images === undefined)
-        return message
+      if (message.role !== "user" && message.role !== "tool") return message
       const images = await Promise.all(
-        message.images.map(async (image) => {
-          if ("data" in image && image.data !== undefined) return image
+        (message.images ?? []).map(async (image) => {
+          if ("data" in image && image.data !== undefined)
+            return prepareModelImage(
+              Buffer.from(image.data, "base64"),
+              image.detail ?? "high",
+            )
           if (rolloutAssets === undefined) {
             throw new Error("Rollout image storage is unavailable.")
           }
@@ -2071,15 +2112,27 @@ async function resolveRolloutAssetImages(
               "Rollout image size does not match its recorded size.",
             )
           }
-          return {
-            type: "image" as const,
-            mediaType: image.mediaType,
-            detail: image.detail ?? "high",
-            data: bytes.toString("base64"),
-          }
+          return prepareModelImage(bytes, image.detail ?? "high")
         }),
       )
-      return { ...message, images }
+      const documents =
+        message.role === "tool" && message.documents !== undefined
+          ? await Promise.all(
+              message.documents.map(async (document) => {
+                if (rolloutAssets === undefined)
+                  throw new Error("Document asset storage unavailable.")
+                const bytes = await rolloutAssets.read(document.file)
+                if (bytes.length !== document.sizeBytes)
+                  throw new Error("Document asset size mismatch.")
+                return { ...document, data: bytes.toString("base64") }
+              }),
+            )
+          : undefined
+      return {
+        ...message,
+        ...(images.length === 0 ? {} : { images }),
+        ...(documents === undefined ? {} : { documents }),
+      }
     }),
   )
 }

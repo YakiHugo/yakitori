@@ -26,17 +26,6 @@ export type ImageBytesInput = {
   readonly data: Uint8Array
 }
 
-export type PreparedCommandFiles = {
-  readonly stdout: {
-    readonly reference: RolloutAssetReference
-    readonly path: string
-  }
-  readonly stderr: {
-    readonly reference: RolloutAssetReference
-    readonly path: string
-  }
-}
-
 export class ImageAttachmentConflictError extends Error {
   override readonly name = "ImageAttachmentConflictError"
 }
@@ -52,6 +41,13 @@ export type RolloutAssetMutationLease = <T>(
 ) => Promise<T>
 
 export type RolloutAssets = {
+  saveToolFile(
+    rolloutId: string,
+    toolCallId: string,
+    name: string,
+    bytes: Uint8Array,
+  ): Promise<{ reference: RolloutAssetReference; path: string }>
+
   importImagePaths(
     rolloutId: string,
     ownerId: string,
@@ -80,10 +76,6 @@ export type RolloutAssets = {
     attachments: readonly ImageAttachment[],
   ): Promise<void>
   cleanupStagingImageAttachments(): Promise<void>
-  prepareCommandFiles(
-    rolloutId: string,
-    toolCallId: string,
-  ): Promise<PreparedCommandFiles>
   read(reference: RolloutAssetReference): Promise<Buffer>
   readRange(
     reference: RolloutAssetReference,
@@ -110,20 +102,6 @@ export function createRolloutAssets(
     const path = resolve(filesDir, reference.path)
     if (path !== filesDir && !path.startsWith(`${filesDir}${sep}`)) {
       throw new Error("Rollout asset path escapes its rollout directory.")
-    }
-    return path
-  }
-
-  async function createEmptyFile(
-    reference: RolloutAssetReference,
-  ): Promise<string> {
-    const path = resolveReference(reference)
-    await ensureDirectoryChain(join(root, reference.rolloutId), dirname(path))
-    const handle = await open(path, "w", 0o600)
-    try {
-      await handle.sync()
-    } finally {
-      await handle.close()
     }
     return path
   }
@@ -375,27 +353,18 @@ export function createRolloutAssets(
       )
     },
 
-    async prepareCommandFiles(rolloutId, toolCallId) {
+    async saveToolFile(rolloutId, toolCallId, name, bytes) {
       requireRolloutId(rolloutId)
       requirePathSegment(toolCallId, "tool call id")
+      requirePathSegment(name, "tool file name")
       return options.withMutationLease(rolloutId, async () => {
-        const toolDirectory = fileNameForId(toolCallId)
-        const stdout = {
+        const reference = {
           rolloutId,
-          path: posix.join("tools", toolDirectory, "stdout.log"),
+          path: posix.join("tools", fileNameForId(toolCallId), name),
         }
-        const stderr = {
-          rolloutId,
-          path: posix.join("tools", toolDirectory, "stderr.log"),
-        }
-        const [stdoutPath, stderrPath] = await Promise.all([
-          createEmptyFile(stdout),
-          createEmptyFile(stderr),
-        ])
-        return {
-          stdout: { reference: stdout, path: stdoutPath },
-          stderr: { reference: stderr, path: stderrPath },
-        }
+        const path = resolveReference(reference)
+        await writeOnce(join(root, rolloutId), path, Buffer.from(bytes))
+        return { reference, path }
       })
     },
 

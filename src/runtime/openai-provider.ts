@@ -273,9 +273,36 @@ export function toOpenAIInput(
         })
         continue
       }
-      const output = message.isError
+      const text = message.isError
         ? `[tool_error]\n${message.content}`
         : message.content
+      // Responses supports file inputs; do not assume every compatible backend does.
+      const documentsSupported = provider === "openai"
+      const media = [
+        ...(message.images ?? []).map((image) => ({
+          type: "input_image" as const,
+          image_url: `data:${image.mediaType};base64,${requireModelImageData(image)}`,
+          detail: image.detail ?? ("high" as const),
+        })),
+        ...(message.documents ?? []).map((document) => {
+          if (!documentsSupported)
+            return {
+              type: "input_text" as const,
+              text: `[Document ${document.name} was not sent: native PDF input is not enabled for this provider.]`,
+            }
+          if (document.data === undefined)
+            throw new Error("Unresolved document asset.")
+          return {
+            type: "input_file" as const,
+            filename: document.name,
+            file_data: `data:application/pdf;base64,${document.data}`,
+          }
+        }),
+      ]
+      const output =
+        media.length === 0
+          ? text
+          : [{ type: "input_text" as const, text }, ...media]
       input.push(
         customCallIds.has(message.toolCallId)
           ? {

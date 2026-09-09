@@ -1,5 +1,6 @@
 import type {
   JsonObject,
+  ModelToolResultMessage,
   JsonValue,
   ToolExecutionDescriptor,
 } from "../../kernel/index.ts"
@@ -53,10 +54,27 @@ export type ToolPermissionRequest = Readonly<{
 
 export type ToolPermissionContext = Readonly<{ workspaceRoot: string }>
 
+export type ToolOutputBudget = Readonly<{ maxBytes: number; maxLines: number }>
+export type ToolModelContent = Pick<
+  ModelToolResultMessage,
+  "content" | "images" | "documents"
+> &
+  Readonly<{
+    // Projection-only metadata; hook additions do not change body completeness.
+    toolContentTruncated?: boolean
+  }>
+export type ToolResultPresentation = Readonly<{
+  // The result owns its model projection; the Session never switches on tool names.
+  toModelContent(
+    budget: ToolOutputBudget,
+  ): ToolModelContent | Promise<ToolModelContent>
+}>
+
 export type ToolSuccess = Readonly<{
   ok: true
   output: JsonValue
   content: string
+  presentation?: ToolResultPresentation
 }>
 
 export type ToolFailure = Readonly<{
@@ -64,6 +82,7 @@ export type ToolFailure = Readonly<{
   code: string
   message: string
   content: string
+  presentation?: ToolResultPresentation
   output?: JsonValue
 }>
 

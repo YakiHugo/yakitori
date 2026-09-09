@@ -45,6 +45,7 @@ export type ExecutionEntry =
       readonly execution: ToolExecutionItem
       readonly state: string
       readonly output?: unknown
+      readonly attachments?: readonly ImageAttachment[]
       readonly resultText?: string
       readonly resultError?: boolean
       readonly resultErrorMessage?: string
@@ -577,6 +578,10 @@ function applyDurable(
         execution: item,
         state: item.error === undefined ? "completed" : "failed",
         ...(item.output === undefined ? {} : { output: item.output }),
+        ...(item.content.kind === "text" &&
+        item.content.attachments !== undefined
+          ? { attachments: item.content.attachments }
+          : {}),
         resultText:
           item.content.kind === "text"
             ? item.content.text

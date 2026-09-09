@@ -241,7 +241,7 @@ function routeRequest(method: string, url: URL): Route {
     segments[0] === "rollouts" &&
     typeof segments[1] === "string" &&
     segments[2] === "assets" &&
-    segments[3] === "attachments"
+    (segments[3] === "attachments" || segments[3] === "tools")
   ) {
     return {
       kind: "readRolloutAsset",
@@ -591,6 +591,7 @@ type Route =
 
 function rolloutAssetContentType(path: string): string {
   const extension = extname(path).toLowerCase()
+  if (extension === ".pdf") return "application/pdf"
   if (extension === ".gif") return "image/gif"
   if (extension === ".jpg" || extension === ".jpeg") return "image/jpeg"
   if (extension === ".png") return "image/png"

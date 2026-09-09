@@ -416,18 +416,28 @@ describe("JsonlThreadStore", () => {
         }),
     })
 
-    const preparing = assets.prepareCommandFiles(rolloutId, "call_race")
+    const preparing = assets.saveToolFile(
+      rolloutId,
+      "call_race",
+      "stdout.log",
+      new Uint8Array(),
+    )
     await entered.promise
     const deleting = store.deleteThread(rolloutId)
     release.resolve()
     const prepared = await preparing
     await deleting
 
-    await expect(assets.read(prepared.stdout.reference)).rejects.toMatchObject({
+    await expect(assets.read(prepared.reference)).rejects.toMatchObject({
       code: "ENOENT",
     })
     await expect(
-      assets.prepareCommandFiles(rolloutId, "call_after_delete"),
+      assets.saveToolFile(
+        rolloutId,
+        "call_after_delete",
+        "stdout.log",
+        new Uint8Array(),
+      ),
     ).rejects.toMatchObject({ code: YakitoriErrorCode.NotFound })
     await expect(
       access(join(root, "rollouts", rolloutId)),

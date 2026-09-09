@@ -1,3 +1,4 @@
+import { textPreview } from "./result-output.ts"
 import { readdir } from "node:fs/promises"
 import { isAbortError } from "../errors.ts"
 import { ToolLimitDefaults } from "../limits.ts"
@@ -223,7 +224,22 @@ export function createReadFileTool(
         content: visibleContent,
         ...(fileObservation === undefined ? {} : { fileObservation }),
       }
-      return { ok: true, output, content: visibleContent }
+      return {
+        ok: true,
+        output,
+        content: visibleContent,
+        presentation: {
+          toModelContent(budget) {
+            return {
+              content: textPreview(
+                visibleContent,
+                budget,
+                `[Read preview truncated. Read ${resolved.displayPath} with a smaller limit or use a bounded command for long lines.]`,
+              ),
+            }
+          },
+        },
+      }
     },
   }
 }

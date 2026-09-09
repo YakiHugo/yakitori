@@ -218,12 +218,18 @@ describe("rollout assets", () => {
     const root = await makeRoot()
     const sessionId = createSessionId()
     const files = await createTestRolloutAssets(root, sessionId)
-    const prepared = await files.prepareCommandFiles(sessionId, "call_1")
-    await writeFile(prepared.stdout.path, "0123456789")
+    const prepared = await files.saveToolFile(
+      sessionId,
+      "call_1",
+      "stdout.log",
+      new Uint8Array(),
+    )
+    await writeFile(prepared.path, "0123456789")
 
-    await expect(
-      files.readRange(prepared.stdout.reference, 3, 4),
-    ).resolves.toEqual({ bytes: Buffer.from("3456"), totalBytes: 10 })
+    await expect(files.readRange(prepared.reference, 3, 4)).resolves.toEqual({
+      bytes: Buffer.from("3456"),
+      totalBytes: 10,
+    })
     await expect(
       files.read({ rolloutId: sessionId, path: "../events.jsonl" }),
     ).rejects.toThrow("Invalid rollout asset path")
@@ -242,8 +248,13 @@ describe("rollout assets", () => {
     )
     expect(attachment?.file.path).not.toContain(":")
 
-    const prepared = await files.prepareCommandFiles(sessionId, "call:1")
-    expect(prepared.stdout.reference.path).toMatch(
+    const prepared = await files.saveToolFile(
+      sessionId,
+      "call:1",
+      "stdout.log",
+      new Uint8Array(),
+    )
+    expect(prepared.reference.path).toMatch(
       /^tools\/id-[a-f0-9]{64}\/stdout\.log$/,
     )
   })
@@ -282,10 +293,15 @@ describe("rollout assets", () => {
     const root = await makeRoot()
     const rolloutId = "rollout_source"
     const files = await createTestRolloutAssets(root, rolloutId)
-    const prepared = await files.prepareCommandFiles(rolloutId, "call_1")
-    await writeFile(prepared.stdout.path, "output")
+    const prepared = await files.saveToolFile(
+      rolloutId,
+      "call_1",
+      "stdout.log",
+      new Uint8Array(),
+    )
+    await writeFile(prepared.path, "output")
 
-    expect(prepared.stdout.path).toBe(
+    expect(prepared.path).toBe(
       join(
         root,
         "rollouts",
@@ -296,7 +312,7 @@ describe("rollout assets", () => {
         "stdout.log",
       ),
     )
-    await expect(files.read(prepared.stdout.reference)).resolves.toEqual(
+    await expect(files.read(prepared.reference)).resolves.toEqual(
       Buffer.from("output"),
     )
   })
@@ -307,7 +323,7 @@ describe("rollout assets", () => {
     const files = createTestAssetStore(root)
 
     await expect(
-      files.prepareCommandFiles(rolloutId, "call_1"),
+      files.saveToolFile(rolloutId, "call_1", "stdout.log", new Uint8Array()),
     ).rejects.toThrow("has no journal")
     await expect(stat(join(root, "rollouts", rolloutId))).rejects.toMatchObject(
       { code: "ENOENT" },

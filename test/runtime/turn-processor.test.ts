@@ -1,3 +1,4 @@
+import { createRolloutAssets } from "../../src/kernel/rollout-assets.ts"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -1188,7 +1189,11 @@ describe("Turn processor", () => {
     expect(toolRolloutId).toBe(rolloutId)
   })
 
-  it("persists a visible read so a later model call can edit the file", async () => {
+  it.each([
+    "none",
+    "short",
+    "long",
+  ])("persists a visible read with %s hook context so a later call can edit", async (hookKind) => {
     const provider = createFauxProvider([
       {
         stopReason: ModelStopReason.ToolUse,
@@ -1218,7 +1223,24 @@ describe("Turn processor", () => {
       },
       { content: [{ type: "text", text: "done" }] },
     ])
-    const runtime = await createRuntime(provider.stream, createToolRegistry())
+    const runtime = await createRuntime(provider.stream, createToolRegistry(), {
+      hookRunner: {
+        async dispose() {},
+        async run(request) {
+          return {
+            continue: true,
+            additionalContext:
+              request.event === HookEvent.PostToolUse && hookKind !== "none"
+                ? [
+                    hookKind === "short"
+                      ? "short hook"
+                      : "long hook\n".repeat(6000),
+                  ]
+                : [],
+          }
+        },
+      },
+    })
     const thread = await runtime.createThread()
     const path = join(runtime.root, "value.txt")
     await writeFile(path, "value = 1\n")
@@ -1415,7 +1437,7 @@ describe("Turn processor", () => {
               expect.objectContaining({
                 role: "tool",
                 toolCallId: "tool_truncated_read",
-                content: expect.stringContaining("...[truncated"),
+                content: expect.stringContaining("Read preview truncated"),
                 fileObservation: undefined,
               }),
             ]),
@@ -2375,7 +2397,7 @@ describe("Turn processor", () => {
               message.role === "tool" &&
               message.toolCallId === "tool_large_result",
           )
-          expect(result?.content).toContain("...[truncated")
+          expect(result?.content).toContain("Output truncated")
           expect(result?.content).not.toContain(hiddenTail)
         },
         content: [{ type: "text", text: oldText }],
@@ -2385,7 +2407,7 @@ describe("Turn processor", () => {
         assertRequest(request) {
           expect(request.compaction === "local").toBe(true)
           const serialized = JSON.stringify(request.messages)
-          expect(serialized).toContain("...[truncated")
+          expect(serialized).toContain("Output truncated")
           expect(serialized).not.toContain(hiddenTail)
         },
         content: [{ type: "text", text: "summary" }],
@@ -2701,6 +2723,111 @@ it("injects explicit skills once per input and expands steering before the next 
         item.item.item.context?.type === "skill_invocation",
     ),
   ).toHaveLength(2)
+})
+
+it.each([
+  "none",
+  "bytes",
+  "lines",
+])("persists tool images and bounds %s hook context for the next model step", async (hookKind) => {
+  const hookText =
+    hookKind === "bytes"
+      ? "x".repeat(70_000)
+      : hookKind === "lines"
+        ? "hook line\n".repeat(3000)
+        : undefined
+  const assetsRoot = await mkdtemp(join(tmpdir(), "yakitori-media-history-"))
+  cleanups.push(() => rm(assetsRoot, { recursive: true, force: true }))
+  const assets = createRolloutAssets(assetsRoot, {
+    withMutationLease: async (id, mutate) => {
+      await mkdir(join(assetsRoot, "rollouts", id), { recursive: true })
+      return mutate()
+    },
+  })
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAGUlEQVQokWP4z8BAEmIY1cAwGkr/h2vSAACQ+f8BxdOlvwAAAABJRU5ErkJggg==",
+    "base64",
+  )
+  const provider = createFauxProvider([
+    {
+      stopReason: ModelStopReason.ToolUse,
+      content: [
+        {
+          type: "tool_call",
+          id: "call_image",
+          name: "view_image",
+          input: { path: "screen.png" },
+        },
+      ],
+    },
+    {
+      assertRequest(request) {
+        const image = request.messages.find(
+          (message) =>
+            message.role === "tool" && message.toolCallId === "call_image",
+        )
+        expect(image).toMatchObject({
+          role: "tool",
+          images: [{ type: "image", data: png.toString("base64") }],
+        })
+      },
+      content: [{ type: "text", text: "Image inspected" }],
+    },
+  ])
+  const runtime = await createRuntime(provider.stream, createToolRegistry(), {
+    rolloutAssets: assets,
+    hookRunner: {
+      async dispose() {},
+      async run(request) {
+        return {
+          continue: true,
+          additionalContext:
+            request.event === HookEvent.PostToolUse && hookText !== undefined
+              ? [hookText]
+              : [],
+        }
+      },
+    },
+  })
+  await writeFile(join(runtime.root, "screen.png"), png)
+  const thread = await runtime.createThread()
+  await thread.startIfIdle({
+    content: { kind: "text", text: "inspect screenshot" },
+  })
+  await nextLifecycleEvent(thread)
+  const completed = await nextLifecycleEvent(thread)
+  expect(completed?.type).toBe("turn.completed")
+  expect(provider.callCount).toBe(2)
+  const stored = await runtime.store.readThread(thread.id)
+  const record = stored?.rollout.find(
+    (record) =>
+      record.item.type === "response_item" &&
+      record.item.item.item.role === "tool" &&
+      record.item.item.item.toolCallId === "call_image",
+  )
+  if (
+    record?.item.type !== "response_item" ||
+    record.item.item.item.role !== "tool"
+  )
+    throw new Error("Missing durable image result")
+  const toolResult = record.item.item.item
+  expect(Buffer.byteLength(toolResult.content)).toBeLessThanOrEqual(50 * 1024)
+  expect(toolResult.content.split("\n").length).toBeLessThanOrEqual(2000)
+  expect(toolResult.content).toContain("Read image: screen.png")
+  if (hookText !== undefined) {
+    const path = toolResult.content.match(/saved to (.+?)\. Use/)?.[1]
+    if (path === undefined) throw new Error("Missing hook recovery path")
+    expect(await readFile(path, "utf8")).toBe(
+      `<hook_context>\n${hookText}\n</hook_context>`,
+    )
+  }
+  const image = toolResult.images?.[0]
+  if (image?.file === undefined) throw new Error("Missing durable image asset")
+  expect(image.data).toBeUndefined()
+  const reopened = createRolloutAssets(assetsRoot, {
+    withMutationLease: async (_id, mutate) => mutate(),
+  })
+  expect(await reopened.read(image.file)).toEqual(png)
 })
 
 async function createRuntime(
