@@ -670,6 +670,8 @@ describe("finalized tool router", () => {
     )
     expect(Object.fromEntries(requirements)).toEqual({
       read_file: "none",
+      view_image: "none",
+      read_document: "none",
       grep: "none",
       glob: "none",
       edit_file: "file_change",

@@ -45,7 +45,7 @@ export function estimateModelRequestBudget(
   const toolTokens = estimateTextTokens(JSON.stringify(budgetedTools))
   const imageTokens = request.messages.reduce(
     (total, message) =>
-      message.role !== "user"
+      message.role !== "user" && message.role !== "tool"
         ? total
         : total +
           (message.images ?? []).reduce(
@@ -83,7 +83,7 @@ export function estimateHistoryTokens(
     (total, message) =>
       total +
       estimateMessageTextTokens(message) +
-      (message.role === "user"
+      (message.role === "user" || message.role === "tool"
         ? (message.images ?? []).reduce(
             (tokens, image) => tokens + estimateImageTokens(image),
             0,
@@ -95,7 +95,16 @@ export function estimateHistoryTokens(
 
 function estimateMessageTextTokens(message: ModelMessage): number {
   if (message.role !== "assistant")
-    return estimateTextTokens(JSON.stringify(message, omitImagePayload))
+    return (
+      estimateTextTokens(JSON.stringify(message, omitImagePayload)) +
+      (message.role === "tool"
+        ? (message.documents ?? []).reduce(
+            (total, document) =>
+              total + Math.ceil(document.sizeBytes / APPROX_BYTES_PER_TOKEN),
+            0,
+          )
+        : 0)
+    )
   const native = message.content.filter((block) => block.type === "compaction")
   if (native.length === 0) return estimateTextTokens(JSON.stringify(message))
   // Codex estimates the decoded payload minus encryption overhead, rather
@@ -123,7 +132,7 @@ function omitImagePayload(_key: string, value: unknown): unknown {
     typeof value === "object" &&
     value !== null &&
     "type" in value &&
-    value.type === "image" &&
+    (value.type === "image" || value.type === "document") &&
     "data" in value &&
     typeof value.data === "string"
   ) {

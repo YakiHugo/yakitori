@@ -16,11 +16,7 @@ export type ToolLimitPolicy = Readonly<{
   toolPreviewLines: number
   fileWriteBytes: number
   toolDiffBytes: number
-  commandOutputBytes: number
-  commandPersistedOutputBytes: number
   commandTextBytes: number
-  runCommandDefaultTimeoutSeconds: number
-  runCommandMaxTimeoutSeconds: number
   commandKillGraceMs: number
 }>
 
@@ -34,11 +30,7 @@ export const ToolLimitDefaults = {
   toolPreviewLines: 2_000,
   fileWriteBytes: 1 * 1024 * 1024,
   toolDiffBytes: 64 * 1024,
-  commandOutputBytes: 1 * 1024 * 1024,
-  commandPersistedOutputBytes: 32 * 1024 * 1024,
   commandTextBytes: 16 * 1024,
-  runCommandDefaultTimeoutSeconds: 120,
-  runCommandMaxTimeoutSeconds: 600,
   commandKillGraceMs: 2_000,
 } as const satisfies ToolLimitPolicy
 

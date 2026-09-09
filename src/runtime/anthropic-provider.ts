@@ -275,7 +275,33 @@ export function toAnthropicMessages(
               type: "tool_reference" as const,
               tool_name: tool.name,
             }))
-          : message.content,
+          : (message.images?.length ?? 0) + (message.documents?.length ?? 0) ===
+              0
+            ? message.content
+            : [
+                { type: "text" as const, text: message.content },
+                ...(message.images ?? []).map((image) => ({
+                  type: "image" as const,
+                  source: {
+                    type: "base64" as const,
+                    media_type: image.mediaType,
+                    data: requireModelImageData(image),
+                  },
+                })),
+                ...(message.documents ?? []).map((document) => {
+                  if (document.data === undefined)
+                    throw new Error("Unresolved document asset.")
+                  return {
+                    type: "document" as const,
+                    title: document.name,
+                    source: {
+                      type: "base64" as const,
+                      media_type: "application/pdf" as const,
+                      data: document.data,
+                    },
+                  }
+                }),
+              ],
       ...(message.isError ? { is_error: true } : {}),
     }
     appendAnthropicUserContent(converted, [toolResult])

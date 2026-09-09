@@ -1,3 +1,5 @@
+import { textPreview } from "./result-output.ts"
+import type { ToolExecutionContext } from "./types.ts"
 import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
 import { plainToolName } from "./tool-name.ts"
 import { noToolApprovalRequired } from "./approval-requirements.ts"
@@ -162,7 +164,7 @@ export function createWebFetchTool(
             continue
           }
 
-          return await buildResult(fetched, current, redirects, limits)
+          return await buildResult(fetched, current, redirects, limits, context)
         }
       } catch (error) {
         if (context.signal?.aborted) {
@@ -234,6 +236,7 @@ async function buildResult(
   url: URL,
   redirects: number,
   limits: Required<WebFetchToolOptions>,
+  context: ToolExecutionContext,
 ): Promise<ToolExecutionResult> {
   const contentType = response.headers.get("content-type")
   const kind = classifyContentType(contentType)
@@ -276,6 +279,26 @@ async function buildResult(
       : []),
   ]
   const content = [statusLine, "", text, ...markers].join("\n")
+  const fullContent = [
+    statusLine,
+    "",
+    rendered,
+    ...(body.truncated
+      ? ["[Response reception limit reached; saved content is incomplete.]"]
+      : []),
+  ].join("\n")
+  const saved =
+    truncated &&
+    context.rolloutAssets !== undefined &&
+    context.rolloutId !== undefined &&
+    context.toolCallId !== undefined
+      ? await context.rolloutAssets.saveToolFile(
+          context.rolloutId,
+          context.toolCallId,
+          "page.txt",
+          Buffer.from(fullContent),
+        )
+      : undefined
   return {
     ok: true,
     output: {
@@ -285,9 +308,32 @@ async function buildResult(
       redirects,
       truncated: truncated || body.truncated,
       characters: text.length,
+      ...(saved === undefined ? {} : { outputPath: saved.path }),
       content,
     },
     content,
+    ...(saved === undefined
+      ? {}
+      : {
+          presentation: {
+            toModelContent(budget) {
+              const notice = `[Page preview truncated. Full received text saved to ${saved.path}. Use read_file with offset and limit, or a bounded command for long lines.${body.truncated ? " Response reception limit reached; saved text is incomplete." : ""}]`
+              return {
+                content: textPreview(
+                  fullContent,
+                  {
+                    maxBytes: Math.min(
+                      budget.maxBytes,
+                      Buffer.byteLength(content),
+                    ),
+                    maxLines: budget.maxLines,
+                  },
+                  notice,
+                ),
+              }
+            },
+          },
+        }),
   }
 }
 

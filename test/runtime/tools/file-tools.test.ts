@@ -817,6 +817,8 @@ describe("bounded file tools", () => {
     const definitions = createToolRegistry().definitions()
     expect(definitions.map((tool) => tool.name)).toEqual([
       "read_file",
+      "view_image",
+      "read_document",
       "grep",
       "glob",
       "edit_file",

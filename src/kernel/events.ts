@@ -125,6 +125,16 @@ export type ModelImageBlock =
       readonly data?: never
     }
 
+export type ModelDocumentBlock = Readonly<{
+  type: "document"
+  name: string
+  mediaType: "application/pdf"
+  sizeBytes: number
+  file: RolloutAssetReference
+  // Request-only; durable history retains the asset reference.
+  data?: string
+}>
+
 export type ModelReasoningBlock = {
   readonly type: "reasoning"
   readonly text: string
@@ -222,6 +232,8 @@ export type FileObservation = {
 export type ModelToolResultMessage = {
   readonly role: "tool"
   readonly toolCallId: string
+  readonly images?: readonly ModelImageBlock[]
+  readonly documents?: readonly ModelDocumentBlock[]
   readonly content: string
   readonly isError?: boolean
   // A structural discovery result. Provider adapters encode this as an
@@ -1313,8 +1325,16 @@ export function isModelMessage(value: unknown): value is ModelMessage {
         "content",
         "isError",
         "toolSearch",
+        "images",
+        "documents",
         "fileObservations",
       ]) &&
+      (value.images === undefined ||
+        (Array.isArray(value.images) &&
+          value.images.every(isModelImageBlock))) &&
+      (value.documents === undefined ||
+        (Array.isArray(value.documents) &&
+          value.documents.every(isModelDocumentBlock))) &&
       isString(value.toolCallId) &&
       isString(value.content) &&
       (value.isError === undefined || typeof value.isError === "boolean") &&
@@ -1849,3 +1869,25 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 const eventTypes = new Set<string>(Object.values(EventType))
 const inputRoles = new Set<string>(Object.values(InputRole))
+
+function isModelDocumentBlock(value: unknown): value is ModelDocumentBlock {
+  return (
+    isRecord(value) &&
+    onlyKeys(value, [
+      "type",
+      "name",
+      "mediaType",
+      "sizeBytes",
+      "file",
+      "data",
+    ]) &&
+    value.type === "document" &&
+    isString(value.name) &&
+    value.mediaType === "application/pdf" &&
+    typeof value.sizeBytes === "number" &&
+    Number.isSafeInteger(value.sizeBytes) &&
+    value.sizeBytes > 0 &&
+    isRolloutAssetReference(value.file) &&
+    (value.data === undefined || isString(value.data))
+  )
+}

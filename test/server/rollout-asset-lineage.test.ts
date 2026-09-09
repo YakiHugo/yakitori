@@ -59,11 +59,13 @@ describe("rollout asset lineage", () => {
       withMutationLease: (candidate, mutate) =>
         assetStore.withRolloutAssetMutation(candidate, mutate),
     })
-    const retainedCommand = await assets.prepareCommandFiles(
+    const retainedCommand = await assets.saveToolFile(
       rolloutId,
       "call_retained",
+      "stdout.log",
+      new Uint8Array(),
     )
-    await writeFile(retainedCommand.stdout.path, "physical output")
+    await writeFile(retainedCommand.path, "physical output")
     const orphanDirectory = join(sessionStoreRoot, "rollouts", "rollout_orphan")
     await mkdir(join(orphanDirectory, "files"), { recursive: true })
     await writeFile(join(orphanDirectory, "files", "orphan.tmp"), "orphan")
@@ -80,7 +82,7 @@ describe("rollout asset lineage", () => {
           .rolloutId,
       ).toBe(rolloutId)
       await expect(
-        application.rolloutAssets.read(retainedCommand.stdout.reference),
+        application.rolloutAssets.read(retainedCommand.reference),
       ).resolves.toEqual(Buffer.from("physical output"))
       await expect(
         stat(join(sessionStoreRoot, "rollouts", "rollout_orphan")),
@@ -115,11 +117,24 @@ describe("rollout asset lineage", () => {
             `${baseUrl}/rollouts/${threadId}/assets/${storedImage.path}`,
           ),
         ).toMatchObject({ status: 404 })
-        expect(
-          await fetch(
-            `${baseUrl}/rollouts/${rolloutId}/assets/tools/call_retained/stdout.log`,
-          ),
-        ).toMatchObject({ status: 404 })
+        const log = await fetch(
+          `${baseUrl}/rollouts/${rolloutId}/assets/tools/call_retained/stdout.log`,
+        )
+        expect(log.status).toBe(200)
+        expect(await log.text()).toBe(
+          await readFile(retainedCommand.path, "utf8"),
+        )
+        const toolImage = await application.rolloutAssets.saveToolFile(
+          rolloutId,
+          "call_media",
+          "image.png",
+          imageBytes,
+        )
+        const media = await fetch(
+          `${baseUrl}/rollouts/${rolloutId}/assets/${toolImage.reference.path}`,
+        )
+        expect(media.headers.get("content-type")).toBe("image/png")
+        expect(Buffer.from(await media.arrayBuffer())).toEqual(imageBytes)
       } finally {
         await closeServer(server)
       }
@@ -279,11 +294,13 @@ describe("rollout asset lineage", () => {
       }),
     )
     await waitForThreadIdle(application, sourceId)
-    const commandFiles = await application.rolloutAssets.prepareCommandFiles(
+    const commandFiles = await application.rolloutAssets.saveToolFile(
       sourceId,
       "call_lineage_output",
+      "stdout.log",
+      new Uint8Array(),
     )
-    await writeFile(commandFiles.stdout.path, "durable command output")
+    await writeFile(commandFiles.path, "durable command output")
     const second = await application.handlers.admitInput({
       sessionId: sourceId,
       requestId: "request_command_second",
@@ -308,7 +325,7 @@ describe("rollout asset lineage", () => {
       stream: createFauxProvider([]).stream,
     })
     await expect(
-      retained.rolloutAssets.read(commandFiles.stdout.reference),
+      retained.rolloutAssets.read(commandFiles.reference),
     ).resolves.toEqual(Buffer.from("durable command output"))
     expectOk(await retained.handlers.deleteSession({ sessionId: childId }))
     await retained.close()

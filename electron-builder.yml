@@ -9,6 +9,10 @@ asarUnpack:
   - dist/desktop/**
   - node_modules/fs-ext/**
   - node_modules/node-pty/**
+  - node_modules/sharp/**
+  - node_modules/@img/**
+  - node_modules/detect-libc/**
+  - node_modules/semver/**
 # JavaScript dependencies are inlined. Native addons remain external because
 # they must be rebuilt against and loaded by Electron's Node runtime.
 files:
@@ -17,6 +21,10 @@ files:
   - "!node_modules/**"
   - node_modules/fs-ext/**
   - node_modules/node-pty/**
+  - node_modules/sharp/**
+  - node_modules/@img/**
+  - node_modules/detect-libc/**
+  - node_modules/semver/**
 extraResources:
   - from: dist/gui
     to: gui

@@ -1,3 +1,4 @@
+import { createViewImageTool, createReadDocumentTool } from "./read-media.ts"
 import type { JsonValue, ToolExecutionDescriptor } from "../../kernel/index.ts"
 import type { ModelToolDefinition, ToolWireProtocol } from "../model.ts"
 import type { UserShellEnv } from "../user-shell-env.ts"
@@ -872,6 +873,8 @@ export function createDefaultTools(
 ): ReadonlyArray<RuntimeTool> {
   return [
     createReadFileTool(),
+    createViewImageTool(),
+    createReadDocumentTool(),
     createGrepTool(),
     createGlobTool(),
     createEditFileTool(),

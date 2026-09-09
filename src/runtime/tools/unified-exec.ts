@@ -1,3 +1,5 @@
+import { openSync, closeSync, writeSync, fsyncSync } from "node:fs"
+import { fitText, headTailPreview } from "./result-output.ts"
 import { type ChildProcess, spawn } from "node:child_process"
 import { randomInt } from "node:crypto"
 import { basename } from "node:path"
@@ -25,8 +27,10 @@ const MAX_YIELD_MS = 30_000
 const DEFAULT_EMPTY_POLL_MS = 5_000
 const MAX_EMPTY_POLL_MS = 300_000
 const DEFAULT_MAX_OUTPUT_TOKENS = 10_000
-const DEFAULT_BACKGROUND_TIMEOUT_MS = 300_000
+// Bound resident interval buffers independently of model previews and disk logs.
 const MAX_OUTPUT_BYTES = 1024 * 1024
+// Stop runaway writers before an individual command consumes unbounded disk.
+const COMMAND_LOG_SAFETY_BYTES = 32 * 1024 * 1024
 const MAX_PROCESSES = 64
 const PROTECTED_RECENT_PROCESSES = 8
 const OUTPUT_HEAD_RATIO = 0.3
@@ -35,6 +39,8 @@ export type UnifiedExecOutput = Readonly<{
   chunk_id: string
   wall_time_seconds: number
   output: string
+  output_file?: string
+  output_error?: string
   original_token_count: number
   exit_code?: number
   session_id?: number
@@ -68,7 +74,7 @@ type ProcessEntry = {
   readonly handle: ProcessHandle
   readonly output: IntervalOutputBuffer
   readonly exit: Promise<ProcessExit>
-  readonly timeout: NodeJS.Timeout
+  readonly timeout: NodeJS.Timeout | undefined
   readonly tty: boolean
   interaction: Promise<void>
   interactionCount: number
@@ -85,6 +91,7 @@ export type UnifiedExecProcessManager = Readonly<{
     readonly tty: boolean
     readonly yieldTimeMs: number
     readonly maxOutputTokens: number
+    readonly outputPath?: string
     readonly signal?: AbortSignal
   }): Promise<UnifiedExecOutput>
   write(input: WriteInput, signal?: AbortSignal): Promise<UnifiedExecOutput>
@@ -105,8 +112,9 @@ export function createUnifiedExecTools(
   const maxCommandBytes =
     options.maxCommandBytes ?? ToolLimitDefaults.commandTextBytes
   const manager = createUnifiedExecProcessManager({
-    backgroundTimeoutMs:
-      options.backgroundTimeoutMs ?? DEFAULT_BACKGROUND_TIMEOUT_MS,
+    ...(options.backgroundTimeoutMs === undefined
+      ? {}
+      : { backgroundTimeoutMs: options.backgroundTimeoutMs }),
     killGraceMs: options.killGraceMs ?? ToolLimitDefaults.commandKillGraceMs,
   })
   const log = options.log ?? (() => {})
@@ -202,7 +210,19 @@ export function createUnifiedExecTools(
         `exec_command start token=${firstCommandToken(parsed.value.cmd)} bytes=${Buffer.byteLength(parsed.value.cmd, "utf8")}`,
       )
       try {
+        const logFile =
+          context.rolloutAssets !== undefined &&
+          context.rolloutId !== undefined &&
+          context.toolCallId !== undefined
+            ? await context.rolloutAssets.saveToolFile(
+                context.rolloutId,
+                context.toolCallId,
+                "output.log",
+                new Uint8Array(),
+              )
+            : undefined
         const output = await manager.exec({
+          ...(logFile === undefined ? {} : { outputPath: logFile.path }),
           command: prepared.command,
           cwd: cwd.absolutePath,
           shell: environment.shell,
@@ -282,7 +302,7 @@ export function createUnifiedExecProcessManager(
     readonly nextSessionId?: () => number
   } = {},
 ): UnifiedExecProcessManager {
-  const backgroundTimeoutMs = options.backgroundTimeoutMs ?? 300_000
+  const backgroundTimeoutMs = options.backgroundTimeoutMs
   const killGraceMs = options.killGraceMs ?? 2_000
   const entries = new Map<number, ProcessEntry>()
   let closed = false
@@ -338,15 +358,31 @@ export function createUnifiedExecProcessManager(
       if (closed) throw new Error("Unified exec manager is closed.")
       if (input.signal?.aborted) throw abortError()
       const id = allocateId()
-      const output = new IntervalOutputBuffer(MAX_OUTPUT_BYTES)
-      const spawned = input.tty
-        ? launchPty(input, output)
-        : launchPipe(input, output)
-      const timeout = setTimeout(() => {
-        const entry = entries.get(id)
-        if (entry !== undefined) terminateEntry(entry, "SIGTERM")
-      }, backgroundTimeoutMs)
-      timeout.unref()
+      const output = new IntervalOutputBuffer(
+        MAX_OUTPUT_BYTES,
+        input.outputPath,
+        () => {
+          const entry = entries.get(id)
+          if (entry !== undefined) terminateEntry(entry, "SIGTERM")
+        },
+      )
+      let spawned: ReturnType<typeof launchPipe>
+      try {
+        spawned = input.tty
+          ? launchPty(input, output)
+          : launchPipe(input, output)
+      } catch (error) {
+        output.finish()
+        throw error
+      }
+      const timeout =
+        backgroundTimeoutMs === undefined
+          ? undefined
+          : setTimeout(() => {
+              const entry = entries.get(id)
+              if (entry !== undefined) terminateEntry(entry, "SIGTERM")
+            }, backgroundTimeoutMs)
+      timeout?.unref()
       const entry: ProcessEntry = {
         id,
         handle: spawned.handle,
@@ -360,6 +396,7 @@ export function createUnifiedExecProcessManager(
       }
       entries.set(id, entry)
       void entry.exit.then((exit) => {
+        output.finish()
         entry.exited = exit
         clearTimeout(timeout)
       })
@@ -613,6 +650,12 @@ function observe(
     chunk_id: globalThis.crypto.randomUUID().slice(0, 6),
     wall_time_seconds: wallTimeMs / 1_000,
     output: captured.text,
+    ...(entry.output.path === undefined
+      ? {}
+      : { output_file: entry.output.path }),
+    ...(entry.output.error === undefined
+      ? {}
+      : { output_error: entry.output.error }),
     original_token_count: Math.ceil(captured.originalBytes / 4),
     ...(exit === undefined
       ? { session_id: entry.id }
@@ -627,13 +670,37 @@ class IntervalOutputBuffer {
   #tail = Buffer.alloc(0)
   #totalBytes = 0
 
-  constructor(maxBytes: number) {
+  readonly path: string | undefined
+  error: string | undefined
+  #logFd: number | undefined
+  #loggedBytes = 0
+  readonly #onLogFailure: (() => void) | undefined
+
+  constructor(maxBytes: number, path?: string, onLogFailure?: () => void) {
+    this.path = path
+    this.#onLogFailure = onLogFailure
+    this.#logFd = path === undefined ? undefined : openSync(path, "a")
     this.#headLimit = Math.floor(maxBytes * OUTPUT_HEAD_RATIO)
     this.#tailLimit = maxBytes - this.#headLimit
   }
 
   append(value: Buffer | string): void {
     const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value)
+    if (this.#logFd !== undefined && this.error === undefined) {
+      try {
+        if (this.#loggedBytes + bytes.length > COMMAND_LOG_SAFETY_BYTES)
+          throw new Error(
+            "Command log reached the disk safety boundary; process terminated, log incomplete.",
+          )
+        let offset = 0
+        while (offset < bytes.length)
+          offset += writeSync(this.#logFd, bytes, offset)
+        this.#loggedBytes += bytes.length
+      } catch (error) {
+        this.error = `Command log incomplete: ${error instanceof Error ? error.message : String(error)}`
+        this.#onLogFailure?.()
+      }
+    }
     this.#totalBytes += bytes.byteLength
     let remaining = bytes
     if (this.#head.byteLength < this.#headLimit) {
@@ -651,6 +718,18 @@ class IntervalOutputBuffer {
           this.#tail.byteLength - this.#tailLimit,
         )
       }
+    }
+  }
+
+  finish(): void {
+    if (this.#logFd === undefined) return
+    try {
+      fsyncSync(this.#logFd)
+    } catch (error) {
+      this.error = `Command log sync failed: ${error instanceof Error ? error.message : String(error)}`
+    } finally {
+      closeSync(this.#logFd)
+      this.#logFd = undefined
     }
   }
 
@@ -838,7 +917,34 @@ function invalid(
 }
 
 function success(output: UnifiedExecOutput): ToolExecutionResult {
-  return { ok: true, output, content: JSON.stringify(output) }
+  return {
+    ok: true,
+    output,
+    content: JSON.stringify(output),
+    presentation: {
+      toModelContent(budget) {
+        const header = [
+          output.session_id === undefined
+            ? `Process exited with code ${output.exit_code}.`
+            : `Process running with session ID ${output.session_id}. Use write_stdin to continue.`,
+          `Wall time: ${output.wall_time_seconds} seconds.`,
+          ...(output.output_file === undefined
+            ? []
+            : [
+                `Command log: ${output.output_file}. Use read_file or a bounded command to inspect it.`,
+              ]),
+          ...(output.output_error === undefined ? [] : [output.output_error]),
+        ].join("\n")
+        if (fitText(header, budget) !== header)
+          throw new Error("Command output budget cannot fit process metadata.")
+        const body = headTailPreview(output.output, {
+          maxBytes: budget.maxBytes - Buffer.byteLength(header) - 1,
+          maxLines: budget.maxLines - header.split("\n").length,
+        })
+        return { content: body === "" ? header : `${header}\n${body}` }
+      },
+    },
+  }
 }
 
 function failure(

@@ -1,3 +1,5 @@
+import { imageAttachmentUrl } from "../../composer-attachments.ts"
+import { useAppStore } from "../../store/app-store.ts"
 import { ChevronRight, ExternalLink } from "lucide-react"
 import { useEffect, useState } from "react"
 import type { ExecutionEntry } from "../../execution-view.ts"
@@ -26,6 +28,7 @@ export function ToolCell({
   readonly workspaceRoot?: string | undefined
   readonly onOpenSession?: ((sessionId: string) => Promise<void>) | undefined
 }) {
+  const apiBase = useAppStore((state) => state.apiBase)
   const presentation = presentTool(entry, workspaceRoot)
   const [open, setOpen] = useState(
     entry.state === "failed" || entry.state === "interrupted",
@@ -92,6 +95,15 @@ export function ToolCell({
       </div>
       <CollapsibleContent className="ml-5 pt-1 pb-2 pl-2">
         <div className="rounded-md bg-muted/35 px-3 py-2.5">
+          {(entry.attachments ?? []).map((attachment) => (
+            <img
+              key={`${attachment.file.rolloutId}:${attachment.file.path}`}
+              src={imageAttachmentUrl(attachment, apiBase)}
+              alt={attachment.name}
+              loading="lazy"
+              className="mb-2 max-h-96 max-w-full rounded object-contain"
+            />
+          ))}
           <ToolDetailView
             detail={presentation.detail}
             workspaceRoot={workspaceRoot}

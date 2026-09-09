@@ -1,3 +1,4 @@
+import { mcpResult } from "./tools/mcp-result.ts"
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import { createHash } from "node:crypto"
 import type { JsonObject, JsonValue } from "../kernel/index.ts"
@@ -485,18 +486,7 @@ function runtimeTool(
         asJsonValue(input),
         context.signal,
       )
-      const parsed = asJsonValue(result)
-      const failed = isRecord(result) && result.isError === true
-      const content = mcpContent(result)
-      return failed
-        ? {
-            ok: false,
-            code: "mcp_tool_error",
-            message: content,
-            content,
-            output: parsed,
-          }
-        : { ok: true, content, output: parsed }
+      return mcpResult(asJsonValue(result), context)
     },
   }
 }
@@ -537,22 +527,6 @@ function parseToolList(
         : {}),
     }
   })
-}
-
-function mcpContent(value: unknown): string {
-  if (isRecord(value) && Array.isArray(value.content)) {
-    const text = value.content
-      .flatMap((entry) =>
-        isRecord(entry) &&
-        entry.type === "text" &&
-        typeof entry.text === "string"
-          ? [entry.text]
-          : [],
-      )
-      .join("\n")
-    if (text !== "") return text
-  }
-  return JSON.stringify(value)
 }
 
 function fingerprint(value: unknown): string {

@@ -40,6 +40,50 @@ describe("compaction request", () => {
     })
     expect(trailing.content).toHaveLength(60_000)
   })
+  it("removes media from omitted tool tails without changing earlier history", () => {
+    const media: ModelMessage = {
+      role: "tool",
+      toolCallId: "media",
+      content: "Attached media",
+      images: [
+        {
+          type: "image",
+          mediaType: "image/png",
+          data: "pixels",
+          detail: "high",
+        },
+      ],
+      documents: [
+        {
+          type: "document",
+          mediaType: "application/pdf",
+          name: "report.pdf",
+          sizeBytes: 8000,
+          file: {
+            rolloutId: "rollout_media",
+            path: "tools/media/document.pdf",
+          },
+        },
+      ],
+    }
+    const boundary: ModelMessage = {
+      role: "assistant",
+      content: [{ type: "text", text: "boundary" }],
+    }
+    const result = trimRemoteCompactionToolTail(
+      [media, boundary, media],
+      "",
+      500,
+    )
+    expect(result.slice(0, 2)).toEqual([media, boundary])
+    expect(result[2]).toEqual({
+      role: "tool",
+      toolCallId: "media",
+      content: "Tool output omitted to fit the context window.",
+    })
+    expect(media.images).toHaveLength(1)
+    expect(media.documents).toHaveLength(1)
+  })
   it("flattens source groups and appends the checkpoint instruction", () => {
     const request = buildCompactionRequest({
       source: [sourceTurn()],

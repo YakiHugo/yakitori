@@ -62,6 +62,7 @@ export function captureStepContext(input: {
   const enabledTrustedTools = new Set(
     input.configuration.enabledTools.filter(
       (name) =>
+        (name !== "view_image" || model.inputModalities.includes("image")) &&
         (!FILE_EDITING_TOOLS.has(name) || fileEditingTools.has(name)) &&
         (model.shellToolType !== "disabled" ||
           (name !== "exec_command" && name !== "write_stdin")),

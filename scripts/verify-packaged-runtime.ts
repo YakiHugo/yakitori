@@ -26,8 +26,9 @@ await access(runtimeDirectory)
 
 await new Promise<void>((resolve, reject) => {
   const probe = [
-    'Promise.all([import("fs-ext"), import("node-pty")])',
-    ".then(([, pty]) => {",
+    'Promise.all([import("fs-ext"), import("node-pty"), import("sharp")])',
+    ".then(async ([, pty, sharp]) => {",
+    'await sharp.default({ create: { width: 16, height: 16, channels: 3, background: "red" } }).resize(8, 8).png().toBuffer();',
     "const spawnPty = pty.spawn ?? pty.default?.spawn;",
     'if (spawnPty === undefined) throw new Error("node-pty spawn export missing");',
     'const terminal = spawnPty("/bin/sh", ["-c", "test -t 0 && printf native-runtime-ok"], {',
