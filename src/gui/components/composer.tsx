@@ -1,7 +1,6 @@
 import { ArrowUp, LoaderCircle, Plus, ShieldCheck, X } from "lucide-react"
 import {
   type KeyboardEvent,
-  useEffect,
   useLayoutEffect,
   useRef,
   useState,
@@ -55,6 +54,7 @@ export function Composer() {
   const [attachmentError, setAttachmentError] = useState<string>()
   const [readingImages, setReadingImages] = useState(false)
   const [historyNavigation, setHistoryNavigation] = useState<{
+    readonly sessionId: string | undefined
     readonly stepsBack: number
     readonly savedDraft: string
   }>()
@@ -92,9 +92,9 @@ export function Composer() {
     if (focusRevision > 0) textareaRef.current?.focus()
   }, [focusRevision])
 
-  useEffect(() => {
-    setHistoryNavigation(undefined)
-  }, [sessionId])
+  // Navigation parked for another session must not leak into this one.
+  const activeHistoryNavigation =
+    historyNavigation?.sessionId === sessionId ? historyNavigation : undefined
 
   const historyTexts = view.entries.flatMap((entry) =>
     entry.kind === "user_input" ? [entry.text] : [],
@@ -207,29 +207,30 @@ export function Composer() {
       const cursorAtStart =
         event.currentTarget.selectionStart === 0 &&
         event.currentTarget.selectionEnd === 0
-      if (historyNavigation === undefined && !cursorAtStart) return
+      if (activeHistoryNavigation === undefined && !cursorAtStart) return
       event.preventDefault()
-      const stepsBack = (historyNavigation?.stepsBack ?? 0) + 1
+      const stepsBack = (activeHistoryNavigation?.stepsBack ?? 0) + 1
       const entry = historyTexts[historyTexts.length - stepsBack]
       if (entry === undefined) return
       setHistoryNavigation({
+        sessionId,
         stepsBack,
-        savedDraft: historyNavigation?.savedDraft ?? draft,
+        savedDraft: activeHistoryNavigation?.savedDraft ?? draft,
       })
       setPromptDraft(entry)
       return
     }
-    if (event.key === "ArrowDown" && historyNavigation !== undefined) {
+    if (event.key === "ArrowDown" && activeHistoryNavigation !== undefined) {
       event.preventDefault()
-      const stepsBack = historyNavigation.stepsBack - 1
+      const stepsBack = activeHistoryNavigation.stepsBack - 1
       if (stepsBack === 0) {
-        setPromptDraft(historyNavigation.savedDraft)
+        setPromptDraft(activeHistoryNavigation.savedDraft)
         setHistoryNavigation(undefined)
         return
       }
       const entry = historyTexts[historyTexts.length - stepsBack]
       if (entry === undefined) return
-      setHistoryNavigation({ ...historyNavigation, stepsBack })
+      setHistoryNavigation({ ...activeHistoryNavigation, stepsBack })
       setPromptDraft(entry)
       return
     }
