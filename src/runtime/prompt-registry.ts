@@ -1,20 +1,13 @@
 import { createHash } from "node:crypto"
 import { readFileSync } from "node:fs"
-import type { InstructionProfileId } from "./model-catalog.ts"
+import instructionManifest from "./prompts/manifest.json" with { type: "json" }
+import type { InstructionProfileId, ResolvedModel } from "./model-catalog.ts"
 
-export type InstructionProfile = {
-  readonly id: InstructionProfileId
-  readonly revision: string
-  readonly text: string
-}
-
-const instructionProfileUrls: Record<InstructionProfileId, URL> = {
-  anthropic: new URL("./prompts/anthropic.md", import.meta.url),
-  codex: new URL("./prompts/codex.md", import.meta.url),
-  default: new URL("./prompts/default.md", import.meta.url),
-  grok: new URL("./prompts/grok.md", import.meta.url),
-  kimi: new URL("./prompts/kimi.md", import.meta.url),
-}
+export type InstructionProfile = Readonly<{
+  id: InstructionProfileId
+  revision: string
+  text: string
+}>
 
 const instructionProfiles = new Map<InstructionProfileId, InstructionProfile>()
 
@@ -23,9 +16,12 @@ export function getInstructionProfile(
 ): InstructionProfile {
   const existing = instructionProfiles.get(id)
   if (existing) return existing
-  const url = instructionProfileUrls[id]
-  if (!url) throw new Error(`Instruction profile ${id} is not registered.`)
-  const text = readFileSync(url, "utf8").trim()
+  const entry = instructionManifest[id]
+  if (!entry) throw new Error(`Instruction profile ${id} is not registered.`)
+  const text = readFileSync(
+    new URL(`./prompts/${entry.file}`, import.meta.url),
+    "utf8",
+  ).trim()
   const profile = {
     id,
     revision: createHash("sha256").update(text).digest("hex"),
@@ -33,4 +29,14 @@ export function getInstructionProfile(
   }
   instructionProfiles.set(id, profile)
   return profile
+}
+
+export function getModelInstructions(model: ResolvedModel): InstructionProfile {
+  if (model.instructions === undefined)
+    return getInstructionProfile(model.instructionProfileId)
+  return {
+    id: model.instructionProfileId,
+    revision: createHash("sha256").update(model.instructions).digest("hex"),
+    text: model.instructions,
+  }
 }

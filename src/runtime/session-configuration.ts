@@ -22,7 +22,7 @@ import {
 } from "./model-catalog.ts"
 import type { ModelSystemSection, ModelTarget } from "./model.ts"
 import type { ModelsManager } from "./models-manager.ts"
-import { getInstructionProfile } from "./prompt-registry.ts"
+import { getModelInstructions } from "./prompt-registry.ts"
 
 export type { ApprovalPolicy } from "../kernel/index.ts"
 
@@ -88,7 +88,7 @@ export class SessionConfiguration {
   ): SessionConfiguration {
     validateSelection(input.selection, models)
     const model = resolveSelection(input.selection, models)
-    const prompt = getInstructionProfile(model.instructionProfileId)
+    const prompt = getModelInstructions(model)
     const baseInstructions = resolveBaseInstructions(input.baseInstructions, {
       prompt,
       model,
@@ -163,7 +163,7 @@ export class SessionConfiguration {
       this.snapshot.modelContextWindowTokens,
       models,
     )
-    const prompt = getInstructionProfile(model.instructionProfileId)
+    const prompt = getModelInstructions(model)
     const modelCapacity = resolveModelCapacity(
       model,
       this.snapshot.modelContextWindowTokens,

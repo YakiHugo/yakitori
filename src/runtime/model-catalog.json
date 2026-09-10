@@ -3,8 +3,44 @@
   "models": [
     {
       "provider": "openai",
+      "model": "gpt-6-astra",
+      "instructionProfileId": "gpt-6-astra",
+      "shellToolType": "unified_exec",
+      "applyPatchToolType": "custom",
+      "supportsCustomTools": true,
+      "fileEditingToolType": "none",
+      "supportsNativeToolSearch": true,
+      "displayName": "GPT-6-Astra",
+      "inputModalities": ["text", "image"],
+      "imageDetailModes": ["high", "original"],
+      "efforts": ["low", "medium", "high", "xhigh", "max"],
+      "speeds": ["standard", "fast"],
+      "contextWindowTokens": 1050000,
+      "maxContextWindowTokens": 1050000,
+      "effectiveContextWindowPercent": 100
+    },
+    {
+      "provider": "codex",
+      "model": "gpt-6-astra",
+      "instructionProfileId": "gpt-6-astra",
+      "shellToolType": "unified_exec",
+      "applyPatchToolType": "custom",
+      "supportsCustomTools": true,
+      "fileEditingToolType": "none",
+      "supportsNativeToolSearch": true,
+      "displayName": "GPT-6-Astra",
+      "inputModalities": ["text", "image"],
+      "imageDetailModes": ["high", "original"],
+      "efforts": ["low", "medium", "high", "xhigh", "max", "ultra"],
+      "speeds": ["standard", "fast"],
+      "contextWindowTokens": 272000,
+      "maxContextWindowTokens": 872000,
+      "effectiveContextWindowPercent": 95
+    },
+    {
+      "provider": "openai",
       "model": "gpt-5.1-codex",
-      "instructionProfileId": "codex",
+      "instructionProfileId": "gpt-5.1-codex",
       "shellToolType": "unified_exec",
       "applyPatchToolType": "custom",
       "supportsCustomTools": true,
@@ -16,7 +52,7 @@
     {
       "provider": "openai",
       "model": "gpt-5",
-      "instructionProfileId": "codex",
+      "instructionProfileId": "gpt-5",
       "shellToolType": "unified_exec",
       "applyPatchToolType": "custom",
       "supportsCustomTools": true,
@@ -28,7 +64,7 @@
     {
       "provider": "anthropic",
       "model": "claude-sonnet-4-6",
-      "instructionProfileId": "anthropic",
+      "instructionProfileId": "claude-sonnet-4-6",
       "shellToolType": "unified_exec",
       "fileEditingToolType": "edit_write",
       "supportsNativeToolSearch": true,
@@ -38,7 +74,7 @@
     {
       "provider": "anthropic",
       "model": "claude-opus-4-6",
-      "instructionProfileId": "anthropic",
+      "instructionProfileId": "claude-opus-4-6",
       "shellToolType": "unified_exec",
       "fileEditingToolType": "edit_write",
       "supportsNativeToolSearch": true,
@@ -48,7 +84,7 @@
     {
       "provider": "anthropic",
       "model": "claude-haiku-4-5",
-      "instructionProfileId": "anthropic",
+      "instructionProfileId": "claude-haiku-4-5",
       "shellToolType": "unified_exec",
       "fileEditingToolType": "edit_write",
       "supportsNativeToolSearch": true,
@@ -58,31 +94,35 @@
     {
       "provider": "kimi",
       "model": "kimi-for-coding",
-      "instructionProfileId": "kimi",
+      "instructionProfileId": "kimi-for-coding",
       "shellToolType": "unified_exec",
       "fileEditingToolType": "edit_write",
       "supportsNativeToolSearch": false,
       "displayName": "K2.7 Coding",
       "effortStyle": "none",
       "inputModalities": ["text", "image", "video"],
-      "contextWindowTokens": 262144
+      "contextWindowTokens": 262144,
+      "maxContextWindowTokens": 262144,
+      "effectiveContextWindowPercent": 100
     },
     {
       "provider": "kimi",
       "model": "kimi-for-coding-highspeed",
-      "instructionProfileId": "kimi",
+      "instructionProfileId": "kimi-for-coding-highspeed",
       "shellToolType": "unified_exec",
       "fileEditingToolType": "edit_write",
       "supportsNativeToolSearch": false,
       "displayName": "K2.7 Coding Highspeed",
       "effortStyle": "none",
       "inputModalities": ["text", "image", "video"],
-      "contextWindowTokens": 262144
+      "contextWindowTokens": 262144,
+      "maxContextWindowTokens": 262144,
+      "effectiveContextWindowPercent": 100
     },
     {
       "provider": "kimi",
       "model": "k3",
-      "instructionProfileId": "kimi",
+      "instructionProfileId": "k3",
       "shellToolType": "unified_exec",
       "fileEditingToolType": "edit_write",
       "supportsNativeToolSearch": false,
@@ -90,12 +130,14 @@
       "effortStyle": "levels",
       "inputModalities": ["text", "image", "video"],
       "efforts": ["low", "high", "max"],
-      "contextWindowTokens": 1048576
+      "contextWindowTokens": 1048576,
+      "maxContextWindowTokens": 1048576,
+      "effectiveContextWindowPercent": 100
     },
     {
       "provider": "kimi",
       "model": "k3-256k",
-      "instructionProfileId": "kimi",
+      "instructionProfileId": "k3-256k",
       "shellToolType": "unified_exec",
       "fileEditingToolType": "edit_write",
       "supportsNativeToolSearch": false,
@@ -103,12 +145,14 @@
       "effortStyle": "levels",
       "inputModalities": ["text", "image"],
       "efforts": ["low", "high", "max"],
-      "contextWindowTokens": 262144
+      "contextWindowTokens": 262144,
+      "maxContextWindowTokens": 262144,
+      "effectiveContextWindowPercent": 100
     },
     {
       "provider": "codex",
       "model": "gpt-5.6-sol",
-      "instructionProfileId": "codex",
+      "instructionProfileId": "gpt-5.6-sol",
       "shellToolType": "unified_exec",
       "applyPatchToolType": "custom",
       "supportsCustomTools": true,
@@ -126,7 +170,7 @@
     {
       "provider": "codex",
       "model": "gpt-5.6-terra",
-      "instructionProfileId": "codex",
+      "instructionProfileId": "gpt-5.6-terra",
       "shellToolType": "unified_exec",
       "applyPatchToolType": "custom",
       "supportsCustomTools": true,
@@ -144,7 +188,7 @@
     {
       "provider": "codex",
       "model": "gpt-5.6-luna",
-      "instructionProfileId": "codex",
+      "instructionProfileId": "gpt-5.6-luna",
       "shellToolType": "unified_exec",
       "applyPatchToolType": "custom",
       "supportsCustomTools": true,
@@ -162,7 +206,7 @@
     {
       "provider": "codex",
       "model": "gpt-5.5",
-      "instructionProfileId": "codex",
+      "instructionProfileId": "gpt-5.5",
       "shellToolType": "unified_exec",
       "applyPatchToolType": "custom",
       "supportsCustomTools": true,
@@ -180,7 +224,7 @@
     {
       "provider": "codex",
       "model": "gpt-5.4",
-      "instructionProfileId": "codex",
+      "instructionProfileId": "gpt-5.4",
       "shellToolType": "unified_exec",
       "applyPatchToolType": "custom",
       "supportsCustomTools": true,
@@ -198,7 +242,7 @@
     {
       "provider": "codex",
       "model": "gpt-5.4-mini",
-      "instructionProfileId": "codex",
+      "instructionProfileId": "gpt-5.4-mini",
       "shellToolType": "unified_exec",
       "applyPatchToolType": "custom",
       "supportsCustomTools": true,
@@ -215,7 +259,7 @@
     {
       "provider": "codex",
       "model": "gpt-5.3-codex-spark",
-      "instructionProfileId": "codex",
+      "instructionProfileId": "gpt-5.3-codex-spark",
       "shellToolType": "unified_exec",
       "applyPatchToolType": "custom",
       "supportsCustomTools": true,
@@ -230,7 +274,7 @@
     {
       "provider": "grok",
       "model": "grok-4.6",
-      "instructionProfileId": "grok",
+      "instructionProfileId": "grok-4.6",
       "shellToolType": "unified_exec",
       "fileEditingToolType": "search_replace",
       "supportsNativeToolSearch": true,
@@ -238,12 +282,14 @@
       "inputModalities": ["text", "image"],
       "imageDetailModes": ["high"],
       "efforts": ["low", "medium", "high", "xhigh"],
-      "contextWindowTokens": 500000
+      "contextWindowTokens": 500000,
+      "maxContextWindowTokens": 500000,
+      "effectiveContextWindowPercent": 100
     },
     {
       "provider": "grok",
       "model": "grok-4.5",
-      "instructionProfileId": "grok",
+      "instructionProfileId": "grok-4.5",
       "shellToolType": "unified_exec",
       "fileEditingToolType": "search_replace",
       "supportsNativeToolSearch": true,
@@ -251,7 +297,9 @@
       "inputModalities": ["text", "image"],
       "imageDetailModes": ["high"],
       "efforts": ["low", "medium", "high"],
-      "contextWindowTokens": 500000
+      "contextWindowTokens": 500000,
+      "maxContextWindowTokens": 500000,
+      "effectiveContextWindowPercent": 100
     },
     {
       "provider": "faux",

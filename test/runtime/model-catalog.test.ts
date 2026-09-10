@@ -8,6 +8,58 @@ import {
 } from "../../src/runtime/model-catalog.ts"
 
 describe("model catalog context windows", () => {
+  it("exposes Astra through both transports with their own verified limits", () => {
+    expect(
+      resolveModel({ provider: "codex", model: "gpt-6-astra" }),
+    ).toMatchObject({
+      instructionProfileId: "gpt-6-astra",
+      applyPatchToolType: "custom",
+      supportsCustomTools: true,
+      usedFallbackModelMetadata: false,
+    })
+    expect(
+      catalogModelCapacity({ provider: "codex", model: "gpt-6-astra" }),
+    ).toEqual({
+      contextWindowTokens: 272000,
+      maxContextWindowTokens: 872000,
+      effectiveContextWindowPercent: 95,
+    })
+    expect(
+      catalogModelCapacity({ provider: "openai", model: "gpt-6-astra" }),
+    ).toEqual({
+      contextWindowTokens: 1050000,
+      maxContextWindowTokens: 1050000,
+      effectiveContextWindowPercent: 100,
+    })
+    expect(() =>
+      validateModelSelection({
+        provider: "codex",
+        model: "gpt-6-astra",
+        effort: "ultra",
+      }),
+    ).not.toThrow()
+    expect(() =>
+      validateModelSelection({
+        provider: "openai",
+        model: "gpt-6-astra",
+        effort: "ultra",
+      }),
+    ).toThrow("not supported")
+    expect(() =>
+      validateModelSelection({
+        provider: "codex",
+        model: "gpt-6-astra",
+        effort: "none",
+      }),
+    ).toThrow("not supported")
+    expect(
+      resolveModel({ provider: "codex", model: "gpt-6-astra-preview" }),
+    ).toMatchObject({
+      instructionProfileId: "default",
+      usedFallbackModelMetadata: true,
+    })
+  })
+
   it("resolves orthogonal tool capabilities and a conservative unknown fallback", () => {
     expect(
       catalogModelCapabilities({ provider: "codex", model: "gpt-5.6-sol" }),
@@ -114,7 +166,7 @@ describe("model catalog context windows", () => {
     ).toMatchObject({
       provider: "codex",
       model: "gpt-5.6-sol",
-      instructionProfileId: "codex",
+      instructionProfileId: "gpt-5.6-sol",
       applyPatchToolType: "custom",
       usedFallbackModelMetadata: false,
     })
@@ -126,16 +178,14 @@ describe("model catalog context windows", () => {
     ).toMatchObject({
       provider: "codex",
       model: "gpt-5.6-sol-2026-09-01",
-      instructionProfileId: "codex",
-      applyPatchToolType: "custom",
-      usedFallbackModelMetadata: false,
+      instructionProfileId: "default",
+      usedFallbackModelMetadata: true,
     })
     expect(
       resolveModel({ provider: "openai", model: "gpt-5.2" }),
     ).toMatchObject({
-      instructionProfileId: "codex",
-      applyPatchToolType: "custom",
-      usedFallbackModelMetadata: false,
+      instructionProfileId: "default",
+      usedFallbackModelMetadata: true,
     })
     expect(resolveModel({ provider: "openai", model: "gpt-50" })).toMatchObject(
       {

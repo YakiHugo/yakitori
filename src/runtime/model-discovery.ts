@@ -1,6 +1,7 @@
 import type { DiscoveredModel } from "./models-manager.ts"
 
 export async function discoverOpenAiCompatibleModels(input: {
+  provider: "grok" | "kimi"
   baseUrl: string
   accessToken: string
   fetchFn?: typeof fetch
@@ -23,7 +24,37 @@ export async function discoverOpenAiCompatibleModels(input: {
   }
   return payload.data.flatMap((entry) => {
     if (!isRecord(entry) || typeof entry.id !== "string") return []
-    return [{ id: entry.id }]
+    const contextWindowTokens = positiveInteger(entry.context_length)
+    const displayName = stringValue(entry.display_name)
+    const efforts =
+      input.provider === "kimi" &&
+      isRecord(entry.think_efforts) &&
+      entry.think_efforts.support === true &&
+      Array.isArray(entry.think_efforts.valid_efforts) &&
+      entry.think_efforts.valid_efforts.length > 0 &&
+      entry.think_efforts.valid_efforts.every(
+        (effort) => typeof effort === "string" && effort.length > 0,
+      )
+        ? (entry.think_efforts.valid_efforts as string[])
+        : undefined
+    const inputModalities: ("text" | "image" | "video")[] = ["text"]
+    if (input.provider === "kimi") {
+      if (entry.supports_image_in === true) inputModalities.push("image")
+      if (entry.supports_video_in === true) inputModalities.push("video")
+    }
+    return [
+      {
+        id: entry.id,
+        ...(displayName === undefined ? {} : { displayName }),
+        ...(contextWindowTokens === undefined ? {} : { contextWindowTokens }),
+        ...(efforts === undefined ? {} : { efforts }),
+        ...(input.provider === "kimi" &&
+        typeof entry.supports_image_in === "boolean" &&
+        typeof entry.supports_video_in === "boolean"
+          ? { inputModalities }
+          : {}),
+      },
+    ]
   })
 }
 
@@ -61,6 +92,7 @@ function parseCodexModel(value: unknown): readonly DiscoveredModel[] {
   if (!isRecord(value)) return []
   const id = stringValue(value.slug) ?? stringValue(value.id)
   if (id === undefined) return []
+  const instructions = codexModelInstructions(value.model_messages)
   const displayName = stringValue(value.display_name ?? value.displayName)
   const contextWindowTokens = positiveInteger(
     value.context_window ?? value.contextWindow,
@@ -81,6 +113,7 @@ function parseCodexModel(value: unknown): readonly DiscoveredModel[] {
   return [
     {
       id,
+      ...(instructions === undefined ? {} : { instructions }),
       ...(displayName === undefined ? {} : { displayName }),
       ...(contextWindowTokens === undefined ? {} : { contextWindowTokens }),
       ...(maxContextWindowTokens === undefined
@@ -113,4 +146,16 @@ function positiveNumber(value: unknown): number | undefined {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+// Codex ModelInfo.get_model_instructions: templates without variables are
+// literal; Yakitori has no personality setting, so use personality_default.
+function codexModelInstructions(value: unknown): string | undefined {
+  if (!isRecord(value)) return undefined
+  const template = stringValue(value.instructions_template)
+  if (template === undefined) return undefined
+  if (!isRecord(value.instructions_variables)) return template
+  const personality =
+    stringValue(value.instructions_variables.personality_default) ?? ""
+  return template.replaceAll("{{ personality }}", personality)
 }

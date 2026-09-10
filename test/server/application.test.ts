@@ -1418,7 +1418,7 @@ describe("application composition", () => {
           sessionId: created.body.session.id,
           requestId: "request_switch_provider",
           content: { kind: "text", text: "switch" },
-          modelSelection: { provider: "openai", model: "gpt-5.6-sol" },
+          modelSelection: { provider: "openai", model: "gpt-6-astra" },
         })
         expectOk(admitted)
         await waitForThreadIdle(application, created.body.session.id)
@@ -1427,8 +1427,8 @@ describe("application composition", () => {
         expect(selected.callCount).toBe(1)
         expect(selected.requests[0]?.target).toEqual({
           provider: "openai",
-          model: "gpt-5.6-sol",
-          instructionProfileId: "codex",
+          model: "gpt-6-astra",
+          instructionProfileId: "gpt-6-astra",
         })
       } finally {
         await application.close()
@@ -1685,7 +1685,7 @@ describe("application composition", () => {
                 {
                   id: "gpt-5.1-codex",
                   displayName: "GPT-5.1 Codex",
-                  instructionProfileId: "codex",
+                  instructionProfileId: "gpt-5.1-codex",
                   efforts: ["low", "medium", "high"],
                   inputModalities: ["text", "image"],
                   imageDetailModes: ["high", "original"],
@@ -1693,7 +1693,7 @@ describe("application composition", () => {
                 {
                   id: "gpt-5",
                   displayName: "GPT-5",
-                  instructionProfileId: "codex",
+                  instructionProfileId: "gpt-5",
                 },
               ]
             }
@@ -1702,7 +1702,7 @@ describe("application composition", () => {
                 {
                   id: "grok-code-fast-1",
                   displayName: "Grok Code Fast 1",
-                  instructionProfileId: "grok",
+                  instructionProfileId: "grok-4.5",
                   efforts: ["low", "medium", "high"],
                 },
               ]
@@ -1738,7 +1738,7 @@ describe("application composition", () => {
             {
               id: "gpt-5.1-codex",
               displayName: "GPT-5.1 Codex",
-              instructionProfileId: "codex",
+              instructionProfileId: "gpt-5.1-codex",
               efforts: ["low", "medium", "high"],
               inputModalities: ["text", "image"],
               imageDetailModes: ["high", "original"],
@@ -1746,7 +1746,7 @@ describe("application composition", () => {
             {
               id: "gpt-5",
               displayName: "GPT-5",
-              instructionProfileId: "codex",
+              instructionProfileId: "gpt-5",
             },
           ],
         })
@@ -1760,7 +1760,7 @@ describe("application composition", () => {
             {
               id: "grok-code-fast-1",
               displayName: "Grok Code Fast 1",
-              instructionProfileId: "grok",
+              instructionProfileId: "grok-4.5",
               efforts: ["low", "medium", "high"],
             },
           ],
@@ -2069,6 +2069,7 @@ describe("codex login registration", () => {
 
       const codex = body.providers.find((provider) => provider.name === "codex")
       expect(codex?.models.map((model) => model.id)).toEqual([
+        "gpt-6-astra",
         "gpt-5.6-sol",
         "gpt-5.6-terra",
         "gpt-5.6-luna",
@@ -2078,8 +2079,8 @@ describe("codex login registration", () => {
         "gpt-5.3-codex-spark",
       ])
       expect(codex?.models[0]).toMatchObject({
-        displayName: "GPT-5.6-Sol",
-        instructionProfileId: "codex",
+        displayName: "GPT-6-Astra",
+        instructionProfileId: "gpt-6-astra",
         efforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
       })
       expect(codex).toMatchObject({

@@ -56,6 +56,51 @@ describe("provider model discovery", () => {
     )
   })
 
+  it.each([
+    {
+      messages: { instructions_template: "Astra literal {{ personality }}" },
+      expected: "Astra literal {{ personality }}",
+    },
+    {
+      messages: {
+        instructions_template: "Astra {{ personality }}",
+        instructions_variables: { personality_default: "precise" },
+      },
+      expected: "Astra precise",
+    },
+    {
+      messages: {
+        instructions_template: "Astra {{ personality }}",
+        instructions_variables: {},
+      },
+      expected: "Astra ",
+    },
+  ])("resolves each model's instruction template: $expected", async ({
+    messages,
+    expected,
+  }) => {
+    const models = await discoverCodexModels({
+      baseUrl: "https://chatgpt.example/backend-api/codex",
+      accessToken: "test",
+      fetchFn: async () =>
+        new Response(
+          JSON.stringify({
+            models: [
+              { slug: "gpt-6-astra", model_messages: messages },
+              {
+                slug: "gpt-5.6-sol",
+                model_messages: { instructions_template: "Sol instructions" },
+              },
+            ],
+          }),
+        ),
+    })
+    expect(models.map((model) => [model.id, model.instructions])).toEqual([
+      ["gpt-6-astra", expected],
+      ["gpt-5.6-sol", "Sol instructions"],
+    ])
+  })
+
   it("reads OpenAI-compatible model ids for Grok and Kimi catalogs", async () => {
     const fetchFn: typeof fetch = async () =>
       new Response(
@@ -65,11 +110,91 @@ describe("provider model discovery", () => {
 
     await expect(
       discoverOpenAiCompatibleModels({
+        provider: "grok",
         baseUrl: "https://api.x.ai/v1/",
         accessToken: "xai-token",
         fetchFn,
       }),
     ).resolves.toEqual([{ id: "grok-4.6" }, { id: "future-model" }])
+  })
+
+  it("uses Kimi's returned capacities, modalities and effort levels throughout the model manager", async () => {
+    const manager = createDiscoveringModelsManager({
+      provider: "kimi",
+      discover: () =>
+        discoverOpenAiCompatibleModels({
+          provider: "kimi",
+          baseUrl: "https://kimi.example/v1",
+          accessToken: "test",
+          fetchFn: async () =>
+            new Response(
+              JSON.stringify({
+                data: [
+                  {
+                    id: "k3",
+                    display_name: "K3 account profile",
+                    context_length: 262144,
+                    supports_image_in: true,
+                    supports_video_in: false,
+                    think_efforts: {
+                      support: true,
+                      valid_efforts: ["low", "high"],
+                    },
+                  },
+                ],
+              }),
+            ),
+        }),
+    })
+    const models = await manager.listModels()
+    expect(models[0]).toMatchObject({
+      model: "k3",
+      displayName: "K3 account profile",
+      efforts: ["low", "high"],
+      effortStyle: "levels",
+      inputModalities: ["text", "image"],
+    })
+    expect(manager.resolve({ provider: "kimi", model: "k3" })).toMatchObject({
+      instructionProfileId: "k3",
+      inputModalities: ["text", "image"],
+    })
+    expect(manager.capacity({ provider: "kimi", model: "k3" })).toEqual({
+      contextWindowTokens: 262144,
+      maxContextWindowTokens: 262144,
+      effectiveContextWindowPercent: 100,
+    })
+    expect(() =>
+      manager.validate({ provider: "kimi", model: "k3", effort: "high" }),
+    ).not.toThrow()
+    expect(() =>
+      manager.validate({ provider: "kimi", model: "k3", effort: "max" }),
+    ).toThrow("not supported")
+  })
+
+  it("reads Grok context length without fabricating prompt or effort metadata", async () => {
+    await expect(
+      discoverOpenAiCompatibleModels({
+        provider: "grok",
+        baseUrl: "https://grok.example/v1",
+        accessToken: "test",
+        fetchFn: async () =>
+          new Response(
+            JSON.stringify({
+              data: [
+                { id: "grok-4.6", context_length: 500000 },
+                {
+                  id: "invalid-metadata",
+                  context_length: -1,
+                  display_name: 42,
+                },
+              ],
+            }),
+          ),
+      }),
+    ).resolves.toEqual([
+      { id: "grok-4.6", contextWindowTokens: 500000 },
+      { id: "invalid-metadata" },
+    ])
   })
 
   it("uses remote metadata while retaining the bundled catalog after discovery fails", async () => {
@@ -106,7 +231,9 @@ describe("provider model discovery", () => {
   it("keeps conservative capabilities for a discovered model without a bundled profile", async () => {
     const manager = createDiscoveringModelsManager({
       provider: "codex",
-      discover: async () => [{ id: "future-model", contextWindowTokens: 42_000 }],
+      discover: async () => [
+        { id: "future-model", contextWindowTokens: 42_000 },
+      ],
     })
 
     await manager.refresh()
@@ -118,4 +245,32 @@ describe("provider model discovery", () => {
       usedFallbackModelMetadata: true,
     })
   })
+})
+
+it("advertises discovered coding models only with a bundled or provider-supplied instruction source", async () => {
+  const grok = createDiscoveringModelsManager({
+    provider: "grok",
+    discover: async () => [
+      { id: "grok-4.6" },
+      { id: "grok-imagine-image" },
+      { id: "unknown-model" },
+    ],
+  })
+  expect((await grok.listModels()).map((model) => model.model)).toEqual([
+    "grok-4.6",
+    "grok-4.5",
+  ])
+  const codex = createDiscoveringModelsManager({
+    provider: "codex",
+    discover: async () => [
+      {
+        id: "gpt-new-coder",
+        instructions: "Official new coding-agent instructions",
+      },
+    ],
+  })
+  expect((await codex.listModels())[0]?.model).toBe("gpt-new-coder")
+  expect(
+    codex.resolve({ provider: "codex", model: "gpt-new-coder" }).instructions,
+  ).toBe("Official new coding-agent instructions")
 })

@@ -11,16 +11,25 @@ describe("model directory", () => {
 
     expect(await directory.listModels("openai")).toEqual([
       {
+        id: "gpt-6-astra",
+        displayName: "GPT-6-Astra",
+        instructionProfileId: "gpt-6-astra",
+        efforts: ["low", "medium", "high", "xhigh", "max"],
+        speeds: ["standard", "fast"],
+        inputModalities: ["text", "image"],
+        imageDetailModes: ["high", "original"],
+      },
+      {
         id: "gpt-5.1-codex",
         displayName: "gpt-5.1-codex",
-        instructionProfileId: "codex",
+        instructionProfileId: "gpt-5.1-codex",
         inputModalities: ["text", "image"],
         imageDetailModes: ["high"],
       },
       {
         id: "gpt-5",
         displayName: "gpt-5",
-        instructionProfileId: "codex",
+        instructionProfileId: "gpt-5",
         inputModalities: ["text", "image"],
         imageDetailModes: ["high"],
       },
@@ -34,7 +43,7 @@ describe("model directory", () => {
       {
         id: "grok-4.6",
         displayName: "Grok 4.6",
-        instructionProfileId: "grok",
+        instructionProfileId: "grok-4.6",
         efforts: ["low", "medium", "high", "xhigh"],
         inputModalities: ["text", "image"],
         imageDetailModes: ["high"],
@@ -42,7 +51,7 @@ describe("model directory", () => {
       {
         id: "grok-4.5",
         displayName: "Grok 4.5",
-        instructionProfileId: "grok",
+        instructionProfileId: "grok-4.5",
         efforts: ["low", "medium", "high"],
         inputModalities: ["text", "image"],
         imageDetailModes: ["high"],
@@ -55,6 +64,7 @@ describe("model directory", () => {
     const models = await directory.listModels("codex")
 
     expect(models.map((model) => model.id)).toEqual([
+      "gpt-6-astra",
       "gpt-5.6-sol",
       "gpt-5.6-terra",
       "gpt-5.6-luna",
@@ -64,9 +74,9 @@ describe("model directory", () => {
       "gpt-5.3-codex-spark",
     ])
     expect(models[0]).toEqual({
-      id: "gpt-5.6-sol",
-      displayName: "GPT-5.6-Sol",
-      instructionProfileId: "codex",
+      id: "gpt-6-astra",
+      displayName: "GPT-6-Astra",
+      instructionProfileId: "gpt-6-astra",
       efforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
       speeds: ["standard", "fast"],
       inputModalities: ["text", "image"],
@@ -75,7 +85,7 @@ describe("model directory", () => {
     expect(models.at(-1)).toEqual({
       id: "gpt-5.3-codex-spark",
       displayName: "GPT-5.3-Codex-Spark",
-      instructionProfileId: "codex",
+      instructionProfileId: "gpt-5.3-codex-spark",
       efforts: ["low", "medium", "high", "xhigh"],
       inputModalities: ["text"],
       imageDetailModes: [],

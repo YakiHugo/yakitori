@@ -89,7 +89,7 @@ file.
 | `YAKITORI_WORKSPACE` | Canonical workspace root (default `process.cwd()`) |
 | `YAKITORI_GUI_DIR` | Static GUI directory served by the server (default `./dist/gui` when present) |
 | `YAKITORI_MATE_ID` | Explicit active Mate when multiple exist |
-| `YAKITORI_PROVIDER` | `faux` (default), `openai`, `anthropic`, `grok`, or `kimi` |
+| `YAKITORI_PROVIDER` | `faux` (default), `openai`, `codex`, `anthropic`, `grok`, or `kimi` |
 | `YAKITORI_FAUX_SCENARIO` | Faux scenario: `text`, `file`, `command`, or `error` |
 | `YAKITORI_MODEL` | Required when a network provider is selected |
 | `OPENAI_API_KEY` | Configures OpenAI as the default or a next-Turn provider |
@@ -124,10 +124,16 @@ Example faux command flow, which runs immediately with host authority:
 YAKITORI_PROVIDER=faux YAKITORI_FAUX_SCENARIO=command pnpm dev
 ```
 
-Example OpenAI Responses:
+Example GPT-6 Astra through the existing Codex CLI ChatGPT login:
 
 ```sh
-YAKITORI_PROVIDER=openai YAKITORI_MODEL=gpt-5.6 OPENAI_API_KEY=… pnpm dev
+YAKITORI_PROVIDER=codex YAKITORI_MODEL=gpt-6-astra pnpm start:desktop
+```
+
+Example GPT-6 Astra through OpenAI Responses with an API key:
+
+```sh
+YAKITORI_PROVIDER=openai YAKITORI_MODEL=gpt-6-astra OPENAI_API_KEY=… pnpm dev
 ```
 
 Example Anthropic Messages:
