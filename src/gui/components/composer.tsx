@@ -11,7 +11,6 @@ import {
   normalizeKimiModelSelection,
   resolveEffectiveModel,
   useAppStore,
-  useExecutionView,
 } from "../store/app-store.ts"
 import { ModelSelector } from "./model-selector.tsx"
 import { Button } from "./ui/button.tsx"
@@ -44,7 +43,6 @@ export function Composer() {
     (state) => state.setPromptAttachments,
   )
   const admitInput = useAppStore((state) => state.admitInput)
-  const view = useExecutionView()
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   const [attachmentError, setAttachmentError] = useState<string>()
   const [readingImages, setReadingImages] = useState(false)
@@ -342,10 +340,6 @@ export function Composer() {
 
             <div className="flex shrink-0 items-center gap-1">
               <ModelSelector />
-              <span
-                aria-hidden="true"
-                className={`size-2 rounded-full ${busy ? "animate-pulse bg-amber-500" : "bg-muted-foreground/25"}`}
-              />
               <Button
                 type="submit"
                 size="icon"
@@ -374,68 +368,7 @@ export function Composer() {
             {attachmentError}
           </p>
         )}
-        <TelemetryRail telemetry={view.telemetry} />
       </form>
     </footer>
   )
-}
-
-function TelemetryRail({
-  telemetry,
-}: {
-  readonly telemetry: ReturnType<typeof useExecutionView>["telemetry"]
-}) {
-  const cacheHit =
-    telemetry.inputTokens === 0
-      ? undefined
-      : (telemetry.cacheReadInputTokens / telemetry.inputTokens) * 100
-  const tokensPerSecond =
-    telemetry.modelDurationMs === 0
-      ? undefined
-      : telemetry.outputTokens / (telemetry.modelDurationMs / 1_000)
-  const items = [
-    `${telemetry.turns} ${telemetry.turns === 1 ? "turn" : "turns"}`,
-    `${telemetry.steps} steps`,
-    `LLM ${formatDuration(telemetry.modelDurationMs)}`,
-    `Tools ${formatDuration(telemetry.toolDurationMs)}`,
-    `TTFT avg ${telemetry.averageTimeToFirstTokenMs === undefined ? "—" : formatDuration(telemetry.averageTimeToFirstTokenMs)}`,
-    `${tokensPerSecond === undefined ? "—" : formatRate(tokensPerSecond)} tok/s`,
-    `Cache hit ${cacheHit === undefined ? "—" : `${Math.round(cacheHit)}%`}`,
-    `Input ${formatTokens(telemetry.inputTokens)} tok`,
-  ]
-
-  return (
-    <div
-      role="status"
-      aria-label="Session telemetry"
-      className="flex items-center justify-center gap-2 overflow-x-auto px-3 pt-2 text-[11px] whitespace-nowrap text-muted-foreground"
-      title={`Provider-reported cache reads: ${formatTokens(telemetry.cacheReadInputTokens)} tokens · cache writes: ${formatTokens(telemetry.cacheWriteInputTokens)} tokens`}
-    >
-      {items.map((item, index) => (
-        <span key={item} className="flex items-center gap-2">
-          {index === 0 ? null : <span className="text-border">|</span>}
-          {item}
-        </span>
-      ))}
-    </div>
-  )
-}
-
-function formatDuration(milliseconds: number): string {
-  if (milliseconds < 1_000) return `${Math.round(milliseconds)}ms`
-  if (milliseconds < 60_000) return `${(milliseconds / 1_000).toFixed(1)}s`
-  const minutes = Math.floor(milliseconds / 60_000)
-  const seconds = Math.round((milliseconds % 60_000) / 1_000)
-  return `${minutes}m${seconds}s`
-}
-
-function formatRate(value: number): string {
-  return value < 10 ? value.toFixed(1) : Math.round(value).toString()
-}
-
-function formatTokens(value: number): string {
-  return new Intl.NumberFormat("en", {
-    notation: value >= 1_000 ? "compact" : "standard",
-    maximumFractionDigits: 1,
-  }).format(value)
 }
