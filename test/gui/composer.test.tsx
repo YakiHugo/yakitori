@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { cleanup, render, screen, waitFor } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { Composer } from "../../src/gui/components/composer.tsx"
@@ -12,7 +12,7 @@ import {
   createInitialAppState,
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
-import { createEventEnvelope, EventType } from "../../src/kernel/events.ts"
+import { createEventEnvelope, EventType, InputRole } from "../../src/kernel/events.ts"
 import { FakeRpcClient } from "./fake-rpc-client.ts"
 
 const fakeRef = vi.hoisted(() => ({
@@ -225,6 +225,96 @@ function draftImage(detail: "high" | "original") {
     },
   }
 }
+
+function executionWithHistory(...texts: readonly string[]) {
+  return texts.reduce(
+    (state, text, index) =>
+      reduceExecutionView(state, {
+        type: "durable",
+        event: createEventEnvelope({
+          sessionId: "session_1",
+          seq: index + 1,
+          event: {
+            type: EventType.InputAdmitted,
+            data: {
+              requestId: `request_${index + 1}`,
+              inputId: `input_${index + 1}`,
+              role: InputRole.User,
+              content: { kind: "text", text },
+            },
+          },
+        }),
+      }),
+    createExecutionViewState(),
+  )
+}
+
+describe("history navigation", () => {
+  it("recalls admitted inputs with ArrowUp and restores the draft with ArrowDown", async () => {
+    const user = userEvent.setup()
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      execution: executionWithHistory("first question", "second question"),
+      promptDraft: "work in progress",
+    })
+    render(<Composer />)
+
+    const textarea = screen.getByRole("textbox") as HTMLTextAreaElement
+    await user.click(textarea)
+    textarea.setSelectionRange(0, 0)
+    await user.keyboard("{ArrowUp}")
+    expect(useAppStore.getState().promptDraft).toBe("second question")
+    await user.keyboard("{ArrowUp}")
+    expect(useAppStore.getState().promptDraft).toBe("first question")
+    // Already at the oldest entry: ArrowUp changes nothing.
+    await user.keyboard("{ArrowUp}")
+    expect(useAppStore.getState().promptDraft).toBe("first question")
+    await user.keyboard("{ArrowDown}")
+    expect(useAppStore.getState().promptDraft).toBe("second question")
+    await user.keyboard("{ArrowDown}")
+    expect(useAppStore.getState().promptDraft).toBe("work in progress")
+  })
+
+  it("keeps ArrowUp for cursor movement when the cursor is not at the start", async () => {
+    const user = userEvent.setup()
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      execution: executionWithHistory("first question"),
+      promptDraft: "hello",
+    })
+    render(<Composer />)
+
+    const textarea = screen.getByRole("textbox") as HTMLTextAreaElement
+    await user.click(textarea)
+    textarea.setSelectionRange(2, 2)
+    await user.keyboard("{ArrowUp}")
+
+    expect(useAppStore.getState().promptDraft).toBe("hello")
+  })
+
+  it("treats an edit during recall as the new in-progress draft", async () => {
+    const user = userEvent.setup()
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      execution: executionWithHistory("first question"),
+      promptDraft: "work in progress",
+    })
+    render(<Composer />)
+
+    const textarea = screen.getByRole("textbox") as HTMLTextAreaElement
+    await user.click(textarea)
+    textarea.setSelectionRange(0, 0)
+    await user.keyboard("{ArrowUp}")
+    expect(useAppStore.getState().promptDraft).toBe("first question")
+
+    fireEvent.change(textarea, { target: { value: "edited" } })
+    textarea.setSelectionRange(0, 0)
+    await user.keyboard("{ArrowUp}")
+    expect(useAppStore.getState().promptDraft).toBe("first question")
+    await user.keyboard("{ArrowDown}")
+    expect(useAppStore.getState().promptDraft).toBe("edited")
+  })
+})
 
 describe("model selector", () => {
   function selectModelState() {

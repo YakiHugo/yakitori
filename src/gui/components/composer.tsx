@@ -1,5 +1,11 @@
 import { ArrowUp, LoaderCircle, Plus, ShieldCheck, X } from "lucide-react"
-import { useLayoutEffect, useRef, useState } from "react"
+import {
+  type KeyboardEvent,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react"
 import { COMPACT_DIRECTIVE } from "../../kernel/events.ts"
 import {
   appendImageFiles,
@@ -11,6 +17,7 @@ import {
   normalizeKimiModelSelection,
   resolveEffectiveModel,
   useAppStore,
+  useExecutionView,
 } from "../store/app-store.ts"
 import { ModelSelector } from "./model-selector.tsx"
 import { Button } from "./ui/button.tsx"
@@ -43,9 +50,14 @@ export function Composer() {
     (state) => state.setPromptAttachments,
   )
   const admitInput = useAppStore((state) => state.admitInput)
+  const view = useExecutionView()
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   const [attachmentError, setAttachmentError] = useState<string>()
   const [readingImages, setReadingImages] = useState(false)
+  const [historyNavigation, setHistoryNavigation] = useState<{
+    readonly stepsBack: number
+    readonly savedDraft: string
+  }>()
 
   const effectiveModel = normalizeKimiModelSelection(
     resolveEffectiveModel({
@@ -79,6 +91,14 @@ export function Composer() {
   useLayoutEffect(() => {
     if (focusRevision > 0) textareaRef.current?.focus()
   }, [focusRevision])
+
+  useEffect(() => {
+    setHistoryNavigation(undefined)
+  }, [sessionId])
+
+  const historyTexts = view.entries.flatMap((entry) =>
+    entry.kind === "user_input" ? [entry.text] : [],
+  )
 
   const text = draft.trim()
   const sending =
@@ -165,6 +185,7 @@ export function Composer() {
 
   const submit = () => {
     if (!canSend) return
+    setHistoryNavigation(undefined)
     if (attachments.length === 0) void admitInput(text)
     else
       void admitInput(
@@ -176,6 +197,46 @@ export function Composer() {
               detail: "high" as const,
             })),
       )
+  }
+
+  const handleDraftKeyDown = (
+    event: KeyboardEvent<HTMLTextAreaElement>,
+  ): void => {
+    if (event.nativeEvent.isComposing) return
+    if (event.key === "ArrowUp") {
+      const cursorAtStart =
+        event.currentTarget.selectionStart === 0 &&
+        event.currentTarget.selectionEnd === 0
+      if (historyNavigation === undefined && !cursorAtStart) return
+      event.preventDefault()
+      const stepsBack = (historyNavigation?.stepsBack ?? 0) + 1
+      const entry = historyTexts[historyTexts.length - stepsBack]
+      if (entry === undefined) return
+      setHistoryNavigation({
+        stepsBack,
+        savedDraft: historyNavigation?.savedDraft ?? draft,
+      })
+      setPromptDraft(entry)
+      return
+    }
+    if (event.key === "ArrowDown" && historyNavigation !== undefined) {
+      event.preventDefault()
+      const stepsBack = historyNavigation.stepsBack - 1
+      if (stepsBack === 0) {
+        setPromptDraft(historyNavigation.savedDraft)
+        setHistoryNavigation(undefined)
+        return
+      }
+      const entry = historyTexts[historyTexts.length - stepsBack]
+      if (entry === undefined) return
+      setHistoryNavigation({ ...historyNavigation, stepsBack })
+      setPromptDraft(entry)
+      return
+    }
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault()
+      submit()
+    }
   }
 
   return (
@@ -289,7 +350,10 @@ export function Composer() {
                 : "Message the Mate"
             }
             disabled={sessionId === undefined}
-            onChange={(event) => setPromptDraft(event.currentTarget.value)}
+            onChange={(event) => {
+              setHistoryNavigation(undefined)
+              setPromptDraft(event.currentTarget.value)
+            }}
             onPaste={(event) => {
               const images = Array.from(event.clipboardData.files).filter(
                 (file) => file.type.startsWith("image/"),
@@ -298,16 +362,7 @@ export function Composer() {
               event.preventDefault()
               void addFiles(images)
             }}
-            onKeyDown={(event) => {
-              if (
-                event.key === "Enter" &&
-                !event.shiftKey &&
-                !event.nativeEvent.isComposing
-              ) {
-                event.preventDefault()
-                submit()
-              }
-            }}
+            onKeyDown={handleDraftKeyDown}
             className="max-h-50 min-h-13 w-full resize-none bg-transparent px-5 pt-4 pb-2 text-[15px] leading-6 outline-none placeholder:text-muted-foreground/65 disabled:opacity-50"
           />
 
