@@ -1,3 +1,6 @@
+import OpenAI from "openai"
+import { createModelProvider } from "../../src/runtime/model-provider.ts"
+import { createOpenAIProvider } from "../../src/runtime/openai-provider.ts"
 import { describe, expect, it, vi } from "vitest"
 import type { CodexAuthProvider } from "../../src/runtime/codex-credentials.ts"
 import { createCodexProvider } from "../../src/runtime/codex-provider.ts"
@@ -116,7 +119,7 @@ describe("Codex provider auth recovery", () => {
           error: {
             code: "codex_account_changed",
             message:
-              "Codex login changed accounts during unauthorized recovery; the request was not retried.",
+              "Codex login changed accounts during the turn; no request was sent to the new account.",
           },
         },
       },
@@ -218,3 +221,144 @@ function requestFixture(): ModelRequest {
     toolWireProtocol: "openai_deferred",
   }
 }
+
+it("replays the first Codex routing token within a turn and isolates concurrent turns", async () => {
+  const received: Headers[] = []
+  const auth: CodexAuthProvider = {
+    resolve: async () => ({
+      accessToken: "test-token",
+      accountId: "test-account",
+    }),
+    invalidate() {},
+  }
+  const provider = createModelProvider({
+    info: {
+      id: "codex",
+      wireApi: "openai_responses",
+      capabilities: { remoteCompaction: false },
+      retry: { maxAttempts: 1 },
+    },
+    createTurnStream: () =>
+      createCodexProvider({
+        auth,
+        createStream(options) {
+          return createOpenAIProvider({
+            ...options,
+            client: new OpenAI({
+              apiKey: options.apiKey,
+              defaultHeaders: options.defaultHeaders,
+              maxRetries: 0,
+              fetch: async (_url, init) => {
+                received.push(new Headers(init?.headers))
+                return new Response(
+                  `data: ${JSON.stringify({
+                    type: "response.completed",
+                    response: {
+                      id: "resp_test",
+                      status: "completed",
+                      output: [],
+                      usage: {
+                        input_tokens: 2000,
+                        output_tokens: 1,
+                        input_tokens_details: { cached_tokens: 1536 },
+                      },
+                    },
+                  })}\n\n`,
+                  {
+                    headers: {
+                      "content-type": "text/event-stream",
+                      "x-codex-turn-state": `routing-${received.length}`,
+                    },
+                  },
+                )
+              },
+            }),
+          })
+        },
+      }),
+  })
+  const client = provider.createClient()
+  const first = client.startTurn()
+  const second = client.startTurn()
+  const run = async (
+    turn: ReturnType<typeof client.startTurn>,
+    cacheKey: string,
+  ) => {
+    const events: ModelStreamEvent[] = []
+    for await (const event of turn.stream({ ...requestFixture(), cacheKey }))
+      events.push(event)
+    expect(events.at(-1)).toMatchObject({
+      type: "response",
+      response: { usage: { cacheReadInputTokens: 1536 } },
+    })
+  }
+  await run(first, "session-a")
+  await run(second, "session-b")
+  await run(first, "session-a")
+  await run(first, "session-a")
+  await run(second, "session-b")
+  await first.close()
+  await run(client.startTurn(), "session-a")
+  expect(received.map((headers) => headers.get("x-codex-turn-state"))).toEqual([
+    null,
+    null,
+    "routing-1",
+    "routing-1",
+    "routing-2",
+    null,
+  ])
+  expect(received.map((headers) => headers.get("session-id"))).toEqual([
+    "session-a",
+    "session-b",
+    "session-a",
+    "session-a",
+    "session-b",
+    "session-a",
+  ])
+  await client.close()
+})
+
+it("stops before sending a continuation when the Codex account changes between tool steps", async () => {
+  const auth: CodexAuthProvider = {
+    resolve: vi
+      .fn()
+      .mockResolvedValueOnce({
+        accessToken: "first-token",
+        accountId: "first-account",
+      })
+      .mockResolvedValueOnce({
+        accessToken: "second-token",
+        accountId: "second-account",
+      }),
+    invalidate: vi.fn(),
+  }
+  const createStream = vi.fn(
+    (options: OpenAIProviderOptions): StreamFn =>
+      async function* () {
+        options.onResponseHeaders?.(
+          new Headers({ "x-codex-turn-state": "first-account-route" }),
+        )
+        yield {
+          type: "response",
+          response: { stopReason: "end_turn", content: [] },
+        }
+      },
+  )
+  const stream = createCodexProvider({ auth, createStream })
+  for await (const _ of stream(requestFixture())) {
+    /* complete the first call */
+  }
+  const events: ModelStreamEvent[] = []
+  for await (const event of stream(requestFixture())) events.push(event)
+  expect(events).toEqual([
+    expect.objectContaining({
+      type: "response",
+      response: expect.objectContaining({
+        stopReason: "error",
+        error: expect.objectContaining({ code: "codex_account_changed" }),
+      }),
+    }),
+  ])
+  expect(createStream).toHaveBeenCalledTimes(1)
+  expect(auth.invalidate).not.toHaveBeenCalled()
+})

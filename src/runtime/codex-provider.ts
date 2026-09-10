@@ -24,14 +24,19 @@ export function createCodexProvider(input?: {
         : { path: input.credentialsPath },
     )
   const createStream = input?.createStream ?? createOpenAIProvider
+  // Codex's sticky routing token belongs to one Turn, including its retries.
+  // The caller must create a fresh stream for each Turn.
+  let turnState: string | undefined
+  let expectedAccountId: string | undefined
+  let accountBound = false
   const stream: StreamFn = async function* (request) {
-    let expectedAccountId: string | undefined
     for (let authAttempt = 0; authAttempt < 2; authAttempt += 1) {
       const token = await auth.resolve(
         authAttempt === 0 ? {} : { forceRefresh: true },
       )
-      if (authAttempt === 0) {
+      if (!accountBound) {
         expectedAccountId = token.accountId
+        accountBound = true
       } else if (token.accountId !== expectedAccountId) {
         yield accountChangedResponse()
         return
@@ -49,9 +54,21 @@ export function createCodexProvider(input?: {
         apiKey: token.accessToken,
         model: request.target.model,
         baseURL: CODEX_API_BASE_URL,
-        ...(token.accountId === undefined
-          ? {}
-          : { defaultHeaders: { "chatgpt-account-id": token.accountId } }),
+        defaultHeaders: {
+          ...(token.accountId === undefined
+            ? {}
+            : { "chatgpt-account-id": token.accountId }),
+          ...(request.cacheKey === undefined
+            ? {}
+            : { "session-id": request.cacheKey }),
+          ...(turnState === undefined
+            ? {}
+            : { "x-codex-turn-state": turnState }),
+        },
+        onResponseHeaders(headers) {
+          // Like Codex's OnceLock, retain the first token unchanged.
+          turnState ??= headers.get("x-codex-turn-state") ?? undefined
+        },
       })(scopedRequest)) {
         if (authAttempt === 0 && !outputObserved && isUnauthorized(event)) {
           if (expectedAccountId === undefined) {
@@ -84,7 +101,7 @@ function accountChangedResponse(): ModelStreamEvent {
       error: {
         code: "codex_account_changed",
         message:
-          "Codex login changed accounts during unauthorized recovery; the request was not retried.",
+          "Codex login changed accounts during the turn; no request was sent to the new account.",
       },
     },
   }

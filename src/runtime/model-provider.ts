@@ -70,12 +70,17 @@ export function createProviderContinuationScope(
     .digest("hex")}`
 }
 
-export function createModelProvider(input: {
-  readonly info: ModelProviderInfo
-  readonly stream: StreamFn
-  readonly models?: ModelsManager
-  readonly continuationScope?: string
-}): ModelProvider {
+export function createModelProvider(
+  input: Readonly<{
+    info: ModelProviderInfo
+    models?: ModelsManager
+    continuationScope?: string
+  }> &
+    (
+      | Readonly<{ stream: StreamFn }>
+      | Readonly<{ createTurnStream: () => StreamFn }>
+    ),
+): ModelProvider {
   const models = input.models ?? createStaticModelsManager(input.info.id)
   // An opaque provider item must never cross backend/configuration identity.
   // A provider instance is the narrowest identity available for injected
@@ -95,7 +100,9 @@ export function createModelProvider(input: {
       return {
         startTurn() {
           const timedStream = withStreamIdleTimeout(
-            input.stream,
+            "createTurnStream" in input
+              ? input.createTurnStream()
+              : input.stream,
             input.info.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS,
           )
           const stream = withRetries(timedStream, input.info.retry)

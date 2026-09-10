@@ -1015,7 +1015,7 @@ async function registerCodexLogin(
   if (login.kind === "chatgpt") {
     providers.codex ??= createModelProvider({
       info: providerInfo("codex", "openai_responses"),
-      stream: createCodexProvider(),
+      createTurnStream: () => createCodexProvider(),
       models: createDiscoveringModelsManager({
         provider: "codex",
         async discover() {
