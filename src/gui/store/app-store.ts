@@ -37,6 +37,11 @@ type SessionSelection = {
   readonly sessionId: string
 }
 
+export type SessionDraft = {
+  readonly text: string | undefined
+  readonly attachments: readonly ImageAttachment[]
+}
+
 export type AppStoreData = {
   apiBase: string
   busy: boolean
@@ -49,12 +54,12 @@ export type AppStoreData = {
   modelSelections: Record<string, ModelSelection>
   restoringModelSelectionFor: string | undefined
   nextCursor: string | undefined
-  // TODO(gui-session-state): Move composer text and staged attachments into
-  // Session-scoped UI state when the GUI shell is redesigned. The current
-  // single active draft is intentionally temporary; do not expand it into a
+  // The active session's live composer state. Drafts of inactive sessions
+  // park in sessionDrafts and are restored on selection; neither is a
   // persistence or attachment-lifecycle authority.
   promptDraft: string | undefined
   promptAttachments: readonly ImageAttachment[]
+  sessionDrafts: Record<string, SessionDraft>
   projects: ApiProject[]
   providers: ApiProviderSummary[]
   userPreference: ApiUserModelPreference | undefined
@@ -118,6 +123,7 @@ export function createInitialAppState(): AppStoreData {
     nextCursor: undefined,
     promptDraft: undefined,
     promptAttachments: [],
+    sessionDrafts: {},
     projects: [],
     providers: [],
     userPreference: undefined,
@@ -416,6 +422,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
 
           await get().loadSessions()
           if (get().sessionSelectionIntentRevision !== intentRevision) return
+          const parkedDrafts = stashSessionDraft(get())
           const selection = activateSession(response.session.id)
           set({
             selectedSession: response.session,
@@ -423,8 +430,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
               type: "durable",
               event: response.event,
             }),
-            promptDraft: undefined,
-            promptAttachments: [],
+            ...takeSessionDraft(parkedDrafts, response.session.id),
           })
           connectEvents(selection, response.event.seq)
         },
@@ -486,6 +492,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
             get().setModelSelection(response.session.id, sourceModelSelection)
           }
 
+          const parkedDrafts = stashSessionDraft(get())
           const selection = activateSession(response.session.id)
           closeStream()
           set((state) => ({
@@ -498,8 +505,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
                 }),
               createExecutionViewState(response.session),
             ),
-            promptDraft: undefined,
-            promptAttachments: [],
+            ...takeSessionDraft(parkedDrafts, response.session.id),
             composerFocusRevision: state.composerFocusRevision + 1,
           }))
           connectEvents(
@@ -530,13 +536,26 @@ export const useAppStore = create<AppStore>()((set, get) => {
         })
         if (get().selection.sessionId === sessionId) {
           closeStream()
-          set((state) => ({
-            selection: {},
-            sessionSelectionIntentRevision:
-              state.sessionSelectionIntentRevision + 1,
-            selectedSession: undefined,
-            execution: createExecutionViewState(),
-          }))
+          set((state) => {
+            const sessionDrafts = { ...state.sessionDrafts }
+            delete sessionDrafts[sessionId]
+            return {
+              selection: {},
+              sessionSelectionIntentRevision:
+                state.sessionSelectionIntentRevision + 1,
+              selectedSession: undefined,
+              execution: createExecutionViewState(),
+              promptDraft: undefined,
+              promptAttachments: [],
+              sessionDrafts,
+            }
+          })
+        } else if (get().sessionDrafts[sessionId] !== undefined) {
+          set((state) => {
+            const sessionDrafts = { ...state.sessionDrafts }
+            delete sessionDrafts[sessionId]
+            return { sessionDrafts }
+          })
         }
         await get().loadSessions()
       })
@@ -561,6 +580,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
         nextCursor: undefined,
         promptDraft: undefined,
         promptAttachments: [],
+        sessionDrafts: stashSessionDraft(state),
       }))
       await get().loadSessions()
     },
@@ -582,6 +602,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
       set((state) => ({
         sessionSelectionIntentRevision:
           state.sessionSelectionIntentRevision + 1,
+        sessionDrafts: stashSessionDraft(state),
       }))
       set({
         restoringModelSelectionFor:
@@ -593,9 +614,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
       closeStream()
       set({
         execution: createExecutionViewState(),
-        promptDraft: undefined,
-        promptAttachments: [],
         selectedSession: undefined,
+        ...takeSessionDraft(get().sessionDrafts, sessionId),
       })
       connectEvents(selection, 0)
     },
@@ -1086,10 +1106,43 @@ function initialApiBase(): string {
   return window.location.origin
 }
 
+function stashSessionDraft(state: AppStoreData): Record<string, SessionDraft> {
+  const sessionId = state.selection.sessionId
+  if (sessionId === undefined) return state.sessionDrafts
+  const hasContent =
+    (state.promptDraft ?? "").trim().length > 0 ||
+    state.promptAttachments.length > 0
+  const sessionDrafts = { ...state.sessionDrafts }
+  if (hasContent) {
+    sessionDrafts[sessionId] = {
+      text: state.promptDraft,
+      attachments: state.promptAttachments,
+    }
+  } else {
+    delete sessionDrafts[sessionId]
+  }
+  return sessionDrafts
+}
+
+function takeSessionDraft(
+  sessionDrafts: Record<string, SessionDraft>,
+  sessionId: string,
+): Pick<AppStoreData, "sessionDrafts" | "promptDraft" | "promptAttachments"> {
+  const next = { ...sessionDrafts }
+  const draft = next[sessionId]
+  delete next[sessionId]
+  return {
+    sessionDrafts: next,
+    promptDraft: draft?.text,
+    promptAttachments: draft?.attachments ?? [],
+  }
+}
+
 function sameAttachments(
   left: readonly ImageAttachment[],
   right: readonly ImageAttachment[],
 ): boolean {
+
   return (
     left.length === right.length &&
     left.every(

@@ -519,6 +519,86 @@ describe("delete session", () => {
   })
 })
 
+describe("session drafts", () => {
+  const attachment = {
+    name: "screenshot.png",
+    mediaType: "image/png" as const,
+    detail: "high" as const,
+    sizeBytes: 9,
+    file: {
+      rolloutId: "session_1",
+      path: "attachments/staging/draft_1/1.png",
+    },
+  }
+
+  it("parks the active draft on session switch and restores it on return", async () => {
+    await useAppStore.getState().selectSession("session_1")
+    useAppStore.getState().setPromptDraft("draft for one")
+    useAppStore.getState().setPromptAttachments([attachment])
+
+    await useAppStore.getState().selectSession("session_2")
+
+    expect(useAppStore.getState().promptDraft).toBeUndefined()
+    expect(useAppStore.getState().promptAttachments).toEqual([])
+
+    useAppStore.getState().setPromptDraft("draft for two")
+    await useAppStore.getState().selectSession("session_1")
+
+    expect(useAppStore.getState().promptDraft).toBe("draft for one")
+    expect(useAppStore.getState().promptAttachments).toEqual([attachment])
+
+    await useAppStore.getState().selectSession("session_2")
+    expect(useAppStore.getState().promptDraft).toBe("draft for two")
+  })
+
+  it("does not park an empty draft", async () => {
+    await useAppStore.getState().selectSession("session_1")
+    useAppStore.getState().setPromptDraft("   ")
+
+    await useAppStore.getState().selectSession("session_2")
+
+    expect(useAppStore.getState().sessionDrafts).toEqual({})
+  })
+
+  it("drops a parked draft when its session is deleted", async () => {
+    fakeRef.current.respond = (method, params) => {
+      if (method === "session/delete") {
+        return { sessionId: (params as { sessionId: string }).sessionId }
+      }
+      if (method === "session/list") return { sessions: [] }
+      return notFound()
+    }
+    await useAppStore.getState().selectSession("session_1")
+    useAppStore.getState().setPromptDraft("draft for one")
+    await useAppStore.getState().selectSession("session_2")
+    expect(useAppStore.getState().sessionDrafts.session_1).toBeDefined()
+
+    await useAppStore.getState().deleteSession("session_1")
+
+    expect(useAppStore.getState().sessionDrafts).toEqual({})
+    expect(useAppStore.getState().selection.sessionId).toBe("session_2")
+    expect(useAppStore.getState().promptDraft).toBeUndefined()
+  })
+
+  it("clears the live draft when the selected session is deleted", async () => {
+    fakeRef.current.respond = (method, params) => {
+      if (method === "session/delete") {
+        return { sessionId: (params as { sessionId: string }).sessionId }
+      }
+      if (method === "session/list") return { sessions: [] }
+      return notFound()
+    }
+    await useAppStore.getState().selectSession("session_1")
+    useAppStore.getState().setPromptDraft("draft for one")
+
+    await useAppStore.getState().deleteSession("session_1")
+
+    expect(useAppStore.getState().promptDraft).toBeUndefined()
+    expect(useAppStore.getState().promptAttachments).toEqual([])
+    expect(useAppStore.getState().sessionDrafts).toEqual({})
+  })
+})
+
 describe("fork session", () => {
   it("edits through one fork request and selects the new Session", async () => {
     window.localStorage.clear()
