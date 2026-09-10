@@ -1,13 +1,10 @@
 import catalog from "./model-catalog.json" with { type: "json" }
+import instructionManifest from "./prompts/manifest.json" with { type: "json" }
 
-export type InstructionProfileId =
-  | "anthropic"
-  | "codex"
-  | "default"
-  | "grok"
-  | "kimi"
+export type InstructionProfileId = keyof typeof instructionManifest
 
 export type ResolvedModel = Readonly<{
+  instructions?: string
   autoCompactTokenLimit?: number
   compactionHash?: string
   provider: string
@@ -242,15 +239,8 @@ export function catalogModelCapacity(input: {
 export function requireInstructionProfileId(
   value: string,
 ): InstructionProfileId {
-  if (
-    value === "anthropic" ||
-    value === "codex" ||
-    value === "default" ||
-    value === "grok" ||
-    value === "kimi"
-  ) {
-    return value
-  }
+  if (Object.hasOwn(instructionManifest, value))
+    return value as InstructionProfileId
   throw new Error(`Unknown instruction profile ID in model catalog: ${value}`)
 }
 
@@ -281,20 +271,11 @@ function findCatalogEntry(input: {
 }) {
   const provider = input.provider.toLowerCase()
   const model = input.model.toLowerCase()
-  return catalog.models
-    .filter(
-      (candidate) =>
-        candidate.provider.toLowerCase() === provider &&
-        matchesModelFamily(model, candidate.model.toLowerCase()),
-    )
-    .sort((left, right) => right.model.length - left.model.length)[0]
-}
-
-function matchesModelFamily(model: string, family: string): boolean {
-  if (model === family) return true
-  if (!model.startsWith(family)) return false
-  const separator = model.at(family.length)
-  return separator === "-" || separator === "."
+  return catalog.models.find(
+    (candidate) =>
+      candidate.provider.toLowerCase() === provider &&
+      candidate.model.toLowerCase() === model,
+  )
 }
 
 function requireInputModalities(

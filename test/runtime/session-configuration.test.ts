@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest"
+import { createStaticModelsManager } from "../../src/runtime/models-manager.ts"
 import {
   createTurnContext,
   SessionConfiguration,
@@ -18,6 +19,56 @@ function resolveSessionConfiguration(
 }
 
 describe("session configuration", () => {
+  it.each([
+    { provider: "kimi", model: "k3", window: 1048576, limit: 943718 },
+    { provider: "kimi", model: "k3-256k", window: 262144, limit: 235929 },
+    {
+      provider: "kimi",
+      model: "kimi-for-coding",
+      window: 262144,
+      limit: 235929,
+    },
+    {
+      provider: "kimi",
+      model: "kimi-for-coding-highspeed",
+      window: 262144,
+      limit: 235929,
+    },
+    { provider: "grok", model: "grok-4.5", window: 500000, limit: 450000 },
+    { provider: "grok", model: "grok-4.6", window: 500000, limit: 450000 },
+  ])("resolves $provider/$model instructions and compaction without discovery", ({
+    provider,
+    model,
+    window,
+    limit,
+  }) => {
+    const models = createStaticModelsManager(provider)
+    const selection = { provider, model }
+    const session = SessionConfiguration.create(
+      {
+        selection,
+        workspaceRoot: "/workspace",
+        enabledTools: [],
+        approvalPolicy: "always_approve",
+        promptCacheKey: "test",
+      },
+      models,
+    )
+    const step = session.resolveStep(selection, models)
+    expect(step.target.instructionProfileId).toBe(model)
+    expect(step.baseInstructions.text).toContain(
+      provider === "kimi"
+        ? "You are Kimi Code CLI"
+        : `You are Grok ${model.split("-")[1]}`,
+    )
+    expect(step.modelInstructions.text).not.toContain("{{ model }}")
+    expect(step.modelCapacity).toMatchObject({
+      contextWindowTokens: window,
+      maxContextWindowTokens: window,
+    })
+    expect(step.autoCompact.limitTokens).toBe(limit)
+  })
+
   it("rejects the legacy never approval policy at the restore boundary", () => {
     const current = SessionConfiguration.create({
       promptCacheKey: "session-cache",
@@ -64,7 +115,7 @@ describe("session configuration", () => {
       scope: "total",
     })
     expect(turn.execution).toMatchObject({
-      instructionProfileId: "codex",
+      instructionProfileId: "gpt-5.6-sol",
       baseInstructionsRevision: configuration.baseInstructions.revision,
       modelInstructionsRevision: configuration.modelInstructions.revision,
       modelContextWindowTokens: 272_000,

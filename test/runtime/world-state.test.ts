@@ -15,7 +15,10 @@ describe("world state", () => {
     expect(full).toMatchObject({
       full: true,
       state: {
-        model: "codex/gpt-5.6-sol",
+        model: {
+          id: "codex/gpt-5.6-sol",
+          instructionsRevision: expect.any(String),
+        },
         environment: { currentDate: "2026-08-21" },
         "project.instructions": { text: "rules a" },
       },

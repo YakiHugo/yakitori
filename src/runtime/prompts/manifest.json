@@ -1,0 +1,162 @@
+{
+  "gpt-6-astra": {
+    "file": "codex-gpt-6-astra.md",
+    "agent": "codex",
+    "source": "https://chatgpt.com/backend-api/codex/models",
+    "version": "2026-09-10",
+    "selection": "Exact model entry; default personality, matching Codex ModelInfo rendering.",
+    "sha256": "be213cc3a9566255f6d43f61c54cbc33cafbc3461680ad6513afa0850050c7d6"
+  },
+  "gpt-5.1-codex": {
+    "file": "codex-fallback.md",
+    "agent": "codex",
+    "source": "https://github.com/openai/codex/blob/1d74c3ba1ee98be2025ab066dcc3fd654fe8a3b6/codex-rs/models-manager/prompt.md",
+    "version": "1d74c3ba1ee98be2025ab066dcc3fd654fe8a3b6",
+    "selection": "Model absent from current official catalog; uses the official Codex fallback, not a guessed newer model prompt.",
+    "sha256": "ebfcbdce4a6c353e85d6cde37e508b89c77a902bd27771c91caba5fd494bdb83"
+  },
+  "gpt-5": {
+    "file": "codex-fallback.md",
+    "agent": "codex",
+    "source": "https://github.com/openai/codex/blob/1d74c3ba1ee98be2025ab066dcc3fd654fe8a3b6/codex-rs/models-manager/prompt.md",
+    "version": "1d74c3ba1ee98be2025ab066dcc3fd654fe8a3b6",
+    "selection": "Model absent from current official catalog; uses the official Codex fallback, not a guessed newer model prompt.",
+    "sha256": "ebfcbdce4a6c353e85d6cde37e508b89c77a902bd27771c91caba5fd494bdb83"
+  },
+  "gpt-5.6-sol": {
+    "file": "codex-gpt-5.6-sol.md",
+    "agent": "codex",
+    "source": "https://chatgpt.com/backend-api/codex/models",
+    "version": "2026-09-10",
+    "selection": "Exact model entry; default personality, matching Codex ModelInfo rendering.",
+    "sha256": "0972574f9d43b6c30321624b9ba5eec3a47db32251b7ba6d94807bf5295170e3"
+  },
+  "gpt-5.6-terra": {
+    "file": "codex-gpt-5.6-terra.md",
+    "agent": "codex",
+    "source": "https://chatgpt.com/backend-api/codex/models",
+    "version": "2026-09-10",
+    "selection": "Exact model entry; default personality, matching Codex ModelInfo rendering.",
+    "sha256": "0972574f9d43b6c30321624b9ba5eec3a47db32251b7ba6d94807bf5295170e3"
+  },
+  "gpt-5.6-luna": {
+    "file": "codex-gpt-5.6-luna.md",
+    "agent": "codex",
+    "source": "https://chatgpt.com/backend-api/codex/models",
+    "version": "2026-09-10",
+    "selection": "Exact model entry; default personality, matching Codex ModelInfo rendering.",
+    "sha256": "0972574f9d43b6c30321624b9ba5eec3a47db32251b7ba6d94807bf5295170e3"
+  },
+  "gpt-5.5": {
+    "file": "codex-gpt-5.5.md",
+    "agent": "codex",
+    "source": "https://chatgpt.com/backend-api/codex/models",
+    "version": "2026-09-10",
+    "selection": "Exact model entry; default personality, matching Codex ModelInfo rendering.",
+    "sha256": "ca4db22940fe7dee15df40285ea01b5710b6e7b8079ad6ba746c98a3e8771336"
+  },
+  "gpt-5.4": {
+    "file": "codex-gpt-5.4.md",
+    "agent": "codex",
+    "source": "https://github.com/openai/codex/blob/1d74c3ba1ee98be2025ab066dcc3fd654fe8a3b6/codex-rs/models-manager/models.json",
+    "version": "2026-09-10",
+    "selection": "Exact model entry; default personality, matching Codex ModelInfo rendering.",
+    "sha256": "46223554f4c456936ec2294667e368e6c4e592f3271364fa78fed662b8349291"
+  },
+  "gpt-5.4-mini": {
+    "file": "codex-gpt-5.4-mini.md",
+    "agent": "codex",
+    "source": "https://github.com/openai/codex/blob/1d74c3ba1ee98be2025ab066dcc3fd654fe8a3b6/codex-rs/models-manager/models.json",
+    "version": "2026-09-10",
+    "selection": "Exact model entry; default personality, matching Codex ModelInfo rendering.",
+    "sha256": "28bcd936d46210b2b1f0fb4e1aece7ac18133b3a13633bd16234b37670d66c0c"
+  },
+  "gpt-5.3-codex-spark": {
+    "file": "codex-gpt-5.3-codex-spark.md",
+    "agent": "codex",
+    "source": "https://chatgpt.com/backend-api/codex/models",
+    "version": "2026-09-10",
+    "selection": "Exact model entry; default personality, matching Codex ModelInfo rendering.",
+    "sha256": "43f4ec5df67c619bfa01d119f3c1c1d850a4463c056f1fbc6353ab8708d02642"
+  },
+  "grok-4.5": {
+    "file": "grok-4.5.md",
+    "agent": "grok-build",
+    "source": "https://github.com/xai-org/grok-build/blob/72a61251fcffb464bcc687aeb5a998e5a98ec0c9/crates/codegen/xai-grok-agent/templates/prompt.md",
+    "version": "72a61251fcffb464bcc687aeb5a998e5a98ec0c9",
+    "selection": "Official shared template rendered with exact model label, interactive mode, Yakitori file/shell/subagent tool names; monitor, automatic completion reminders and browser verification disabled because those integrations are not supplied.",
+    "sha256": "a685e186c283f153bcd2b8b9c53f5ff65208381c60a5bf0eb0c71701c5148d48"
+  },
+  "grok-4.6": {
+    "file": "grok-4.6.md",
+    "agent": "grok-build",
+    "source": "https://github.com/xai-org/grok-build/blob/72a61251fcffb464bcc687aeb5a998e5a98ec0c9/crates/codegen/xai-grok-agent/templates/prompt.md",
+    "version": "72a61251fcffb464bcc687aeb5a998e5a98ec0c9",
+    "selection": "Official shared template rendered with exact model label, interactive mode, Yakitori file/shell/subagent tool names; monitor, automatic completion reminders and browser verification disabled because those integrations are not supplied.",
+    "sha256": "33ff976406660414f7bf52ad7e62e7844f3a5b3f0bed8f0613b4af173e1fcc3d"
+  },
+  "kimi-for-coding": {
+    "file": "kimi-code.md",
+    "agent": "kimi-code",
+    "source": "https://github.com/MoonshotAI/kimi-code/blob/523d35b54b25a0b4589388a2b6c8c4261f1ef7db/packages/agent-core-v2/src/app/agentProfileCatalog/system.md",
+    "version": "523d35b54b25a0b4589388a2b6c8c4261f1ef7db",
+    "selection": "Official shared default profile, standard CLI reply style. Stable prefix before Environment; live environment, project instructions, and skills remain harness-owned world-state messages.",
+    "sha256": "baf8f8174e398d8cac5821daa5aec7c91ac19fd9532b406ca196d44d77cfcb9a"
+  },
+  "kimi-for-coding-highspeed": {
+    "file": "kimi-code.md",
+    "agent": "kimi-code",
+    "source": "https://github.com/MoonshotAI/kimi-code/blob/523d35b54b25a0b4589388a2b6c8c4261f1ef7db/packages/agent-core-v2/src/app/agentProfileCatalog/system.md",
+    "version": "523d35b54b25a0b4589388a2b6c8c4261f1ef7db",
+    "selection": "Official shared default profile, standard CLI reply style. Stable prefix before Environment; live environment, project instructions, and skills remain harness-owned world-state messages.",
+    "sha256": "baf8f8174e398d8cac5821daa5aec7c91ac19fd9532b406ca196d44d77cfcb9a"
+  },
+  "k3": {
+    "file": "kimi-code.md",
+    "agent": "kimi-code",
+    "source": "https://github.com/MoonshotAI/kimi-code/blob/523d35b54b25a0b4589388a2b6c8c4261f1ef7db/packages/agent-core-v2/src/app/agentProfileCatalog/system.md",
+    "version": "523d35b54b25a0b4589388a2b6c8c4261f1ef7db",
+    "selection": "Official shared default profile, standard CLI reply style. Stable prefix before Environment; live environment, project instructions, and skills remain harness-owned world-state messages.",
+    "sha256": "baf8f8174e398d8cac5821daa5aec7c91ac19fd9532b406ca196d44d77cfcb9a"
+  },
+  "k3-256k": {
+    "file": "kimi-code.md",
+    "agent": "kimi-code",
+    "source": "https://github.com/MoonshotAI/kimi-code/blob/523d35b54b25a0b4589388a2b6c8c4261f1ef7db/packages/agent-core-v2/src/app/agentProfileCatalog/system.md",
+    "version": "523d35b54b25a0b4589388a2b6c8c4261f1ef7db",
+    "selection": "Official shared default profile, standard CLI reply style. Stable prefix before Environment; live environment, project instructions, and skills remain harness-owned world-state messages.",
+    "sha256": "baf8f8174e398d8cac5821daa5aec7c91ac19fd9532b406ca196d44d77cfcb9a"
+  },
+  "claude-sonnet-4-6": {
+    "file": "claude-code-claude-sonnet-4-6.md",
+    "agent": "claude-code",
+    "source": "https://www.npmjs.com/package/@anthropic-ai/claude-code/v/2.1.150",
+    "version": "2.1.150",
+    "selection": "Captured from installed official CLI at loopback only, exact --model, --exclude-dynamic-system-prompt-sections, Read/Write/Edit/Glob/Grep/Bash, no skills/plugins/MCP/auto-memory. Excludes billing header and SDK identity wrapper; preserves model-specific instruction body verbatim.",
+    "sha256": "50ea2598b7f256bcbbf3731f65a26d09f1d389a56a50b210614e027e6b9f10eb"
+  },
+  "claude-opus-4-6": {
+    "file": "claude-code-claude-opus-4-6.md",
+    "agent": "claude-code",
+    "source": "https://www.npmjs.com/package/@anthropic-ai/claude-code/v/2.1.150",
+    "version": "2.1.150",
+    "selection": "Captured from installed official CLI at loopback only, exact --model, --exclude-dynamic-system-prompt-sections, Read/Write/Edit/Glob/Grep/Bash, no skills/plugins/MCP/auto-memory. Excludes billing header and SDK identity wrapper; preserves model-specific instruction body verbatim.",
+    "sha256": "dbd4929c21061a076ac4c675cabda7daf9d096f9ff6c5a89b254fe49f816c622"
+  },
+  "claude-haiku-4-5": {
+    "file": "claude-code-claude-haiku-4-5.md",
+    "agent": "claude-code",
+    "source": "https://www.npmjs.com/package/@anthropic-ai/claude-code/v/2.1.150",
+    "version": "2.1.150",
+    "selection": "Captured from installed official CLI at loopback only, exact --model, --exclude-dynamic-system-prompt-sections, Read/Write/Edit/Glob/Grep/Bash, no skills/plugins/MCP/auto-memory. Excludes billing header and SDK identity wrapper; preserves model-specific instruction body verbatim.",
+    "sha256": "c03feab27fabb131e4c0a7e12bc1857650df8535f303b8884b58d314abf7d28a"
+  },
+  "default": {
+    "file": "default.md",
+    "agent": "yakitori",
+    "source": "local",
+    "version": "1",
+    "selection": "Faux and unrecognized models only; not a vendor prompt.",
+    "sha256": "1e633ec685899be040ca803baf7dbda408f32a0b1717f52e971d00b308fd6abb"
+  }
+}

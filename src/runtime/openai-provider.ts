@@ -31,6 +31,7 @@ export type OpenAIProviderOptions = {
   // Extra per-endpoint identity headers (e.g. chatgpt-account-id for the
   // codex ChatGPT backend).
   readonly defaultHeaders?: Record<string, string>
+  readonly onResponseHeaders?: (headers: Headers) => void
 }
 
 export function createOpenAIProvider(options: OpenAIProviderOptions): StreamFn {
@@ -43,13 +44,15 @@ export function createOpenAIProvider(options: OpenAIProviderOptions): StreamFn {
       defaultHeaders: options.defaultHeaders,
       maxRetries: 0,
     })
-  return (request) => streamOpenAI(client, options.model, request)
+  return (request) =>
+    streamOpenAI(client, options.model, request, options.onResponseHeaders)
 }
 
 async function* streamOpenAI(
   client: OpenAI,
   defaultModel: string,
   request: ModelRequest,
+  onResponseHeaders?: (headers: Headers) => void,
 ): AsyncGenerator<ModelStreamEvent> {
   if (request.signal?.aborted) {
     yield abortedResponse()
@@ -63,7 +66,7 @@ async function* streamOpenAI(
       request,
       nativeDeferredLoading,
     )
-    const stream = await client.responses.create(
+    const pending = client.responses.create(
       {
         model: request.target.model || defaultModel,
         instructions: flattenModelSystem(request.system),
@@ -80,8 +83,14 @@ async function* streamOpenAI(
         ],
         tools: toOpenAITools(request.tools, nativeDeferredLoading),
         parallel_tool_calls: true,
-        max_output_tokens:
-          request.maxOutputTokens ?? DEFAULT_MODEL_MAX_OUTPUT_TOKENS,
+        // The Codex subscription endpoint rejects max_output_tokens. Its
+        // ResponsesApiRequest omits this API-only output control.
+        ...(request.target.provider === "codex"
+          ? {}
+          : {
+              max_output_tokens:
+                request.maxOutputTokens ?? DEFAULT_MODEL_MAX_OUTPUT_TOKENS,
+            }),
         store: false,
         stream: true,
         ...(request.cacheKey === undefined
@@ -108,9 +117,16 @@ async function* streamOpenAI(
       },
       request.signal === undefined ? undefined : { signal: request.signal },
     )
+    const stream =
+      onResponseHeaders === undefined
+        ? await pending
+        : await pending.withResponse().then(({ data, response }) => {
+            onResponseHeaders(response.headers)
+            return data
+          })
     let text = ""
     let reasoning = ""
-    const compactionItems: Response["output"] = []
+    const completedItems = new Map<number, Response["output"][number]>()
     for await (const event of stream) {
       if (request.signal?.aborted) {
         yield abortedResponse()
@@ -126,11 +142,8 @@ async function* streamOpenAI(
         yield { type: "reasoning_snapshot", text: reasoning }
         continue
       }
-      if (
-        event.type === "response.output_item.done" &&
-        event.item.type === "compaction"
-      ) {
-        compactionItems.push(event.item)
+      if (event.type === "response.output_item.done") {
+        completedItems.set(event.output_index, event.item)
         continue
       }
       if (
@@ -138,20 +151,19 @@ async function* streamOpenAI(
         event.type === "response.incomplete" ||
         event.type === "response.failed"
       ) {
+        // Codex sends completed items separately and may leave terminal
+        // output empty. Preserve output_index order and merge by item id so
+        // ordinary Responses endpoints cannot duplicate a tool side effect.
+        const outputById = new Map(
+          [...completedItems.entries()]
+            .sort(([left], [right]) => left - right)
+            .map(([, item]) => [item.id, item]),
+        )
+        for (const item of event.response.output) outputById.set(item.id, item)
         yield {
           type: "response",
           response: fromOpenAIResponse(
-            compactionItems.length === 0
-              ? event.response
-              : {
-                  ...event.response,
-                  output: [
-                    ...event.response.output.filter(
-                      (item) => item.type !== "compaction",
-                    ),
-                    ...compactionItems,
-                  ],
-                },
+            { ...event.response, output: [...outputById.values()] },
             customFallbackKeys,
             request.target.provider,
             request.continuationScope,

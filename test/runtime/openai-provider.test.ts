@@ -14,6 +14,130 @@ import {
 } from "../../src/runtime/openai-provider.ts"
 
 describe("OpenAI Responses provider", () => {
+  it.each([
+    "codex",
+    "openai",
+  ])("sends only supported output controls to %s", async (provider) => {
+    let body: Record<string, unknown> | undefined
+    const client = new OpenAI({
+      apiKey: "test",
+      maxRetries: 0,
+      fetch: async (_url, init) => {
+        body = JSON.parse(String(init?.body))
+        return new globalThis.Response(
+          `data: ${JSON.stringify({ type: "response.completed", response: responseFixture({ output: [] }) })}\n\n`,
+          { headers: { "content-type": "text/event-stream" } },
+        )
+      },
+    })
+    const stream = createOpenAIProvider({
+      apiKey: "test",
+      model: "gpt-6-astra",
+      client,
+    })
+    const events = []
+    for await (const event of stream(
+      requestFixture({
+        target: {
+          provider,
+          model: "gpt-6-astra",
+          instructionProfileId: "gpt-6-astra",
+          effort: "medium",
+        },
+        maxOutputTokens: 1234,
+      }),
+    ))
+      events.push(event)
+    expect(body?.model).toBe("gpt-6-astra")
+    if (provider === "codex")
+      expect(body).not.toHaveProperty("max_output_tokens")
+    else expect(body?.max_output_tokens).toBe(1234)
+    expect(events.at(-1)).toMatchObject({
+      type: "response",
+      response: { stopReason: ModelStopReason.EndTurn },
+    })
+  })
+
+  it.each([
+    false,
+    true,
+  ])("preserves streamed tool calls in output order without duplicating terminal output (%s)", async (terminalIncludesItems) => {
+    const output: Response["output"] = [
+      {
+        id: "msg_intro",
+        type: "message",
+        role: "assistant",
+        status: "completed",
+        content: [
+          {
+            type: "output_text",
+            text: "I will inspect the file.",
+            annotations: [],
+            logprobs: [],
+          },
+        ],
+      },
+      {
+        id: "fc_read",
+        type: "function_call",
+        call_id: "call_read",
+        name: "read_file",
+        arguments: '{"path":"sum.mjs"}',
+        status: "completed",
+      },
+    ]
+    const client = new OpenAI({
+      apiKey: "test",
+      maxRetries: 0,
+      fetch: async () =>
+        new globalThis.Response(
+          [
+            {
+              type: "response.output_item.done",
+              output_index: 1,
+              item: output[1],
+            },
+            {
+              type: "response.output_item.done",
+              output_index: 0,
+              item: output[0],
+            },
+            {
+              type: "response.completed",
+              response: responseFixture({
+                output: terminalIncludesItems ? output : [],
+              }),
+            },
+          ]
+            .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+            .join(""),
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    })
+    const stream = createOpenAIProvider({
+      apiKey: "test",
+      model: "gpt-6-astra",
+      client,
+    })
+    const events = []
+    for await (const event of stream(requestFixture())) events.push(event)
+    expect(events.at(-1)).toMatchObject({
+      type: "response",
+      response: {
+        stopReason: ModelStopReason.ToolUse,
+        content: [
+          { type: "text", text: "I will inspect the file." },
+          {
+            type: "tool_call",
+            id: "call_read",
+            name: "read_file",
+            input: { path: "sum.mjs" },
+          },
+        ],
+      },
+    })
+  })
+
   it("sends the native compaction control and collects its streamed item before completion", async () => {
     const client = new OpenAI({
       apiKey: "test",

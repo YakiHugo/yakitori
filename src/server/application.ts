@@ -895,6 +895,19 @@ async function configureProviders(input: {
       providers,
     }
   }
+  if (input.provider === "codex") {
+    if (providers.codex === undefined) {
+      throw new Error(
+        "A Codex ChatGPT login is required when YAKITORI_PROVIDER=codex.",
+      )
+    }
+    if (!model) {
+      throw new Error(
+        "YAKITORI_MODEL is required when YAKITORI_PROVIDER=codex.",
+      )
+    }
+    return { provider: input.provider, model, providers }
+  }
   if (isApiKeyProvider(input.provider)) {
     const credential = apiKeyEnvironment[input.provider]
     const apiKey = process.env[credential]
@@ -917,7 +930,7 @@ async function configureProviders(input: {
   }
   if (input.provider !== "grok") {
     throw new Error(
-      `Provider "${input.provider}" is not configured. Use YAKITORI_PROVIDER=faux|openai|anthropic|grok|kimi or inject a stream.`,
+      `Provider "${input.provider}" is not configured. Use YAKITORI_PROVIDER=faux|openai|codex|anthropic|grok|kimi or inject a stream.`,
     )
   }
   if (!model) {
@@ -984,6 +997,7 @@ function createApiKeyProvider(
             provider,
             discover: () =>
               discoverOpenAiCompatibleModels({
+                provider: "kimi",
                 baseUrl: `${KIMI_CODE_API_BASE_URL}/v1`,
                 accessToken: apiKey,
               }),
@@ -1015,7 +1029,7 @@ async function registerCodexLogin(
   if (login.kind === "chatgpt") {
     providers.codex ??= createModelProvider({
       info: providerInfo("codex", "openai_responses"),
-      stream: createCodexProvider(),
+      createTurnStream: () => createCodexProvider(),
       models: createDiscoveringModelsManager({
         provider: "codex",
         async discover() {
@@ -1224,6 +1238,7 @@ function createGrokProvider(): ModelProvider {
         const accessToken =
           process.env.XAI_API_KEY ?? (await resolveGrokAccessToken())
         return discoverOpenAiCompatibleModels({
+          provider: "grok",
           baseUrl: GROK_API_BASE_URL,
           accessToken,
         })

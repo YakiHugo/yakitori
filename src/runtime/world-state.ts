@@ -64,6 +64,7 @@ export function buildWorldStateFromSnapshot(input: {
       modelSection(
         input.configuration,
         input.baseModelId ?? input.previousModelId,
+        input.baseModelId !== undefined,
       ),
       ...(input.multiAgent === undefined
         ? []
@@ -115,6 +116,21 @@ function toolInstructionsSection(
   names: ReadonlySet<string>,
 ): ErasedWorldStateSection {
   const guidance = [
+    "You are Yakitori, running in the user's local workspace. Only the tools exposed in this request are available; use their schemas and the current harness permission policy even when a model template mentions another host or tool.",
+    "Vendor coding-agent instructions describe the original host. Here the host is Yakitori: repository instructions and live environment arrive in developer messages. Vendor slash commands, documentation paths, memory stores, and integrations are not provided unless explicitly exposed by this harness. Use only the active tool-name equivalents below and follow their actual schemas and lifecycles.",
+    ...[
+      ["Read", "read_file"],
+      ["Write", "write_file"],
+      ["Edit", "edit_file"],
+      ["Glob", "glob"],
+      ["Grep", "grep"],
+      ["Bash or shell", "exec_command"],
+      ["Task or Agent", "spawn_agent"],
+    ].flatMap(([vendor, local]) =>
+      local !== undefined && names.has(local)
+        ? [`Vendor tool ${vendor} corresponds to ${local}.`]
+        : [],
+    ),
     names.has("read_file")
       ? "Use read_file to read files; continue paginated or truncated instruction reads."
       : "",
@@ -282,25 +298,35 @@ export function snapshotWorldState(current: WorldState): JsonObject {
 function modelSection(
   configuration: ResolvedStepConfiguration,
   previousModelId: string | undefined,
+  modelOwnedBase: boolean,
 ): ErasedWorldStateSection {
   const modelId = `${configuration.target.provider}/${configuration.target.model}`
-  const snapshot = modelId
+  const snapshot = {
+    id: modelId,
+    instructionsRevision: configuration.modelInstructions.revision,
+  }
   return section({
     id: WorldStateSectionId.Model,
     snapshot,
-    decode: stringSnapshot,
+    decode: jsonObjectSnapshot,
     render(previous) {
+      // Discovery can supply a newer model prompt after the Session base was
+      // pinned. Record that revision as a developer update, including on the
+      // first request, without rewriting the durable base or cache prefix.
       const changed =
         previous.type === "known"
-          ? previous.snapshot !== modelId
-          : previousModelId !== undefined && previousModelId !== modelId
+          ? !jsonValuesEqual(previous.snapshot, snapshot)
+          : (previousModelId !== undefined && previousModelId !== modelId) ||
+            (modelOwnedBase &&
+              configuration.baseInstructions.revision !==
+                snapshot.instructionsRevision)
       if (!changed || configuration.modelInstructions.text.length === 0)
         return []
       return [
         fragment(
           WorldStateSectionId.Model,
           "developer",
-          `<model_switch>\nThe user was previously using a different model. Continue the conversation according to the following model-specific instructions.\n\n${configuration.modelInstructions.text}\n</model_switch>`,
+          `<model_switch>\nThe active model or its instructions have changed. Continue the conversation according to the following model-specific instructions.\n\n${configuration.modelInstructions.text}\n</model_switch>`,
         ),
       ]
     },

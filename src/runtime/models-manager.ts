@@ -3,6 +3,7 @@ import {
   type CatalogModel,
   listCatalogModels,
   type ModelCapacity,
+  type ModelInputModality,
   type ResolvedModel,
   resolveModel,
   validateModelSelection,
@@ -28,6 +29,9 @@ export type ModelsManager = {
 }
 
 export type DiscoveredModel = Readonly<{
+  instructions?: string
+  efforts?: readonly string[]
+  inputModalities?: readonly ModelInputModality[]
   id: string
   displayName?: string
   autoCompactTokenLimit?: number
@@ -80,23 +84,38 @@ export function createDiscoveringModelsManager(input: {
         staticModels.map((model) => [model.model.toLowerCase(), model]),
       )
       return [
-        ...[...remote.values()].map((model) => {
-          const base = staticById.get(model.id.toLowerCase())
-          return {
-            ...(base ??
-              fallback.resolve({ provider: input.provider, model: model.id })),
-            model: model.id,
-            ...(model.displayName === undefined
-              ? {}
-              : { displayName: model.displayName }),
-            ...(model.autoCompactTokenLimit === undefined
-              ? {}
-              : { autoCompactTokenLimit: model.autoCompactTokenLimit }),
-            ...(model.compactionHash === undefined
-              ? {}
-              : { compactionHash: model.compactionHash }),
-          }
-        }),
+        ...[...remote.values()]
+          .filter(
+            (model) =>
+              staticById.has(model.id.toLowerCase()) ||
+              model.instructions !== undefined,
+          )
+          .map((model) => {
+            const base = staticById.get(model.id.toLowerCase())
+            return {
+              ...(base ??
+                fallback.resolve({
+                  provider: input.provider,
+                  model: model.id,
+                })),
+              model: model.id,
+              ...(model.efforts === undefined
+                ? {}
+                : { efforts: model.efforts, effortStyle: "levels" as const }),
+              ...(model.inputModalities === undefined
+                ? {}
+                : { inputModalities: model.inputModalities }),
+              ...(model.displayName === undefined
+                ? {}
+                : { displayName: model.displayName }),
+              ...(model.autoCompactTokenLimit === undefined
+                ? {}
+                : { autoCompactTokenLimit: model.autoCompactTokenLimit }),
+              ...(model.compactionHash === undefined
+                ? {}
+                : { compactionHash: model.compactionHash }),
+            }
+          }),
         ...staticModels.filter(
           (model) => !remote.has(model.model.toLowerCase()),
         ),
@@ -109,6 +128,12 @@ export function createDiscoveringModelsManager(input: {
       if (model === undefined) return base
       return {
         ...base,
+        ...(model.inputModalities === undefined
+          ? {}
+          : { inputModalities: model.inputModalities }),
+        ...(model.instructions === undefined
+          ? {}
+          : { instructions: model.instructions }),
         ...(model.autoCompactTokenLimit === undefined
           ? {}
           : { autoCompactTokenLimit: model.autoCompactTokenLimit }),
@@ -120,7 +145,16 @@ export function createDiscoveringModelsManager(input: {
     },
     validate(selection) {
       requireProvider(input.provider, selection.provider)
-      fallback.validate(selection)
+      const model = discovered(selection.model)
+      if (model?.efforts !== undefined && selection.effort !== undefined) {
+        if (!model.efforts.includes(selection.effort)) {
+          throw new Error(
+            `Reasoning effort ${selection.effort} is not supported by ${input.provider}/${selection.model}.`,
+          )
+        }
+        const { effort: _, ...rest } = selection
+        fallback.validate(rest)
+      } else fallback.validate(selection)
     },
     capacity(selection) {
       requireProvider(input.provider, selection.provider)
