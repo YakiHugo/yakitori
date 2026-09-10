@@ -21,6 +21,18 @@ import {
 import { ModelSelector } from "./model-selector.tsx"
 import { Button } from "./ui/button.tsx"
 
+type SlashCommand = {
+  readonly name: string
+  readonly description: string
+}
+
+const SLASH_COMMANDS: readonly SlashCommand[] = [
+  {
+    name: COMPACT_DIRECTIVE,
+    description: "Compact the conversation context",
+  },
+]
+
 export function Composer() {
   const draft = useAppStore((state) => state.promptDraft) ?? ""
   const attachments = useAppStore((state) => state.promptAttachments)
@@ -58,6 +70,7 @@ export function Composer() {
     readonly stepsBack: number
     readonly savedDraft: string
   }>()
+  const [slashDismissed, setSlashDismissed] = useState<string>()
 
   const effectiveModel = normalizeKimiModelSelection(
     resolveEffectiveModel({
@@ -99,6 +112,19 @@ export function Composer() {
   const historyTexts = view.entries.flatMap((entry) =>
     entry.kind === "user_input" ? [entry.text] : [],
   )
+
+  // The menu tracks a single first-token query like codex's command popup:
+  // it stays open while the draft is exactly one `/name` token.
+  const slashQuery =
+    draft.startsWith("/") && !/\s/.test(draft) ? draft : undefined
+  const slashMatches =
+    slashQuery === undefined || slashDismissed === slashQuery
+      ? []
+      : SLASH_COMMANDS.filter(
+          (command) =>
+            command.name.startsWith(slashQuery) && command.name !== slashQuery,
+        )
+  const slashMenuOpen = slashMatches.length > 0
 
   const text = draft.trim()
   const sending =
@@ -199,10 +225,31 @@ export function Composer() {
       )
   }
 
+  const acceptSlashCommand = (command: SlashCommand): void => {
+    setSlashDismissed(undefined)
+    setPromptDraft(command.name)
+    textareaRef.current?.focus()
+  }
+
   const handleDraftKeyDown = (
     event: KeyboardEvent<HTMLTextAreaElement>,
   ): void => {
     if (event.nativeEvent.isComposing) return
+    if (slashMenuOpen) {
+      if (event.key === "Escape") {
+        setSlashDismissed(slashQuery)
+        return
+      }
+      const first = slashMatches[0]
+      if (
+        (event.key === "Enter" || event.key === "Tab") &&
+        first !== undefined
+      ) {
+        event.preventDefault()
+        acceptSlashCommand(first)
+        return
+      }
+    }
     if (event.key === "ArrowUp") {
       const cursorAtStart =
         event.currentTarget.selectionStart === 0 &&
@@ -257,7 +304,30 @@ export function Composer() {
           void addFiles(Array.from(event.dataTransfer.files))
         }}
       >
-        <div className="overflow-visible rounded-2xl border bg-card shadow-[0_1px_2px_color-mix(in_oklab,var(--foreground)_7%,transparent),0_8px_24px_-10px_color-mix(in_oklab,var(--foreground)_14%,transparent)] transition-shadow focus-within:shadow-[0_1px_2px_color-mix(in_oklab,var(--foreground)_8%,transparent),0_10px_30px_-10px_color-mix(in_oklab,var(--foreground)_20%,transparent)]">
+        <div className="relative overflow-visible rounded-2xl border bg-card shadow-[0_1px_2px_color-mix(in_oklab,var(--foreground)_7%,transparent),0_8px_24px_-10px_color-mix(in_oklab,var(--foreground)_14%,transparent)] transition-shadow focus-within:shadow-[0_1px_2px_color-mix(in_oklab,var(--foreground)_8%,transparent),0_10px_30px_-10px_color-mix(in_oklab,var(--foreground)_20%,transparent)]">
+          {slashMenuOpen ? (
+            <div
+              role="listbox"
+              aria-label="Slash commands"
+              className="absolute bottom-full left-0 z-10 mb-1 w-72 space-y-1 rounded-md border bg-popover p-2 text-sm shadow-md"
+            >
+              {slashMatches.map((command, index) => (
+                <button
+                  key={command.name}
+                  type="button"
+                  role="option"
+                  aria-selected={index === 0}
+                  onClick={() => acceptSlashCommand(command)}
+                  className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left hover:bg-accent ${index === 0 ? "bg-accent" : ""}`}
+                >
+                  <span className="shrink-0 font-mono">{command.name}</span>
+                  <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                    {command.description}
+                  </span>
+                </button>
+              ))}
+            </div>
+          ) : null}
           {attachments.length > 0 ? (
             <div className="flex gap-2 overflow-x-auto px-3 pt-3">
               {attachments.map((attachment, index) => (

@@ -316,6 +316,75 @@ describe("history navigation", () => {
   })
 })
 
+describe("slash command menu", () => {
+  it("completes the highlighted command with Enter and sends it on a second Enter", async () => {
+    const user = userEvent.setup()
+    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    useAppStore.setState({
+      admitInput,
+      selection: { sessionId: "session_1" },
+    })
+    render(<Composer />)
+
+    const textarea = screen.getByRole("textbox")
+    await user.click(textarea)
+    await user.keyboard("/")
+
+    const menu = screen.getByRole("listbox", { name: "Slash commands" })
+    expect(menu.textContent).toContain("/compact")
+
+    await user.keyboard("{Enter}")
+    expect(useAppStore.getState().promptDraft).toBe("/compact")
+    expect(admitInput).not.toHaveBeenCalled()
+    // A complete command no longer matches the menu.
+    expect(screen.queryByRole("listbox")).toBeNull()
+
+    await user.keyboard("{Enter}")
+    expect(admitInput).toHaveBeenCalledWith("/compact")
+  })
+
+  it("accepts a clicked command", async () => {
+    const user = userEvent.setup()
+    useAppStore.setState({ selection: { sessionId: "session_1" } })
+    render(<Composer />)
+
+    await user.click(screen.getByRole("textbox"))
+    await user.keyboard("/com")
+    await user.click(screen.getByRole("option", { name: /\/compact/ }))
+
+    expect(useAppStore.getState().promptDraft).toBe("/compact")
+    expect(screen.queryByRole("listbox")).toBeNull()
+  })
+
+  it("dismisses with Escape until the query changes", async () => {
+    const user = userEvent.setup()
+    useAppStore.setState({ selection: { sessionId: "session_1" } })
+    render(<Composer />)
+
+    const textarea = screen.getByRole("textbox")
+    await user.click(textarea)
+    await user.keyboard("/")
+    expect(screen.getByRole("listbox")).toBeDefined()
+
+    await user.keyboard("{Escape}")
+    expect(screen.queryByRole("listbox")).toBeNull()
+
+    await user.keyboard("c")
+    expect(screen.getByRole("listbox")).toBeDefined()
+  })
+
+  it("stays closed once the draft takes arguments", async () => {
+    const user = userEvent.setup()
+    useAppStore.setState({ selection: { sessionId: "session_1" } })
+    render(<Composer />)
+
+    await user.click(screen.getByRole("textbox"))
+    await user.keyboard("/compact now")
+
+    expect(screen.queryByRole("listbox")).toBeNull()
+  })
+})
+
 describe("model selector", () => {
   function selectModelState() {
     return {
