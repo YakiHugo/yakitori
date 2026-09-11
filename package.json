@@ -68,6 +68,7 @@
     "smol-toml": "^1.8.0",
     "tailwind-merge": "^3.6.0",
     "tailwindcss": "^4.3.3",
+    "undici": "^8.10.2",
     "ws": "^8.21.3",
     "yaml": "^2.9.0",
     "zustand": "^5.0.14"

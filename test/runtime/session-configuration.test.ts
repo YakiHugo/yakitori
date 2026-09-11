@@ -19,6 +19,38 @@ function resolveSessionConfiguration(
 }
 
 describe("session configuration", () => {
+  it("resolves provider transport overrides from the persisted Turn snapshot", () => {
+    const session = SessionConfiguration.create({
+      promptCacheKey: "session-cache",
+      selection: { provider: "kimi", model: "k3" },
+      workspaceRoot: "/workspace",
+      enabledTools: [],
+      approvalPolicy: "always_approve",
+      modelTransport: {
+        maxAttempts: 4,
+        streamIdleTimeoutMs: 300_000,
+        providers: {
+          kimi: { maxAttempts: 6, streamIdleTimeoutMs: 420_000 },
+        },
+      },
+    })
+
+    expect(session.snapshot.modelTransport).toEqual({
+      maxAttempts: 4,
+      streamIdleTimeoutMs: 300_000,
+      providers: {
+        kimi: { maxAttempts: 6, streamIdleTimeoutMs: 420_000 },
+      },
+    })
+    expect(
+      session.resolveStep({ provider: "kimi", model: "k3" }).modelRequestPolicy,
+    ).toEqual({ maxAttempts: 6, streamIdleTimeoutMs: 420_000 })
+    expect(
+      session.resolveStep({ provider: "openai", model: "gpt-5" })
+        .modelRequestPolicy,
+    ).toEqual({ maxAttempts: 4, streamIdleTimeoutMs: 300_000 })
+  })
+
   it.each([
     { provider: "kimi", model: "k3", window: 1048576, limit: 943718 },
     { provider: "kimi", model: "k3-256k", window: 262144, limit: 235929 },

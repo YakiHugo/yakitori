@@ -123,9 +123,7 @@ export type ServerHandlers = {
     input: unknown,
   ): Promise<ApiHandlerResult<ApiSearchSessionOccurrencesResponse>>
   readSession(input: unknown): Promise<ApiHandlerResult<ApiReadSessionResponse>>
-  listSkills(
-    input: unknown,
-  ): Promise<ApiHandlerResult<ApiListSkillsResponse>>
+  listSkills(input: unknown): Promise<ApiHandlerResult<ApiListSkillsResponse>>
   deleteSession(
     input: unknown,
   ): Promise<ApiHandlerResult<ApiDeleteSessionResponse>>
@@ -306,6 +304,10 @@ export function createThreadServerHandlers(
               sessionId: event.threadId,
               turnId: event.turnId,
               message: event.message,
+              ...(event.code === undefined ? {} : { code: event.code }),
+              ...(event.details === undefined
+                ? {}
+                : { details: event.details }),
               createdAt: new Date().toISOString(),
             })
           }

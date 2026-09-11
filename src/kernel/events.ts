@@ -330,6 +330,17 @@ export type SessionExecutionPolicyDefaultsSnapshot = {
 export type ApprovalPolicy = "always_approve" | "auto_file_tools"
 export type AutoCompactTokenLimitScope = "body_after_prefix" | "total"
 
+export type ModelRequestPolicy = Readonly<{
+  maxAttempts?: number
+  rateLimitMaxAttempts?: number
+  streamIdleTimeoutMs?: number
+}>
+
+export type ModelTransportPolicy = ModelRequestPolicy &
+  Readonly<{
+    providers?: Readonly<Record<string, ModelRequestPolicy>>
+  }>
+
 export type SessionConfigurationSnapshot = {
   readonly schemaVersion: 5
   readonly workspaceRoot: string
@@ -342,6 +353,7 @@ export type SessionConfigurationSnapshot = {
   readonly modelContextWindowTokens?: number
   readonly modelAutoCompactTokenLimit?: number
   readonly modelAutoCompactTokenLimitScope: AutoCompactTokenLimitScope
+  readonly modelTransport?: ModelTransportPolicy
 }
 
 export type TurnExecutionContext = {
@@ -1561,6 +1573,7 @@ export function isSessionConfigurationSnapshot(
       "modelContextWindowTokens",
       "modelAutoCompactTokenLimit",
       "modelAutoCompactTokenLimitScope",
+      "modelTransport",
     ]) ||
     value.schemaVersion !== 5 ||
     !isString(value.workspaceRoot) ||
@@ -1578,11 +1591,57 @@ export function isSessionConfigurationSnapshot(
     (value.modelAutoCompactTokenLimit !== undefined &&
       !isPositiveInteger(value.modelAutoCompactTokenLimit)) ||
     (value.modelAutoCompactTokenLimitScope !== "total" &&
-      value.modelAutoCompactTokenLimitScope !== "body_after_prefix")
+      value.modelAutoCompactTokenLimitScope !== "body_after_prefix") ||
+    (value.modelTransport !== undefined &&
+      !isModelTransportPolicy(value.modelTransport))
   ) {
     return false
   }
   return true
+}
+
+function isModelTransportPolicy(value: unknown): value is ModelTransportPolicy {
+  if (!isRecord(value)) return false
+  if (
+    !onlyKeys(value, [
+      "maxAttempts",
+      "rateLimitMaxAttempts",
+      "streamIdleTimeoutMs",
+      "providers",
+    ]) ||
+    !hasValidModelRequestPolicyValues(value)
+  ) {
+    return false
+  }
+  return (
+    value.providers === undefined ||
+    (isRecord(value.providers) &&
+      Object.values(value.providers).every(isModelRequestPolicy))
+  )
+}
+
+function isModelRequestPolicy(value: unknown): value is ModelRequestPolicy {
+  return (
+    isRecord(value) &&
+    onlyKeys(value, [
+      "maxAttempts",
+      "rateLimitMaxAttempts",
+      "streamIdleTimeoutMs",
+    ]) &&
+    hasValidModelRequestPolicyValues(value)
+  )
+}
+
+function hasValidModelRequestPolicyValues(
+  value: Record<string, unknown>,
+): boolean {
+  return (
+    (value.maxAttempts === undefined || isPositiveInteger(value.maxAttempts)) &&
+    (value.rateLimitMaxAttempts === undefined ||
+      isPositiveInteger(value.rateLimitMaxAttempts)) &&
+    (value.streamIdleTimeoutMs === undefined ||
+      isPositiveInteger(value.streamIdleTimeoutMs))
+  )
 }
 
 function isBaseInstructionsSnapshot(

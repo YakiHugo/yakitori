@@ -85,6 +85,55 @@ describe("provider registry", () => {
     await client.close()
   })
 
+  it("rebuilds attempt transport with the previous classified failure", async () => {
+    const attempts: NonNullable<ModelRequest["attempt"]>[] = []
+    const provider = createModelProvider({
+      info: {
+        id: "openai",
+        wireApi: "openai_responses",
+        capabilities: { remoteCompaction: false },
+        retry: { sleep: async () => {}, random: () => 0 },
+      },
+      createAttemptStream(attempt) {
+        attempts.push(attempt)
+        return async function* () {
+          if (attempt.number === 1) {
+            yield {
+              type: "failure",
+              failure: {
+                kind: "connection_failed",
+                stage: "connect",
+                provider: "openai",
+                wireApi: "openai_responses",
+                message: "connect failed",
+              },
+            }
+            return
+          }
+          yield* responseStream([], "recovered")
+        }
+      },
+    })
+    const session = provider.createClient().startTurn({ maxAttempts: 2 })
+
+    const events: ModelStreamEvent[] = []
+    for await (const event of session.stream(request("openai", "gpt"))) {
+      events.push(event)
+    }
+
+    expect(attempts).toHaveLength(2)
+    expect(attempts[1]).toMatchObject({
+      number: 2,
+      maxAttempts: 2,
+      previousFailure: {
+        kind: "connection_failed",
+        attempt: 1,
+        retryDecision: "retry",
+      },
+    })
+    expect(events.at(-1)).toMatchObject({ type: "response" })
+  })
+
   it("enforces the Turn provider fence for custom provider implementations", () => {
     let enteredTransport = false
     const registry = createProviderRegistry({

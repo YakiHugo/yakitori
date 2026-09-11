@@ -8,6 +8,7 @@ import {
   resolve,
   sep,
 } from "node:path"
+import { Agent as UndiciAgent } from "undici"
 import packageJson from "../../package.json" with { type: "json" }
 import {
   createSqliteAgentGraphStore,
@@ -441,6 +442,12 @@ export async function createYakitoriApplication(
               }
               return snapshot.configuration
             },
+            loadModelTransport: async () =>
+              (
+                await sessionUserConfig.readSnapshot({
+                  cwd: workingDirectory,
+                })
+              ).configuration.modelTransport,
             modelClient: providerRegistry.createClient(),
             provider: provider.provider,
             model: provider.model,
@@ -994,7 +1001,7 @@ function createApiKeyProvider(
   if (provider === "openai") {
     return createModelProvider({
       info: providerInfo(provider, "openai_responses"),
-      stream: createOpenAIProvider({ apiKey, model }),
+      createAttemptStream: () => createOpenAIProvider({ apiKey, model }),
       continuationScope: createProviderContinuationScope(
         provider,
         OPENAI_API_BASE_URL,
@@ -1006,11 +1013,12 @@ function createApiKeyProvider(
     provider === "kimi" ? KIMI_CODE_API_BASE_URL : ANTHROPIC_API_BASE_URL
   return createModelProvider({
     info: providerInfo(provider, "anthropic_messages"),
-    stream: createAnthropicProvider({
-      apiKey,
-      model,
-      ...(provider === "kimi" ? { baseURL: KIMI_CODE_API_BASE_URL } : {}),
-    }),
+    createAttemptStream: () =>
+      createAnthropicProvider({
+        apiKey,
+        model,
+        ...(provider === "kimi" ? { baseURL: KIMI_CODE_API_BASE_URL } : {}),
+      }),
     continuationScope: createProviderContinuationScope(
       provider,
       baseURL,
@@ -1074,10 +1082,11 @@ async function registerCodexLogin(
   if (providers.openai === undefined) {
     providers.openai = createModelProvider({
       info: providerInfo("openai", "openai_responses"),
-      stream: createOpenAIProvider({
-        apiKey: login.apiKey,
-        model: "selected-at-request-time",
-      }),
+      createAttemptStream: () =>
+        createOpenAIProvider({
+          apiKey: login.apiKey,
+          model: "selected-at-request-time",
+        }),
       continuationScope: createProviderContinuationScope(
         "openai",
         OPENAI_API_BASE_URL,
@@ -1239,24 +1248,57 @@ function createGrokProvider(): ModelProvider {
   // tokens expire, so resolve per model call rather than freezing one token at
   // application startup. The same lazy stream supports primary and switched
   // Grok Turns.
-  const stream: StreamFn = async function* (request) {
-    const apiKey = process.env.XAI_API_KEY ?? (await resolveGrokAccessToken())
-    yield* createOpenAIProvider({
-      apiKey,
-      model: request.target.model,
-      baseURL: GROK_API_BASE_URL,
-    })({
-      ...request,
-      continuationScope: createProviderContinuationScope(
-        "grok",
-        GROK_API_BASE_URL,
-        apiKey,
-      ),
-    })
-  }
   return createModelProvider({
     info: providerInfo("grok", "openai_responses"),
-    stream,
+    createAttemptStream: (attempt) => {
+      const forceHttp1 =
+        attempt.number > 1 &&
+        attempt.previousFailure !== undefined &&
+        attempt.previousFailure.kind !== "rate_limited"
+      const dispatcher = forceHttp1
+        ? new UndiciAgent({ allowH2: false })
+        : undefined
+      return async function* (request) {
+        try {
+          let apiKey: string
+          try {
+            apiKey = process.env.XAI_API_KEY ?? (await resolveGrokAccessToken())
+          } catch (cause) {
+            yield {
+              type: "failure",
+              failure: {
+                kind: "authentication",
+                stage: "request_build",
+                provider: "grok",
+                wireApi: "openai_responses",
+                providerCode: "grok_login_unavailable",
+                message:
+                  "Grok login is unavailable. Run `grok` and log in again, or set XAI_API_KEY, then retry.",
+              },
+              cause,
+            }
+            return
+          }
+          yield* createOpenAIProvider({
+            apiKey,
+            model: request.target.model,
+            baseURL: GROK_API_BASE_URL,
+            ...(dispatcher === undefined
+              ? {}
+              : { fetchOptions: { dispatcher } }),
+          })({
+            ...request,
+            continuationScope: createProviderContinuationScope(
+              "grok",
+              GROK_API_BASE_URL,
+              apiKey,
+            ),
+          })
+        } finally {
+          await dispatcher?.close()
+        }
+      }
+    },
     models: createDiscoveringModelsManager({
       provider: "grok",
       async discover() {
@@ -1310,11 +1352,14 @@ function createFauxScenarioStream(scenario: string): StreamFn {
     }
     if (scenario === "error") {
       yield {
-        type: "response",
-        response: {
-          stopReason: ModelStopReason.Error,
-          content: [],
-          error: { code: "faux_error", message: "Scripted provider error." },
+        type: "failure",
+        failure: {
+          kind: "provider_error",
+          stage: "model_event",
+          provider: "faux",
+          wireApi: "faux",
+          providerCode: "faux_error",
+          message: "Scripted provider error.",
         },
       }
       return

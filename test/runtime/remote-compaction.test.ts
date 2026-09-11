@@ -50,15 +50,14 @@ describe("provider-native compaction history", () => {
         attempts += 1
         yield { type: "snapshot", text: "provisional output" }
         yield {
-          type: "response",
-          response: {
-            stopReason: ModelStopReason.Error,
-            content: [],
-            error: {
-              code: "transient",
-              message: "retry",
-              details: { retryable: true },
-            },
+          type: "failure",
+          failure: {
+            kind: "server_error",
+            stage: "model_event",
+            provider: "codex",
+            wireApi: "openai_responses",
+            providerCode: "transient",
+            message: "retry",
           },
         }
       },
@@ -85,10 +84,10 @@ describe("provider-native compaction history", () => {
       await client.close()
     }
     expect(attempts).toBe(3)
-    expect(events.filter((event) => event.type === "response")).toHaveLength(1)
+    expect(events.filter((event) => event.type === "failure")).toHaveLength(1)
     expect(events.at(-1)).toMatchObject({
-      type: "response",
-      response: { stopReason: ModelStopReason.Error },
+      type: "failure",
+      failure: { kind: "server_error" },
     })
   })
   it("samples after one compaction even if the replacement still estimates above the trigger", async () => {
@@ -275,13 +274,24 @@ describe("provider-native compaction history", () => {
         }
         return
       }
+      if (failure === "failed") {
+        yield {
+          type: "failure",
+          failure: {
+            kind: "provider_error",
+            stage: "model_event",
+            provider: "codex",
+            wireApi: "openai_responses",
+            providerCode: "unavailable",
+            message: "compaction failed",
+          },
+        }
+        return
+      }
       yield {
         type: "response",
         response: {
-          stopReason:
-            failure === "failed"
-              ? ModelStopReason.Error
-              : ModelStopReason.EndTurn,
+          stopReason: ModelStopReason.EndTurn,
           content:
             failure === "missing"
               ? []
@@ -289,9 +299,6 @@ describe("provider-native compaction history", () => {
                 ? [checkpoint, checkpoint]
                 : [checkpoint],
           providerRequestId: "resp_failed",
-          ...(failure === "failed"
-            ? { error: { code: "unavailable", message: "compaction failed" } }
-            : {}),
         },
       }
     }

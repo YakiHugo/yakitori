@@ -12,10 +12,12 @@ import {
   type ContextCompactionCompletedItem,
   type JsonObject,
   type KernelError,
+  type ModelTransportPolicy,
   MISSING_TOOL_RESULT_TEXT,
   type ModelMessage,
   type ModelSelection,
   type RolloutAssets,
+  type SessionConfigurationSnapshot,
   type StartedExecutionItem,
   type TokenUsage,
   type ToolExecutionItem,
@@ -28,7 +30,7 @@ import {
   trimRemoteCompactionToolTail,
 } from "./compaction.ts"
 import { observeEnvironment } from "./environment-context.ts"
-import { isAbortError, ModelResponseError } from "./errors.ts"
+import { isAbortError, ModelFailureError } from "./errors.ts"
 import { HookEvent, type HookRunner } from "./hooks.ts"
 import type { InstructionDiagnostic } from "./instruction-files.ts"
 import {
@@ -113,6 +115,7 @@ export type TurnProcessorOptions = {
   readonly modelContextWindowTokens?: number
   readonly modelAutoCompactTokenLimit?: number
   readonly modelAutoCompactTokenLimitScope?: import("../kernel/index.ts").AutoCompactTokenLimitScope
+  readonly loadModelTransport?: () => Promise<ModelTransportPolicy | undefined>
   readonly loadProjectInstructions?: typeof loadProjectInstructions
   readonly prepareStepExtensions?: (signal: AbortSignal) => Promise<
     Readonly<{
@@ -138,6 +141,7 @@ export type TurnProcessorOptions = {
 export type TurnProcessorOperationalFailure = Readonly<{
   operation:
     | "load-instructions"
+    | "model-request"
     | "abort-model-stream"
     | "close-model-session"
     | "close-model-stream"
@@ -255,7 +259,7 @@ export function createTurnProcessor(
         throw new AggregateError(errors, "Failed to dispose Turn processor.")
       }
     },
-    prepare(snapshot, input) {
+    async prepare(snapshot, input) {
       const metadata = snapshot.metadata
       if (
         metadata.mateId === undefined ||
@@ -269,6 +273,10 @@ export function createTurnProcessor(
       const selection: ModelSelection = input.modelSelection ??
         snapshot.configuration?.defaultTarget ?? { provider, model }
       const models = options.modelClient?.models(selection.provider)
+      const modelTransport =
+        options.loadModelTransport === undefined
+          ? snapshot.configuration?.modelTransport
+          : await options.loadModelTransport()
       const configuration =
         snapshot.configuration === undefined
           ? SessionConfiguration.create(
@@ -300,14 +308,16 @@ export function createTurnProcessor(
                       modelAutoCompactTokenLimitScope:
                         options.modelAutoCompactTokenLimitScope,
                     }),
+                ...(modelTransport === undefined ? {} : { modelTransport }),
               },
               models,
             )
           : SessionConfiguration.restore(
-              {
-                ...snapshot.configuration,
-                defaultTarget: selection,
-              },
+              replaceModelTransport(
+                snapshot.configuration,
+                selection,
+                modelTransport,
+              ),
               models,
             )
       return {
@@ -386,6 +396,19 @@ export function createTurnProcessor(
   }
 }
 
+function replaceModelTransport(
+  snapshot: SessionConfigurationSnapshot,
+  selection: ModelSelection,
+  modelTransport: ModelTransportPolicy | undefined,
+): SessionConfigurationSnapshot {
+  const { modelTransport: _previous, ...rest } = snapshot
+  return {
+    ...rest,
+    defaultTarget: selection,
+    ...(modelTransport === undefined ? {} : { modelTransport }),
+  }
+}
+
 async function executeTurn(input: {
   readonly runtime: TurnRuntime
   readonly input: TurnInput
@@ -427,6 +450,7 @@ async function executeTurn(input: {
   }
   const modelSession = input.options.modelClient?.startTurn(
     turn.requestSettings.target.provider,
+    turn.requestSettings.modelRequestPolicy,
   )
   let closePromise: Promise<void> | undefined
   const closeModelSession = () => {
@@ -728,12 +752,15 @@ async function executeTurnModelLoop(
               configuration.autoCompact.limitTokens !== undefined &&
               activeTokens > configuration.autoCompact.limitTokens))
         if (foreignCheckpoint !== undefined || hashChanged || downshift) {
-          const sourceSession = client?.startTurn(sourceSelection.provider)
+          const sourceStep = captureStepContext({
+            registry: input.toolRegistry,
+            configuration: sourceConfiguration,
+          })
+          const sourceSession = client?.startTurn(
+            sourceSelection.provider,
+            sourceStep.configuration.modelRequestPolicy,
+          )
           try {
-            const sourceStep = captureStepContext({
-              registry: input.toolRegistry,
-              configuration: sourceConfiguration,
-            })
             try {
               await compactLiveHistory({
                 runtime: input.runtime,
@@ -870,6 +897,8 @@ async function executeTurnModelLoop(
         turnId: input.input.submissionId,
         itemId: responseItemId,
         emitModelStream: (event) => input.runtime.emitModelStream(event),
+        emitWarning: (message, diagnostic) =>
+          input.runtime.emitWarning(message, diagnostic),
         assistantResponseBytes: step.executionPolicy.assistantResponseBytes,
         onOperationalFailure: input.options.onOperationalFailure,
         async onUsage(usage) {
@@ -899,13 +928,6 @@ async function executeTurnModelLoop(
       if (response.stopReason === ModelStopReason.Length) {
         throw new Error("Model response was truncated by length.")
       }
-      if (response.stopReason === ModelStopReason.Error) {
-        throw new ModelResponseError(response.error)
-      }
-      if (response.stopReason === ModelStopReason.Aborted) {
-        throw abortError()
-      }
-
       const calls = response.content.filter(
         (block): block is ModelToolCallBlock => block.type === "tool_call",
       )
@@ -1102,6 +1124,7 @@ async function consumeModelStream(input: {
   readonly turnId: string
   readonly itemId?: string
   readonly emitModelStream?: TurnRuntime["emitModelStream"]
+  readonly emitWarning?: TurnRuntime["emitWarning"]
   readonly assistantResponseBytes: number
   readonly onOperationalFailure:
     | TurnProcessorOperationalFailureReporter
@@ -1124,8 +1147,46 @@ async function consumeModelStream(input: {
         break
       }
       const event = next.value
-      if (event.type !== "response") {
+      if (event.type === "retry") {
+        if (event.usage !== undefined) await input.onUsage(event.usage)
+        input.emitWarning?.(
+          `Model request failed (${event.failure.kind}); retrying attempt ${String(event.nextAttempt)} of ${String(event.maxAttempts)} in ${String(Math.round(event.delayMs))} ms.`,
+          {
+            message: event.failure.message,
+            code: "model.retry",
+            details: {
+              attempt: event.attempt,
+              nextAttempt: event.nextAttempt,
+              maxAttempts: event.maxAttempts,
+              delayMs: event.delayMs,
+              kind: event.failure.kind,
+              stage: event.failure.stage,
+              provider: event.failure.provider,
+              wireApi: event.failure.wireApi,
+              ...(event.failure.status === undefined
+                ? {}
+                : { status: event.failure.status }),
+              ...(event.failure.providerCode === undefined
+                ? {}
+                : { providerCode: event.failure.providerCode }),
+            },
+          },
+        )
+        continue
+      }
+      if (event.type === "cancelled") {
         if (input.request.signal?.aborted) throw abortError()
+        throw new Error("Model provider cancelled without caller cancellation.")
+      }
+      if (event.type === "failure") {
+        if (event.usage !== undefined) await input.onUsage(event.usage)
+        reportOperationalFailure(input.onOperationalFailure, {
+          operation: "model-request",
+          cause: event.cause ?? event.failure,
+        })
+        throw new ModelFailureError(event.failure, { cause: event.cause })
+      }
+      if (event.type !== "response") {
         if (input.request.compaction === "remote_v2") continue
         if (utf8Bytes(event.text) > input.assistantResponseBytes) {
           throw new Error(
@@ -1150,7 +1211,7 @@ async function consumeModelStream(input: {
         await input.onUsage(event.response.usage)
     }
   } catch (error) {
-    if (input.request.signal?.aborted || isAbortError(error)) {
+    if (input.request.signal?.aborted) {
       throw abortError()
     }
     throw error
@@ -1296,6 +1357,8 @@ async function compactLiveHistory(input: {
         turnId: input.turnId,
         assistantResponseBytes:
           compactionStep.executionPolicy.assistantResponseBytes,
+        emitWarning: (message, diagnostic) =>
+          input.runtime.emitWarning(message, diagnostic),
         onOperationalFailure: input.onOperationalFailure,
         onUsage(usage) {
           input.usages.push(usage)
@@ -1305,13 +1368,9 @@ async function compactLiveHistory(input: {
         },
         setActiveStream: input.setActiveStream,
       })
-      if (response.stopReason === ModelStopReason.Error) {
-        throw new ModelResponseError(response.error)
-      }
       if (response.stopReason === ModelStopReason.Length) {
         throw new Error("Compaction was truncated by the model output limit.")
       }
-      if (response.stopReason === ModelStopReason.Aborted) throw abortError()
       const nativeItems = response.content.filter(
         (block) => block.type === "compaction",
       )

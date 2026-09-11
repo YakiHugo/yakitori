@@ -22,7 +22,11 @@ import {
   type TomlValueWithoutBigInt,
 } from "smol-toml"
 import { ConfigurationError } from "./config-errors.ts"
-import type { AutoCompactTokenLimitScope } from "../kernel/events.ts"
+import type {
+  AutoCompactTokenLimitScope,
+  ModelRequestPolicy,
+  ModelTransportPolicy,
+} from "../kernel/events.ts"
 import {
   type HookConfiguration,
   HookEvent,
@@ -30,6 +34,7 @@ import {
   type HookMatcherGroup,
 } from "../runtime/hooks.ts"
 import type { McpServerConfig } from "../runtime/mcp-config.ts"
+import { MAX_TIMER_DELAY_MS } from "../runtime/model-request.ts"
 import type { RolloutBudgetConfig } from "../runtime/rollout-budget.ts"
 import type { SkillConfiguration } from "../runtime/skills.ts"
 import type { ShellEnvironmentPolicy } from "../runtime/user-shell-env.ts"
@@ -90,6 +95,7 @@ export type UserConfiguration = Readonly<{
   modelContextWindowTokens?: number
   modelAutoCompactTokenLimit?: number
   modelAutoCompactTokenLimitScope?: AutoCompactTokenLimitScope
+  modelTransport?: ModelTransportPolicy
   shellEnvironmentPolicy?: Partial<ShellEnvironmentPolicy>
   mcpServers?: Readonly<Record<string, McpServerConfig>>
   hooks?: HookConfiguration
@@ -184,10 +190,8 @@ async function writePreference(
     speed: preference.speed,
   }
   const content = stringify(value)
-  await configurationFromConfig(
-    parseConfigDocument(configPath, content).value,
-    dirname(configPath),
-  )
+  const candidate = parseConfigDocument(configPath, content)
+  await readConfigurationSnapshot(configPath, {}, candidate)
   const current = await readFile(configPath, "utf8").catch((error) => {
     if (isMissingFile(error)) return ""
     throw error
@@ -241,7 +245,7 @@ async function writeConfigValue(
   const content = stringify(value)
   const candidate = parseConfigDocument(configPath, content)
   // Validate the user layer even when the selected project overrides its values.
-  await configurationFromConfig(candidate.value, dirname(configPath))
+  await readConfigurationSnapshot(configPath, {}, candidate)
   const snapshot = await readConfigurationSnapshot(
     configPath,
     {
@@ -377,11 +381,25 @@ function parseConfigDocument(path: string, content: string): ConfigDocument {
     }
   } catch (cause) {
     if (!(cause instanceof TomlError)) throw cause
-    throw new ConfigurationError(`Invalid TOML in ${path}: ${cause.message}`, {
-      code: "syntax",
-      path,
-      cause,
-    })
+    // TomlError.message includes a source code excerpt. Configuration files may
+    // contain credentials, so only return the parser summary and source range.
+    const detail = cause.message
+      .split(/\r?\n/, 1)[0]
+      ?.replace(/^Invalid TOML document:\s*/, "")
+    throw new ConfigurationError(
+      detail === undefined || detail.length === 0
+        ? "Invalid TOML document."
+        : `TOML parse error at line ${String(cause.line)}, column ${String(cause.column)}: ${detail}`,
+      {
+        code: "syntax",
+        path,
+        range: {
+          start: { line: cause.line, column: cause.column },
+          end: { line: cause.line, column: cause.column },
+        },
+        cause,
+      },
+    )
   }
 }
 
@@ -430,16 +448,24 @@ async function readConfigurationSnapshot(
     recordOrigins(layer.value, "", layer, origins)
   }
   const instructionOrigin = origins.model_instructions_file
-  const configuration = await configurationFromConfig(
-    effective,
-    instructionOrigin === undefined
-      ? dirname(configPath)
-      : dirname(instructionOrigin.path),
-    {
-      paths: dirname(origins["skills.paths"]?.path ?? configPath),
-      config: dirname(origins["skills.config"]?.path ?? configPath),
-    },
-  )
+  let configuration: UserConfiguration
+  try {
+    configuration = await configurationFromConfig(
+      effective,
+      instructionOrigin === undefined
+        ? dirname(configPath)
+        : dirname(instructionOrigin.path),
+      {
+        paths: dirname(origins["skills.paths"]?.path ?? configPath),
+        config: dirname(origins["skills.config"]?.path ?? configPath),
+      },
+    )
+  } catch (error) {
+    if (!(error instanceof ConfigurationError) || error.path !== undefined) {
+      throw error
+    }
+    throw locateConfigurationError(error, layers, origins)
+  }
   return {
     configuration,
     effective: jsonSafeTomlTable(effective),
@@ -650,6 +676,7 @@ async function configurationFromConfig(
   }
   const modelAutoCompactTokenLimitScope =
     value.model_auto_compact_token_limit_scope
+  const modelTransport = modelTransportFromConfig(value.model_transport)
   if (
     modelAutoCompactTokenLimitScope !== undefined &&
     modelAutoCompactTokenLimitScope !== "total" &&
@@ -673,10 +700,253 @@ async function configurationFromConfig(
     ...(modelAutoCompactTokenLimitScope === undefined
       ? {}
       : { modelAutoCompactTokenLimitScope }),
+    ...(modelTransport === undefined ? {} : { modelTransport }),
     ...(shellEnvironmentPolicy === undefined ? {} : { shellEnvironmentPolicy }),
     ...(mcpServers === undefined ? {} : { mcpServers }),
     ...(hooks === undefined ? {} : { hooks }),
   }
+}
+
+function modelTransportFromConfig(
+  value: TomlValue | undefined,
+): ModelTransportPolicy | undefined {
+  if (value === undefined) return undefined
+  if (!isTomlTable(value)) {
+    throw new ConfigurationError("model_transport must be a table.", {
+      keyPath: "model_transport",
+    })
+  }
+  const defaults = modelRequestPolicyFromTable(value, "model_transport", [
+    "providers",
+  ])
+  const configuredProviders = value.providers
+  if (configuredProviders === undefined) return defaults
+  if (!isTomlTable(configuredProviders)) {
+    throw new ConfigurationError("model_transport.providers must be a table.", {
+      keyPath: "model_transport.providers",
+    })
+  }
+  const providers = Object.fromEntries(
+    Object.entries(configuredProviders).map(([provider, configured]) => {
+      if (provider.trim().length === 0 || !isTomlTable(configured)) {
+        throw new ConfigurationError(
+          `model_transport.providers.${provider} must be a table.`,
+          { keyPath: `model_transport.providers.${provider}` },
+        )
+      }
+      return [
+        provider,
+        modelRequestPolicyFromTable(
+          configured,
+          `model_transport.providers.${provider}`,
+        ),
+      ]
+    }),
+  )
+  return { ...defaults, providers }
+}
+
+function modelRequestPolicyFromTable(
+  value: TomlTable,
+  keyPath: string,
+  additionalFields: readonly string[] = [],
+): ModelRequestPolicy {
+  const fields = {
+    max_attempts: "maxAttempts",
+    rate_limit_max_attempts: "rateLimitMaxAttempts",
+    stream_idle_timeout_ms: "streamIdleTimeoutMs",
+  } as const
+  for (const key of Object.keys(value)) {
+    if (!Object.hasOwn(fields, key) && !additionalFields.includes(key)) {
+      throw new ConfigurationError(`Unknown ${keyPath} field: ${key}.`, {
+        code: "unknown_field",
+        keyPath: `${keyPath}.${key}`,
+      })
+    }
+  }
+  const result: Record<string, number> = {}
+  for (const [configName, propertyName] of Object.entries(fields)) {
+    const configured = value[configName]
+    if (configured === undefined) continue
+    if (
+      typeof configured !== "number" ||
+      !Number.isSafeInteger(configured) ||
+      configured <= 0 ||
+      (configName === "stream_idle_timeout_ms" &&
+        configured > MAX_TIMER_DELAY_MS)
+    ) {
+      throw new ConfigurationError(
+        configName === "stream_idle_timeout_ms"
+          ? `${keyPath}.${configName} must be an integer between 1 and ${String(MAX_TIMER_DELAY_MS)} milliseconds.`
+          : `${keyPath}.${configName} must be a positive integer.`,
+        { keyPath: `${keyPath}.${configName}` },
+      )
+    }
+    result[propertyName] = configured
+  }
+  return result
+}
+
+function locateConfigurationError(
+  error: ConfigurationError,
+  layers: readonly LoadedConfigLayer[],
+  origins: Readonly<Record<string, ConfigOrigin>>,
+): ConfigurationError {
+  const keyPath = error.keyPath ?? inferConfigurationKey(error.message, origins)
+  const origin = keyPath === undefined ? undefined : origins[keyPath]
+  const located =
+    keyPath === undefined
+      ? undefined
+      : [...layers]
+          .reverse()
+          .filter((candidate) => candidate.disabledReason === undefined)
+          .map((candidate) => ({
+            layer: candidate,
+            range: findConfigKeyRange(candidate.content, keyPath),
+          }))
+          .find((candidate) => candidate.range !== undefined)
+  const layer =
+    located?.layer ??
+    layers.find((candidate) => candidate.path === origin?.path) ??
+    [...layers]
+      .reverse()
+      .find((candidate) => candidate.disabledReason === undefined)
+  if (layer === undefined) return error
+  const range = located?.range
+  return new ConfigurationError(error.message, {
+    code: error.code,
+    path: layer.path,
+    ...(range === undefined ? {} : { range }),
+    ...(keyPath === undefined ? {} : { keyPath }),
+    cause: error.cause ?? error,
+  })
+}
+
+function inferConfigurationKey(
+  message: string,
+  origins: Readonly<Record<string, ConfigOrigin>>,
+): string | undefined {
+  const originKey = Object.keys(origins)
+    .sort((left, right) => right.length - left.length)
+    .find(
+      (key) =>
+        message.startsWith(key) ||
+        message.startsWith(`${key.split(".").at(-1) ?? key} `),
+    )
+  if (originKey !== undefined) return originKey
+  return /^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*/.exec(message)?.[0]
+}
+
+function findConfigKeyRange(
+  content: string,
+  keyPath: string,
+): import("./config-errors.ts").ConfigTextRange | undefined {
+  const expected = keyPath.split(".")
+  const lines = content.split(/\r?\n/)
+  let tablePath: readonly string[] = []
+  let enclosingTable: import("./config-errors.ts").ConfigTextRange | undefined
+  let enclosingDepth = 0
+  for (const [index, line] of lines.entries()) {
+    const table = /^\s*\[(?!\[)(.+)\]\s*(?:#.*)?$/.exec(line)
+    const arrayTable = /^\s*\[\[(.+)\]\]\s*(?:#.*)?$/.exec(line)
+    const tableKey = parseTomlDottedKey(table?.[1] ?? arrayTable?.[1])
+    if (tableKey !== undefined) {
+      tablePath = tableKey
+      if (samePath(tablePath, expected)) {
+        const raw = table?.[1] ?? arrayTable?.[1]
+        if (raw === undefined) continue
+        const column = line.indexOf(raw) + 1
+        return {
+          start: { line: index + 1, column },
+          end: { line: index + 1, column: column + raw.length },
+        }
+      }
+      if (
+        tablePath.length > enclosingDepth &&
+        tablePath.every((segment, pathIndex) => segment === expected[pathIndex])
+      ) {
+        const raw = table?.[1] ?? arrayTable?.[1]
+        if (raw !== undefined) {
+          const column = line.indexOf(raw) + 1
+          enclosingTable = {
+            start: { line: index + 1, column },
+            end: { line: index + 1, column: column + raw.length },
+          }
+          enclosingDepth = tablePath.length
+        }
+      }
+      continue
+    }
+
+    const assignment =
+      /^(\s*)((?:"(?:\\.|[^"])*"|'[^']*'|[A-Za-z0-9_-]+)(?:\s*\.\s*(?:"(?:\\.|[^"])*"|'[^']*'|[A-Za-z0-9_-]+))*)\s*=/.exec(
+        line,
+      )
+    const raw = assignment?.[2]
+    const assignmentPath = parseTomlDottedKey(raw)
+    if (
+      raw === undefined ||
+      assignmentPath === undefined ||
+      !samePath([...tablePath, ...assignmentPath], expected)
+    ) {
+      continue
+    }
+    const column = (assignment?.[1]?.length ?? 0) + 1
+    return {
+      start: { line: index + 1, column },
+      end: { line: index + 1, column: column + raw.length },
+    }
+  }
+  return enclosingTable
+}
+
+function parseTomlDottedKey(raw: string | undefined): string[] | undefined {
+  if (raw === undefined) return undefined
+  const segments: string[] = []
+  let index = 0
+  while (index < raw.length) {
+    while (/\s/.test(raw[index] ?? "")) index += 1
+    const quote = raw[index]
+    if (quote === '"' || quote === "'") {
+      index += 1
+      let value = ""
+      for (;;) {
+        const character = raw[index]
+        if (character === undefined) return undefined
+        if (character === quote) {
+          index += 1
+          break
+        }
+        if (quote === '"' && character === "\\") {
+          const escaped = raw[index + 1]
+          if (escaped === undefined) return undefined
+          value += escaped
+          index += 2
+          continue
+        }
+        value += character
+        index += 1
+      }
+      segments.push(value)
+    } else {
+      const match = /^[A-Za-z0-9_-]+/.exec(raw.slice(index))
+      if (match === null) return undefined
+      segments.push(match[0])
+      index += match[0].length
+    }
+    while (/\s/.test(raw[index] ?? "")) index += 1
+    if (index === raw.length) return segments
+    if (raw[index] !== ".") return undefined
+    index += 1
+  }
+  return segments.length === 0 ? undefined : segments
+}
+
+function samePath(left: readonly string[], right: readonly string[]): boolean {
+  return (
+    left.length === right.length &&
+    left.every((segment, index) => segment === right[index])
+  )
 }
 
 function instructionsFromConfig(

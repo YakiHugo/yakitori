@@ -2,6 +2,7 @@ import type {
   CompletedExecutionItem,
   EventMetadata,
   JsonObject,
+  KernelError,
   ModelMessage,
   ModelSelection,
   SessionConfigurationSnapshot,
@@ -77,7 +78,7 @@ export type RolloutItem =
       readonly turnId: string
       readonly outcome: "completed" | "failed" | "interrupted"
       readonly usage?: TokenUsage
-      readonly error?: { readonly message: string; readonly code?: string }
+      readonly error?: KernelError
     }
   | {
       readonly type: "agent_status"

@@ -1626,12 +1626,13 @@ function isSubmissionMetadata(value: unknown): boolean {
 
 function isRolloutError(
   value: unknown,
-): value is { readonly message: string; readonly code?: string } {
+): value is import("../kernel/index.ts").KernelError {
   return (
     isRecord(value) &&
-    hasOnlyKeys(value, ["message", "code"]) &&
+    hasOnlyKeys(value, ["message", "code", "details"]) &&
     typeof value.message === "string" &&
-    optionalString(value.code)
+    optionalString(value.code) &&
+    (value.details === undefined || isJsonObject(value.details))
   )
 }
 

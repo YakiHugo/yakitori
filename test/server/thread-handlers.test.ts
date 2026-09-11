@@ -10,6 +10,9 @@ import {
 import { createRolloutAssets } from "../../src/kernel/rollout-assets.ts"
 import { isKernelEvent } from "../../src/kernel/events.ts"
 import { createFauxProvider } from "../support/faux-provider.ts"
+import { createModelProvider } from "../../src/runtime/model-provider.ts"
+import { ModelStopReason, type StreamFn } from "../../src/runtime/model.ts"
+import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
 import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
 import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
 import { createSessionEventHub } from "../../src/server/event-hub.ts"
@@ -271,6 +274,104 @@ describe("thread server handlers", () => {
     const restored = await handlers.readSession({ sessionId })
     if (!restored.ok) throw new Error(restored.body.error.message)
     expect(restored.body.session.counts).toMatchObject({ items: 2, tools: 0 })
+  })
+
+  it("publishes structured model retry diagnostics as a runtime warning", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "yakitori-handler-retry-"))
+    const store = new MemoryThreadStore()
+    let attempt = 0
+    const stream: StreamFn = async function* () {
+      attempt += 1
+      if (attempt === 1) {
+        yield {
+          type: "failure",
+          failure: {
+            kind: "server_error",
+            stage: "response_headers",
+            provider: "faux",
+            wireApi: "faux",
+            status: 503,
+            message: "The model provider encountered a temporary server error.",
+          },
+        }
+        return
+      }
+      yield {
+        type: "response",
+        response: {
+          stopReason: ModelStopReason.EndTurn,
+          content: [{ type: "text", text: "recovered" }],
+        },
+      }
+    }
+    const registry = createProviderRegistry({
+      faux: createModelProvider({
+        info: {
+          id: "faux",
+          wireApi: "faux",
+          capabilities: { remoteCompaction: false },
+          retry: { sleep: async () => {}, random: () => 0 },
+        },
+        stream,
+      }),
+    })
+    const manager = new ThreadManager({
+      store,
+      createTurnProcessor: () =>
+        createTurnProcessor({
+          modelClient: registry.createClient(),
+          provider: "faux",
+          model: "faux",
+          toolRegistry: createToolRegistry([]),
+          loadProjectInstructions: async () => undefined,
+        }),
+    })
+    const eventHub = createSessionEventHub()
+    const handlers = createThreadServerHandlers({ manager, store, eventHub })
+    cleanups.push(async () => {
+      await manager.shutdown()
+      await handlers.close()
+      await rm(workspace, { recursive: true, force: true })
+    })
+    const created = await handlers.createSession({
+      workingDirectory: workspace,
+      mateId: "mate_test",
+      mateRevisionId: "mate_revision_test",
+    })
+    if (!created.ok) throw new Error(created.body.error.message)
+    const sessionId = created.body.session.id
+    let warning: unknown
+    const subscription = eventHub.subscribe(sessionId, (delivery) => {
+      if (
+        delivery.kind === "transient" &&
+        delivery.event.type === "runtime.warning" &&
+        delivery.event.code === "model.retry"
+      ) {
+        warning = delivery.event
+      }
+    })
+    cleanups.push(async () => subscription.close())
+
+    const admitted = await handlers.admitInput({
+      sessionId,
+      requestId: "request_retry_warning",
+      content: { kind: "text", text: "recover" },
+    })
+    if (!admitted.ok) throw new Error(admitted.body.error.message)
+    await waitForValue(() => (warning === undefined ? undefined : true))
+
+    expect(warning).toMatchObject({
+      type: "runtime.warning",
+      sessionId,
+      code: "model.retry",
+      details: {
+        attempt: 1,
+        nextAttempt: 2,
+        maxAttempts: 4,
+        kind: "server_error",
+        status: 503,
+      },
+    })
   })
 
   it("promotes attachments into the physical rollout asset namespace", async () => {

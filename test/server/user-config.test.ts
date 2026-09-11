@@ -387,6 +387,141 @@ describe("user config", () => {
     })
   })
 
+  it("lets trusted project config override model retry and timeout policy", async () => {
+    await withConfigPath(async (configPath) => {
+      const workspace = join(dirname(configPath), "workspace")
+      await mkdir(join(workspace, ".yakitori"), { recursive: true })
+      await writeFile(
+        configPath,
+        [
+          "[model_transport]",
+          "max_attempts = 4",
+          "stream_idle_timeout_ms = 300000",
+          "[model_transport.providers.kimi]",
+          "max_attempts = 6",
+          `[projects."${workspace}"]`,
+          'trust_level = "trusted"',
+          "",
+        ].join("\n"),
+      )
+      await writeFile(
+        join(workspace, ".yakitori", "config.toml"),
+        "[model_transport]\nmax_attempts = 2\n",
+      )
+
+      const snapshot = await createUserConfigStore({
+        configPath,
+        workspaceRoot: workspace,
+      }).readSnapshot({ cwd: workspace })
+
+      expect(snapshot.configuration.modelTransport).toEqual({
+        maxAttempts: 2,
+        streamIdleTimeoutMs: 300_000,
+        providers: { kimi: { maxAttempts: 6 } },
+      })
+      expect(snapshot.origins["model_transport.max_attempts"]?.source).toBe(
+        "project",
+      )
+    })
+  })
+
+  it("rejects unknown model request policy fields", async () => {
+    await withConfigPath(async (configPath) => {
+      await writeFile(configPath, "[model_transport]\nmax_retries = 3\n")
+
+      await expect(
+        createUserConfigStore({ configPath }).readConfiguration(),
+      ).rejects.toMatchObject({
+        name: "ConfigurationError",
+        code: "unknown_field",
+        path: configPath,
+        range: {
+          start: { line: 2, column: 1 },
+          end: { line: 2, column: 12 },
+        },
+      })
+    })
+  })
+
+  it("locates a provider override instead of the same-named default", async () => {
+    await withConfigPath(async (configPath) => {
+      await writeFile(
+        configPath,
+        [
+          "[model_transport]",
+          "max_attempts = 4",
+          '[model_transport.providers."kimi"]',
+          "max_attempts = 0",
+          "",
+        ].join("\n"),
+      )
+
+      await expect(
+        createUserConfigStore({ configPath }).readConfiguration(),
+      ).rejects.toMatchObject({
+        name: "ConfigurationError",
+        path: configPath,
+        range: {
+          start: { line: 4, column: 1 },
+          end: { line: 4, column: 13 },
+        },
+      })
+    })
+  })
+
+  it("locates an invalid empty table in its lower configuration layer", async () => {
+    await withConfigPath(async (configPath) => {
+      const workspace = join(dirname(configPath), "workspace")
+      const projectPath = join(workspace, ".yakitori", "config.toml")
+      await mkdir(dirname(projectPath), { recursive: true })
+      await writeFile(
+        configPath,
+        [
+          "[features.rollout_budget]",
+          "",
+          `[projects."${workspace}"]`,
+          'trust_level = "trusted"',
+          "",
+        ].join("\n"),
+      )
+      await writeFile(projectPath, 'instructions = "project"\n')
+
+      await expect(
+        createUserConfigStore({
+          configPath,
+          workspaceRoot: workspace,
+        }).readConfiguration({ cwd: workspace }),
+      ).rejects.toMatchObject({
+        name: "ConfigurationError",
+        path: configPath,
+        range: {
+          start: { line: 1, column: 2 },
+          end: { line: 1, column: 25 },
+        },
+      })
+    })
+  })
+
+  it("rejects stream timeouts above the Node timer boundary", async () => {
+    await withConfigPath(async (configPath) => {
+      await writeFile(
+        configPath,
+        "[model_transport]\nstream_idle_timeout_ms = 2147483648\n",
+      )
+
+      await expect(
+        createUserConfigStore({ configPath }).readConfiguration(),
+      ).rejects.toMatchObject({
+        name: "ConfigurationError",
+        path: configPath,
+        range: {
+          start: { line: 2, column: 1 },
+          end: { line: 2, column: 23 },
+        },
+      })
+    })
+  })
+
   it("loads untrusted project config as disabled without applying it", async () => {
     await withConfigPath(async (configPath) => {
       const workspace = join(dirname(configPath), "workspace")
@@ -659,6 +794,26 @@ describe("user config", () => {
         }),
       ).resolves.toMatchObject({
         configuration: { mcpServers: { demo: { command: "node" } } },
+      })
+    })
+  })
+
+  it("locates semantic errors in a candidate write", async () => {
+    await withConfigPath(async (configPath) => {
+      const store = createUserConfigStore({ configPath })
+
+      await expect(
+        store.writeValue({
+          keyPath: ["model_transport", "max_attempts"],
+          value: 0,
+        }),
+      ).rejects.toMatchObject({
+        name: "ConfigurationError",
+        path: configPath,
+        range: {
+          start: { line: 2, column: 1 },
+          end: { line: 2, column: 13 },
+        },
       })
     })
   })

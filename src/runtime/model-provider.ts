@@ -1,18 +1,17 @@
 import { createHash } from "node:crypto"
-import type { ModelTarget, StreamFn } from "./model.ts"
+import type {
+  ModelRequest,
+  ModelTarget,
+  ModelWireApi,
+  StreamFn,
+} from "./model.ts"
 import type { ModelsManager } from "./models-manager.ts"
 import { createStaticModelsManager } from "./models-manager.ts"
-import { type RetryingStreamOptions, withRetries } from "./retrying-stream.ts"
 import {
-  DEFAULT_STREAM_IDLE_TIMEOUT_MS,
-  withStreamIdleTimeout,
-} from "./stream-idle-timeout.ts"
-
-export type ModelWireApi =
-  | "anthropic_messages"
-  | "faux"
-  | "openai_responses"
-  | "unknown"
+  createModelRequestStream,
+  type ModelRequestOptions,
+  type ModelRequestPolicy,
+} from "./model-request.ts"
 
 export type ModelProviderCapabilities = Readonly<{
   remoteCompaction: boolean
@@ -22,7 +21,7 @@ export type ModelProviderInfo = Readonly<{
   id: string
   wireApi: ModelWireApi
   capabilities: ModelProviderCapabilities
-  retry?: RetryingStreamOptions
+  retry?: Omit<ModelRequestOptions, "wireApi" | "streamIdleTimeoutMs">
   streamIdleTimeoutMs?: number
 }>
 
@@ -37,12 +36,12 @@ export type ModelClientSession = {
 export type ModelClient = {
   hasProvider(provider: string): boolean
   models(provider: string): ModelsManager
-  startTurn(provider: string): ModelClientSession
+  startTurn(provider: string, policy?: ModelRequestPolicy): ModelClientSession
   close(): void | Promise<void>
 }
 
 export type ModelProviderClient = {
-  startTurn(): ModelClientSession
+  startTurn(policy?: ModelRequestPolicy): ModelClientSession
   close(): void | Promise<void>
 }
 
@@ -51,6 +50,8 @@ export type ModelProvider = {
   readonly models: ModelsManager
   createClient(): ModelProviderClient
 }
+
+export type ModelAttemptContext = NonNullable<ModelRequest["attempt"]>
 
 // Stable opaque identity for continuation blobs that are only valid for one
 // provider endpoint and credential. The high-entropy credential is never
@@ -79,6 +80,9 @@ export function createModelProvider(
     (
       | Readonly<{ stream: StreamFn }>
       | Readonly<{ createTurnStream: () => StreamFn }>
+      | Readonly<{
+          createAttemptStream: (attempt: ModelAttemptContext) => StreamFn
+        }>
     ),
 ): ModelProvider {
   const models = input.models ?? createStaticModelsManager(input.info.id)
@@ -98,24 +102,44 @@ export function createModelProvider(
     models,
     createClient() {
       return {
-        startTurn() {
-          const timedStream = withStreamIdleTimeout(
+        startTurn(policy) {
+          const providerStream: StreamFn =
             "createTurnStream" in input
               ? input.createTurnStream()
-              : input.stream,
-            input.info.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS,
-          )
-          const stream = withRetries(timedStream, input.info.retry)
+              : "createAttemptStream" in input
+                ? (request) =>
+                    input.createAttemptStream(
+                      request.attempt ?? { number: 1, maxAttempts: 1 },
+                    )(request)
+                : input.stream
+          const stream = createModelRequestStream(providerStream, {
+            wireApi: input.info.wireApi,
+            ...(input.info.streamIdleTimeoutMs === undefined
+              ? {}
+              : { streamIdleTimeoutMs: input.info.streamIdleTimeoutMs }),
+            ...input.info.retry,
+            ...policy,
+          })
           // Codex remote v2 permits at most two stream retries, including
           // failures after provisional output. No history is installed yet.
-          const remoteStream = withRetries(timedStream, {
+          const remoteStream = createModelRequestStream(providerStream, {
+            wireApi: input.info.wireApi,
+            ...(input.info.streamIdleTimeoutMs === undefined
+              ? {}
+              : { streamIdleTimeoutMs: input.info.streamIdleTimeoutMs }),
             ...input.info.retry,
-            maxAttempts: Math.min(input.info.retry?.maxAttempts ?? 4, 3),
-            rateLimitMaxAttempts: Math.min(
-              input.info.retry?.rateLimitMaxAttempts ?? 2,
+            ...policy,
+            maxAttempts: Math.min(
+              policy?.maxAttempts ?? input.info.retry?.maxAttempts ?? 4,
               3,
             ),
-            retryOnlyBeforeOutput: false,
+            rateLimitMaxAttempts: Math.min(
+              policy?.rateLimitMaxAttempts ??
+                input.info.retry?.rateLimitMaxAttempts ??
+                2,
+              3,
+            ),
+            retryAfterOutput: true,
           })
           return {
             remoteCompaction: input.info.capabilities.remoteCompaction,

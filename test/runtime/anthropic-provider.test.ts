@@ -1267,16 +1267,16 @@ describe("anthropic provider error classification", () => {
 
     expect(events).toEqual([
       {
-        type: "response",
-        response: {
-          stopReason: ModelStopReason.Error,
-          content: [],
-          error: {
-            code: "anthropic_error",
-            message: error.message,
-            details: { retryable: true, status: 429 },
-          },
+        type: "failure",
+        failure: {
+          kind: "rate_limited",
+          stage: "connect",
+          provider: "anthropic",
+          wireApi: "anthropic_messages",
+          message: "The model provider rate limited the request.",
+          status: 429,
         },
+        cause: error,
       },
     ])
   })
@@ -1293,13 +1293,39 @@ describe("anthropic provider error classification", () => {
 
     expect(events).toEqual([
       {
-        type: "response",
-        response: {
-          stopReason: ModelStopReason.Error,
-          content: [],
-          error: { code: "anthropic_error", message: error.message },
+        type: "failure",
+        failure: {
+          kind: "invalid_request",
+          stage: "connect",
+          provider: "anthropic",
+          wireApi: "anthropic_messages",
+          message: "The model provider rejected the request.",
+          status: 400,
         },
+        cause: error,
       },
+    ])
+  })
+
+  it("preserves request IDs and an explicit retry veto", async () => {
+    const error = new Anthropic.APIError(
+      503,
+      undefined,
+      undefined,
+      new Headers({
+        "request-id": "request_456",
+        "x-should-retry": "false",
+      }),
+    )
+
+    expect(await collectWithThrowingClient(error)).toEqual([
+      expect.objectContaining({
+        type: "failure",
+        failure: expect.objectContaining({
+          providerRequestId: "request_456",
+          serverShouldRetry: false,
+        }),
+      }),
     ])
   })
 
@@ -1312,16 +1338,15 @@ describe("anthropic provider error classification", () => {
 
     expect(events).toEqual([
       {
-        type: "response",
-        response: {
-          stopReason: ModelStopReason.Error,
-          content: [],
-          error: {
-            code: "anthropic_error",
-            message: error.message,
-            details: { retryable: true },
-          },
+        type: "failure",
+        failure: {
+          kind: "connection_failed",
+          stage: "connect",
+          provider: "anthropic",
+          wireApi: "anthropic_messages",
+          message: "Could not connect to the model provider.",
         },
+        cause: error,
       },
     ])
   })
@@ -1355,16 +1380,51 @@ describe("anthropic provider error classification", () => {
     expect(events).toEqual([
       { type: "snapshot", text: "par" },
       {
-        type: "response",
-        response: {
-          stopReason: ModelStopReason.Error,
-          content: [],
-          error: {
-            code: "anthropic_error",
-            message: error.message,
-            details: { retryable: true, type: "overloaded_error" },
-          },
+        type: "failure",
+        failure: {
+          kind: "server_error",
+          stage: "response_body",
+          provider: "anthropic",
+          wireApi: "anthropic_messages",
+          providerCode: "overloaded_error",
+          message: "The model provider encountered a temporary server error.",
         },
+        cause: error,
+      },
+    ])
+  })
+
+  it("normalizes an undici termination before the first provider event", async () => {
+    const socket = Object.assign(new Error("other side closed"), {
+      code: "UND_ERR_SOCKET",
+    })
+    const error = new TypeError("terminated", { cause: socket })
+    const client = {
+      messages: {
+        stream() {
+          return {
+            [Symbol.asyncIterator]() {
+              return { next: () => Promise.reject(error) }
+            },
+          }
+        },
+      },
+    } as unknown as Anthropic
+
+    const events = await collectWithClient(client)
+
+    expect(events).toEqual([
+      {
+        type: "failure",
+        failure: {
+          kind: "connection_failed",
+          stage: "connect",
+          provider: "anthropic",
+          wireApi: "anthropic_messages",
+          message: "Could not connect to the model provider.",
+          details: { causeCode: "UND_ERR_SOCKET" },
+        },
+        cause: error,
       },
     ])
   })

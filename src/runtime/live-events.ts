@@ -1,4 +1,8 @@
-import type { StartedExecutionItem, TokenUsage } from "../kernel/events.ts"
+import type {
+  EventMetadata,
+  StartedExecutionItem,
+  TokenUsage,
+} from "../kernel/events.ts"
 import type { RuntimePermissionEvent } from "./permission-gate.ts"
 
 export type LiveAssistantDelta = {
@@ -50,6 +54,8 @@ export type LiveSessionError = {
   readonly sessionId: string
   readonly operation: "turn_input" | "interrupt" | "persistence"
   readonly message: string
+  readonly code?: string
+  readonly details?: EventMetadata
   readonly createdAt: string
 }
 
@@ -58,6 +64,8 @@ export type LiveRuntimeWarning = {
   readonly sessionId: string
   readonly turnId: string
   readonly message: string
+  readonly code?: string
+  readonly details?: EventMetadata
   readonly createdAt: string
 }
 

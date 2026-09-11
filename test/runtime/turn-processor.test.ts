@@ -40,6 +40,71 @@ afterEach(async () => {
 })
 
 describe("Turn processor", () => {
+  it("snapshots model transport configuration once per Turn", async () => {
+    const policies: Parameters<ModelClient["startTurn"]>[1][] = []
+    const responses = ["first", "second"]
+    const modelClient: ModelClient = {
+      hasProvider: (provider) => provider === "faux",
+      models: () => createStaticModelsManager("faux"),
+      startTurn(_provider, policy) {
+        policies.push(policy)
+        const text = responses.shift()
+        if (text === undefined) throw new Error("Missing scripted response.")
+        return {
+          stream: async function* () {
+            yield responseEvent(text)
+          },
+          close() {},
+        }
+      },
+      close() {},
+    }
+    let maxAttempts = 4
+    const runtime = await createRuntime(
+      () => {
+        throw new Error("Fallback stream must not run.")
+      },
+      createToolRegistry([]),
+      {
+        modelClient,
+        provider: "faux",
+        model: "faux",
+        loadModelTransport: async () => ({
+          maxAttempts,
+          providers: { faux: { streamIdleTimeoutMs: 300_000 } },
+        }),
+      },
+    )
+    const thread = await runtime.createThread()
+
+    await thread.startIfIdle({ content: { kind: "text", text: "one" } })
+    await expect.poll(() => thread.agentStatus).toEqual({ completed: "first" })
+    maxAttempts = 2
+    await thread.startIfIdle({ content: { kind: "text", text: "two" } })
+    await expect.poll(() => thread.agentStatus).toEqual({ completed: "second" })
+
+    const stored = await runtime.store.readThread(thread.id)
+    const contexts = stored?.rollout.flatMap(({ item }) =>
+      item.type === "turn_context" ? [item.context] : [],
+    )
+    expect(
+      contexts?.map((context) => context.configuration.modelTransport),
+    ).toEqual([
+      {
+        maxAttempts: 4,
+        providers: { faux: { streamIdleTimeoutMs: 300_000 } },
+      },
+      {
+        maxAttempts: 2,
+        providers: { faux: { streamIdleTimeoutMs: 300_000 } },
+      },
+    ])
+    expect(policies).toEqual([
+      { maxAttempts: 4, streamIdleTimeoutMs: 300_000 },
+      { maxAttempts: 2, streamIdleTimeoutMs: 300_000 },
+    ])
+  })
+
   it("runs pre/post tool hooks around the approved tool invocation", async () => {
     const events: string[] = []
     const hookRunner: HookRunner = {
@@ -2113,8 +2178,14 @@ describe("Turn processor", () => {
         content: [{ type: "text", text: "recovered" }],
       },
       {
-        stopReason: ModelStopReason.Error,
-        error: { code: "provider_failed", message: "provider failed" },
+        failure: {
+          kind: "provider_error",
+          stage: "model_event",
+          provider: "test",
+          wireApi: "unknown",
+          providerCode: "provider_failed",
+          message: "provider failed",
+        },
         usage: { inputTokens: 4, outputTokens: 1 },
       },
     ])
@@ -2167,7 +2238,18 @@ describe("Turn processor", () => {
           entry.item.type === "turn_completed" &&
           entry.item.outcome === "failed",
       )?.item,
-    ).toMatchObject({ usage: { inputTokens: 4, outputTokens: 1 } })
+    ).toMatchObject({
+      usage: { inputTokens: 4, outputTokens: 1 },
+      error: {
+        code: "model.provider_error",
+        details: {
+          kind: "provider_error",
+          stage: "model_event",
+          provider: "test",
+          providerCode: "provider_failed",
+        },
+      },
+    })
   })
 
   it("keeps terminal usage when interruption wins before the stream closes", async () => {
@@ -2508,9 +2590,12 @@ describe("Turn processor", () => {
       },
       failure !== "thrown"
         ? {
-            stopReason: ModelStopReason.Error,
-            error: {
-              code: "context_length_exceeded",
+            failure: {
+              kind: "invalid_request",
+              stage: "model_event",
+              provider: "test",
+              wireApi: "unknown",
+              providerCode: "context_length_exceeded",
               message:
                 failure === "code"
                   ? "Input rejected"

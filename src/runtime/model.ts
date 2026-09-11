@@ -32,9 +32,7 @@ export type {
 }
 
 export const ModelStopReason = {
-  Aborted: "aborted",
   EndTurn: "end_turn",
-  Error: "error",
   Length: "length",
   ToolUse: "tool_use",
 } as const
@@ -49,6 +47,12 @@ export type ModelTarget = {
   readonly effort?: string
   readonly speed?: string
 }
+
+export type ModelWireApi =
+  | "anthropic_messages"
+  | "faux"
+  | "openai_responses"
+  | "unknown"
 
 export type ToolWireProtocol =
   | "anthropic_deferred"
@@ -76,6 +80,13 @@ export type ModelRequest = {
   readonly tools: readonly ModelToolDefinition[]
   readonly toolWireProtocol: ToolWireProtocol
   readonly maxOutputTokens?: number
+  // Runtime-only physical attempt context. Provider adapters may use it to
+  // rebuild transport resources; it is never serialized onto the wire.
+  readonly attempt?: Readonly<{
+    number: number
+    maxAttempts: number
+    previousFailure?: ModelFailure
+  }>
   readonly signal?: AbortSignal
 }
 
@@ -99,17 +110,47 @@ export type ModelUsage = Readonly<{
   activeContextTokens?: number
 }>
 
-export type ModelError = {
-  readonly code: string
+export type ModelFailureKind =
+  | "authentication"
+  | "connection_failed"
+  | "idle_timeout"
+  | "invalid_request"
+  | "protocol_error"
+  | "provider_error"
+  | "rate_limited"
+  | "server_error"
+  | "stream_disconnected"
+
+export type ModelFailureStage =
+  | "connect"
+  | "model_event"
+  | "request_build"
+  | "response_body"
+  | "response_headers"
+  | "sse_decode"
+
+export type ModelFailure = Readonly<{
+  kind: ModelFailureKind
+  stage: ModelFailureStage
+  provider: string
+  wireApi: ModelWireApi
   readonly message: string
+  readonly status?: number
+  readonly providerCode?: string
+  readonly providerRequestId?: string
+  readonly retryAfterMs?: number
+  readonly serverShouldRetry?: boolean
+  readonly attempt?: number
+  readonly maxAttempts?: number
+  readonly outputObserved?: boolean
+  readonly retryDecision?: "fail" | "retry"
   readonly details?: JsonObject
-}
+}>
 
 export type ModelResponse = {
   readonly stopReason: ModelStopReason
   readonly content: readonly ModelContentBlock[]
   readonly usage?: ModelUsage
-  readonly error?: ModelError
   readonly providerRequestId?: string
 }
 
@@ -128,10 +169,35 @@ export type ModelStreamResponseEvent = {
   readonly response: ModelResponse
 }
 
+export type ModelStreamFailureEvent = {
+  readonly type: "failure"
+  readonly failure: ModelFailure
+  readonly usage?: ModelUsage
+  // Runtime-only diagnostic. It must never be copied into rollout or RPC data.
+  readonly cause?: unknown
+}
+
+export type ModelStreamCancelledEvent = {
+  readonly type: "cancelled"
+}
+
+export type ModelStreamRetryEvent = {
+  readonly type: "retry"
+  readonly attempt: number
+  readonly nextAttempt: number
+  readonly maxAttempts: number
+  readonly delayMs: number
+  readonly failure: ModelFailure
+  readonly usage?: ModelUsage
+}
+
 export type ModelStreamEvent =
   | ModelStreamSnapshotEvent
   | ModelStreamReasoningSnapshotEvent
   | ModelStreamResponseEvent
+  | ModelStreamFailureEvent
+  | ModelStreamCancelledEvent
+  | ModelStreamRetryEvent
 
 export type StreamFn = (
   request: ModelRequest,

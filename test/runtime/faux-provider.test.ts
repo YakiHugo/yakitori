@@ -114,17 +114,26 @@ describe("faux provider", () => {
 
     const explicitError = createFauxProvider([
       {
-        stopReason: ModelStopReason.Error,
-        error: { code: "provider_error", message: "rate limited" },
+        failure: {
+          kind: "rate_limited",
+          stage: "model_event",
+          provider: "test",
+          wireApi: "unknown",
+          providerCode: "provider_error",
+          message: "rate limited",
+        },
       },
     ])
     expect(await collect(explicitError.stream(baseRequest()))).toEqual([
       {
-        type: "response",
-        response: {
-          stopReason: ModelStopReason.Error,
-          content: [],
-          error: { code: "provider_error", message: "rate limited" },
+        type: "failure",
+        failure: {
+          kind: "rate_limited",
+          stage: "model_event",
+          provider: "test",
+          wireApi: "unknown",
+          providerCode: "provider_error",
+          message: "rate limited",
         },
       },
     ])
@@ -135,15 +144,7 @@ describe("faux provider", () => {
       waiting.stream(baseRequest({ signal: controller.signal })),
     )
     controller.abort()
-    expect(await pending).toEqual([
-      {
-        type: "response",
-        response: {
-          stopReason: ModelStopReason.Aborted,
-          content: [],
-        },
-      },
-    ])
+    expect(await pending).toEqual([{ type: "cancelled" }])
   })
 
   it("retains requests for whole-object assertions without mutation", async () => {
