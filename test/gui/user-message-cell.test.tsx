@@ -24,12 +24,12 @@ const entry = {
 }
 
 describe("skill mentions", () => {
-  it("renders path-qualified skill mentions as chips and strips them from the text", () => {
+  it("renders trailing skill mentions as chips and strips them from the text", () => {
     render(
       <UserMessageCell
         entry={{
           ...entry,
-          text: "Use this [$Template Creator](/repo/.agents/skills/template/SKILL.md) please",
+          text: "Use this please [$Template Creator](/repo/.agents/skills/template/SKILL.md)",
         }}
         queued={false}
       />,
@@ -53,6 +53,23 @@ describe("skill mentions", () => {
 
     expect(screen.getByText("Template Creator")).toBeDefined()
     expect(screen.queryByText(/SKILL\.md/)).toBeNull()
+  })
+
+  it("leaves inline mention-shaped text the user typed untouched", () => {
+    render(
+      <UserMessageCell
+        entry={{
+          ...entry,
+          text: "See [$HOME](/docs/env) for details",
+        }}
+        queued={false}
+      />,
+    )
+
+    expect(
+      screen.getByText("See [$HOME](/docs/env) for details"),
+    ).toBeDefined()
+    expect(screen.queryByText("HOME")).toBeNull()
   })
 })
 

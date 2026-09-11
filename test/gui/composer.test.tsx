@@ -411,6 +411,23 @@ describe("slash command menu", () => {
     expect(admitInput).not.toHaveBeenCalled()
   })
 
+  it("completes the command as text while the session model is restoring", async () => {
+    const user = userEvent.setup()
+    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    useAppStore.setState({
+      admitInput,
+      selection: { sessionId: "session_1" },
+      restoringModelSelectionFor: "session_1",
+    })
+    render(<Composer />)
+
+    await user.click(screen.getByRole("textbox"))
+    await user.keyboard("/com{Enter}")
+
+    expect(admitInput).not.toHaveBeenCalled()
+    expect(useAppStore.getState().promptDraft).toBe("/compact")
+  })
+
   it("dismisses with Escape until the query changes", async () => {
     const user = userEvent.setup()
     useAppStore.setState({ selection: { sessionId: "session_1" } })
@@ -437,6 +454,23 @@ describe("slash command menu", () => {
     await user.keyboard("/compact now")
 
     expect(screen.queryByRole("listbox")).toBeNull()
+  })
+
+  it("lets Shift+Enter insert a newline while the menu is open", async () => {
+    const user = userEvent.setup()
+    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    useAppStore.setState({
+      admitInput,
+      selection: { sessionId: "session_1" },
+    })
+    render(<Composer />)
+
+    await user.click(screen.getByRole("textbox"))
+    await user.keyboard("/com")
+    await user.keyboard("{Shift>}{Enter}{/Shift}")
+
+    expect(admitInput).not.toHaveBeenCalled()
+    expect(useAppStore.getState().promptDraft).toBe("/com\n")
   })
 })
 
@@ -540,6 +574,25 @@ describe("skill mention popup", () => {
 
     await user.keyboard("t")
     expect(screen.getByRole("listbox", { name: "Skills" })).toBeDefined()
+  })
+
+  it("closes the mention popup when the cursor leaves the trailing token", async () => {
+    const user = userEvent.setup()
+    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    useAppStore.setState({ ...skillsState(), admitInput })
+    render(<Composer />)
+
+    const textarea = screen.getByRole("textbox") as HTMLTextAreaElement
+    await user.click(textarea)
+    await user.keyboard("use $tem")
+    expect(screen.getByRole("listbox", { name: "Skills" })).toBeDefined()
+
+    textarea.setSelectionRange(2, 2)
+    fireEvent.select(textarea)
+    expect(screen.queryByRole("listbox", { name: "Skills" })).toBeNull()
+
+    await user.keyboard("{Enter}")
+    expect(admitInput).toHaveBeenCalledWith("use $tem")
   })
 
   it("removes a chip", async () => {

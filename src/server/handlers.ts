@@ -102,6 +102,7 @@ export type ThreadServerHandlerOptions = {
   readonly listSessionSkills?: (input: {
     readonly sessionId: string
     readonly workingDirectory: string
+    readonly projectId?: string
   }) => Promise<readonly SkillMetadata[]>
   // Enables projectId on session create/list and orphan suppression on reads.
   readonly projectStore?: ProjectStore
@@ -593,6 +594,9 @@ export function createThreadServerHandlers(
         const discovered = await options.listSessionSkills({
           sessionId,
           workingDirectory,
+          ...(stored.metadata.projectId === undefined
+            ? {}
+            : { projectId: stored.metadata.projectId }),
         })
         return ok(200, {
           skills: discovered

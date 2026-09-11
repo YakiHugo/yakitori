@@ -84,6 +84,7 @@ export function Composer() {
     readonly query: string
     readonly index: number
   }>()
+  const [cursorAtEnd, setCursorAtEnd] = useState(true)
 
   const effectiveModel = normalizeKimiModelSelection(
     resolveEffectiveModel({
@@ -137,7 +138,8 @@ export function Composer() {
       : 0
 
   // The mention popup tracks a trailing `$token`, like codex's skill popup:
-  // it opens while the last whitespace-delimited token is a `$name` prefix.
+  // it opens only while the cursor sits at the end of that token, so editing
+  // earlier text never triggers completions or captures Enter.
   const skillQuery = /(?:^|\s)\$([\p{L}\p{N}_-]*)$/u.exec(draft)?.[1]
   const skillMatches =
     skillQuery === undefined || skillDismissed === skillQuery
@@ -147,7 +149,8 @@ export function Composer() {
             !promptSkills.some((picked) => picked.path === skill.path) &&
             skill.name.toLowerCase().includes(skillQuery.toLowerCase()),
         )
-  const skillMenuOpen = sessionSkills.length > 0 && skillMatches.length > 0
+  const skillMenuOpen =
+    cursorAtEnd && sessionSkills.length > 0 && skillMatches.length > 0
   const activeSkillHighlight =
     skillHighlight !== undefined && skillHighlight.query === skillQuery
       ? Math.min(skillHighlight.index, skillMatches.length - 1)
@@ -255,16 +258,20 @@ export function Composer() {
   }
 
   // Selecting a command dispatches it right away, like codex: the draft
-  // clears and the command runs. The compact lane rejects attachments, so
-  // with images staged the selection only completes the text and the
-  // existing send-button hint explains the block.
+  // clears and the command runs. When execution is currently blocked —
+  // mid-restore, busy, or compact with staged chips, which the compact lane
+  // rejects — the selection only completes the text so nothing is lost.
   const runSlashCommand = (command: SlashCommand): void => {
     setSlashDismissed(undefined)
     setSlashHighlight(undefined)
-    if (
-      command.name === COMPACT_DIRECTIVE &&
-      (attachments.length > 0 || promptSkills.length > 0)
-    ) {
+    const blocked =
+      sessionId === undefined ||
+      restoringModelSelectionFor === sessionId ||
+      busy ||
+      sending ||
+      (command.name === COMPACT_DIRECTIVE &&
+        (attachments.length > 0 || promptSkills.length > 0))
+    if (blocked) {
       setPromptDraft(command.name)
       textareaRef.current?.focus()
       return
@@ -306,8 +313,8 @@ export function Composer() {
       }
       const highlighted = slashMatches[activeSlashHighlight]
       if (
-        (event.key === "Enter" || event.key === "Tab") &&
-        highlighted !== undefined
+        (event.key === "Enter" && !event.shiftKey && highlighted !== undefined) ||
+        (event.key === "Tab" && highlighted !== undefined)
       ) {
         event.preventDefault()
         runSlashCommand(highlighted)
@@ -332,8 +339,8 @@ export function Composer() {
       }
       const highlighted = skillMatches[activeSkillHighlight]
       if (
-        (event.key === "Enter" || event.key === "Tab") &&
-        highlighted !== undefined
+        (event.key === "Enter" && !event.shiftKey && highlighted !== undefined) ||
+        (event.key === "Tab" && highlighted !== undefined)
       ) {
         event.preventDefault()
         pickSkill(highlighted)
@@ -579,6 +586,13 @@ export function Composer() {
             onChange={(event) => {
               setHistoryNavigation(undefined)
               setPromptDraft(event.currentTarget.value)
+            }}
+            onSelect={(event) => {
+              const target = event.currentTarget
+              setCursorAtEnd(
+                target.selectionStart === target.value.length &&
+                  target.selectionEnd === target.value.length,
+              )
             }}
             onPaste={(event) => {
               const images = Array.from(event.clipboardData.files).filter(

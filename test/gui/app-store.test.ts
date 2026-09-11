@@ -1129,6 +1129,67 @@ describe("model selection", () => {
     expect(useAppStore.getState().promptDraft).toBeUndefined()
   })
 
+  it("keeps chips picked while an admission is in flight", async () => {
+    window.localStorage.clear()
+    let release: (() => void) | undefined
+    fakeRef.current.respond = (method, params) => {
+      if (method === "userPreference/write") return { userPreference: params }
+      if (method === "session/list") return { sessions: [] }
+      if (method === "session/input") {
+        const body = params as { requestId: string }
+        return new Promise((resolve) => {
+          release = () =>
+            resolve({
+              requestId: body.requestId,
+              inputId: "input_1",
+              event: createEventEnvelope({
+                sessionId: "session_1",
+                seq: 2,
+                event: {
+                  type: EventType.InputAdmitted,
+                  data: {
+                    requestId: body.requestId,
+                    inputId: "input_1",
+                    role: InputRole.User,
+                    content: { kind: "text", text: "hello [$A](/a)" },
+                  },
+                },
+              }),
+            })
+        })
+      }
+      return notFound()
+    }
+    const skillA = {
+      name: "A",
+      description: "a",
+      path: "/a",
+      scope: "repo" as const,
+    }
+    const skillB = {
+      name: "B",
+      description: "b",
+      path: "/b",
+      scope: "repo" as const,
+    }
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      promptDraft: "hello",
+      promptSkills: [skillA],
+    })
+
+    const pending = useAppStore.getState().admitInput("hello")
+    for (let attempt = 0; attempt < 100 && release === undefined; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+    useAppStore.getState().setPromptSkills([skillA, skillB])
+    release?.()
+    await pending
+
+    expect(useAppStore.getState().promptSkills).toEqual([skillA, skillB])
+    expect(useAppStore.getState().promptDraft).toBe("hello")
+  })
+
   it("sends the saved modelSelection with admitted input", async () => {
     window.localStorage.clear()
     fakeRef.current.respond = admissionResponder()

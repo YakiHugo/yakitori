@@ -707,8 +707,9 @@ export const useAppStore = create<AppStore>()((set, get) => {
 
       // Picked skill chips travel as path-qualified mentions appended to the
       // text; the runtime resolves them through loadExplicitSkillInstructions.
-      const skillMentions = get()
-        .promptSkills.map((skill) => `[$${skill.name}](${skill.path})`)
+      const stagedSkills = get().promptSkills
+      const skillMentions = stagedSkills
+        .map((skill) => `[$${skill.name}](${skill.path})`)
         .join(" ")
       const submittedText =
         skillMentions.length === 0
@@ -763,7 +764,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
           if (!isCurrentSelection(selection)) return
           if (
             (get().promptDraft ?? "").trim() === text &&
-            sameAttachments(get().promptAttachments, attachments)
+            sameAttachments(get().promptAttachments, attachments) &&
+            sameSkills(get().promptSkills, stagedSkills)
           ) {
             set({
               promptDraft: undefined,
@@ -1216,6 +1218,19 @@ function sameAttachments(
         attachment.detail === right[index]?.detail &&
         attachment.file.rolloutId === right[index]?.file.rolloutId &&
         attachment.file.path === right[index]?.file.path,
+    )
+  )
+}
+
+function sameSkills(
+  left: readonly ApiSkillSummary[],
+  right: readonly ApiSkillSummary[],
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every(
+      (skill, index) =>
+        skill.path === right[index]?.path && skill.name === right[index]?.name,
     )
   )
 }

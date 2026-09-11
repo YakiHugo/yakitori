@@ -564,8 +564,15 @@ export async function createYakitoriApplication(
       listPendingPermissions: (sessionId) => permissionGate.list(sessionId),
       availableProviders: providerRegistry.providers,
       rolloutAssets,
-      listSessionSkills: async ({ workingDirectory }) => {
-        const snapshot = await routedUserConfig.readSnapshot({
+      listSessionSkills: async ({ workingDirectory, projectId }) => {
+        // Resolve the config root the same way the turn-processor path does:
+        // with the session's project, not a roots-only scan.
+        const root = await resolveProjectConfigRoot(
+          ownedProjectStore,
+          workingDirectory,
+          projectId,
+        )
+        const snapshot = await createSessionUserConfig(root).readSnapshot({
           cwd: workingDirectory,
         })
         const configuration = snapshot.configuration
