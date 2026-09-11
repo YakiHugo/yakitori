@@ -31,9 +31,15 @@ export function createCodexProvider(input?: {
   let accountBound = false
   const stream: StreamFn = async function* (request) {
     for (let authAttempt = 0; authAttempt < 2; authAttempt += 1) {
-      const token = await auth.resolve(
-        authAttempt === 0 ? {} : { forceRefresh: true },
-      )
+      let token: Awaited<ReturnType<CodexAuthProvider["resolve"]>>
+      try {
+        token = await auth.resolve(
+          authAttempt === 0 ? {} : { forceRefresh: true },
+        )
+      } catch (cause) {
+        yield codexLoginFailure(cause)
+        return
+      }
       if (!accountBound) {
         expectedAccountId = token.accountId
         accountBound = true
@@ -88,27 +94,41 @@ export function createCodexProvider(input?: {
   return stream
 }
 
+function codexLoginFailure(cause: unknown): ModelStreamEvent {
+  return {
+    type: "failure",
+    failure: {
+      kind: "authentication",
+      stage: "request_build",
+      provider: "codex",
+      wireApi: "openai_responses",
+      providerCode: "codex_login_unavailable",
+      message:
+        "Codex login is unavailable. Run `codex` and log in again, then retry.",
+    },
+    cause,
+  }
+}
+
 function codexAccountScope(accountId: string): string {
   return `codex:${createHash("sha256").update(accountId).digest("hex")}`
 }
 
 function accountChangedResponse(): ModelStreamEvent {
   return {
-    type: "response",
-    response: {
-      stopReason: "error",
-      content: [],
-      error: {
-        code: "codex_account_changed",
-        message:
-          "Codex login changed accounts during the turn; no request was sent to the new account.",
-      },
+    type: "failure",
+    failure: {
+      kind: "authentication",
+      stage: "request_build",
+      provider: "codex",
+      wireApi: "openai_responses",
+      providerCode: "codex_account_changed",
+      message:
+        "Codex login changed accounts during the turn; no request was sent to the new account.",
     },
   }
 }
 
 function isUnauthorized(event: ModelStreamEvent): boolean {
-  return (
-    event.type === "response" && event.response.error?.details?.status === 401
-  )
+  return event.type === "failure" && event.failure.status === 401
 }

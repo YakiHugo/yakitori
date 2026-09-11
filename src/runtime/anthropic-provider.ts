@@ -9,15 +9,13 @@ import type {
   Tool,
   ToolResultBlockParam,
 } from "@anthropic-ai/sdk/resources/messages"
-import {
-  isJsonObject,
-  isJsonValue,
-  type JsonObject,
-  type JsonValue,
-} from "../kernel/index.ts"
+import { isJsonObject, isJsonValue, type JsonValue } from "../kernel/index.ts"
 import { nativeDeferredToolProtocol } from "./deferred-tool-loading.ts"
-import { isAbortError } from "./errors.ts"
-import { parseRetryAfterMs } from "./retry-after.ts"
+import {
+  failureKindForStatus,
+  modelFailureFromUnknown,
+} from "./model-failure.ts"
+import { parseRetryAfterMs, parseShouldRetry } from "./retry-after.ts"
 import {
   DEFAULT_MODEL_MAX_OUTPUT_TOKENS,
   flattenModelSystem,
@@ -27,6 +25,7 @@ import {
   type ModelResponse,
   ModelStopReason,
   type ModelStreamEvent,
+  type ModelStreamFailureEvent,
   requireModelImageData,
   type StreamFn,
 } from "./model.ts"
@@ -44,7 +43,7 @@ export type AnthropicProviderOptions = {
 export function createAnthropicProvider(
   options: AnthropicProviderOptions,
 ): StreamFn {
-  // SDK-internal retries stay disabled: withRetries owns the retry policy.
+  // SDK-internal retries stay disabled: the model request runtime owns policy.
   const client =
     options.client ??
     new Anthropic({
@@ -63,14 +62,12 @@ async function* streamAnthropic(
   request: ModelRequest,
 ): AsyncGenerator<ModelStreamEvent> {
   if (request.signal?.aborted) {
-    yield {
-      type: "response",
-      response: { stopReason: ModelStopReason.Aborted, content: [] },
-    }
+    yield { type: "cancelled" }
     return
   }
 
   let stream: Awaited<ReturnType<typeof client.messages.stream>>
+  let failureStage: "connect" | "response_body" = "connect"
   const customFallbackKeys = new Map(
     request.tools.flatMap((tool) =>
       tool.kind === "custom" && tool.customInputFallbackKey !== undefined
@@ -144,11 +141,19 @@ async function* streamAnthropic(
               : { headers: { "anthropic-beta": "effort-2025-11-24" } }),
           },
     )
-  } catch (error) {
-    yield {
-      type: "response",
-      response: terminalError(error),
+    // MessageStream starts its HTTP request asynchronously. Await its response
+    // when the real SDK surface is present so pre-header failures stay in the
+    // connect stage; lightweight test clients remain ordinary async iterables.
+    if (typeof stream.withResponse === "function") {
+      await stream.withResponse()
+      failureStage = "response_body"
     }
+  } catch (error) {
+    if (request.signal?.aborted) {
+      yield { type: "cancelled" }
+      return
+    }
+    yield terminalFailure(error, request.target.provider, "connect")
     return
   }
 
@@ -156,11 +161,9 @@ async function* streamAnthropic(
   let reasoning = ""
   try {
     for await (const event of stream) {
+      failureStage = "response_body"
       if (request.signal?.aborted) {
-        yield {
-          type: "response",
-          response: { stopReason: ModelStopReason.Aborted, content: [] },
-        }
+        yield { type: "cancelled" }
         return
       }
       if (
@@ -191,17 +194,11 @@ async function* streamAnthropic(
       ),
     }
   } catch (error) {
-    if (request.signal?.aborted || isAbortError(error)) {
-      yield {
-        type: "response",
-        response: { stopReason: ModelStopReason.Aborted, content: [] },
-      }
+    if (request.signal?.aborted) {
+      yield { type: "cancelled" }
       return
     }
-    yield {
-      type: "response",
-      response: terminalError(error),
-    }
+    yield terminalFailure(error, request.target.provider, failureStage)
   }
 }
 
@@ -624,26 +621,61 @@ function mapStopReason(
       : ModelStopReason.EndTurn
   }
   if (stopReason === null) return ModelStopReason.EndTurn
-  return ModelStopReason.Error
+  throw new Error(`Unsupported Anthropic stop reason: ${stopReason}.`)
 }
 
-function terminalError(error: unknown): ModelResponse {
-  const details = providerErrorDetails(error)
+function terminalFailure(
+  error: unknown,
+  provider: string,
+  stage: "connect" | "response_body",
+): ModelStreamFailureEvent {
+  const status =
+    error instanceof Anthropic.APIError && typeof error.status === "number"
+      ? error.status
+      : undefined
+  const providerCode =
+    error instanceof Anthropic.APIError && error.type !== null
+      ? error.type
+      : undefined
+  const kind =
+    error instanceof Anthropic.APIConnectionError
+      ? stage === "connect"
+        ? "connection_failed"
+        : "stream_disconnected"
+      : status !== undefined
+        ? failureKindForStatus(status)
+        : RETRYABLE_ERROR_TYPES.has(providerCode ?? "")
+          ? "server_error"
+          : undefined
+  const retryAfterMs =
+    error instanceof Anthropic.APIError
+      ? parseRetryAfterMs(error.headers)
+      : undefined
+  const serverShouldRetry =
+    error instanceof Anthropic.APIError
+      ? parseShouldRetry(error.headers)
+      : undefined
+  const providerRequestId =
+    error instanceof Anthropic.APIError && typeof error.requestID === "string"
+      ? error.requestID
+      : undefined
   return {
-    stopReason: ModelStopReason.Error,
-    content: [],
-    error: {
-      code: "anthropic_error",
-      message:
-        error instanceof Error ? error.message : "Anthropic request failed.",
-      ...(details === undefined ? {} : { details }),
-    },
+    type: "failure",
+    failure: modelFailureFromUnknown(error, {
+      provider,
+      wireApi: "anthropic_messages",
+      stage,
+      ...(kind === undefined ? {} : { kind }),
+      fallbackMessage: "Anthropic request failed.",
+      ...(status === undefined ? {} : { status }),
+      ...(providerCode === undefined ? {} : { providerCode }),
+      ...(providerRequestId === undefined ? {} : { providerRequestId }),
+      ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+      ...(serverShouldRetry === undefined ? {} : { serverShouldRetry }),
+    }),
+    cause: error,
   }
 }
-
-const RETRYABLE_STATUSES: ReadonlySet<number> = new Set([
-  408, 409, 429, 500, 502, 503, 504, 529,
-])
 
 // Providers whose Anthropic-compatible endpoint accepts the effort beta.
 const EFFORT_BETA_PROVIDERS: ReadonlySet<string> = new Set([
@@ -657,45 +689,6 @@ const RETRYABLE_ERROR_TYPES: ReadonlySet<string> = new Set([
   "overloaded_error",
   "api_error",
 ])
-
-// Transient failures carry retryable details for withRetries: retryable HTTP
-// statuses, plus connection/timeout errors (APIConnectionTimeoutError extends
-// APIConnectionError; both have no HTTP status).
-function retryableDetails(error: unknown): JsonObject | undefined {
-  if (error instanceof Anthropic.APIConnectionError) {
-    return { retryable: true }
-  }
-  if (
-    error instanceof Anthropic.APIError &&
-    typeof error.status === "number" &&
-    RETRYABLE_STATUSES.has(error.status)
-  ) {
-    return { retryable: true, status: error.status }
-  }
-  if (
-    error instanceof Anthropic.APIError &&
-    error.type !== null &&
-    RETRYABLE_ERROR_TYPES.has(error.type)
-  ) {
-    return { retryable: true, type: error.type }
-  }
-  return undefined
-}
-
-function providerErrorDetails(error: unknown): JsonObject | undefined {
-  const retryable = retryableDetails(error)
-  if (error instanceof Anthropic.APIError && typeof error.status === "number") {
-    if (retryable !== undefined || error.status === 401) {
-      const retryAfterMs = parseRetryAfterMs(error.headers)
-      return {
-        ...(retryable ?? {}),
-        status: error.status,
-        ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
-      }
-    }
-  }
-  return retryable
-}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)

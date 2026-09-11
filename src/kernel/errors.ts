@@ -1,4 +1,4 @@
-import type { EventMetadata } from "./events.ts"
+import type { EventMetadata, KernelError } from "./events.ts"
 
 export const YakitoriErrorCode = {
   InvalidArgument: "invalid_argument",
@@ -35,4 +35,21 @@ export function createYakitoriError(input: YakitoriErrorInput): YakitoriError {
 
 export function isYakitoriError(error: unknown): error is YakitoriError {
   return error instanceof YakitoriError
+}
+
+export class KernelErrorException extends Error {
+  readonly kernelError: KernelError
+
+  constructor(kernelError: KernelError, options: ErrorOptions = {}) {
+    super(kernelError.message, options)
+    this.name = "KernelErrorException"
+    this.kernelError = kernelError
+  }
+}
+
+export function kernelErrorFromUnknown(error: unknown): KernelError {
+  if (error instanceof KernelErrorException) return error.kernelError
+  return {
+    message: error instanceof Error ? error.message : "Turn execution failed.",
+  }
 }

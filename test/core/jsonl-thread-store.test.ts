@@ -32,6 +32,34 @@ afterEach(async () => {
 })
 
 describe("JsonlThreadStore", () => {
+  it("reopens structured Turn failures with nested diagnostic details", async () => {
+    const { root, store } = await createStore()
+    const threadId = "thread_structured_failure"
+    const completed: RolloutItem = {
+      type: "turn_completed",
+      turnId: "turn_failed",
+      outcome: "failed",
+      error: {
+        message: "The model response stream disconnected before completion.",
+        code: "model.stream_disconnected",
+        details: {
+          provider: "grok",
+          attempt: 2,
+          transport: { wireApi: "openai_responses", causeCode: "EPIPE" },
+        },
+      },
+    }
+    await store.createThread(metadata(threadId))
+    await store.appendItems(threadId, [completed])
+    await store.shutdownThread(threadId)
+
+    const reopened = new JsonlThreadStore({ root })
+    const recovered = await reopened.resumeThread(threadId)
+
+    expect(recovered?.rollout.at(-1)?.item).toEqual(completed)
+    await reopened.shutdownThread(threadId)
+  })
+
   it.each([
     0, 1, 2, 3, 4,
   ])("recovers a coherent context after %i checkpoint records reach disk", async (persistedCheckpointRecords) => {

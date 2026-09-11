@@ -1,5 +1,6 @@
 import type {
   ModelContentBlock,
+  ModelFailure,
   ModelRequest,
   ModelResponse,
   ModelStopReason,
@@ -15,7 +16,7 @@ export type FauxScriptedResponse = {
   readonly reasoningSnapshots?: readonly string[]
   readonly content?: readonly ModelContentBlock[]
   readonly stopReason?: ModelStopReason
-  readonly error?: ModelResponse["error"]
+  readonly failure?: ModelFailure
   readonly usage?: ModelResponse["usage"]
   readonly providerRequestId?: string
   readonly throwBefore?: unknown
@@ -75,13 +76,7 @@ async function* streamScriptedResponse(
 
   for (const text of step.reasoningSnapshots ?? []) {
     if (request.signal?.aborted) {
-      yield {
-        type: "response",
-        response: {
-          stopReason: StopReason.Aborted,
-          content: [],
-        },
-      }
+      yield { type: "cancelled" }
       return
     }
     yield { type: "reasoning_snapshot", text }
@@ -89,13 +84,7 @@ async function* streamScriptedResponse(
 
   for (const text of step.snapshots ?? []) {
     if (request.signal?.aborted) {
-      yield {
-        type: "response",
-        response: {
-          stopReason: StopReason.Aborted,
-          content: [],
-        },
-      }
+      yield { type: "cancelled" }
       return
     }
     yield { type: "snapshot", text }
@@ -106,12 +95,15 @@ async function* streamScriptedResponse(
   if (step.endWithoutResponse) return
 
   if (request.signal?.aborted) {
+    yield { type: "cancelled" }
+    return
+  }
+
+  if (step.failure !== undefined) {
     yield {
-      type: "response",
-      response: {
-        stopReason: StopReason.Aborted,
-        content: [],
-      },
+      type: "failure",
+      failure: step.failure,
+      ...(step.usage === undefined ? {} : { usage: step.usage }),
     }
     return
   }
@@ -121,7 +113,6 @@ async function* streamScriptedResponse(
     response: {
       stopReason: step.stopReason ?? StopReason.EndTurn,
       content: step.content ?? [],
-      ...(step.error === undefined ? {} : { error: step.error }),
       ...(step.usage === undefined ? {} : { usage: step.usage }),
       ...(step.providerRequestId === undefined
         ? {}

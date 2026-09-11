@@ -1259,16 +1259,16 @@ describe("OpenAI provider error classification", () => {
 
     expect(events).toEqual([
       {
-        type: "response",
-        response: {
-          stopReason: ModelStopReason.Error,
-          content: [],
-          error: {
-            code: "openai_error",
-            message: error.message,
-            details: { retryable: true, status: 429 },
-          },
+        type: "failure",
+        failure: {
+          kind: "rate_limited",
+          stage: "connect",
+          provider: "openai",
+          wireApi: "openai_responses",
+          message: "The model provider rate limited the request.",
+          status: 429,
         },
+        cause: error,
       },
     ])
   })
@@ -1280,17 +1280,94 @@ describe("OpenAI provider error classification", () => {
 
     expect(events).toEqual([
       {
-        type: "response",
-        response: {
-          stopReason: ModelStopReason.Error,
-          content: [],
-          error: {
-            code: "openai_error",
-            message: error.message,
-            details: { status: 400 },
-          },
+        type: "failure",
+        failure: {
+          kind: "invalid_request",
+          stage: "connect",
+          provider: "openai",
+          wireApi: "openai_responses",
+          message: "The model provider rejected the request.",
+          status: 400,
         },
+        cause: error,
       },
+    ])
+  })
+
+  it("lets HTTP status override a transient-looking body code", async () => {
+    const error = new OpenAI.APIError(
+      400,
+      { code: "server_error" },
+      "bad request",
+      new Headers(),
+    )
+
+    expect(await collectWithThrowingClient(error)).toEqual([
+      expect.objectContaining({
+        type: "failure",
+        failure: expect.objectContaining({
+          kind: "invalid_request",
+          status: 400,
+          providerCode: "server_error",
+        }),
+      }),
+    ])
+  })
+
+  it("preserves request IDs and an explicit retry veto", async () => {
+    const error = new OpenAI.APIError(
+      503,
+      undefined,
+      undefined,
+      new Headers({
+        "x-request-id": "request_123",
+        "x-should-retry": "FALSE",
+      }),
+    )
+
+    expect(await collectWithThrowingClient(error)).toEqual([
+      expect.objectContaining({
+        type: "failure",
+        failure: expect.objectContaining({
+          providerRequestId: "request_123",
+          serverShouldRetry: false,
+        }),
+      }),
+    ])
+  })
+
+  it("treats Grok Cloudflare origin TLS failures as terminal", async () => {
+    const error = new OpenAI.APIError(525, undefined, undefined, new Headers())
+    const client = {
+      responses: { create: async () => Promise.reject(error) },
+    } as unknown as OpenAI
+    const stream = createOpenAIProvider({
+      apiKey: "test",
+      model: "grok-test",
+      client,
+    })
+    const events: ModelStreamEvent[] = []
+    for await (const event of stream(
+      requestFixture({
+        target: {
+          provider: "grok",
+          model: "grok-test",
+          instructionProfileId: "default",
+        },
+      }),
+    )) {
+      events.push(event)
+    }
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: "failure",
+        failure: expect.objectContaining({
+          kind: "server_error",
+          status: 525,
+          serverShouldRetry: false,
+        }),
+      }),
     ])
   })
 
@@ -1301,77 +1378,83 @@ describe("OpenAI provider error classification", () => {
 
     expect(events).toEqual([
       {
-        type: "response",
-        response: {
-          stopReason: ModelStopReason.Error,
-          content: [],
-          error: {
-            code: "openai_error",
-            message: error.message,
-            details: { retryable: true },
-          },
+        type: "failure",
+        failure: {
+          kind: "connection_failed",
+          stage: "connect",
+          provider: "openai",
+          wireApi: "openai_responses",
+          message: "Could not connect to the model provider.",
         },
+        cause: error,
       },
     ])
   })
 
-  it("marks a failed response with a transient code as retryable", () => {
-    const response = fromOpenAIResponse(
+  it("classifies a failed response with a transient code", async () => {
+    const events = await collectWithTerminalResponse(
       responseFixture({
         status: "failed",
         error: { code: "server_error", message: "upstream overloaded" },
       }),
     )
 
-    expect(response).toEqual({
-      stopReason: ModelStopReason.Error,
-      content: [],
-      providerRequestId: "response_1",
-      error: {
-        code: "server_error",
-        message: "upstream overloaded",
-        details: { retryable: true },
+    expect(events).toEqual([
+      {
+        type: "failure",
+        failure: {
+          kind: "server_error",
+          stage: "model_event",
+          provider: "openai",
+          wireApi: "openai_responses",
+          providerCode: "server_error",
+          providerRequestId: "response_1",
+          message: "The model provider encountered a temporary server error.",
+        },
       },
-    })
+    ])
   })
 
-  it("keeps a failed response with a non-transient code free of retry details", () => {
-    const response = fromOpenAIResponse(
+  it("classifies a failed response with a non-transient code", async () => {
+    const events = await collectWithTerminalResponse(
       responseFixture({
         status: "failed",
         error: { code: "invalid_prompt", message: "bad prompt" },
       }),
     )
 
-    expect(response).toEqual({
-      stopReason: ModelStopReason.Error,
-      content: [],
-      providerRequestId: "response_1",
-      error: { code: "invalid_prompt", message: "bad prompt" },
-    })
+    expect(events).toEqual([
+      {
+        type: "failure",
+        failure: {
+          kind: "provider_error",
+          stage: "model_event",
+          provider: "openai",
+          wireApi: "openai_responses",
+          providerCode: "invalid_prompt",
+          providerRequestId: "response_1",
+          message: "OpenAI request failed.",
+        },
+      },
+    ])
   })
 
   it("keeps refusals free of retry details", () => {
-    const response = fromOpenAIResponse(
-      responseFixture({
-        output: [
-          {
-            type: "message",
-            id: "message_1",
-            role: "assistant",
-            status: "completed",
-            content: [{ type: "refusal", refusal: "cannot help" }],
-          },
-        ],
-      }),
-    )
-
-    expect(response).toEqual({
-      stopReason: ModelStopReason.Error,
-      content: [],
-      providerRequestId: "response_1",
-      error: { code: "openai_refusal", message: "cannot help" },
-    })
+    expect(() =>
+      fromOpenAIResponse(
+        responseFixture({
+          output: [
+            {
+              type: "message",
+              id: "message_1",
+              role: "assistant",
+              status: "completed",
+              content: [{ type: "refusal", refusal: "cannot help" }],
+            },
+          ],
+        }),
+      ),
+    ).toThrow("cannot help")
   })
 
   it("marks a stream error event with a transient code as retryable", async () => {
@@ -1401,16 +1484,56 @@ describe("OpenAI provider error classification", () => {
 
     expect(events).toEqual([
       {
-        type: "response",
-        response: {
-          stopReason: ModelStopReason.Error,
-          content: [],
-          error: {
-            code: "server_error",
-            message: "stream failed",
-            details: { retryable: true },
-          },
+        type: "failure",
+        failure: {
+          kind: "server_error",
+          stage: "model_event",
+          provider: "openai",
+          wireApi: "openai_responses",
+          providerCode: "server_error",
+          message: "The model provider encountered a temporary server error.",
         },
+      },
+    ])
+  })
+
+  it("normalizes an undici terminated error from the response body", async () => {
+    const socket = Object.assign(new Error("other side closed"), {
+      code: "UND_ERR_SOCKET",
+    })
+    const error = new TypeError("terminated", { cause: socket })
+    const client = {
+      responses: {
+        async create() {
+          return {
+            [Symbol.asyncIterator]() {
+              return { next: () => Promise.reject(error) }
+            },
+          }
+        },
+      },
+    } as unknown as OpenAI
+    const stream = createOpenAIProvider({
+      apiKey: "test",
+      model: "gpt-test",
+      client,
+    })
+
+    const events: ModelStreamEvent[] = []
+    for await (const event of stream(requestFixture())) events.push(event)
+
+    expect(events).toEqual([
+      {
+        type: "failure",
+        failure: {
+          kind: "stream_disconnected",
+          stage: "response_body",
+          provider: "openai",
+          wireApi: "openai_responses",
+          message: "The model response stream disconnected before completion.",
+          details: { causeCode: "UND_ERR_SOCKET" },
+        },
+        cause: error,
       },
     ])
   })
@@ -1432,6 +1555,28 @@ async function collectWithThrowingClient(
     client,
   })
 
+  const events: ModelStreamEvent[] = []
+  for await (const event of stream(requestFixture())) events.push(event)
+  return events
+}
+
+async function collectWithTerminalResponse(
+  response: Response,
+): Promise<ModelStreamEvent[]> {
+  const client = {
+    responses: {
+      async create() {
+        return (async function* () {
+          yield { type: `response.${response.status}`, response }
+        })()
+      },
+    },
+  } as unknown as OpenAI
+  const stream = createOpenAIProvider({
+    apiKey: "test",
+    model: "gpt-test",
+    client,
+  })
   const events: ModelStreamEvent[] = []
   for await (const event of stream(requestFixture())) events.push(event)
   return events

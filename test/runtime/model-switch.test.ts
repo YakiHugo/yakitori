@@ -196,15 +196,15 @@ describe("pre-sampling model switches", () => {
       if (request.compaction !== undefined && request.target.model === "old") {
         requests.push(request)
         yield {
-          type: "response",
-          response: {
-            stopReason: ModelStopReason.Error,
-            content: [],
-            error: {
-              code: "model_not_found",
-              message: "old model retired",
-              details: { status: 404 },
-            },
+          type: "failure",
+          failure: {
+            kind: "invalid_request",
+            stage: "model_event",
+            provider: request.target.provider,
+            wireApi: "unknown",
+            providerCode: "model_not_found",
+            status: 404,
+            message: "old model retired",
           },
         }
         return
@@ -263,15 +263,15 @@ describe("pre-sampling model switches", () => {
         requests.push(request)
         if (request.target.model === "old") {
           yield {
-            type: "response",
-            response: {
-              stopReason: ModelStopReason.Error,
-              content: [],
-              error: {
-                code: "not_found",
-                message: "old model retired",
-                details: { status: 404 },
-              },
+            type: "failure",
+            failure: {
+              kind: "invalid_request",
+              stage: "model_event",
+              provider: request.target.provider,
+              wireApi: "unknown",
+              providerCode: "not_found",
+              status: 404,
+              message: "old model retired",
             },
           }
           return
@@ -293,16 +293,20 @@ describe("pre-sampling model switches", () => {
       mateRevisionId: "revision",
     })
     await thread.startIfIdle({ content: { kind: "text", text: "start" } })
-    await expect.poll(() => thread.agentStatus).toEqual({ completed: "done old" })
+    await expect
+      .poll(() => thread.agentStatus)
+      .toEqual({ completed: "done old" })
 
     await thread.startIfIdle({
       content: { kind: "text", text: "switch" },
       modelSelection: { provider: "codex", model: "new" },
     })
 
-    await expect.poll(() => thread.agentStatus).toEqual({
-      errored: "old model retired",
-    })
+    await expect
+      .poll(() => thread.agentStatus)
+      .toEqual({
+        errored: "old model retired",
+      })
   })
 
   it("does not advance previous-model state after an invalid checkpoint, so restart retries the switch", async () => {

@@ -20,6 +20,15 @@ export function parseRetryAfterMs(
   return cap(Math.max(0, at - nowMs))
 }
 
+export function parseShouldRetry(
+  headers: Headers | undefined,
+): boolean | undefined {
+  const value = headers?.get("x-should-retry")?.trim().toLowerCase()
+  if (value === "true") return true
+  if (value === "false") return false
+  return undefined
+}
+
 function cap(milliseconds: number): number {
   return Math.min(MAX_RETRY_AFTER_MS, Math.ceil(milliseconds))
 }

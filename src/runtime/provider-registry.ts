@@ -72,14 +72,14 @@ function createRegistryClient(
     models(provider) {
       return requireProvider(provider).models
     },
-    startTurn(provider) {
+    startTurn(provider, policy) {
       if (closed) throw new Error("Model client is closed.")
       let client = clients.get(provider)
       if (client === undefined) {
         client = requireProvider(provider).createClient()
         clients.set(provider, client)
       }
-      const session = client.startTurn()
+      const session = client.startTurn(policy)
       let closePromise: Promise<void> | undefined
       const ownedSession: ReturnType<ModelClient["startTurn"]> = {
         remoteCompaction: session.remoteCompaction ?? false,

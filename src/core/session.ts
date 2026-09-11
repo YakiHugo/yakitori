@@ -1,10 +1,12 @@
 import type {
   CompletedExecutionItem,
   JsonObject,
+  KernelError,
   SessionConfigurationSnapshot,
   StartedExecutionItem,
   TokenUsage,
 } from "../kernel/events.ts"
+import { kernelErrorFromUnknown } from "../kernel/errors.ts"
 import { InputRole } from "../kernel/events.ts"
 import { createTurnId } from "../kernel/ids.ts"
 import { fingerprintInputAdmission } from "../kernel/operation.ts"
@@ -70,7 +72,7 @@ export type TurnRuntime = {
     readonly kind: "assistant" | "reasoning"
     readonly text: string
   }): void
-  emitWarning(message: string): void
+  emitWarning(message: string, diagnostic?: KernelError): void
   emitItemStarted(item: StartedExecutionItem): void
   emitPermissionEvent(event: SessionPermissionEvent): void
   recordConversationItems(items: readonly ResponseItemEnvelope[]): Promise<void>
@@ -92,7 +94,10 @@ export type TurnRuntime = {
 }
 
 export type TurnProcessor = {
-  prepare(snapshot: SessionSnapshot, input: TurnInput): TurnContextItem
+  prepare(
+    snapshot: SessionSnapshot,
+    input: TurnInput,
+  ): TurnContextItem | Promise<TurnContextItem>
   prepareSteering?(
     snapshot: SessionSnapshot,
     input: TurnInput,
@@ -391,7 +396,7 @@ export class Session {
   async #startTurn(input: TurnInput): Promise<TurnInputSubmission> {
     let context: TurnContextItem
     try {
-      context = this.#processor.prepare(this.snapshot(), input)
+      context = await this.#processor.prepare(this.snapshot(), input)
     } catch (error) {
       await this.#recordAgentFailure(
         error instanceof Error ? error.message : "Turn preparation failed.",
@@ -576,17 +581,15 @@ export class Session {
     }
 
     if (outcome.type === "failed") {
-      const message =
-        outcome.error instanceof Error
-          ? outcome.error.message
-          : "Turn execution failed."
+      const error = kernelErrorFromUnknown(outcome.error)
+      const message = error.message
       await this.#appendRollout([
         {
           type: "turn_completed",
           turnId: active.input.submissionId,
           outcome: "failed",
           ...(active.usage === undefined ? {} : { usage: active.usage }),
-          error: { message },
+          error,
         },
       ])
       await this.#flushRollout()
@@ -667,10 +670,11 @@ export class Session {
           !Number.isSafeInteger(input.activeContextTokens) ||
           input.activeContextTokens < 0 ||
           (input.inputTokens !== undefined &&
-            (!Number.isSafeInteger(input.inputTokens) || input.inputTokens < 0))
-          || input.historyAnchorItemId.trim().length === 0
-          || input.provider.trim().length === 0
-          || input.model.trim().length === 0
+            (!Number.isSafeInteger(input.inputTokens) ||
+              input.inputTokens < 0)) ||
+          input.historyAnchorItemId.trim().length === 0 ||
+          input.provider.trim().length === 0 ||
+          input.model.trim().length === 0
         ) {
           throw new Error(
             "Active context tokens must be a non-negative integer.",
@@ -695,13 +699,17 @@ export class Session {
           ...input,
         })
       },
-      emitWarning: (message) => {
+      emitWarning: (message, diagnostic) => {
         requireLease()
         this.#events.send({
           type: "runtime.warning",
           threadId: this.id,
           turnId: active.input.submissionId,
           message,
+          ...(diagnostic?.code === undefined ? {} : { code: diagnostic.code }),
+          ...(diagnostic?.details === undefined
+            ? {}
+            : { details: diagnostic.details }),
         })
       },
       emitItemStarted: (item) => {

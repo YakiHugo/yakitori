@@ -323,13 +323,40 @@ describe("method dispatch", () => {
         },
       })
       expect(await readFile(configPath, "utf8")).toBe(content)
+      await expect(
+        connection.sendRequest("config/write", {
+          keyPath: ["model_transport", "max_attempts"],
+          value: 0,
+        }),
+      ).resolves.toMatchObject({
+        error: {
+          code: INVALID_PARAMS,
+          data: {
+            code: "invalid_input",
+            configurationError: "invalid_value",
+            path: configPath,
+            range: {
+              start: { line: 5, column: 1 },
+              end: { line: 5, column: 13 },
+            },
+          },
+        },
+      })
+      expect(await readFile(configPath, "utf8")).toBe(content)
       await writeFile(configPath, "[malformed")
       await expect(
         connection.sendRequest("config/read", {}),
       ).resolves.toMatchObject({
         error: {
           code: INVALID_PARAMS,
-          data: { configurationError: "syntax", path: configPath },
+          data: {
+            configurationError: "syntax",
+            path: configPath,
+            range: {
+              start: { line: 1, column: 2 },
+              end: { line: 1, column: 2 },
+            },
+          },
         },
       })
     } finally {

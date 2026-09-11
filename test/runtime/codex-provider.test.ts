@@ -32,15 +32,14 @@ describe("Codex provider auth recovery", () => {
       return async function* (): AsyncGenerator<ModelStreamEvent> {
         if (options.apiKey === "expired-token") {
           yield {
-            type: "response",
-            response: {
-              stopReason: ModelStopReason.Error,
-              content: [],
-              error: {
-                code: "unauthorized",
-                message: "Unauthorized",
-                details: { status: 401 },
-              },
+            type: "failure",
+            failure: {
+              kind: "authentication",
+              stage: "response_headers",
+              provider: "codex",
+              wireApi: "openai_responses",
+              status: 401,
+              message: "Unauthorized",
             },
           }
           return
@@ -88,15 +87,14 @@ describe("Codex provider auth recovery", () => {
     const createStream = vi.fn((): StreamFn => {
       return async function* (): AsyncGenerator<ModelStreamEvent> {
         yield {
-          type: "response",
-          response: {
-            stopReason: ModelStopReason.Error,
-            content: [],
-            error: {
-              code: "unauthorized",
-              message: "Unauthorized",
-              details: { status: 401 },
-            },
+          type: "failure",
+          failure: {
+            kind: "authentication",
+            stage: "response_headers",
+            provider: "codex",
+            wireApi: "openai_responses",
+            status: 401,
+            message: "Unauthorized",
           },
         }
       }
@@ -112,15 +110,15 @@ describe("Codex provider auth recovery", () => {
     expect(createStream).toHaveBeenCalledTimes(1)
     expect(events).toEqual([
       {
-        type: "response",
-        response: {
-          stopReason: ModelStopReason.Error,
-          content: [],
-          error: {
-            code: "codex_account_changed",
-            message:
-              "Codex login changed accounts during the turn; no request was sent to the new account.",
-          },
+        type: "failure",
+        failure: {
+          kind: "authentication",
+          stage: "request_build",
+          provider: "codex",
+          wireApi: "openai_responses",
+          providerCode: "codex_account_changed",
+          message:
+            "Codex login changed accounts during the turn; no request was sent to the new account.",
         },
       },
     ])
@@ -128,15 +126,14 @@ describe("Codex provider auth recovery", () => {
 
   it("does not attempt unauthorized recovery without an account fence", async () => {
     const unauthorized: ModelStreamEvent = {
-      type: "response",
-      response: {
-        stopReason: ModelStopReason.Error,
-        content: [],
-        error: {
-          code: "unauthorized",
-          message: "Unauthorized",
-          details: { status: 401 },
-        },
+      type: "failure",
+      failure: {
+        kind: "authentication",
+        stage: "response_headers",
+        provider: "codex",
+        wireApi: "openai_responses",
+        status: 401,
+        message: "Unauthorized",
       },
     }
     const auth: CodexAuthProvider = {
@@ -166,15 +163,14 @@ describe("Codex provider auth recovery", () => {
 
   it("does not refresh after a request has produced visible output", async () => {
     const unauthorized: ModelStreamEvent = {
-      type: "response",
-      response: {
-        stopReason: ModelStopReason.Error,
-        content: [],
-        error: {
-          code: "unauthorized",
-          message: "Unauthorized",
-          details: { status: 401 },
-        },
+      type: "failure",
+      failure: {
+        kind: "authentication",
+        stage: "response_headers",
+        provider: "codex",
+        wireApi: "openai_responses",
+        status: 401,
+        message: "Unauthorized",
       },
     }
     const auth: CodexAuthProvider = {
@@ -205,6 +201,35 @@ describe("Codex provider auth recovery", () => {
     expect(auth.resolve).toHaveBeenCalledTimes(1)
     expect(auth.invalidate).not.toHaveBeenCalled()
     expect(createStream).toHaveBeenCalledTimes(1)
+  })
+
+  it("turns local login resolution failures into an actionable auth failure", async () => {
+    const cause = new Error("credentials file contained a private path")
+    const auth: CodexAuthProvider = {
+      resolve: vi.fn().mockRejectedValue(cause),
+      invalidate: vi.fn(),
+    }
+    const events: ModelStreamEvent[] = []
+
+    for await (const event of createCodexProvider({ auth })(requestFixture())) {
+      events.push(event)
+    }
+
+    expect(events).toEqual([
+      {
+        type: "failure",
+        failure: {
+          kind: "authentication",
+          stage: "request_build",
+          provider: "codex",
+          wireApi: "openai_responses",
+          providerCode: "codex_login_unavailable",
+          message:
+            "Codex login is unavailable. Run `codex` and log in again, then retry.",
+        },
+        cause,
+      },
+    ])
   })
 })
 
@@ -352,10 +377,10 @@ it("stops before sending a continuation when the Codex account changes between t
   for await (const event of stream(requestFixture())) events.push(event)
   expect(events).toEqual([
     expect.objectContaining({
-      type: "response",
-      response: expect.objectContaining({
-        stopReason: "error",
-        error: expect.objectContaining({ code: "codex_account_changed" }),
+      type: "failure",
+      failure: expect.objectContaining({
+        kind: "authentication",
+        providerCode: "codex_account_changed",
       }),
     }),
   ])

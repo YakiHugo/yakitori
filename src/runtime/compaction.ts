@@ -1,4 +1,4 @@
-import { ModelResponseError } from "./errors.ts"
+import { ModelFailureError } from "./errors.ts"
 import { estimateHistoryTokens } from "./model-request-budget.ts"
 import type {
   ModelMessage,
@@ -16,13 +16,13 @@ const LOCAL_COMPACTION_PROMPT = `Write a concise checkpoint for the model that w
 // retry compaction with a smaller source instead of giving up.
 export function isContextOverflowError(error: unknown): boolean {
   if (
-    error instanceof ModelResponseError &&
+    error instanceof ModelFailureError &&
     ([
       "context_length_exceeded",
       "context_window_exceeded",
       "prompt_too_long",
-    ].includes(error.providerError?.code ?? "") ||
-      error.providerError?.details?.status === 413)
+    ].includes(error.failure.providerCode ?? "") ||
+      error.failure.status === 413)
   )
     return true
   const message = (
@@ -40,12 +40,14 @@ export function isContextOverflowError(error: unknown): boolean {
 }
 
 export function canRetryCompactionWithCurrentModel(error: unknown): boolean {
-  if (!(error instanceof ModelResponseError)) return false
-  const details = error.providerError?.details
-  const status = details?.status
+  if (!(error instanceof ModelFailureError)) return false
+  const status = error.failure.status
   return (
     isContextOverflowError(error) ||
-    details?.retryable === true ||
+    error.failure.kind === "connection_failed" ||
+    error.failure.kind === "rate_limited" ||
+    error.failure.kind === "server_error" ||
+    error.failure.kind === "stream_disconnected" ||
     (typeof status === "number" && status >= 400 && status !== 401) ||
     [
       "invalid_request_error",
@@ -55,7 +57,7 @@ export function canRetryCompactionWithCurrentModel(error: unknown): boolean {
       "usage_limit_reached",
       "server_error",
       "server_overloaded",
-    ].includes(error.providerError?.code ?? "")
+    ].includes(error.failure.providerCode ?? "")
   )
 }
 

@@ -416,6 +416,7 @@ export class MessageProcessor {
         code: ApiErrorCode.InvalidInput,
         configurationError: error.code,
         ...(error.path === undefined ? {} : { path: error.path }),
+        ...(error.range === undefined ? {} : { range: error.range }),
       })
     }
     reportOperationalFailure(this.reporter, {

@@ -184,6 +184,8 @@ export type SessionEvent =
       readonly threadId: string
       readonly turnId: string
       readonly message: string
+      readonly code?: string
+      readonly details?: import("../kernel/index.ts").EventMetadata
     }
 
 export class SessionIo {

@@ -3,6 +3,7 @@ import type {
   ApprovalPolicy,
   AutoCompactTokenLimitScope,
   ModelSelection,
+  ModelTransportPolicy,
   SessionConfigurationSnapshot,
   TurnExecutionContext,
   TurnExecutionLimits,
@@ -21,6 +22,7 @@ import {
   validateModelSelection,
 } from "./model-catalog.ts"
 import type { ModelSystemSection, ModelTarget } from "./model.ts"
+import type { ModelRequestPolicy } from "./model-request.ts"
 import type { ModelsManager } from "./models-manager.ts"
 import { getModelInstructions } from "./prompt-registry.ts"
 
@@ -53,6 +55,7 @@ export type ResolvedStepConfiguration = Readonly<{
   approvalPolicy: ApprovalPolicy
   executionPolicy: SessionExecutionPolicy
   modelCapacity?: ResolvedModelCapacity
+  modelRequestPolicy?: ModelRequestPolicy
   autoCompact: Readonly<{
     limitTokens?: number
     scope: AutoCompactTokenLimitScope
@@ -83,6 +86,7 @@ export class SessionConfiguration {
       readonly modelContextWindowTokens?: number
       readonly modelAutoCompactTokenLimit?: number
       readonly modelAutoCompactTokenLimitScope?: AutoCompactTokenLimitScope
+      readonly modelTransport?: ModelTransportPolicy
     },
     models?: ModelsManager,
   ): SessionConfiguration {
@@ -117,6 +121,9 @@ export class SessionConfiguration {
         : { modelAutoCompactTokenLimit: input.modelAutoCompactTokenLimit }),
       modelAutoCompactTokenLimitScope:
         input.modelAutoCompactTokenLimitScope ?? "total",
+      ...(input.modelTransport === undefined
+        ? {}
+        : { modelTransport: structuredClone(input.modelTransport) }),
     })
   }
 
@@ -201,9 +208,23 @@ export class SessionConfiguration {
         this.snapshot.modelAutoCompactTokenLimit,
         this.snapshot.modelAutoCompactTokenLimitScope,
       ),
+      ...resolveModelRequestPolicy(
+        this.snapshot.modelTransport,
+        model.provider,
+      ),
       ...(modelCapacity === undefined ? {} : { modelCapacity }),
     }
   }
+}
+
+function resolveModelRequestPolicy(
+  transport: ModelTransportPolicy | undefined,
+  provider: string,
+): Readonly<{ modelRequestPolicy?: ModelRequestPolicy }> {
+  if (transport === undefined) return {}
+  const { providers, ...defaults } = transport
+  const policy = { ...defaults, ...providers?.[provider] }
+  return Object.keys(policy).length === 0 ? {} : { modelRequestPolicy: policy }
 }
 
 function validateAutoCompactTokenLimit(limit: number | undefined): void {

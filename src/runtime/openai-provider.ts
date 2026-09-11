@@ -1,14 +1,17 @@
-import OpenAI from "openai"
+import OpenAI, { type ClientOptions } from "openai"
 import type {
   Tool as OpenAITool,
   Response,
   ResponseInput,
 } from "openai/resources/responses/responses"
 import type { ReasoningEffort } from "openai/resources/shared"
-import { isJsonObject, isJsonValue, type JsonObject } from "../kernel/index.ts"
+import { isJsonObject, isJsonValue } from "../kernel/index.ts"
 import { nativeDeferredToolProtocol } from "./deferred-tool-loading.ts"
-import { isAbortError } from "./errors.ts"
-import { parseRetryAfterMs } from "./retry-after.ts"
+import {
+  failureKindForStatus,
+  modelFailureFromUnknown,
+} from "./model-failure.ts"
+import { parseRetryAfterMs, parseShouldRetry } from "./retry-after.ts"
 import {
   DEFAULT_MODEL_MAX_OUTPUT_TOKENS,
   flattenModelSystem,
@@ -18,6 +21,7 @@ import {
   type ModelResponse,
   ModelStopReason,
   type ModelStreamEvent,
+  type ModelStreamFailureEvent,
   requireModelImageData,
   type StreamFn,
 } from "./model.ts"
@@ -32,16 +36,18 @@ export type OpenAIProviderOptions = {
   // codex ChatGPT backend).
   readonly defaultHeaders?: Record<string, string>
   readonly onResponseHeaders?: (headers: Headers) => void
+  readonly fetchOptions?: ClientOptions["fetchOptions"]
 }
 
 export function createOpenAIProvider(options: OpenAIProviderOptions): StreamFn {
-  // SDK-internal retries stay disabled: withRetries owns the retry policy.
+  // SDK-internal retries stay disabled: the model request runtime owns policy.
   const client =
     options.client ??
     new OpenAI({
       apiKey: options.apiKey,
       baseURL: options.baseURL,
       defaultHeaders: options.defaultHeaders,
+      fetchOptions: options.fetchOptions,
       maxRetries: 0,
     })
   return (request) =>
@@ -59,6 +65,7 @@ async function* streamOpenAI(
     return
   }
 
+  let failureStage: "connect" | "response_body" = "connect"
   try {
     const nativeDeferredLoading =
       nativeDeferredToolProtocol(request) === "openai"
@@ -124,6 +131,7 @@ async function* streamOpenAI(
             onResponseHeaders(response.headers)
             return data
           })
+    failureStage = "response_body"
     let text = ""
     let reasoning = ""
     const completedItems = new Map<number, Response["output"][number]>()
@@ -160,45 +168,49 @@ async function* streamOpenAI(
             .map(([, item]) => [item.id, item]),
         )
         for (const item of event.response.output) outputById.set(item.id, item)
-        yield {
-          type: "response",
-          response: fromOpenAIResponse(
-            { ...event.response, output: [...outputById.values()] },
-            customFallbackKeys,
-            request.target.provider,
-            request.continuationScope,
-            request.target.model,
-          ),
+        const response = {
+          ...event.response,
+          output: [...outputById.values()],
+        }
+        const failure = responseFailure(response, request.target.provider)
+        if (failure !== undefined) {
+          yield failure
+        } else {
+          yield {
+            type: "response",
+            response: fromOpenAIResponse(
+              response,
+              customFallbackKeys,
+              request.target.provider,
+              request.continuationScope,
+              request.target.model,
+            ),
+          }
         }
         return
       }
       if (event.type === "error") {
+        const providerCode = event.code ?? "openai_error"
         yield {
-          type: "response",
-          response: {
-            stopReason: ModelStopReason.Error,
-            content: [],
-            error: {
-              code: event.code ?? "openai_error",
-              message: event.message,
-              ...(event.code !== null && TRANSIENT_ERROR_CODES.has(event.code)
-                ? { details: { retryable: true } }
-                : {}),
-            },
-          },
+          type: "failure",
+          failure: modelFailureFromUnknown(undefined, {
+            provider: request.target.provider,
+            wireApi: "openai_responses",
+            stage: "model_event",
+            kind: failureKindForProviderCode(providerCode),
+            providerCode,
+            fallbackMessage: "OpenAI request failed.",
+          }),
         }
         return
       }
     }
   } catch (error) {
-    if (request.signal?.aborted || isAbortError(error)) {
+    if (request.signal?.aborted) {
       yield abortedResponse()
       return
     }
-    yield {
-      type: "response",
-      response: terminalError(error),
-    }
+    yield terminalFailure(error, request.target.provider, failureStage)
   }
 }
 
@@ -457,29 +469,18 @@ export function fromOpenAIResponse(
   model = response.model,
 ): ModelResponse {
   if (response.status === "cancelled") {
-    return { stopReason: ModelStopReason.Aborted, content: [] }
+    throw new Error("Cancelled OpenAI responses are not successful results.")
   }
   if (response.status === "incomplete") {
     if (response.incomplete_details?.reason === "max_output_tokens") {
       return responseResult(response, ModelStopReason.Length, [], provider)
     }
-    return responseError(
-      response,
-      "openai_incomplete",
+    throw new Error(
       `OpenAI response was incomplete: ${response.incomplete_details?.reason ?? "unknown"}.`,
-      undefined,
-      provider,
     )
   }
   if (response.status === "failed" || response.error) {
-    const code = response.error?.code ?? "openai_error"
-    return responseError(
-      response,
-      code,
-      response.error?.message ?? "OpenAI response failed.",
-      TRANSIENT_ERROR_CODES.has(code) ? { retryable: true } : undefined,
-      provider,
-    )
+    throw new Error(response.error?.message ?? "OpenAI response failed.")
   }
 
   const content: ModelContentBlock[] = []
@@ -536,13 +537,7 @@ export function fromOpenAIResponse(
           continue
         }
         if (part.type === "refusal") {
-          return responseError(
-            response,
-            "openai_refusal",
-            part.refusal,
-            undefined,
-            provider,
-          )
+          throw new Error(part.refusal)
         }
       }
       continue
@@ -584,21 +579,13 @@ export function fromOpenAIResponse(
     try {
       parsed = JSON.parse(item.arguments)
     } catch {
-      return responseError(
-        response,
-        "openai_invalid_tool_arguments",
+      throw new Error(
         `OpenAI returned invalid JSON arguments for tool ${item.name}.`,
-        undefined,
-        provider,
       )
     }
     if (!isJsonValue(parsed)) {
-      return responseError(
-        response,
-        "openai_invalid_tool_arguments",
+      throw new Error(
         `OpenAI returned non-JSON arguments for tool ${item.name}.`,
-        undefined,
-        provider,
       )
     }
     content.push({
@@ -715,16 +702,43 @@ function responseResult(
   }
 }
 
-function responseError(
+function responseFailure(
   response: Response,
-  code: string,
-  message: string,
-  details?: JsonObject,
-  provider = "openai",
-): ModelResponse {
+  provider: string,
+): ModelStreamFailureEvent | undefined {
+  if (
+    response.status !== "cancelled" &&
+    response.status !== "failed" &&
+    !(
+      response.status === "incomplete" &&
+      response.incomplete_details?.reason !== "max_output_tokens"
+    ) &&
+    (response.error === null || response.error === undefined)
+  ) {
+    return undefined
+  }
+  const providerCode =
+    response.error?.code ??
+    (response.status === "cancelled"
+      ? "response_cancelled"
+      : "openai_incomplete")
   return {
-    ...responseResult(response, ModelStopReason.Error, [], provider),
-    error: { code, message, ...(details === undefined ? {} : { details }) },
+    type: "failure",
+    failure: modelFailureFromUnknown(undefined, {
+      provider,
+      wireApi: "openai_responses",
+      stage: "model_event",
+      kind: failureKindForProviderCode(providerCode),
+      providerCode,
+      providerRequestId: response.id,
+      fallbackMessage: "OpenAI request failed.",
+    }),
+    ...(response.usage === undefined
+      ? {}
+      : {
+          usage: responseResult(response, ModelStopReason.EndTurn, [], provider)
+            .usage,
+        }),
   }
 }
 
@@ -746,69 +760,75 @@ function activeContextTokens(
   return usage.total_tokens
 }
 
-function terminalError(error: unknown): ModelResponse {
-  const details = providerErrorDetails(error)
+function terminalFailure(
+  error: unknown,
+  provider: string,
+  stage: "connect" | "response_body",
+): ModelStreamFailureEvent {
+  const status =
+    error instanceof OpenAI.APIError && typeof error.status === "number"
+      ? error.status
+      : undefined
+  const providerCode =
+    error instanceof OpenAI.APIError && typeof error.code === "string"
+      ? error.code
+      : undefined
+  const kind =
+    error instanceof OpenAI.APIConnectionError
+      ? stage === "connect"
+        ? "connection_failed"
+        : "stream_disconnected"
+      : status !== undefined
+        ? failureKindForStatus(status)
+        : providerCode === undefined
+          ? undefined
+          : failureKindForProviderCode(providerCode)
+  const retryAfterMs =
+    error instanceof OpenAI.APIError
+      ? parseRetryAfterMs(error.headers)
+      : undefined
+  const serverShouldRetry =
+    error instanceof OpenAI.APIError
+      ? (parseShouldRetry(error.headers) ??
+        (provider === "grok" && (status === 525 || status === 526)
+          ? false
+          : undefined))
+      : undefined
+  const providerRequestId =
+    error instanceof OpenAI.APIError && typeof error.requestID === "string"
+      ? error.requestID
+      : undefined
   return {
-    stopReason: ModelStopReason.Error,
-    content: [],
-    error: {
-      code: "openai_error",
-      message:
-        error instanceof Error ? error.message : "OpenAI request failed.",
-      ...(details === undefined ? {} : { details }),
-    },
+    type: "failure",
+    failure: modelFailureFromUnknown(error, {
+      provider,
+      wireApi: "openai_responses",
+      stage,
+      ...(kind === undefined ? {} : { kind }),
+      fallbackMessage: "OpenAI request failed.",
+      ...(status === undefined ? {} : { status }),
+      ...(providerCode === undefined ? {} : { providerCode }),
+      ...(providerRequestId === undefined ? {} : { providerRequestId }),
+      ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+      ...(serverShouldRetry === undefined ? {} : { serverShouldRetry }),
+    }),
+    cause: error,
   }
 }
 
-const RETRYABLE_STATUSES: ReadonlySet<number> = new Set([
-  408, 409, 429, 500, 502, 503, 504, 529,
-])
-
-// Stream error events and failed responses carry no HTTP status; these error
-// codes are the transient ones worth retrying.
-const TRANSIENT_ERROR_CODES: ReadonlySet<string> = new Set([
-  "server_error",
-  "rate_limit_exceeded",
-])
+function failureKindForProviderCode(
+  code: string,
+): ReturnType<typeof failureKindForStatus> {
+  if (code === "rate_limit_exceeded") return "rate_limited"
+  if (code === "server_error") return "server_error"
+  return "provider_error"
+}
 
 const REASONING_SUMMARY_PROVIDERS: ReadonlySet<string> = new Set([
   "openai",
   "codex",
 ])
 
-// Transient failures carry retryable details for withRetries: retryable HTTP
-// statuses, plus connection/timeout errors (APIConnectionTimeoutError extends
-// APIConnectionError; both have no HTTP status).
-function retryableDetails(error: unknown): JsonObject | undefined {
-  if (error instanceof OpenAI.APIConnectionError) {
-    return { retryable: true }
-  }
-  if (
-    error instanceof OpenAI.APIError &&
-    typeof error.status === "number" &&
-    RETRYABLE_STATUSES.has(error.status)
-  ) {
-    return { retryable: true, status: error.status }
-  }
-  return undefined
-}
-
-function providerErrorDetails(error: unknown): JsonObject | undefined {
-  const retryable = retryableDetails(error)
-  if (error instanceof OpenAI.APIError && typeof error.status === "number") {
-    const retryAfterMs = parseRetryAfterMs(error.headers)
-    return {
-      ...(retryable ?? {}),
-      status: error.status,
-      ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
-    }
-  }
-  return retryable
-}
-
 function abortedResponse(): ModelStreamEvent {
-  return {
-    type: "response",
-    response: { stopReason: ModelStopReason.Aborted, content: [] },
-  }
+  return { type: "cancelled" }
 }
