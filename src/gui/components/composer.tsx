@@ -71,6 +71,10 @@ export function Composer() {
     readonly savedDraft: string
   }>()
   const [slashDismissed, setSlashDismissed] = useState<string>()
+  const [slashHighlight, setSlashHighlight] = useState<{
+    readonly query: string
+    readonly index: number
+  }>()
 
   const effectiveModel = normalizeKimiModelSelection(
     resolveEffectiveModel({
@@ -107,17 +111,21 @@ export function Composer() {
   )
 
   // The menu tracks a single first-token query like codex's command popup:
-  // it stays open while the draft is exactly one `/name` token.
+  // it stays open while the draft is exactly one `/name` token, matching
+  // case-insensitively and keeping exact matches selectable.
   const slashQuery =
     draft.startsWith("/") && !/\s/.test(draft) ? draft : undefined
   const slashMatches =
     slashQuery === undefined || slashDismissed === slashQuery
       ? []
-      : SLASH_COMMANDS.filter(
-          (command) =>
-            command.name.startsWith(slashQuery) && command.name !== slashQuery,
+      : SLASH_COMMANDS.filter((command) =>
+          command.name.toLowerCase().startsWith(slashQuery.toLowerCase()),
         )
   const slashMenuOpen = slashMatches.length > 0
+  const activeSlashHighlight =
+    slashHighlight !== undefined && slashHighlight.query === slashQuery
+      ? Math.min(slashHighlight.index, slashMatches.length - 1)
+      : 0
 
   const text = draft.trim()
   const sending =
@@ -218,10 +226,20 @@ export function Composer() {
       )
   }
 
-  const acceptSlashCommand = (command: SlashCommand): void => {
+  // Selecting a command dispatches it right away, like codex: the draft
+  // clears and the command runs. The compact lane rejects attachments, so
+  // with images staged the selection only completes the text and the
+  // existing send-button hint explains the block.
+  const runSlashCommand = (command: SlashCommand): void => {
     setSlashDismissed(undefined)
-    setPromptDraft(command.name)
-    textareaRef.current?.focus()
+    setSlashHighlight(undefined)
+    if (command.name === COMPACT_DIRECTIVE && attachments.length > 0) {
+      setPromptDraft(command.name)
+      textareaRef.current?.focus()
+      return
+    }
+    setPromptDraft("")
+    void admitInput(command.name)
   }
 
   const handleDraftKeyDown = (
@@ -233,13 +251,24 @@ export function Composer() {
         setSlashDismissed(slashQuery)
         return
       }
-      const first = slashMatches[0]
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault()
+        const step = event.key === "ArrowDown" ? 1 : -1
+        setSlashHighlight({
+          query: slashQuery ?? "",
+          index:
+            (activeSlashHighlight + step + slashMatches.length) %
+            slashMatches.length,
+        })
+        return
+      }
+      const highlighted = slashMatches[activeSlashHighlight]
       if (
         (event.key === "Enter" || event.key === "Tab") &&
-        first !== undefined
+        highlighted !== undefined
       ) {
         event.preventDefault()
-        acceptSlashCommand(first)
+        runSlashCommand(highlighted)
         return
       }
     }
@@ -309,9 +338,15 @@ export function Composer() {
                   key={command.name}
                   type="button"
                   role="option"
-                  aria-selected={index === 0}
-                  onClick={() => acceptSlashCommand(command)}
-                  className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left hover:bg-accent ${index === 0 ? "bg-accent" : ""}`}
+                  aria-selected={index === activeSlashHighlight}
+                  onClick={() => runSlashCommand(command)}
+                  onMouseEnter={() =>
+                    setSlashHighlight({
+                      query: slashQuery ?? "",
+                      index,
+                    })
+                  }
+                  className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left hover:bg-accent ${index === activeSlashHighlight ? "bg-accent" : ""}`}
                 >
                   <span className="shrink-0 font-mono">{command.name}</span>
                   <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">

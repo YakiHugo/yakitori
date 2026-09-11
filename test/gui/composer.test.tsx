@@ -317,7 +317,7 @@ describe("history navigation", () => {
 })
 
 describe("slash command menu", () => {
-  it("completes the highlighted command with Enter and sends it on a second Enter", async () => {
+  it("executes the highlighted command on Enter and clears the draft", async () => {
     const user = userEvent.setup()
     const admitInput = vi.fn((_text: string) => Promise.resolve())
     useAppStore.setState({
@@ -328,32 +328,87 @@ describe("slash command menu", () => {
 
     const textarea = screen.getByRole("textbox")
     await user.click(textarea)
-    await user.keyboard("/")
+    await user.keyboard("/com")
 
     const menu = screen.getByRole("listbox", { name: "Slash commands" })
     expect(menu.textContent).toContain("/compact")
 
     await user.keyboard("{Enter}")
-    expect(useAppStore.getState().promptDraft).toBe("/compact")
-    expect(admitInput).not.toHaveBeenCalled()
-    // A complete command no longer matches the menu.
+    expect(admitInput).toHaveBeenCalledWith("/compact")
+    expect(useAppStore.getState().promptDraft).toBe("")
     expect(screen.queryByRole("listbox")).toBeNull()
+  })
+
+  it("keeps the exact match selectable so Enter executes it", async () => {
+    const user = userEvent.setup()
+    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    useAppStore.setState({
+      admitInput,
+      selection: { sessionId: "session_1" },
+    })
+    render(<Composer />)
+
+    await user.click(screen.getByRole("textbox"))
+    await user.keyboard("/compact")
+    expect(screen.getByRole("listbox")).toBeDefined()
 
     await user.keyboard("{Enter}")
     expect(admitInput).toHaveBeenCalledWith("/compact")
   })
 
-  it("accepts a clicked command", async () => {
+  it("executes a clicked command", async () => {
     const user = userEvent.setup()
-    useAppStore.setState({ selection: { sessionId: "session_1" } })
+    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    useAppStore.setState({
+      admitInput,
+      selection: { sessionId: "session_1" },
+    })
     render(<Composer />)
 
     await user.click(screen.getByRole("textbox"))
     await user.keyboard("/com")
     await user.click(screen.getByRole("option", { name: /\/compact/ }))
 
+    expect(admitInput).toHaveBeenCalledWith("/compact")
+    expect(useAppStore.getState().promptDraft).toBe("")
+  })
+
+  it("keeps the wrapped highlight selectable with arrow keys", async () => {
+    const user = userEvent.setup()
+    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    useAppStore.setState({
+      admitInput,
+      selection: { sessionId: "session_1" },
+    })
+    render(<Composer />)
+
+    await user.click(screen.getByRole("textbox"))
+    await user.keyboard("/")
+    // One command: cycling wraps back onto it and Enter still executes.
+    await user.keyboard("{ArrowDown}{ArrowUp}{Enter}")
+
+    expect(admitInput).toHaveBeenCalledWith("/compact")
+  })
+
+  it("completes compact as text instead of executing while images are staged", async () => {
+    const user = userEvent.setup()
+    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    useAppStore.setState({
+      admitInput,
+      selection: { sessionId: "session_1" },
+      promptAttachments: [draftImage("high")],
+    })
+    render(<Composer />)
+
+    await user.click(screen.getByRole("textbox"))
+    await user.keyboard("/com{Enter}")
+
+    expect(admitInput).not.toHaveBeenCalled()
     expect(useAppStore.getState().promptDraft).toBe("/compact")
-    expect(screen.queryByRole("listbox")).toBeNull()
+    // The exact match stays listed, but executing again is still blocked.
+    expect(screen.getByRole("listbox")).toBeDefined()
+    await user.keyboard("{Enter}")
+    expect(admitInput).not.toHaveBeenCalled()
   })
 
   it("dismisses with Escape until the query changes", async () => {
