@@ -95,13 +95,6 @@ export function Composer() {
       : (modelEntry.imageDetailModes?.includes("original") ?? false)
 
   useLayoutEffect(() => {
-    const textarea = textareaRef.current
-    if (!textarea || textarea.value !== draft) return
-    textarea.style.height = "auto"
-    textarea.style.height = `${Math.min(Math.max(textarea.scrollHeight, 52), 200)}px`
-  }, [draft])
-
-  useLayoutEffect(() => {
     if (focusRevision > 0) textareaRef.current?.focus()
   }, [focusRevision])
 
@@ -434,7 +427,7 @@ export function Composer() {
               void addFiles(images)
             }}
             onKeyDown={handleDraftKeyDown}
-            className="max-h-50 min-h-13 w-full resize-none bg-transparent px-5 pt-4 pb-2 text-[15px] leading-6 outline-none placeholder:text-muted-foreground/65 disabled:opacity-50"
+            className="field-sizing-content max-h-50 min-h-13 w-full resize-none bg-transparent px-5 pt-4 pb-2 text-[15px] leading-6 outline-none placeholder:text-muted-foreground/65 disabled:opacity-50"
           />
 
           <div className="flex min-h-12 items-center justify-between gap-3 px-2.5 pb-2.5">
