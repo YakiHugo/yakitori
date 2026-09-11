@@ -440,6 +440,145 @@ describe("slash command menu", () => {
   })
 })
 
+describe("skill mention popup", () => {
+  const templateCreator = {
+    name: "Template Creator",
+    description: "Creates project templates",
+    path: "/repo/.agents/skills/template-creator/SKILL.md",
+    scope: "repo" as const,
+  }
+  const changelogWriter = {
+    name: "Changelog Writer",
+    description: "Writes changelogs",
+    path: "/repo/.agents/skills/changelog-writer/SKILL.md",
+    scope: "repo" as const,
+  }
+
+  function skillsState() {
+    return {
+      selection: { sessionId: "session_1" },
+      sessionSkills: [templateCreator, changelogWriter],
+    }
+  }
+
+  it("picks a skill with Enter, replacing the $token with a chip", async () => {
+    const user = userEvent.setup()
+    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    useAppStore.setState({ ...skillsState(), admitInput })
+    render(<Composer />)
+
+    const textarea = screen.getByRole("textbox")
+    await user.click(textarea)
+    await user.keyboard("use $tem")
+
+    const menu = screen.getByRole("listbox", { name: "Skills" })
+    expect(menu.textContent).toContain("Template Creator")
+    expect(menu.textContent).not.toContain("Changelog Writer")
+
+    await user.keyboard("{Enter}")
+    expect(useAppStore.getState().promptDraft).toBe("use")
+    expect(useAppStore.getState().promptSkills).toEqual([templateCreator])
+    expect(admitInput).not.toHaveBeenCalled()
+    expect(
+      screen.getByRole("button", { name: "Remove Template Creator" }),
+    ).toBeDefined()
+  })
+
+  it("sends a skill-only draft and clears the chips after admission", async () => {
+    const user = userEvent.setup()
+    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    useAppStore.setState({ ...skillsState(), admitInput })
+    render(<Composer />)
+
+    await user.click(screen.getByRole("textbox"))
+    await user.keyboard("$tem{Enter}")
+    await user.click(screen.getByRole("button", { name: "Send" }))
+
+    // The store appends path-qualified mentions; the composer sends plain text.
+    expect(admitInput).toHaveBeenCalledWith("")
+  })
+
+  it("cycles the highlight with arrow keys and picks with Tab", async () => {
+    const user = userEvent.setup()
+    useAppStore.setState(skillsState())
+    render(<Composer />)
+
+    await user.click(screen.getByRole("textbox"))
+    await user.keyboard("$")
+    await user.keyboard("{ArrowDown}{Tab}")
+
+    expect(useAppStore.getState().promptSkills).toEqual([changelogWriter])
+  })
+
+  it("does not list an already picked skill again", async () => {
+    const user = userEvent.setup()
+    useAppStore.setState({
+      ...skillsState(),
+      promptSkills: [templateCreator],
+    })
+    render(<Composer />)
+
+    await user.click(screen.getByRole("textbox"))
+    await user.keyboard("$")
+
+    const menu = screen.getByRole("listbox", { name: "Skills" })
+    expect(menu.textContent).toContain("Changelog Writer")
+    expect(menu.textContent).not.toContain("Template Creator")
+  })
+
+  it("dismisses with Escape until the query changes", async () => {
+    const user = userEvent.setup()
+    useAppStore.setState(skillsState())
+    render(<Composer />)
+
+    await user.click(screen.getByRole("textbox"))
+    await user.keyboard("$")
+    expect(screen.getByRole("listbox", { name: "Skills" })).toBeDefined()
+
+    await user.keyboard("{Escape}")
+    expect(screen.queryByRole("listbox", { name: "Skills" })).toBeNull()
+
+    await user.keyboard("t")
+    expect(screen.getByRole("listbox", { name: "Skills" })).toBeDefined()
+  })
+
+  it("removes a chip", async () => {
+    const user = userEvent.setup()
+    useAppStore.setState({
+      ...skillsState(),
+      promptSkills: [templateCreator],
+    })
+    render(<Composer />)
+
+    await user.click(
+      screen.getByRole("button", { name: "Remove Template Creator" }),
+    )
+
+    expect(useAppStore.getState().promptSkills).toEqual([])
+  })
+
+  it("blocks compact while skill chips are staged", async () => {
+    const user = userEvent.setup()
+    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    useAppStore.setState({
+      ...skillsState(),
+      admitInput,
+      promptDraft: "/compact",
+      promptSkills: [templateCreator],
+    })
+    render(<Composer />)
+
+    expect(screen.getByRole("button", { name: "Send" })).toHaveProperty(
+      "disabled",
+      true,
+    )
+    await user.click(screen.getByRole("textbox"))
+    await user.keyboard("{Enter}")
+    expect(admitInput).not.toHaveBeenCalled()
+    expect(useAppStore.getState().promptDraft).toBe("/compact")
+  })
+})
+
 describe("model selector", () => {
   function selectModelState() {
     return {

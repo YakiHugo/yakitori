@@ -61,6 +61,7 @@ import {
   type StreamFn,
   type UserShellEnv,
 } from "../runtime/index.ts"
+import { createSkillsLoader } from "../runtime/skills.ts"
 import { createSessionEventHub } from "./event-hub.ts"
 import {
   createThreadServerHandlers,
@@ -551,6 +552,7 @@ export async function createYakitoriApplication(
     })
     threadManagerForCleanup = threadManager
 
+    const skillsLoader = createSkillsLoader()
     const handlers = createThreadServerHandlers({
       manager: threadManager,
       discardThread: (threadId) => agentRuntime.discardThread(threadId),
@@ -562,6 +564,22 @@ export async function createYakitoriApplication(
       listPendingPermissions: (sessionId) => permissionGate.list(sessionId),
       availableProviders: providerRegistry.providers,
       rolloutAssets,
+      listSessionSkills: async ({ workingDirectory }) => {
+        const snapshot = await routedUserConfig.readSnapshot({
+          cwd: workingDirectory,
+        })
+        const configuration = snapshot.configuration
+        const discovered = await skillsLoader({
+          workingDirectory,
+          ...(configuration.projectRootMarkers === undefined
+            ? {}
+            : { projectRootMarkers: configuration.projectRootMarkers }),
+          ...(configuration.skills === undefined
+            ? {}
+            : { configuration: configuration.skills }),
+        })
+        return discovered.skills
+      },
       reportOperationalFailure: reporter,
     })
 

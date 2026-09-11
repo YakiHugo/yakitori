@@ -122,7 +122,9 @@ describe("app store event stream", () => {
 
     const stream = fakeRef.current.streams[0]
     emitSnapshot(stream)
-    expect(fakeRef.current.requests).toEqual([])
+    expect(fakeRef.current.requests).toEqual([
+      { method: "session/skills", params: { sessionId: "session_1" } },
+    ])
     expect(stream?.sessionId).toBe("session_1")
     expect(stream?.after).toBe(0)
     expect(useAppStore.getState().selectedSession?.id).toBe("session_1")
@@ -532,20 +534,29 @@ describe("session drafts", () => {
   }
 
   it("parks the active draft on session switch and restores it on return", async () => {
+    const skill = {
+      name: "Template Creator",
+      description: "Creates project templates",
+      path: "/repo/.agents/skills/template-creator/SKILL.md",
+      scope: "repo" as const,
+    }
     await useAppStore.getState().selectSession("session_1")
     useAppStore.getState().setPromptDraft("draft for one")
     useAppStore.getState().setPromptAttachments([attachment])
+    useAppStore.getState().setPromptSkills([skill])
 
     await useAppStore.getState().selectSession("session_2")
 
     expect(useAppStore.getState().promptDraft).toBeUndefined()
     expect(useAppStore.getState().promptAttachments).toEqual([])
+    expect(useAppStore.getState().promptSkills).toEqual([])
 
     useAppStore.getState().setPromptDraft("draft for two")
     await useAppStore.getState().selectSession("session_1")
 
     expect(useAppStore.getState().promptDraft).toBe("draft for one")
     expect(useAppStore.getState().promptAttachments).toEqual([attachment])
+    expect(useAppStore.getState().promptSkills).toEqual([skill])
 
     await useAppStore.getState().selectSession("session_2")
     expect(useAppStore.getState().promptDraft).toBe("draft for two")
@@ -1085,6 +1096,37 @@ describe("model selection", () => {
 
     expect(useAppStore.getState().providers).toHaveLength(2)
     expect(useAppStore.getState().message).toBeUndefined()
+  })
+
+  it("submits picked skills as path-qualified mentions and clears the chips", async () => {
+    window.localStorage.clear()
+    fakeRef.current.respond = admissionResponder()
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      promptDraft: "hello",
+      promptSkills: [
+        {
+          name: "Template Creator",
+          description: "Creates project templates",
+          path: "/repo/.agents/skills/template-creator/SKILL.md",
+          scope: "repo",
+        },
+      ],
+    })
+
+    await useAppStore.getState().admitInput("hello")
+
+    const admissions = fakeRef.current.requestsFor("session/input")
+    expect(admissions).toHaveLength(1)
+    expect(admissions[0]?.params).toMatchObject({
+      sessionId: "session_1",
+      content: {
+        kind: "text",
+        text: "hello [$Template Creator](/repo/.agents/skills/template-creator/SKILL.md)",
+      },
+    })
+    expect(useAppStore.getState().promptSkills).toEqual([])
+    expect(useAppStore.getState().promptDraft).toBeUndefined()
   })
 
   it("sends the saved modelSelection with admitted input", async () => {

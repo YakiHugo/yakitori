@@ -1,4 +1,4 @@
-import { ArrowUp, LoaderCircle, Plus, ShieldCheck, X } from "lucide-react"
+import { ArrowUp, LoaderCircle, Package, Plus, ShieldCheck, X } from "lucide-react"
 import {
   type KeyboardEvent,
   useLayoutEffect,
@@ -6,6 +6,7 @@ import {
   useState,
 } from "react"
 import { COMPACT_DIRECTIVE } from "../../kernel/events.ts"
+import type { ApiSkillSummary } from "../../server/protocol.ts"
 import {
   appendImageFiles,
   appendPickedImages,
@@ -36,6 +37,8 @@ const SLASH_COMMANDS: readonly SlashCommand[] = [
 export function Composer() {
   const draft = useAppStore((state) => state.promptDraft) ?? ""
   const attachments = useAppStore((state) => state.promptAttachments)
+  const promptSkills = useAppStore((state) => state.promptSkills)
+  const sessionSkills = useAppStore((state) => state.sessionSkills)
   const apiBase = useAppStore((state) => state.apiBase)
   const busy = useAppStore((state) => state.busy)
   const focusRevision = useAppStore((state) => state.composerFocusRevision)
@@ -60,6 +63,7 @@ export function Composer() {
   const setPromptAttachments = useAppStore(
     (state) => state.setPromptAttachments,
   )
+  const setPromptSkills = useAppStore((state) => state.setPromptSkills)
   const admitInput = useAppStore((state) => state.admitInput)
   const view = useExecutionView()
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
@@ -72,6 +76,11 @@ export function Composer() {
   }>()
   const [slashDismissed, setSlashDismissed] = useState<string>()
   const [slashHighlight, setSlashHighlight] = useState<{
+    readonly query: string
+    readonly index: number
+  }>()
+  const [skillDismissed, setSkillDismissed] = useState<string>()
+  const [skillHighlight, setSkillHighlight] = useState<{
     readonly query: string
     readonly index: number
   }>()
@@ -127,12 +136,31 @@ export function Composer() {
       ? Math.min(slashHighlight.index, slashMatches.length - 1)
       : 0
 
+  // The mention popup tracks a trailing `$token`, like codex's skill popup:
+  // it opens while the last whitespace-delimited token is a `$name` prefix.
+  const skillQuery = /(?:^|\s)\$([\p{L}\p{N}_-]*)$/u.exec(draft)?.[1]
+  const skillMatches =
+    skillQuery === undefined || skillDismissed === skillQuery
+      ? []
+      : sessionSkills.filter(
+          (skill) =>
+            !promptSkills.some((picked) => picked.path === skill.path) &&
+            skill.name.toLowerCase().includes(skillQuery.toLowerCase()),
+        )
+  const skillMenuOpen = sessionSkills.length > 0 && skillMatches.length > 0
+  const activeSkillHighlight =
+    skillHighlight !== undefined && skillHighlight.query === skillQuery
+      ? Math.min(skillHighlight.index, skillMatches.length - 1)
+      : 0
+
   const text = draft.trim()
   const sending =
     sessionId !== undefined && inFlightActions.has(`admit:${sessionId}`)
-  const containsInput = text.length > 0 || attachments.length > 0
-  const compactHasAttachments =
-    text === COMPACT_DIRECTIVE && attachments.length > 0
+  const containsInput =
+    text.length > 0 || attachments.length > 0 || promptSkills.length > 0
+  const compactBlocked =
+    text === COMPACT_DIRECTIVE &&
+    (attachments.length > 0 || promptSkills.length > 0)
   const canSend =
     containsInput &&
     sessionId !== undefined &&
@@ -140,7 +168,7 @@ export function Composer() {
     !busy &&
     !sending &&
     !readingImages &&
-    !compactHasAttachments
+    !compactBlocked
 
   const addFiles = async (files: readonly File[]) => {
     if (files.length === 0 || sessionId === undefined) return
@@ -233,13 +261,27 @@ export function Composer() {
   const runSlashCommand = (command: SlashCommand): void => {
     setSlashDismissed(undefined)
     setSlashHighlight(undefined)
-    if (command.name === COMPACT_DIRECTIVE && attachments.length > 0) {
+    if (
+      command.name === COMPACT_DIRECTIVE &&
+      (attachments.length > 0 || promptSkills.length > 0)
+    ) {
       setPromptDraft(command.name)
       textareaRef.current?.focus()
       return
     }
     setPromptDraft("")
     void admitInput(command.name)
+  }
+
+  const pickSkill = (skill: ApiSkillSummary): void => {
+    setSkillDismissed(undefined)
+    setSkillHighlight(undefined)
+    // The chip replaces the trailing `$query` token in the draft.
+    setPromptDraft(draft.replace(/(^|\s)\$[\p{L}\p{N}_-]*$/u, "").trimEnd())
+    if (!promptSkills.some((picked) => picked.path === skill.path)) {
+      setPromptSkills([...promptSkills, skill])
+    }
+    textareaRef.current?.focus()
   }
 
   const handleDraftKeyDown = (
@@ -269,6 +311,32 @@ export function Composer() {
       ) {
         event.preventDefault()
         runSlashCommand(highlighted)
+        return
+      }
+    }
+    if (skillMenuOpen) {
+      if (event.key === "Escape") {
+        setSkillDismissed(skillQuery)
+        return
+      }
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault()
+        const step = event.key === "ArrowDown" ? 1 : -1
+        setSkillHighlight({
+          query: skillQuery ?? "",
+          index:
+            (activeSkillHighlight + step + skillMatches.length) %
+            skillMatches.length,
+        })
+        return
+      }
+      const highlighted = skillMatches[activeSkillHighlight]
+      if (
+        (event.key === "Enter" || event.key === "Tab") &&
+        highlighted !== undefined
+      ) {
+        event.preventDefault()
+        pickSkill(highlighted)
         return
       }
     }
@@ -353,6 +421,65 @@ export function Composer() {
                     {command.description}
                   </span>
                 </button>
+              ))}
+            </div>
+          ) : null}
+          {skillMenuOpen ? (
+            <div
+              role="listbox"
+              aria-label="Skills"
+              className="absolute bottom-full left-0 z-10 mb-1 w-72 space-y-1 rounded-md border bg-popover p-2 text-sm shadow-md"
+            >
+              {skillMatches.map((skill, index) => (
+                <button
+                  key={skill.path}
+                  type="button"
+                  role="option"
+                  aria-selected={index === activeSkillHighlight}
+                  onClick={() => pickSkill(skill)}
+                  onMouseEnter={() =>
+                    setSkillHighlight({
+                      query: skillQuery ?? "",
+                      index,
+                    })
+                  }
+                  className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left hover:bg-accent ${index === activeSkillHighlight ? "bg-accent" : ""}`}
+                >
+                  <Package className="size-4 shrink-0 text-muted-foreground" />
+                  <span className="shrink-0">{skill.name}</span>
+                  <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                    {skill.description}
+                  </span>
+                </button>
+              ))}
+            </div>
+          ) : null}
+          {promptSkills.length > 0 ? (
+            <div className="flex flex-wrap gap-1.5 px-3 pt-3">
+              {promptSkills.map((skill, index) => (
+                <span
+                  key={skill.path}
+                  className="inline-flex items-center gap-1.5 rounded-md border bg-muted px-2 py-1 text-xs"
+                  title={skill.description}
+                >
+                  <Package className="size-3.5 text-muted-foreground" />
+                  {skill.name}
+                  <button
+                    type="button"
+                    disabled={sending}
+                    aria-label={`Remove ${skill.name}`}
+                    onClick={() =>
+                      setPromptSkills(
+                        promptSkills.filter(
+                          (_, candidate) => candidate !== index,
+                        ),
+                      )
+                    }
+                    className="rounded-full text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    <X className="size-3" />
+                  </button>
+                </span>
               ))}
             </div>
           ) : null}
@@ -500,8 +627,8 @@ export function Composer() {
                 disabled={!canSend}
                 aria-label={sending ? "Sending" : "Send"}
                 title={
-                  compactHasAttachments
-                    ? "Remove images before compacting"
+                  compactBlocked
+                    ? "Remove images and skills before compacting"
                     : "Send message"
                 }
                 className="rounded-full"

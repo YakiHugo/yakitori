@@ -117,6 +117,17 @@ export type ApiReadSessionResponse = {
   readonly session: ApiSessionDetail
 }
 
+export type ApiSkillSummary = {
+  readonly name: string
+  readonly description: string
+  readonly path: string
+  readonly scope: "user" | "repo"
+}
+
+export type ApiListSkillsResponse = {
+  readonly skills: readonly ApiSkillSummary[]
+}
+
 export type ApiDeleteSessionResponse = {
   readonly sessionId: string
 }

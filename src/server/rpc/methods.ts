@@ -27,6 +27,7 @@ import {
   type ApiListProjectsResponse,
   type ApiListProvidersResponse,
   type ApiListSessionsResponse,
+  type ApiListSkillsResponse,
   type ApiPendingPermission,
   type ApiReadProjectResponse,
   type ApiReadSessionRequest,
@@ -589,6 +590,11 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
     sessionScope,
     (handlers, params) => handlers.readSession(params),
   ),
+  handlerEntry<ApiListSkillsResponse>(
+    "session/skills",
+    sessionScope,
+    (handlers, params) => handlers.listSkills(params),
+  ),
   handlerEntry<ApiDeleteSessionResponse>(
     "session/close",
     sessionScope,
@@ -905,6 +911,7 @@ export type RpcMethodParams = Readonly<{
   "session/searchOccurrences": ApiSearchSessionOccurrencesRequest
   "session/create": ApiCreateSessionRequest
   "session/read": ApiReadSessionRequest
+  "session/skills": ApiReadSessionRequest
   "session/delete": ApiReadSessionRequest
   "session/close": ApiReadSessionRequest
   "session/fork": ApiForkSessionRequest & Readonly<{ sessionId: string }>
@@ -934,6 +941,7 @@ export type RpcMethodResponses = Readonly<{
   "session/searchOccurrences": ApiSearchSessionOccurrencesResponse
   "session/create": ApiCreateSessionResponse
   "session/read": ApiReadSessionResponse
+  "session/skills": ApiListSkillsResponse
   "session/delete": ApiDeleteSessionResponse
   "session/close": ApiDeleteSessionResponse
   "session/fork": ApiForkSessionResponse
