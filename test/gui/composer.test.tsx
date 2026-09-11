@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { cleanup, render, screen, waitFor } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { Composer } from "../../src/gui/components/composer.tsx"
@@ -12,7 +12,7 @@ import {
   createInitialAppState,
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
-import { createEventEnvelope, EventType } from "../../src/kernel/events.ts"
+import { createEventEnvelope, EventType, InputRole } from "../../src/kernel/events.ts"
 import { FakeRpcClient } from "./fake-rpc-client.ts"
 
 const fakeRef = vi.hoisted(() => ({
@@ -225,6 +225,412 @@ function draftImage(detail: "high" | "original") {
     },
   }
 }
+
+function executionWithHistory(...texts: readonly string[]) {
+  return texts.reduce(
+    (state, text, index) =>
+      reduceExecutionView(state, {
+        type: "durable",
+        event: createEventEnvelope({
+          sessionId: "session_1",
+          seq: index + 1,
+          event: {
+            type: EventType.InputAdmitted,
+            data: {
+              requestId: `request_${index + 1}`,
+              inputId: `input_${index + 1}`,
+              role: InputRole.User,
+              content: { kind: "text", text },
+            },
+          },
+        }),
+      }),
+    createExecutionViewState(),
+  )
+}
+
+describe("history navigation", () => {
+  it("recalls admitted inputs with ArrowUp and restores the draft with ArrowDown", async () => {
+    const user = userEvent.setup()
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      execution: executionWithHistory("first question", "second question"),
+      promptDraft: "work in progress",
+    })
+    render(<Composer />)
+
+    const textarea = screen.getByRole("textbox") as HTMLTextAreaElement
+    await user.click(textarea)
+    textarea.setSelectionRange(0, 0)
+    await user.keyboard("{ArrowUp}")
+    expect(useAppStore.getState().promptDraft).toBe("second question")
+    await user.keyboard("{ArrowUp}")
+    expect(useAppStore.getState().promptDraft).toBe("first question")
+    // Already at the oldest entry: ArrowUp changes nothing.
+    await user.keyboard("{ArrowUp}")
+    expect(useAppStore.getState().promptDraft).toBe("first question")
+    await user.keyboard("{ArrowDown}")
+    expect(useAppStore.getState().promptDraft).toBe("second question")
+    await user.keyboard("{ArrowDown}")
+    expect(useAppStore.getState().promptDraft).toBe("work in progress")
+  })
+
+  it("keeps ArrowUp for cursor movement when the cursor is not at the start", async () => {
+    const user = userEvent.setup()
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      execution: executionWithHistory("first question"),
+      promptDraft: "hello",
+    })
+    render(<Composer />)
+
+    const textarea = screen.getByRole("textbox") as HTMLTextAreaElement
+    await user.click(textarea)
+    textarea.setSelectionRange(2, 2)
+    await user.keyboard("{ArrowUp}")
+
+    expect(useAppStore.getState().promptDraft).toBe("hello")
+  })
+
+  it("treats an edit during recall as the new in-progress draft", async () => {
+    const user = userEvent.setup()
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      execution: executionWithHistory("first question"),
+      promptDraft: "work in progress",
+    })
+    render(<Composer />)
+
+    const textarea = screen.getByRole("textbox") as HTMLTextAreaElement
+    await user.click(textarea)
+    textarea.setSelectionRange(0, 0)
+    await user.keyboard("{ArrowUp}")
+    expect(useAppStore.getState().promptDraft).toBe("first question")
+
+    fireEvent.change(textarea, { target: { value: "edited" } })
+    textarea.setSelectionRange(0, 0)
+    await user.keyboard("{ArrowUp}")
+    expect(useAppStore.getState().promptDraft).toBe("first question")
+    await user.keyboard("{ArrowDown}")
+    expect(useAppStore.getState().promptDraft).toBe("edited")
+  })
+})
+
+describe("slash command menu", () => {
+  it("executes the highlighted command on Enter and clears the draft", async () => {
+    const user = userEvent.setup()
+    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    useAppStore.setState({
+      admitInput,
+      selection: { sessionId: "session_1" },
+    })
+    render(<Composer />)
+
+    const textarea = screen.getByRole("textbox")
+    await user.click(textarea)
+    await user.keyboard("/com")
+
+    const menu = screen.getByRole("listbox", { name: "Slash commands" })
+    expect(menu.textContent).toContain("/compact")
+
+    await user.keyboard("{Enter}")
+    expect(admitInput).toHaveBeenCalledWith("/compact")
+    expect(useAppStore.getState().promptDraft).toBe("")
+    expect(screen.queryByRole("listbox")).toBeNull()
+  })
+
+  it("keeps the exact match selectable so Enter executes it", async () => {
+    const user = userEvent.setup()
+    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    useAppStore.setState({
+      admitInput,
+      selection: { sessionId: "session_1" },
+    })
+    render(<Composer />)
+
+    await user.click(screen.getByRole("textbox"))
+    await user.keyboard("/compact")
+    expect(screen.getByRole("listbox")).toBeDefined()
+
+    await user.keyboard("{Enter}")
+    expect(admitInput).toHaveBeenCalledWith("/compact")
+  })
+
+  it("executes a clicked command", async () => {
+    const user = userEvent.setup()
+    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    useAppStore.setState({
+      admitInput,
+      selection: { sessionId: "session_1" },
+    })
+    render(<Composer />)
+
+    await user.click(screen.getByRole("textbox"))
+    await user.keyboard("/com")
+    await user.click(screen.getByRole("option", { name: /\/compact/ }))
+
+    expect(admitInput).toHaveBeenCalledWith("/compact")
+    expect(useAppStore.getState().promptDraft).toBe("")
+  })
+
+  it("keeps the wrapped highlight selectable with arrow keys", async () => {
+    const user = userEvent.setup()
+    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    useAppStore.setState({
+      admitInput,
+      selection: { sessionId: "session_1" },
+    })
+    render(<Composer />)
+
+    await user.click(screen.getByRole("textbox"))
+    await user.keyboard("/")
+    // One command: cycling wraps back onto it and Enter still executes.
+    await user.keyboard("{ArrowDown}{ArrowUp}{Enter}")
+
+    expect(admitInput).toHaveBeenCalledWith("/compact")
+  })
+
+  it("completes compact as text instead of executing while images are staged", async () => {
+    const user = userEvent.setup()
+    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    useAppStore.setState({
+      admitInput,
+      selection: { sessionId: "session_1" },
+      promptAttachments: [draftImage("high")],
+    })
+    render(<Composer />)
+
+    await user.click(screen.getByRole("textbox"))
+    await user.keyboard("/com{Enter}")
+
+    expect(admitInput).not.toHaveBeenCalled()
+    expect(useAppStore.getState().promptDraft).toBe("/compact")
+    // The exact match stays listed, but executing again is still blocked.
+    expect(screen.getByRole("listbox")).toBeDefined()
+    await user.keyboard("{Enter}")
+    expect(admitInput).not.toHaveBeenCalled()
+  })
+
+  it("completes the command as text while the session model is restoring", async () => {
+    const user = userEvent.setup()
+    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    useAppStore.setState({
+      admitInput,
+      selection: { sessionId: "session_1" },
+      restoringModelSelectionFor: "session_1",
+    })
+    render(<Composer />)
+
+    await user.click(screen.getByRole("textbox"))
+    await user.keyboard("/com{Enter}")
+
+    expect(admitInput).not.toHaveBeenCalled()
+    expect(useAppStore.getState().promptDraft).toBe("/compact")
+  })
+
+  it("dismisses with Escape until the query changes", async () => {
+    const user = userEvent.setup()
+    useAppStore.setState({ selection: { sessionId: "session_1" } })
+    render(<Composer />)
+
+    const textarea = screen.getByRole("textbox")
+    await user.click(textarea)
+    await user.keyboard("/")
+    expect(screen.getByRole("listbox")).toBeDefined()
+
+    await user.keyboard("{Escape}")
+    expect(screen.queryByRole("listbox")).toBeNull()
+
+    await user.keyboard("c")
+    expect(screen.getByRole("listbox")).toBeDefined()
+  })
+
+  it("stays closed once the draft takes arguments", async () => {
+    const user = userEvent.setup()
+    useAppStore.setState({ selection: { sessionId: "session_1" } })
+    render(<Composer />)
+
+    await user.click(screen.getByRole("textbox"))
+    await user.keyboard("/compact now")
+
+    expect(screen.queryByRole("listbox")).toBeNull()
+  })
+
+  it("lets Shift+Enter insert a newline while the menu is open", async () => {
+    const user = userEvent.setup()
+    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    useAppStore.setState({
+      admitInput,
+      selection: { sessionId: "session_1" },
+    })
+    render(<Composer />)
+
+    await user.click(screen.getByRole("textbox"))
+    await user.keyboard("/com")
+    await user.keyboard("{Shift>}{Enter}{/Shift}")
+
+    expect(admitInput).not.toHaveBeenCalled()
+    expect(useAppStore.getState().promptDraft).toBe("/com\n")
+  })
+})
+
+describe("skill mention popup", () => {
+  const templateCreator = {
+    name: "Template Creator",
+    description: "Creates project templates",
+    path: "/repo/.agents/skills/template-creator/SKILL.md",
+    scope: "repo" as const,
+  }
+  const changelogWriter = {
+    name: "Changelog Writer",
+    description: "Writes changelogs",
+    path: "/repo/.agents/skills/changelog-writer/SKILL.md",
+    scope: "repo" as const,
+  }
+
+  function skillsState() {
+    return {
+      selection: { sessionId: "session_1" },
+      sessionSkills: [templateCreator, changelogWriter],
+    }
+  }
+
+  it("picks a skill with Enter, replacing the $token with a chip", async () => {
+    const user = userEvent.setup()
+    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    useAppStore.setState({ ...skillsState(), admitInput })
+    render(<Composer />)
+
+    const textarea = screen.getByRole("textbox")
+    await user.click(textarea)
+    await user.keyboard("use $tem")
+
+    const menu = screen.getByRole("listbox", { name: "Skills" })
+    expect(menu.textContent).toContain("Template Creator")
+    expect(menu.textContent).not.toContain("Changelog Writer")
+
+    await user.keyboard("{Enter}")
+    expect(useAppStore.getState().promptDraft).toBe("use")
+    expect(useAppStore.getState().promptSkills).toEqual([templateCreator])
+    expect(admitInput).not.toHaveBeenCalled()
+    expect(
+      screen.getByRole("button", { name: "Remove Template Creator" }),
+    ).toBeDefined()
+  })
+
+  it("sends a skill-only draft and clears the chips after admission", async () => {
+    const user = userEvent.setup()
+    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    useAppStore.setState({ ...skillsState(), admitInput })
+    render(<Composer />)
+
+    await user.click(screen.getByRole("textbox"))
+    await user.keyboard("$tem{Enter}")
+    await user.click(screen.getByRole("button", { name: "Send" }))
+
+    // The store appends path-qualified mentions; the composer sends plain text.
+    expect(admitInput).toHaveBeenCalledWith("")
+  })
+
+  it("cycles the highlight with arrow keys and picks with Tab", async () => {
+    const user = userEvent.setup()
+    useAppStore.setState(skillsState())
+    render(<Composer />)
+
+    await user.click(screen.getByRole("textbox"))
+    await user.keyboard("$")
+    await user.keyboard("{ArrowDown}{Tab}")
+
+    expect(useAppStore.getState().promptSkills).toEqual([changelogWriter])
+  })
+
+  it("does not list an already picked skill again", async () => {
+    const user = userEvent.setup()
+    useAppStore.setState({
+      ...skillsState(),
+      promptSkills: [templateCreator],
+    })
+    render(<Composer />)
+
+    await user.click(screen.getByRole("textbox"))
+    await user.keyboard("$")
+
+    const menu = screen.getByRole("listbox", { name: "Skills" })
+    expect(menu.textContent).toContain("Changelog Writer")
+    expect(menu.textContent).not.toContain("Template Creator")
+  })
+
+  it("dismisses with Escape until the query changes", async () => {
+    const user = userEvent.setup()
+    useAppStore.setState(skillsState())
+    render(<Composer />)
+
+    await user.click(screen.getByRole("textbox"))
+    await user.keyboard("$")
+    expect(screen.getByRole("listbox", { name: "Skills" })).toBeDefined()
+
+    await user.keyboard("{Escape}")
+    expect(screen.queryByRole("listbox", { name: "Skills" })).toBeNull()
+
+    await user.keyboard("t")
+    expect(screen.getByRole("listbox", { name: "Skills" })).toBeDefined()
+  })
+
+  it("closes the mention popup when the cursor leaves the trailing token", async () => {
+    const user = userEvent.setup()
+    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    useAppStore.setState({ ...skillsState(), admitInput })
+    render(<Composer />)
+
+    const textarea = screen.getByRole("textbox") as HTMLTextAreaElement
+    await user.click(textarea)
+    await user.keyboard("use $tem")
+    expect(screen.getByRole("listbox", { name: "Skills" })).toBeDefined()
+
+    textarea.setSelectionRange(2, 2)
+    fireEvent.select(textarea)
+    expect(screen.queryByRole("listbox", { name: "Skills" })).toBeNull()
+
+    await user.keyboard("{Enter}")
+    expect(admitInput).toHaveBeenCalledWith("use $tem")
+  })
+
+  it("removes a chip", async () => {
+    const user = userEvent.setup()
+    useAppStore.setState({
+      ...skillsState(),
+      promptSkills: [templateCreator],
+    })
+    render(<Composer />)
+
+    await user.click(
+      screen.getByRole("button", { name: "Remove Template Creator" }),
+    )
+
+    expect(useAppStore.getState().promptSkills).toEqual([])
+  })
+
+  it("blocks compact while skill chips are staged", async () => {
+    const user = userEvent.setup()
+    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    useAppStore.setState({
+      ...skillsState(),
+      admitInput,
+      promptDraft: "/compact",
+      promptSkills: [templateCreator],
+    })
+    render(<Composer />)
+
+    expect(screen.getByRole("button", { name: "Send" })).toHaveProperty(
+      "disabled",
+      true,
+    )
+    await user.click(screen.getByRole("textbox"))
+    await user.keyboard("{Enter}")
+    expect(admitInput).not.toHaveBeenCalled()
+    expect(useAppStore.getState().promptDraft).toBe("/compact")
+  })
+})
 
 describe("model selector", () => {
   function selectModelState() {

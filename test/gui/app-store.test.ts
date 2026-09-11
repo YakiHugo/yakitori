@@ -122,7 +122,9 @@ describe("app store event stream", () => {
 
     const stream = fakeRef.current.streams[0]
     emitSnapshot(stream)
-    expect(fakeRef.current.requests).toEqual([])
+    expect(fakeRef.current.requests).toEqual([
+      { method: "session/skills", params: { sessionId: "session_1" } },
+    ])
     expect(stream?.sessionId).toBe("session_1")
     expect(stream?.after).toBe(0)
     expect(useAppStore.getState().selectedSession?.id).toBe("session_1")
@@ -516,6 +518,95 @@ describe("delete session", () => {
 
     expect(useAppStore.getState().selectedSession?.id).toBe("session_1")
     expect(useAppStore.getState().selection.sessionId).toBe("session_1")
+  })
+})
+
+describe("session drafts", () => {
+  const attachment = {
+    name: "screenshot.png",
+    mediaType: "image/png" as const,
+    detail: "high" as const,
+    sizeBytes: 9,
+    file: {
+      rolloutId: "session_1",
+      path: "attachments/staging/draft_1/1.png",
+    },
+  }
+
+  it("parks the active draft on session switch and restores it on return", async () => {
+    const skill = {
+      name: "Template Creator",
+      description: "Creates project templates",
+      path: "/repo/.agents/skills/template-creator/SKILL.md",
+      scope: "repo" as const,
+    }
+    await useAppStore.getState().selectSession("session_1")
+    useAppStore.getState().setPromptDraft("draft for one")
+    useAppStore.getState().setPromptAttachments([attachment])
+    useAppStore.getState().setPromptSkills([skill])
+
+    await useAppStore.getState().selectSession("session_2")
+
+    expect(useAppStore.getState().promptDraft).toBeUndefined()
+    expect(useAppStore.getState().promptAttachments).toEqual([])
+    expect(useAppStore.getState().promptSkills).toEqual([])
+
+    useAppStore.getState().setPromptDraft("draft for two")
+    await useAppStore.getState().selectSession("session_1")
+
+    expect(useAppStore.getState().promptDraft).toBe("draft for one")
+    expect(useAppStore.getState().promptAttachments).toEqual([attachment])
+    expect(useAppStore.getState().promptSkills).toEqual([skill])
+
+    await useAppStore.getState().selectSession("session_2")
+    expect(useAppStore.getState().promptDraft).toBe("draft for two")
+  })
+
+  it("does not park an empty draft", async () => {
+    await useAppStore.getState().selectSession("session_1")
+    useAppStore.getState().setPromptDraft("   ")
+
+    await useAppStore.getState().selectSession("session_2")
+
+    expect(useAppStore.getState().sessionDrafts).toEqual({})
+  })
+
+  it("drops a parked draft when its session is deleted", async () => {
+    fakeRef.current.respond = (method, params) => {
+      if (method === "session/delete") {
+        return { sessionId: (params as { sessionId: string }).sessionId }
+      }
+      if (method === "session/list") return { sessions: [] }
+      return notFound()
+    }
+    await useAppStore.getState().selectSession("session_1")
+    useAppStore.getState().setPromptDraft("draft for one")
+    await useAppStore.getState().selectSession("session_2")
+    expect(useAppStore.getState().sessionDrafts.session_1).toBeDefined()
+
+    await useAppStore.getState().deleteSession("session_1")
+
+    expect(useAppStore.getState().sessionDrafts).toEqual({})
+    expect(useAppStore.getState().selection.sessionId).toBe("session_2")
+    expect(useAppStore.getState().promptDraft).toBeUndefined()
+  })
+
+  it("clears the live draft when the selected session is deleted", async () => {
+    fakeRef.current.respond = (method, params) => {
+      if (method === "session/delete") {
+        return { sessionId: (params as { sessionId: string }).sessionId }
+      }
+      if (method === "session/list") return { sessions: [] }
+      return notFound()
+    }
+    await useAppStore.getState().selectSession("session_1")
+    useAppStore.getState().setPromptDraft("draft for one")
+
+    await useAppStore.getState().deleteSession("session_1")
+
+    expect(useAppStore.getState().promptDraft).toBeUndefined()
+    expect(useAppStore.getState().promptAttachments).toEqual([])
+    expect(useAppStore.getState().sessionDrafts).toEqual({})
   })
 })
 
@@ -1005,6 +1096,98 @@ describe("model selection", () => {
 
     expect(useAppStore.getState().providers).toHaveLength(2)
     expect(useAppStore.getState().message).toBeUndefined()
+  })
+
+  it("submits picked skills as path-qualified mentions and clears the chips", async () => {
+    window.localStorage.clear()
+    fakeRef.current.respond = admissionResponder()
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      promptDraft: "hello",
+      promptSkills: [
+        {
+          name: "Template Creator",
+          description: "Creates project templates",
+          path: "/repo/.agents/skills/template-creator/SKILL.md",
+          scope: "repo",
+        },
+      ],
+    })
+
+    await useAppStore.getState().admitInput("hello")
+
+    const admissions = fakeRef.current.requestsFor("session/input")
+    expect(admissions).toHaveLength(1)
+    expect(admissions[0]?.params).toMatchObject({
+      sessionId: "session_1",
+      content: {
+        kind: "text",
+        text: "hello [$Template Creator](/repo/.agents/skills/template-creator/SKILL.md)",
+      },
+    })
+    expect(useAppStore.getState().promptSkills).toEqual([])
+    expect(useAppStore.getState().promptDraft).toBeUndefined()
+  })
+
+  it("keeps chips picked while an admission is in flight", async () => {
+    window.localStorage.clear()
+    let release: (() => void) | undefined
+    fakeRef.current.respond = (method, params) => {
+      if (method === "userPreference/write") return { userPreference: params }
+      if (method === "session/list") return { sessions: [] }
+      if (method === "session/input") {
+        const body = params as { requestId: string }
+        return new Promise((resolve) => {
+          release = () =>
+            resolve({
+              requestId: body.requestId,
+              inputId: "input_1",
+              event: createEventEnvelope({
+                sessionId: "session_1",
+                seq: 2,
+                event: {
+                  type: EventType.InputAdmitted,
+                  data: {
+                    requestId: body.requestId,
+                    inputId: "input_1",
+                    role: InputRole.User,
+                    content: { kind: "text", text: "hello [$A](/a)" },
+                  },
+                },
+              }),
+            })
+        })
+      }
+      return notFound()
+    }
+    const skillA = {
+      name: "A",
+      description: "a",
+      path: "/a",
+      scope: "repo" as const,
+    }
+    const skillB = {
+      name: "B",
+      description: "b",
+      path: "/b",
+      scope: "repo" as const,
+    }
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      promptDraft: "hello",
+      promptSkills: [skillA],
+    })
+
+    const pending = useAppStore.getState().admitInput("hello")
+    for (let attempt = 0; attempt < 100 && release === undefined; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+    useAppStore.getState().setPromptSkills([skillA, skillB])
+    release?.()
+    await pending
+
+    expect(useAppStore.getState().promptSkills).toEqual([skillA, skillB])
+    expect(useAppStore.getState().promptDraft).toBe("hello")
   })
 
   it("sends the saved modelSelection with admitted input", async () => {

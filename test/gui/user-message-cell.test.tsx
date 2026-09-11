@@ -23,6 +23,56 @@ const entry = {
   at: "2026-08-17T00:00:00.000Z",
 }
 
+describe("skill mentions", () => {
+  it("renders trailing skill mentions as chips and strips them from the text", () => {
+    render(
+      <UserMessageCell
+        entry={{
+          ...entry,
+          text: "Use this please [$Template Creator](/repo/.agents/skills/template/SKILL.md)",
+        }}
+        queued={false}
+      />,
+    )
+
+    expect(screen.getByText("Template Creator")).toBeDefined()
+    expect(screen.getByText("Use this please")).toBeDefined()
+    expect(screen.queryByText(/SKILL\.md/)).toBeNull()
+  })
+
+  it("renders a mentions-only message without an empty text block", () => {
+    render(
+      <UserMessageCell
+        entry={{
+          ...entry,
+          text: "[$Template Creator](/repo/.agents/skills/template/SKILL.md)",
+        }}
+        queued={false}
+      />,
+    )
+
+    expect(screen.getByText("Template Creator")).toBeDefined()
+    expect(screen.queryByText(/SKILL\.md/)).toBeNull()
+  })
+
+  it("leaves inline mention-shaped text the user typed untouched", () => {
+    render(
+      <UserMessageCell
+        entry={{
+          ...entry,
+          text: "See [$HOME](/docs/env) for details",
+        }}
+        queued={false}
+      />,
+    )
+
+    expect(
+      screen.getByText("See [$HOME](/docs/env) for details"),
+    ).toBeDefined()
+    expect(screen.queryByText("HOME")).toBeNull()
+  })
+})
+
 describe("user message fork actions", () => {
   it("confirms conversation-only undo before creating a branch", async () => {
     const user = userEvent.setup()

@@ -31,6 +31,7 @@ import {
   YakitoriErrorCode,
 } from "../kernel/index.ts"
 import { createCoalescingDeltaPublisher } from "../runtime/live-events.ts"
+import type { SkillMetadata } from "../runtime/skills.ts"
 import type {
   RuntimePermissionReason,
   RuntimePermissionRequest,
@@ -51,6 +52,7 @@ import {
   type ApiForkSessionResponse,
   type ApiHandlerResult,
   type ApiListSessionsResponse,
+  type ApiListSkillsResponse,
   type ApiReadSessionEventsResponse,
   type ApiReadSessionResponse,
   type ApiResolvePermissionResponse,
@@ -95,6 +97,13 @@ export type ThreadServerHandlerOptions = {
   readonly maxInputBytes?: number
   readonly availableProviders?: readonly string[]
   readonly rolloutAssets?: RolloutAssets
+  // Lists the skills the runtime would discover for a session's working
+  // directory. Absent in tests and embedders without skill discovery.
+  readonly listSessionSkills?: (input: {
+    readonly sessionId: string
+    readonly workingDirectory: string
+    readonly projectId?: string
+  }) => Promise<readonly SkillMetadata[]>
   // Enables projectId on session create/list and orphan suppression on reads.
   readonly projectStore?: ProjectStore
   readonly reportOperationalFailure?: OperationalFailureReporter
@@ -114,6 +123,9 @@ export type ServerHandlers = {
     input: unknown,
   ): Promise<ApiHandlerResult<ApiSearchSessionOccurrencesResponse>>
   readSession(input: unknown): Promise<ApiHandlerResult<ApiReadSessionResponse>>
+  listSkills(
+    input: unknown,
+  ): Promise<ApiHandlerResult<ApiListSkillsResponse>>
   deleteSession(
     input: unknown,
   ): Promise<ApiHandlerResult<ApiDeleteSessionResponse>>
@@ -562,6 +574,42 @@ export function createThreadServerHandlers(
         })
       } catch (error) {
         return fail(error, reporter, "read-session")
+      }
+    },
+
+    async listSkills(input) {
+      try {
+        const { sessionId } = requireReadSessionRequest(input)
+        const stored = await options.store.readThread(sessionId)
+        if (stored === undefined) {
+          throw notFound(`Session ${sessionId} was not found.`, { sessionId })
+        }
+        if (options.listSessionSkills === undefined) {
+          return ok(200, { skills: [] })
+        }
+        const workingDirectory =
+          stored.metadata.workingDirectory ??
+          options.sessionDefaults?.workingDirectory
+        if (workingDirectory === undefined) return ok(200, { skills: [] })
+        const discovered = await options.listSessionSkills({
+          sessionId,
+          workingDirectory,
+          ...(stored.metadata.projectId === undefined
+            ? {}
+            : { projectId: stored.metadata.projectId }),
+        })
+        return ok(200, {
+          skills: discovered
+            .filter((skill) => skill.enabled !== false)
+            .map((skill) => ({
+              name: skill.name,
+              description: skill.description,
+              path: skill.path,
+              scope: skill.scope,
+            })),
+        })
+      } catch (error) {
+        return fail(error, reporter, "list-skills")
       }
     },
 

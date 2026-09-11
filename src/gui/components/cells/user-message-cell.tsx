@@ -1,10 +1,38 @@
-import { PencilLine, RotateCcw, X } from "lucide-react"
+import { Package, PencilLine, RotateCcw, X } from "lucide-react"
 import { useState } from "react"
 import type { ExecutionEntry } from "../../execution-view.ts"
 import { useAppStore } from "../../store/app-store.ts"
 import { imageAttachmentUrl } from "../../composer-attachments.ts"
 import { Badge } from "../ui/badge.tsx"
 import { Button } from "../ui/button.tsx"
+
+// Skill chips submitted from the composer travel as a trailing run of
+// path-qualified mentions appended to the text; render that run as chips
+// instead of raw markdown. Inline `[$x](y)` spans the user typed elsewhere
+// in the message are left untouched.
+const SKILL_MENTION_PATTERN = /\[\$([^\]]+)\]\(([^)]+)\)/g
+const TRAILING_SKILL_MENTIONS = /(?:[^\S\n]*\[\$[^\]]+\]\([^)]+\))+\s*$/
+
+function splitSkillMentions(text: string): {
+  readonly text: string
+  readonly mentions: readonly { readonly name: string; readonly path: string }[]
+} {
+  if (!text.includes("[$")) return { text, mentions: [] }
+  const trailing = TRAILING_SKILL_MENTIONS.exec(text)
+  if (trailing === null) return { text, mentions: [] }
+  const seen = new Set<string>()
+  const mentions = [...trailing[0].matchAll(SKILL_MENTION_PATTERN)]
+    .map((match) => ({
+      name: match[1] ?? "",
+      path: match[2] ?? "",
+    }))
+    .filter((mention) => {
+      if (seen.has(mention.path)) return false
+      seen.add(mention.path)
+      return true
+    })
+  return { text: text.slice(0, trailing.index).trimEnd(), mentions }
+}
 
 export function UserMessageCell({
   entry,
@@ -20,6 +48,7 @@ export function UserMessageCell({
   const [draft, setDraft] = useState(entry.text)
   const edited = draft.trim()
   const attachments = entry.attachments ?? []
+  const display = splitSkillMentions(entry.text)
 
   return (
     <div className="group flex flex-col items-end gap-1.5">
@@ -38,8 +67,22 @@ export function UserMessageCell({
             ))}
           </div>
         ) : null}
-        {entry.text.length > 0 ? (
-          <div className="px-3 py-2 whitespace-pre-wrap">{entry.text}</div>
+        {display.mentions.length > 0 ? (
+          <div className="flex flex-wrap gap-1 px-3 pt-2">
+            {display.mentions.map((mention) => (
+              <span
+                key={mention.path}
+                title={mention.path}
+                className="inline-flex items-center gap-1 rounded bg-primary-foreground/15 px-1.5 py-0.5 text-[11px]"
+              >
+                <Package className="size-3" />
+                {mention.name}
+              </span>
+            ))}
+          </div>
+        ) : null}
+        {display.text.length > 0 ? (
+          <div className="px-3 py-2 whitespace-pre-wrap">{display.text}</div>
         ) : null}
       </div>
       <div className="flex min-h-5 items-center gap-1">

@@ -14,6 +14,7 @@ import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
 import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
 import { createSessionEventHub } from "../../src/server/event-hub.ts"
 import { createThreadServerHandlers } from "../../src/server/handlers.ts"
+import { createSkillsLoader } from "../../src/runtime/skills.ts"
 import { MemoryThreadStore } from "../core/memory-thread-store.ts"
 
 const cleanups: Array<() => Promise<void>> = []
@@ -432,6 +433,106 @@ describe("thread server handlers", () => {
     expect(admitted).toMatchObject({
       ok: false,
       status: 404,
+      body: { error: { code: "not_found" } },
+    })
+  })
+
+  it("lists discoverable skills for a session, hiding disabled ones", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "yakitori-handler-skills-"))
+    const skillDirectory = join(workspace, ".agents", "skills", "template")
+    await mkdir(skillDirectory, { recursive: true })
+    await writeFile(
+      join(skillDirectory, "SKILL.md"),
+      "---\nname: Template Creator\ndescription: Makes templates\n---\nBody.\n",
+    )
+    const store = new MemoryThreadStore()
+    const manager = new ThreadManager({
+      store,
+      createTurnProcessor: () =>
+        createTurnProcessor({
+          stream: createFauxProvider([]).stream,
+          toolRegistry: createToolRegistry([]),
+          loadProjectInstructions: async () => undefined,
+        }),
+    })
+    const skillsLoader = createSkillsLoader()
+    const handlers = createThreadServerHandlers({
+      manager,
+      store,
+      listSessionSkills: async ({ workingDirectory }) => {
+        const discovered = await skillsLoader({ workingDirectory })
+        return [
+          ...discovered.skills,
+          {
+            name: "Disabled Skill",
+            description: "Hidden",
+            path: join(skillDirectory, "DISABLED.md"),
+            scope: "repo" as const,
+            enabled: false,
+          },
+        ]
+      },
+    })
+    cleanups.push(async () => {
+      await manager.shutdown()
+      await handlers.close()
+      await rm(workspace, { recursive: true, force: true })
+    })
+    const created = await handlers.createSession({
+      workingDirectory: workspace,
+      mateId: "mate_test",
+      mateRevisionId: "mate_revision_test",
+    })
+    if (!created.ok) throw new Error(created.body.error.message)
+    const sessionId = created.body.session.id
+
+    const listed = await handlers.listSkills({ sessionId })
+
+    if (!listed.ok) throw new Error(listed.body.error.message)
+    expect(listed.body.skills).toEqual([
+      {
+        name: "Template Creator",
+        description: "Makes templates",
+        path: expect.stringContaining("SKILL.md"),
+        scope: "repo",
+      },
+    ])
+  })
+
+  it("answers an empty skill list without discovery wired", async () => {
+    const store = new MemoryThreadStore()
+    const manager = new ThreadManager({
+      store,
+      createTurnProcessor: () =>
+        createTurnProcessor({
+          stream: createFauxProvider([]).stream,
+          toolRegistry: createToolRegistry([]),
+          loadProjectInstructions: async () => undefined,
+        }),
+    })
+    const handlers = createThreadServerHandlers({ manager, store })
+    cleanups.push(async () => {
+      await manager.shutdown()
+      await handlers.close()
+    })
+    const created = await handlers.createSession({
+      workingDirectory: "/tmp",
+      mateId: "mate_test",
+      mateRevisionId: "mate_revision_test",
+    })
+    if (!created.ok) throw new Error(created.body.error.message)
+
+    const listed = await handlers.listSkills({
+      sessionId: created.body.session.id,
+    })
+    if (!listed.ok) throw new Error(listed.body.error.message)
+    expect(listed.body.skills).toEqual([])
+
+    const missing = await handlers.listSkills({
+      sessionId: "session_00000000-0000-0000-0000-000000000000",
+    })
+    expect(missing).toMatchObject({
+      ok: false,
       body: { error: { code: "not_found" } },
     })
   })

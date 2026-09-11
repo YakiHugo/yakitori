@@ -3,6 +3,7 @@ import { ApprovalBar } from "./components/approval-bar.tsx"
 import { Composer } from "./components/composer.tsx"
 import { ProjectSwitcher } from "./components/project-switcher.tsx"
 import { StatusSurface } from "./components/status-surface.tsx"
+import { TelemetryRail } from "./components/telemetry-rail.tsx"
 import { ThreadList } from "./components/thread-list.tsx"
 import { Transcript } from "./components/transcript.tsx"
 import { Button } from "./components/ui/button.tsx"
@@ -50,6 +51,7 @@ export function App() {
               <ApprovalBar />
               <StatusSurface />
               <Composer />
+              <TelemetryRail />
             </>
           ) : (
             <EmptyState />

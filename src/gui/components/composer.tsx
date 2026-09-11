@@ -1,6 +1,12 @@
-import { ArrowUp, LoaderCircle, Plus, ShieldCheck, X } from "lucide-react"
-import { useLayoutEffect, useRef, useState } from "react"
+import { ArrowUp, LoaderCircle, Package, Plus, ShieldCheck, X } from "lucide-react"
+import {
+  type KeyboardEvent,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react"
 import { COMPACT_DIRECTIVE } from "../../kernel/events.ts"
+import type { ApiSkillSummary } from "../../server/protocol.ts"
 import {
   appendImageFiles,
   appendPickedImages,
@@ -16,9 +22,23 @@ import {
 import { ModelSelector } from "./model-selector.tsx"
 import { Button } from "./ui/button.tsx"
 
+type SlashCommand = {
+  readonly name: string
+  readonly description: string
+}
+
+const SLASH_COMMANDS: readonly SlashCommand[] = [
+  {
+    name: COMPACT_DIRECTIVE,
+    description: "Compact the conversation context",
+  },
+]
+
 export function Composer() {
   const draft = useAppStore((state) => state.promptDraft) ?? ""
   const attachments = useAppStore((state) => state.promptAttachments)
+  const promptSkills = useAppStore((state) => state.promptSkills)
+  const sessionSkills = useAppStore((state) => state.sessionSkills)
   const apiBase = useAppStore((state) => state.apiBase)
   const busy = useAppStore((state) => state.busy)
   const focusRevision = useAppStore((state) => state.composerFocusRevision)
@@ -43,11 +63,28 @@ export function Composer() {
   const setPromptAttachments = useAppStore(
     (state) => state.setPromptAttachments,
   )
+  const setPromptSkills = useAppStore((state) => state.setPromptSkills)
   const admitInput = useAppStore((state) => state.admitInput)
   const view = useExecutionView()
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   const [attachmentError, setAttachmentError] = useState<string>()
   const [readingImages, setReadingImages] = useState(false)
+  const [historyNavigation, setHistoryNavigation] = useState<{
+    readonly sessionId: string | undefined
+    readonly stepsBack: number
+    readonly savedDraft: string
+  }>()
+  const [slashDismissed, setSlashDismissed] = useState<string>()
+  const [slashHighlight, setSlashHighlight] = useState<{
+    readonly query: string
+    readonly index: number
+  }>()
+  const [skillDismissed, setSkillDismissed] = useState<string>()
+  const [skillHighlight, setSkillHighlight] = useState<{
+    readonly query: string
+    readonly index: number
+  }>()
+  const [cursorAtEnd, setCursorAtEnd] = useState(true)
 
   const effectiveModel = normalizeKimiModelSelection(
     resolveEffectiveModel({
@@ -72,22 +109,61 @@ export function Composer() {
       : (modelEntry.imageDetailModes?.includes("original") ?? false)
 
   useLayoutEffect(() => {
-    const textarea = textareaRef.current
-    if (!textarea || textarea.value !== draft) return
-    textarea.style.height = "auto"
-    textarea.style.height = `${Math.min(Math.max(textarea.scrollHeight, 52), 200)}px`
-  }, [draft])
-
-  useLayoutEffect(() => {
     if (focusRevision > 0) textareaRef.current?.focus()
   }, [focusRevision])
+
+  // Navigation parked for another session must not leak into this one.
+  const activeHistoryNavigation =
+    historyNavigation?.sessionId === sessionId ? historyNavigation : undefined
+
+  const historyTexts = view.entries.flatMap((entry) =>
+    entry.kind === "user_input" ? [entry.text] : [],
+  )
+
+  // The menu tracks a single first-token query like codex's command popup:
+  // it stays open while the draft is exactly one `/name` token, matching
+  // case-insensitively and keeping exact matches selectable.
+  const slashQuery =
+    draft.startsWith("/") && !/\s/.test(draft) ? draft : undefined
+  const slashMatches =
+    slashQuery === undefined || slashDismissed === slashQuery
+      ? []
+      : SLASH_COMMANDS.filter((command) =>
+          command.name.toLowerCase().startsWith(slashQuery.toLowerCase()),
+        )
+  const slashMenuOpen = slashMatches.length > 0
+  const activeSlashHighlight =
+    slashHighlight !== undefined && slashHighlight.query === slashQuery
+      ? Math.min(slashHighlight.index, slashMatches.length - 1)
+      : 0
+
+  // The mention popup tracks a trailing `$token`, like codex's skill popup:
+  // it opens only while the cursor sits at the end of that token, so editing
+  // earlier text never triggers completions or captures Enter.
+  const skillQuery = /(?:^|\s)\$([\p{L}\p{N}_-]*)$/u.exec(draft)?.[1]
+  const skillMatches =
+    skillQuery === undefined || skillDismissed === skillQuery
+      ? []
+      : sessionSkills.filter(
+          (skill) =>
+            !promptSkills.some((picked) => picked.path === skill.path) &&
+            skill.name.toLowerCase().includes(skillQuery.toLowerCase()),
+        )
+  const skillMenuOpen =
+    cursorAtEnd && sessionSkills.length > 0 && skillMatches.length > 0
+  const activeSkillHighlight =
+    skillHighlight !== undefined && skillHighlight.query === skillQuery
+      ? Math.min(skillHighlight.index, skillMatches.length - 1)
+      : 0
 
   const text = draft.trim()
   const sending =
     sessionId !== undefined && inFlightActions.has(`admit:${sessionId}`)
-  const containsInput = text.length > 0 || attachments.length > 0
-  const compactHasAttachments =
-    text === COMPACT_DIRECTIVE && attachments.length > 0
+  const containsInput =
+    text.length > 0 || attachments.length > 0 || promptSkills.length > 0
+  const compactBlocked =
+    text === COMPACT_DIRECTIVE &&
+    (attachments.length > 0 || promptSkills.length > 0)
   const canSend =
     containsInput &&
     sessionId !== undefined &&
@@ -95,7 +171,7 @@ export function Composer() {
     !busy &&
     !sending &&
     !readingImages &&
-    !compactHasAttachments
+    !compactBlocked
 
   const addFiles = async (files: readonly File[]) => {
     if (files.length === 0 || sessionId === undefined) return
@@ -167,6 +243,7 @@ export function Composer() {
 
   const submit = () => {
     if (!canSend) return
+    setHistoryNavigation(undefined)
     if (attachments.length === 0) void admitInput(text)
     else
       void admitInput(
@@ -178,6 +255,133 @@ export function Composer() {
               detail: "high" as const,
             })),
       )
+  }
+
+  // Selecting a command dispatches it right away, like codex: the draft
+  // clears and the command runs. When execution is currently blocked —
+  // mid-restore, busy, or compact with staged chips, which the compact lane
+  // rejects — the selection only completes the text so nothing is lost.
+  const runSlashCommand = (command: SlashCommand): void => {
+    setSlashDismissed(undefined)
+    setSlashHighlight(undefined)
+    const blocked =
+      sessionId === undefined ||
+      restoringModelSelectionFor === sessionId ||
+      busy ||
+      sending ||
+      (command.name === COMPACT_DIRECTIVE &&
+        (attachments.length > 0 || promptSkills.length > 0))
+    if (blocked) {
+      setPromptDraft(command.name)
+      textareaRef.current?.focus()
+      return
+    }
+    setPromptDraft("")
+    void admitInput(command.name)
+  }
+
+  const pickSkill = (skill: ApiSkillSummary): void => {
+    setSkillDismissed(undefined)
+    setSkillHighlight(undefined)
+    // The chip replaces the trailing `$query` token in the draft.
+    setPromptDraft(draft.replace(/(^|\s)\$[\p{L}\p{N}_-]*$/u, "").trimEnd())
+    if (!promptSkills.some((picked) => picked.path === skill.path)) {
+      setPromptSkills([...promptSkills, skill])
+    }
+    textareaRef.current?.focus()
+  }
+
+  const handleDraftKeyDown = (
+    event: KeyboardEvent<HTMLTextAreaElement>,
+  ): void => {
+    if (event.nativeEvent.isComposing) return
+    if (slashMenuOpen) {
+      if (event.key === "Escape") {
+        setSlashDismissed(slashQuery)
+        return
+      }
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault()
+        const step = event.key === "ArrowDown" ? 1 : -1
+        setSlashHighlight({
+          query: slashQuery ?? "",
+          index:
+            (activeSlashHighlight + step + slashMatches.length) %
+            slashMatches.length,
+        })
+        return
+      }
+      const highlighted = slashMatches[activeSlashHighlight]
+      if (
+        (event.key === "Enter" && !event.shiftKey && highlighted !== undefined) ||
+        (event.key === "Tab" && highlighted !== undefined)
+      ) {
+        event.preventDefault()
+        runSlashCommand(highlighted)
+        return
+      }
+    }
+    if (skillMenuOpen) {
+      if (event.key === "Escape") {
+        setSkillDismissed(skillQuery)
+        return
+      }
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault()
+        const step = event.key === "ArrowDown" ? 1 : -1
+        setSkillHighlight({
+          query: skillQuery ?? "",
+          index:
+            (activeSkillHighlight + step + skillMatches.length) %
+            skillMatches.length,
+        })
+        return
+      }
+      const highlighted = skillMatches[activeSkillHighlight]
+      if (
+        (event.key === "Enter" && !event.shiftKey && highlighted !== undefined) ||
+        (event.key === "Tab" && highlighted !== undefined)
+      ) {
+        event.preventDefault()
+        pickSkill(highlighted)
+        return
+      }
+    }
+    if (event.key === "ArrowUp") {
+      const cursorAtStart =
+        event.currentTarget.selectionStart === 0 &&
+        event.currentTarget.selectionEnd === 0
+      if (activeHistoryNavigation === undefined && !cursorAtStart) return
+      event.preventDefault()
+      const stepsBack = (activeHistoryNavigation?.stepsBack ?? 0) + 1
+      const entry = historyTexts[historyTexts.length - stepsBack]
+      if (entry === undefined) return
+      setHistoryNavigation({
+        sessionId,
+        stepsBack,
+        savedDraft: activeHistoryNavigation?.savedDraft ?? draft,
+      })
+      setPromptDraft(entry)
+      return
+    }
+    if (event.key === "ArrowDown" && activeHistoryNavigation !== undefined) {
+      event.preventDefault()
+      const stepsBack = activeHistoryNavigation.stepsBack - 1
+      if (stepsBack === 0) {
+        setPromptDraft(activeHistoryNavigation.savedDraft)
+        setHistoryNavigation(undefined)
+        return
+      }
+      const entry = historyTexts[historyTexts.length - stepsBack]
+      if (entry === undefined) return
+      setHistoryNavigation({ ...activeHistoryNavigation, stepsBack })
+      setPromptDraft(entry)
+      return
+    }
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault()
+      submit()
+    }
   }
 
   return (
@@ -197,7 +401,95 @@ export function Composer() {
           void addFiles(Array.from(event.dataTransfer.files))
         }}
       >
-        <div className="overflow-visible rounded-2xl border bg-card shadow-[0_1px_2px_color-mix(in_oklab,var(--foreground)_7%,transparent),0_8px_24px_-10px_color-mix(in_oklab,var(--foreground)_14%,transparent)] transition-shadow focus-within:shadow-[0_1px_2px_color-mix(in_oklab,var(--foreground)_8%,transparent),0_10px_30px_-10px_color-mix(in_oklab,var(--foreground)_20%,transparent)]">
+        <div className="relative overflow-visible rounded-2xl border bg-card shadow-[0_1px_2px_color-mix(in_oklab,var(--foreground)_7%,transparent),0_8px_24px_-10px_color-mix(in_oklab,var(--foreground)_14%,transparent)] transition-shadow focus-within:shadow-[0_1px_2px_color-mix(in_oklab,var(--foreground)_8%,transparent),0_10px_30px_-10px_color-mix(in_oklab,var(--foreground)_20%,transparent)]">
+          {slashMenuOpen ? (
+            <div
+              role="listbox"
+              aria-label="Slash commands"
+              className="absolute bottom-full left-0 z-10 mb-1 w-72 space-y-1 rounded-md border bg-popover p-2 text-sm shadow-md"
+            >
+              {slashMatches.map((command, index) => (
+                <button
+                  key={command.name}
+                  type="button"
+                  role="option"
+                  aria-selected={index === activeSlashHighlight}
+                  onClick={() => runSlashCommand(command)}
+                  onMouseEnter={() =>
+                    setSlashHighlight({
+                      query: slashQuery ?? "",
+                      index,
+                    })
+                  }
+                  className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left hover:bg-accent ${index === activeSlashHighlight ? "bg-accent" : ""}`}
+                >
+                  <span className="shrink-0 font-mono">{command.name}</span>
+                  <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                    {command.description}
+                  </span>
+                </button>
+              ))}
+            </div>
+          ) : null}
+          {skillMenuOpen ? (
+            <div
+              role="listbox"
+              aria-label="Skills"
+              className="absolute bottom-full left-0 z-10 mb-1 w-72 space-y-1 rounded-md border bg-popover p-2 text-sm shadow-md"
+            >
+              {skillMatches.map((skill, index) => (
+                <button
+                  key={skill.path}
+                  type="button"
+                  role="option"
+                  aria-selected={index === activeSkillHighlight}
+                  onClick={() => pickSkill(skill)}
+                  onMouseEnter={() =>
+                    setSkillHighlight({
+                      query: skillQuery ?? "",
+                      index,
+                    })
+                  }
+                  className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left hover:bg-accent ${index === activeSkillHighlight ? "bg-accent" : ""}`}
+                >
+                  <Package className="size-4 shrink-0 text-muted-foreground" />
+                  <span className="shrink-0">{skill.name}</span>
+                  <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                    {skill.description}
+                  </span>
+                </button>
+              ))}
+            </div>
+          ) : null}
+          {promptSkills.length > 0 ? (
+            <div className="flex flex-wrap gap-1.5 px-3 pt-3">
+              {promptSkills.map((skill, index) => (
+                <span
+                  key={skill.path}
+                  className="inline-flex items-center gap-1.5 rounded-md border bg-muted px-2 py-1 text-xs"
+                  title={skill.description}
+                >
+                  <Package className="size-3.5 text-muted-foreground" />
+                  {skill.name}
+                  <button
+                    type="button"
+                    disabled={sending}
+                    aria-label={`Remove ${skill.name}`}
+                    onClick={() =>
+                      setPromptSkills(
+                        promptSkills.filter(
+                          (_, candidate) => candidate !== index,
+                        ),
+                      )
+                    }
+                    className="rounded-full text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    <X className="size-3" />
+                  </button>
+                </span>
+              ))}
+            </div>
+          ) : null}
           {attachments.length > 0 ? (
             <div className="flex gap-2 overflow-x-auto px-3 pt-3">
               {attachments.map((attachment, index) => (
@@ -291,7 +583,17 @@ export function Composer() {
                 : "Message the Mate"
             }
             disabled={sessionId === undefined}
-            onChange={(event) => setPromptDraft(event.currentTarget.value)}
+            onChange={(event) => {
+              setHistoryNavigation(undefined)
+              setPromptDraft(event.currentTarget.value)
+            }}
+            onSelect={(event) => {
+              const target = event.currentTarget
+              setCursorAtEnd(
+                target.selectionStart === target.value.length &&
+                  target.selectionEnd === target.value.length,
+              )
+            }}
             onPaste={(event) => {
               const images = Array.from(event.clipboardData.files).filter(
                 (file) => file.type.startsWith("image/"),
@@ -300,17 +602,8 @@ export function Composer() {
               event.preventDefault()
               void addFiles(images)
             }}
-            onKeyDown={(event) => {
-              if (
-                event.key === "Enter" &&
-                !event.shiftKey &&
-                !event.nativeEvent.isComposing
-              ) {
-                event.preventDefault()
-                submit()
-              }
-            }}
-            className="max-h-50 min-h-13 w-full resize-none bg-transparent px-5 pt-4 pb-2 text-[15px] leading-6 outline-none placeholder:text-muted-foreground/65 disabled:opacity-50"
+            onKeyDown={handleDraftKeyDown}
+            className="field-sizing-content max-h-50 min-h-13 w-full resize-none bg-transparent px-5 pt-4 pb-2 text-[15px] leading-6 outline-none placeholder:text-muted-foreground/65 disabled:opacity-50"
           />
 
           <div className="flex min-h-12 items-center justify-between gap-3 px-2.5 pb-2.5">
@@ -342,18 +635,14 @@ export function Composer() {
 
             <div className="flex shrink-0 items-center gap-1">
               <ModelSelector />
-              <span
-                aria-hidden="true"
-                className={`size-2 rounded-full ${busy ? "animate-pulse bg-amber-500" : "bg-muted-foreground/25"}`}
-              />
               <Button
                 type="submit"
                 size="icon"
                 disabled={!canSend}
                 aria-label={sending ? "Sending" : "Send"}
                 title={
-                  compactHasAttachments
-                    ? "Remove images before compacting"
+                  compactBlocked
+                    ? "Remove images and skills before compacting"
                     : "Send message"
                 }
                 className="rounded-full"
@@ -374,68 +663,7 @@ export function Composer() {
             {attachmentError}
           </p>
         )}
-        <TelemetryRail telemetry={view.telemetry} />
       </form>
     </footer>
   )
-}
-
-function TelemetryRail({
-  telemetry,
-}: {
-  readonly telemetry: ReturnType<typeof useExecutionView>["telemetry"]
-}) {
-  const cacheHit =
-    telemetry.inputTokens === 0
-      ? undefined
-      : (telemetry.cacheReadInputTokens / telemetry.inputTokens) * 100
-  const tokensPerSecond =
-    telemetry.modelDurationMs === 0
-      ? undefined
-      : telemetry.outputTokens / (telemetry.modelDurationMs / 1_000)
-  const items = [
-    `${telemetry.turns} ${telemetry.turns === 1 ? "turn" : "turns"}`,
-    `${telemetry.steps} steps`,
-    `LLM ${formatDuration(telemetry.modelDurationMs)}`,
-    `Tools ${formatDuration(telemetry.toolDurationMs)}`,
-    `TTFT avg ${telemetry.averageTimeToFirstTokenMs === undefined ? "—" : formatDuration(telemetry.averageTimeToFirstTokenMs)}`,
-    `${tokensPerSecond === undefined ? "—" : formatRate(tokensPerSecond)} tok/s`,
-    `Cache hit ${cacheHit === undefined ? "—" : `${Math.round(cacheHit)}%`}`,
-    `Input ${formatTokens(telemetry.inputTokens)} tok`,
-  ]
-
-  return (
-    <div
-      role="status"
-      aria-label="Session telemetry"
-      className="flex items-center justify-center gap-2 overflow-x-auto px-3 pt-2 text-[11px] whitespace-nowrap text-muted-foreground"
-      title={`Provider-reported cache reads: ${formatTokens(telemetry.cacheReadInputTokens)} tokens · cache writes: ${formatTokens(telemetry.cacheWriteInputTokens)} tokens`}
-    >
-      {items.map((item, index) => (
-        <span key={item} className="flex items-center gap-2">
-          {index === 0 ? null : <span className="text-border">|</span>}
-          {item}
-        </span>
-      ))}
-    </div>
-  )
-}
-
-function formatDuration(milliseconds: number): string {
-  if (milliseconds < 1_000) return `${Math.round(milliseconds)}ms`
-  if (milliseconds < 60_000) return `${(milliseconds / 1_000).toFixed(1)}s`
-  const minutes = Math.floor(milliseconds / 60_000)
-  const seconds = Math.round((milliseconds % 60_000) / 1_000)
-  return `${minutes}m${seconds}s`
-}
-
-function formatRate(value: number): string {
-  return value < 10 ? value.toFixed(1) : Math.round(value).toString()
-}
-
-function formatTokens(value: number): string {
-  return new Intl.NumberFormat("en", {
-    notation: value >= 1_000 ? "compact" : "standard",
-    maximumFractionDigits: 1,
-  }).format(value)
 }
