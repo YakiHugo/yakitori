@@ -53,7 +53,10 @@ function geometry() {
     scrollTop: {
       get: () => top,
       set: (value: number) => {
-        top = Math.max(0, Math.min(800, value))
+        top = Math.max(
+          0,
+          Math.min(viewport.scrollHeight - viewport.clientHeight, value),
+        )
       },
       configurable: true,
     },
@@ -82,6 +85,34 @@ it("does not resume following when layout changes during history reading", () =>
   act(() => resize())
   expect(viewport.scrollTop).toBe(100)
   expect(scroll.atBottom).toBe(false)
+})
+it.each([
+  "click",
+  "wheel",
+  "touch",
+])("keeps following after %s at the bottom", (gesture) => {
+  render(<Fixture />)
+  const viewport = geometry()
+  act(() => resize())
+  if (gesture === "click")
+    fireEvent.pointerDown(scroll.contentRef.current as HTMLElement)
+  if (gesture === "wheel") fireEvent.wheel(viewport, { deltaY: 20 })
+  if (gesture === "touch")
+    fireEvent.touchStart(viewport, { touches: [{ clientY: 200 }] })
+  Object.defineProperty(viewport, "scrollHeight", { value: 1400 })
+  act(() => resize())
+  expect(viewport.scrollTop).toBe(1000)
+})
+it("does not treat inline editing keyboard navigation as transcript scrolling", () => {
+  render(<Fixture />)
+  const viewport = geometry()
+  act(() => resize())
+  const input = document.createElement("textarea")
+  scroll.contentRef.current?.append(input)
+  fireEvent.keyDown(input, { key: "ArrowUp" })
+  Object.defineProperty(viewport, "scrollHeight", { value: 1400 })
+  act(() => resize())
+  expect(viewport.scrollTop).toBe(1000)
 })
 it("animates a jump to the current bottom and lets user scrolling cancel it", () => {
   render(<Fixture />)

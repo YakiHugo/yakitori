@@ -102,8 +102,51 @@ export function usePinnedScroll(sessionId?: string) {
           24,
       )
     }
-    const interrupt = () => pauseFollowing()
+    const interrupt = (away: boolean) => {
+      cancelAnimation()
+      following.current =
+        !away &&
+        viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= 24
+    }
+    const wheelInterrupt = (event: WheelEvent) => {
+      if (event.deltaY !== 0) interrupt(event.deltaY < 0)
+    }
+    let touchY: number | undefined
+    const touchStart = (event: TouchEvent) => {
+      touchY = event.touches[0]?.clientY
+    }
+    const touchMove = (event: TouchEvent) => {
+      const nextY = event.touches[0]?.clientY
+      if (touchY !== undefined && nextY !== undefined && nextY !== touchY)
+        interrupt(nextY > touchY)
+      touchY = nextY
+    }
+    let draggingScrollbar = false
+    const pointerInterrupt = (event: PointerEvent) => {
+      // Only scrollbar interaction implies scrolling. Clicking transcript text
+      // or a disclosure must not detach a reader who is still at the bottom.
+      if (
+        event.target instanceof Element &&
+        event.target.closest('[data-slot="scroll-area-scrollbar"]')
+      ) {
+        draggingScrollbar = true
+        pauseFollowing()
+      }
+    }
+    const pointerEnd = () => {
+      if (!draggingScrollbar) return
+      draggingScrollbar = false
+      interrupt(false)
+    }
     const keyInterrupt = (event: globalThis.KeyboardEvent) => {
+      if (
+        event.defaultPrevented ||
+        (event.target instanceof HTMLElement &&
+          (event.target.isContentEditable ||
+            event.target.closest("input, textarea, select") ||
+            (event.key === " " && event.target.closest("button"))))
+      )
+        return
       if (
         [
           "ArrowUp",
@@ -115,11 +158,17 @@ export function usePinnedScroll(sessionId?: string) {
           " ",
         ].includes(event.key)
       )
-        interrupt()
+        interrupt(
+          ["ArrowUp", "PageUp", "Home"].includes(event.key) ||
+            (event.key === " " && event.shiftKey),
+        )
     }
-    viewport.addEventListener("wheel", interrupt, { passive: true })
-    viewport.addEventListener("touchstart", interrupt, { passive: true })
-    viewport.parentElement?.addEventListener("pointerdown", interrupt)
+    viewport.addEventListener("wheel", wheelInterrupt, { passive: true })
+    viewport.addEventListener("touchstart", touchStart, { passive: true })
+    viewport.addEventListener("touchmove", touchMove, { passive: true })
+    viewport.parentElement?.addEventListener("pointerdown", pointerInterrupt)
+    document.addEventListener("pointerup", pointerEnd)
+    document.addEventListener("pointercancel", pointerEnd)
     viewport.addEventListener("keydown", keyInterrupt)
     follow()
     const observer = new ResizeObserver(follow)
@@ -128,10 +177,16 @@ export function usePinnedScroll(sessionId?: string) {
     return () => {
       observer.disconnect()
       cancelAnimation()
-      viewport.removeEventListener("wheel", interrupt)
-      viewport.removeEventListener("touchstart", interrupt)
-      viewport.parentElement?.removeEventListener("pointerdown", interrupt)
+      viewport.removeEventListener("wheel", wheelInterrupt)
+      viewport.removeEventListener("touchstart", touchStart)
+      viewport.removeEventListener("touchmove", touchMove)
+      viewport.parentElement?.removeEventListener(
+        "pointerdown",
+        pointerInterrupt,
+      )
       viewport.removeEventListener("keydown", keyInterrupt)
+      document.removeEventListener("pointerup", pointerEnd)
+      document.removeEventListener("pointercancel", pointerEnd)
     }
   }, [pauseFollowing, cancelAnimation])
 
