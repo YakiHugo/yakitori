@@ -498,7 +498,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
         sessionSelectionIntentRevision: intentRevision,
       }))
 
-      await runTask(
+      const completed = await runTask(
         async () => {
           const response = await getAppRpcClient(get().apiBase).request(
             "session/fork",
@@ -555,6 +555,12 @@ export const useAppStore = create<AppStore>()((set, get) => {
         },
         () => get().sessionSelectionIntentRevision === intentRevision,
       )
+
+      // The fork intent invalidated the old stream. A failed edit keeps the
+      // source conversation open and catches up events received in the meantime.
+      if (!completed && isCurrentSelection(sourceSelection)) {
+        connectEvents(sourceSelection, get().execution.lastSeq)
+      }
 
       set((state) => {
         const inFlightActions = new Set(state.inFlightActions)

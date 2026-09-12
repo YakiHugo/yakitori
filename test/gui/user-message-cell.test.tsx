@@ -66,9 +66,7 @@ describe("skill mentions", () => {
       />,
     )
 
-    expect(
-      screen.getByText("See [$HOME](/docs/env) for details"),
-    ).toBeDefined()
+    expect(screen.getByText("See [$HOME](/docs/env) for details")).toBeDefined()
     expect(screen.queryByText("HOME")).toBeNull()
   })
 })
@@ -99,7 +97,7 @@ describe("user message fork actions", () => {
     const editor = screen.getByRole("textbox", { name: "Edit message" })
     await user.clear(editor)
     await user.type(editor, "Replacement request")
-    await user.click(screen.getByRole("button", { name: /Save & send/ }))
+    await user.click(screen.getByRole("button", { name: "Send" }))
 
     expect(forkSession).toHaveBeenCalledWith(
       "input_1",
@@ -107,4 +105,51 @@ describe("user message fork actions", () => {
       "Replacement request",
     )
   })
+})
+
+it("edits in place, cancels with Escape and preserves skill mentions when sending", async () => {
+  const user = userEvent.setup()
+  const forkSession = vi.fn(async () => {})
+  useAppStore.setState({ forkSession })
+  render(
+    <UserMessageCell
+      entry={{
+        ...entry,
+        text: "Original request [$review](/skills/review/SKILL.md)",
+      }}
+      queued={false}
+    />,
+  )
+  await user.click(screen.getByRole("button", { name: "Edit & resubmit" }))
+  let editor = screen.getByRole("textbox", { name: "Edit message" })
+  expect(document.activeElement).toBe(editor)
+  expect(screen.getAllByText("Original request")).toEqual([editor])
+  await user.keyboard("{Escape}")
+  expect(screen.getByText("Original request")).toBeDefined()
+  expect(forkSession).not.toHaveBeenCalled()
+  await user.click(screen.getByRole("button", { name: "Edit & resubmit" }))
+  editor = screen.getByRole("textbox", { name: "Edit message" })
+  await user.clear(editor)
+  await user.type(editor, "Updated request{Enter}")
+  expect(forkSession).toHaveBeenCalledWith(
+    "input_1",
+    "edit",
+    "Updated request [$review](/skills/review/SKILL.md)",
+  )
+})
+
+it("keeps the edited draft until the replacement conversation is activated", async () => {
+  const user = userEvent.setup()
+  useAppStore.setState({ forkSession: vi.fn(async () => {}) })
+  render(<UserMessageCell entry={entry} queued={false} />)
+  await user.click(screen.getByRole("button", { name: "Edit & resubmit" }))
+  await user.clear(screen.getByRole("textbox", { name: "Edit message" }))
+  await user.type(
+    screen.getByRole("textbox", { name: "Edit message" }),
+    "Keep this draft{Enter}",
+  )
+  expect(screen.getByRole("textbox", { name: "Edit message" })).toHaveProperty(
+    "value",
+    "Keep this draft",
+  )
 })

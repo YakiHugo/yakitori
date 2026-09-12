@@ -1531,3 +1531,37 @@ function admissionResponder() {
     return notFound()
   }
 }
+
+it("resumes the source event stream after an edit request fails", async () => {
+  fakeRef.current.respond = (method) => {
+    if (method === "session/skills") return { skills: [] }
+    throw new ApiRequestError("Edit failed", "not_found")
+  }
+  await useAppStore.getState().selectSession("session_1")
+  const first = fakeRef.current.streams[0]
+  emitSnapshot(first)
+  first?.emitReplayComplete()
+  await useAppStore.getState().forkSession("input_1", "edit", "Replacement")
+  expect(useAppStore.getState().selection.sessionId).toBe("session_1")
+  expect(useAppStore.getState().message).toBe("Edit failed")
+  const resumed = fakeRef.current.streams[1]
+  expect(resumed?.after).toBe(1)
+  resumed?.emitEvent(
+    createEventEnvelope({
+      sessionId: "session_1",
+      seq: 2,
+      event: {
+        type: EventType.InputAdmitted,
+        data: {
+          requestId: "late",
+          inputId: "input_late",
+          role: InputRole.User,
+          content: { kind: "text", text: "Input during edit" },
+        },
+      },
+    }),
+  )
+  expect(useAppStore.getState().execution.entries).toContainEqual(
+    expect.objectContaining({ text: "Input during edit" }),
+  )
+})
