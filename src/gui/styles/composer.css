@@ -43,6 +43,16 @@
 .prompt-skill.ProseMirror-selectednode {
   outline: 2px solid var(--ring);
 }
+/* A paragraph ending in a skill atom gets ProseMirror's caret aids (separator
+   image + trailing break), which wrap onto a phantom second line. Hide them;
+   Chromium paints the caret directly after the chip. Keep the break in
+   otherwise-empty paragraphs so they retain their height. */
+.prompt-editor .ProseMirror img.ProseMirror-separator {
+  display: none;
+}
+.prompt-editor .ProseMirror p > br.ProseMirror-trailingBreak:not(:only-child) {
+  display: none;
+}
 .conversation-inline-edit .ProseMirror {
   padding: 0;
   min-height: 76px;

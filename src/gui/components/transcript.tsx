@@ -1,5 +1,12 @@
 import { ArrowDown, ChevronRight } from "lucide-react"
-import { type ReactNode, useId, useMemo, useRef, useState } from "react"
+import {
+  type ReactNode,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react"
 import type { ExecutionEntry, TurnTiming } from "../execution-view.ts"
 import { ConversationScrollContext } from "../hooks/conversation-scroll-context.ts"
 import { usePinnedScroll } from "../hooks/use-pinned-scroll.ts"
@@ -57,7 +64,9 @@ export function Transcript({ children }: Readonly<{ children?: ReactNode }>) {
   const sessionId = useAppStore((state) => state.selection.sessionId)
   const scroll = usePinnedScroll(sessionId)
   const anchors = useRef(new Map<string, HTMLDivElement>())
-  const [activeInput, setActiveInput] = useState<string>()
+  const [visibleInputs, setVisibleInputs] = useState<ReadonlySet<string>>(
+    new Set(),
+  )
   const blocks = useMemo(() => groupEntries(view.entries), [view.entries])
   const finalAnswers = useMemo(() => {
     const turns = new Map<
@@ -87,17 +96,36 @@ export function Transcript({ children }: Readonly<{ children?: ReactNode }>) {
   }, [view.entries, view.turnTimings, view.activeTurnId])
   const inputs = view.entries.filter((entry) => entry.kind === "user_input")
   const queued = new Set(view.queuedInputIds)
+  // A message counts as in view while its turn segment — from its own bubble
+  // to the next bubble — intersects the viewport, like codex's rail. Only
+  // those markers take the active color; there is no default selection.
+  const updateVisibleInputs = () => {
+    const viewport = scroll.viewportRef.current
+    if (!viewport) return
+    const { top, bottom } = viewport.getBoundingClientRect()
+    const tops = inputs.map((input) => ({
+      inputId: input.inputId,
+      top: anchors.current.get(input.inputId)?.getBoundingClientRect().top,
+    }))
+    const next = new Set<string>()
+    tops.forEach((entry, index) => {
+      if (entry.top === undefined) return
+      const end = tops[index + 1]?.top ?? Number.POSITIVE_INFINITY
+      if (entry.top < bottom && end > top) next.add(entry.inputId)
+    })
+    setVisibleInputs((previous) =>
+      previous.size === next.size && [...next].every((id) => previous.has(id))
+        ? previous
+        : next,
+    )
+  }
   const updateScroll = () => {
     scroll.onScroll()
-    const top = scroll.viewportRef.current?.getBoundingClientRect().top ?? 0
-    let active = inputs[0]?.inputId
-    for (const input of inputs) {
-      const node = anchors.current.get(input.inputId)
-      if (node && node.getBoundingClientRect().top <= top + 100)
-        active = input.inputId
-    }
-    setActiveInput(active)
+    updateVisibleInputs()
   }
+  useLayoutEffect(() => {
+    updateVisibleInputs()
+  })
 
   return (
     <ConversationScrollContext.Provider value={scroll}>
@@ -152,11 +180,10 @@ export function Transcript({ children }: Readonly<{ children?: ReactNode }>) {
         </ScrollArea>
         <ConversationNavigation
           entries={view.entries}
-          activeInput={activeInput}
+          visibleInputs={visibleInputs}
           onJump={(inputId) => {
             const node = anchors.current.get(inputId)
             if (node) scroll.jumpToElement(node)
-            setActiveInput(inputId)
           }}
         />
         {
