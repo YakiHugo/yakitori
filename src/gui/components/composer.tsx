@@ -1,12 +1,13 @@
-import { ArrowUp, LoaderCircle, Package, Plus, ShieldCheck, X } from "lucide-react"
 import {
-  type KeyboardEvent,
-  useLayoutEffect,
-  useRef,
-  useState,
-} from "react"
+  ArrowUp,
+  LoaderCircle,
+  Package,
+  Plus,
+  ShieldCheck,
+  X,
+} from "lucide-react"
+import { type KeyboardEvent, useLayoutEffect, useRef, useState } from "react"
 import { COMPACT_DIRECTIVE } from "../../kernel/events.ts"
-import type { ApiSkillSummary } from "../../server/protocol.ts"
 import {
   appendImageFiles,
   appendPickedImages,
@@ -19,13 +20,17 @@ import {
   useAppStore,
   useExecutionView,
 } from "../store/app-store.ts"
+import {
+  ComposerSuggestions,
+  type ComposerSuggestion,
+} from "./composer-suggestions.tsx"
 import { ModelSelector } from "./model-selector.tsx"
 import { Button } from "./ui/button.tsx"
 
-type SlashCommand = {
-  readonly name: string
-  readonly description: string
-}
+type SlashCommand = Readonly<{
+  name: string
+  description: string
+}>
 
 const SLASH_COMMANDS: readonly SlashCommand[] = [
   {
@@ -38,6 +43,7 @@ export function Composer() {
   const draft = useAppStore((state) => state.promptDraft) ?? ""
   const attachments = useAppStore((state) => state.promptAttachments)
   const promptSkills = useAppStore((state) => state.promptSkills)
+  const sessionSkillsError = useAppStore((state) => state.sessionSkillsError)
   const sessionSkills = useAppStore((state) => state.sessionSkills)
   const apiBase = useAppStore((state) => state.apiBase)
   const busy = useAppStore((state) => state.busy)
@@ -74,17 +80,10 @@ export function Composer() {
     readonly stepsBack: number
     readonly savedDraft: string
   }>()
-  const [slashDismissed, setSlashDismissed] = useState<string>()
-  const [slashHighlight, setSlashHighlight] = useState<{
-    readonly query: string
-    readonly index: number
-  }>()
-  const [skillDismissed, setSkillDismissed] = useState<string>()
-  const [skillHighlight, setSkillHighlight] = useState<{
-    readonly query: string
-    readonly index: number
-  }>()
-  const [cursorAtEnd, setCursorAtEnd] = useState(true)
+  const [dismissedQuery, setDismissedQuery] = useState<string>()
+  const [highlight, setHighlight] = useState<{ query: string; index: number }>()
+  const [cursor, setCursor] = useState(draft.length)
+  const [hasSelection, setHasSelection] = useState(false)
 
   const effectiveModel = normalizeKimiModelSelection(
     resolveEffectiveModel({
@@ -120,41 +119,48 @@ export function Composer() {
     entry.kind === "user_input" ? [entry.text] : [],
   )
 
-  // The menu tracks a single first-token query like codex's command popup:
-  // it stays open while the draft is exactly one `/name` token, matching
-  // case-insensitively and keeping exact matches selectable.
-  const slashQuery =
-    draft.startsWith("/") && !/\s/.test(draft) ? draft : undefined
-  const slashMatches =
-    slashQuery === undefined || slashDismissed === slashQuery
-      ? []
-      : SLASH_COMMANDS.filter((command) =>
-          command.name.toLowerCase().startsWith(slashQuery.toLowerCase()),
-        )
-  const slashMenuOpen = slashMatches.length > 0
-  const activeSlashHighlight =
-    slashHighlight !== undefined && slashHighlight.query === slashQuery
-      ? Math.min(slashHighlight.index, slashMatches.length - 1)
+  const prefix = draft.slice(0, cursor)
+  const token = /(?:^|\s)([/$])([\p{L}\p{N}_:-]*)$/u.exec(prefix)
+  const query = token?.[2] ?? ""
+  const trigger = token?.[1]
+  const tokenStart = cursor - query.length - 1
+  const tokenEnd =
+    cursor + (/^[\p{L}\p{N}_:-]*/u.exec(draft.slice(cursor))?.[0].length ?? 0)
+  const queryKey = `${sessionId}:${tokenStart}:${trigger}:${query}`
+  const matchingSkills: ComposerSuggestion[] = sessionSkills
+    .filter(
+      (skill) =>
+        !promptSkills.some((picked) => picked.path === skill.path) &&
+        `${skill.name} ${skill.description}`
+          .toLowerCase()
+          .includes(query.toLowerCase()),
+    )
+    .map((skill) => ({
+      kind: "skill",
+      name: skill.name,
+      description: skill.description,
+      skill,
+    }))
+  const suggestions: ComposerSuggestion[] = [
+    ...(trigger === "/" && tokenStart === 0
+      ? SLASH_COMMANDS.filter((command) =>
+          command.name.slice(1).toLowerCase().startsWith(query.toLowerCase()),
+        ).map((command) => ({ ...command, kind: "command" as const }))
+      : []),
+    ...matchingSkills,
+  ]
+  const menuOpen =
+    token !== null && !hasSelection && dismissedQuery !== queryKey
+  const activeHighlight =
+    highlight?.query === queryKey
+      ? Math.min(highlight.index, suggestions.length - 1)
       : 0
 
-  // The mention popup tracks a trailing `$token`, like codex's skill popup:
-  // it opens only while the cursor sits at the end of that token, so editing
-  // earlier text never triggers completions or captures Enter.
-  const skillQuery = /(?:^|\s)\$([\p{L}\p{N}_-]*)$/u.exec(draft)?.[1]
-  const skillMatches =
-    skillQuery === undefined || skillDismissed === skillQuery
-      ? []
-      : sessionSkills.filter(
-          (skill) =>
-            !promptSkills.some((picked) => picked.path === skill.path) &&
-            skill.name.toLowerCase().includes(skillQuery.toLowerCase()),
-        )
-  const skillMenuOpen =
-    cursorAtEnd && sessionSkills.length > 0 && skillMatches.length > 0
-  const activeSkillHighlight =
-    skillHighlight !== undefined && skillHighlight.query === skillQuery
-      ? Math.min(skillHighlight.index, skillMatches.length - 1)
-      : 0
+  useLayoutEffect(() => {
+    // Selection changes caused by restoring a draft do not fire a select event.
+    const textarea = textareaRef.current
+    if (textarea) setCursor(Math.min(draft.length, textarea.selectionStart))
+  }, [draft])
 
   const text = draft.trim()
   const sending =
@@ -262,8 +268,8 @@ export function Composer() {
   // mid-restore, busy, or compact with staged chips, which the compact lane
   // rejects — the selection only completes the text so nothing is lost.
   const runSlashCommand = (command: SlashCommand): void => {
-    setSlashDismissed(undefined)
-    setSlashHighlight(undefined)
+    setDismissedQuery(queryKey)
+    setHighlight(undefined)
     const blocked =
       sessionId === undefined ||
       restoringModelSelectionFor === sessionId ||
@@ -280,13 +286,18 @@ export function Composer() {
     void admitInput(command.name)
   }
 
-  const pickSkill = (skill: ApiSkillSummary): void => {
-    setSkillDismissed(undefined)
-    setSkillHighlight(undefined)
-    // The chip replaces the trailing `$query` token in the draft.
-    setPromptDraft(draft.replace(/(^|\s)\$[\p{L}\p{N}_-]*$/u, "").trimEnd())
-    if (!promptSkills.some((picked) => picked.path === skill.path)) {
-      setPromptSkills([...promptSkills, skill])
+  const pickSuggestion = (item: ComposerSuggestion, complete = false): void => {
+    setDismissedQuery(queryKey)
+    setHighlight(undefined)
+    if (item.kind === "command") {
+      if (complete) setPromptDraft(`${item.name} `)
+      else runSlashCommand(item)
+    } else {
+      setPromptDraft(
+        `${draft.slice(0, tokenStart)}${draft.slice(tokenEnd)}`.trimEnd(),
+      )
+      if (!promptSkills.some((picked) => picked.path === item.skill.path))
+        setPromptSkills([...promptSkills, item.skill])
     }
     textareaRef.current?.focus()
   }
@@ -295,57 +306,44 @@ export function Composer() {
     event: KeyboardEvent<HTMLTextAreaElement>,
   ): void => {
     if (event.nativeEvent.isComposing) return
-    if (slashMenuOpen) {
+    if (menuOpen) {
       if (event.key === "Escape") {
-        setSlashDismissed(slashQuery)
+        event.preventDefault()
+        event.stopPropagation()
+        setDismissedQuery(queryKey)
         return
       }
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
         event.preventDefault()
-        const step = event.key === "ArrowDown" ? 1 : -1
-        setSlashHighlight({
-          query: slashQuery ?? "",
-          index:
-            (activeSlashHighlight + step + slashMatches.length) %
-            slashMatches.length,
-        })
+        if (suggestions.length > 0)
+          setHighlight({
+            query: queryKey,
+            index:
+              (activeHighlight +
+                (event.key === "ArrowDown" ? 1 : -1) +
+                suggestions.length) %
+              suggestions.length,
+          })
         return
       }
-      const highlighted = slashMatches[activeSlashHighlight]
+      const item = suggestions[activeHighlight]
       if (
-        (event.key === "Enter" && !event.shiftKey && highlighted !== undefined) ||
-        (event.key === "Tab" && highlighted !== undefined)
+        item &&
+        ((event.key === "Enter" && !event.shiftKey) || event.key === "Tab")
       ) {
         event.preventDefault()
-        runSlashCommand(highlighted)
+        pickSuggestion(item, event.key === "Tab")
         return
       }
     }
-    if (skillMenuOpen) {
-      if (event.key === "Escape") {
-        setSkillDismissed(skillQuery)
-        return
-      }
-      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-        event.preventDefault()
-        const step = event.key === "ArrowDown" ? 1 : -1
-        setSkillHighlight({
-          query: skillQuery ?? "",
-          index:
-            (activeSkillHighlight + step + skillMatches.length) %
-            skillMatches.length,
-        })
-        return
-      }
-      const highlighted = skillMatches[activeSkillHighlight]
-      if (
-        (event.key === "Enter" && !event.shiftKey && highlighted !== undefined) ||
-        (event.key === "Tab" && highlighted !== undefined)
-      ) {
-        event.preventDefault()
-        pickSkill(highlighted)
-        return
-      }
+    if (
+      event.key === "Backspace" &&
+      draft.length === 0 &&
+      promptSkills.length > 0
+    ) {
+      event.preventDefault()
+      setPromptSkills(promptSkills.slice(0, -1))
+      return
     }
     if (event.key === "ArrowUp") {
       const cursorAtStart =
@@ -402,64 +400,15 @@ export function Composer() {
         }}
       >
         <div className="relative overflow-visible rounded-2xl border bg-card shadow-[0_1px_2px_color-mix(in_oklab,var(--foreground)_7%,transparent),0_8px_24px_-10px_color-mix(in_oklab,var(--foreground)_14%,transparent)] transition-shadow focus-within:shadow-[0_1px_2px_color-mix(in_oklab,var(--foreground)_8%,transparent),0_10px_30px_-10px_color-mix(in_oklab,var(--foreground)_20%,transparent)]">
-          {slashMenuOpen ? (
-            <div
-              role="listbox"
-              aria-label="Slash commands"
-              className="absolute bottom-full left-0 z-10 mb-1 w-72 space-y-1 rounded-md border bg-popover p-2 text-sm shadow-md"
-            >
-              {slashMatches.map((command, index) => (
-                <button
-                  key={command.name}
-                  type="button"
-                  role="option"
-                  aria-selected={index === activeSlashHighlight}
-                  onClick={() => runSlashCommand(command)}
-                  onMouseEnter={() =>
-                    setSlashHighlight({
-                      query: slashQuery ?? "",
-                      index,
-                    })
-                  }
-                  className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left hover:bg-accent ${index === activeSlashHighlight ? "bg-accent" : ""}`}
-                >
-                  <span className="shrink-0 font-mono">{command.name}</span>
-                  <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
-                    {command.description}
-                  </span>
-                </button>
-              ))}
-            </div>
-          ) : null}
-          {skillMenuOpen ? (
-            <div
-              role="listbox"
-              aria-label="Skills"
-              className="absolute bottom-full left-0 z-10 mb-1 w-72 space-y-1 rounded-md border bg-popover p-2 text-sm shadow-md"
-            >
-              {skillMatches.map((skill, index) => (
-                <button
-                  key={skill.path}
-                  type="button"
-                  role="option"
-                  aria-selected={index === activeSkillHighlight}
-                  onClick={() => pickSkill(skill)}
-                  onMouseEnter={() =>
-                    setSkillHighlight({
-                      query: skillQuery ?? "",
-                      index,
-                    })
-                  }
-                  className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left hover:bg-accent ${index === activeSkillHighlight ? "bg-accent" : ""}`}
-                >
-                  <Package className="size-4 shrink-0 text-muted-foreground" />
-                  <span className="shrink-0">{skill.name}</span>
-                  <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
-                    {skill.description}
-                  </span>
-                </button>
-              ))}
-            </div>
+          {menuOpen ? (
+            <ComposerSuggestions
+              items={suggestions}
+              activeIndex={activeHighlight}
+              skillOnly={trigger === "$"}
+              error={sessionSkillsError}
+              onHighlight={(index) => setHighlight({ query: queryKey, index })}
+              onPick={pickSuggestion}
+            />
           ) : null}
           {promptSkills.length > 0 ? (
             <div className="flex flex-wrap gap-1.5 px-3 pt-3">
@@ -589,11 +538,18 @@ export function Composer() {
             }}
             onSelect={(event) => {
               const target = event.currentTarget
-              setCursorAtEnd(
-                target.selectionStart === target.value.length &&
-                  target.selectionEnd === target.value.length,
-              )
+              setCursor(target.selectionStart)
+              setHasSelection(target.selectionStart !== target.selectionEnd)
             }}
+            aria-controls={menuOpen ? "composer-suggestions" : undefined}
+            aria-activedescendant={
+              menuOpen && suggestions.length > 0
+                ? `composer-suggestion-${activeHighlight}`
+                : undefined
+            }
+            aria-autocomplete="list"
+            onBlur={() => setDismissedQuery(queryKey)}
+            onFocus={() => setDismissedQuery(undefined)}
             onPaste={(event) => {
               const images = Array.from(event.clipboardData.files).filter(
                 (file) => file.type.startsWith("image/"),

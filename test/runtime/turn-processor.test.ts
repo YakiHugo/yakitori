@@ -2,7 +2,7 @@ import { createRolloutAssets } from "../../src/kernel/rollout-assets.ts"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { SessionEvent } from "../../src/core/session-io.ts"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
 import {
@@ -33,10 +33,20 @@ import {
 import { MemoryThreadStore } from "../core/memory-thread-store.ts"
 import { createFauxProvider } from "../support/faux-provider.ts"
 
+const testUserHome = vi.hoisted(() => ({ path: "" }))
+vi.mock("node:os", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:os")>()),
+  homedir: () => testUserHome.path,
+}))
+beforeEach(async () => {
+  testUserHome.path = await mkdtemp(join(tmpdir(), "yakitori-user-home-"))
+})
+
 const cleanups: Array<() => Promise<void>> = []
 
 afterEach(async () => {
   await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()))
+  await rm(testUserHome.path, { recursive: true, force: true })
 })
 
 describe("Turn processor", () => {

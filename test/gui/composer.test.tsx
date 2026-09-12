@@ -1,5 +1,11 @@
 // @vitest-environment happy-dom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { Composer } from "../../src/gui/components/composer.tsx"
@@ -12,7 +18,11 @@ import {
   createInitialAppState,
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
-import { createEventEnvelope, EventType, InputRole } from "../../src/kernel/events.ts"
+import {
+  createEventEnvelope,
+  EventType,
+  InputRole,
+} from "../../src/kernel/events.ts"
 import { FakeRpcClient } from "./fake-rpc-client.ts"
 
 const fakeRef = vi.hoisted(() => ({
@@ -1039,5 +1049,74 @@ describe("model selector", () => {
         .getByRole("button", { name: "GPT 5.1 Codex" })
         .querySelector("svg"),
     ).toBeNull()
+  })
+})
+
+describe("unified composer suggestions", () => {
+  const skill = {
+    name: "review",
+    description: "Review changes",
+    path: "/skills/review/SKILL.md",
+    scope: "user" as const,
+  }
+
+  it("selects a skill through slash without submitting a message", async () => {
+    const user = userEvent.setup()
+    const admitInput = vi.fn(async () => {})
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      sessionSkills: [skill],
+      admitInput,
+    })
+    render(<Composer />)
+    await user.type(screen.getByRole("textbox"), "/rev")
+    await user.keyboard("{Enter}")
+    expect(useAppStore.getState().promptSkills).toEqual([skill])
+    expect(useAppStore.getState().promptDraft).toBe("")
+    expect(admitInput).not.toHaveBeenCalled()
+  })
+
+  it("completes commands with Tab without running them", async () => {
+    const user = userEvent.setup()
+    const admitInput = vi.fn(async () => {})
+    useAppStore.setState({ selection: { sessionId: "session_1" }, admitInput })
+    render(<Composer />)
+    await user.type(screen.getByRole("textbox"), "/com")
+    await user.keyboard("{Tab}")
+    expect(useAppStore.getState().promptDraft).toBe("/compact ")
+    expect(admitInput).not.toHaveBeenCalled()
+  })
+
+  it("replaces a skill token at the caret without deleting surrounding text", () => {
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      sessionSkills: [skill],
+      promptDraft: "Please $rev then test",
+    })
+    render(<Composer />)
+    const textarea = screen.getByRole("textbox") as HTMLTextAreaElement
+    textarea.focus()
+    textarea.setSelectionRange(11, 11)
+    fireEvent.select(textarea)
+    fireEvent.keyDown(textarea, { key: "Enter" })
+    expect(useAppStore.getState().promptSkills).toEqual([skill])
+    expect(useAppStore.getState().promptDraft).toBe("Please  then test")
+  })
+
+  it("dismisses suggestions and removes the last skill chip with Backspace on empty input", async () => {
+    const user = userEvent.setup()
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      sessionSkills: [skill],
+    })
+    render(<Composer />)
+    await user.type(screen.getByRole("textbox"), "/")
+    await user.keyboard("{Escape}")
+    expect(screen.queryByRole("listbox")).toBeNull()
+    await user.clear(screen.getByRole("textbox"))
+    await user.type(screen.getByRole("textbox"), "$rev{Enter}")
+    expect(screen.getByRole("button", { name: "Remove review" })).toBeDefined()
+    await user.keyboard("{Backspace}")
+    expect(useAppStore.getState().promptSkills).toEqual([])
   })
 })

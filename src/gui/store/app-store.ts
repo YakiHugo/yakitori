@@ -65,6 +65,7 @@ export type AppStoreData = {
   sessionDrafts: Record<string, SessionDraft>
   // Skills discoverable in the selected session's working directory.
   sessionSkills: readonly ApiSkillSummary[]
+  sessionSkillsError: string | undefined
   hydratingSessionId: string | undefined
   projects: ApiProject[]
   providers: ApiProviderSummary[]
@@ -133,6 +134,7 @@ export function createInitialAppState(): AppStoreData {
     promptSkills: [],
     sessionDrafts: {},
     sessionSkills: [],
+    sessionSkillsError: undefined,
     hydratingSessionId: undefined,
     projects: [],
     providers: [],
@@ -198,6 +200,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
 
   const loadSessionSkills = (sessionId: string): void => {
     const revision = get().sessionSelectionIntentRevision
+    set({ sessionSkillsError: undefined })
     void getAppRpcClient(get().apiBase)
       .request("session/skills", { sessionId })
       .then((response) => {
@@ -209,9 +212,15 @@ export const useAppStore = create<AppStore>()((set, get) => {
         }
         set({ sessionSkills: response.skills })
       })
-      .catch(() => {
-        // Servers without skill discovery answer method-not-found; the
-        // mention popup simply stays empty.
+      .catch((error: unknown) => {
+        if (
+          get().selection.sessionId !== sessionId ||
+          get().sessionSelectionIntentRevision !== revision
+        )
+          return
+        set({
+          sessionSkillsError: errorMessage(error, "Could not load skills."),
+        })
       })
   }
 
