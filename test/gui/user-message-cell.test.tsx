@@ -2,6 +2,7 @@
 import { cleanup, render, screen } from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { pastePrompt } from "./prompt-editor-helpers.ts"
 import { UserMessageCell } from "../../src/gui/components/cells/user-message-cell.tsx"
 import {
   createInitialAppState,
@@ -35,7 +36,7 @@ describe("skill mentions", () => {
       />,
     )
 
-    expect(screen.getByText("Template Creator")).toBeDefined()
+    expect(screen.getByText("$Template Creator")).toBeDefined()
     expect(screen.getByText("Use this please")).toBeDefined()
     expect(screen.queryByText(/SKILL\.md/)).toBeNull()
   })
@@ -51,11 +52,11 @@ describe("skill mentions", () => {
       />,
     )
 
-    expect(screen.getByText("Template Creator")).toBeDefined()
+    expect(screen.getByText("$Template Creator")).toBeDefined()
     expect(screen.queryByText(/SKILL\.md/)).toBeNull()
   })
 
-  it("leaves inline mention-shaped text the user typed untouched", () => {
+  it("renders inline path-qualified mentions in their original position", () => {
     render(
       <UserMessageCell
         entry={{
@@ -66,8 +67,9 @@ describe("skill mentions", () => {
       />,
     )
 
-    expect(screen.getByText("See [$HOME](/docs/env) for details")).toBeDefined()
-    expect(screen.queryByText("HOME")).toBeNull()
+    expect(screen.getByText("$HOME").parentElement?.textContent).toBe(
+      "See $HOME for details",
+    )
   })
 })
 
@@ -95,8 +97,7 @@ describe("user message fork actions", () => {
 
     await user.click(screen.getByRole("button", { name: "Edit & resubmit" }))
     const editor = screen.getByRole("textbox", { name: "Edit message" })
-    await user.clear(editor)
-    await user.type(editor, "Replacement request")
+    await pastePrompt(editor, "Replacement request", true)
     await user.click(screen.getByRole("button", { name: "Send" }))
 
     expect(forkSession).toHaveBeenCalledWith(
@@ -123,14 +124,18 @@ it("edits in place, cancels with Escape and preserves skill mentions when sendin
   await user.click(screen.getByRole("button", { name: "Edit & resubmit" }))
   let editor = screen.getByRole("textbox", { name: "Edit message" })
   expect(document.activeElement).toBe(editor)
-  expect(screen.getAllByText("Original request")).toEqual([editor])
+  expect(editor.textContent).toBe("Original request $review")
   await user.keyboard("{Escape}")
   expect(screen.getByText("Original request")).toBeDefined()
   expect(forkSession).not.toHaveBeenCalled()
   await user.click(screen.getByRole("button", { name: "Edit & resubmit" }))
   editor = screen.getByRole("textbox", { name: "Edit message" })
-  await user.clear(editor)
-  await user.type(editor, "Updated request{Enter}")
+  await pastePrompt(
+    editor,
+    "Updated request [$review](/skills/review/SKILL.md)",
+    true,
+  )
+  await user.keyboard("{Enter}")
   expect(forkSession).toHaveBeenCalledWith(
     "input_1",
     "edit",
@@ -143,13 +148,14 @@ it("keeps the edited draft until the replacement conversation is activated", asy
   useAppStore.setState({ forkSession: vi.fn(async () => {}) })
   render(<UserMessageCell entry={entry} queued={false} />)
   await user.click(screen.getByRole("button", { name: "Edit & resubmit" }))
-  await user.clear(screen.getByRole("textbox", { name: "Edit message" }))
-  await user.type(
+  await pastePrompt(
     screen.getByRole("textbox", { name: "Edit message" }),
-    "Keep this draft{Enter}",
+    "Keep this draft",
+    true,
   )
+  await user.keyboard("{Enter}")
   expect(screen.getByRole("textbox", { name: "Edit message" })).toHaveProperty(
-    "value",
+    "textContent",
     "Keep this draft",
   )
 })

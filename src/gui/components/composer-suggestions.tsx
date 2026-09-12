@@ -1,4 +1,4 @@
-import { CornerDownLeft, Package, Terminal } from "lucide-react"
+import { Package, Terminal } from "lucide-react"
 import { useLayoutEffect, useRef } from "react"
 import type { ApiSkillSummary } from "../../server/protocol.ts"
 
@@ -12,6 +12,7 @@ export type ComposerSuggestion =
     }>
 
 export function ComposerSuggestions({
+  open,
   items,
   activeIndex,
   skillOnly,
@@ -19,6 +20,7 @@ export function ComposerSuggestions({
   onHighlight,
   onPick,
 }: Readonly<{
+  open: boolean
   items: readonly ComposerSuggestion[]
   activeIndex: number
   skillOnly: boolean
@@ -28,6 +30,7 @@ export function ComposerSuggestions({
 }>) {
   const listRef = useRef<HTMLDivElement>(null)
   useLayoutEffect(() => {
+    if (!open) return
     const list = listRef.current
     const option = list?.querySelector<HTMLElement>(
       `#composer-suggestion-${activeIndex}`,
@@ -41,12 +44,14 @@ export function ComposerSuggestions({
       list.scrollTop =
         option.offsetTop + option.offsetHeight - list.clientHeight
     }
-  }, [activeIndex])
+  }, [activeIndex, open])
   return (
-    <div className="absolute bottom-full left-0 z-20 mb-2 w-full overflow-hidden rounded-2xl border bg-popover p-1.5 text-sm shadow-[0_8px_32px_-8px_#0003]">
-      <div className="px-3 py-2 text-xs text-muted-foreground">
-        {skillOnly ? "Skills" : "Commands & skills"}
-      </div>
+    <div
+      hidden={!open}
+      aria-hidden={!open}
+      inert={!open}
+      className="composer-suggestion-panel absolute bottom-full left-0 z-20 mb-2 w-full overflow-hidden rounded-2xl border bg-popover p-1.5 text-sm shadow-[0_8px_32px_-8px_#0003]"
+    >
       <div
         ref={listRef}
         id="composer-suggestions"
@@ -55,45 +60,51 @@ export function ComposerSuggestions({
         className="relative max-h-72 overflow-y-auto"
       >
         {items.map((item, index) => (
-          <button
-            key={item.kind === "skill" ? item.skill.path : item.name}
-            id={`composer-suggestion-${index}`}
-            type="button"
-            role="option"
-            tabIndex={-1}
-            aria-selected={index === activeIndex}
-            onMouseDown={(event) => event.preventDefault()}
-            onClick={() => onPick(item)}
-            onMouseEnter={() => onHighlight(index)}
-            title={
-              item.kind === "skill"
-                ? `${item.description}\n${item.skill.path}`
-                : item.description
-            }
-            className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left ${index === activeIndex ? "bg-accent" : "hover:bg-accent/60"}`}
-          >
-            <span className="flex size-8 shrink-0 items-center justify-center rounded-lg border bg-background">
+          <div key={item.kind === "skill" ? item.skill.path : item.name}>
+            {item.kind === "skill" && items[index - 1]?.kind !== "skill" ? (
+              <div className="px-2 pt-2 pb-1 text-xs text-muted-foreground">
+                Skills
+              </div>
+            ) : null}
+            <button
+              key={item.kind === "skill" ? item.skill.path : item.name}
+              id={`composer-suggestion-${index}`}
+              type="button"
+              role="option"
+              tabIndex={-1}
+              aria-selected={index === activeIndex}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => onPick(item)}
+              onMouseEnter={() => onHighlight(index)}
+              title={
+                item.kind === "skill"
+                  ? `${item.description}\n${item.skill.path}`
+                  : item.description
+              }
+              className={`flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left ${index === activeIndex ? "bg-accent" : "hover:bg-accent/60"}`}
+            >
+              <span className="flex size-5 shrink-0 items-center justify-center text-muted-foreground">
+                {item.kind === "skill" ? (
+                  <Package className="size-4" />
+                ) : (
+                  <Terminal className="size-4" />
+                )}
+              </span>
+              <span className="flex min-w-0 flex-1 items-center gap-3">
+                <span className="max-w-[60%] shrink-0 truncate">
+                  {item.name}
+                </span>
+                <span className="min-w-0 flex-1 truncate text-sm text-muted-foreground">
+                  {item.description}
+                </span>
+              </span>
               {item.kind === "skill" ? (
-                <Package className="size-4" />
-              ) : (
-                <Terminal className="size-4" />
-              )}
-            </span>
-            <span className="min-w-0 flex-1">
-              <span className="block truncate font-medium">{item.name}</span>
-              <span className="block truncate text-xs text-muted-foreground">
-                {item.description}
-              </span>
-            </span>
-            {item.kind === "skill" ? (
-              <span className="text-[10px] text-muted-foreground">
-                {item.skill.scope === "repo" ? "Project" : "Personal"}
-              </span>
-            ) : null}
-            {index === activeIndex ? (
-              <CornerDownLeft className="size-3.5 shrink-0 text-muted-foreground" />
-            ) : null}
-          </button>
+                <span className="text-[10px] text-muted-foreground">
+                  {item.skill.scope === "repo" ? "Project" : "Personal"}
+                </span>
+              ) : null}
+            </button>
+          </div>
         ))}
         {items.length === 0 ? (
           <p className="px-3 py-4 text-sm text-muted-foreground">
@@ -106,12 +117,6 @@ export function ComposerSuggestions({
           {error}
         </p>
       ) : null}
-      <div className="mt-1 flex gap-3 border-t px-3 pt-2 pb-1 text-[11px] text-muted-foreground">
-        <span>↑ ↓ Navigate</span>
-        <span>↵ Select</span>
-        <span>Tab Complete</span>
-        <span className="ml-auto">Esc Close</span>
-      </div>
     </div>
   )
 }
