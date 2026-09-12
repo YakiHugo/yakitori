@@ -117,12 +117,31 @@ export function PromptEditor(props: Props) {
         !view.composing &&
         !event.isComposing &&
         (latest.current.onKeyDown?.(event) ?? false),
-      handlePaste: (_view, event) => {
+      handlePaste: (view, event) => {
         const images = Array.from(event.clipboardData?.files ?? []).filter(
           (file) => file.type.startsWith("image/"),
         )
-        if (!images.length || !latest.current.onPasteImages) return false
-        latest.current.onPasteImages(images)
+        if (images.length && latest.current.onPasteImages) {
+          latest.current.onPasteImages(images)
+          return true
+        }
+        // Rich clipboard content carries both HTML and text. Choose text here:
+        // clearing transformPastedHTML would instead paste an empty HTML slice.
+        const text = event.clipboardData?.getData("text/plain")
+        if (!text) return false
+        view.dispatch(
+          view.state.tr
+            .replaceSelection(
+              new Slice(
+                parsePrompt(text.replace(/\r\n?/g, "\n")).content,
+                1,
+                1,
+              ),
+            )
+            .scrollIntoView()
+            .setMeta("paste", true)
+            .setMeta("uiEvent", "paste"),
+        )
         return true
       },
       clipboardTextSerializer: (slice) =>
@@ -132,7 +151,6 @@ export function PromptEditor(props: Props) {
             : "",
         ),
       clipboardTextParser: (text) => new Slice(parsePrompt(text).content, 1, 1),
-      transformPastedHTML: () => "", // Paste as plain text, preserving explicit skill mentions.
       handleDOMEvents: {
         focus: () => {
           latest.current.onFocus?.()
