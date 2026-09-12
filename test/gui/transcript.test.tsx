@@ -61,18 +61,20 @@ it("shows the final answer and lets the reader expand and collapse earlier activ
   expect(screen.getByText("Final answer")).toBeDefined()
   expect(
     screen
-      .getByText("Checking the implementation")
+      .getByText("Checking the implementation", { selector: "p" })
       .closest("[aria-hidden]")
       ?.getAttribute("aria-hidden"),
   ).toBe("true")
   const toggle = screen.getByRole("button", { name: "Worked for 1m 49s" })
   expect(toggle.getAttribute("aria-expanded")).toBe("false")
   fireEvent.click(toggle)
-  expect(screen.getByText("Checking the implementation")).toBeDefined()
+  expect(
+    screen.getByText("Checking the implementation", { selector: "p" }),
+  ).toBeDefined()
   fireEvent.click(toggle)
   expect(
     screen
-      .getByText("Checking the implementation")
+      .getByText("Checking the implementation", { selector: "p" })
       .closest("[aria-hidden]")
       ?.getAttribute("aria-hidden"),
   ).toBe("true")
@@ -180,4 +182,78 @@ it("keeps pending approvals outside the collapsed activity", () => {
   render(<Transcript />)
   expect(screen.getByText("Permission · Write config")).toBeDefined()
   expect(screen.getByText("awaiting approval")).toBeDefined()
+})
+
+it("promotes only the final answer of a completed turn split by another input", () => {
+  useAppStore.setState({
+    execution: {
+      ...useAppStore.getState().execution,
+      entries: [
+        ...entries.slice(0, 2),
+        { kind: "user_input", inputId: "input_2", text: "Follow-up", at },
+        ...entries.slice(2),
+      ],
+    },
+  })
+  render(<Transcript />)
+  expect(screen.getAllByRole("button", { name: "Copy response" })).toHaveLength(
+    1,
+  )
+  expect(
+    screen
+      .getByText("Checking the implementation", { selector: "p" })
+      .closest("[aria-hidden]")
+      ?.getAttribute("aria-hidden"),
+  ).toBe("true")
+  expect(
+    screen
+      .getByText("Final answer", { selector: "p" })
+      .closest("[aria-hidden]"),
+  ).toBeNull()
+})
+
+it("keeps every fragment of a failed turn as activity", () => {
+  useAppStore.setState({
+    execution: {
+      ...useAppStore.getState().execution,
+      entries: [
+        ...entries.slice(0, 2),
+        { kind: "user_input", inputId: "input_2", text: "Follow-up", at },
+        ...entries.slice(2),
+        {
+          kind: "turn_terminal",
+          turnId: "turn_1",
+          state: "failed",
+          message: "Provider disconnected",
+        },
+      ],
+    },
+  })
+  render(<Transcript />)
+  expect(screen.queryByRole("button", { name: "Copy response" })).toBeNull()
+  for (const text of ["Checking the implementation", "Final answer"])
+    expect(
+      screen
+        .getByText(text, { selector: "p" })
+        .closest("[aria-hidden]")
+        ?.getAttribute("aria-hidden"),
+    ).toBe("false")
+  expect(screen.getByText(/Provider disconnected/)).toBeDefined()
+})
+
+it("does not promote inactive text until its turn has completed", () => {
+  useAppStore.setState({
+    execution: {
+      ...useAppStore.getState().execution,
+      turnTimings: { turn_1: { startedAt: at } },
+    },
+  })
+  render(<Transcript />)
+  expect(screen.queryByRole("button", { name: "Copy response" })).toBeNull()
+  expect(
+    screen
+      .getByText("Final answer", { selector: "p" })
+      .closest("[aria-hidden]")
+      ?.getAttribute("aria-hidden"),
+  ).toBe("false")
 })

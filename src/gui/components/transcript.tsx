@@ -59,6 +59,32 @@ export function Transcript({ children }: Readonly<{ children?: ReactNode }>) {
   const anchors = useRef(new Map<string, HTMLDivElement>())
   const [activeInput, setActiveInput] = useState<string>()
   const blocks = useMemo(() => groupEntries(view.entries), [view.entries])
+  const finalAnswers = useMemo(() => {
+    const turns = new Map<
+      string,
+      { last: ExecutionEntry | undefined; failed: boolean }
+    >()
+    for (const entry of view.entries) {
+      if (!("turnId" in entry)) continue
+      const turn = turns.get(entry.turnId) ?? { last: undefined, failed: false }
+      if (entry.kind === "turn_terminal") turn.failed = true
+      else if (entry.kind !== "permission") turn.last = entry
+      turns.set(entry.turnId, turn)
+    }
+    const answers = new Map<string, string>()
+    for (const [turnId, turn] of turns) {
+      // An input can split a turn into several adjacent blocks. Final-answer
+      // promotion belongs to the entire completed turn, not each fragment.
+      if (
+        view.turnTimings[turnId]?.completedAt !== undefined &&
+        view.activeTurnId !== turnId &&
+        !turn.failed &&
+        turn.last?.kind === "assistant"
+      )
+        answers.set(turnId, turn.last.itemId)
+    }
+    return answers
+  }, [view.entries, view.turnTimings, view.activeTurnId])
   const inputs = view.entries.filter((entry) => entry.kind === "user_input")
   const queued = new Set(view.queuedInputIds)
   const updateScroll = () => {
@@ -113,6 +139,7 @@ export function Transcript({ children }: Readonly<{ children?: ReactNode }>) {
                     entries={block.entries}
                     active={view.activeTurnId === block.turnId}
                     timing={view.turnTimings[block.turnId]}
+                    finalAnswerId={finalAnswers.get(block.turnId)}
                   />
                 ) : (
                   block.entries.map((entry) => (
@@ -155,23 +182,19 @@ function TurnBlock({
   entries,
   active,
   timing,
+  finalAnswerId,
 }: Readonly<{
   entries: readonly ExecutionEntry[]
   active: boolean
   timing: TurnTiming | undefined
+  finalAnswerId: string | undefined
 }>) {
   const [expandedOverride, setExpanded] = useState<boolean>()
   const contentId = useId()
-  const failed = entries.some((entry) => entry.kind === "turn_terminal")
-  const last = [...entries]
-    .reverse()
-    .find(
-      (entry) => entry.kind !== "permission" && entry.kind !== "turn_terminal",
-    )
-  // Codex has an explicit final-assistant phase. Yakitori's providers do not all
-  // expose it: only a successfully completed turn can promote its trailing text.
-  const finalAnswer =
-    !active && !failed && last?.kind === "assistant" ? last : undefined
+  const finalAnswer = entries.find(
+    (entry): entry is Extract<ExecutionEntry, { kind: "assistant" }> =>
+      entry.kind === "assistant" && entry.itemId === finalAnswerId,
+  )
   const persistent = entries.filter(
     (entry) =>
       entry === finalAnswer ||
@@ -179,7 +202,7 @@ function TurnBlock({
       (entry.kind === "permission" && entry.state !== "resolved"),
   )
   const activity = entries.filter((entry) => !persistent.includes(entry))
-  const expanded = expandedOverride ?? finalAnswer === undefined
+  const expanded = expandedOverride ?? finalAnswerId === undefined
   const seconds =
     timing?.startedAt && timing.completedAt
       ? Math.max(
