@@ -18,6 +18,11 @@ import { useAppStore, useExecutionView } from "./store/app-store.ts"
 
 export function App() {
   const message = useAppStore((state) => state.message)
+  const hydrating = useAppStore(
+    (state) =>
+      state.hydratingSessionId !== undefined &&
+      state.hydratingSessionId === state.selection.sessionId,
+  )
   const hasSession = useAppStore((state) => state.selectedSession !== undefined)
 
   return (
@@ -44,7 +49,14 @@ export function App() {
               {message}
             </div>
           )}
-          {hasSession ? (
+          {hydrating ? (
+            <div
+              role="status"
+              className="flex flex-1 items-center justify-center text-sm text-muted-foreground"
+            >
+              Loading conversation…
+            </div>
+          ) : hasSession ? (
             <>
               <SessionHeader />
               <Transcript />

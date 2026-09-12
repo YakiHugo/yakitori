@@ -144,6 +144,7 @@ describe("app store event stream", () => {
       },
     })
     stream?.emitEvent(admitted)
+    expect(useAppStore.getState().hydratingSessionId).toBe("session_1")
     expect(
       projectExecutionView(useAppStore.getState().execution).entries,
     ).toEqual([expect.objectContaining({ kind: "user_input", text: "hello" })])
@@ -153,6 +154,7 @@ describe("app store event stream", () => {
       turns: 0,
     })
     stream?.emitReplayComplete()
+    expect(useAppStore.getState().hydratingSessionId).toBeUndefined()
     expect(useAppStore.getState().restoringModelSelectionFor).toBeUndefined()
 
     stream?.emitEvent(

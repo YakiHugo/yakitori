@@ -115,42 +115,44 @@ export type ActiveTurnActivity =
   | { readonly kind: "running_tool"; readonly name: string }
   | { readonly kind: "compacting" }
 
-export type ExecutionView = {
-  readonly entries: readonly ExecutionEntry[]
-  readonly activeTurnId?: string
-  readonly mateId?: string
-  readonly mateRevisionId?: string
-  readonly workingDirectory?: string
-  readonly queuedInputIds: readonly string[]
-  readonly lastModel?: { readonly provider: string; readonly model: string }
-  readonly lastTurnUsage?: TokenUsage
-  readonly lastTurnMetrics?: TurnMetrics
-  readonly telemetry: SessionTelemetry
-  readonly activeTurnStartedAt?: string
-  readonly activeActivity?: ActiveTurnActivity
-}
+export type TurnTiming = Readonly<{ startedAt?: string; completedAt?: string }>
 
-export type ExecutionViewState = {
-  readonly entries: readonly ExecutionEntry[]
-  readonly activeTurnId: string | undefined
-  readonly mateId: string | undefined
-  readonly mateRevisionId: string | undefined
-  readonly workingDirectory: string | undefined
-  readonly lastModel:
-    | { readonly provider: string; readonly model: string }
-    | undefined
-  readonly lastTurnUsage: TokenUsage | undefined
-  readonly lastTurnMetrics: TurnMetrics | undefined
-  readonly telemetry: SessionTelemetry
-  readonly activeTurnStartedAt: string | undefined
-  readonly lastSeq: number
-  readonly itemEntryIndexes: Readonly<Record<string, number>>
-  readonly permissionEntryIndexes: Readonly<Record<string, number>>
-  readonly openCompactionItems: Readonly<Record<string, string>>
-  readonly queuedInputs: Readonly<Record<string, ApiPendingInput>>
-  readonly timeToFirstTokenWeightedMs: number
-  readonly timeToFirstTokenSamples: number
-}
+export type ExecutionView = Readonly<{
+  turnTimings: Readonly<Record<string, TurnTiming>>
+  entries: readonly ExecutionEntry[]
+  activeTurnId?: string
+  mateId?: string
+  mateRevisionId?: string
+  workingDirectory?: string
+  queuedInputIds: readonly string[]
+  lastModel?: { readonly provider: string; readonly model: string }
+  lastTurnUsage?: TokenUsage
+  lastTurnMetrics?: TurnMetrics
+  telemetry: SessionTelemetry
+  activeTurnStartedAt?: string
+  activeActivity?: ActiveTurnActivity
+}>
+
+export type ExecutionViewState = Readonly<{
+  turnTimings: Readonly<Record<string, TurnTiming>>
+  entries: readonly ExecutionEntry[]
+  activeTurnId: string | undefined
+  mateId: string | undefined
+  mateRevisionId: string | undefined
+  workingDirectory: string | undefined
+  lastModel: { readonly provider: string; readonly model: string } | undefined
+  lastTurnUsage: TokenUsage | undefined
+  lastTurnMetrics: TurnMetrics | undefined
+  telemetry: SessionTelemetry
+  activeTurnStartedAt: string | undefined
+  lastSeq: number
+  itemEntryIndexes: Readonly<Record<string, number>>
+  permissionEntryIndexes: Readonly<Record<string, number>>
+  openCompactionItems: Readonly<Record<string, string>>
+  queuedInputs: Readonly<Record<string, ApiPendingInput>>
+  timeToFirstTokenWeightedMs: number
+  timeToFirstTokenSamples: number
+}>
 
 export type ExecutionViewAction =
   | { readonly type: "snapshot"; readonly session: ApiSessionDetail }
@@ -183,6 +185,7 @@ export function createExecutionViewState(
 ): ExecutionViewState {
   const initial: ExecutionViewState = {
     entries: [],
+    turnTimings: {},
     activeTurnId: undefined,
     mateId: undefined,
     mateRevisionId: undefined,
@@ -260,6 +263,7 @@ export function projectExecutionView(state: ExecutionViewState): ExecutionView {
       ? {}
       : { lastTurnMetrics: state.lastTurnMetrics }),
     telemetry: state.telemetry,
+    turnTimings: state.turnTimings,
     ...(state.activeTurnStartedAt === undefined
       ? {}
       : { activeTurnStartedAt: state.activeTurnStartedAt }),
@@ -430,6 +434,10 @@ function applyDurable(
         ...next,
         activeTurnId: event.data.turnId,
         activeTurnStartedAt: event.createdAt,
+        turnTimings: {
+          ...next.turnTimings,
+          [event.data.turnId]: { startedAt: event.createdAt },
+        },
       }
     case "turn.completed": {
       const metrics = event.data.metrics
@@ -470,6 +478,13 @@ function applyDurable(
         telemetry,
         timeToFirstTokenWeightedMs,
         timeToFirstTokenSamples,
+        turnTimings: {
+          ...next.turnTimings,
+          [event.data.turnId]: {
+            ...next.turnTimings[event.data.turnId],
+            completedAt: event.createdAt,
+          },
+        },
         ...(event.data.usage === undefined
           ? {}
           : { lastTurnUsage: event.data.usage }),

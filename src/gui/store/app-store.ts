@@ -65,6 +65,7 @@ export type AppStoreData = {
   sessionDrafts: Record<string, SessionDraft>
   // Skills discoverable in the selected session's working directory.
   sessionSkills: readonly ApiSkillSummary[]
+  hydratingSessionId: string | undefined
   projects: ApiProject[]
   providers: ApiProviderSummary[]
   userPreference: ApiUserModelPreference | undefined
@@ -132,6 +133,7 @@ export function createInitialAppState(): AppStoreData {
     promptSkills: [],
     sessionDrafts: {},
     sessionSkills: [],
+    hydratingSessionId: undefined,
     projects: [],
     providers: [],
     userPreference: undefined,
@@ -216,6 +218,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
   const connectEvents = (selection: SessionSelection, after: number): void => {
     if (!isCurrentSelection(selection)) return
     closeStream()
+    if (after === 0) set({ hydratingSessionId: selection.sessionId })
 
     try {
       const source = getAppRpcClient(get().apiBase).openSessionStream(
@@ -253,6 +256,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
             if (get().stream !== source || !isCurrentSelection(selection)) {
               return
             }
+            set({ hydratingSessionId: undefined })
             if (get().restoringModelSelectionFor === selection.sessionId) {
               set({ restoringModelSelectionFor: undefined })
             }
@@ -302,6 +306,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
             }
             set({
               stream: undefined,
+              hydratingSessionId: undefined,
               message: errorMessage(error, "Could not open event stream."),
             })
           },
@@ -311,7 +316,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
     } catch (error) {
       closeStream()
       if (!isCurrentSelection(selection)) return
-      set({ message: errorMessage(error, "Could not open event stream.") })
+      set({
+        hydratingSessionId: undefined,
+        message: errorMessage(error, "Could not open event stream."),
+      })
     }
   }
 
