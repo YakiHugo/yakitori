@@ -1,12 +1,7 @@
-import { ArrowUp, LoaderCircle, Package, Plus, ShieldCheck, X } from "lucide-react"
-import {
-  type KeyboardEvent,
-  useLayoutEffect,
-  useRef,
-  useState,
-} from "react"
+import { ArrowUp, LoaderCircle, Plus, ShieldCheck, X } from "lucide-react"
+import { useContext, useLayoutEffect, useRef, useState } from "react"
+import { ConversationScrollContext } from "../hooks/conversation-scroll-context.ts"
 import { COMPACT_DIRECTIVE } from "../../kernel/events.ts"
-import type { ApiSkillSummary } from "../../server/protocol.ts"
 import {
   appendImageFiles,
   appendPickedImages,
@@ -19,13 +14,19 @@ import {
   useAppStore,
   useExecutionView,
 } from "../store/app-store.ts"
+import {
+  ComposerSuggestions,
+  type ComposerSuggestion,
+} from "./composer-suggestions.tsx"
+import { PromptEditor, type PromptEditorHandle } from "./prompt-editor.tsx"
+import { skillMentionText } from "./prompt-document.ts"
 import { ModelSelector } from "./model-selector.tsx"
 import { Button } from "./ui/button.tsx"
 
-type SlashCommand = {
-  readonly name: string
-  readonly description: string
-}
+type SlashCommand = Readonly<{
+  name: string
+  description: string
+}>
 
 const SLASH_COMMANDS: readonly SlashCommand[] = [
   {
@@ -35,9 +36,10 @@ const SLASH_COMMANDS: readonly SlashCommand[] = [
 ]
 
 export function Composer() {
+  const conversationScroll = useContext(ConversationScrollContext)
   const draft = useAppStore((state) => state.promptDraft) ?? ""
   const attachments = useAppStore((state) => state.promptAttachments)
-  const promptSkills = useAppStore((state) => state.promptSkills)
+  const sessionSkillsError = useAppStore((state) => state.sessionSkillsError)
   const sessionSkills = useAppStore((state) => state.sessionSkills)
   const apiBase = useAppStore((state) => state.apiBase)
   const busy = useAppStore((state) => state.busy)
@@ -63,10 +65,9 @@ export function Composer() {
   const setPromptAttachments = useAppStore(
     (state) => state.setPromptAttachments,
   )
-  const setPromptSkills = useAppStore((state) => state.setPromptSkills)
   const admitInput = useAppStore((state) => state.admitInput)
   const view = useExecutionView()
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null)
+  const editorRef = useRef<PromptEditorHandle | null>(null)
   const [attachmentError, setAttachmentError] = useState<string>()
   const [readingImages, setReadingImages] = useState(false)
   const [historyNavigation, setHistoryNavigation] = useState<{
@@ -74,17 +75,10 @@ export function Composer() {
     readonly stepsBack: number
     readonly savedDraft: string
   }>()
-  const [slashDismissed, setSlashDismissed] = useState<string>()
-  const [slashHighlight, setSlashHighlight] = useState<{
-    readonly query: string
-    readonly index: number
-  }>()
-  const [skillDismissed, setSkillDismissed] = useState<string>()
-  const [skillHighlight, setSkillHighlight] = useState<{
-    readonly query: string
-    readonly index: number
-  }>()
-  const [cursorAtEnd, setCursorAtEnd] = useState(true)
+  const [dismissedQuery, setDismissedQuery] = useState<string>()
+  const [highlight, setHighlight] = useState<{ query: string; index: number }>()
+  const [cursor, setCursor] = useState(draft.length)
+  const [hasSelection, setHasSelection] = useState(false)
 
   const effectiveModel = normalizeKimiModelSelection(
     resolveEffectiveModel({
@@ -109,7 +103,7 @@ export function Composer() {
       : (modelEntry.imageDetailModes?.includes("original") ?? false)
 
   useLayoutEffect(() => {
-    if (focusRevision > 0) textareaRef.current?.focus()
+    if (focusRevision > 0) editorRef.current?.focus()
   }, [focusRevision])
 
   // Navigation parked for another session must not leak into this one.
@@ -120,50 +114,51 @@ export function Composer() {
     entry.kind === "user_input" ? [entry.text] : [],
   )
 
-  // The menu tracks a single first-token query like codex's command popup:
-  // it stays open while the draft is exactly one `/name` token, matching
-  // case-insensitively and keeping exact matches selectable.
-  const slashQuery =
-    draft.startsWith("/") && !/\s/.test(draft) ? draft : undefined
-  const slashMatches =
-    slashQuery === undefined || slashDismissed === slashQuery
-      ? []
-      : SLASH_COMMANDS.filter((command) =>
-          command.name.toLowerCase().startsWith(slashQuery.toLowerCase()),
-        )
-  const slashMenuOpen = slashMatches.length > 0
-  const activeSlashHighlight =
-    slashHighlight !== undefined && slashHighlight.query === slashQuery
-      ? Math.min(slashHighlight.index, slashMatches.length - 1)
-      : 0
-
-  // The mention popup tracks a trailing `$token`, like codex's skill popup:
-  // it opens only while the cursor sits at the end of that token, so editing
-  // earlier text never triggers completions or captures Enter.
-  const skillQuery = /(?:^|\s)\$([\p{L}\p{N}_-]*)$/u.exec(draft)?.[1]
-  const skillMatches =
-    skillQuery === undefined || skillDismissed === skillQuery
-      ? []
-      : sessionSkills.filter(
-          (skill) =>
-            !promptSkills.some((picked) => picked.path === skill.path) &&
-            skill.name.toLowerCase().includes(skillQuery.toLowerCase()),
-        )
-  const skillMenuOpen =
-    cursorAtEnd && sessionSkills.length > 0 && skillMatches.length > 0
-  const activeSkillHighlight =
-    skillHighlight !== undefined && skillHighlight.query === skillQuery
-      ? Math.min(skillHighlight.index, skillMatches.length - 1)
+  const prefix = draft.slice(0, cursor)
+  const token = /(?:^|\s)([/$])([\p{L}\p{N}_:-]*)$/u.exec(prefix)
+  const query = token?.[2] ?? ""
+  const trigger = token?.[1]
+  const tokenStart = cursor - query.length - 1
+  const tokenEnd =
+    cursor + (/^[\p{L}\p{N}_:-]*/u.exec(draft.slice(cursor))?.[0].length ?? 0)
+  const queryKey = `${sessionId}:${tokenStart}:${trigger}:${query}`
+  const matchingSkills: ComposerSuggestion[] = [...sessionSkills]
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .filter(
+      (skill) =>
+        !draft.includes(skillMentionText(skill)) &&
+        `${skill.name} ${skill.description}`
+          .toLowerCase()
+          .includes(query.toLowerCase()),
+    )
+    .map((skill) => ({
+      kind: "skill",
+      name: skill.name,
+      description: skill.description,
+      skill,
+    }))
+  const suggestions: ComposerSuggestion[] = [
+    ...(trigger === "/" &&
+    tokenStart === 0 &&
+    draft.slice(tokenEnd).trim().length === 0
+      ? SLASH_COMMANDS.filter((command) =>
+          command.name.slice(1).toLowerCase().startsWith(query.toLowerCase()),
+        ).map((command) => ({ ...command, kind: "command" as const }))
+      : []),
+    ...matchingSkills,
+  ]
+  const menuOpen =
+    token !== null && !hasSelection && dismissedQuery !== queryKey
+  const activeHighlight =
+    highlight?.query === queryKey
+      ? Math.min(highlight.index, suggestions.length - 1)
       : 0
 
   const text = draft.trim()
   const sending =
     sessionId !== undefined && inFlightActions.has(`admit:${sessionId}`)
-  const containsInput =
-    text.length > 0 || attachments.length > 0 || promptSkills.length > 0
-  const compactBlocked =
-    text === COMPACT_DIRECTIVE &&
-    (attachments.length > 0 || promptSkills.length > 0)
+  const containsInput = text.length > 0 || attachments.length > 0
+  const compactBlocked = text === COMPACT_DIRECTIVE && attachments.length > 0
   const canSend =
     containsInput &&
     sessionId !== undefined &&
@@ -243,6 +238,7 @@ export function Composer() {
 
   const submit = () => {
     if (!canSend) return
+    conversationScroll?.jumpToBottom()
     setHistoryNavigation(undefined)
     if (attachments.length === 0) void admitInput(text)
     else
@@ -259,110 +255,86 @@ export function Composer() {
 
   // Selecting a command dispatches it right away, like codex: the draft
   // clears and the command runs. When execution is currently blocked —
-  // mid-restore, busy, or compact with staged chips, which the compact lane
+  // mid-restore, busy, or compact with staged images, which the compact lane
   // rejects — the selection only completes the text so nothing is lost.
   const runSlashCommand = (command: SlashCommand): void => {
-    setSlashDismissed(undefined)
-    setSlashHighlight(undefined)
+    setDismissedQuery(queryKey)
+    setHighlight(undefined)
     const blocked =
       sessionId === undefined ||
       restoringModelSelectionFor === sessionId ||
       busy ||
       sending ||
-      (command.name === COMPACT_DIRECTIVE &&
-        (attachments.length > 0 || promptSkills.length > 0))
+      (command.name === COMPACT_DIRECTIVE && attachments.length > 0)
     if (blocked) {
       setPromptDraft(command.name)
-      textareaRef.current?.focus()
+      editorRef.current?.focus()
       return
     }
     setPromptDraft("")
+    conversationScroll?.jumpToBottom()
     void admitInput(command.name)
   }
 
-  const pickSkill = (skill: ApiSkillSummary): void => {
-    setSkillDismissed(undefined)
-    setSkillHighlight(undefined)
-    // The chip replaces the trailing `$query` token in the draft.
-    setPromptDraft(draft.replace(/(^|\s)\$[\p{L}\p{N}_-]*$/u, "").trimEnd())
-    if (!promptSkills.some((picked) => picked.path === skill.path)) {
-      setPromptSkills([...promptSkills, skill])
-    }
-    textareaRef.current?.focus()
+  const pickSuggestion = (item: ComposerSuggestion): void => {
+    setDismissedQuery(queryKey)
+    setHighlight(undefined)
+    if (item.kind === "command") runSlashCommand(item)
+    else
+      editorRef.current?.replaceRange(
+        tokenStart,
+        tokenEnd,
+        `${skillMentionText(item.skill)} `,
+      )
+    editorRef.current?.focus()
   }
 
-  const handleDraftKeyDown = (
-    event: KeyboardEvent<HTMLTextAreaElement>,
-  ): void => {
-    if (event.nativeEvent.isComposing) return
-    if (slashMenuOpen) {
+  const handleDraftKeyDown = (event: globalThis.KeyboardEvent): boolean => {
+    if (event.isComposing) return false
+    if (menuOpen) {
       if (event.key === "Escape") {
-        setSlashDismissed(slashQuery)
-        return
+        event.preventDefault()
+        event.stopPropagation()
+        setDismissedQuery(queryKey)
+        return true
       }
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
         event.preventDefault()
-        const step = event.key === "ArrowDown" ? 1 : -1
-        setSlashHighlight({
-          query: slashQuery ?? "",
-          index:
-            (activeSlashHighlight + step + slashMatches.length) %
-            slashMatches.length,
-        })
-        return
+        if (suggestions.length > 0)
+          setHighlight({
+            query: queryKey,
+            index:
+              (activeHighlight +
+                (event.key === "ArrowDown" ? 1 : -1) +
+                suggestions.length) %
+              suggestions.length,
+          })
+        return true
       }
-      const highlighted = slashMatches[activeSlashHighlight]
+      const item = suggestions[activeHighlight]
       if (
-        (event.key === "Enter" && !event.shiftKey && highlighted !== undefined) ||
-        (event.key === "Tab" && highlighted !== undefined)
+        item &&
+        ((event.key === "Enter" && !event.shiftKey) || event.key === "Tab")
       ) {
         event.preventDefault()
-        runSlashCommand(highlighted)
-        return
-      }
-    }
-    if (skillMenuOpen) {
-      if (event.key === "Escape") {
-        setSkillDismissed(skillQuery)
-        return
-      }
-      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-        event.preventDefault()
-        const step = event.key === "ArrowDown" ? 1 : -1
-        setSkillHighlight({
-          query: skillQuery ?? "",
-          index:
-            (activeSkillHighlight + step + skillMatches.length) %
-            skillMatches.length,
-        })
-        return
-      }
-      const highlighted = skillMatches[activeSkillHighlight]
-      if (
-        (event.key === "Enter" && !event.shiftKey && highlighted !== undefined) ||
-        (event.key === "Tab" && highlighted !== undefined)
-      ) {
-        event.preventDefault()
-        pickSkill(highlighted)
-        return
+        pickSuggestion(item)
+        return true
       }
     }
     if (event.key === "ArrowUp") {
-      const cursorAtStart =
-        event.currentTarget.selectionStart === 0 &&
-        event.currentTarget.selectionEnd === 0
-      if (activeHistoryNavigation === undefined && !cursorAtStart) return
+      const cursorAtStart = cursor === 0 && !hasSelection
+      if (activeHistoryNavigation === undefined && !cursorAtStart) return false
       event.preventDefault()
       const stepsBack = (activeHistoryNavigation?.stepsBack ?? 0) + 1
       const entry = historyTexts[historyTexts.length - stepsBack]
-      if (entry === undefined) return
+      if (entry === undefined) return false
       setHistoryNavigation({
         sessionId,
         stepsBack,
         savedDraft: activeHistoryNavigation?.savedDraft ?? draft,
       })
       setPromptDraft(entry)
-      return
+      return true
     }
     if (event.key === "ArrowDown" && activeHistoryNavigation !== undefined) {
       event.preventDefault()
@@ -370,24 +342,26 @@ export function Composer() {
       if (stepsBack === 0) {
         setPromptDraft(activeHistoryNavigation.savedDraft)
         setHistoryNavigation(undefined)
-        return
+        return true
       }
       const entry = historyTexts[historyTexts.length - stepsBack]
-      if (entry === undefined) return
+      if (entry === undefined) return false
       setHistoryNavigation({ ...activeHistoryNavigation, stepsBack })
       setPromptDraft(entry)
-      return
+      return true
     }
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault()
       submit()
+      return true
     }
+    return false
   }
 
   return (
-    <footer className="bg-background/95 px-4 pt-3 pb-2 backdrop-blur-sm">
+    <footer className="bg-background pt-3 pb-3">
       <form
-        className="mx-auto max-w-3xl"
+        className="conversation-composer mx-auto w-full"
         onSubmit={(event) => {
           event.preventDefault()
           submit()
@@ -401,95 +375,16 @@ export function Composer() {
           void addFiles(Array.from(event.dataTransfer.files))
         }}
       >
-        <div className="relative overflow-visible rounded-2xl border bg-card shadow-[0_1px_2px_color-mix(in_oklab,var(--foreground)_7%,transparent),0_8px_24px_-10px_color-mix(in_oklab,var(--foreground)_14%,transparent)] transition-shadow focus-within:shadow-[0_1px_2px_color-mix(in_oklab,var(--foreground)_8%,transparent),0_10px_30px_-10px_color-mix(in_oklab,var(--foreground)_20%,transparent)]">
-          {slashMenuOpen ? (
-            <div
-              role="listbox"
-              aria-label="Slash commands"
-              className="absolute bottom-full left-0 z-10 mb-1 w-72 space-y-1 rounded-md border bg-popover p-2 text-sm shadow-md"
-            >
-              {slashMatches.map((command, index) => (
-                <button
-                  key={command.name}
-                  type="button"
-                  role="option"
-                  aria-selected={index === activeSlashHighlight}
-                  onClick={() => runSlashCommand(command)}
-                  onMouseEnter={() =>
-                    setSlashHighlight({
-                      query: slashQuery ?? "",
-                      index,
-                    })
-                  }
-                  className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left hover:bg-accent ${index === activeSlashHighlight ? "bg-accent" : ""}`}
-                >
-                  <span className="shrink-0 font-mono">{command.name}</span>
-                  <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
-                    {command.description}
-                  </span>
-                </button>
-              ))}
-            </div>
-          ) : null}
-          {skillMenuOpen ? (
-            <div
-              role="listbox"
-              aria-label="Skills"
-              className="absolute bottom-full left-0 z-10 mb-1 w-72 space-y-1 rounded-md border bg-popover p-2 text-sm shadow-md"
-            >
-              {skillMatches.map((skill, index) => (
-                <button
-                  key={skill.path}
-                  type="button"
-                  role="option"
-                  aria-selected={index === activeSkillHighlight}
-                  onClick={() => pickSkill(skill)}
-                  onMouseEnter={() =>
-                    setSkillHighlight({
-                      query: skillQuery ?? "",
-                      index,
-                    })
-                  }
-                  className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left hover:bg-accent ${index === activeSkillHighlight ? "bg-accent" : ""}`}
-                >
-                  <Package className="size-4 shrink-0 text-muted-foreground" />
-                  <span className="shrink-0">{skill.name}</span>
-                  <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
-                    {skill.description}
-                  </span>
-                </button>
-              ))}
-            </div>
-          ) : null}
-          {promptSkills.length > 0 ? (
-            <div className="flex flex-wrap gap-1.5 px-3 pt-3">
-              {promptSkills.map((skill, index) => (
-                <span
-                  key={skill.path}
-                  className="inline-flex items-center gap-1.5 rounded-md border bg-muted px-2 py-1 text-xs"
-                  title={skill.description}
-                >
-                  <Package className="size-3.5 text-muted-foreground" />
-                  {skill.name}
-                  <button
-                    type="button"
-                    disabled={sending}
-                    aria-label={`Remove ${skill.name}`}
-                    onClick={() =>
-                      setPromptSkills(
-                        promptSkills.filter(
-                          (_, candidate) => candidate !== index,
-                        ),
-                      )
-                    }
-                    className="rounded-full text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  >
-                    <X className="size-3" />
-                  </button>
-                </span>
-              ))}
-            </div>
-          ) : null}
+        <div className="relative overflow-visible rounded-3xl border bg-card shadow-[0_1px_2px_color-mix(in_oklab,var(--foreground)_7%,transparent),0_8px_24px_-10px_color-mix(in_oklab,var(--foreground)_14%,transparent)] transition-shadow focus-within:shadow-[0_1px_2px_color-mix(in_oklab,var(--foreground)_8%,transparent),0_10px_30px_-10px_color-mix(in_oklab,var(--foreground)_20%,transparent)]">
+          <ComposerSuggestions
+            open={menuOpen}
+            items={suggestions}
+            activeIndex={activeHighlight}
+            skillOnly={trigger === "$"}
+            error={sessionSkillsError}
+            onHighlight={(index) => setHighlight({ query: queryKey, index })}
+            onPick={pickSuggestion}
+          />
           {attachments.length > 0 ? (
             <div className="flex gap-2 overflow-x-auto px-3 pt-3">
               {attachments.map((attachment, index) => (
@@ -572,38 +467,36 @@ export function Composer() {
             </p>
           ) : null}
 
-          <textarea
-            ref={textareaRef}
-            aria-label="Message the Mate"
+          <PromptEditor
+            key={sessionId}
+            ref={editorRef}
+            label="Message the Mate"
             value={draft}
-            rows={1}
             placeholder={
               sessionId === undefined
                 ? "Create or select a session to start"
-                : "Message the Mate"
+                : "Ask anything"
             }
             disabled={sessionId === undefined}
-            onChange={(event) => {
+            onChange={(text) => {
+              setDismissedQuery(undefined)
               setHistoryNavigation(undefined)
-              setPromptDraft(event.currentTarget.value)
+              setPromptDraft(text)
             }}
-            onSelect={(event) => {
-              const target = event.currentTarget
-              setCursorAtEnd(
-                target.selectionStart === target.value.length &&
-                  target.selectionEnd === target.value.length,
-              )
+            onSelection={(from, to) => {
+              setCursor(from)
+              setHasSelection(from !== to)
             }}
-            onPaste={(event) => {
-              const images = Array.from(event.clipboardData.files).filter(
-                (file) => file.type.startsWith("image/"),
-              )
-              if (images.length === 0) return
-              event.preventDefault()
-              void addFiles(images)
-            }}
+            menuOpen={menuOpen}
+            activeSuggestion={
+              menuOpen && suggestions.length > 0
+                ? `composer-suggestion-${activeHighlight}`
+                : undefined
+            }
+            onBlur={() => setDismissedQuery(queryKey)}
+            onFocus={() => setDismissedQuery(undefined)}
+            onPasteImages={(images) => void addFiles(images)}
             onKeyDown={handleDraftKeyDown}
-            className="field-sizing-content max-h-50 min-h-13 w-full resize-none bg-transparent px-5 pt-4 pb-2 text-[15px] leading-6 outline-none placeholder:text-muted-foreground/65 disabled:opacity-50"
           />
 
           <div className="flex min-h-12 items-center justify-between gap-3 px-2.5 pb-2.5">
@@ -642,7 +535,7 @@ export function Composer() {
                 aria-label={sending ? "Sending" : "Send"}
                 title={
                   compactBlocked
-                    ? "Remove images and skills before compacting"
+                    ? "Remove images before compacting"
                     : "Send message"
                 }
                 className="rounded-full"

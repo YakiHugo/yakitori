@@ -1,7 +1,15 @@
 // @vitest-environment happy-dom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { ConversationScrollContext } from "../../src/gui/hooks/conversation-scroll-context.ts"
+import { skillMentionText } from "../../src/gui/components/prompt-document.ts"
 import { Composer } from "../../src/gui/components/composer.tsx"
 import {
   createExecutionViewState,
@@ -12,7 +20,12 @@ import {
   createInitialAppState,
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
-import { createEventEnvelope, EventType, InputRole } from "../../src/kernel/events.ts"
+import {
+  createEventEnvelope,
+  EventType,
+  InputRole,
+} from "../../src/kernel/events.ts"
+import { pastePrompt, selectPrompt } from "./prompt-editor-helpers.ts"
 import { FakeRpcClient } from "./fake-rpc-client.ts"
 
 const fakeRef = vi.hoisted(() => ({
@@ -71,6 +84,25 @@ describe("composer", () => {
 
     expect(admitInput).toHaveBeenCalledTimes(1)
     expect(admitInput).toHaveBeenCalledWith("hello mate")
+  })
+
+  it("resumes latest-output following when the reader sends from history", async () => {
+    const user = userEvent.setup()
+    const jumpToBottom = vi.fn()
+    const admitInput = vi.fn(async () => {})
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      promptDraft: "Continue",
+      admitInput,
+    })
+    render(
+      <ConversationScrollContext.Provider value={{ jumpToBottom }}>
+        <Composer />
+      </ConversationScrollContext.Provider>,
+    )
+    await user.click(screen.getByRole("button", { name: "Send" }))
+    expect(admitInput).toHaveBeenCalledWith("Continue")
+    expect(jumpToBottom).toHaveBeenCalledOnce()
   })
 
   it("does not send on Shift+Enter", async () => {
@@ -261,7 +293,7 @@ describe("history navigation", () => {
 
     const textarea = screen.getByRole("textbox") as HTMLTextAreaElement
     await user.click(textarea)
-    textarea.setSelectionRange(0, 0)
+    await selectPrompt(textarea, 0)
     await user.keyboard("{ArrowUp}")
     expect(useAppStore.getState().promptDraft).toBe("second question")
     await user.keyboard("{ArrowUp}")
@@ -286,7 +318,7 @@ describe("history navigation", () => {
 
     const textarea = screen.getByRole("textbox") as HTMLTextAreaElement
     await user.click(textarea)
-    textarea.setSelectionRange(2, 2)
+    await selectPrompt(textarea, 2)
     await user.keyboard("{ArrowUp}")
 
     expect(useAppStore.getState().promptDraft).toBe("hello")
@@ -303,12 +335,12 @@ describe("history navigation", () => {
 
     const textarea = screen.getByRole("textbox") as HTMLTextAreaElement
     await user.click(textarea)
-    textarea.setSelectionRange(0, 0)
+    await selectPrompt(textarea, 0)
     await user.keyboard("{ArrowUp}")
     expect(useAppStore.getState().promptDraft).toBe("first question")
 
-    fireEvent.change(textarea, { target: { value: "edited" } })
-    textarea.setSelectionRange(0, 0)
+    await pastePrompt(textarea, "edited", true)
+    await selectPrompt(textarea, 0)
     await user.keyboard("{ArrowUp}")
     expect(useAppStore.getState().promptDraft).toBe("first question")
     await user.keyboard("{ArrowDown}")
@@ -328,7 +360,7 @@ describe("slash command menu", () => {
 
     const textarea = screen.getByRole("textbox")
     await user.click(textarea)
-    await user.keyboard("/com")
+    await pastePrompt(screen.getByRole("textbox"), "/com")
 
     const menu = screen.getByRole("listbox", { name: "Slash commands" })
     expect(menu.textContent).toContain("/compact")
@@ -349,7 +381,7 @@ describe("slash command menu", () => {
     render(<Composer />)
 
     await user.click(screen.getByRole("textbox"))
-    await user.keyboard("/compact")
+    await pastePrompt(screen.getByRole("textbox"), "/compact")
     expect(screen.getByRole("listbox")).toBeDefined()
 
     await user.keyboard("{Enter}")
@@ -366,7 +398,7 @@ describe("slash command menu", () => {
     render(<Composer />)
 
     await user.click(screen.getByRole("textbox"))
-    await user.keyboard("/com")
+    await pastePrompt(screen.getByRole("textbox"), "/com")
     await user.click(screen.getByRole("option", { name: /\/compact/ }))
 
     expect(admitInput).toHaveBeenCalledWith("/compact")
@@ -383,7 +415,7 @@ describe("slash command menu", () => {
     render(<Composer />)
 
     await user.click(screen.getByRole("textbox"))
-    await user.keyboard("/")
+    await pastePrompt(screen.getByRole("textbox"), "/")
     // One command: cycling wraps back onto it and Enter still executes.
     await user.keyboard("{ArrowDown}{ArrowUp}{Enter}")
 
@@ -401,7 +433,8 @@ describe("slash command menu", () => {
     render(<Composer />)
 
     await user.click(screen.getByRole("textbox"))
-    await user.keyboard("/com{Enter}")
+    await pastePrompt(screen.getByRole("textbox"), "/com")
+    await user.keyboard("{Enter}")
 
     expect(admitInput).not.toHaveBeenCalled()
     expect(useAppStore.getState().promptDraft).toBe("/compact")
@@ -422,7 +455,8 @@ describe("slash command menu", () => {
     render(<Composer />)
 
     await user.click(screen.getByRole("textbox"))
-    await user.keyboard("/com{Enter}")
+    await pastePrompt(screen.getByRole("textbox"), "/com")
+    await user.keyboard("{Enter}")
 
     expect(admitInput).not.toHaveBeenCalled()
     expect(useAppStore.getState().promptDraft).toBe("/compact")
@@ -435,13 +469,13 @@ describe("slash command menu", () => {
 
     const textarea = screen.getByRole("textbox")
     await user.click(textarea)
-    await user.keyboard("/")
+    await pastePrompt(screen.getByRole("textbox"), "/")
     expect(screen.getByRole("listbox")).toBeDefined()
 
     await user.keyboard("{Escape}")
     expect(screen.queryByRole("listbox")).toBeNull()
 
-    await user.keyboard("c")
+    await pastePrompt(screen.getByRole("textbox"), "c")
     expect(screen.getByRole("listbox")).toBeDefined()
   })
 
@@ -451,7 +485,7 @@ describe("slash command menu", () => {
     render(<Composer />)
 
     await user.click(screen.getByRole("textbox"))
-    await user.keyboard("/compact now")
+    await pastePrompt(screen.getByRole("textbox"), "/compact now")
 
     expect(screen.queryByRole("listbox")).toBeNull()
   })
@@ -466,7 +500,7 @@ describe("slash command menu", () => {
     render(<Composer />)
 
     await user.click(screen.getByRole("textbox"))
-    await user.keyboard("/com")
+    await pastePrompt(screen.getByRole("textbox"), "/com")
     await user.keyboard("{Shift>}{Enter}{/Shift}")
 
     expect(admitInput).not.toHaveBeenCalled()
@@ -503,18 +537,19 @@ describe("skill mention popup", () => {
 
     const textarea = screen.getByRole("textbox")
     await user.click(textarea)
-    await user.keyboard("use $tem")
+    await pastePrompt(screen.getByRole("textbox"), "use $tem")
 
     const menu = screen.getByRole("listbox", { name: "Skills" })
     expect(menu.textContent).toContain("Template Creator")
     expect(menu.textContent).not.toContain("Changelog Writer")
 
     await user.keyboard("{Enter}")
-    expect(useAppStore.getState().promptDraft).toBe("use")
-    expect(useAppStore.getState().promptSkills).toEqual([templateCreator])
+    expect(useAppStore.getState().promptDraft).toBe(
+      `use ${skillMentionText(templateCreator)} `,
+    )
     expect(admitInput).not.toHaveBeenCalled()
     expect(
-      screen.getByRole("button", { name: "Remove Template Creator" }),
+      screen.getByRole("textbox").querySelector("[data-skill-path]"),
     ).toBeDefined()
   })
 
@@ -525,35 +560,37 @@ describe("skill mention popup", () => {
     render(<Composer />)
 
     await user.click(screen.getByRole("textbox"))
-    await user.keyboard("$tem{Enter}")
+    await pastePrompt(screen.getByRole("textbox"), "$tem")
+    await user.keyboard("{Enter}")
     await user.click(screen.getByRole("button", { name: "Send" }))
 
-    // The store appends path-qualified mentions; the composer sends plain text.
-    expect(admitInput).toHaveBeenCalledWith("")
+    expect(admitInput).toHaveBeenCalledWith(skillMentionText(templateCreator))
   })
 
-  it("cycles the highlight with arrow keys and picks with Tab", async () => {
+  it("cycles the sorted skill list and inserts the selected skill with Tab", async () => {
     const user = userEvent.setup()
     useAppStore.setState(skillsState())
     render(<Composer />)
 
     await user.click(screen.getByRole("textbox"))
-    await user.keyboard("$")
+    await pastePrompt(screen.getByRole("textbox"), "$")
     await user.keyboard("{ArrowDown}{Tab}")
 
-    expect(useAppStore.getState().promptSkills).toEqual([changelogWriter])
+    expect(useAppStore.getState().promptDraft).toBe(
+      `${skillMentionText(templateCreator)} `,
+    )
   })
 
   it("does not list an already picked skill again", async () => {
     const user = userEvent.setup()
     useAppStore.setState({
       ...skillsState(),
-      promptSkills: [templateCreator],
+      promptDraft: `${skillMentionText(templateCreator)} `,
     })
     render(<Composer />)
 
     await user.click(screen.getByRole("textbox"))
-    await user.keyboard("$")
+    await pastePrompt(screen.getByRole("textbox"), "$")
 
     const menu = screen.getByRole("listbox", { name: "Skills" })
     expect(menu.textContent).toContain("Changelog Writer")
@@ -566,13 +603,13 @@ describe("skill mention popup", () => {
     render(<Composer />)
 
     await user.click(screen.getByRole("textbox"))
-    await user.keyboard("$")
+    await pastePrompt(screen.getByRole("textbox"), "$")
     expect(screen.getByRole("listbox", { name: "Skills" })).toBeDefined()
 
     await user.keyboard("{Escape}")
     expect(screen.queryByRole("listbox", { name: "Skills" })).toBeNull()
 
-    await user.keyboard("t")
+    await pastePrompt(screen.getByRole("textbox"), "t")
     expect(screen.getByRole("listbox", { name: "Skills" })).toBeDefined()
   })
 
@@ -584,51 +621,24 @@ describe("skill mention popup", () => {
 
     const textarea = screen.getByRole("textbox") as HTMLTextAreaElement
     await user.click(textarea)
-    await user.keyboard("use $tem")
+    await pastePrompt(screen.getByRole("textbox"), "use $tem")
     expect(screen.getByRole("listbox", { name: "Skills" })).toBeDefined()
 
-    textarea.setSelectionRange(2, 2)
-    fireEvent.select(textarea)
+    await selectPrompt(textarea, 2)
     expect(screen.queryByRole("listbox", { name: "Skills" })).toBeNull()
 
     await user.keyboard("{Enter}")
     expect(admitInput).toHaveBeenCalledWith("use $tem")
   })
 
-  it("removes a chip", async () => {
+  it("treats a command with inline skills as ordinary message text", async () => {
     const user = userEvent.setup()
-    useAppStore.setState({
-      ...skillsState(),
-      promptSkills: [templateCreator],
-    })
+    const admitInput = vi.fn(async () => {})
+    const draft = `/compact ${skillMentionText(templateCreator)}`
+    useAppStore.setState({ ...skillsState(), admitInput, promptDraft: draft })
     render(<Composer />)
-
-    await user.click(
-      screen.getByRole("button", { name: "Remove Template Creator" }),
-    )
-
-    expect(useAppStore.getState().promptSkills).toEqual([])
-  })
-
-  it("blocks compact while skill chips are staged", async () => {
-    const user = userEvent.setup()
-    const admitInput = vi.fn((_text: string) => Promise.resolve())
-    useAppStore.setState({
-      ...skillsState(),
-      admitInput,
-      promptDraft: "/compact",
-      promptSkills: [templateCreator],
-    })
-    render(<Composer />)
-
-    expect(screen.getByRole("button", { name: "Send" })).toHaveProperty(
-      "disabled",
-      true,
-    )
-    await user.click(screen.getByRole("textbox"))
-    await user.keyboard("{Enter}")
-    expect(admitInput).not.toHaveBeenCalled()
-    expect(useAppStore.getState().promptDraft).toBe("/compact")
+    await user.click(screen.getByRole("button", { name: "Send" }))
+    expect(admitInput).toHaveBeenCalledWith(draft)
   })
 })
 
@@ -1038,6 +1048,103 @@ describe("model selector", () => {
       screen
         .getByRole("button", { name: "GPT 5.1 Codex" })
         .querySelector("svg"),
+    ).toBeNull()
+  })
+})
+
+describe("unified composer suggestions", () => {
+  const skill = {
+    name: "review",
+    description: "Review changes",
+    path: "/skills/review/SKILL.md",
+    scope: "user" as const,
+  }
+
+  it("selects a skill through slash without submitting a message", async () => {
+    const user = userEvent.setup()
+    const admitInput = vi.fn(async () => {})
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      sessionSkills: [skill],
+      admitInput,
+    })
+    render(<Composer />)
+    await pastePrompt(screen.getByRole("textbox"), "/rev")
+    await user.keyboard("{Enter}")
+    expect(useAppStore.getState().promptDraft).toBe(
+      `${skillMentionText(skill)} `,
+    )
+    expect(admitInput).not.toHaveBeenCalled()
+  })
+
+  it("reopens a dismissed query after the user clears and types it again", async () => {
+    const user = userEvent.setup()
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      sessionSkills: [skill],
+    })
+    render(<Composer />)
+    await pastePrompt(screen.getByRole("textbox"), "/rev")
+    await user.keyboard("{Escape}")
+    expect(screen.queryByRole("listbox")).toBeNull()
+    await pastePrompt(screen.getByRole("textbox"), "", true)
+    await pastePrompt(screen.getByRole("textbox"), "/rev")
+    expect(
+      screen.getByRole("option", { name: /review Review changes/ }),
+    ).toBeDefined()
+  })
+
+  it("selects commands with Tab like the inline Codex command menu", async () => {
+    const user = userEvent.setup()
+    const admitInput = vi.fn(async () => {})
+    useAppStore.setState({ selection: { sessionId: "session_1" }, admitInput })
+    render(<Composer />)
+    await pastePrompt(screen.getByRole("textbox"), "/com")
+    await user.keyboard("{Tab}")
+    expect(useAppStore.getState().promptDraft).toBe("")
+    expect(admitInput).toHaveBeenCalledWith("/compact")
+  })
+
+  it("replaces a skill token at the caret without deleting surrounding text", async () => {
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      sessionSkills: [skill],
+      promptDraft: "Please $rev then test",
+    })
+    render(<Composer />)
+    const textarea = screen.getByRole("textbox") as HTMLTextAreaElement
+    textarea.focus()
+    await selectPrompt(textarea, 11)
+    fireEvent.keyDown(textarea, { key: "Enter" })
+    expect(useAppStore.getState().promptDraft).toBe(
+      `Please ${skillMentionText(skill)}  then test`,
+    )
+  })
+
+  it("dismisses suggestions and removes the last skill chip with Backspace on empty input", async () => {
+    const user = userEvent.setup()
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      sessionSkills: [skill],
+    })
+    render(<Composer />)
+    await pastePrompt(screen.getByRole("textbox"), "/")
+    await user.keyboard("{Escape}")
+    expect(screen.queryByRole("listbox")).toBeNull()
+    await pastePrompt(screen.getByRole("textbox"), "", true)
+    await pastePrompt(screen.getByRole("textbox"), "$rev")
+    await user.keyboard("{Enter}")
+    expect(
+      screen.getByRole("textbox").querySelector("[data-skill-path]"),
+    ).not.toBeNull()
+    await pastePrompt(
+      screen.getByRole("textbox"),
+      skillMentionText(skill),
+      true,
+    )
+    await user.keyboard("{Backspace}")
+    expect(
+      screen.getByRole("textbox").querySelector("[data-skill-path]"),
     ).toBeNull()
   })
 })

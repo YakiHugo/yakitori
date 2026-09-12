@@ -1,4 +1,5 @@
 import { readdir, realpath, stat } from "node:fs/promises"
+import { homedir } from "node:os"
 import { basename, dirname, join } from "node:path"
 import { parseDocument } from "yaml"
 import {
@@ -63,6 +64,7 @@ export type SkillLoadInput = Readonly<{
   workspaceRoot?: string
   workingDirectory: string
   homeDir?: string
+  userHomeDir?: string
   maxBytes?: number
   projectRootMarkers?: readonly string[]
   configuration?: SkillConfiguration
@@ -99,6 +101,11 @@ export function createSkillsLoader(): (
       })),
       {
         path: join(input.homeDir ?? instructionHome(), "skills"),
+        scope: "user" as const,
+      },
+      // Codex host_roots: the shared user catalog lives in ~/.agents/skills.
+      {
+        path: join(input.userHomeDir ?? homedir(), ".agents", "skills"),
         scope: "user" as const,
       },
       ...(input.configuration?.paths ?? []).map((path) => ({

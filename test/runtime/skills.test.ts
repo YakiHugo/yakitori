@@ -58,6 +58,7 @@ describe("skills catalog", () => {
         workspaceRoot: workspace,
         workingDirectory: nested,
         homeDir: home,
+        userHomeDir: home,
       })
 
       expect(catalog?.skills.map((skill) => [skill.name, skill.scope])).toEqual(
@@ -98,7 +99,11 @@ it("keeps valid YAML, large bodies, linked skills and discovery diagnostics inde
       "---\nname: [broken\n---\n",
     )
     const loader = createSkillsLoader()
-    const input = { workingDirectory: workspace, homeDir: home }
+    const input = {
+      workingDirectory: workspace,
+      homeDir: home,
+      userHomeDir: home,
+    }
     const snapshot = await loader(input)
     expect(snapshot.skills.map((skill) => skill.name)).toEqual(["shared"])
     expect(snapshot.diagnostics).toHaveLength(1)
@@ -141,6 +146,7 @@ it("requires path disambiguation and honors configuration changes without restar
     const input = {
       workingDirectory: root,
       homeDir: join(root, "empty"),
+      userHomeDir: join(root, "empty"),
       configuration: { paths },
     }
     const snapshot = await loader(input)
@@ -168,6 +174,36 @@ it("requires path disambiguation and honors configuration changes without restar
         snapshot,
       ),
     ).toContain("Failed to load")
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+it("discovers and injects shared user skills outside the project and app home", async () => {
+  const root = await mkdtemp(join(tmpdir(), "yakitori-shared-skills-"))
+  try {
+    const userHomeDir = join(root, "user")
+    const directory = join(userHomeDir, ".agents", "skills", "review")
+    await mkdir(directory, { recursive: true })
+    await writeFile(
+      join(directory, "SKILL.md"),
+      "---\nname: review\ndescription: Review changes\n---\nInspect the diff before acting.\n",
+    )
+    const snapshot = await createSkillsLoader()({
+      workingDirectory: root,
+      homeDir: join(root, "app"),
+      userHomeDir,
+    })
+    expect(snapshot.skills).toHaveLength(1)
+    expect(snapshot.skills[0]).toMatchObject({ name: "review", scope: "user" })
+    const injected = await loadExplicitSkillInstructions(
+      `Please review [$review](${snapshot.skills[0]?.path})`,
+      snapshot,
+    )
+    expect(injected).toContain("Inspect the diff before acting.")
+    expect(renderSkillsCatalog(snapshot)?.text).not.toContain(
+      "Inspect the diff before acting.",
+    )
   } finally {
     await rm(root, { recursive: true, force: true })
   }

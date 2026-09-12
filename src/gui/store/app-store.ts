@@ -38,11 +38,10 @@ type SessionSelection = {
   readonly sessionId: string
 }
 
-export type SessionDraft = {
-  readonly text: string | undefined
-  readonly attachments: readonly ImageAttachment[]
-  readonly skills: readonly ApiSkillSummary[]
-}
+export type SessionDraft = Readonly<{
+  text: string | undefined
+  attachments: readonly ImageAttachment[]
+}>
 
 export type AppStoreData = {
   apiBase: string
@@ -61,10 +60,11 @@ export type AppStoreData = {
   // persistence or attachment-lifecycle authority.
   promptDraft: string | undefined
   promptAttachments: readonly ImageAttachment[]
-  promptSkills: readonly ApiSkillSummary[]
   sessionDrafts: Record<string, SessionDraft>
   // Skills discoverable in the selected session's working directory.
   sessionSkills: readonly ApiSkillSummary[]
+  sessionSkillsError: string | undefined
+  hydratingSessionId: string | undefined
   projects: ApiProject[]
   providers: ApiProviderSummary[]
   userPreference: ApiUserModelPreference | undefined
@@ -105,7 +105,6 @@ export type AppStoreActions = {
   ): Promise<void>
   setPromptDraft(text: string): void
   setPromptAttachments(attachments: readonly ImageAttachment[]): void
-  setPromptSkills(skills: readonly ApiSkillSummary[]): void
   setModelSelection(
     sessionId: string,
     selection: ModelSelection | undefined,
@@ -129,9 +128,10 @@ export function createInitialAppState(): AppStoreData {
     nextCursor: undefined,
     promptDraft: undefined,
     promptAttachments: [],
-    promptSkills: [],
     sessionDrafts: {},
     sessionSkills: [],
+    sessionSkillsError: undefined,
+    hydratingSessionId: undefined,
     projects: [],
     providers: [],
     userPreference: undefined,
@@ -196,6 +196,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
 
   const loadSessionSkills = (sessionId: string): void => {
     const revision = get().sessionSelectionIntentRevision
+    set({ sessionSkillsError: undefined })
     void getAppRpcClient(get().apiBase)
       .request("session/skills", { sessionId })
       .then((response) => {
@@ -207,15 +208,22 @@ export const useAppStore = create<AppStore>()((set, get) => {
         }
         set({ sessionSkills: response.skills })
       })
-      .catch(() => {
-        // Servers without skill discovery answer method-not-found; the
-        // mention popup simply stays empty.
+      .catch((error: unknown) => {
+        if (
+          get().selection.sessionId !== sessionId ||
+          get().sessionSelectionIntentRevision !== revision
+        )
+          return
+        set({
+          sessionSkillsError: errorMessage(error, "Could not load skills."),
+        })
       })
   }
 
   const connectEvents = (selection: SessionSelection, after: number): void => {
     if (!isCurrentSelection(selection)) return
     closeStream()
+    if (after === 0) set({ hydratingSessionId: selection.sessionId })
 
     try {
       const source = getAppRpcClient(get().apiBase).openSessionStream(
@@ -253,6 +261,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
             if (get().stream !== source || !isCurrentSelection(selection)) {
               return
             }
+            set({ hydratingSessionId: undefined })
             if (get().restoringModelSelectionFor === selection.sessionId) {
               set({ restoringModelSelectionFor: undefined })
             }
@@ -302,6 +311,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
             }
             set({
               stream: undefined,
+              hydratingSessionId: undefined,
               message: errorMessage(error, "Could not open event stream."),
             })
           },
@@ -311,7 +321,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
     } catch (error) {
       closeStream()
       if (!isCurrentSelection(selection)) return
-      set({ message: errorMessage(error, "Could not open event stream.") })
+      set({
+        hydratingSessionId: undefined,
+        message: errorMessage(error, "Could not open event stream."),
+      })
     }
   }
 
@@ -490,7 +503,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
         sessionSelectionIntentRevision: intentRevision,
       }))
 
-      await runTask(
+      const completed = await runTask(
         async () => {
           const response = await getAppRpcClient(get().apiBase).request(
             "session/fork",
@@ -548,6 +561,12 @@ export const useAppStore = create<AppStore>()((set, get) => {
         () => get().sessionSelectionIntentRevision === intentRevision,
       )
 
+      // The fork intent invalidated the old stream. A failed edit keeps the
+      // source conversation open and catches up events received in the meantime.
+      if (!completed && isCurrentSelection(sourceSelection)) {
+        connectEvents(sourceSelection, get().execution.lastSeq)
+      }
+
       set((state) => {
         const inFlightActions = new Set(state.inFlightActions)
         inFlightActions.delete(key)
@@ -578,7 +597,6 @@ export const useAppStore = create<AppStore>()((set, get) => {
               execution: createExecutionViewState(),
               promptDraft: undefined,
               promptAttachments: [],
-              promptSkills: [],
               sessionSkills: [],
               sessionDrafts,
             }
@@ -613,7 +631,6 @@ export const useAppStore = create<AppStore>()((set, get) => {
         nextCursor: undefined,
         promptDraft: undefined,
         promptAttachments: [],
-        promptSkills: [],
         sessionSkills: [],
         sessionDrafts: stashSessionDraft(state),
       }))
@@ -705,19 +722,6 @@ export const useAppStore = create<AppStore>()((set, get) => {
         return
       }
 
-      // Picked skill chips travel as path-qualified mentions appended to the
-      // text; the runtime resolves them through loadExplicitSkillInstructions.
-      const stagedSkills = get().promptSkills
-      const skillMentions = stagedSkills
-        .map((skill) => `[$${skill.name}](${skill.path})`)
-        .join(" ")
-      const submittedText =
-        skillMentions.length === 0
-          ? text
-          : text.length === 0
-            ? skillMentions
-            : `${text} ${skillMentions}`
-
       await runTask(
         async () => {
           const state = get()
@@ -735,7 +739,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
           const pendingAdmission = await reserveAdmission(window.localStorage, {
             apiBase: get().apiBase,
             sessionId: selection.sessionId,
-            text: submittedText,
+            text,
             ...(attachments.length === 0 ? {} : { attachments }),
           })
           if (!isCurrentSelection(selection)) return
@@ -746,7 +750,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
               requestId: pendingAdmission.requestId,
               content: {
                 kind: "text",
-                text: submittedText,
+                text,
                 ...(attachments.length === 0 ? {} : { attachments }),
               },
               ...(admittedModelSelection === undefined
@@ -764,13 +768,11 @@ export const useAppStore = create<AppStore>()((set, get) => {
           if (!isCurrentSelection(selection)) return
           if (
             (get().promptDraft ?? "").trim() === text &&
-            sameAttachments(get().promptAttachments, attachments) &&
-            sameSkills(get().promptSkills, stagedSkills)
+            sameAttachments(get().promptAttachments, attachments)
           ) {
             set({
               promptDraft: undefined,
               promptAttachments: [],
-              promptSkills: [],
             })
           }
           set((state) => {
@@ -905,10 +907,6 @@ export const useAppStore = create<AppStore>()((set, get) => {
 
     setPromptAttachments: (attachments) => {
       set({ promptAttachments: [...attachments] })
-    },
-
-    setPromptSkills: (skills) => {
-      set({ promptSkills: [...skills] })
     },
 
     setModelSelection: (sessionId, selection) => {
@@ -1170,14 +1168,12 @@ function stashSessionDraft(state: AppStoreData): Record<string, SessionDraft> {
   if (sessionId === undefined) return state.sessionDrafts
   const hasContent =
     (state.promptDraft ?? "").trim().length > 0 ||
-    state.promptAttachments.length > 0 ||
-    state.promptSkills.length > 0
+    state.promptAttachments.length > 0
   const sessionDrafts = { ...state.sessionDrafts }
   if (hasContent) {
     sessionDrafts[sessionId] = {
       text: state.promptDraft,
       attachments: state.promptAttachments,
-      skills: state.promptSkills,
     }
   } else {
     delete sessionDrafts[sessionId]
@@ -1188,10 +1184,7 @@ function stashSessionDraft(state: AppStoreData): Record<string, SessionDraft> {
 function takeSessionDraft(
   sessionDrafts: Record<string, SessionDraft>,
   sessionId: string,
-): Pick<
-  AppStoreData,
-  "sessionDrafts" | "promptDraft" | "promptAttachments" | "promptSkills"
-> {
+): Pick<AppStoreData, "sessionDrafts" | "promptDraft" | "promptAttachments"> {
   const next = { ...sessionDrafts }
   const draft = next[sessionId]
   delete next[sessionId]
@@ -1199,7 +1192,6 @@ function takeSessionDraft(
     sessionDrafts: next,
     promptDraft: draft?.text,
     promptAttachments: draft?.attachments ?? [],
-    promptSkills: draft?.skills ?? [],
   }
 }
 
@@ -1207,7 +1199,6 @@ function sameAttachments(
   left: readonly ImageAttachment[],
   right: readonly ImageAttachment[],
 ): boolean {
-
   return (
     left.length === right.length &&
     left.every(
@@ -1218,19 +1209,6 @@ function sameAttachments(
         attachment.detail === right[index]?.detail &&
         attachment.file.rolloutId === right[index]?.file.rolloutId &&
         attachment.file.path === right[index]?.file.path,
-    )
-  )
-}
-
-function sameSkills(
-  left: readonly ApiSkillSummary[],
-  right: readonly ApiSkillSummary[],
-): boolean {
-  return (
-    left.length === right.length &&
-    left.every(
-      (skill, index) =>
-        skill.path === right[index]?.path && skill.name === right[index]?.name,
     )
   )
 }

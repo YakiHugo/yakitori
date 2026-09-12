@@ -1,117 +1,112 @@
-import { Package, PencilLine, RotateCcw, X } from "lucide-react"
-import { useState } from "react"
+import { PencilLine, RotateCcw } from "lucide-react"
+import { type ReactNode, useLayoutEffect, useRef, useState } from "react"
 import type { ExecutionEntry } from "../../execution-view.ts"
 import { useAppStore } from "../../store/app-store.ts"
 import { imageAttachmentUrl } from "../../composer-attachments.ts"
 import { Badge } from "../ui/badge.tsx"
 import { Button } from "../ui/button.tsx"
 
-// Skill chips submitted from the composer travel as a trailing run of
-// path-qualified mentions appended to the text; render that run as chips
-// instead of raw markdown. Inline `[$x](y)` spans the user typed elsewhere
-// in the message are left untouched.
-const SKILL_MENTION_PATTERN = /\[\$([^\]]+)\]\(([^)]+)\)/g
-const TRAILING_SKILL_MENTIONS = /(?:[^\S\n]*\[\$[^\]]+\]\([^)]+\))+\s*$/
+import { PromptEditor, type PromptEditorHandle } from "../prompt-editor.tsx"
+import { parsePrompt } from "../prompt-document.ts"
 
-function splitSkillMentions(text: string): {
-  readonly text: string
-  readonly mentions: readonly { readonly name: string; readonly path: string }[]
-} {
-  if (!text.includes("[$")) return { text, mentions: [] }
-  const trailing = TRAILING_SKILL_MENTIONS.exec(text)
-  if (trailing === null) return { text, mentions: [] }
-  const seen = new Set<string>()
-  const mentions = [...trailing[0].matchAll(SKILL_MENTION_PATTERN)]
-    .map((match) => ({
-      name: match[1] ?? "",
-      path: match[2] ?? "",
-    }))
-    .filter((mention) => {
-      if (seen.has(mention.path)) return false
-      seen.add(mention.path)
-      return true
+function MessageText({ text }: Readonly<{ text: string }>) {
+  const paragraphs: ReactNode[] = []
+  parsePrompt(text).forEach((paragraph, paragraphOffset) => {
+    const content: ReactNode[] = []
+    paragraph.forEach((node, offset) => {
+      content.push(
+        node.isText ? (
+          node.text
+        ) : (
+          <span
+            // biome-ignore lint/suspicious/noArrayIndexKey: ProseMirror supplies document offsets, not array indices; admitted messages are immutable.
+            key={offset}
+            title={node.attrs.path}
+            className="mx-0.5 inline rounded-md bg-primary-foreground/15 px-1.5 py-0.5 font-medium"
+          >
+            ${node.attrs.name}
+          </span>
+        ),
+      )
     })
-  return { text: text.slice(0, trailing.index).trimEnd(), mentions }
+    paragraphs.push(
+      // biome-ignore lint/suspicious/noArrayIndexKey: This is a ProseMirror document offset in an immutable admitted message.
+      <p key={paragraphOffset}>{content.length ? content : <br />}</p>,
+    )
+  })
+  return <div className="px-4 py-3 whitespace-pre-wrap">{paragraphs}</div>
 }
 
 export function UserMessageCell({
   entry,
   queued,
-}: {
-  readonly entry: Extract<ExecutionEntry, { kind: "user_input" }>
-  readonly queued: boolean
-}) {
+}: Readonly<{
+  entry: Extract<ExecutionEntry, { kind: "user_input" }>
+  queued: boolean
+}>) {
   const busy = useAppStore((state) => state.busy)
   const apiBase = useAppStore((state) => state.apiBase)
   const forkSession = useAppStore((state) => state.forkSession)
   const [mode, setMode] = useState<"undo" | "edit" | undefined>()
   const [draft, setDraft] = useState(entry.text)
   const edited = draft.trim()
+  const editorRef = useRef<PromptEditorHandle>(null)
+  useLayoutEffect(() => {
+    if (mode === "edit") {
+      editorRef.current?.focus(true)
+    }
+  }, [mode])
   const attachments = entry.attachments ?? []
-  const display = splitSkillMentions(entry.text)
 
   return (
     <div className="group flex flex-col items-end gap-1.5">
-      <div className="max-w-[85%] overflow-hidden rounded-xl bg-primary text-sm text-primary-foreground">
-        {attachments.length > 0 ? (
-          <div
-            className={`grid gap-1.5 p-1.5 ${attachments.length > 1 ? "grid-cols-2" : "grid-cols-1"}`}
-          >
-            {attachments.map((attachment) => (
-              <img
-                key={`${attachment.name}:${attachment.sizeBytes}:${attachment.file.rolloutId}:${attachment.file.path}`}
-                src={imageAttachmentUrl(attachment, apiBase)}
-                alt={attachment.name}
-                className="max-h-72 min-h-24 w-full rounded-lg bg-black/10 object-cover"
-              />
-            ))}
-          </div>
-        ) : null}
-        {display.mentions.length > 0 ? (
-          <div className="flex flex-wrap gap-1 px-3 pt-2">
-            {display.mentions.map((mention) => (
-              <span
-                key={mention.path}
-                title={mention.path}
-                className="inline-flex items-center gap-1 rounded bg-primary-foreground/15 px-1.5 py-0.5 text-[11px]"
+      {mode !== "edit" ? (
+        <>
+          <div className="max-w-[85%] overflow-hidden rounded-3xl bg-primary text-[15px] leading-6 text-primary-foreground">
+            {attachments.length > 0 ? (
+              <div
+                className={`grid gap-1.5 p-1.5 ${attachments.length > 1 ? "grid-cols-2" : "grid-cols-1"}`}
               >
-                <Package className="size-3" />
-                {mention.name}
-              </span>
-            ))}
+                {attachments.map((attachment) => (
+                  <img
+                    key={`${attachment.name}:${attachment.sizeBytes}:${attachment.file.rolloutId}:${attachment.file.path}`}
+                    src={imageAttachmentUrl(attachment, apiBase)}
+                    alt={attachment.name}
+                    className="max-h-72 min-h-24 w-full rounded-lg bg-black/10 object-cover"
+                  />
+                ))}
+              </div>
+            ) : null}
+            {entry.text ? <MessageText text={entry.text} /> : null}
           </div>
-        ) : null}
-        {display.text.length > 0 ? (
-          <div className="px-3 py-2 whitespace-pre-wrap">{display.text}</div>
-        ) : null}
-      </div>
-      <div className="flex min-h-5 items-center gap-1">
-        {queued ? <Badge variant="secondary">queued</Badge> : null}
-        {mode === undefined ? (
-          <div className="flex items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => setMode("undo")}
-              className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
-            >
-              <RotateCcw className="size-3" /> Undo to here
-            </button>
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => {
-                setDraft(entry.text)
-                setMode("edit")
-              }}
-              className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
-            >
-              <PencilLine className="size-3" /> Edit &amp; resubmit
-            </button>
+          <div className="flex min-h-5 items-center gap-1">
+            {queued ? <Badge variant="secondary">queued</Badge> : null}
+            {mode === undefined ? (
+              <div className="flex items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => setMode("undo")}
+                  className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
+                >
+                  <RotateCcw className="size-3" /> Undo to here
+                </button>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => {
+                    setDraft(entry.text)
+                    setMode("edit")
+                  }}
+                  className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
+                >
+                  <PencilLine className="size-3" /> Edit &amp; resubmit
+                </button>
+              </div>
+            ) : null}
           </div>
-        ) : null}
-      </div>
-
+        </>
+      ) : null}
       {mode === "undo" ? (
         <div className="w-full max-w-lg rounded-md border bg-card p-3 shadow-sm">
           <p className="text-xs font-medium">
@@ -123,7 +118,7 @@ export function UserMessageCell({
           <div className="mt-3 flex justify-end gap-2">
             <Button
               type="button"
-              variant="ghost"
+              variant="outline"
               size="sm"
               disabled={busy}
               onClick={() => setMode(undefined)}
@@ -135,9 +130,7 @@ export function UserMessageCell({
               size="sm"
               disabled={busy}
               onClick={() => {
-                void forkSession(entry.inputId, "undo").then(() =>
-                  setMode(undefined),
-                )
+                void forkSession(entry.inputId, "undo")
               }}
             >
               <RotateCcw /> Undo
@@ -148,44 +141,49 @@ export function UserMessageCell({
 
       {mode === "edit" ? (
         <form
-          className="w-full max-w-lg rounded-md border bg-card p-3 shadow-sm"
+          className="conversation-inline-edit w-full rounded-3xl bg-muted p-4"
           onSubmit={(event) => {
             event.preventDefault()
-            if (edited.length === 0 || busy) return
-            void forkSession(entry.inputId, "edit", edited).then(() =>
-              setMode(undefined),
-            )
+            if ((edited.length === 0 && attachments.length === 0) || busy)
+              return
+            void forkSession(entry.inputId, "edit", edited)
           }}
         >
-          <div className="mb-2 flex items-center justify-between gap-3">
-            <div>
-              <p className="text-xs font-medium">Edit message</p>
-              <p className="text-[11px] text-muted-foreground">
-                Attached images will be kept.
-              </p>
+          {attachments.length > 0 ? (
+            <div className="mb-3 flex gap-2">
+              {attachments.map((attachment) => (
+                <img
+                  key={attachment.file.path}
+                  src={imageAttachmentUrl(attachment, apiBase)}
+                  alt={attachment.name}
+                  className="size-16 rounded-lg object-cover"
+                />
+              ))}
             </div>
-            <button
-              type="button"
-              aria-label="Close editor"
-              disabled={busy}
-              onClick={() => setMode(undefined)}
-              className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
-            >
-              <X className="size-3.5" />
-            </button>
-          </div>
-          <textarea
-            aria-label="Edit message"
+          ) : null}
+          <PromptEditor
+            ref={editorRef}
+            label="Edit message"
             value={draft}
-            rows={3}
             disabled={busy}
-            onChange={(event) => setDraft(event.currentTarget.value)}
-            className="max-h-48 min-h-20 w-full resize-y rounded-md border bg-background px-3 py-2 text-sm outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+            onChange={setDraft}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                setMode(undefined)
+                return true
+              }
+              if (event.key === "Enter" && !event.shiftKey) {
+                if (!busy && (edited.length > 0 || attachments.length > 0))
+                  void forkSession(entry.inputId, "edit", edited)
+                return true
+              }
+              return false
+            }}
           />
           <div className="mt-2 flex justify-end gap-2">
             <Button
               type="button"
-              variant="ghost"
+              variant="outline"
               size="sm"
               disabled={busy}
               onClick={() => setMode(undefined)}
@@ -195,9 +193,11 @@ export function UserMessageCell({
             <Button
               type="submit"
               size="sm"
-              disabled={busy || edited.length === 0}
+              disabled={
+                busy || (edited.length === 0 && attachments.length === 0)
+              }
             >
-              <PencilLine /> Save &amp; send
+              Send
             </Button>
           </div>
         </form>

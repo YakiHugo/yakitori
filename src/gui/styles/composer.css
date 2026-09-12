@@ -1,0 +1,78 @@
+.prompt-editor .ProseMirror {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  outline: none;
+  min-height: 80px;
+  max-height: 240px;
+  overflow-y: auto;
+  font-size: 15px;
+  line-height: 26px;
+  padding: 14px 16px 10px;
+}
+.prompt-editor .ProseMirror[aria-disabled="true"] {
+  opacity: 0.5;
+}
+.prompt-editor .ProseMirror p {
+  margin: 0;
+}
+.prompt-editor
+  .ProseMirror:has(
+    > p:only-child > br.ProseMirror-trailingBreak:only-child
+  )::before {
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  pointer-events: none;
+  color: color-mix(in oklab, var(--muted-foreground) 65%, transparent);
+}
+.prompt-skill {
+  display: inline;
+  padding: 2px 5px;
+  margin-inline: 1px;
+  border-radius: 6px;
+  background: var(--muted);
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.prompt-skill-icon {
+  padding-right: 4px;
+  color: var(--muted-foreground);
+}
+.prompt-skill.ProseMirror-selectednode {
+  outline: 2px solid var(--ring);
+}
+.conversation-inline-edit .ProseMirror {
+  padding: 0;
+  min-height: 76px;
+  max-height: 320px;
+}
+.conversation-inline-edit .prompt-skill {
+  background: var(--background);
+}
+.composer-suggestion-panel {
+  transform-origin: bottom;
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  transition:
+    opacity 150ms var(--conversation-ease),
+    transform 150ms var(--conversation-ease),
+    display 150ms allow-discrete;
+}
+.composer-suggestion-panel[hidden] {
+  display: none;
+  opacity: 0;
+  transform: translateY(4px) scale(0.98);
+}
+@starting-style {
+  .composer-suggestion-panel:not([hidden]) {
+    opacity: 0;
+    transform: translateY(4px) scale(0.98);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .composer-suggestion-panel {
+    transition: none;
+  }
+}

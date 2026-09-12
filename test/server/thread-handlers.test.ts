@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
 import {
   createYakitoriError,
@@ -20,10 +20,20 @@ import { createThreadServerHandlers } from "../../src/server/handlers.ts"
 import { createSkillsLoader } from "../../src/runtime/skills.ts"
 import { MemoryThreadStore } from "../core/memory-thread-store.ts"
 
+const testUserHome = vi.hoisted(() => ({ path: "" }))
+vi.mock("node:os", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:os")>()),
+  homedir: () => testUserHome.path,
+}))
+beforeEach(async () => {
+  testUserHome.path = await mkdtemp(join(tmpdir(), "yakitori-handler-home-"))
+})
+
 const cleanups: Array<() => Promise<void>> = []
 
 afterEach(async () => {
   await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()))
+  await rm(testUserHome.path, { recursive: true, force: true })
 })
 
 describe("thread server handlers", () => {
@@ -561,7 +571,11 @@ describe("thread server handlers", () => {
       manager,
       store,
       listSessionSkills: async ({ workingDirectory }) => {
-        const discovered = await skillsLoader({ workingDirectory })
+        const discovered = await skillsLoader({
+          workingDirectory,
+          homeDir: workspace,
+          userHomeDir: workspace,
+        })
         return [
           ...discovered.skills,
           {

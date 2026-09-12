@@ -144,6 +144,7 @@ describe("app store event stream", () => {
       },
     })
     stream?.emitEvent(admitted)
+    expect(useAppStore.getState().hydratingSessionId).toBe("session_1")
     expect(
       projectExecutionView(useAppStore.getState().execution).entries,
     ).toEqual([expect.objectContaining({ kind: "user_input", text: "hello" })])
@@ -153,6 +154,7 @@ describe("app store event stream", () => {
       turns: 0,
     })
     stream?.emitReplayComplete()
+    expect(useAppStore.getState().hydratingSessionId).toBeUndefined()
     expect(useAppStore.getState().restoringModelSelectionFor).toBeUndefined()
 
     stream?.emitEvent(
@@ -541,22 +543,23 @@ describe("session drafts", () => {
       scope: "repo" as const,
     }
     await useAppStore.getState().selectSession("session_1")
-    useAppStore.getState().setPromptDraft("draft for one")
+    useAppStore
+      .getState()
+      .setPromptDraft(`draft for one [$${skill.name}](${skill.path})`)
     useAppStore.getState().setPromptAttachments([attachment])
-    useAppStore.getState().setPromptSkills([skill])
 
     await useAppStore.getState().selectSession("session_2")
 
     expect(useAppStore.getState().promptDraft).toBeUndefined()
     expect(useAppStore.getState().promptAttachments).toEqual([])
-    expect(useAppStore.getState().promptSkills).toEqual([])
 
     useAppStore.getState().setPromptDraft("draft for two")
     await useAppStore.getState().selectSession("session_1")
 
-    expect(useAppStore.getState().promptDraft).toBe("draft for one")
+    expect(useAppStore.getState().promptDraft).toBe(
+      "draft for one [$Template Creator](/repo/.agents/skills/template-creator/SKILL.md)",
+    )
     expect(useAppStore.getState().promptAttachments).toEqual([attachment])
-    expect(useAppStore.getState().promptSkills).toEqual([skill])
 
     await useAppStore.getState().selectSession("session_2")
     expect(useAppStore.getState().promptDraft).toBe("draft for two")
@@ -1098,23 +1101,20 @@ describe("model selection", () => {
     expect(useAppStore.getState().message).toBeUndefined()
   })
 
-  it("submits picked skills as path-qualified mentions and clears the chips", async () => {
+  it("submits inline skill mentions unchanged and clears the admitted draft", async () => {
     window.localStorage.clear()
     fakeRef.current.respond = admissionResponder()
     useAppStore.setState({
       selection: { sessionId: "session_1" },
-      promptDraft: "hello",
-      promptSkills: [
-        {
-          name: "Template Creator",
-          description: "Creates project templates",
-          path: "/repo/.agents/skills/template-creator/SKILL.md",
-          scope: "repo",
-        },
-      ],
+      promptDraft:
+        "hello [$Template Creator](/repo/.agents/skills/template-creator/SKILL.md)",
     })
 
-    await useAppStore.getState().admitInput("hello")
+    await useAppStore
+      .getState()
+      .admitInput(
+        "hello [$Template Creator](/repo/.agents/skills/template-creator/SKILL.md)",
+      )
 
     const admissions = fakeRef.current.requestsFor("session/input")
     expect(admissions).toHaveLength(1)
@@ -1125,11 +1125,10 @@ describe("model selection", () => {
         text: "hello [$Template Creator](/repo/.agents/skills/template-creator/SKILL.md)",
       },
     })
-    expect(useAppStore.getState().promptSkills).toEqual([])
     expect(useAppStore.getState().promptDraft).toBeUndefined()
   })
 
-  it("keeps chips picked while an admission is in flight", async () => {
+  it("keeps inline mentions edited while an admission is in flight", async () => {
     window.localStorage.clear()
     let release: (() => void) | undefined
     fakeRef.current.respond = (method, params) => {
@@ -1160,34 +1159,24 @@ describe("model selection", () => {
       }
       return notFound()
     }
-    const skillA = {
-      name: "A",
-      description: "a",
-      path: "/a",
-      scope: "repo" as const,
-    }
-    const skillB = {
-      name: "B",
-      description: "b",
-      path: "/b",
-      scope: "repo" as const,
-    }
     useAppStore.setState({
       selection: { sessionId: "session_1" },
-      promptDraft: "hello",
-      promptSkills: [skillA],
+      promptDraft: "hello [$A](/a)",
     })
 
-    const pending = useAppStore.getState().admitInput("hello")
-    for (let attempt = 0; attempt < 100 && release === undefined; attempt += 1) {
+    const pending = useAppStore.getState().admitInput("hello [$A](/a)")
+    for (
+      let attempt = 0;
+      attempt < 100 && release === undefined;
+      attempt += 1
+    ) {
       await new Promise((resolve) => setTimeout(resolve, 0))
     }
-    useAppStore.getState().setPromptSkills([skillA, skillB])
+    useAppStore.getState().setPromptDraft("hello [$A](/a) [$B](/b)")
     release?.()
     await pending
 
-    expect(useAppStore.getState().promptSkills).toEqual([skillA, skillB])
-    expect(useAppStore.getState().promptDraft).toBe("hello")
+    expect(useAppStore.getState().promptDraft).toBe("hello [$A](/a) [$B](/b)")
   })
 
   it("sends the saved modelSelection with admitted input", async () => {
@@ -1529,3 +1518,37 @@ function admissionResponder() {
     return notFound()
   }
 }
+
+it("resumes the source event stream after an edit request fails", async () => {
+  fakeRef.current.respond = (method) => {
+    if (method === "session/skills") return { skills: [] }
+    throw new ApiRequestError("Edit failed", "not_found")
+  }
+  await useAppStore.getState().selectSession("session_1")
+  const first = fakeRef.current.streams[0]
+  emitSnapshot(first)
+  first?.emitReplayComplete()
+  await useAppStore.getState().forkSession("input_1", "edit", "Replacement")
+  expect(useAppStore.getState().selection.sessionId).toBe("session_1")
+  expect(useAppStore.getState().message).toBe("Edit failed")
+  const resumed = fakeRef.current.streams[1]
+  expect(resumed?.after).toBe(1)
+  resumed?.emitEvent(
+    createEventEnvelope({
+      sessionId: "session_1",
+      seq: 2,
+      event: {
+        type: EventType.InputAdmitted,
+        data: {
+          requestId: "late",
+          inputId: "input_late",
+          role: InputRole.User,
+          content: { kind: "text", text: "Input during edit" },
+        },
+      },
+    }),
+  )
+  expect(useAppStore.getState().execution.entries).toContainEqual(
+    expect.objectContaining({ text: "Input during edit" }),
+  )
+})
