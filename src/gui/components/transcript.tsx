@@ -1,6 +1,7 @@
 import { ArrowDown, ChevronRight } from "lucide-react"
-import { useMemo, useRef, useState } from "react"
+import { type ReactNode, useId, useMemo, useRef, useState } from "react"
 import type { ExecutionEntry, TurnTiming } from "../execution-view.ts"
+import { ConversationScrollContext } from "../hooks/conversation-scroll-context.ts"
 import { usePinnedScroll } from "../hooks/use-pinned-scroll.ts"
 import { formatElapsed } from "../lib/format.ts"
 import { useAppStore, useExecutionView } from "../store/app-store.ts"
@@ -11,6 +12,8 @@ import { ReasoningCell } from "./cells/reasoning-cell.tsx"
 import { ToolCell } from "./cells/tool-cell.tsx"
 import { TurnTerminalCell } from "./cells/turn-terminal-cell.tsx"
 import { UserMessageCell } from "./cells/user-message-cell.tsx"
+import { ResponseActions } from "./response-actions.tsx"
+import { ConversationNavigation } from "./conversation-navigation.tsx"
 import { ScrollArea } from "./ui/scroll-area.tsx"
 
 // Keep admission order, including queued/steering inputs between turn items.
@@ -49,7 +52,7 @@ function entryKey(entry: ExecutionEntry): string {
   }
 }
 
-export function Transcript() {
+export function Transcript({ children }: Readonly<{ children?: ReactNode }>) {
   const view = useExecutionView()
   const sessionId = useAppStore((state) => state.selection.sessionId)
   const scroll = usePinnedScroll(sessionId)
@@ -71,107 +74,80 @@ export function Transcript() {
   }
 
   return (
-    <div className="relative flex min-h-0 flex-1">
-      <ScrollArea
-        className="min-h-0 flex-1"
-        viewportRef={scroll.viewportRef}
-        onScroll={updateScroll}
-      >
-        <div
-          ref={scroll.contentRef}
-          className="mx-auto flex w-full max-w-3xl flex-col gap-6 px-8 py-8"
+    <ConversationScrollContext.Provider value={scroll}>
+      <div className="relative flex min-h-0 flex-1">
+        <ScrollArea
+          className="min-h-0 flex-1"
+          viewportRef={scroll.viewportRef}
+          onScroll={updateScroll}
         >
-          {view.entries.length === 0 ? (
-            <p className="py-12 text-center text-sm text-muted-foreground">
-              Conversation will appear here
-            </p>
-          ) : (
-            blocks.map((block) => {
-              const first = block.entries[0]
-              if (first?.kind === "user_input")
-                return (
-                  <div
+          <div
+            ref={scroll.contentRef}
+            className="conversation-content mx-auto flex w-full flex-col gap-8 py-8"
+          >
+            {view.entries.length === 0 ? (
+              <p className="py-12 text-center text-sm text-muted-foreground">
+                Conversation will appear here
+              </p>
+            ) : (
+              blocks.map((block) => {
+                const first = block.entries[0]
+                if (first?.kind === "user_input")
+                  return (
+                    <div
+                      key={block.key}
+                      ref={(node) => {
+                        if (node) anchors.current.set(first.inputId, node)
+                        else anchors.current.delete(first.inputId)
+                      }}
+                    >
+                      <UserMessageCell
+                        entry={first}
+                        queued={queued.has(first.inputId)}
+                      />
+                    </div>
+                  )
+                return block.turnId ? (
+                  <TurnBlock
                     key={block.key}
-                    ref={(node) => {
-                      if (node) anchors.current.set(first.inputId, node)
-                      else anchors.current.delete(first.inputId)
-                    }}
-                  >
-                    <UserMessageCell
-                      entry={first}
-                      queued={queued.has(first.inputId)}
-                    />
-                  </div>
+                    entries={block.entries}
+                    active={view.activeTurnId === block.turnId}
+                    timing={view.turnTimings[block.turnId]}
+                  />
+                ) : (
+                  block.entries.map((entry) => (
+                    <EntryCell key={entryKey(entry)} entry={entry} />
+                  ))
                 )
-              return block.turnId ? (
-                <TurnBlock
-                  key={block.key}
-                  entries={block.entries}
-                  active={view.activeTurnId === block.turnId}
-                  timing={view.turnTimings[block.turnId]}
-                />
-              ) : (
-                block.entries.map((entry) => (
-                  <EntryCell key={entryKey(entry)} entry={entry} />
-                ))
-              )
-            })
-          )}
-        </div>
-      </ScrollArea>
-      {inputs.length > 1 ? (
-        <nav
-          aria-label="Conversation messages"
-          className="absolute top-1/2 left-1 z-10 flex max-h-[60%] -translate-y-1/2 flex-col gap-0.5"
-        >
-          {inputs.map((input, index) => (
-            <button
-              key={input.inputId}
-              type="button"
-              aria-label={`Jump to message ${index + 1}: ${input.text.slice(0, 80)}`}
-              aria-current={
-                (activeInput ?? inputs.at(-1)?.inputId) === input.inputId
-                  ? "location"
-                  : undefined
-              }
-              className="group relative flex h-3 min-h-0 w-6 shrink items-center outline-none"
-              onClick={() => {
-                const viewport = scroll.viewportRef.current
-                const node = anchors.current.get(input.inputId)
-                if (!viewport || !node) return
-                scroll.pauseFollowing()
-                viewport.scrollTop +=
-                  node.getBoundingClientRect().top -
-                  viewport.getBoundingClientRect().top -
-                  24
-                setActiveInput(input.inputId)
-                scroll.onScroll()
-              }}
-            >
-              <span className="h-0.5 w-2.5 rounded-full bg-muted-foreground/30 transition-all group-hover:w-5 group-hover:bg-foreground group-focus-visible:w-5 group-aria-current:w-5 group-aria-current:bg-foreground" />
-              <span className="pointer-events-none absolute left-8 hidden w-72 rounded-xl border bg-popover p-3 text-left text-xs shadow-lg group-hover:block group-focus-visible:block">
-                <span className="mb-1 block text-muted-foreground">
-                  Message {index + 1}
-                </span>
-                <span className="line-clamp-3">
-                  {input.text || "Attached images"}
-                </span>
-              </span>
-            </button>
-          ))}
-        </nav>
-      ) : null}
-      {!scroll.atBottom ? (
-        <button
-          type="button"
-          aria-label="Jump to latest output"
-          onClick={scroll.jumpToBottom}
-          className="absolute bottom-3 left-1/2 z-10 -translate-x-1/2 rounded-full border bg-background p-2 text-foreground shadow-sm hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
-        >
-          <ArrowDown className="size-5" />
-        </button>
-      ) : null}
-    </div>
+              })
+            )}
+          </div>
+        </ScrollArea>
+        <ConversationNavigation
+          entries={view.entries}
+          activeInput={activeInput}
+          onJump={(inputId) => {
+            const node = anchors.current.get(inputId)
+            if (node) scroll.jumpToElement(node)
+            setActiveInput(inputId)
+          }}
+        />
+        {
+          <button
+            type="button"
+            aria-label="Jump to latest output"
+            onClick={scroll.jumpToBottom}
+            data-visible={!scroll.atBottom}
+            tabIndex={scroll.atBottom ? -1 : 0}
+            aria-hidden={scroll.atBottom}
+            className="conversation-jump"
+          >
+            <ArrowDown className="size-5" />
+          </button>
+        }
+      </div>
+      {children}
+    </ConversationScrollContext.Provider>
   )
 }
 
@@ -184,23 +160,26 @@ function TurnBlock({
   active: boolean
   timing: TurnTiming | undefined
 }>) {
-  const [expanded, setExpanded] = useState(false)
+  const [expandedOverride, setExpanded] = useState<boolean>()
+  const contentId = useId()
+  const failed = entries.some((entry) => entry.kind === "turn_terminal")
   const last = [...entries]
     .reverse()
     .find(
       (entry) => entry.kind !== "permission" && entry.kind !== "turn_terminal",
     )
-  // Providers do not expose a common final-answer phase. The trailing assistant
-  // item is the visible response; a message followed by tools remains activity.
-  const visible = new Set(
-    entries.filter(
-      (entry) =>
-        entry.kind === "turn_terminal" ||
-        (entry.kind === "permission" && entry.state !== "resolved") ||
-        (entry === last && (active || entry.kind === "assistant")),
-    ),
+  // Codex has an explicit final-assistant phase. Yakitori's providers do not all
+  // expose it: only a successfully completed turn can promote its trailing text.
+  const finalAnswer =
+    !active && !failed && last?.kind === "assistant" ? last : undefined
+  const persistent = entries.filter(
+    (entry) =>
+      entry === finalAnswer ||
+      entry.kind === "turn_terminal" ||
+      (entry.kind === "permission" && entry.state !== "resolved"),
   )
-  const activity = entries.filter((entry) => !visible.has(entry))
+  const activity = entries.filter((entry) => !persistent.includes(entry))
+  const expanded = expandedOverride ?? finalAnswer === undefined
   const seconds =
     timing?.startedAt && timing.completedAt
       ? Math.max(
@@ -213,7 +192,7 @@ function TurnBlock({
       : undefined
   return (
     <section
-      className="flex flex-col gap-4"
+      className="flex flex-col gap-5"
       aria-label={active ? "Current response" : "Response"}
     >
       {activity.length > 0 ? (
@@ -221,25 +200,47 @@ function TurnBlock({
           <button
             type="button"
             aria-expanded={expanded}
+            aria-controls={contentId}
             onClick={() => setExpanded(!expanded)}
-            className="flex w-full items-center gap-1.5 border-b pb-3 text-left text-sm text-muted-foreground hover:text-foreground"
+            className={`flex w-full items-center gap-1.5 text-left text-[14px] text-muted-foreground hover:text-foreground ${finalAnswer ? "border-b pb-3" : "pb-1"}`}
           >
-            {active
-              ? "Working"
-              : seconds === undefined
-                ? "Activity"
-                : `Worked for ${formatElapsed(seconds)}`}
+            <span className={active ? "tool-running-label" : undefined}>
+              {active
+                ? "Working"
+                : seconds === undefined
+                  ? "Activity"
+                  : `Worked for ${formatElapsed(seconds)}`}
+            </span>
             <ChevronRight
-              className={`size-4 transition-transform ${expanded ? "rotate-90" : ""}`}
+              className={`size-3.5 transition-transform duration-150 ${expanded ? "rotate-90" : ""}`}
             />
           </button>
+          <div
+            id={contentId}
+            className="conversation-disclosure"
+            data-expanded={expanded}
+            aria-hidden={!expanded}
+            inert={!expanded}
+          >
+            <div className="min-h-0 overflow-hidden">
+              <div className="flex flex-col gap-4 pt-4">
+                {activity.map((entry) => (
+                  <EntryCell key={entryKey(entry)} entry={entry} />
+                ))}
+              </div>
+            </div>
+          </div>
         </div>
       ) : null}
-      {entries
-        .filter((entry) => expanded || visible.has(entry))
-        .map((entry) => (
-          <EntryCell key={entryKey(entry)} entry={entry} />
-        ))}
+      {persistent.map((entry) => (
+        <EntryCell key={entryKey(entry)} entry={entry} />
+      ))}
+      {finalAnswer ? (
+        <ResponseActions
+          text={finalAnswer.text}
+          at={timing?.completedAt ?? finalAnswer.at}
+        />
+      ) : null}
     </section>
   )
 }

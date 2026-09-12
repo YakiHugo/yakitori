@@ -1,4 +1,4 @@
-import { GitFork, Plus } from "lucide-react"
+import { GitFork, Info, Plus } from "lucide-react"
 import { ApprovalBar } from "./components/approval-bar.tsx"
 import { Composer } from "./components/composer.tsx"
 import { ProjectSwitcher } from "./components/project-switcher.tsx"
@@ -59,11 +59,11 @@ export function App() {
           ) : hasSession ? (
             <>
               <SessionHeader />
-              <Transcript />
-              <ApprovalBar />
-              <StatusSurface />
-              <Composer />
-              <TelemetryRail />
+              <Transcript>
+                <ApprovalBar />
+                <StatusSurface />
+                <Composer />
+              </Transcript>
             </>
           ) : (
             <EmptyState />
@@ -104,7 +104,7 @@ function SessionHeader() {
     (candidate) => candidate.id === session.parentSessionId,
   )
   return (
-    <header className="border-b px-4 py-2">
+    <header className="flex h-12 shrink-0 items-center justify-between gap-3 border-b px-5">
       <div className="flex items-center gap-2">
         <h2 className="truncate text-sm font-semibold">
           {session.title ?? "Untitled session"}
@@ -125,15 +125,27 @@ function SessionHeader() {
             </span>
           </button>
         ) : null}
-        <span className="truncate font-mono text-xs text-muted-foreground">
-          {session.id}
-        </span>
       </div>
-      <p className="truncate text-xs text-muted-foreground">
-        mate {view.mateId ?? "—"} · rev {view.mateRevisionId ?? "—"} ·{" "}
-        {view.workingDirectory ?? "—"} · {session.counts.turns} turns ·{" "}
-        {session.counts.inputs} inputs · {session.counts.tools} tools
-      </p>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            aria-label="Session details"
+            className="rounded-md p-1.5 text-muted-foreground hover:bg-accent"
+          >
+            <Info className="size-4" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="bottom" className="max-w-sm">
+          <p>{view.workingDirectory}</p>
+          <p>
+            {session.counts.turns} turns · {session.counts.inputs} inputs ·{" "}
+            {session.counts.tools} tools
+          </p>
+          <p className="font-mono text-[10px]">{session.id}</p>
+          <TelemetryRail />
+        </TooltipContent>
+      </Tooltip>
     </header>
   )
 }

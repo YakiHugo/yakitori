@@ -1,0 +1,197 @@
+/* Session geometry and motion follow Codex's navigation rail and scroll layout.
+   The renderer owns these values; reduced motion skips all spatial transitions. */
+:root {
+  --conversation-width: 800px;
+  --conversation-ease: cubic-bezier(0.23, 1, 0.32, 1);
+}
+.conversation-content,
+.conversation-composer {
+  max-width: calc(var(--conversation-width) + 64px);
+  padding-inline: 32px;
+}
+.conversation-navigation {
+  position: absolute;
+  top: 50%;
+  left: 12px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  max-height: 60%;
+  transform: translateY(-50%);
+  animation: conversation-appear 150ms var(--conversation-ease);
+}
+.conversation-marker {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 36px;
+  height: 10px;
+  min-height: 3px;
+  flex-shrink: 1;
+  outline: none;
+  color: var(--muted-foreground);
+}
+.conversation-marker-line {
+  width: 26px;
+  height: 2px;
+  background: currentColor;
+  opacity: 0.4;
+  transform-origin: left;
+  transition:
+    transform 160ms var(--conversation-ease),
+    opacity 160ms;
+}
+.conversation-marker:is(:hover, :focus-visible, [aria-current]) {
+  color: var(--foreground);
+}
+.conversation-marker:is(:hover, :focus-visible) .conversation-marker-line {
+  opacity: 1;
+}
+.conversation-preview {
+  position: absolute;
+  left: 36px;
+  top: 50%;
+  width: min(320px, 65vw);
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--popover);
+  box-shadow:
+    0 8px 24px #00000012,
+    0 2px 6px #00000008;
+  font-size: 13px;
+  line-height: 20px;
+  text-align: left;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translate(4px, -50%);
+  transition:
+    opacity 150ms var(--conversation-ease),
+    transform 150ms var(--conversation-ease),
+    visibility 150ms;
+}
+.conversation-preview[data-visible="true"] {
+  opacity: 1;
+  visibility: visible;
+  transform: translate(0, -50%);
+}
+.conversation-jump {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  z-index: 10;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--background);
+  box-shadow: 0 2px 6px #00000008;
+  opacity: 0;
+  visibility: hidden;
+  transform: translate(-50%, 6px) scale(0.95);
+  transition:
+    opacity 150ms,
+    transform 150ms var(--conversation-ease),
+    visibility 150ms;
+}
+.conversation-jump[data-visible="true"] {
+  opacity: 1;
+  visibility: visible;
+  transform: translate(-50%, 0) scale(1);
+}
+.conversation-jump:hover {
+  background: var(--accent);
+}
+.conversation-jump:focus-visible {
+  outline: 2px solid var(--ring);
+}
+@keyframes conversation-appear {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@media (max-width: 1000px) {
+  .conversation-content,
+  .conversation-composer {
+    padding-inline: 48px 24px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .conversation-marker-line,
+  .conversation-preview,
+  .conversation-jump {
+    transition: none;
+  }
+  .conversation-navigation {
+    animation: none;
+  }
+}
+.conversation-disclosure {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transform: translateY(-8px);
+  transition:
+    grid-template-rows 150ms var(--conversation-ease),
+    opacity 150ms,
+    transform 150ms var(--conversation-ease);
+}
+.conversation-disclosure[data-expanded="true"] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  transform: translateY(0);
+  transition-duration: 220ms;
+  transition-timing-function: cubic-bezier(0.33, 1, 0.68, 1);
+}
+.conversation-inline-edit {
+  animation: conversation-appear 150ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .conversation-disclosure {
+    transition: none;
+    transform: none;
+  }
+  .conversation-inline-edit {
+    animation: none;
+  }
+}
+[data-slot="collapsible-content"][data-state="open"] {
+  animation: activity-open 220ms cubic-bezier(0.33, 1, 0.68, 1);
+}
+[data-slot="collapsible-content"][data-state="closed"] {
+  overflow: hidden;
+  animation: activity-close 150ms var(--conversation-ease);
+}
+@keyframes activity-open {
+  from {
+    height: 0;
+    opacity: 0;
+    overflow: hidden;
+  }
+  to {
+    height: var(--radix-collapsible-content-height);
+    opacity: 1;
+    overflow: hidden;
+  }
+}
+@keyframes activity-close {
+  from {
+    height: var(--radix-collapsible-content-height);
+    opacity: 1;
+  }
+  to {
+    height: 0;
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-slot="collapsible-content"][data-state] {
+    animation: none;
+  }
+}

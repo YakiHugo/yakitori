@@ -59,17 +59,27 @@ afterEach(cleanup)
 it("shows the final answer and lets the reader expand and collapse earlier activity", () => {
   render(<Transcript />)
   expect(screen.getByText("Final answer")).toBeDefined()
-  expect(screen.queryByText("Checking the implementation")).toBeNull()
+  expect(
+    screen
+      .getByText("Checking the implementation")
+      .closest("[aria-hidden]")
+      ?.getAttribute("aria-hidden"),
+  ).toBe("true")
   const toggle = screen.getByRole("button", { name: "Worked for 1m 49s" })
   expect(toggle.getAttribute("aria-expanded")).toBe("false")
   fireEvent.click(toggle)
   expect(screen.getByText("Checking the implementation")).toBeDefined()
   fireEvent.click(toggle)
-  expect(screen.queryByText("Checking the implementation")).toBeNull()
+  expect(
+    screen
+      .getByText("Checking the implementation")
+      .closest("[aria-hidden]")
+      ?.getAttribute("aria-hidden"),
+  ).toBe("true")
   expect(screen.getByText("Final answer")).toBeDefined()
 })
 
-it("keeps only the latest activity visible while output is arriving", () => {
+it("keeps live process history available until the turn has a final answer", () => {
   useAppStore.setState({
     execution: { ...useAppStore.getState().execution, activeTurnId: "turn_1" },
   })
@@ -95,7 +105,12 @@ it("keeps only the latest activity visible while output is arriving", () => {
     }),
   )
   expect(screen.getByText("Latest output")).toBeDefined()
-  expect(screen.queryByText("Final answer")).toBeNull()
+  expect(
+    screen
+      .getByText("Final answer")
+      .closest("[aria-hidden]")
+      ?.getAttribute("aria-hidden"),
+  ).toBe("false")
 })
 
 it("keeps failures visible even when the preceding activity is collapsed", () => {
