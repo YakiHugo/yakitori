@@ -133,6 +133,11 @@ export type StoredThread = {
   readonly rollout: readonly StoredRolloutItem[]
 }
 
-export type ThreadSummary = ThreadMetadata & {
-  readonly seq: number
-}
+export type ThreadSummary = ThreadMetadata &
+  Readonly<{
+    archived?: boolean
+    sectionId?: string
+    sectionPosition?: number
+    navigationId?: string
+    seq: number
+  }>

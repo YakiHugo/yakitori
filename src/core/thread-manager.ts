@@ -274,6 +274,8 @@ export class ThreadManager {
       const {
         rolloutId: _rolloutId,
         historyBase: _historyBase,
+        forkReason: _forkReason,
+        forkedFromInputId: _forkedFromInputId,
         ...forkableMetadata
       } = sourceMetadata
       const now = new Date().toISOString()
