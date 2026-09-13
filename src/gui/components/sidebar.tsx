@@ -1,7 +1,6 @@
 import { Folder, FolderOpen, GitFork, Plus, SquarePen, Trash2 } from "lucide-react"
 import { useState } from "react"
 import type { ApiProject } from "../../server/protocol.ts"
-import { formatTime } from "../lib/format.ts"
 import { cn } from "../lib/utils.ts"
 import { useAppStore } from "../store/app-store.ts"
 import { Button } from "./ui/button.tsx"
@@ -191,9 +190,6 @@ function SessionItems() {
                 <span className="truncate">
                   {session.title ?? "Untitled session"}
                 </span>
-              </span>
-              <span className="block text-xs text-muted-foreground">
-                seq {session.seq} · {formatTime(session.updatedAt)}
               </span>
             </button>
             <button
