@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { app, BrowserWindow, dialog } from "electron"
-import { loadLocalEnvFile } from "../server/env-file.ts"
+import { loadLocalEnvFile, resolveYakitoriHome } from "../server/env-file.ts"
 import { registerAttachmentImporter } from "./attachment-importer.ts"
 import { registerResourceOpener } from "./resource-opener.ts"
 import { type ServerProcess, spawnServerProcess } from "./server-process.ts"
@@ -14,13 +14,6 @@ const appRoot = path.resolve(
   "..",
   "..",
 )
-
-// Dev spawns the sidecar from the checkout with cwd at the repo root, so the
-// child picks up the local .env itself. Packaged installs have no checkout
-// .env; users configure keys via their shell environment instead.
-if (!app.isPackaged) {
-  loadLocalEnvFile(path.join(appRoot, ".env"))
-}
 
 const maxLoadAttempts = 20
 const loadRetryDelayMs = 500
@@ -75,13 +68,25 @@ app.on("will-quit", (event) => {
 // Thin shell: the main process only spawns/manages the sidecar server child
 // and the window. Dev and prod share the topology; only the spawn differs.
 async function start(): Promise<void> {
+  // All state lives in one user-level home shared by every app form (codex's
+  // CODEX_HOME pattern); YAKITORI_STORE_DIR overrides it for isolated stores.
+  // Dev loads the checkout .env; packaged installs have no checkout, so they
+  // load keys from the home .env instead.
+  const yakitoriHome = resolveYakitoriHome()
+  mkdirSync(yakitoriHome, { recursive: true })
+  loadLocalEnvFile(
+    app.isPackaged
+      ? path.join(yakitoriHome, ".env")
+      : path.join(appRoot, ".env"),
+  )
   const workspace = await resolveWorkspace()
-  const storeDir =
-    process.env.YAKITORI_STORE_DIR ?? path.join(workspace, ".yakitori")
+  const storeDir = process.env.YAKITORI_STORE_DIR || yakitoriHome
+  console.log(`yakitori: store=${storeDir}`)
   const child = app.isPackaged
     ? await spawnServerProcess({
         command: process.execPath,
         args: [packagedServerEntry()],
+        cwd: yakitoriHome,
         env: {
           ...process.env,
           ELECTRON_RUN_AS_NODE: "1",

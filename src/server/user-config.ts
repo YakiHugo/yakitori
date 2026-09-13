@@ -22,6 +22,7 @@ import {
   type TomlValueWithoutBigInt,
 } from "smol-toml"
 import { ConfigurationError } from "./config-errors.ts"
+import { resolveYakitoriHome } from "./env-file.ts"
 import type {
   AutoCompactTokenLimitScope,
   ModelRequestPolicy,
@@ -171,10 +172,7 @@ export function createUserConfigStore(
 }
 
 function defaultUserConfigPath(): string {
-  return join(
-    process.env.YAKITORI_HOME ?? join(homedir(), ".yakitori"),
-    "config.toml",
-  )
+  return join(resolveYakitoriHome(), "config.toml")
 }
 
 async function writePreference(
