@@ -143,6 +143,8 @@ export function createFakeHandlers(
   overrides: Partial<ServerHandlers> = {},
 ): ServerHandlers {
   const base: ServerHandlers = {
+    readSidebar: async () => okResult({ sections: [], entries: {} }),
+    updateSidebar: async () => okResult({ sections: [], entries: {} }),
     createSession: async () =>
       okResult({
         session: makeSessionDetail("session_created"),

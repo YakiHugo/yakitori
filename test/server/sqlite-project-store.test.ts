@@ -36,6 +36,7 @@ describe("sqlite project store", () => {
         roots: ["/p/a"],
         metadata: { tier: "one" },
         position: 0,
+        pinned: false,
       })
       expect(first.project.createdAt).toBeGreaterThan(0)
       expect(first.project.updatedAt).toBe(first.project.createdAt)
@@ -214,7 +215,71 @@ describe("sqlite project store", () => {
     }
   })
 
-  it("paginates with a strict position|id keyset cursor", async () => {
+  it("updates roots and pinned as first-class fields", async () => {
+    const store = memoryStore()
+    try {
+      const created = await store.createProject({
+        name: "alpha",
+        roots: ["/p/a", "/p/a2"],
+      })
+
+      const noop = await store.updateProject(created.project.id, {
+        roots: ["/p/a", "/p/a2"],
+        pinned: false,
+      })
+      expect(noop).toEqual({ project: created.project, changed: false })
+
+      const updated = await store.updateProject(created.project.id, {
+        roots: ["/p/b"],
+        pinned: true,
+      })
+      expect(updated?.changed).toBe(true)
+      expect(updated?.project.roots).toEqual(["/p/b"])
+      expect(updated?.project.pinned).toBe(true)
+
+      const read = await store.readProject(created.project.id)
+      expect(read).toEqual(updated?.project)
+
+      await expect(
+        store.updateProject(created.project.id, { roots: [] }),
+      ).rejects.toMatchObject({ code: "invalid_argument" })
+    } finally {
+      store.close()
+    }
+  })
+
+  it("sorts pinned projects ahead of unpinned ones across pages", async () => {
+    const store = memoryStore()
+    try {
+      const ids: string[] = []
+      for (const name of ["a", "b", "c"]) {
+        const created = await store.createProject({
+          name,
+          roots: [`/p/${name}`],
+        })
+        ids.push(created.project.id)
+      }
+      const [, b, c] = ids as [string, string, string]
+      await store.updateProject(c, { pinned: true })
+      await store.updateProject(b, { pinned: true })
+
+      const first = await store.listProjects({ limit: 2 })
+      expect(first.projects.map((project) => project.id)).toEqual([b, c])
+      expect(first.nextCursor).toBe(`1|2|${c}`)
+
+      const second = await store.listProjects({
+        limit: 2,
+        ...(first.nextCursor === undefined ? {} : { cursor: first.nextCursor }),
+      })
+      expect(second.projects.map((project) => project.name)).toEqual(["a"])
+      expect(second.projects[0]?.pinned).toBe(false)
+      expect(second.nextCursor).toBeUndefined()
+    } finally {
+      store.close()
+    }
+  })
+
+  it("paginates with a strict pinned|position|id keyset cursor", async () => {
     const store = memoryStore()
     try {
       for (const name of ["a", "b", "c"]) {
@@ -223,7 +288,7 @@ describe("sqlite project store", () => {
 
       const first = await store.listProjects({ limit: 2 })
       expect(first.projects.map((project) => project.name)).toEqual(["a", "b"])
-      expect(first.nextCursor).toBe(`1|${first.projects[1]?.id}`)
+      expect(first.nextCursor).toBe(`0|1|${first.projects[1]?.id}`)
 
       const second = await store.listProjects({
         limit: 2,
@@ -236,9 +301,10 @@ describe("sqlite project store", () => {
         "bogus",
         "1",
         "1|nope",
-        `01|${first.projects[1]?.id}`,
-        `-1|${first.projects[1]?.id}`,
-        `1|${first.projects[1]?.id}|extra`,
+        `2|1|${first.projects[1]?.id}`,
+        `0|01|${first.projects[1]?.id}`,
+        `0|-1|${first.projects[1]?.id}`,
+        `0|1|${first.projects[1]?.id}|extra`,
       ]) {
         await expect(store.listProjects({ cursor })).rejects.toBeInstanceOf(
           InvalidProjectCursorError,

@@ -971,6 +971,7 @@ function fakeProject(input: {
     roots: input.roots,
     metadata: {},
     position: 0,
+    pinned: false,
     createdAt: 0,
     updatedAt: 0,
   }

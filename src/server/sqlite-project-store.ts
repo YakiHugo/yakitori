@@ -15,6 +15,8 @@ export type Project = {
   readonly roots: readonly string[]
   readonly metadata: Readonly<Record<string, string>>
   readonly position: number
+  // Pinned projects sort ahead of all unpinned ones, ahead of position.
+  readonly pinned: boolean
   readonly createdAt: number
   readonly updatedAt: number
 }
@@ -43,7 +45,9 @@ export type CreatedProject = Readonly<{
 
 export type UpdateProjectInput = Readonly<{
   readonly name?: string
+  readonly roots?: readonly string[]
   readonly metadata?: Readonly<Record<string, string>>
+  readonly pinned?: boolean
 }>
 
 export type UpdatedProject = Readonly<{
@@ -105,6 +109,7 @@ type ProjectRow = {
   readonly name: string
   readonly metadata: string
   readonly position: number
+  readonly pinned: number
   readonly created_at_ms: number
   readonly updated_at_ms: number
 }
@@ -135,22 +140,31 @@ export function createSqliteProjectStore(
         anchor === undefined
           ? database
               .prepare(`
-                SELECT id, name, metadata, position, created_at_ms, updated_at_ms
+                SELECT id, name, metadata, position, pinned, created_at_ms, updated_at_ms
                 FROM projects
-                ORDER BY position ASC, id ASC
+                ORDER BY pinned DESC, position ASC, id ASC
                 LIMIT ?
               `)
               .all(limit + 1)
           : database
               .prepare(`
-                SELECT id, name, metadata, position, created_at_ms, updated_at_ms
+                SELECT id, name, metadata, position, pinned, created_at_ms, updated_at_ms
                 FROM projects
-                WHERE position > ?
-                   OR (position = ? AND id > ?)
-                ORDER BY position ASC, id ASC
+                WHERE pinned < ?
+                   OR (pinned = ? AND position > ?)
+                   OR (pinned = ? AND position = ? AND id > ?)
+                ORDER BY pinned DESC, position ASC, id ASC
                 LIMIT ?
               `)
-              .all(anchor.position, anchor.position, anchor.id, limit + 1)
+              .all(
+                anchor.pinned,
+                anchor.pinned,
+                anchor.position,
+                anchor.pinned,
+                anchor.position,
+                anchor.id,
+                limit + 1,
+              )
       ) as ProjectRow[]
       const page = rows.slice(0, limit)
       const projects = page.map((row) => readProjectRow(database, row))
@@ -167,7 +181,7 @@ export function createSqliteProjectStore(
       requireProjectId(projectId)
       const row = database
         .prepare(`
-          SELECT id, name, metadata, position, created_at_ms, updated_at_ms
+          SELECT id, name, metadata, position, pinned, created_at_ms, updated_at_ms
           FROM projects
           WHERE id = ?
         `)
@@ -245,6 +259,8 @@ export function createSqliteProjectStore(
     async updateProject(projectId, input) {
       requireProjectId(projectId)
       if (input.name !== undefined) requireProjectName(input.name)
+      const roots =
+        input.roots === undefined ? undefined : requireProjectRoots(input.roots)
       database.exec("BEGIN IMMEDIATE")
       try {
         const current = readProjectRowById(database, projectId)
@@ -254,19 +270,46 @@ export function createSqliteProjectStore(
         }
         const name = input.name ?? current.name
         const metadata = input.metadata ?? current.metadata
-        if (name === current.name && sameMetadata(metadata, current.metadata)) {
+        const pinned = input.pinned ?? current.pinned
+        const rootsChanged =
+          roots !== undefined && !sameRoots(roots, current.roots)
+        if (
+          name === current.name &&
+          sameMetadata(metadata, current.metadata) &&
+          pinned === current.pinned &&
+          !rootsChanged
+        ) {
           database.exec("ROLLBACK")
           return { project: current, changed: false }
         }
         const now = Date.now()
         database
           .prepare(
-            "UPDATE projects SET name = ?, metadata = ?, updated_at_ms = ? WHERE id = ?",
+            "UPDATE projects SET name = ?, metadata = ?, pinned = ?, updated_at_ms = ? WHERE id = ?",
           )
-          .run(name, JSON.stringify(metadata), now, projectId)
+          .run(name, JSON.stringify(metadata), pinned ? 1 : 0, now, projectId)
+        if (rootsChanged && roots !== undefined) {
+          database
+            .prepare("DELETE FROM project_roots WHERE project_id = ?")
+            .run(projectId)
+          for (const [rootPosition, path] of roots.entries()) {
+            database
+              .prepare(
+                "INSERT INTO project_roots (project_id, position, path) VALUES (?, ?, ?)",
+              )
+              .run(projectId, rootPosition, path)
+          }
+        }
         database.exec("COMMIT")
         return {
-          project: { ...current, name, metadata, updatedAt: now },
+          project: {
+            ...current,
+            name,
+            roots: roots ?? current.roots,
+            metadata,
+            pinned,
+            updatedAt: now,
+          },
           changed: true,
         }
       } catch (error) {
@@ -352,6 +395,7 @@ function initializeDatabase(database: DatabaseSync): void {
         name TEXT NOT NULL,
         metadata TEXT NOT NULL,
         position INTEGER NOT NULL,
+        pinned INTEGER NOT NULL DEFAULT 0,
         created_at_ms INTEGER NOT NULL,
         updated_at_ms INTEGER NOT NULL
       ) STRICT;
@@ -370,8 +414,20 @@ function initializeDatabase(database: DatabaseSync): void {
       ) STRICT;
 
       CREATE INDEX IF NOT EXISTS projects_position
-      ON projects (position ASC, id ASC);
+      ON projects (pinned DESC, position ASC, id ASC);
     `)
+    // Databases created before the pinned column get it added in place; the
+    // default keeps every existing project unpinned.
+    const hasPinned = (
+      database.prepare("PRAGMA table_info(projects)").all() as {
+        readonly name: string
+      }[]
+    ).some((column) => column.name === "pinned")
+    if (!hasPinned) {
+      database.exec(
+        "ALTER TABLE projects ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
+      )
+    }
     const enableDefensive = Reflect.get(database, "enableDefensive")
     if (typeof enableDefensive === "function") {
       Reflect.apply(enableDefensive, database, [true])
@@ -388,7 +444,7 @@ function readProjectRowById(
 ): Project | undefined {
   const row = database
     .prepare(`
-      SELECT id, name, metadata, position, created_at_ms, updated_at_ms
+      SELECT id, name, metadata, position, pinned, created_at_ms, updated_at_ms
       FROM projects
       WHERE id = ?
     `)
@@ -410,6 +466,7 @@ function readProjectRow(database: DatabaseSync, row: ProjectRow): Project {
     roots,
     metadata: parseMetadata(row.metadata, row.id),
     position: row.position,
+    pinned: row.pinned !== 0,
     createdAt: row.created_at_ms,
     updatedAt: row.updated_at_ms,
   }
@@ -442,13 +499,15 @@ function nextPosition(database: DatabaseSync): number {
   return (row.position ?? -1) + 1
 }
 
-// Keyset cursor over the (position, id) order: "<position>|<id>", strictly
-// parsed so a malformed or non-canonical cursor never silently re-anchors.
+// Keyset cursor over the (pinned DESC, position, id) order:
+// "<pinned>|<position>|<id>", strictly parsed so a malformed or non-canonical
+// cursor never silently re-anchors.
 function encodeListCursor(row: ProjectRow): string {
-  return `${row.position}|${row.id}`
+  return `${row.pinned}|${row.position}|${row.id}`
 }
 
 function parseListCursor(cursor: string): {
+  readonly pinned: number
   readonly position: number
   readonly id: string
 } {
@@ -456,14 +515,15 @@ function parseListCursor(cursor: string): {
     new InvalidProjectCursorError("Project list cursor is invalid.")
   if (cursor.length > 128) throw invalid()
   const parts = cursor.split("|")
-  if (parts.length !== 2) throw invalid()
-  const [rawPosition, id] = parts as [string, string]
+  if (parts.length !== 3) throw invalid()
+  const [rawPinned, rawPosition, id] = parts as [string, string, string]
+  if (rawPinned !== "0" && rawPinned !== "1") throw invalid()
   if (!/^(0|[1-9][0-9]*)$/.test(rawPosition)) throw invalid()
   const position = Number(rawPosition)
   if (!Number.isSafeInteger(position) || !isGeneratedProjectId(id)) {
     throw invalid()
   }
-  return { position, id }
+  return { pinned: Number(rawPinned), position, id }
 }
 
 function requireListLimit(limit: number | undefined): number {
@@ -511,6 +571,16 @@ function requireIdempotencyKey(key: string): string {
     code: YakitoriErrorCode.InvalidArgument,
     message: "idempotencyKey must be non-empty and at most 512 bytes.",
   })
+}
+
+function sameRoots(
+  left: readonly string[],
+  right: readonly string[],
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((path, index) => right[index] === path)
+  )
 }
 
 function sameMetadata(

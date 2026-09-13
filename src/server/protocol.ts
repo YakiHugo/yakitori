@@ -79,6 +79,7 @@ export type ApiListSessionsResponse = {
 }
 
 export type ApiSearchSessionsRequest = {
+  readonly archived?: boolean
   readonly searchTerm: string
   readonly limit?: number
   readonly cursor?: string
@@ -145,6 +146,8 @@ export type ApiProject = {
   readonly roots: readonly string[]
   readonly metadata: Readonly<Record<string, string>>
   readonly position: number
+  // Pinned projects sort ahead of all unpinned ones in project/list.
+  readonly pinned: boolean
   readonly createdAt: number
   readonly updatedAt: number
 }
@@ -295,24 +298,28 @@ export type ApiReadSessionEventsResponse = {
   readonly nextAfter?: number
 }
 
-export type ApiSessionSummary = {
-  readonly id: string
-  readonly conversationId: string
-  readonly seq: number
-  readonly createdAt: string
-  readonly updatedAt: string
-  readonly title?: string
-  readonly workingDirectory?: string
+export type ApiSessionSummary = Readonly<{
+  archived?: boolean
+  sectionId?: string
+  sectionPosition?: number
+  navigationId?: string
+  id: string
+  conversationId: string
+  seq: number
+  createdAt: string
+  updatedAt: string
+  title?: string
+  workingDirectory?: string
   // Set when the Session belongs to a live Project; omitted for orphaned
   // projectIds (orphan-on-delete, see ThreadMetadata.projectId).
-  readonly projectId?: string
-  readonly mateId?: string
-  readonly mateRevisionId?: string
-  readonly parentSessionId?: string
-  readonly forkedFromInputId?: string
-  readonly forkReason?: ForkReason
-  readonly metadata?: EventMetadata
-}
+  projectId?: string
+  mateId?: string
+  mateRevisionId?: string
+  parentSessionId?: string
+  forkedFromInputId?: string
+  forkReason?: ForkReason
+  metadata?: EventMetadata
+}>
 
 export type ApiSessionDetail = ApiSessionSummary & {
   readonly activeTurnId?: string
