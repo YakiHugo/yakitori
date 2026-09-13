@@ -85,7 +85,7 @@ file.
 | Name | Purpose |
 | --- | --- |
 | `YAKITORI_HOME` | User config and project registry root (default `~/.yakitori`) |
-| `YAKITORI_STORE_DIR` | Session store directory (default `.yakitori`) |
+| `YAKITORI_STORE_DIR` | Session store directory (default `YAKITORI_HOME`) |
 | `YAKITORI_WORKSPACE` | Canonical workspace root (default `process.cwd()`) |
 | `YAKITORI_GUI_DIR` | Static GUI directory served by the server (default `./dist/gui` when present) |
 | `YAKITORI_MATE_ID` | Explicit active Mate when multiple exist |

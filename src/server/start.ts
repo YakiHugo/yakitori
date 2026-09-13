@@ -1,13 +1,13 @@
 import { existsSync } from "node:fs"
 import { join } from "node:path"
-import { loadLocalEnvFile } from "./env-file.ts"
+import { loadLocalEnvFile, resolveYakitoriHome } from "./env-file.ts"
 import { runYakitoriServerProcess } from "./server-process.ts"
 
 loadLocalEnvFile(".env")
 
 const host = process.env.HOST ?? "127.0.0.1"
 const port = Number(process.env.PORT ?? 4141)
-const rootDir = process.env.YAKITORI_STORE_DIR ?? ".yakitori"
+const rootDir = process.env.YAKITORI_STORE_DIR || resolveYakitoriHome()
 const guiStaticDir = resolveGuiStaticDir()
 
 await runYakitoriServerProcess({
