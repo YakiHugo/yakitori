@@ -1,13 +1,11 @@
 import { GitFork, Info, Plus } from "lucide-react"
 import { ApprovalBar } from "./components/approval-bar.tsx"
 import { Composer } from "./components/composer.tsx"
-import { ProjectSwitcher } from "./components/project-switcher.tsx"
+import { Sidebar } from "./components/sidebar.tsx"
 import { StatusSurface } from "./components/status-surface.tsx"
 import { TelemetryRail } from "./components/telemetry-rail.tsx"
-import { ThreadList } from "./components/thread-list.tsx"
 import { Transcript } from "./components/transcript.tsx"
 import { Button } from "./components/ui/button.tsx"
-import { Separator } from "./components/ui/separator.tsx"
 import {
   Tooltip,
   TooltipContent,
@@ -29,16 +27,7 @@ export function App() {
     <TooltipProvider>
       <div className="flex h-screen overflow-hidden bg-background text-foreground">
         <aside className="flex w-72 shrink-0 flex-col border-r">
-          <div className="flex items-center justify-between gap-2 px-3 py-3">
-            <div>
-              <h1 className="text-sm font-semibold">Yakitori</h1>
-              <p className="text-xs text-muted-foreground">Coding workbench</p>
-            </div>
-            <NewSessionButton />
-          </div>
-          <ProjectSwitcher />
-          <Separator />
-          <ThreadList />
+          <Sidebar />
         </aside>
         <main className="flex min-w-0 flex-1 flex-col">
           {message !== undefined && message !== "" && (
@@ -72,26 +61,6 @@ export function App() {
         </main>
       </div>
     </TooltipProvider>
-  )
-}
-
-function NewSessionButton() {
-  const createSession = useAppStore((state) => state.createSession)
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <Button
-          type="button"
-          variant="outline"
-          size="icon-sm"
-          aria-label="New session"
-          onClick={() => void createSession()}
-        >
-          <Plus />
-        </Button>
-      </TooltipTrigger>
-      <TooltipContent>New session</TooltipContent>
-    </Tooltip>
   )
 }
 
