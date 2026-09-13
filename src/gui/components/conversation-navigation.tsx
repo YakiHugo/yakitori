@@ -10,11 +10,11 @@ function previewText(text: string): string {
 
 export function ConversationNavigation({
   entries,
-  activeInput,
+  visibleInputs,
   onJump,
 }: Readonly<{
   entries: readonly ExecutionEntry[]
-  activeInput: string | undefined
+  visibleInputs: ReadonlySet<string>
   onJump(inputId: string): void
 }>) {
   const [hovered, setHovered] = useState<number>()
@@ -36,7 +36,7 @@ export function ConversationNavigation({
     >
       {messages.map((message, index) => {
         const distance = Math.abs(index - (hovered ?? -100))
-        const active = (activeInput ?? messages.at(-1)?.id) === message.id
+        const active = visibleInputs.has(message.id)
         const width =
           distance === 0
             ? 26

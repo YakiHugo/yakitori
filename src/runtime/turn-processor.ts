@@ -527,6 +527,11 @@ async function executeTurnModelLoop(
   const metadata = input.runtime.snapshot().metadata
   const usages: ModelUsage[] = []
   let modelCalls = 0
+  let toolCalls = 0
+  let modelDurationMs = 0
+  let toolDurationMs = 0
+  let timeToFirstTokenTotalMs = 0
+  let timeToFirstTokenSamples = 0
   let compactedAtModelCall = -1
   const pendingSkillInputs = [input.input]
   let previousDiagnostics = new Set<string>()
@@ -890,6 +895,8 @@ async function executeTurnModelLoop(
             estimatedPrefill: boolean
           }>
         | undefined
+      const modelStartedAt = Date.now()
+      let firstTokenAt: number | undefined
       const response = await consumeModelStream({
         request,
         stream,
@@ -901,6 +908,9 @@ async function executeTurnModelLoop(
           input.runtime.emitWarning(message, diagnostic),
         assistantResponseBytes: step.executionPolicy.assistantResponseBytes,
         onOperationalFailure: input.options.onOperationalFailure,
+        onFirstToken: () => {
+          firstTokenAt ??= Date.now()
+        },
         async onUsage(usage) {
           usages.push(usage)
           const aggregate = aggregateTokenUsage(usages)
@@ -923,6 +933,11 @@ async function executeTurnModelLoop(
       })
       input.setActiveStream(undefined)
       modelCalls += 1
+      modelDurationMs += Date.now() - modelStartedAt
+      if (firstTokenAt !== undefined) {
+        timeToFirstTokenTotalMs += firstTokenAt - modelStartedAt
+        timeToFirstTokenSamples += 1
+      }
       throwIfAborted(input.signal)
 
       if (response.stopReason === ModelStopReason.Length) {
@@ -984,6 +999,7 @@ async function executeTurnModelLoop(
       }
 
       if (response.stopReason === ModelStopReason.ToolUse) {
+        const toolsStartedAt = Date.now()
         const results = await executeToolCalls({
           calls,
           threadId: metadata.id,
@@ -1014,6 +1030,8 @@ async function executeTurnModelLoop(
                 ),
               }),
         })
+        toolCalls += calls.length
+        toolDurationMs += Date.now() - toolsStartedAt
         for (const { call, item, result } of results) {
           const { toolContentTruncated, ...modelContent } =
             await finalizeToolOutput(
@@ -1095,6 +1113,19 @@ async function executeTurnModelLoop(
         input.input.submissionId,
         stopHook?.additionalContext ?? [],
       )
+      input.runtime.recordTurnMetrics({
+        modelCalls,
+        toolCalls,
+        modelDurationMs,
+        toolDurationMs,
+        ...(timeToFirstTokenSamples === 0
+          ? {}
+          : {
+              averageTimeToFirstTokenMs: Math.round(
+                timeToFirstTokenTotalMs / timeToFirstTokenSamples,
+              ),
+            }),
+      })
       return
     } catch (error) {
       if (!input.signal.aborted && isContextOverflowError(error)) {
@@ -1129,6 +1160,7 @@ async function consumeModelStream(input: {
   readonly onOperationalFailure:
     | TurnProcessorOperationalFailureReporter
     | undefined
+  readonly onFirstToken?: () => void
   readonly onUsage: (usage: ModelUsage) => void | Promise<void>
   readonly setActiveStream: (
     stream: AsyncIterator<ModelStreamEvent> | undefined,
@@ -1188,6 +1220,7 @@ async function consumeModelStream(input: {
       }
       if (event.type !== "response") {
         if (input.request.compaction === "remote_v2") continue
+        input.onFirstToken?.()
         if (utf8Bytes(event.text) > input.assistantResponseBytes) {
           throw new Error(
             "Model stream update exceeded the configured byte limit.",
@@ -1207,6 +1240,7 @@ async function consumeModelStream(input: {
         throw new Error("Model stream emitted more than one terminal response.")
       }
       terminal = event.response
+      input.onFirstToken?.()
       if (event.response.usage !== undefined)
         await input.onUsage(event.response.usage)
     }

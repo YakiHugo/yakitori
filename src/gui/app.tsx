@@ -64,6 +64,7 @@ export function App() {
                 <StatusSurface />
                 <Composer />
               </Transcript>
+              <TelemetryRail />
             </>
           ) : (
             <EmptyState />
@@ -143,7 +144,6 @@ function SessionHeader() {
             {session.counts.tools} tools
           </p>
           <p className="font-mono text-[10px]">{session.id}</p>
-          <TelemetryRail />
         </TooltipContent>
       </Tooltip>
     </header>

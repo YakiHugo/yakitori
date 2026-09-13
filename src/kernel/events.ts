@@ -1779,7 +1779,7 @@ export function isTokenUsage(value: unknown): value is TokenUsage {
   )
 }
 
-function isTurnMetrics(value: unknown): value is TurnMetrics {
+export function isTurnMetrics(value: unknown): value is TurnMetrics {
   return (
     isRecord(value) &&
     onlyKeys(value, [

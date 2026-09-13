@@ -18,6 +18,7 @@ import {
   ComposerSuggestions,
   type ComposerSuggestion,
 } from "./composer-suggestions.tsx"
+import { ImageLightbox } from "./image-lightbox.tsx"
 import { PromptEditor, type PromptEditorHandle } from "./prompt-editor.tsx"
 import { skillMentionText } from "./prompt-document.ts"
 import { ModelSelector } from "./model-selector.tsx"
@@ -69,6 +70,7 @@ export function Composer() {
   const view = useExecutionView()
   const editorRef = useRef<PromptEditorHandle | null>(null)
   const [attachmentError, setAttachmentError] = useState<string>()
+  const [previewIndex, setPreviewIndex] = useState<number>()
   const [readingImages, setReadingImages] = useState(false)
   const [historyNavigation, setHistoryNavigation] = useState<{
     readonly sessionId: string | undefined
@@ -157,6 +159,8 @@ export function Composer() {
   const text = draft.trim()
   const sending =
     sessionId !== undefined && inFlightActions.has(`admit:${sessionId}`)
+  const previewAttachment =
+    previewIndex === undefined ? undefined : attachments[previewIndex]
   const containsInput = text.length > 0 || attachments.length > 0
   const compactBlocked = text === COMPACT_DIRECTIVE && attachments.length > 0
   const canSend =
@@ -392,11 +396,18 @@ export function Composer() {
                   key={`${attachment.file.rolloutId}:${attachment.file.path}`}
                   className="group/image relative size-18 shrink-0 overflow-hidden rounded-xl border bg-muted"
                 >
-                  <img
-                    src={imageAttachmentUrl(attachment, apiBase)}
-                    alt={attachment.name}
-                    className="size-full object-cover"
-                  />
+                  <button
+                    type="button"
+                    aria-label={`Preview ${attachment.name}`}
+                    onClick={() => setPreviewIndex(index)}
+                    className="block size-full cursor-zoom-in"
+                  >
+                    <img
+                      src={imageAttachmentUrl(attachment, apiBase)}
+                      alt={attachment.name}
+                      className="size-full object-cover"
+                    />
+                  </button>
                   <button
                     type="button"
                     disabled={sending}
@@ -557,6 +568,13 @@ export function Composer() {
           </p>
         )}
       </form>
+      {previewAttachment === undefined ? null : (
+        <ImageLightbox
+          src={imageAttachmentUrl(previewAttachment, apiBase)}
+          name={previewAttachment.name}
+          onClose={() => setPreviewIndex(undefined)}
+        />
+      )}
     </footer>
   )
 }

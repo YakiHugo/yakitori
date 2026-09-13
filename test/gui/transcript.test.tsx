@@ -154,6 +154,82 @@ it("offers an anchor for every input including inputs received during a turn", (
   ).toBeDefined()
 })
 
+it("marks only the rail markers whose turns intersect the viewport", () => {
+  useAppStore.setState({
+    execution: {
+      ...createExecutionViewState(),
+      entries: [
+        { kind: "user_input", inputId: "input_1", text: "First request", at },
+        {
+          kind: "assistant",
+          itemId: "answer_1",
+          turnId: "turn_1",
+          text: "Answer one",
+          status: "completed",
+          at,
+        },
+        {
+          kind: "user_input",
+          inputId: "input_2",
+          text: "Second request",
+          at,
+        },
+        {
+          kind: "assistant",
+          itemId: "answer_2",
+          turnId: "turn_2",
+          text: "Answer two",
+          status: "completed",
+          at,
+        },
+      ],
+    },
+  })
+  render(<Transcript />)
+  const viewport = document.querySelector(
+    "[data-slot=scroll-area-viewport]",
+  ) as HTMLElement
+  const rect = (top: number, bottom: number) =>
+    ({
+      top,
+      bottom,
+      left: 0,
+      right: 0,
+      width: 0,
+      height: bottom - top,
+      x: 0,
+      y: top,
+      toJSON: () => ({}),
+    }) as DOMRect
+  const anchorFor = (text: string) => {
+    let node: HTMLElement = screen.getByText(text, { selector: "p" })
+    while (!node.parentElement?.className.includes("conversation-content")) {
+      node = node.parentElement as HTMLElement
+    }
+    return node
+  }
+  const first = screen.getByRole("button", {
+    name: "Jump to message 1: First request",
+  })
+  const second = screen.getByRole("button", {
+    name: "Jump to message 2: Second request",
+  })
+
+  viewport.getBoundingClientRect = () => rect(100, 500)
+  anchorFor("First request").getBoundingClientRect = () => rect(-300, -250)
+  anchorFor("Second request").getBoundingClientRect = () => rect(50, 90)
+  fireEvent.scroll(viewport)
+  expect(first.getAttribute("aria-current")).toBeNull()
+  expect(second.getAttribute("aria-current")).toBe("location")
+
+  // A tall first turn stays marked while its content fills the viewport, even
+  // though its own bubble has scrolled out.
+  anchorFor("Second request").getBoundingClientRect = () => rect(600, 650)
+  fireEvent.scroll(viewport)
+  expect(first.getAttribute("aria-current")).toBe("location")
+  expect(second.getAttribute("aria-current")).toBeNull()
+})
+
 it("does not display replayed activity until the selected session finishes restoring", () => {
   useAppStore.setState({ hydratingSessionId: "session_1" })
   render(<App />)

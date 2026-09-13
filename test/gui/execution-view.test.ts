@@ -319,6 +319,43 @@ describe("execution view", () => {
     })
   })
 
+  it("accumulates per-turn usage when no cumulative snapshot is provided", () => {
+    const turnCompleted = (turnId: string, inputTokens: number) => ({
+      type: EventType.TurnCompleted,
+      data: {
+        turnId,
+        outcome: { status: "completed" as const },
+        usage: {
+          inputTokens,
+          outputTokens: 10,
+          cacheReadInputTokens: 5,
+          cacheWriteInputTokens: 1,
+        },
+      },
+    })
+    const state = [turnCompleted("turn_1", 100), turnCompleted("turn_2", 150)]
+      .reduce(
+        (current, event, index) =>
+          reduceExecutionView(current, {
+            type: "durable",
+            event: createExecutionEnvelope({
+              sessionId,
+              seq: index + 1,
+              event,
+            }),
+          }),
+        createExecutionViewState(),
+      )
+
+    expect(projectExecutionView(state).telemetry).toMatchObject({
+      turns: 2,
+      inputTokens: 250,
+      outputTokens: 20,
+      cacheReadInputTokens: 10,
+      cacheWriteInputTokens: 2,
+    })
+  })
+
   it("projects public reasoning separately from the assistant answer", () => {
     const state = [
       {

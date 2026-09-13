@@ -648,19 +648,26 @@ describe("Turn processor", () => {
       model: "scripted",
     })
     const stored = await runtime.store.readThread(thread.id)
-    expect(
-      stored?.rollout.find(
-        (entry) =>
-          entry.item.type === "turn_completed" &&
-          entry.item.outcome === "completed",
-      )?.item,
-    ).toMatchObject({
+    const completed = stored?.rollout.find(
+      (entry) =>
+        entry.item.type === "turn_completed" &&
+        entry.item.outcome === "completed",
+    )?.item
+    expect(completed).toMatchObject({
       usage: {
         inputTokens: 12,
         outputTokens: 3,
         activeContextTokens: 9,
       },
+      metrics: { modelCalls: 1, toolCalls: 0 },
     })
+    if (completed?.type === "turn_completed") {
+      expect(completed.metrics?.modelDurationMs).toBeGreaterThanOrEqual(0)
+      expect(completed.metrics?.toolDurationMs).toBe(0)
+      expect(
+        completed.metrics?.averageTimeToFirstTokenMs,
+      ).toBeGreaterThanOrEqual(0)
+    }
     const assistant = stored?.rollout.find(
       (entry) =>
         entry.item.type === "response_item" &&

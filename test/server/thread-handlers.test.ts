@@ -267,6 +267,16 @@ describe("thread server handlers", () => {
     if (!replay.ok) throw new Error(replay.body.error.message)
     expect(
       replay.body.events.find(
+        (event) => isKernelEvent(event) && event.type === "turn.completed",
+      ),
+    ).toMatchObject({
+      type: "turn.completed",
+      data: {
+        metrics: { modelCalls: 1, toolCalls: 0 },
+      },
+    })
+    expect(
+      replay.body.events.find(
         (event) =>
           isKernelEvent(event) &&
           event.type === "item.completed" &&

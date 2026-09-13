@@ -195,6 +195,47 @@ describe("composer", () => {
     ])
   })
 
+  it("previews an attached image with zoom controls", async () => {
+    const user = userEvent.setup()
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      promptAttachments: [draftImage("high")],
+    })
+    render(<Composer />)
+
+    await user.click(
+      screen.getByRole("button", { name: "Preview screenshot.png" }),
+    )
+    const dialog = screen.getByRole("dialog", {
+      name: "Preview screenshot.png",
+    })
+    expect(dialog.textContent).toContain("100%")
+
+    await user.click(screen.getByRole("button", { name: "Zoom in" }))
+    expect(dialog.textContent).toContain("125%")
+    await user.click(screen.getByRole("button", { name: "Reset zoom" }))
+    expect(dialog.textContent).toContain("100%")
+
+    await user.click(screen.getByRole("button", { name: "Close preview" }))
+    expect(screen.queryByRole("dialog")).toBeNull()
+  })
+
+  it("closes the image preview with Escape", async () => {
+    const user = userEvent.setup()
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      promptAttachments: [draftImage("high")],
+    })
+    render(<Composer />)
+
+    await user.click(
+      screen.getByRole("button", { name: "Preview screenshot.png" }),
+    )
+    expect(screen.getByRole("dialog")).toBeDefined()
+    await user.keyboard("{Escape}")
+    expect(screen.queryByRole("dialog")).toBeNull()
+  })
+
   it("explains and normalizes original detail for a model without that mode", async () => {
     const user = userEvent.setup()
     const admitInput = vi.fn(() => Promise.resolve())
@@ -752,10 +793,13 @@ describe("model selector", () => {
 
     expect(
       screen.getByRole("button", { name: "Select model" }).textContent,
-    ).toBe("Claude Sonnet 4.6 · low")
+    ).toBe("Claude Sonnet 4.6")
+    expect(
+      screen.getByRole("button", { name: "Select effort" }).textContent,
+    ).toBe("low")
   })
 
-  it("groups model rows by provider and offers efforts for reasoning models", async () => {
+  it("groups model rows by provider under a Select model header", async () => {
     const user = userEvent.setup()
     window.localStorage.clear()
     useAppStore.setState({ ...selectModelState(), modelSelections: {} })
@@ -763,7 +807,8 @@ describe("model selector", () => {
 
     await user.click(screen.getByRole("button", { name: "Select model" }))
 
-    expect(screen.getByText("模型")).toBeDefined()
+    expect(screen.getByText("Select model")).toBeDefined()
+    expect(screen.getByText("Recommended set of models")).toBeDefined()
     expect(screen.getByText("openai")).toBeDefined()
     expect(screen.getByText("anthropic")).toBeDefined()
     expect(screen.getByRole("button", { name: "GPT 5.1 Codex" })).toBeDefined()
@@ -773,17 +818,24 @@ describe("model selector", () => {
     expect(
       screen.getByRole("button", { name: "Grok 4.20 Non-Reasoning" }),
     ).toBeDefined()
+  })
 
-    // The effective default model is a reasoning model: effort rows show.
-    expect(screen.getByText("推理强度")).toBeDefined()
+  it("offers effort stops and a speed toggle for reasoning models", async () => {
+    const user = userEvent.setup()
+    window.localStorage.clear()
+    useAppStore.setState({ ...selectModelState(), modelSelections: {} })
+    render(<Composer />)
+
+    await user.click(screen.getByRole("button", { name: "Select effort" }))
+
+    // The effective default model is a reasoning model: effort stops show.
+    expect(screen.getByRole("slider", { name: "Reasoning effort" }))
     expect(screen.getByRole("button", { name: "low" })).toBeDefined()
     expect(screen.getByRole("button", { name: "medium" })).toBeDefined()
     expect(screen.getByRole("button", { name: "high" })).toBeDefined()
 
-    // And it has speed tiers.
-    expect(screen.getByText("速度")).toBeDefined()
-    expect(screen.getByRole("button", { name: "标准" })).toBeDefined()
-    expect(screen.getByRole("button", { name: "快速" })).toBeDefined()
+    // And it has a speed tier toggle.
+    expect(screen.getByRole("button", { name: "Use fast speed" })).toBeDefined()
   })
 
   it("does not offer providers that require login", async () => {
@@ -875,32 +927,33 @@ describe("model selector", () => {
     })
   })
 
-  it("pins an effort for the effective model and clears it with Default", async () => {
+  it("pins an effort for the effective model and resets it to default", async () => {
     const user = userEvent.setup()
     window.localStorage.clear()
     useAppStore.setState({ ...selectModelState(), modelSelections: {} })
     render(<Composer />)
 
-    await user.click(screen.getByRole("button", { name: "Select model" }))
+    await user.click(screen.getByRole("button", { name: "Select effort" }))
     await user.click(screen.getByRole("button", { name: "high" }))
 
     expect(useAppStore.getState().modelSelections).toEqual({
       session_1: { provider: "openai", model: "gpt-5.1-codex", effort: "high" },
     })
     expect(
-      screen.getByRole("button", { name: "Select model" }).textContent,
-    ).toBe("GPT 5.1 Codex · high")
+      screen.getByRole("button", { name: "Select effort" }).textContent,
+    ).toBe("high")
 
-    await user.click(screen.getByRole("button", { name: "Select model" }))
-    // The effort section Default row clears only the effort, keeping the model.
-    await user.click(screen.getByRole("button", { name: "Default" }))
+    // The reset control clears only the effort, keeping the model.
+    await user.click(
+      screen.getByRole("button", { name: "Reset effort to default" }),
+    )
 
     expect(useAppStore.getState().modelSelections).toEqual({
       session_1: { provider: "openai", model: "gpt-5.1-codex" },
     })
   })
 
-  it("hides the effort section when the effective model offers none", async () => {
+  it("hides the effort pill when the effective model offers none", async () => {
     const user = userEvent.setup()
     window.localStorage.clear()
     useAppStore.setState({
@@ -911,18 +964,16 @@ describe("model selector", () => {
     })
     render(<Composer />)
 
-    await user.click(screen.getByRole("button", { name: "Select model" }))
+    expect(screen.queryByRole("button", { name: "Select effort" })).toBeNull()
 
-    expect(screen.queryByText("推理强度")).toBeNull()
+    await user.click(screen.getByRole("button", { name: "Select model" }))
     const selectedRow = screen.getByRole("button", {
       name: "Grok 4.20 Non-Reasoning",
     })
-    expect(selectedRow.className).toContain("bg-accent")
     expect(selectedRow.querySelector("svg")).not.toBeNull()
   })
 
-  it("keeps K2.7 thinking on without exposing K3 effort levels", async () => {
-    const user = userEvent.setup()
+  it("keeps K2.7 thinking on without exposing K3 effort levels", () => {
     window.localStorage.clear()
     useAppStore.setState({
       ...selectModelState(),
@@ -932,10 +983,7 @@ describe("model selector", () => {
     })
     render(<Composer />)
 
-    await user.click(screen.getByRole("button", { name: "Select model" }))
-
-    expect(screen.queryByText("推理强度")).toBeNull()
-    expect(screen.queryByText("速度")).toBeNull()
+    expect(screen.queryByRole("button", { name: "Select effort" })).toBeNull()
   })
 
   it("pins and clears a speed tier for codex models", async () => {
@@ -949,8 +997,8 @@ describe("model selector", () => {
     })
     render(<Composer />)
 
-    await user.click(screen.getByRole("button", { name: "Select model" }))
-    await user.click(screen.getByRole("button", { name: "快速" }))
+    await user.click(screen.getByRole("button", { name: "Select effort" }))
+    await user.click(screen.getByRole("button", { name: "Use fast speed" }))
 
     // Picking a speed keeps the pinned effort.
     expect(useAppStore.getState().modelSelections).toEqual({
@@ -974,16 +1022,16 @@ describe("model selector", () => {
       },
     })
 
-    await user.click(screen.getByRole("button", { name: "Select model" }))
-    await user.click(screen.getByRole("button", { name: "标准" }))
+    await user.click(screen.getByRole("button", { name: "Use standard speed" }))
 
     expect(useAppStore.getState().modelSelections).toEqual({
       session_1: { provider: "codex", model: "gpt-5.6-sol", effort: "high" },
     })
   })
 
-  it("checks the standard row for an explicit standard speed", async () => {
+  it("shows the standard speed state for an explicit standard speed", async () => {
     const user = userEvent.setup()
+    window.localStorage.clear()
     useAppStore.setState({
       ...selectModelState(),
       modelSelections: {
@@ -996,17 +1044,15 @@ describe("model selector", () => {
     })
     render(<Composer />)
 
-    await user.click(screen.getByRole("button", { name: "Select model" }))
+    await user.click(screen.getByRole("button", { name: "Select effort" }))
 
+    expect(screen.getByRole("button", { name: "Use fast speed" })).toBeDefined()
     expect(
-      screen.getByRole("button", { name: "标准" }).querySelector("svg"),
-    ).not.toBeNull()
-    expect(
-      screen.getByRole("button", { name: "快速" }).querySelector("svg"),
+      screen.queryByRole("button", { name: "Use standard speed" }),
     ).toBeNull()
   })
 
-  it("hides the speed section for providers without tiers", async () => {
+  it("hides the speed toggle for providers without tiers", async () => {
     const user = userEvent.setup()
     window.localStorage.clear()
     useAppStore.setState({
@@ -1017,10 +1063,12 @@ describe("model selector", () => {
     })
     render(<Composer />)
 
-    await user.click(screen.getByRole("button", { name: "Select model" }))
+    await user.click(screen.getByRole("button", { name: "Select effort" }))
 
-    expect(screen.getByText("推理强度")).toBeDefined()
-    expect(screen.queryByText("速度")).toBeNull()
+    expect(
+      screen.getByRole("slider", { name: "Reasoning effort" }),
+    ).toBeDefined()
+    expect(screen.queryByRole("button", { name: /speed/ })).toBeNull()
   })
 
   it("checks the effective model row and offers no Default row", async () => {

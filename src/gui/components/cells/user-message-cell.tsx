@@ -5,6 +5,8 @@ import { useAppStore } from "../../store/app-store.ts"
 import { imageAttachmentUrl } from "../../composer-attachments.ts"
 import { Badge } from "../ui/badge.tsx"
 import { Button } from "../ui/button.tsx"
+import { CopyIconButton, MessageTimestamp } from "../response-actions.tsx"
+import { ImageLightbox } from "../image-lightbox.tsx"
 
 import { PromptEditor, type PromptEditorHandle } from "../prompt-editor.tsx"
 import { parsePrompt } from "../prompt-document.ts"
@@ -49,6 +51,7 @@ export function UserMessageCell({
   const forkSession = useAppStore((state) => state.forkSession)
   const [mode, setMode] = useState<"undo" | "edit" | undefined>()
   const [draft, setDraft] = useState(entry.text)
+  const [previewIndex, setPreviewIndex] = useState<number>()
   const edited = draft.trim()
   const editorRef = useRef<PromptEditorHandle>(null)
   useLayoutEffect(() => {
@@ -57,6 +60,8 @@ export function UserMessageCell({
     }
   }, [mode])
   const attachments = entry.attachments ?? []
+  const preview =
+    previewIndex === undefined ? undefined : attachments[previewIndex]
 
   return (
     <div className="group flex flex-col items-end gap-1.5">
@@ -67,13 +72,20 @@ export function UserMessageCell({
               <div
                 className={`grid gap-1.5 p-1.5 ${attachments.length > 1 ? "grid-cols-2" : "grid-cols-1"}`}
               >
-                {attachments.map((attachment) => (
-                  <img
+                {attachments.map((attachment, index) => (
+                  <button
                     key={`${attachment.name}:${attachment.sizeBytes}:${attachment.file.rolloutId}:${attachment.file.path}`}
-                    src={imageAttachmentUrl(attachment, apiBase)}
-                    alt={attachment.name}
-                    className="max-h-72 min-h-24 w-full rounded-lg bg-black/10 object-cover"
-                  />
+                    type="button"
+                    aria-label={`Preview ${attachment.name}`}
+                    onClick={() => setPreviewIndex(index)}
+                    className="cursor-zoom-in"
+                  >
+                    <img
+                      src={imageAttachmentUrl(attachment, apiBase)}
+                      alt={attachment.name}
+                      className="max-h-72 min-h-24 w-full rounded-lg bg-black/10 object-cover"
+                    />
+                  </button>
                 ))}
               </div>
             ) : null}
@@ -82,25 +94,31 @@ export function UserMessageCell({
           <div className="flex min-h-5 items-center gap-1">
             {queued ? <Badge variant="secondary">queued</Badge> : null}
             {mode === undefined ? (
-              <div className="flex items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+              <div className="flex items-center gap-1 text-xs text-muted-foreground opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+                <MessageTimestamp at={entry.at} />
+                <CopyIconButton text={entry.text} label="message" />
                 <button
                   type="button"
                   disabled={busy}
-                  onClick={() => setMode("undo")}
-                  className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
-                >
-                  <RotateCcw className="size-3" /> Undo to here
-                </button>
-                <button
-                  type="button"
-                  disabled={busy}
+                  aria-label="Edit & resubmit"
+                  title="Edit & resubmit"
                   onClick={() => {
                     setDraft(entry.text)
                     setMode("edit")
                   }}
-                  className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
+                  className="rounded-md p-1 transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
                 >
-                  <PencilLine className="size-3" /> Edit &amp; resubmit
+                  <PencilLine className="size-4" />
+                </button>
+                <button
+                  type="button"
+                  disabled={busy}
+                  aria-label="Undo to here"
+                  title="Undo to here"
+                  onClick={() => setMode("undo")}
+                  className="rounded-md p-1 transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+                >
+                  <RotateCcw className="size-4" />
                 </button>
               </div>
             ) : null}
@@ -202,6 +220,13 @@ export function UserMessageCell({
           </div>
         </form>
       ) : null}
+      {preview === undefined ? null : (
+        <ImageLightbox
+          src={imageAttachmentUrl(preview, apiBase)}
+          name={preview.name}
+          onClose={() => setPreviewIndex(undefined)}
+        />
+      )}
     </div>
   )
 }
