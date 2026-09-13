@@ -24,6 +24,41 @@ const entry = {
   at: "2026-08-17T00:00:00.000Z",
 }
 
+describe("attachments", () => {
+  const image = {
+    name: "screenshot.png",
+    mediaType: "image/png" as const,
+    detail: "high" as const,
+    sizeBytes: 9,
+    file: {
+      rolloutId: "session_1",
+      path: "attachments/staging/draft_1/1.png",
+    },
+  }
+
+  it("opens a zoomable preview when an image attachment is clicked", async () => {
+    const user = userEvent.setup()
+    render(
+      <UserMessageCell
+        entry={{ ...entry, attachments: [image] }}
+        queued={false}
+      />,
+    )
+
+    await user.click(
+      screen.getByRole("button", { name: "Preview screenshot.png" }),
+    )
+    const dialog = screen.getByRole("dialog", {
+      name: "Preview screenshot.png",
+    })
+    expect(dialog.textContent).toContain("100%")
+    await user.click(screen.getByRole("button", { name: "Zoom in" }))
+    expect(dialog.textContent).toContain("125%")
+    await user.click(screen.getByRole("button", { name: "Close preview" }))
+    expect(screen.queryByRole("dialog")).toBeNull()
+  })
+})
+
 describe("skill mentions", () => {
   it("renders trailing skill mentions as chips and strips them from the text", () => {
     render(

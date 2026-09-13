@@ -300,7 +300,6 @@ function applySnapshot(
             model: session.currentModel.model,
           },
         }),
-    telemetry: replaceUsage(state.telemetry, session.usage),
   }
   const pendingIds = new Set(
     session.pendingPermissions.map(
@@ -451,27 +450,32 @@ function applyDurable(
           : 0)
       const timeToFirstTokenSamples =
         next.timeToFirstTokenSamples + (hasTimeToFirstToken ? samples : 0)
-      const telemetry = replaceUsage(
-        {
-          ...next.telemetry,
-          turns: next.telemetry.turns + 1,
-          steps:
-            next.telemetry.steps +
-            (metrics?.modelCalls ?? 0) +
-            (metrics?.toolCalls ?? 0),
-          modelDurationMs:
-            next.telemetry.modelDurationMs + (metrics?.modelDurationMs ?? 0),
-          toolDurationMs:
-            next.telemetry.toolDurationMs + (metrics?.toolDurationMs ?? 0),
-          ...(timeToFirstTokenSamples === 0
-            ? {}
-            : {
-                averageTimeToFirstTokenMs: Math.round(
-                  timeToFirstTokenWeightedMs / timeToFirstTokenSamples,
-                ),
-              }),
-        },
-        event.data.sessionUsage,
+      const telemetry = addUsage(
+        replaceUsage(
+          {
+            ...next.telemetry,
+            turns: next.telemetry.turns + 1,
+            steps:
+              next.telemetry.steps +
+              (metrics?.modelCalls ?? 0) +
+              (metrics?.toolCalls ?? 0),
+            modelDurationMs:
+              next.telemetry.modelDurationMs + (metrics?.modelDurationMs ?? 0),
+            toolDurationMs:
+              next.telemetry.toolDurationMs + (metrics?.toolDurationMs ?? 0),
+            ...(timeToFirstTokenSamples === 0
+              ? {}
+              : {
+                  averageTimeToFirstTokenMs: Math.round(
+                    timeToFirstTokenWeightedMs / timeToFirstTokenSamples,
+                  ),
+                }),
+          },
+          event.data.sessionUsage,
+        ),
+        // Without a cumulative session usage, accumulate the turn's own
+        // usage; snapshots replace the totals from the session authority.
+        event.data.sessionUsage === undefined ? event.data.usage : undefined,
       )
       next = {
         ...next,
@@ -843,6 +847,22 @@ function replaceUsage(
     outputTokens: usage.outputTokens,
     cacheReadInputTokens: usage.cacheReadInputTokens ?? 0,
     cacheWriteInputTokens: usage.cacheWriteInputTokens ?? 0,
+  }
+}
+
+function addUsage(
+  telemetry: SessionTelemetry,
+  usage: TokenUsage | undefined,
+): SessionTelemetry {
+  if (usage === undefined) return telemetry
+  return {
+    ...telemetry,
+    inputTokens: telemetry.inputTokens + usage.inputTokens,
+    outputTokens: telemetry.outputTokens + usage.outputTokens,
+    cacheReadInputTokens:
+      telemetry.cacheReadInputTokens + (usage.cacheReadInputTokens ?? 0),
+    cacheWriteInputTokens:
+      telemetry.cacheWriteInputTokens + (usage.cacheWriteInputTokens ?? 0),
   }
 }
 

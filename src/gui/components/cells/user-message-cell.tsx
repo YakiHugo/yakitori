@@ -6,6 +6,7 @@ import { imageAttachmentUrl } from "../../composer-attachments.ts"
 import { Badge } from "../ui/badge.tsx"
 import { Button } from "../ui/button.tsx"
 import { CopyIconButton, MessageTimestamp } from "../response-actions.tsx"
+import { ImageLightbox } from "../image-lightbox.tsx"
 
 import { PromptEditor, type PromptEditorHandle } from "../prompt-editor.tsx"
 import { parsePrompt } from "../prompt-document.ts"
@@ -50,6 +51,7 @@ export function UserMessageCell({
   const forkSession = useAppStore((state) => state.forkSession)
   const [mode, setMode] = useState<"undo" | "edit" | undefined>()
   const [draft, setDraft] = useState(entry.text)
+  const [previewIndex, setPreviewIndex] = useState<number>()
   const edited = draft.trim()
   const editorRef = useRef<PromptEditorHandle>(null)
   useLayoutEffect(() => {
@@ -58,6 +60,8 @@ export function UserMessageCell({
     }
   }, [mode])
   const attachments = entry.attachments ?? []
+  const preview =
+    previewIndex === undefined ? undefined : attachments[previewIndex]
 
   return (
     <div className="group flex flex-col items-end gap-1.5">
@@ -68,13 +72,20 @@ export function UserMessageCell({
               <div
                 className={`grid gap-1.5 p-1.5 ${attachments.length > 1 ? "grid-cols-2" : "grid-cols-1"}`}
               >
-                {attachments.map((attachment) => (
-                  <img
+                {attachments.map((attachment, index) => (
+                  <button
                     key={`${attachment.name}:${attachment.sizeBytes}:${attachment.file.rolloutId}:${attachment.file.path}`}
-                    src={imageAttachmentUrl(attachment, apiBase)}
-                    alt={attachment.name}
-                    className="max-h-72 min-h-24 w-full rounded-lg bg-black/10 object-cover"
-                  />
+                    type="button"
+                    aria-label={`Preview ${attachment.name}`}
+                    onClick={() => setPreviewIndex(index)}
+                    className="cursor-zoom-in"
+                  >
+                    <img
+                      src={imageAttachmentUrl(attachment, apiBase)}
+                      alt={attachment.name}
+                      className="max-h-72 min-h-24 w-full rounded-lg bg-black/10 object-cover"
+                    />
+                  </button>
                 ))}
               </div>
             ) : null}
@@ -209,6 +220,13 @@ export function UserMessageCell({
           </div>
         </form>
       ) : null}
+      {preview === undefined ? null : (
+        <ImageLightbox
+          src={imageAttachmentUrl(preview, apiBase)}
+          name={preview.name}
+          onClose={() => setPreviewIndex(undefined)}
+        />
+      )}
     </div>
   )
 }

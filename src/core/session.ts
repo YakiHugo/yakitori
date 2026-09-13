@@ -5,6 +5,7 @@ import type {
   SessionConfigurationSnapshot,
   StartedExecutionItem,
   TokenUsage,
+  TurnMetrics,
 } from "../kernel/events.ts"
 import { kernelErrorFromUnknown } from "../kernel/errors.ts"
 import { InputRole } from "../kernel/events.ts"
@@ -57,6 +58,7 @@ export type TurnRuntime = {
   recordModelContext(settings: ModelContextSettings): Promise<void>
   snapshot(): SessionSnapshot
   recordUsage(usage: TokenUsage): void
+  recordTurnMetrics(metrics: TurnMetrics): void
   recordContextTokens(
     input: Readonly<{
       activeContextTokens: number
@@ -125,6 +127,7 @@ type ActiveTurn = {
   readonly steering: TurnInput[]
   acceptingSteering: boolean
   usage: TokenUsage | undefined
+  metrics: TurnMetrics | undefined
   readonly resolveAbort: () => void
   taskHandle: TurnTask | undefined
   task: Promise<void>
@@ -467,6 +470,7 @@ export class Session {
       steering: [],
       acceptingSteering: true,
       usage: undefined,
+      metrics: undefined,
       resolveAbort: () => aborted.resolve(),
       taskHandle: undefined,
       task: Promise.resolve(),
@@ -564,6 +568,7 @@ export class Session {
           turnId: active.input.submissionId,
           outcome: "interrupted",
           ...(active.usage === undefined ? {} : { usage: active.usage }),
+          ...(active.metrics === undefined ? {} : { metrics: active.metrics }),
         },
       ])
       await this.#flushRollout()
@@ -589,6 +594,7 @@ export class Session {
           turnId: active.input.submissionId,
           outcome: "failed",
           ...(active.usage === undefined ? {} : { usage: active.usage }),
+          ...(active.metrics === undefined ? {} : { metrics: active.metrics }),
           error,
         },
       ])
@@ -610,6 +616,7 @@ export class Session {
         turnId: active.input.submissionId,
         outcome: "completed",
         ...(active.usage === undefined ? {} : { usage: active.usage }),
+        ...(active.metrics === undefined ? {} : { metrics: active.metrics }),
       },
     ])
     await this.#flushRollout()
@@ -663,6 +670,10 @@ export class Session {
       recordUsage: (usage) => {
         requireActive()
         active.usage = structuredClone(usage)
+      },
+      recordTurnMetrics: (metrics) => {
+        requireActive()
+        active.metrics = metrics
       },
       recordContextTokens: async (input) => {
         requireLease()

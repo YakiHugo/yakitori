@@ -1216,6 +1216,7 @@ function mapRolloutEvent(
           turnId: item.turnId,
           outcome,
           ...(item.usage === undefined ? {} : { usage: item.usage }),
+          ...(item.metrics === undefined ? {} : { metrics: item.metrics }),
         },
       },
     })

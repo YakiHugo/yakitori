@@ -7,6 +7,7 @@ import type {
   ModelSelection,
   SessionConfigurationSnapshot,
   TokenUsage,
+  TurnMetrics,
 } from "../kernel/events.ts"
 
 export type HistoryPosition = {
@@ -78,6 +79,7 @@ export type RolloutItem =
       readonly turnId: string
       readonly outcome: "completed" | "failed" | "interrupted"
       readonly usage?: TokenUsage
+      readonly metrics?: TurnMetrics
       readonly error?: KernelError
     }
   | {

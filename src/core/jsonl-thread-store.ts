@@ -23,6 +23,7 @@ import {
   isModelSelection,
   isSessionConfigurationSnapshot,
   isTokenUsage,
+  isTurnMetrics,
 } from "../kernel/events.ts"
 import { isStorageKey } from "../kernel/ids.ts"
 import type {
@@ -1510,12 +1511,20 @@ function isRolloutItem(value: unknown): value is RolloutItem {
   }
   if (value.type === "turn_completed") {
     return (
-      hasOnlyKeys(value, ["type", "turnId", "outcome", "usage", "error"]) &&
+      hasOnlyKeys(value, [
+        "type",
+        "turnId",
+        "outcome",
+        "usage",
+        "metrics",
+        "error",
+      ]) &&
       typeof value.turnId === "string" &&
       (value.outcome === "completed" ||
         value.outcome === "failed" ||
         value.outcome === "interrupted") &&
       (value.usage === undefined || isTokenUsage(value.usage)) &&
+      (value.metrics === undefined || isTurnMetrics(value.metrics)) &&
       (value.error === undefined || isRolloutError(value.error))
     )
   }
