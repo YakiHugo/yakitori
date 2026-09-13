@@ -69,6 +69,7 @@ function makeProject(id: string, root: string, name = ""): ApiProject {
     roots: [root],
     metadata: {},
     position: 0,
+    pinned: false,
     createdAt: 0,
     updatedAt: 0,
   }
@@ -117,7 +118,9 @@ describe("app store event stream", () => {
   })
 
   it("streams durable execution events into the store", async () => {
-    useAppStore.setState({ sessions: [sessionDetail] })
+    useAppStore.setState({
+      sessionsByProject: { "": { sessions: [sessionDetail] } },
+    })
     await useAppStore.getState().selectSession("session_1")
 
     const stream = fakeRef.current.streams[0]
@@ -240,7 +243,9 @@ describe("app store event stream", () => {
       items: 2,
       tools: 1,
     })
-    expect(useAppStore.getState().sessions[0]?.seq).toBe(5)
+    expect(useAppStore.getState().sessionsByProject[""]?.sessions[0]?.seq).toBe(
+      5,
+    )
   })
 
   it("does not revive a permission resolved before its answer failure returns", async () => {
@@ -477,7 +482,9 @@ describe("delete session", () => {
   it("removes the session from state", async () => {
     fakeRef.current.respond = respondToDelete([summary("session_2")])
     useAppStore.setState({
-      sessions: [summary("session_1"), summary("session_2")],
+      sessionsByProject: {
+        "": { sessions: [summary("session_1"), summary("session_2")] },
+      },
     })
 
     await useAppStore.getState().deleteSession("session_1")
@@ -487,7 +494,9 @@ describe("delete session", () => {
       params: { sessionId: "session_1" },
     })
     expect(
-      useAppStore.getState().sessions.map((session) => session.id),
+      useAppStore
+        .getState()
+        .sessionsByProject[""]?.sessions.map((session) => session.id),
     ).toEqual(["session_2"])
     expect(useAppStore.getState().inFlightActions.size).toBe(0)
   })
@@ -507,7 +516,7 @@ describe("delete session", () => {
     expect(
       projectExecutionView(useAppStore.getState().execution).entries,
     ).toEqual([])
-    expect(useAppStore.getState().sessions).toEqual([])
+    expect(useAppStore.getState().sessionsByProject[""]?.sessions).toEqual([])
     expect(stream?.closed).toBe(true)
   })
 
@@ -822,7 +831,7 @@ describe("project state", () => {
     expect(fakeRef.current.requestsFor("project/list")).toHaveLength(1)
   })
 
-  it("selectProject persists the choice and filters session loads", async () => {
+  it("expanding a project loads its sessions without changing the new-session target", async () => {
     window.localStorage.clear()
     fakeRef.current.respond = (method) => {
       if (method === "session/list") {
@@ -833,19 +842,33 @@ describe("project state", () => {
     useAppStore.setState({
       projects: [projectA, projectB],
       currentProject: "project_a",
+      collapsedProjects: { project_b: true },
     })
 
-    await useAppStore.getState().selectProject("project_b")
+    await useAppStore.getState().toggleProject("project_b")
 
-    expect(useAppStore.getState().currentProject).toBe("project_b")
-    expect(window.localStorage.getItem("yakitori.project")).toBe("project_b")
+    expect(useAppStore.getState().currentProject).toBe("project_a")
+    expect(useAppStore.getState().collapsedProjects).toEqual({})
+    expect(window.localStorage.getItem("yakitori.project")).toBeNull()
+    expect(window.localStorage.getItem("yakitori.collapsedProjects")).toBe("{}")
     expect(fakeRef.current.requestsFor("session/list")).toEqual([
       {
         method: "session/list",
-        params: { limit: 30, projectId: "project_b" },
+        params: { limit: 30, projectId: "project_b", sectionId: null },
       },
     ])
-    expect(useAppStore.getState().sessions).toEqual([])
+    expect(useAppStore.getState().sessionsByProject.project_b).toBeDefined()
+
+    await useAppStore.getState().toggleProject("project_b")
+
+    expect(useAppStore.getState().collapsedProjects).toEqual({
+      project_b: true,
+    })
+    expect(window.localStorage.getItem("yakitori.collapsedProjects")).toContain(
+      "project_b",
+    )
+    // Collapsing needs no further session load.
+    expect(fakeRef.current.requestsFor("session/list")).toHaveLength(1)
   })
 
   it("keeps the latest same-project session list response", async () => {
@@ -865,8 +888,8 @@ describe("project state", () => {
     }
     useAppStore.setState({ currentProject: "project_a" })
 
-    const slow = useAppStore.getState().loadSessions()
-    const fast = useAppStore.getState().loadSessions()
+    const slow = useAppStore.getState().loadSessions("project_a")
+    const fast = useAppStore.getState().loadSessions("project_a")
     resolveSecond?.({
       sessions: [{ ...sessionDetail, id: "session_new" }],
     })
@@ -877,14 +900,16 @@ describe("project state", () => {
     await slow
 
     expect(
-      useAppStore.getState().sessions.map((session) => session.id),
+      useAppStore
+        .getState()
+        .sessionsByProject.project_a?.sessions.map((session) => session.id),
     ).toEqual(["session_new"])
   })
 
-  it("addProject creates the project and selects it", async () => {
+  it("opening a project starts a draft and preserves the previous conversation draft", async () => {
     window.localStorage.clear()
     fakeRef.current.respond = (method) => {
-      if (method === "project/create") {
+      if (method === "project/open") {
         return { project: projectB }
       }
       if (method === "project/list") {
@@ -898,15 +923,71 @@ describe("project state", () => {
     useAppStore.setState({
       projects: [projectA],
       currentProject: "project_a",
+      selection: { sessionId: "session_existing" },
+      promptDraft: "unfinished message",
+      collapsedProjects: { project_b: true },
     })
 
-    await useAppStore.getState().addProject(" /p/b ")
+    await useAppStore.getState().addProject(" /p/b ", "My project")
 
-    expect(fakeRef.current.requestsFor("project/create")).toEqual([
-      { method: "project/create", params: { roots: ["/p/b"] } },
+    expect(fakeRef.current.requestsFor("project/open")).toEqual([
+      { method: "project/open", params: { path: "/p/b", name: "My project" } },
     ])
     expect(useAppStore.getState().projects).toEqual([projectA, projectB])
     expect(useAppStore.getState().currentProject).toBe("project_b")
+    expect(useAppStore.getState().selection.sessionId).toBeUndefined()
+    expect(useAppStore.getState().sessionDrafts.session_existing?.text).toBe(
+      "unfinished message",
+    )
+    expect(useAppStore.getState().collapsedProjects.project_b).toBeUndefined()
+    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(0)
+  })
+
+  it("toggleProjectPinned flips pinned via project/update and reloads projects", async () => {
+    fakeRef.current.respond = (method) => {
+      if (method === "project/update") {
+        return { project: { ...projectA, pinned: true } }
+      }
+      if (method === "project/list") {
+        return { projects: [{ ...projectA, pinned: true }, projectB] }
+      }
+      return notFound()
+    }
+    useAppStore.setState({ projects: [projectA, projectB] })
+
+    await useAppStore.getState().toggleProjectPinned("project_a")
+
+    expect(fakeRef.current.requestsFor("project/update")).toEqual([
+      {
+        method: "project/update",
+        params: { projectId: "project_a", pinned: true },
+      },
+    ])
+    expect(useAppStore.getState().projects[0]?.pinned).toBe(true)
+  })
+
+  it("removeProject deletes, reloads, and retargets the current project", async () => {
+    window.localStorage.clear()
+    fakeRef.current.respond = (method) => {
+      if (method === "project/delete") return {}
+      if (method === "project/list") return { projects: [projectB] }
+      return notFound()
+    }
+    useAppStore.setState({
+      projects: [projectA, projectB],
+      currentProject: "project_a",
+      sessionsByProject: { project_a: { sessions: [] } },
+    })
+
+    const completed = await useAppStore.getState().removeProject("project_a")
+
+    expect(completed).toBe(true)
+    expect(fakeRef.current.requestsFor("project/delete")).toEqual([
+      { method: "project/delete", params: { projectId: "project_a" } },
+    ])
+    expect(useAppStore.getState().projects).toEqual([projectB])
+    expect(useAppStore.getState().currentProject).toBe("project_b")
+    expect(useAppStore.getState().sessionsByProject.project_a).toBeUndefined()
   })
 
   it("createSession sends the current project id and its first root", async () => {
@@ -930,13 +1011,13 @@ describe("project state", () => {
       currentProject: "project_a",
     })
 
-    await useAppStore.getState().createSession()
+    await useAppStore.getState().createSession("Build a sidebar")
 
     expect(fakeRef.current.requestsFor("session/create")).toEqual([
       {
         method: "session/create",
         params: {
-          title: expect.stringContaining("Session"),
+          title: "Build a sidebar",
           projectId: "project_a",
           workingDirectory: "/p/a",
         },
@@ -1551,4 +1632,202 @@ it("resumes the source event stream after an edit request fails", async () => {
   expect(useAppStore.getState().execution.entries).toContainEqual(
     expect.objectContaining({ text: "Input during edit" }),
   )
+})
+
+describe("new session drafts", () => {
+  it("keeps the new-session draft separate from an existing session draft", async () => {
+    useAppStore.getState().startNewSession()
+    useAppStore.getState().setPromptDraft("new task")
+    await useAppStore.getState().selectSession("session_1")
+    useAppStore.getState().setPromptDraft("existing task")
+    useAppStore.getState().startNewSession()
+    expect(useAppStore.getState().promptDraft).toBe("new task")
+    await useAppStore.getState().selectSession("session_1")
+    expect(useAppStore.getState().promptDraft).toBe("existing task")
+    expect(fakeRef.current.requestsFor("session/create")).toEqual([])
+  })
+
+  it("creates once on first send and carries the draft model into admission", async () => {
+    window.localStorage.clear()
+    const respond = admissionResponder()
+    fakeRef.current.respond = (method, params) => {
+      if (method === "session/create")
+        return {
+          session: sessionDetail,
+          event: createEventEnvelope({
+            sessionId: "session_1",
+            seq: 1,
+            event: { type: EventType.SessionCreated, data: {} },
+          }),
+        }
+      return respond(method, params)
+    }
+    useAppStore.getState().startNewSession()
+    useAppStore
+      .getState()
+      .setModelSelection(undefined, { provider: "faux", model: "scripted" })
+    useAppStore.getState().setPromptDraft("hello")
+    await Promise.all([
+      useAppStore.getState().admitInput("hello"),
+      useAppStore.getState().admitInput("hello"),
+    ])
+    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(1)
+    expect(fakeRef.current.requestsFor("session/input")).toHaveLength(1)
+    expect(
+      fakeRef.current.requestsFor("session/input")[0]?.params,
+    ).toMatchObject({
+      sessionId: "session_1",
+      content: { kind: "text", text: "hello" },
+      modelSelection: { provider: "faux", model: "scripted" },
+    })
+    expect(useAppStore.getState().promptDraft).toBeUndefined()
+  })
+
+  it("reveals a search result in its collapsed project without duplicating later pagination", async () => {
+    const found = {
+      ...sessionDetail,
+      id: "session_found",
+      projectId: "project_a",
+      navigationId: "session_original",
+    }
+    fakeRef.current.respond = (method) =>
+      method === "session/list" ? { sessions: [found] } : notFound()
+    useAppStore.setState({ collapsedProjects: { project_a: true } })
+    await useAppStore.getState().selectSession(found.id, found)
+    expect(useAppStore.getState().currentProject).toBe("project_a")
+    expect(useAppStore.getState().collapsedProjects.project_a).toBeUndefined()
+    await useAppStore.getState().loadSessions("project_a", { append: true })
+    expect(
+      useAppStore
+        .getState()
+        .sessionsByProject.project_a?.sessions.map((entry) => entry.id),
+    ).toEqual(["session_found"])
+  })
+})
+
+it("preserves draft edits made while the first session is being created", async () => {
+  window.localStorage.clear()
+  let release: () => void = () => {
+    throw new Error("Creation has not started")
+  }
+  const waiting = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const respond = admissionResponder()
+  fakeRef.current.respond = async (method, params) => {
+    if (method === "session/create") {
+      await waiting
+      return {
+        session: sessionDetail,
+        event: createEventEnvelope({
+          sessionId: "session_1",
+          seq: 1,
+          event: { type: EventType.SessionCreated, data: {} },
+        }),
+      }
+    }
+    return respond(method, params)
+  }
+  useAppStore.getState().startNewSession()
+  useAppStore.getState().setPromptDraft("hello")
+  const sending = useAppStore.getState().admitInput("hello")
+  await vi.waitFor(() =>
+    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(1),
+  )
+  useAppStore.getState().setPromptDraft("hello with another thought")
+  release()
+  await sending
+  expect(useAppStore.getState().promptDraft).toBe("hello with another thought")
+  expect(fakeRef.current.requestsFor("session/input")[0]?.params).toMatchObject(
+    { content: { kind: "text", text: "hello" } },
+  )
+})
+
+it("reveals a grouped search result in its section without inserting it into the project list", async () => {
+  const found = {
+    ...sessionDetail,
+    id: "session_found",
+    projectId: "project_a",
+    navigationId: "session_original",
+    sectionId: "section_work",
+  }
+  fakeRef.current.respond = () => notFound()
+  useAppStore.setState({
+    collapsedSections: { section_work: true },
+    sessionsByProject: { project_a: { sessions: [] } },
+  })
+  await useAppStore.getState().selectSession(found.id, found)
+  expect(useAppStore.getState().collapsedSections.section_work).toBeUndefined()
+  expect(useAppStore.getState().sessionsByProject.project_a?.sessions).toEqual(
+    [],
+  )
+  expect(
+    useAppStore
+      .getState()
+      .sessionsByProject["sidebar:section:section_work"]?.sessions.map(
+        (s) => s.id,
+      ),
+  ).toEqual(["session_found"])
+  expect(useAppStore.getState().currentProject).toBe("project_a")
+})
+
+it("clears removed section membership and refreshes every loaded list after restoring a conversation", async () => {
+  const archived = { ...sessionDetail, archived: true, sectionId: "pinned" }
+  useAppStore.setState({
+    selectedSession: archived,
+    selection: { sessionId: archived.id },
+    sessionsByProject: {
+      "sidebar:section:pinned": { sessions: [archived] },
+      "sidebar:archived": { sessions: [archived] },
+    },
+  })
+  fakeRef.current.respond = (method, params) => {
+    if (method === "sidebar/update") {
+      fakeRef.current.sidebarResponse = {
+        sections: [],
+        entries: { session_1: { archived: false } },
+      }
+      return fakeRef.current.sidebarResponse
+    }
+    if (method === "session/list") {
+      const filter = params as { sectionId?: string; archived?: boolean }
+      return {
+        sessions: filter.archived || filter.sectionId ? [] : [sessionDetail],
+      }
+    }
+    return notFound()
+  }
+  expect(
+    await useAppStore.getState().changeSidebar({
+      type: "session",
+      sessionId: archived.id,
+      archived: false,
+      sectionId: null,
+    }),
+  ).toBe(true)
+  expect(useAppStore.getState().selectedSession?.archived).toBe(false)
+  expect(useAppStore.getState().selectedSession?.sectionId).toBeUndefined()
+  expect(
+    useAppStore.getState().sessionsByProject["sidebar:section:pinned"]
+      ?.sessions,
+  ).toEqual([])
+  expect(
+    useAppStore.getState().sessionsByProject["sidebar:archived"]?.sessions,
+  ).toEqual([])
+  expect(
+    useAppStore.getState().sessionsByProject[""]?.sessions.map((s) => s.id),
+  ).toEqual(["session_1"])
+})
+
+it("keeps the sidebar order when an already listed search result is selected", async () => {
+  const first = { ...sessionDetail, id: "session_first" }
+  const second = { ...sessionDetail, id: "session_second" }
+  useAppStore.setState({
+    sessionsByProject: { "": { sessions: [first, second] } },
+  })
+  fakeRef.current.respond = () => notFound()
+  await useAppStore.getState().selectSession(second.id, second)
+  expect(
+    useAppStore.getState().sessionsByProject[""]?.sessions.map((s) => s.id),
+  ).toEqual(["session_first", "session_second"])
 })

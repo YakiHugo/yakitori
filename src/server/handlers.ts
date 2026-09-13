@@ -1,3 +1,7 @@
+import {
+  parseSidebarChange,
+  type SessionSidebar,
+} from "../core/session-sidebar.ts"
 import { realpath, stat } from "node:fs/promises"
 import type { AgentThread } from "../core/agent-thread.ts"
 import type {
@@ -110,6 +114,8 @@ export type ThreadServerHandlerOptions = {
 }
 
 export type ServerHandlers = {
+  readSidebar(): Promise<ApiHandlerResult<SessionSidebar>>
+  updateSidebar(input: unknown): Promise<ApiHandlerResult<SessionSidebar>>
   createSession(
     input?: unknown,
   ): Promise<ApiHandlerResult<ApiCreateSessionResponse>>
@@ -423,6 +429,30 @@ export function createThreadServerHandlers(
       }
     },
 
+    async readSidebar() {
+      try {
+        return ok(200, await options.store.readSessionSidebar())
+      } catch (error) {
+        return fail(error, reporter, "read-sidebar")
+      }
+    },
+    async updateSidebar(input) {
+      try {
+        const change = parseSidebarChange(input)
+        if (
+          change.type === "session" &&
+          change.archived === true &&
+          options.manager.getThread(change.sessionId)?.snapshot()
+            .activeTurnId !== undefined
+        ) {
+          throw conflict("Wait for the active turn to finish before archiving.")
+        }
+        return ok(200, await options.store.updateSessionSidebar(change))
+      } catch (error) {
+        return fail(error, reporter, "update-sidebar")
+      }
+    },
+
     async listSessions(input = {}) {
       try {
         const request = requireListSessionsRequest(input)
@@ -438,6 +468,11 @@ export function createThreadServerHandlers(
           }
         }
         const result = await options.manager.listThreads({
+          view: "sessions",
+          archived: request.archived,
+          ...(request.sectionId === undefined
+            ? {}
+            : { sectionId: request.sectionId }),
           limit: request.limit,
           ...(request.workingDirectory === undefined
             ? {}
@@ -453,6 +488,8 @@ export function createThreadServerHandlers(
                   request.limit,
                   request.workingDirectory,
                   request.projectId,
+                  request.archived,
+                  request.sectionId,
                 ),
               }),
         })
@@ -469,6 +506,8 @@ export function createThreadServerHandlers(
                   request.limit,
                   request.workingDirectory,
                   request.projectId,
+                  request.archived,
+                  request.sectionId,
                 ),
               }),
         })
@@ -485,11 +524,13 @@ export function createThreadServerHandlers(
             ? undefined
             : decodeSearchCursor(
                 request.cursor,
-                "sessions",
+                request.archived ? "archived-sessions" : "sessions",
                 request.searchTerm,
                 request.limit,
               )
         const result = await options.store.searchThreads({
+          view: "sessions",
+          archived: request.archived,
           searchTerm: request.searchTerm,
           limit: request.limit,
           ...(storeCursor === undefined ? {} : { cursor: storeCursor }),
@@ -507,7 +548,7 @@ export function createThreadServerHandlers(
             ? {}
             : {
                 nextCursor: encodeSearchCursor(
-                  "sessions",
+                  request.archived ? "archived-sessions" : "sessions",
                   request.searchTerm,
                   request.limit,
                   result.nextCursor,
@@ -621,6 +662,14 @@ export function createThreadServerHandlers(
         if ((await options.store.readThread(sessionId)) === undefined) {
           throw notFound(`Session ${sessionId} was not found.`, { sessionId })
         }
+        if (
+          (await options.store.sessionPresentation(sessionId)).navigationId !==
+          undefined
+        ) {
+          // Keep an explicit head while deleting, so retained edit history can
+          // never reappear as an unrelated conversation after the head is gone.
+          await options.store.setSessionHead(sessionId, sessionId)
+        }
         await (options.discardThread?.(sessionId) ??
           options.manager.discardThread(sessionId))
         publishedThrough.delete(sessionId)
@@ -648,6 +697,10 @@ export function createThreadServerHandlers(
           input,
           options.maxInputBytes ?? DEFAULT_MAX_INPUT_BYTES,
         )
+        if (
+          (await options.store.sessionPresentation(request.sessionId)).archived
+        )
+          throw conflict("Restore this conversation before sending a message.")
         requireAvailableProvider(
           request.modelSelection?.provider,
           options.availableProviders,
@@ -658,6 +711,7 @@ export function createThreadServerHandlers(
         )
         const beforeTurnId = turnIdForInput(source, request.atInputId)
         const sourceAttachments = inputAttachments(source, request.atInputId)
+        await options.store.setSessionHead(request.sessionId, request.sessionId)
         const forked = await options.manager.forkThread({
           sourceThreadId: request.sessionId,
           beforeTurnId,
@@ -696,6 +750,11 @@ export function createThreadServerHandlers(
               throw conflict(`Fork input was not started: ${submitted.type}.`)
             }
           }
+          await options.store.flushThread(forked.thread.id)
+          await options.store.setSessionHead(
+            request.sessionId,
+            forked.thread.id,
+          )
         } catch (error) {
           try {
             await options.manager.discardThread(forked.thread.id)
@@ -735,6 +794,10 @@ export function createThreadServerHandlers(
           input,
           options.maxInputBytes ?? DEFAULT_MAX_INPUT_BYTES,
         )
+        if (
+          (await options.store.sessionPresentation(request.sessionId)).archived
+        )
+          throw conflict("Restore this conversation before sending a message.")
         requireAvailableProvider(
           request.modelSelection?.provider,
           options.availableProviders,
@@ -969,8 +1032,16 @@ function mapThreadSummary(
   liveProjects: ReadonlySet<string> | undefined,
 ): ApiSessionSummary {
   return {
+    ...(thread.archived === undefined ? {} : { archived: thread.archived }),
+    ...(thread.sectionPosition === undefined
+      ? {}
+      : { sectionPosition: thread.sectionPosition }),
+    ...(thread.sectionId === undefined ? {} : { sectionId: thread.sectionId }),
     id: thread.id,
     conversationId: thread.conversationId,
+    ...(thread.navigationId === undefined
+      ? {}
+      : { navigationId: thread.navigationId }),
     seq: thread.seq + 1,
     createdAt: thread.createdAt,
     updatedAt: thread.updatedAt,
@@ -1037,6 +1108,7 @@ async function mapStoredThread(
   const currentContext = contexts.at(-1)
   const summary: ThreadSummary = {
     ...stored.metadata,
+    ...(await options.store.sessionPresentation(stored.metadata.id)),
     seq: Math.max(0, threadSeq(stored) - 1),
   }
   const liveProjects = await liveProjectIds(options, [stored.metadata])
@@ -1418,6 +1490,12 @@ async function resolveOptionalWorkspace(
   }
 }
 
+function requireArchivedFilter(value: unknown): boolean {
+  if (value !== undefined && typeof value !== "boolean")
+    throw invalidInput("archived must be a boolean.")
+  return value === true
+}
+
 function requireListSessionsRequest(input: unknown) {
   const record = requireRecord(input, "Session list request must be an object.")
   const limit = requireOptionalLimit(record.limit)
@@ -1427,8 +1505,15 @@ function requireListSessionsRequest(input: unknown) {
     "workingDirectory",
   )
   const projectId = requireOptionalString(record.projectId, "projectId")
+  const archived = requireArchivedFilter(record.archived)
+  const sectionId =
+    record.sectionId === null
+      ? null
+      : requireOptionalString(record.sectionId, "sectionId")
 
   return {
+    archived,
+    sectionId,
     limit,
     ...(cursor === undefined ? {} : { cursor }),
     ...(workingDirectory === undefined ? {} : { workingDirectory }),
@@ -1443,6 +1528,7 @@ function requireSearchSessionsRequest(input: unknown) {
   )
   const cursor = requireOptionalString(record.cursor, "cursor")
   return {
+    archived: requireArchivedFilter(record.archived),
     searchTerm: requireSearchTerm(record.searchTerm),
     limit: requireSearchLimit(record.limit),
     ...(cursor === undefined ? {} : { cursor }),
@@ -1957,12 +2043,19 @@ function encodeSessionListCursor(
   limit: number,
   workingDirectory: string | undefined,
   projectId: string | undefined,
+  archived: boolean,
+  sectionId: string | null | undefined,
 ): string {
   return Buffer.from(
     JSON.stringify({
       version: 1,
       resource: "sessions",
-      order: sessionListOrder,
+      archived,
+      sectionId,
+      order:
+        typeof sectionId === "string"
+          ? "section_position_asc"
+          : sessionListOrder,
       limit,
       anchor,
       ...(workingDirectory === undefined ? {} : { workingDirectory }),
@@ -2008,15 +2101,22 @@ function decodeSessionListCursor(
   limit: number,
   workingDirectory: string | undefined,
   projectId: string | undefined,
+  archived: boolean,
+  sectionId: string | null | undefined,
 ): string {
   const payload = parseCursorPayload(cursor)
   if (
     payload.version === 1 &&
     payload.resource === "sessions" &&
-    payload.order === sessionListOrder &&
+    payload.order ===
+      (typeof sectionId === "string"
+        ? "section_position_asc"
+        : sessionListOrder) &&
     payload.limit === limit &&
     payload.workingDirectory === workingDirectory &&
     payload.projectId === projectId &&
+    payload.archived === archived &&
+    payload.sectionId === sectionId &&
     typeof payload.anchor === "string"
   ) {
     return payload.anchor

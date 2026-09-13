@@ -1,3 +1,4 @@
+import type { SessionSidebar } from "../../src/core/session-sidebar.ts"
 import type {
   SessionStream,
   SessionStreamHandlers,
@@ -55,6 +56,14 @@ export type FakeRequest = {
 }
 
 export class FakeRpcClient {
+  sidebarResponse: SessionSidebar = { sections: [], entries: {} }
+  readonly sidebarChangeListeners = new Set<() => void>()
+  subscribeToSidebarChanges(listener: () => void) {
+    this.sidebarChangeListeners.add(listener)
+    return () => {
+      this.sidebarChangeListeners.delete(listener)
+    }
+  }
   readonly streams: FakeSessionStream[] = []
   readonly requests: FakeRequest[] = []
   readonly answeredPermissions: {
@@ -72,6 +81,7 @@ export class FakeRpcClient {
   answerError: Error | undefined
 
   async request(method: string, params: unknown): Promise<unknown> {
+    if (method === "sidebar/read") return this.sidebarResponse
     this.requests.push({ method, params })
     return await this.respond(method, params)
   }

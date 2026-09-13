@@ -175,25 +175,42 @@ export class SqliteThreadSearchProjection {
       .run(threadId)
   }
 
-  searchThreads(input: ThreadStoreSearchInput): ThreadStoreSearchResult {
+  searchThreads(
+    input: ThreadStoreSearchInput &
+      Readonly<{
+        threadIds?: readonly string[]
+        titles?: Readonly<Record<string, string>>
+      }>,
+  ): ThreadStoreSearchResult {
     const anchor =
       input.cursor === undefined ? undefined : parseThreadCursor(input.cursor)
+    const filter =
+      input.threadIds === undefined
+        ? ""
+        : " AND thread_id IN (SELECT value FROM json_each(?))"
+    const parameters = [
+      JSON.stringify(input.titles ?? {}),
+      input.searchTerm,
+      input.searchTerm,
+      ...(input.threadIds === undefined
+        ? []
+        : [JSON.stringify(input.threadIds)]),
+    ]
     const rows = (
       anchor === undefined
         ? this.#database
             .prepare(
-              `${matchingThreadsSql()} ORDER BY updated_at DESC, thread_id DESC LIMIT ?`,
+              `${matchingThreadsSql()}${filter} ORDER BY updated_at DESC, thread_id DESC LIMIT ?`,
             )
-            .all(input.searchTerm, input.searchTerm, input.limit + 1)
+            .all(...parameters, input.limit + 1)
         : this.#database
-            .prepare(`${matchingThreadsSql()}
+            .prepare(`${matchingThreadsSql()}${filter}
             AND (updated_at < ? OR (updated_at = ? AND thread_id < ?))
             ORDER BY updated_at DESC, thread_id DESC
             LIMIT ?
           `)
             .all(
-              input.searchTerm,
-              input.searchTerm,
+              ...parameters,
               anchor.updatedAt,
               anchor.updatedAt,
               anchor.id,
@@ -359,8 +376,13 @@ export class SqliteThreadSearchProjection {
 
 function matchingThreadsSql(): string {
   return `
+    WITH presented AS (
+      SELECT thread_id, metadata_json, seq, updated_at,
+        COALESCE((SELECT value FROM json_each(?) WHERE key = search_threads.thread_id), title) AS title
+      FROM search_threads
+    )
     SELECT thread_id, metadata_json, seq, title
-    FROM search_threads AS thread
+    FROM presented AS thread
     WHERE (literal_match(title, ?) = 1 OR EXISTS (
       SELECT 1
       FROM search_messages AS message

@@ -1,3 +1,7 @@
+import type {
+  SessionSidebar,
+  SidebarChange,
+} from "../../core/session-sidebar.ts"
 import { useMemo } from "react"
 import { create } from "zustand"
 import {
@@ -43,7 +47,35 @@ export type SessionDraft = Readonly<{
   attachments: readonly ImageAttachment[]
 }>
 
+// The sidebar loads each expanded Project's sessions independently; the empty
+// key holds the All sessions view, including sessions without a live project.
+export const allSessionsListKey = ""
+
+export type SidebarListFilter = Readonly<{
+  sectionId?: string
+  archived?: boolean
+}>
+export function sessionListKey(
+  projectId: string | undefined,
+  filter: SidebarListFilter = {},
+): string {
+  return filter.archived
+    ? "sidebar:archived"
+    : filter.sectionId === undefined
+      ? (projectId ?? allSessionsListKey)
+      : `sidebar:section:${filter.sectionId}`
+}
+
+export type ProjectSessionList = Readonly<{
+  sessions: ApiSessionSummary[]
+  nextCursor?: string
+  loading?: boolean
+  error?: string
+}>
+
 export type AppStoreData = {
+  sidebar: SessionSidebar
+  collapsedSections: Record<string, boolean>
   apiBase: string
   busy: boolean
   composerFocusRevision: number
@@ -54,10 +86,11 @@ export type AppStoreData = {
   message: string | undefined
   modelSelections: Record<string, ModelSelection>
   restoringModelSelectionFor: string | undefined
-  nextCursor: string | undefined
   // The active session's live composer state. Drafts of inactive sessions
   // park in sessionDrafts and are restored on selection; neither is a
   // persistence or attachment-lifecycle authority.
+  draftModelSelection: ModelSelection | undefined
+  newSessionPrompt: string | undefined
   promptDraft: string | undefined
   promptAttachments: readonly ImageAttachment[]
   sessionDrafts: Record<string, SessionDraft>
@@ -71,27 +104,50 @@ export type AppStoreData = {
   selection: { readonly sessionId?: string }
   sessionSelectionIntentRevision: number
   selectedSession: ApiSessionDetail | undefined
-  sessions: ApiSessionSummary[]
+  sessionsByProject: Record<string, ProjectSessionList>
   stream: SessionStream | undefined
-  // The selected Project id (entity-based since the C8-D2 cutover).
+  // The Project new sessions are created in (entity-based since the C8-D2
+  // cutover); follows the last clicked project or selected session.
   currentProject: string | undefined
+  // Project ids the user collapsed in the sidebar; projects expand by
+  // default, so only collapsed ids are recorded (persisted locally).
+  collapsedProjects: Record<string, boolean>
 }
 
 export type AppStoreActions = {
   boot(): Promise<void>
-  loadSessions(input?: { readonly append?: boolean }): Promise<boolean>
+  loadSessions(
+    projectId: string | undefined,
+    input?: Readonly<{ append?: boolean }> & SidebarListFilter,
+  ): Promise<boolean>
+  setSectionOpen(sectionId: string, open: boolean): void
+  loadSidebar(): Promise<void>
+  refreshSidebar(): Promise<void>
+  changeSidebar(change: SidebarChange): Promise<boolean>
   loadProjects(): Promise<void>
   loadProviders(): Promise<void>
-  createSession(): Promise<void>
+  startNewSession(projectId?: string): void
+  createSession(title?: string): Promise<string | undefined>
   deleteSession(sessionId: string): Promise<void>
   forkSession(
     atInputId: string,
     reason: "undo" | "edit",
     content?: string,
   ): Promise<void>
-  selectProject(projectId: string): Promise<void>
-  addProject(path: string): Promise<void>
-  selectSession(sessionId: string): Promise<void>
+  toggleProject(projectId: string): Promise<void>
+  addProject(path: string, name?: string): Promise<boolean>
+  updateProject(
+    projectId: string,
+    input: { readonly name?: string; readonly roots?: readonly string[] },
+  ): Promise<boolean>
+  removeProject(projectId: string): Promise<boolean>
+  toggleProjectPinned(projectId: string): Promise<boolean>
+  moveProject(
+    projectId: string,
+    targetId: string,
+    after: boolean,
+  ): Promise<boolean>
+  selectSession(sessionId: string, summary?: ApiSessionSummary): Promise<void>
   admitInput(
     text: string,
     attachments?: readonly ImageAttachment[],
@@ -106,7 +162,7 @@ export type AppStoreActions = {
   setPromptDraft(text: string): void
   setPromptAttachments(attachments: readonly ImageAttachment[]): void
   setModelSelection(
-    sessionId: string,
+    sessionId: string | undefined,
     selection: ModelSelection | undefined,
   ): void
 }
@@ -115,6 +171,10 @@ export type AppStore = AppStoreData & AppStoreActions
 
 export function createInitialAppState(): AppStoreData {
   return {
+    sidebar: { sections: [], entries: {} },
+    collapsedSections: JSON.parse(
+      window.localStorage.getItem("yakitori.collapsedSections") ?? "{}",
+    ) as Record<string, boolean>,
     apiBase: initialApiBase(),
     busy: false,
     composerFocusRevision: 0,
@@ -125,7 +185,8 @@ export function createInitialAppState(): AppStoreData {
     message: undefined,
     modelSelections: initialModelSelections(),
     restoringModelSelectionFor: undefined,
-    nextCursor: undefined,
+    draftModelSelection: undefined,
+    newSessionPrompt: undefined,
     promptDraft: undefined,
     promptAttachments: [],
     sessionDrafts: {},
@@ -138,16 +199,18 @@ export function createInitialAppState(): AppStoreData {
     selection: {},
     sessionSelectionIntentRevision: 0,
     selectedSession: undefined,
-    sessions: [],
+    sessionsByProject: {},
     stream: undefined,
     currentProject: undefined,
+    collapsedProjects: initialCollapsedProjects(),
   }
 }
 
 let activeTaskCount = 0
 
 export const useAppStore = create<AppStore>()((set, get) => {
-  let sessionListRevision = 0
+  const sessionListRevisions: Record<string, number> = {}
+  let sidebarReadRevision = 0
   let projectChangesSubscribedClient: AppRpcClient | undefined
   const runTask = async (
     task: () => Promise<void>,
@@ -249,6 +312,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
             }
             set({
               selectedSession: response.session,
+              currentProject: response.session.projectId,
               modelSelections,
               restoringModelSelectionFor,
               execution: reduceExecutionView(get().execution, {
@@ -278,7 +342,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
               )
               return {
                 selectedSession,
-                sessions: updateSessionSummary(state.sessions, selectedSession),
+                sessionsByProject: updateSessionSummaryInLists(
+                  state.sessionsByProject,
+                  selectedSession,
+                ),
                 execution: reduceExecutionView(state.execution, {
                   type: "durable",
                   event,
@@ -336,17 +403,23 @@ export const useAppStore = create<AppStore>()((set, get) => {
       const client = getAppRpcClient(get().apiBase)
       if (projectChangesSubscribedClient !== client) {
         projectChangesSubscribedClient = client
+        client.subscribeToSidebarChanges(() => {
+          void get().refreshSidebar()
+        })
         client.subscribeToProjectChanges(() => {
           void get().loadProjects()
         })
       }
+      await get().loadSidebar()
       await get().loadProviders()
       await get().loadProjects()
-      const loaded = await get().loadSessions()
+      const currentProject = get().currentProject
+      const loaded = await get().loadSessions(currentProject)
       if (!loaded || get().sessionSelectionIntentRevision !== intentRevision) {
         return
       }
-      const session = get().sessions.at(0)
+      const session =
+        get().sessionsByProject[sessionListKey(currentProject)]?.sessions.at(0)
       if (session) {
         await get().selectSession(session.id)
         return
@@ -359,11 +432,23 @@ export const useAppStore = create<AppStore>()((set, get) => {
       })
     },
 
-    loadSessions: async (input = {}) => {
-      const requestRevision = ++sessionListRevision
-      const existingSessions = get().sessions
-      const cursor = input.append ? get().nextCursor : undefined
-      const projectId = get().currentProject
+    loadSessions: async (projectId, input = {}) => {
+      const key = sessionListKey(projectId, input)
+      const requestRevision = (sessionListRevisions[key] ?? 0) + 1
+      sessionListRevisions[key] = requestRevision
+      const cursor = input.append
+        ? get().sessionsByProject[key]?.nextCursor
+        : undefined
+      set((state) => ({
+        sessionsByProject: {
+          ...state.sessionsByProject,
+          [key]: {
+            ...state.sessionsByProject[key],
+            sessions: state.sessionsByProject[key]?.sessions ?? [],
+            loading: true,
+          },
+        },
+      }))
       let applied = false
       const completed = await runTask(
         async () => {
@@ -371,29 +456,145 @@ export const useAppStore = create<AppStore>()((set, get) => {
             "session/list",
             {
               limit: 30,
+              ...(input.archived ? { archived: true } : {}),
+              ...(input.sectionId === undefined
+                ? projectId === undefined
+                  ? {}
+                  : { sectionId: null }
+                : { sectionId: input.sectionId }),
               ...(cursor === undefined ? {} : { cursor }),
               ...(projectId === undefined ? {} : { projectId }),
             },
           )
-          if (
-            get().currentProject !== projectId ||
-            sessionListRevision !== requestRevision
-          ) {
-            return
-          }
-          set({
-            sessions: input.append
-              ? [...existingSessions, ...response.sessions]
-              : [...response.sessions],
-            nextCursor: response.nextCursor,
+          if (sessionListRevisions[key] !== requestRevision) return
+          set((state) => {
+            const current = state.sessionsByProject[key]
+            return {
+              sessionsByProject: {
+                ...state.sessionsByProject,
+                [key]: {
+                  sessions: input.append
+                    ? [
+                        ...new Map(
+                          [
+                            ...(current?.sessions ?? []),
+                            ...response.sessions,
+                          ].map((session) => [
+                            session.navigationId ?? session.id,
+                            session,
+                          ]),
+                        ).values(),
+                      ]
+                    : [...response.sessions],
+                  ...(response.nextCursor === undefined
+                    ? {}
+                    : { nextCursor: response.nextCursor }),
+                },
+              },
+            }
           })
           applied = true
         },
-        () =>
-          get().currentProject === projectId &&
-          sessionListRevision === requestRevision,
+        () => sessionListRevisions[key] === requestRevision,
       )
+      if (!completed && sessionListRevisions[key] === requestRevision) {
+        set((state) => ({
+          sessionsByProject: {
+            ...state.sessionsByProject,
+            [key]: {
+              ...state.sessionsByProject[key],
+              sessions: state.sessionsByProject[key]?.sessions ?? [],
+              loading: false,
+              error: "Could not load sessions.",
+            },
+          },
+        }))
+      }
       return completed && applied
+    },
+
+    setSectionOpen: (sectionId, open) => {
+      const collapsedSections = { ...get().collapsedSections }
+      if (open) delete collapsedSections[sectionId]
+      else collapsedSections[sectionId] = true
+      set({ collapsedSections })
+      window.localStorage.setItem(
+        "yakitori.collapsedSections",
+        JSON.stringify(collapsedSections),
+      )
+    },
+    loadSidebar: async () => {
+      const revision = ++sidebarReadRevision
+      await runTask(async () => {
+        const sidebar = await getAppRpcClient(get().apiBase).request(
+          "sidebar/read",
+          {},
+        )
+        if (revision !== sidebarReadRevision) return
+        set((state) => {
+          if (!state.selectedSession) return { sidebar }
+          const {
+            archived: _,
+            sectionId: __,
+            sectionPosition: ___,
+            ...session
+          } = state.selectedSession
+          return {
+            sidebar,
+            selectedSession: {
+              ...session,
+              ...sidebar.entries[session.navigationId ?? session.id],
+            },
+          }
+        })
+      })
+    },
+    refreshSidebar: async () => {
+      await get().loadSidebar()
+      await Promise.all(
+        [
+          ...new Set([
+            sessionListKey(get().currentProject),
+            ...Object.keys(get().sessionsByProject),
+          ]),
+        ].map((key) =>
+          key === "sidebar:archived"
+            ? get().loadSessions(undefined, { archived: true })
+            : key.startsWith("sidebar:section:")
+              ? get().loadSessions(undefined, {
+                  sectionId: key.slice("sidebar:section:".length),
+                })
+              : get().loadSessions(
+                  key === allSessionsListKey ? undefined : key,
+                ),
+        ),
+      )
+    },
+    changeSidebar: async (change) => {
+      if (get().inFlightActions.has("sidebar-update")) return false
+      set((state) => ({
+        inFlightActions: new Set(state.inFlightActions).add("sidebar-update"),
+      }))
+      const completed = await runTask(async () => {
+        const sidebar = await getAppRpcClient(get().apiBase).request(
+          "sidebar/update",
+          change,
+        )
+        sidebarReadRevision += 1
+        set({ sidebar })
+        if (
+          (change.type === "session" || change.type === "move-session") &&
+          change.sectionId
+        )
+          get().setSectionOpen(change.sectionId, true)
+        await get().refreshSidebar()
+      })
+      set((state) => {
+        const inFlightActions = new Set(state.inFlightActions)
+        inFlightActions.delete("sidebar-update")
+        return { inFlightActions }
+      })
+      return completed
     },
 
     loadProjects: async () => {
@@ -403,15 +604,37 @@ export const useAppStore = create<AppStore>()((set, get) => {
           {},
         )
         const projects = [...response.projects]
-        const current = get().currentProject
-        const remembered = window.localStorage.getItem("yakitori.project")
-        const currentProject =
-          current !== undefined && projects.some((p) => p.id === current)
-            ? current
-            : remembered !== null && projects.some((p) => p.id === remembered)
-              ? remembered
-              : projects[0]?.id
-        set({ projects, currentProject })
+        set((state) => {
+          const liveIds = new Set(projects.map((project) => project.id))
+          const sessionsByProject = Object.fromEntries(
+            Object.entries(state.sessionsByProject).filter(
+              ([key]) =>
+                key === allSessionsListKey ||
+                key.startsWith("sidebar:") ||
+                liveIds.has(key),
+            ),
+          )
+          const collapsedProjects = Object.fromEntries(
+            Object.entries(state.collapsedProjects).filter(([id]) =>
+              liveIds.has(id),
+            ),
+          )
+          persistCollapsedProjects(collapsedProjects)
+          const remembered = window.localStorage.getItem("yakitori.project")
+          const currentProject =
+            state.currentProject !== undefined &&
+            liveIds.has(state.currentProject)
+              ? state.currentProject
+              : remembered !== null && liveIds.has(remembered)
+                ? remembered
+                : projects[0]?.id
+          return {
+            projects,
+            currentProject,
+            sessionsByProject,
+            collapsedProjects,
+          }
+        })
       } catch {
         // Servers without the project store answer method-not-found;
         // project state stays empty and the switcher stays hidden.
@@ -437,7 +660,34 @@ export const useAppStore = create<AppStore>()((set, get) => {
       }
     },
 
-    createSession: async () => {
+    startNewSession: (projectId = get().currentProject) => {
+      const state = get()
+      closeStream()
+      set({
+        sessionDrafts: stashSessionDraft(state),
+        currentProject: projectId,
+        selection: {},
+        selectedSession: undefined,
+        execution: createExecutionViewState(),
+        hydratingSessionId: undefined,
+        sessionSkills: [],
+        promptAttachments: [],
+        promptDraft:
+          state.selection.sessionId === undefined
+            ? state.promptDraft
+            : state.newSessionPrompt,
+        sessionSelectionIntentRevision:
+          state.sessionSelectionIntentRevision + 1,
+        composerFocusRevision: state.composerFocusRevision + 1,
+      })
+    },
+
+    createSession: async (title) => {
+      if (get().inFlightActions.has("create-session")) return
+      set((state) => ({
+        inFlightActions: new Set(state.inFlightActions).add("create-session"),
+      }))
+      let createdId: string | undefined
       const intentRevision = get().sessionSelectionIntentRevision + 1
       set({ sessionSelectionIntentRevision: intentRevision })
       await runTask(
@@ -449,10 +699,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
           const response = await getAppRpcClient(get().apiBase).request(
             "session/create",
             {
-              title: `Session ${new Date().toLocaleTimeString([], {
-                hour: "2-digit",
-                minute: "2-digit",
-              })}`,
+              ...(title === undefined ? {} : { title }),
               ...(project === undefined ? {} : { projectId: project.id }),
               ...(firstRoot === undefined
                 ? {}
@@ -460,8 +707,32 @@ export const useAppStore = create<AppStore>()((set, get) => {
             },
           )
 
-          await get().loadSessions()
+          if (
+            project !== undefined &&
+            get().collapsedProjects[project.id] === true
+          ) {
+            const collapsedProjects = { ...get().collapsedProjects }
+            delete collapsedProjects[project.id]
+            set({ collapsedProjects })
+            persistCollapsedProjects(collapsedProjects)
+          }
+          await get().loadSessions(project?.id)
           if (get().sessionSelectionIntentRevision !== intentRevision) return
+          createdId = response.session.id
+          const draftModel = get().draftModelSelection
+          if (draftModel !== undefined) {
+            const modelSelections = {
+              ...get().modelSelections,
+              [createdId]: draftModel,
+            }
+            set({ modelSelections })
+            persistModelSelections(modelSelections)
+          }
+          set({ newSessionPrompt: undefined })
+          const draftAtCreation =
+            get().selection.sessionId === undefined
+              ? get().promptDraft
+              : undefined
           const parkedDrafts = stashSessionDraft(get())
           const selection = activateSession(response.session.id)
           set({
@@ -472,12 +743,21 @@ export const useAppStore = create<AppStore>()((set, get) => {
             }),
             sessionSkills: [],
             ...takeSessionDraft(parkedDrafts, response.session.id),
+            ...(draftAtCreation === undefined
+              ? {}
+              : { promptDraft: draftAtCreation }),
           })
           connectEvents(selection, response.event.seq)
           loadSessionSkills(response.session.id)
         },
         () => get().sessionSelectionIntentRevision === intentRevision,
       )
+      set((state) => {
+        const inFlightActions = new Set(state.inFlightActions)
+        inFlightActions.delete("create-session")
+        return { inFlightActions }
+      })
+      return createdId
     },
 
     forkSession: async (atInputId, reason, content) => {
@@ -556,7 +836,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
             response.events.at(-1)?.seq ?? response.session.seq,
           )
           loadSessionSkills(response.session.id)
-          await get().loadSessions()
+          await get().refreshSidebar()
         },
         () => get().sessionSelectionIntentRevision === intentRevision,
       )
@@ -608,7 +888,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
             return { sessionDrafts }
           })
         }
-        await get().loadSessions()
+        await get().refreshSidebar()
       })
       set((state) => {
         const inFlightActions = new Set(state.inFlightActions)
@@ -617,40 +897,181 @@ export const useAppStore = create<AppStore>()((set, get) => {
       })
     },
 
-    selectProject: async (projectId) => {
-      if (get().currentProject === projectId) return
-      set({ currentProject: projectId })
-      window.localStorage.setItem("yakitori.project", projectId)
-      closeStream()
-      set((state) => ({
-        selection: {},
-        sessionSelectionIntentRevision:
-          state.sessionSelectionIntentRevision + 1,
-        selectedSession: undefined,
-        execution: createExecutionViewState(),
-        nextCursor: undefined,
-        promptDraft: undefined,
-        promptAttachments: [],
-        sessionSkills: [],
-        sessionDrafts: stashSessionDraft(state),
-      }))
-      await get().loadSessions()
+    toggleProject: async (projectId) => {
+      const collapsedProjects = { ...get().collapsedProjects }
+      const expanding = collapsedProjects[projectId] === true
+      if (expanding) delete collapsedProjects[projectId]
+      else collapsedProjects[projectId] = true
+      set({ collapsedProjects })
+      persistCollapsedProjects(collapsedProjects)
+      if (
+        expanding &&
+        get().sessionsByProject[sessionListKey(projectId)] === undefined
+      ) {
+        await get().loadSessions(projectId)
+      }
     },
 
-    addProject: async (path) => {
+    addProject: async (path, name) => {
       const trimmed = path.trim()
-      if (trimmed === "") return
-      await runTask(async () => {
-        const response = await getAppRpcClient(get().apiBase).request(
-          "project/create",
-          { roots: [trimmed] },
+      if (trimmed === "" || get().inFlightActions.has("project-open"))
+        return false
+      set((state) => ({
+        inFlightActions: new Set(state.inFlightActions).add("project-open"),
+      }))
+      const completed = await runTask(async () => {
+        const { project } = await getAppRpcClient(get().apiBase).request(
+          "project/open",
+          {
+            path: trimmed,
+            ...(name === undefined ? {} : { name: name.trim() }),
+          },
         )
-        await get().loadProjects()
-        await get().selectProject(response.project.id)
+        set((state) => ({
+          projects: [
+            ...state.projects.filter((entry) => entry.id !== project.id),
+            project,
+          ].sort(
+            (a, b) =>
+              Number(b.pinned) - Number(a.pinned) || a.position - b.position,
+          ),
+          collapsedProjects: Object.fromEntries(
+            Object.entries(state.collapsedProjects).filter(
+              ([id]) => id !== project.id,
+            ),
+          ),
+        }))
+        persistCollapsedProjects(get().collapsedProjects)
+        window.localStorage.setItem("yakitori.project", project.id)
+        get().startNewSession(project.id)
       })
+      set((state) => {
+        const inFlightActions = new Set(state.inFlightActions)
+        inFlightActions.delete("project-open")
+        return { inFlightActions }
+      })
+      return completed
     },
 
-    selectSession: async (sessionId) => {
+    updateProject: async (projectId, input) => {
+      const completed = await runTask(async () => {
+        await getAppRpcClient(get().apiBase).request("project/update", {
+          projectId,
+          ...(input.name === undefined ? {} : { name: input.name }),
+          ...(input.roots === undefined ? {} : { roots: [...input.roots] }),
+        })
+      })
+      if (completed) await get().loadProjects()
+      return completed
+    },
+
+    removeProject: async (projectId) => {
+      const completed = await runTask(async () => {
+        await getAppRpcClient(get().apiBase).request("project/delete", {
+          projectId,
+        })
+      })
+      if (completed) await get().loadProjects()
+      return completed
+    },
+
+    moveProject: async (projectId, targetId, after) => {
+      if (get().inFlightActions.has("project-order")) return false
+      const source = get().projects.find((project) => project.id === projectId)
+      const target = get().projects.find((project) => project.id === targetId)
+      if (
+        !source ||
+        !target ||
+        source.id === target.id ||
+        source.pinned !== target.pinned
+      )
+        return false
+      const ordered = [...get().projects]
+        .sort((a, b) => a.position - b.position)
+        .filter((project) => project.id !== projectId)
+      const position =
+        ordered.findIndex((project) => project.id === targetId) +
+        (after ? 1 : 0)
+      set((state) => ({
+        inFlightActions: new Set(state.inFlightActions).add("project-order"),
+      }))
+      const done = await runTask(async () => {
+        await getAppRpcClient(get().apiBase).request("project/move", {
+          projectId,
+          toPosition: position,
+        })
+        await get().loadProjects()
+      })
+      set((state) => {
+        const inFlightActions = new Set(state.inFlightActions)
+        inFlightActions.delete("project-order")
+        return { inFlightActions }
+      })
+      return done
+    },
+
+    toggleProjectPinned: async (projectId) => {
+      const project = get().projects.find(
+        (candidate) => candidate.id === projectId,
+      )
+      if (project === undefined) return false
+      const completed = await runTask(async () => {
+        await getAppRpcClient(get().apiBase).request("project/update", {
+          projectId,
+          pinned: !project.pinned,
+        })
+      })
+      if (completed) await get().loadProjects()
+      return completed
+    },
+
+    selectSession: async (sessionId, suppliedSummary) => {
+      const summary = suppliedSummary ?? findSessionSummary(get(), sessionId)
+      if (suppliedSummary !== undefined) {
+        const key = sessionListKey(suppliedSummary.projectId, {
+          ...(suppliedSummary.sectionId === undefined
+            ? {}
+            : { sectionId: suppliedSummary.sectionId }),
+          ...(suppliedSummary.archived ? { archived: true } : {}),
+        })
+        set((state) => ({
+          sessionsByProject: {
+            ...state.sessionsByProject,
+            [key]: {
+              ...state.sessionsByProject[key],
+              sessions: (state.sessionsByProject[key]?.sessions ?? []).some(
+                (entry) =>
+                  (entry.navigationId ?? entry.id) ===
+                  (suppliedSummary.navigationId ?? suppliedSummary.id),
+              )
+                ? (state.sessionsByProject[key]?.sessions ?? []).map((entry) =>
+                    (entry.navigationId ?? entry.id) ===
+                    (suppliedSummary.navigationId ?? suppliedSummary.id)
+                      ? suppliedSummary
+                      : entry,
+                  )
+                : [
+                    suppliedSummary,
+                    ...(state.sessionsByProject[key]?.sessions ?? []),
+                  ],
+            },
+          },
+          collapsedProjects: Object.fromEntries(
+            Object.entries(state.collapsedProjects).filter(
+              ([id]) => id !== suppliedSummary.projectId,
+            ),
+          ),
+        }))
+        persistCollapsedProjects(get().collapsedProjects)
+        if (suppliedSummary.sectionId && !suppliedSummary.archived)
+          get().setSectionOpen(suppliedSummary.sectionId, true)
+      }
+      if (get().selection.sessionId === undefined)
+        set({ newSessionPrompt: get().promptDraft })
+      if (summary !== undefined) {
+        set({ currentProject: summary.projectId })
+        window.localStorage.setItem("yakitori.project", summary.projectId ?? "")
+      }
       set((state) => ({
         sessionSelectionIntentRevision:
           state.sessionSelectionIntentRevision + 1,
@@ -675,6 +1096,13 @@ export const useAppStore = create<AppStore>()((set, get) => {
     },
 
     admitInput: async (text, attachments = []) => {
+      if (get().selection.sessionId === undefined) {
+        if (text === COMPACT_DIRECTIVE) return
+        const sessionId = await get().createSession(text.slice(0, 80))
+        if (sessionId === undefined || get().selection.sessionId !== sessionId)
+          return
+        if (get().promptDraft === undefined) set({ promptDraft: text })
+      }
       const selection = currentSelection()
       if (
         !selection ||
@@ -781,7 +1209,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
             return { inFlightActions }
           })
           if (!isCurrentSelection(selection)) return
-          await get().loadSessions()
+          await get().refreshSidebar()
         },
         () => isCurrentSelection(selection),
       )
@@ -910,6 +1338,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
     },
 
     setModelSelection: (sessionId, selection) => {
+      if (sessionId === undefined) {
+        set({ draftModelSelection: selection })
+        return
+      }
       const apiBase = get().apiBase
       const modelSelections = { ...get().modelSelections }
       if (selection === undefined) delete modelSelections[sessionId]
@@ -1157,6 +1589,33 @@ function updateSessionSummary(
   )
 }
 
+function updateSessionSummaryInLists(
+  lists: Record<string, ProjectSessionList>,
+  selectedSession: ApiSessionDetail | undefined,
+): Record<string, ProjectSessionList> {
+  if (selectedSession === undefined) return lists
+  return Object.fromEntries(
+    Object.entries(lists).map(([key, list]) => [
+      key,
+      {
+        ...list,
+        sessions: updateSessionSummary(list.sessions, selectedSession),
+      },
+    ]),
+  )
+}
+
+export function findSessionSummary(
+  state: AppStoreData,
+  sessionId: string,
+): ApiSessionSummary | undefined {
+  for (const list of Object.values(state.sessionsByProject)) {
+    const found = list.sessions.find((session) => session.id === sessionId)
+    if (found !== undefined) return found
+  }
+  return undefined
+}
+
 function initialApiBase(): string {
   const queryApi = new URLSearchParams(window.location.search).get("api")
   if (queryApi) return queryApi
@@ -1251,6 +1710,35 @@ function persistModelSelections(
   window.localStorage.setItem(
     "yakitori.modelSelections",
     JSON.stringify(modelSelections),
+  )
+}
+
+function initialCollapsedProjects(): Record<string, boolean> {
+  const raw = window.localStorage.getItem("yakitori.collapsedProjects")
+  if (raw === null) return {}
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      return {}
+    }
+    return Object.fromEntries(
+      Object.entries(parsed).filter(([, value]) => value === true),
+    )
+  } catch {
+    return {}
+  }
+}
+
+function persistCollapsedProjects(
+  collapsedProjects: Readonly<Record<string, boolean>>,
+): void {
+  window.localStorage.setItem(
+    "yakitori.collapsedProjects",
+    JSON.stringify(collapsedProjects),
   )
 }
 

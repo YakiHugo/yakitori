@@ -1,4 +1,11 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
+import {
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
@@ -494,6 +501,67 @@ describe("project methods over a real store", () => {
     return { processor, connection, projectStore }
   }
 
+  it("opens a folder once across concurrent requests and symbolic links", async () => {
+    const { processor, connection, projectStore } = projectSetup()
+    const root = await mkdtemp(join(tmpdir(), "yakitori-project-open-"))
+    try {
+      const folder = join(root, "my-project")
+      await mkdir(folder)
+      await symlink(folder, join(root, "alias"))
+      const other = openTestConnection(processor)
+      await initializeConnection(connection)
+      await initializeConnection(other)
+      const [first, repeated] = await Promise.all([
+        rpc<{ project: ApiProject }>(connection, "project/open", {
+          path: folder,
+          name: "My project",
+        }),
+        rpc<{ project: ApiProject }>(other, "project/open", {
+          path: join(root, "alias"),
+        }),
+      ])
+      expect(first.project.id).toBe(repeated.project.id)
+      expect(first.project.name).toBe("My project")
+      expect(first.project.roots).toEqual([await realpath(folder)])
+      expect((await projectStore.listProjects()).projects).toHaveLength(1)
+      await rpc(connection, "project/update", {
+        projectId: first.project.id,
+        name: "My saved name",
+      })
+      expect(
+        (
+          await rpc<{ project: ApiProject }>(connection, "project/open", {
+            path: folder,
+          })
+        ).project.name,
+      ).toBe("My saved name")
+    } finally {
+      projectStore.close()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it("rejects missing paths and regular files without creating a project", async () => {
+    const { connection, projectStore } = projectSetup()
+    const root = await mkdtemp(join(tmpdir(), "yakitori-project-invalid-"))
+    try {
+      await initializeConnection(connection)
+      await writeFile(join(root, "file.txt"), "test")
+      for (const path of [
+        join(root, "missing"),
+        join(root, "file.txt"),
+        "relative",
+      ])
+        expect(
+          (await rpcError(connection, "project/open", { path })).code,
+        ).toBe(INVALID_PARAMS)
+      expect((await projectStore.listProjects()).projects).toHaveLength(0)
+    } finally {
+      projectStore.close()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it("runs the project lifecycle and broadcasts project/changed", async () => {
     const { processor, connection, projectStore } = projectSetup()
     try {
@@ -970,4 +1038,65 @@ describe("permission requests over real handlers", () => {
       outcome: "allow",
     })
   })
+})
+
+it("publishes sidebar changes across connections and requires restoring an archived conversation before input", async () => {
+  const { connection, processor } = realSetup()
+  const second = openTestConnection(processor)
+  await initializeConnection(connection)
+  await initializeConnection(second)
+  const { session } = await createSession(connection, { title: "Original" })
+  await rpc(connection, "sidebar/update", {
+    type: "session",
+    sessionId: session.id,
+    title: "Renamed",
+    archived: true,
+    sectionId: "pinned",
+  })
+  expect(second.notifications("sidebar/changed")).toHaveLength(2)
+  expect(
+    (
+      await rpc<ApiReadSessionResponse>(second, "session/read", {
+        sessionId: session.id,
+      })
+    ).session,
+  ).toMatchObject({ title: "Renamed", archived: true, sectionId: "pinned" })
+  expect(
+    (await rpc<ApiListSessionsResponse>(connection, "session/list", {}))
+      .sessions,
+  ).toEqual([])
+  expect(
+    (
+      await rpc<ApiListSessionsResponse>(connection, "session/list", {
+        archived: true,
+      })
+    ).sessions,
+  ).toHaveLength(1)
+  const error = await rpcError(connection, "session/input", {
+    sessionId: session.id,
+    requestId: "request_archived",
+    content: { kind: "text", text: "hello" },
+  })
+  expect(error.message).toContain("Restore this conversation")
+  expect(
+    (
+      await rpcError(connection, "sidebar/update", {
+        type: "session",
+        sessionId: session.id,
+        title: "   ",
+      })
+    ).code,
+  ).toBe(INVALID_PARAMS)
+  await rpc(connection, "sidebar/update", {
+    type: "session",
+    sessionId: session.id,
+    archived: false,
+  })
+  expect(
+    (
+      await rpc<ApiSearchSessionsResponse>(connection, "session/search", {
+        searchTerm: "Renamed",
+      })
+    ).data,
+  ).toHaveLength(1)
 })

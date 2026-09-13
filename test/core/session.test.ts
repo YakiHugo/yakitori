@@ -10,6 +10,40 @@ import { SessionConfiguration } from "../../src/runtime/session-configuration.ts
 import { MemoryThreadStore } from "./memory-thread-store.ts"
 
 describe("live Session actor", () => {
+  it("an explicit fork of an edited thread remains a separate navigation entry", async () => {
+    const store = new MemoryThreadStore()
+    const manager = createManager({ run: async () => undefined }, store)
+    const original = await manager.createThread()
+    await original.startIfIdle({
+      submissionId: "turn_original",
+      content: { kind: "text", text: "original" },
+    })
+    await nextEventOfType(original, "turn.completed")
+    const { thread: edited } = await manager.forkThread({
+      sourceThreadId: original.id,
+      beforeTurnId: "turn_original",
+      forkReason: "edit",
+      forkedFromInputId: "input_original",
+    })
+    await edited.startIfIdle({
+      submissionId: "turn_edited",
+      content: { kind: "text", text: "edited" },
+    })
+    await nextEventOfType(edited, "turn.completed")
+    const { thread: fork } = await manager.forkThread({
+      sourceThreadId: edited.id,
+      beforeTurnId: "turn_edited",
+    })
+    const ids = (await store.listThreads({ view: "sessions" })).threads.map(
+      (thread) => thread.id,
+    )
+    expect(ids).toHaveLength(2)
+    expect(ids).toContain(edited.id)
+    expect(ids).toContain(fork.id)
+    expect(fork.snapshot().metadata.forkReason).toBeUndefined()
+    await manager.shutdown()
+  })
+
   it("removes a newly created Thread when async processor setup fails", async () => {
     const store = new MemoryThreadStore()
     const manager = new ThreadManager({

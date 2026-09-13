@@ -70,6 +70,7 @@ export type AppRpcClient = {
   ): SessionStream
   // Registers a listener for server-broadcast project/changed notifications;
   // returns the unsubscribe function.
+  subscribeToSidebarChanges(listener: () => void): () => void
   subscribeToProjectChanges(
     listener: (notification: ProjectChangedNotification) => void,
   ): () => void
@@ -112,6 +113,7 @@ export function createAppRpcClient(options: {
   const url = rpcUrl(options.apiBase)
   let socket: WebSocket | undefined
   let ready = false
+  let initializedOnce = false
   let closed = false
   let connecting: Promise<void> | undefined
   let reconnectAttempt = 0
@@ -126,6 +128,7 @@ export function createAppRpcClient(options: {
   // permissionRequestId; ids are process-global on the server, so a responder
   // stays valid across reconnects until answered or pruned.
   const permissionResponders = new Map<string, { readonly id: number }>()
+  const sidebarChangeListeners = new Set<() => void>()
   const projectChangeListeners = new Set<
     (notification: ProjectChangedNotification) => void
   >()
@@ -189,6 +192,9 @@ export function createAppRpcClient(options: {
         inflight.delete(id)
         send({ method: "initialized" })
         resubscribeAll()
+        if (initializedOnce)
+          for (const listener of sidebarChangeListeners) listener()
+        initializedOnce = true
         resolve()
       },
       reject: fail,
@@ -316,6 +322,9 @@ export function createAppRpcClient(options: {
       record.handlers.onReplayComplete()
       return
     }
+    if (message.method === "sidebar/changed") {
+      for (const listener of sidebarChangeListeners) listener()
+    }
     if (message.method === "project/changed") {
       const params = message.params as ProjectChangedNotification
       for (const listener of projectChangeListeners) listener(params)
@@ -372,6 +381,12 @@ export function createAppRpcClient(options: {
 
   return {
     request,
+    subscribeToSidebarChanges(listener) {
+      sidebarChangeListeners.add(listener)
+      return () => {
+        sidebarChangeListeners.delete(listener)
+      }
+    },
     subscribeToProjectChanges(listener) {
       projectChangeListeners.add(listener)
       return () => {

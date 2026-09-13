@@ -1,3 +1,21 @@
+import {
+  compareSectionSessions,
+  sectionSessionCursor,
+  startAfterSectionCursor,
+} from "./session-sidebar.ts"
+import {
+  emptySessionSidebar,
+  changeSessionSidebar,
+  presentSession,
+  sessionInView,
+  type SessionSidebar,
+  type SidebarChange,
+} from "./session-sidebar.ts"
+import {
+  advanceSessionHead,
+  sessionEntries,
+  type SessionHeads,
+} from "./session-navigation.ts"
 import { constants } from "node:fs"
 import {
   type FileHandle,
@@ -54,6 +72,7 @@ import type {
   ThreadStoreForkResult,
   ThreadStoreListInput,
   ThreadStoreListResult,
+  ThreadStoreSearchInput,
 } from "./thread-store.ts"
 
 type PendingWrite = {
@@ -92,6 +111,8 @@ type OwnedFileLock = {
 
 export class JsonlThreadStore implements ThreadStore {
   readonly #searchProjection: SqliteThreadSearchProjection
+  readonly #sessionSidebarPath: string
+  readonly #sessionHeadsPath: string
   readonly #threadsDirectory: string
   readonly #rolloutsDirectory: string
   readonly #writerLocksDirectory: string
@@ -109,6 +130,8 @@ export class JsonlThreadStore implements ThreadStore {
     this.#searchProjection = new SqliteThreadSearchProjection(
       join(root, "thread-search.sqlite"),
     )
+    this.#sessionSidebarPath = join(root, "session-sidebar.json")
+    this.#sessionHeadsPath = join(root, "session-heads.json")
     this.#threadsDirectory = join(root, "threads")
     this.#rolloutsDirectory = join(root, "rollouts")
     this.#writerLocksDirectory = join(root, "locks", "writers")
@@ -475,6 +498,47 @@ export class JsonlThreadStore implements ThreadStore {
     input: ThreadStoreListInput = {},
   ): Promise<ThreadStoreListResult> {
     await this.#ready
+    const summaries = await this.#threadSummaries()
+    const sidebar =
+      input.view === "sessions"
+        ? await this.readSessionSidebar()
+        : emptySessionSidebar()
+    const entries =
+      input.view === "sessions"
+        ? sessionEntries(summaries, await this.#readSessionHeads())
+            .map((entry) => presentSession(entry, sidebar))
+            .filter((entry) => sessionInView(entry, input))
+        : summaries
+    const ordered =
+      input.view === "sessions" && typeof input.sectionId === "string"
+    const matching = entries
+      .filter(
+        (thread) =>
+          (input.workingDirectory === undefined ||
+            thread.workingDirectory === input.workingDirectory) &&
+          (input.projectId === undefined ||
+            thread.projectId === input.projectId),
+      )
+      .sort(ordered ? compareSectionSessions : compareThreadSummaries)
+    const start = ordered
+      ? startAfterSectionCursor(matching, input.cursor)
+      : startAfterThreadCursor(matching, input.cursor)
+    const limit = input.limit ?? 50
+    const threads = matching.slice(start, start + limit)
+    const last = threads.at(-1)
+    return {
+      threads: structuredClone(threads),
+      ...(last !== undefined && start + limit < matching.length
+        ? {
+            nextCursor: ordered
+              ? sectionSessionCursor(last)
+              : threadCursor(last),
+          }
+        : {}),
+    }
+  }
+
+  async #threadSummaries(): Promise<ThreadSummary[]> {
     const files = await readdir(this.#threadsDirectory)
     const summaries = (
       await Promise.all(
@@ -500,36 +564,202 @@ export class JsonlThreadStore implements ThreadStore {
           }),
       )
     ).filter((summary): summary is ThreadSummary => summary !== undefined)
-    const matching = summaries
-      .filter(
-        (thread) =>
-          (input.workingDirectory === undefined ||
-            thread.workingDirectory === input.workingDirectory) &&
-          (input.projectId === undefined ||
-            thread.projectId === input.projectId),
+    return summaries
+  }
+
+  async #navigationMetadata(): Promise<ThreadMetadata[]> {
+    const files = await readdir(this.#threadsDirectory)
+    const entries = await Promise.all(
+      files
+        .filter((file) => file.endsWith(".json"))
+        .map(async (file) => {
+          try {
+            return await this.#readMetadata(basename(file, ".json"))
+          } catch (error) {
+            // A thread may be deleted between directory enumeration and its read.
+            if (isRecord(error) && error.code === "ENOENT") return undefined
+            throw error
+          }
+        }),
+    )
+    return entries.filter(
+      (entry): entry is ThreadMetadata => entry !== undefined,
+    )
+  }
+
+  async #readSessionHeads(): Promise<SessionHeads> {
+    let contents: string
+    try {
+      contents = await readFile(this.#sessionHeadsPath, "utf8")
+    } catch (error) {
+      if (isRecord(error) && error.code === "ENOENT") return {}
+      throw error
+    }
+    const value: unknown = JSON.parse(contents)
+    if (
+      !isRecord(value) ||
+      !Object.entries(value).every(
+        ([key, head]) =>
+          isStorageKey(key) && typeof head === "string" && isStorageKey(head),
       )
-      .sort(compareThreadSummaries)
-    const start = startAfterThreadCursor(matching, input.cursor)
-    const limit = input.limit ?? 50
-    const threads = matching.slice(start, start + limit)
-    const last = threads.at(-1)
-    return {
-      threads: structuredClone(threads),
-      ...(last !== undefined && start + limit < matching.length
-        ? { nextCursor: threadCursor(last) }
-        : {}),
+    ) {
+      throw new Error("Invalid session navigation state.")
+    }
+    return value as SessionHeads
+  }
+
+  async readSessionSidebar(): Promise<SessionSidebar> {
+    await this.#ready
+    try {
+      // Canonical UI state is separate from the disposable search projection.
+      const value: unknown = JSON.parse(
+        await readFile(this.#sessionSidebarPath, "utf8"),
+      )
+      if (
+        !isRecord(value) ||
+        !Array.isArray(value.sections) ||
+        !isRecord(value.entries) ||
+        !value.sections.every(
+          (section) =>
+            isRecord(section) &&
+            typeof section.id === "string" &&
+            typeof section.name === "string",
+        ) ||
+        !Object.values(value.entries).every(
+          (entry) =>
+            isRecord(entry) &&
+            (entry.title === undefined || typeof entry.title === "string") &&
+            (entry.archived === undefined ||
+              typeof entry.archived === "boolean") &&
+            (entry.sectionId === undefined ||
+              typeof entry.sectionId === "string") &&
+            (entry.sectionPosition === undefined ||
+              (typeof entry.sectionPosition === "number" &&
+                Number.isSafeInteger(entry.sectionPosition))),
+        )
+      ) {
+        throw new Error("Invalid session sidebar state.")
+      }
+      return value as SessionSidebar
+    } catch (error) {
+      if (isRecord(error) && error.code === "ENOENT")
+        return emptySessionSidebar()
+      throw error
     }
   }
 
-  async searchThreads(input: {
-    readonly searchTerm: string
-    readonly cursor?: string
-    readonly limit: number
-  }) {
+  async sessionPresentation(threadId: string) {
+    const entries = sessionEntries(
+      await this.#navigationMetadata(),
+      await this.#readSessionHeads(),
+    )
+    const session = entries.find((entry) => entry.id === threadId)
+    if (!session) return {}
+    const state = await this.readSessionSidebar()
+    return {
+      navigationId: session.navigationId,
+      ...state.entries[session.navigationId],
+    }
+  }
+
+  async updateSessionSidebar(change: SidebarChange): Promise<SessionSidebar> {
     await this.#ready
+    const lock = await acquireOwnedLock(
+      this.#coordinationLockPath,
+      "Sidebar is being updated.",
+      false,
+      true,
+    )
+    try {
+      const sessions = sessionEntries(
+        await this.#navigationMetadata(),
+        await this.#readSessionHeads(),
+      )
+      const state = changeSessionSidebar(
+        await this.readSessionSidebar(),
+        change,
+        sessions,
+      )
+      await atomicWrite(this.#sessionSidebarPath, JSON.stringify(state))
+      return state
+    } finally {
+      await releaseOwnedLock(lock)
+    }
+  }
+
+  async setSessionHead(
+    sourceThreadId: string,
+    targetThreadId: string,
+  ): Promise<void> {
+    await this.#ready
+    const lock = await acquireOwnedLock(
+      this.#coordinationLockPath,
+      "Session navigation is being updated.",
+      false,
+      true,
+    )
+    try {
+      const heads = advanceSessionHead(
+        await this.#navigationMetadata(),
+        await this.#readSessionHeads(),
+        sourceThreadId,
+        targetThreadId,
+      )
+      await atomicWrite(this.#sessionHeadsPath, JSON.stringify(heads))
+    } finally {
+      await releaseOwnedLock(lock)
+    }
+  }
+
+  async searchThreads(input: ThreadStoreSearchInput) {
+    await this.#ready
+    const sidebar =
+      input.view === "sessions"
+        ? await this.readSessionSidebar()
+        : emptySessionSidebar()
+    const entries =
+      input.view === "sessions"
+        ? sessionEntries(
+            await this.#navigationMetadata(),
+            await this.#readSessionHeads(),
+          )
+            .map((entry) => presentSession(entry, sidebar))
+            .filter((entry) => sessionInView(entry, input))
+        : undefined
     return this.#withSearchProjection(async () => {
       await this.#repairSearchProjection()
-      return this.#searchProjection.searchThreads(input)
+      const result = this.#searchProjection.searchThreads({
+        ...input,
+        ...(entries === undefined
+          ? {}
+          : {
+              threadIds: entries.map((entry) => entry.id),
+              titles: Object.fromEntries(
+                entries.flatMap((entry) =>
+                  entry.title === undefined ? [] : [[entry.id, entry.title]],
+                ),
+              ),
+            }),
+      })
+      const navigationIds = new Map(
+        entries?.map((entry) => [entry.id, entry.navigationId]),
+      )
+      return {
+        ...result,
+        matches: result.matches.map((match) => {
+          const navigationId = navigationIds.get(match.summary.id)
+          return {
+            ...match,
+            summary: {
+              ...match.summary,
+              ...(navigationId === undefined
+                ? {}
+                : sidebar.entries[navigationId]),
+              ...(navigationId === undefined ? {} : { navigationId }),
+            },
+          }
+        }),
+      }
     })
   }
 

@@ -134,7 +134,8 @@ export function attachWebsocketRpcTransport(
         // error/close handlers own reporting and cleanup, so here the flush
         // just stops and waits for the close path.
         ws.send(text, (error) => {
-          if (error !== undefined) return
+          // Node's successful write callback can carry null (not just undefined).
+          if (error != null) return
           flush()
         })
       }

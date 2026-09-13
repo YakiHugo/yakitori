@@ -1,3 +1,4 @@
+import type { SessionSidebar, SidebarChange } from "./session-sidebar.ts"
 import type {
   HistoryPosition,
   RolloutItem,
@@ -47,12 +48,15 @@ export type ThreadStoreForkResult = {
   readonly historyEndSeqExclusive?: number
 }
 
-export type ThreadStoreListInput = {
-  readonly cursor?: string
-  readonly limit?: number
-  readonly workingDirectory?: string
-  readonly projectId?: string
-}
+export type ThreadStoreListInput = Readonly<{
+  view?: "sessions"
+  archived?: boolean
+  sectionId?: string | null
+  cursor?: string
+  limit?: number
+  workingDirectory?: string
+  projectId?: string
+}>
 
 export type ThreadStoreListResult = {
   readonly threads: readonly ThreadSummary[]
@@ -60,6 +64,9 @@ export type ThreadStoreListResult = {
 }
 
 export type ThreadStoreSearchInput = Readonly<{
+  view?: "sessions"
+  archived?: boolean
+  sectionId?: string | null
   searchTerm: string
   cursor?: string
   limit: number
@@ -97,6 +104,15 @@ export type ThreadStore = {
   releasePreparedFork(prepared: PreparedFork): Promise<void>
   readThread(threadId: string): Promise<StoredThread | undefined>
   listThreadIds(): Promise<readonly string[]>
+  readSessionSidebar(): Promise<SessionSidebar>
+  updateSessionSidebar(change: SidebarChange): Promise<SessionSidebar>
+  sessionPresentation(
+    threadId: string,
+  ): Promise<
+    Readonly<{ navigationId?: string }> &
+      import("./session-sidebar.ts").SessionPresentation
+  >
+  setSessionHead(sourceThreadId: string, targetThreadId: string): Promise<void>
   listThreads(input?: ThreadStoreListInput): Promise<ThreadStoreListResult>
   searchThreads(input: ThreadStoreSearchInput): Promise<ThreadStoreSearchResult>
   searchThreadOccurrences(

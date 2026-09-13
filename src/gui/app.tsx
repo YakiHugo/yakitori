@@ -1,11 +1,10 @@
-import { GitFork, Info, Plus } from "lucide-react"
+import { GitFork, Info } from "lucide-react"
 import { ApprovalBar } from "./components/approval-bar.tsx"
 import { Composer } from "./components/composer.tsx"
-import { Sidebar } from "./components/sidebar.tsx"
+import { SidebarFrame } from "./components/sidebar-frame.tsx"
 import { StatusSurface } from "./components/status-surface.tsx"
 import { TelemetryRail } from "./components/telemetry-rail.tsx"
 import { Transcript } from "./components/transcript.tsx"
-import { Button } from "./components/ui/button.tsx"
 import {
   Tooltip,
   TooltipContent,
@@ -25,11 +24,9 @@ export function App() {
 
   return (
     <TooltipProvider>
-      <div className="flex h-screen overflow-hidden bg-background text-foreground">
-        <aside className="flex w-72 shrink-0 flex-col border-r">
-          <Sidebar />
-        </aside>
-        <main className="flex min-w-0 flex-1 flex-col">
+      <div className="app-shell flex h-screen overflow-hidden text-foreground">
+        <SidebarFrame />
+        <main className="flex min-w-0 flex-1 flex-col bg-background">
           {message !== undefined && message !== "" && (
             <div
               role="alert"
@@ -51,7 +48,7 @@ export function App() {
               <Transcript>
                 <ApprovalBar />
                 <StatusSurface />
-                <Composer />
+                <SessionComposer />
               </Transcript>
               <TelemetryRail />
             </>
@@ -64,15 +61,43 @@ export function App() {
   )
 }
 
+function SessionComposer() {
+  const session = useAppStore((state) => state.selectedSession)
+  const changeSidebar = useAppStore((state) => state.changeSidebar)
+  const pending = useAppStore((state) =>
+    state.inFlightActions.has("sidebar-update"),
+  )
+  if (!session?.archived) return <Composer />
+  return (
+    <div className="mx-auto mb-5 flex max-w-3xl items-center justify-between gap-4 rounded-xl border bg-muted/40 px-4 py-3 text-sm">
+      <span>This conversation is archived.</span>
+      <button
+        type="button"
+        className="rounded-md bg-primary px-3 py-1.5 text-primary-foreground"
+        disabled={pending}
+        onClick={() =>
+          void changeSidebar({
+            type: "session",
+            sessionId: session.id,
+            archived: false,
+          })
+        }
+      >
+        Restore conversation
+      </button>
+    </div>
+  )
+}
+
 function SessionHeader() {
   const session = useAppStore((state) => state.selectedSession)
-  const sessions = useAppStore((state) => state.sessions)
+  const sessionsByProject = useAppStore((state) => state.sessionsByProject)
   const selectSession = useAppStore((state) => state.selectSession)
   const view = useExecutionView()
   if (!session) return null
-  const parent = sessions.find(
-    (candidate) => candidate.id === session.parentSessionId,
-  )
+  const parent = Object.values(sessionsByProject)
+    .flatMap((list) => list.sessions)
+    .find((candidate) => candidate.id === session.parentSessionId)
   return (
     <header className="flex h-12 shrink-0 items-center justify-between gap-3 border-b px-5">
       <div className="flex items-center gap-2">
@@ -120,13 +145,38 @@ function SessionHeader() {
 }
 
 function EmptyState() {
-  const createSession = useAppStore((state) => state.createSession)
+  const projects = useAppStore((state) => state.projects)
+  const currentProject = useAppStore((state) => state.currentProject)
+  const project = projects.find((candidate) => candidate.id === currentProject)
   return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-3">
-      <p className="text-sm text-muted-foreground">No session selected</p>
-      <Button type="button" onClick={() => void createSession()}>
-        <Plus /> New session
-      </Button>
+    <div className="flex min-h-0 flex-1 flex-col justify-center px-6">
+      <div className="mx-auto w-full max-w-3xl">
+        <h2 className="mb-3 text-center text-xl font-medium">
+          {project
+            ? `What would you like to build in ${project.name}?`
+            : "What would you like to work on?"}
+        </h2>
+        <div className="mb-7 flex justify-center">
+          <select
+            aria-label="New session project"
+            value={currentProject ?? ""}
+            className="max-w-full rounded-md border bg-background px-3 py-1.5 text-xs"
+            onChange={(event) =>
+              useAppStore.setState({
+                currentProject: event.target.value || undefined,
+              })
+            }
+          >
+            <option value="">No project</option>
+            {projects.map((entry) => (
+              <option key={entry.id} value={entry.id}>
+                {entry.name}
+              </option>
+            ))}
+          </select>
+        </div>
+        <Composer />
+      </div>
     </div>
   )
 }

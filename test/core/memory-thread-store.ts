@@ -1,3 +1,20 @@
+import {
+  compareSectionSessions,
+  sectionSessionCursor,
+  startAfterSectionCursor,
+} from "../../src/core/session-sidebar.ts"
+import {
+  emptySessionSidebar,
+  changeSessionSidebar,
+  presentSession,
+  sessionInView,
+  type SidebarChange,
+} from "../../src/core/session-sidebar.ts"
+import {
+  advanceSessionHead,
+  sessionEntries,
+  type SessionHeads,
+} from "../../src/core/session-navigation.ts"
 import type {
   RolloutItem,
   StoredRolloutItem,
@@ -12,6 +29,7 @@ import type {
   PrepareForkInput,
   ThreadStore,
   ThreadStoreListInput,
+  ThreadStoreSearchInput,
 } from "../../src/core/thread-store.ts"
 import {
   compareThreadSummaries,
@@ -29,6 +47,34 @@ type Writer = {
 }
 
 export class MemoryThreadStore implements ThreadStore {
+  #sessionHeads: SessionHeads = {}
+  #sidebar = emptySessionSidebar()
+  async readSessionSidebar() {
+    return structuredClone(this.#sidebar)
+  }
+  async updateSessionSidebar(change: SidebarChange) {
+    this.#sidebar = changeSessionSidebar(
+      this.#sidebar,
+      change,
+      sessionEntries(
+        [...this.#threads.values()].map((thread) => thread.metadata),
+        this.#sessionHeads,
+      ),
+    )
+    return this.readSessionSidebar()
+  }
+  async sessionPresentation(threadId: string) {
+    const session = sessionEntries(
+      [...this.#threads.values()].map((thread) => thread.metadata),
+      this.#sessionHeads,
+    ).find((entry) => entry.id === threadId)
+    return session
+      ? {
+          navigationId: session.navigationId,
+          ...this.#sidebar.entries[session.navigationId],
+        }
+      : {}
+  }
   readonly #threads = new Map<string, StoredThread>()
   readonly #writers = new Map<string, Writer>()
   readonly #forks = new Map<
@@ -239,7 +285,7 @@ export class MemoryThreadStore implements ThreadStore {
 
   async listThreads(input: ThreadStoreListInput = {}) {
     const limit = input.limit ?? 50
-    const threads: ThreadSummary[] = [...this.#threads.values()]
+    const summaries: ThreadSummary[] = [...this.#threads.values()]
       .filter(
         (thread) =>
           (input.workingDirectory === undefined ||
@@ -252,31 +298,80 @@ export class MemoryThreadStore implements ThreadStore {
         seq: thread.rollout.length,
       }))
       .sort(compareThreadSummaries)
-    const start = startAfterThreadCursor(threads, input.cursor)
+    const ordered =
+      input.view === "sessions" && typeof input.sectionId === "string"
+    const threads =
+      input.view === "sessions"
+        ? sessionEntries(summaries, this.#sessionHeads)
+            .map((entry) => presentSession(entry, this.#sidebar))
+            .filter((entry) => sessionInView(entry, input))
+            .sort(ordered ? compareSectionSessions : compareThreadSummaries)
+        : summaries
+    const start = ordered
+      ? startAfterSectionCursor(threads, input.cursor)
+      : startAfterThreadCursor(threads, input.cursor)
     const page = threads.slice(start, start + limit)
     const last = page.at(-1)
     return {
       threads: structuredClone(page),
       ...(last !== undefined && start + limit < threads.length
-        ? { nextCursor: threadCursor(last) }
+        ? {
+            nextCursor: ordered
+              ? sectionSessionCursor(last)
+              : threadCursor(last),
+          }
         : {}),
     }
   }
 
-  async searchThreads(input: {
-    readonly searchTerm: string
-    readonly cursor?: string
-    readonly limit: number
-  }) {
+  async setSessionHead(
+    sourceThreadId: string,
+    targetThreadId: string,
+  ): Promise<void> {
+    const threads = (await this.listThreads({ limit: Number.MAX_SAFE_INTEGER }))
+      .threads
+    this.#sessionHeads = advanceSessionHead(
+      threads,
+      this.#sessionHeads,
+      sourceThreadId,
+      targetThreadId,
+    )
+  }
+
+  async searchThreads(input: ThreadStoreSearchInput) {
+    const entries =
+      input.view === "sessions"
+        ? (
+            await this.listThreads({
+              view: "sessions",
+              archived: input.archived === true,
+              ...(input.sectionId === undefined
+                ? {}
+                : { sectionId: input.sectionId }),
+              limit: Number.MAX_SAFE_INTEGER,
+            })
+          ).threads
+        : undefined
+    const entryById =
+      entries === undefined
+        ? undefined
+        : new Map(entries.map((entry) => [entry.id, entry]))
     const candidates = [...this.#threads.values()]
+      .filter(
+        (stored) =>
+          entryById === undefined || entryById.has(stored.metadata.id),
+      )
       .map((stored) => ({
         stored,
         summary: {
           ...stored.metadata,
+          ...entryById?.get(stored.metadata.id),
           seq: stored.rollout.length,
         },
       }))
-      .sort((left, right) => compareThreadSummaries(left.summary, right.summary))
+      .sort((left, right) =>
+        compareThreadSummaries(left.summary, right.summary),
+      )
     const start = startAfterThreadCursor(
       candidates.map(({ summary }) => summary),
       input.cursor,
@@ -284,12 +379,23 @@ export class MemoryThreadStore implements ThreadStore {
     const matches: Array<{ summary: ThreadSummary; snippet: string }> = []
     let lastScanned: ThreadSummary | undefined
     let index = start
-    for (; index < candidates.length && matches.length < input.limit; index += 1) {
+    for (
+      ;
+      index < candidates.length && matches.length < input.limit;
+      index += 1
+    ) {
       const candidate = candidates[index]
       if (candidate === undefined) continue
       lastScanned = candidate.summary
-      const snippet = firstVisibleThreadMatch(candidate.stored, input.searchTerm)
-      if (snippet !== undefined) matches.push({ summary: candidate.summary, snippet })
+      const snippet = firstVisibleThreadMatch(
+        {
+          ...candidate.stored,
+          metadata: { ...candidate.stored.metadata, ...candidate.summary },
+        },
+        input.searchTerm,
+      )
+      if (snippet !== undefined)
+        matches.push({ summary: candidate.summary, snippet })
     }
     return {
       matches: structuredClone(matches),

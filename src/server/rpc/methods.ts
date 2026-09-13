@@ -1,4 +1,8 @@
-import { realpath } from "node:fs/promises"
+import type {
+  SessionSidebar,
+  SidebarChange,
+} from "../../core/session-sidebar.ts"
+import { realpath, stat } from "node:fs/promises"
 import { basename, isAbsolute, normalize } from "node:path"
 import {
   isYakitoriError,
@@ -72,6 +76,8 @@ export type InitializeResponse = Readonly<{
 }>
 
 export type SessionListParams = Readonly<{
+  archived?: boolean
+  sectionId?: string | null
   cursor?: string
   limit?: number
   workingDirectory?: string
@@ -103,7 +109,9 @@ export type ProjectCreateParams = Readonly<{
 export type ProjectUpdateParams = Readonly<{
   projectId: string
   name?: string
+  roots?: readonly string[]
   metadata?: Readonly<Record<string, string>>
+  pinned?: boolean
 }>
 
 export type ProjectMoveParams = Readonly<{
@@ -369,14 +377,29 @@ function parseProjectUpdateParams(params: unknown): ProjectUpdateParams {
   if (name !== undefined && (typeof name !== "string" || name.trim() === "")) {
     throw invalidParams("name must be a non-empty string.")
   }
+  const roots = record.roots
+  if (
+    roots !== undefined &&
+    (!Array.isArray(roots) ||
+      roots.length === 0 ||
+      !roots.every((root) => typeof root === "string" && root.trim() !== ""))
+  ) {
+    throw invalidParams("roots must be a non-empty array of absolute paths.")
+  }
   const metadata = record.metadata
   if (metadata !== undefined && !isStringRecord(metadata)) {
     throw invalidParams("metadata must be an object with string values.")
   }
+  const pinned = record.pinned
+  if (pinned !== undefined && typeof pinned !== "boolean") {
+    throw invalidParams("pinned must be a boolean.")
+  }
   return {
     projectId,
     ...(name === undefined ? {} : { name: name.trim() }),
+    ...(roots === undefined ? {} : { roots: roots as string[] }),
     ...(metadata === undefined ? {} : { metadata }),
+    ...(pinned === undefined ? {} : { pinned }),
   }
 }
 
@@ -533,13 +556,16 @@ function handlerEntry<TResult>(
     handlers: ServerHandlers,
     params: unknown,
   ) => Promise<ApiHandlerResult<TResult>>,
+  changesSidebar = false,
 ): RpcMethodDefinition {
   return {
     method,
     scope,
-    invoke: async (params, context) => ({
-      result: adaptHandlerResult(await call(context.handlers, params)),
-    }),
+    invoke: async (params, context) => {
+      const result = adaptHandlerResult(await call(context.handlers, params))
+      if (changesSidebar) context.broadcastNotification("sidebar/changed", {})
+      return { result }
+    },
   }
 }
 
@@ -563,6 +589,26 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
       }
     },
   },
+  handlerEntry<SessionSidebar>(
+    "sidebar/read",
+    () => undefined,
+    (handlers) => handlers.readSidebar(),
+  ),
+  {
+    method: "sidebar/update",
+    scope: (params) =>
+      isRecord(params) &&
+      (params.type === "session" || params.type === "move-session")
+        ? sessionScope(params)
+        : { kind: "global", name: "sidebar" },
+    async invoke(params, context) {
+      const result = adaptHandlerResult(
+        await context.handlers.updateSidebar(params),
+      )
+      context.broadcastNotification("sidebar/changed", {})
+      return { result }
+    },
+  },
   handlerEntry<ApiListSessionsResponse>(
     "session/list",
     // Unserialized, mirroring Codex's thread/list.
@@ -584,6 +630,7 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
     // Unserialized, mirroring Codex's thread/start.
     () => undefined,
     (handlers, params) => handlers.createSession(params),
+    true,
   ),
   handlerEntry<ApiReadSessionResponse>(
     "session/read",
@@ -604,11 +651,13 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
     "session/delete",
     sessionScope,
     (handlers, params) => handlers.deleteSession(params),
+    true,
   ),
   handlerEntry<ApiForkSessionResponse>(
     "session/fork",
     sessionScope,
     (handlers, params) => handlers.forkSession(params),
+    true,
   ),
   handlerEntry<ApiCompactSessionResponse>(
     "session/compact",
@@ -690,6 +739,77 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
     },
   },
   {
+    method: "project/open",
+    scope: () => ({ kind: "global", name: "projects" }),
+    async invoke(params, context) {
+      const store = requireProjectStore(context, "project/open")
+      const request = requireParamsRecord(params, "project/open")
+      if (typeof request.path !== "string" || !isAbsolute(request.path))
+        throw invalidParams("Choose a project folder using an absolute path.")
+      if (
+        request.name !== undefined &&
+        (typeof request.name !== "string" || !request.name.trim())
+      )
+        throw invalidParams("Enter a project name.")
+      let folder: string
+      try {
+        folder = await realpath(request.path)
+        if (!(await stat(folder)).isDirectory())
+          throw invalidParams("Choose a folder, not a file.")
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code
+        if (code === "ENOENT" || code === "ENOTDIR")
+          throw invalidParams(
+            "This folder does not exist. Check the path and try again.",
+          )
+        if (code === "EACCES" || code === "EPERM")
+          throw invalidParams(
+            "This folder cannot be accessed. Check its permissions.",
+          )
+        throw error
+      }
+      // Opening a folder reuses its saved project, including a symbolic link
+      // to an existing root. The projects queue serializes concurrent opens.
+      let cursor: string | undefined
+      do {
+        const page = await store.listProjects(cursor ? { cursor } : {})
+        for (const project of page.projects) {
+          for (const root of project.roots) {
+            let existing = normalize(root)
+            try {
+              existing = await realpath(root)
+            } catch (error) {
+              if (
+                !["ENOENT", "ENOTDIR", "EACCES", "EPERM"].includes(
+                  (error as NodeJS.ErrnoException).code ?? "",
+                )
+              )
+                throw error
+            }
+            if (existing === folder)
+              return { result: { project } satisfies ApiCreateProjectResponse }
+          }
+        }
+        cursor = page.nextCursor
+      } while (cursor)
+      const created = await store.createProject({
+        name:
+          typeof request.name === "string"
+            ? request.name.trim()
+            : basename(folder) || folder,
+        roots: [folder],
+      })
+      return {
+        result: { project: created.project } satisfies ApiCreateProjectResponse,
+        afterResponse: notifyProjectChanged(
+          context,
+          created.project.id,
+          "created",
+        ),
+      }
+    },
+  },
+  {
     method: "project/create",
     scope: () => ({ kind: "global", name: "projects" }),
     async invoke(params, context) {
@@ -729,12 +849,18 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
     async invoke(params, context) {
       const store = requireProjectStore(context, "project/update")
       const request = parseProjectUpdateParams(params)
+      const roots =
+        request.roots === undefined
+          ? undefined
+          : await canonicalizeProjectRoots(request.roots)
       try {
         const updated = await store.updateProject(request.projectId, {
           ...(request.name === undefined ? {} : { name: request.name }),
+          ...(roots === undefined ? {} : { roots }),
           ...(request.metadata === undefined
             ? {}
             : { metadata: request.metadata }),
+          ...(request.pinned === undefined ? {} : { pinned: request.pinned }),
         })
         if (updated === undefined) throw projectNotFound(request.projectId)
         return {
@@ -906,6 +1032,8 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
 export type RpcMethodParams = Readonly<{
   initialize: InitializeParams
   "server/diagnostics": Readonly<Record<string, never>>
+  "sidebar/read": Readonly<Record<string, never>>
+  "sidebar/update": SidebarChange
   "session/list": SessionListParams
   "session/search": ApiSearchSessionsRequest
   "session/searchOccurrences": ApiSearchSessionOccurrencesRequest
@@ -923,6 +1051,7 @@ export type RpcMethodParams = Readonly<{
   "session/unsubscribe": SessionUnsubscribeParams
   "project/list": ProjectListParams
   "project/read": ProjectReadParams
+  "project/open": Readonly<{ path: string; name?: string }>
   "project/create": ProjectCreateParams
   "project/update": ProjectUpdateParams
   "project/move": ProjectMoveParams
@@ -936,6 +1065,8 @@ export type RpcMethodParams = Readonly<{
 export type RpcMethodResponses = Readonly<{
   initialize: InitializeResponse
   "server/diagnostics": ApiServerDiagnostics
+  "sidebar/read": SessionSidebar
+  "sidebar/update": SessionSidebar
   "session/list": ApiListSessionsResponse
   "session/search": ApiSearchSessionsResponse
   "session/searchOccurrences": ApiSearchSessionOccurrencesResponse
@@ -953,6 +1084,7 @@ export type RpcMethodResponses = Readonly<{
   "session/unsubscribe": Readonly<Record<string, never>>
   "project/list": ApiListProjectsResponse
   "project/read": ApiReadProjectResponse
+  "project/open": ApiCreateProjectResponse
   "project/create": ApiCreateProjectResponse
   "project/update": ApiUpdateProjectResponse
   "project/move": Readonly<Record<string, never>>
