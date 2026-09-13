@@ -1,6 +1,10 @@
 const { contextBridge, ipcRenderer, webUtils } = require("electron")
 
 contextBridge.exposeInMainWorld("yakitoriDesktop", {
+  platform: process.platform,
+  pickProjectFolder() {
+    return ipcRenderer.invoke("yakitori:pick-project-folder")
+  },
   pickImages(input) {
     return ipcRenderer.invoke("yakitori:pick-images", input)
   },

@@ -1,5 +1,12 @@
 // @vitest-environment happy-dom
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from "@testing-library/react"
 import { afterEach, beforeEach, expect, it } from "vitest"
 import { App } from "../../src/gui/app.tsx"
 import { Transcript } from "../../src/gui/components/transcript.tsx"
@@ -233,7 +240,9 @@ it("marks only the rail markers whose turns intersect the viewport", () => {
 it("does not display replayed activity until the selected session finishes restoring", () => {
   useAppStore.setState({ hydratingSessionId: "session_1" })
   render(<App />)
-  expect(screen.getByRole("status").textContent).toBe("Loading conversation…")
+  expect(within(screen.getByRole("main")).getByRole("status").textContent).toBe(
+    "Loading conversation…",
+  )
   expect(screen.queryByText("First request")).toBeNull()
   expect(screen.queryByRole("textbox", { name: "Message the Mate" })).toBeNull()
 })

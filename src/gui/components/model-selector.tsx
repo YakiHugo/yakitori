@@ -29,13 +29,13 @@ export function ModelSelector() {
   const userPreference = useAppStore((state) => state.userPreference)
   const sessionCurrent = useAppStore((state) =>
     state.selection.sessionId === undefined
-      ? undefined
+      ? state.draftModelSelection
       : state.modelSelections[state.selection.sessionId],
   )
   const setModelSelection = useAppStore((state) => state.setModelSelection)
   const [menu, setMenu] = useState<"model" | "effort">()
 
-  if (sessionId === undefined || providers.length === 0) return null
+  if (providers.length === 0) return null
 
   const availableProviders = providers.filter(
     (provider) => provider.availability !== "requires_login",

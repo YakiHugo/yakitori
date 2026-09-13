@@ -1,6 +1,7 @@
 @import "tailwindcss";
 @import "./conversation.css";
 @import "./composer.css";
+@import "./sidebar.css";
 
 @custom-variant dark (&:is(.dark *));
 

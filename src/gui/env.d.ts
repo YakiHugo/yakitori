@@ -1,6 +1,8 @@
 /// <reference types="vite/client" />
 
 type YakitoriDesktopBridge = {
+  platform: string
+  pickProjectFolder(): Promise<string | null>
   pickImages(input: {
     readonly sessionId: string
   }): Promise<readonly import("../kernel/events.ts").ImageAttachment[]>

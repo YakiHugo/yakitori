@@ -59,7 +59,7 @@ export function Composer() {
   )
   const sessionCurrent = useAppStore((state) =>
     state.selection.sessionId === undefined
-      ? undefined
+      ? state.draftModelSelection
       : state.modelSelections[state.selection.sessionId],
   )
   const setPromptDraft = useAppStore((state) => state.setPromptDraft)
@@ -165,8 +165,7 @@ export function Composer() {
   const compactBlocked = text === COMPACT_DIRECTIVE && attachments.length > 0
   const canSend =
     containsInput &&
-    sessionId !== undefined &&
-    restoringModelSelectionFor !== sessionId &&
+    (sessionId === undefined || restoringModelSelectionFor !== sessionId) &&
     !busy &&
     !sending &&
     !readingImages &&
@@ -485,10 +484,10 @@ export function Composer() {
             value={draft}
             placeholder={
               sessionId === undefined
-                ? "Create or select a session to start"
+                ? "Describe what you want to work on"
                 : "Ask anything"
             }
-            disabled={sessionId === undefined}
+            disabled={sending}
             onChange={(text) => {
               setDismissedQuery(undefined)
               setHistoryNavigation(undefined)
