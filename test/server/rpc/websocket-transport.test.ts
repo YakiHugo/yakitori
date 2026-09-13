@@ -155,6 +155,48 @@ describe("websocket RPC transport", () => {
     }
   })
 
+  it("drains queued events in order after a paused client resumes reading", async () => {
+    const eventHub = createSessionEventHub()
+    const server = createServer()
+    attachWebsocketRpcTransport(server, {
+      processor: new MessageProcessor({
+        handlers: createFakeHandlers(),
+        eventHub,
+      }),
+    })
+    const port = await listen(server)
+    const client = connect(port)
+    try {
+      await client.open
+      await client.request("initialize", {
+        clientInfo: { name: "test-client", version: "0.0.0" },
+      })
+      await client.request("session/subscribe", { sessionId: "session_1" })
+      await client.waitFor((frame) => frame.method === "session/replayComplete")
+      const socket = (client.ws as unknown as { _socket: Socket })._socket
+      socket.pause()
+      const padding = "x".repeat(256 * 1024)
+      for (let seq = 2; seq <= 65; seq++)
+        eventHub.publishDurable([makeTurnStarted("session_1", seq, padding)])
+      socket.resume()
+      await client.waitFor(
+        (frame) =>
+          frame.method === "session/event" &&
+          (frame.params as { seq: number }).seq === 65,
+      )
+      expect(
+        client.frames
+          .filter((frame) => frame.method === "session/event")
+          .map((frame) => (frame.params as { seq: number }).seq),
+      ).toEqual(Array.from({ length: 64 }, (_, index) => index + 2))
+      expect(client.ws.readyState).toBe(WebSocket.OPEN)
+    } finally {
+      client.ws.terminate()
+      await client.closed
+      await closeServer(server)
+    }
+  })
+
   it("closes the processor connection and its subscriptions when the client disconnects", async () => {
     const eventHub = createSessionEventHub()
     const processor = new MessageProcessor({
