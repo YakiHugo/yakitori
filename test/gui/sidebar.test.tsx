@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { cleanup, render, screen, within } from "@testing-library/react"
+import { act, cleanup, render, screen, within } from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { App } from "../../src/gui/app.tsx"
@@ -129,19 +129,116 @@ describe("sidebar", () => {
       projects: [project("project_1", "yakitori")],
       currentProject: "project_1",
       sessionsByProject: {
-        project_1: {
-          sessions: [session("session_1", "fix the thing")],
-          nextCursor: "cursor-1",
-        },
+        project_1: { sessions: [session("session_1", "fix the thing")] },
       },
       loadSessions,
     })
     const user = userEvent.setup()
     render(<App />)
 
+    expect(screen.queryByRole("button", { name: "Show more" })).toBeNull()
+
+    act(() => {
+      useAppStore.setState({
+        sessionsByProject: {
+          project_1: {
+            sessions: [session("session_1", "fix the thing")],
+            nextCursor: "cursor-1",
+          },
+        },
+      })
+    })
     await user.click(screen.getByRole("button", { name: "Show more" }))
 
     expect(loadSessions).toHaveBeenCalledWith("project_1", { append: true })
+  })
+
+  it("selecting a conversation selects it in the store", async () => {
+    const summary = session("session_1", "fix the thing")
+    const selectSession = vi.fn()
+    useAppStore.setState({
+      projects: [project("project_1", "yakitori")],
+      currentProject: "project_1",
+      sessionsByProject: { project_1: { sessions: [summary] } },
+      selectSession,
+    })
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(screen.getByRole("button", { name: "fix the thing" }))
+
+    expect(selectSession).toHaveBeenCalledWith("session_1", summary)
+  })
+
+  it("expanding a project lazily loads its session list", async () => {
+    const loadSessions = vi.fn()
+    // Earlier tests replace toggleProject with a bare spy and the store keeps
+    // mocked actions across resets, so restore the real toggle behavior here.
+    const toggleProject = vi.fn(async (projectId: string) => {
+      const collapsedProjects = {
+        ...useAppStore.getState().collapsedProjects,
+      }
+      if (collapsedProjects[projectId] === true)
+        delete collapsedProjects[projectId]
+      else collapsedProjects[projectId] = true
+      useAppStore.setState({ collapsedProjects })
+    })
+    useAppStore.setState({
+      projects: [project("project_1", "yakitori")],
+      currentProject: "project_1",
+      collapsedProjects: { project_1: true },
+      sessionsByProject: { "sidebar:section:pinned": { sessions: [] } },
+      loadSessions,
+      toggleProject,
+    })
+    const user = userEvent.setup()
+    render(<App />)
+
+    expect(loadSessions).not.toHaveBeenCalled()
+
+    await user.click(screen.getByRole("button", { name: "yakitori" }))
+    expect(loadSessions).toHaveBeenCalledWith("project_1")
+
+    loadSessions.mockClear()
+    act(() => {
+      useAppStore.setState({
+        sessionsByProject: {
+          project_1: { sessions: [session("session_1", "fix the thing")] },
+          "sidebar:section:pinned": { sessions: [] },
+        },
+      })
+    })
+    await user.click(screen.getByRole("button", { name: "yakitori" }))
+    await user.click(screen.getByRole("button", { name: "yakitori" }))
+
+    expect(loadSessions).not.toHaveBeenCalled()
+  })
+
+  it("archives a conversation from its row menu", async () => {
+    const changeSidebar = vi.fn().mockResolvedValue(true)
+    useAppStore.setState({
+      projects: [project("project_1", "yakitori")],
+      currentProject: "project_1",
+      sessionsByProject: {
+        project_1: { sessions: [session("session_1", "fix the thing")] },
+      },
+      changeSidebar,
+    })
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(
+      screen.getByRole("button", { name: "Session actions for fix the thing" }),
+    )
+    await user.click(
+      screen.getByRole("menuitem", { name: "Archive conversation" }),
+    )
+
+    expect(changeSidebar).toHaveBeenCalledWith({
+      type: "session",
+      sessionId: "session_1",
+      archived: true,
+    })
   })
 
   it("pins a project from its row menu", async () => {

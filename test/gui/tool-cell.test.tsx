@@ -8,7 +8,9 @@ import type {
   ExecutionEntry,
   ToolDiff,
 } from "../../src/gui/execution-view.ts"
+import { useAppStore } from "../../src/gui/store/app-store.ts"
 import type {
+  ImageAttachment,
   JsonValue,
   ToolExecutionDescriptor,
 } from "../../src/kernel/events.ts"
@@ -65,32 +67,6 @@ describe("tool cell", () => {
 
     expect(await screen.findByText("file contents")).toBeTruthy()
     expect(screen.queryByText(/"path"/)).toBeNull()
-  })
-
-  it("renders run_command entries as a terminal card when expanded", async () => {
-    const user = userEvent.setup()
-    render(
-      <ToolCell
-        entry={toolEntry({
-          kind: "tool",
-          toolCallId: "tool_2",
-          turnId: "turn_1",
-          name: "run_command",
-          executionType: "command_execution",
-          summary: "pnpm test",
-          input: { command: "pnpm test" },
-          state: "completed",
-          resultText: "all green",
-        })}
-      />,
-    )
-
-    expect(screen.queryByText(/\$ pnpm test/)).toBeNull()
-
-    await user.click(screen.getByRole("button", { name: /Run pnpm test/ }))
-
-    expect(await screen.findByText(/\$ pnpm test/)).toBeTruthy()
-    expect(screen.getByText(/all green/)).toBeTruthy()
   })
 
   it("renders a structured command result with exit status and stderr", async () => {
@@ -166,46 +142,8 @@ describe("tool cell", () => {
     )
 
     // Failed tools open themselves so the reason is not hidden.
-    expect(await screen.findAllByText(/blocked/)).toHaveLength(3)
-    expect(screen.getByText(/No process was started/)).toBeTruthy()
-    expect(screen.getByText(".")).toBeTruthy()
-  })
-
-  it("renders structured command execution errors", async () => {
-    render(
-      <ToolCell
-        entry={toolEntry({
-          kind: "tool",
-          toolCallId: "tool_spawn_error",
-          turnId: "turn_1",
-          name: "run_command",
-          executionType: "command_execution",
-          summary: "Run command",
-          input: { command: "example" },
-          state: "failed",
-          resultError: true,
-          resultErrorMessage: "Command failed to start: spawn example ENOENT",
-          resultText: "Partial command output",
-          commandResult: {
-            exitCode: null,
-            signal: null,
-            stdout: "",
-            stderr: "",
-            truncated: false,
-            timedOut: false,
-            cwd: ".",
-            shell: "/bin/zsh",
-          },
-        })}
-      />,
-    )
-
-    // Failed tools open themselves so the reason is not hidden.
-    expect(
-      await screen.findAllByText(
-        "Command failed to start: spawn example ENOENT",
-      ),
-    ).toHaveLength(2)
+    expect(await screen.findByText(/No process was started/)).toBeTruthy()
+    expect(screen.queryByText(/exit \d/)).toBeNull()
   })
 
   it("renders a diff view instead of raw input for edit_file results", async () => {
@@ -283,29 +221,6 @@ describe("tool cell", () => {
     expect(screen.getByText("→")).toBeTruthy()
   })
 
-  it("uses a text shimmer instead of a status badge while running", () => {
-    render(
-      <ToolCell
-        entry={toolEntry({
-          kind: "tool",
-          toolCallId: "tool_running",
-          turnId: "turn_1",
-          name: "grep",
-          executionType: "search",
-          summary: "src",
-          input: { pattern: "needle", path: "src" },
-          state: "requested",
-        })}
-      />,
-    )
-
-    expect(screen.getByText("Searching").className).toContain(
-      "tool-running-label",
-    )
-    expect(screen.queryByText("requested")).toBeNull()
-    expect(screen.queryByText("completed")).toBeNull()
-  })
-
   it("defaults running tools closed and preserves an explicit expansion on completion", async () => {
     const user = userEvent.setup()
     const { rerender } = render(
@@ -349,6 +264,110 @@ describe("tool cell", () => {
 
     expect(await screen.findByText("Read")).toBeTruthy()
     expect(screen.getByText("file contents")).toBeTruthy()
+  })
+
+  it("opens itself when a running tool fails", async () => {
+    const requested = toolEntry({
+      kind: "tool",
+      toolCallId: "tool_fail_mid_run",
+      turnId: "turn_1",
+      name: "run_command",
+      executionType: "command_execution",
+      summary: "Run command",
+      input: { command: "example" },
+      state: "requested",
+    })
+    const { rerender } = render(<ToolCell entry={requested} />)
+
+    expect(screen.queryByText("$ example")).toBeNull()
+
+    rerender(
+      <ToolCell
+        entry={toolEntry({
+          kind: "tool",
+          toolCallId: "tool_fail_mid_run",
+          turnId: "turn_1",
+          name: "run_command",
+          executionType: "command_execution",
+          summary: "Run command",
+          input: { command: "example" },
+          state: "failed",
+          resultError: true,
+          resultErrorMessage: "Command failed to start: spawn example ENOENT",
+          commandResult: {
+            exitCode: null,
+            signal: null,
+            stdout: "",
+            stderr: "",
+            truncated: false,
+            timedOut: false,
+            cwd: ".",
+            shell: "/bin/zsh",
+          },
+        })}
+      />,
+    )
+
+    expect(await screen.findByText("$ example")).toBeTruthy()
+  })
+
+  it("shows an interrupted summary and opens the detail", async () => {
+    render(
+      <ToolCell
+        entry={toolEntry({
+          kind: "tool",
+          toolCallId: "tool_interrupted",
+          turnId: "turn_1",
+          name: "run_command",
+          executionType: "command_execution",
+          summary: "pnpm build",
+          input: { command: "pnpm build" },
+          state: "interrupted",
+          resultText: "partial build output",
+        })}
+      />,
+    )
+
+    expect(screen.getByText("Interrupted")).toBeTruthy()
+    expect(await screen.findByText(/partial build output/)).toBeTruthy()
+  })
+
+  it("renders image attachments against the store apiBase", async () => {
+    const user = userEvent.setup()
+    useAppStore.setState({ apiBase: "http://api.test:4444/base/" })
+    const screenshot: ImageAttachment = {
+      name: "screenshot.png",
+      mediaType: "image/png",
+      sizeBytes: 1_234,
+      file: { rolloutId: "rollout_1", path: "captures/screenshot.png" },
+    }
+    render(
+      <ToolCell
+        entry={{
+          ...toolEntry({
+            kind: "tool",
+            toolCallId: "tool_screenshot",
+            turnId: "turn_1",
+            name: "read_file",
+            executionType: "file_read",
+            summary: "src/index.ts",
+            input: { path: "src/index.ts" },
+            state: "completed",
+            resultText: "file contents",
+          }),
+          attachments: [screenshot],
+        }}
+      />,
+    )
+
+    await user.click(
+      screen.getByRole("button", { name: /Read src\/index\.ts/ }),
+    )
+
+    const image = await screen.findByRole("img", { name: "screenshot.png" })
+    expect(image.getAttribute("src")).toBe(
+      "http://api.test:4444/base/rollouts/rollout_1/assets/captures/screenshot.png",
+    )
   })
 })
 

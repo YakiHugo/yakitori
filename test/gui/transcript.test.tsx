@@ -7,7 +7,7 @@ import {
   screen,
   within,
 } from "@testing-library/react"
-import { afterEach, beforeEach, expect, it } from "vitest"
+import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import { App } from "../../src/gui/app.tsx"
 import { Transcript } from "../../src/gui/components/transcript.tsx"
 import {
@@ -48,7 +48,42 @@ const entries: ExecutionEntry[] = [
   },
 ]
 
+let frames: Map<number, FrameRequestCallback>
+let nextFrame: number
+function frame(now: number) {
+  act(() => {
+    const callbacks = [...frames.values()]
+    frames.clear()
+    for (const callback of callbacks) callback(now)
+  })
+}
+function scrollGeometry(viewport: HTMLElement) {
+  let top = 0
+  Object.defineProperties(viewport, {
+    scrollTop: {
+      get: () => top,
+      set: (value: number) => {
+        top = Math.max(
+          0,
+          Math.min(viewport.scrollHeight - viewport.clientHeight, value),
+        )
+      },
+      configurable: true,
+    },
+    scrollHeight: { value: 1200, configurable: true },
+    clientHeight: { value: 400, configurable: true },
+  })
+}
+
 beforeEach(() => {
+  frames = new Map()
+  nextFrame = 0
+  vi.spyOn(performance, "now").mockReturnValue(0)
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+    frames.set(++nextFrame, callback)
+    return nextFrame
+  })
+  vi.stubGlobal("cancelAnimationFrame", (id: number) => frames.delete(id))
   useAppStore.setState({
     ...createInitialAppState(),
     selection: { sessionId: "session_1" },
@@ -61,7 +96,11 @@ beforeEach(() => {
     },
   })
 })
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  vi.unstubAllGlobals()
+  vi.restoreAllMocks()
+})
 
 it("shows the final answer and lets the reader expand and collapse earlier activity", () => {
   render(<Transcript />)
@@ -138,7 +177,16 @@ it("keeps failures visible even when the preceding activity is collapsed", () =>
     },
   })
   render(<Transcript />)
-  expect(screen.getByText(/Provider disconnected/)).toBeDefined()
+  fireEvent.click(screen.getByRole("button", { name: "Worked for 1m 49s" }))
+  expect(
+    screen
+      .getByText("Checking the implementation", { selector: "p" })
+      .closest("[aria-hidden]")
+      ?.getAttribute("aria-hidden"),
+  ).toBe("true")
+  expect(
+    screen.getByText(/Provider disconnected/).closest("[aria-hidden]"),
+  ).toBeNull()
 })
 
 it("offers an anchor for every input including inputs received during a turn", () => {
@@ -153,12 +201,48 @@ it("offers an anchor for every input including inputs received during a turn", (
     },
   })
   render(<Transcript />)
-  expect(
-    screen.getByRole("button", { name: "Jump to message 1: First request" }),
-  ).toBeDefined()
+  const first = screen.getByRole("button", {
+    name: "Jump to message 1: First request",
+  })
+  expect(first).toBeDefined()
   expect(
     screen.getByRole("button", { name: "Jump to message 2: Follow-up" }),
   ).toBeDefined()
+
+  const viewport = document.querySelector(
+    "[data-slot=scroll-area-viewport]",
+  ) as HTMLElement
+  scrollGeometry(viewport)
+  viewport.scrollTop = viewport.scrollHeight
+  const rect = (top: number, bottom: number) =>
+    ({
+      top,
+      bottom,
+      left: 0,
+      right: 0,
+      width: 0,
+      height: bottom - top,
+      x: 0,
+      y: top,
+      toJSON: () => ({}),
+    }) as DOMRect
+  let anchor: HTMLElement = screen.getByText("First request", {
+    selector: "p",
+  })
+  while (!anchor.parentElement?.className.includes("conversation-content")) {
+    anchor = anchor.parentElement as HTMLElement
+  }
+  viewport.getBoundingClientRect = () => rect(0, 400)
+  anchor.getBoundingClientRect = () => rect(-100, -60)
+
+  fireEvent.click(first)
+  frame(300)
+  expect(viewport.scrollTop).toBe(676)
+  expect(
+    screen
+      .getByRole("button", { name: "Jump to latest output" })
+      .getAttribute("data-visible"),
+  ).toBe("true")
 })
 
 it("marks only the rail markers whose turns intersect the viewport", () => {
@@ -265,8 +349,18 @@ it("keeps pending approvals outside the collapsed activity", () => {
     },
   })
   render(<Transcript />)
-  expect(screen.getByText("Permission · Write config")).toBeDefined()
-  expect(screen.getByText("awaiting approval")).toBeDefined()
+  expect(
+    screen
+      .getByText("Checking the implementation", { selector: "p" })
+      .closest("[aria-hidden]")
+      ?.getAttribute("aria-hidden"),
+  ).toBe("true")
+  expect(
+    screen.getByText("Permission · Write config").closest("[aria-hidden]"),
+  ).toBeNull()
+  expect(
+    screen.getByText("awaiting approval").closest("[aria-hidden]"),
+  ).toBeNull()
 })
 
 it("promotes only the final answer of a completed turn split by another input", () => {
@@ -341,4 +435,65 @@ it("does not promote inactive text until its turn has completed", () => {
       .closest("[aria-hidden]")
       ?.getAttribute("aria-hidden"),
   ).toBe("false")
+})
+
+it("reveals a jump-to-latest button when the reader scrolls up and returns to the bottom on click", () => {
+  render(<Transcript />)
+  const viewport = document.querySelector(
+    "[data-slot=scroll-area-viewport]",
+  ) as HTMLElement
+  scrollGeometry(viewport)
+  // aria-hidden elements compute an empty accessible name, so the collapsed
+  // button is located by its aria-label attribute instead of its role.
+  const button = document.querySelector(
+    "button[aria-label='Jump to latest output']",
+  ) as HTMLElement
+  expect(button.getAttribute("data-visible")).toBe("false")
+  expect(button.tabIndex).toBe(-1)
+
+  viewport.scrollTop = 0
+  fireEvent.scroll(viewport)
+  expect(button.getAttribute("data-visible")).toBe("true")
+  expect(button.getAttribute("aria-hidden")).toBe("false")
+  expect(button.tabIndex).toBe(0)
+
+  fireEvent.click(button)
+  frame(300)
+  expect(viewport.scrollTop).toBe(800)
+  expect(button.getAttribute("data-visible")).toBe("false")
+  expect(button.tabIndex).toBe(-1)
+})
+
+it("marks a queued input as pending until it is admitted", () => {
+  useAppStore.setState({
+    execution: {
+      ...useAppStore.getState().execution,
+      entries: [
+        ...entries.slice(0, 2),
+        { kind: "user_input", inputId: "input_2", text: "Follow-up", at },
+        ...entries.slice(2),
+      ],
+      queuedInputs: {
+        input_2: { id: "input_2", text: "Follow-up", admittedAt: at },
+      },
+    },
+  })
+  render(<Transcript />)
+  const blockFor = (text: string) => {
+    let node: HTMLElement = screen.getByText(text, { selector: "p" })
+    while (!node.parentElement?.className.includes("conversation-content")) {
+      node = node.parentElement as HTMLElement
+    }
+    return node
+  }
+  expect(within(blockFor("Follow-up")).getByText("queued")).toBeDefined()
+  expect(within(blockFor("First request")).queryByText("queued")).toBeNull()
+
+  act(() =>
+    useAppStore.setState({
+      execution: { ...useAppStore.getState().execution, queuedInputs: {} },
+    }),
+  )
+  expect(screen.queryByText("queued")).toBeNull()
+  expect(screen.getByText("Follow-up", { selector: "p" })).toBeDefined()
 })

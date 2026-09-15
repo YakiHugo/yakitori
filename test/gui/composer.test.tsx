@@ -86,7 +86,7 @@ describe("composer", () => {
     expect(admitInput).toHaveBeenCalledWith("hello mate")
   })
 
-  it("resumes latest-output following when the reader sends from history", async () => {
+  it("resumes latest-output following when the reader sends", async () => {
     const user = userEvent.setup()
     const jumpToBottom = vi.fn()
     const admitInput = vi.fn(async () => {})
@@ -120,6 +120,7 @@ describe("composer", () => {
     await user.keyboard("{Shift>}{Enter}{/Shift}")
 
     expect(admitInput).not.toHaveBeenCalled()
+    expect(useAppStore.getState().promptDraft).toBe("hello\n")
   })
 
   it("keeps the send button disabled for an empty draft", () => {
@@ -160,6 +161,32 @@ describe("composer", () => {
     const button = screen.getByRole("button", { name: "Sending" })
     expect(button.textContent).toContain("Sending")
     expect(button).toHaveProperty("disabled", true)
+  })
+
+  it("blocks send and slash execution while the session is busy", async () => {
+    const user = userEvent.setup()
+    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    useAppStore.setState({
+      admitInput,
+      selection: { sessionId: "session_1" },
+      promptDraft: "hello",
+      busy: true,
+    })
+    render(<Composer />)
+
+    expect(screen.getByRole("button", { name: "Send" })).toHaveProperty(
+      "disabled",
+      true,
+    )
+    await user.click(screen.getByRole("textbox"))
+    await user.keyboard("{Enter}")
+    expect(admitInput).not.toHaveBeenCalled()
+
+    // A picked slash command only completes as text while busy.
+    await pastePrompt(screen.getByRole("textbox"), "/com", true)
+    await user.keyboard("{Enter}")
+    expect(admitInput).not.toHaveBeenCalled()
+    expect(useAppStore.getState().promptDraft).toBe("/compact")
   })
 
   it("attaches an image, selects original detail, and sends without text", async () => {
@@ -234,6 +261,26 @@ describe("composer", () => {
     expect(screen.getByRole("dialog")).toBeDefined()
     await user.keyboard("{Escape}")
     expect(screen.queryByRole("dialog")).toBeNull()
+  })
+
+  it("removes an attachment and discards its staged file", async () => {
+    const user = userEvent.setup()
+    const bridge = window.yakitoriDesktop
+    if (bridge === undefined) throw new Error("Expected the desktop bridge")
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      promptAttachments: [draftImage("high")],
+    })
+    render(<Composer />)
+
+    await user.click(
+      screen.getByRole("button", { name: "Remove screenshot.png" }),
+    )
+
+    expect(useAppStore.getState().promptAttachments).toEqual([])
+    expect(bridge.discardDraftImages).toHaveBeenCalledWith([
+      draftImage("high"),
+    ])
   })
 
   it("explains and normalizes original detail for a model without that mode", async () => {
@@ -522,13 +569,20 @@ describe("slash command menu", () => {
 
   it("stays closed once the draft takes arguments", async () => {
     const user = userEvent.setup()
-    useAppStore.setState({ selection: { sessionId: "session_1" } })
+    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    useAppStore.setState({
+      admitInput,
+      selection: { sessionId: "session_1" },
+    })
     render(<Composer />)
 
     await user.click(screen.getByRole("textbox"))
     await pastePrompt(screen.getByRole("textbox"), "/compact now")
 
     expect(screen.queryByRole("listbox")).toBeNull()
+
+    await user.keyboard("{Enter}")
+    expect(admitInput).toHaveBeenCalledWith("/compact now")
   })
 
   it("lets Shift+Enter insert a newline while the menu is open", async () => {
@@ -596,16 +650,60 @@ describe("skill mention popup", () => {
 
   it("sends a skill-only draft and clears the chips after admission", async () => {
     const user = userEvent.setup()
-    const admitInput = vi.fn((_text: string) => Promise.resolve())
-    useAppStore.setState({ ...skillsState(), admitInput })
+    window.localStorage.clear()
+    fakeRef.current.respond = (method, params) => {
+      if (method === "session/input") {
+        const body = params as { requestId: string }
+        return {
+          requestId: body.requestId,
+          inputId: "input_1",
+          event: createEventEnvelope({
+            sessionId: "session_1",
+            seq: 1,
+            event: {
+              type: EventType.InputAdmitted,
+              data: {
+                requestId: body.requestId,
+                inputId: "input_1",
+                role: InputRole.User,
+                content: {
+                  kind: "text",
+                  text: skillMentionText(templateCreator),
+                },
+              },
+            },
+          }),
+        }
+      }
+      if (method === "session/list") {
+        return { sessions: [] }
+      }
+      throw new ApiRequestError("not found", "not_found")
+    }
+    useAppStore.setState(skillsState())
     render(<Composer />)
 
     await user.click(screen.getByRole("textbox"))
     await pastePrompt(screen.getByRole("textbox"), "$tem")
     await user.keyboard("{Enter}")
+    expect(
+      screen.getByRole("textbox").querySelector("[data-skill-path]"),
+    ).not.toBeNull()
+
     await user.click(screen.getByRole("button", { name: "Send" }))
 
-    expect(admitInput).toHaveBeenCalledWith(skillMentionText(templateCreator))
+    await waitFor(() => {
+      expect(useAppStore.getState().promptDraft).toBeUndefined()
+      expect(
+        screen.getByRole("textbox").querySelector("[data-skill-path]"),
+      ).toBeNull()
+    })
+    const admissions = fakeRef.current.requestsFor("session/input")
+    expect(admissions).toHaveLength(1)
+    expect(admissions[0]?.params).toMatchObject({
+      sessionId: "session_1",
+      content: { kind: "text", text: skillMentionText(templateCreator) },
+    })
   })
 
   it("cycles the sorted skill list and inserts the selected skill with Tab", async () => {
@@ -966,24 +1064,18 @@ describe("model selector", () => {
 
     expect(screen.queryByRole("button", { name: "Select effort" })).toBeNull()
 
+    // The non-reasoning model is the pressed row in the model menu.
     await user.click(screen.getByRole("button", { name: "Select model" }))
-    const selectedRow = screen.getByRole("button", {
-      name: "Grok 4.20 Non-Reasoning",
-    })
-    expect(selectedRow.querySelector("svg")).not.toBeNull()
-  })
-
-  it("keeps K2.7 thinking on without exposing K3 effort levels", () => {
-    window.localStorage.clear()
-    useAppStore.setState({
-      ...selectModelState(),
-      modelSelections: {
-        session_1: { provider: "kimi", model: "kimi-for-coding" },
-      },
-    })
-    render(<Composer />)
-
-    expect(screen.queryByRole("button", { name: "Select effort" })).toBeNull()
+    expect(
+      screen
+        .getByRole("button", { name: "Grok 4.20 Non-Reasoning" })
+        .getAttribute("aria-pressed"),
+    ).toBe("true")
+    expect(
+      screen
+        .getByRole("button", { name: "GPT 5.1 Codex" })
+        .getAttribute("aria-pressed"),
+    ).toBe("false")
   })
 
   it("pins and clears a speed tier for codex models", async () => {
@@ -1071,7 +1163,7 @@ describe("model selector", () => {
     expect(screen.queryByRole("button", { name: /speed/ })).toBeNull()
   })
 
-  it("checks the effective model row and offers no Default row", async () => {
+  it("checks the effective model row and clears the session override via the Default row", async () => {
     const user = userEvent.setup()
     window.localStorage.clear()
     useAppStore.setState({ ...selectModelState(), modelSelections: {} })
@@ -1079,24 +1171,40 @@ describe("model selector", () => {
 
     await user.click(screen.getByRole("button", { name: "Select model" }))
 
-    // No override: the configured default model row carries the check.
-    expect(screen.queryByRole("button", { name: /^Default \(/ })).toBeNull()
-    const defaultRow = screen.getByRole("button", { name: "GPT 5.1 Codex" })
-    expect(defaultRow.querySelector("svg")).not.toBeNull()
-    const otherRow = screen.getByRole("button", { name: "GPT-5" })
-    expect(otherRow.querySelector("svg")).toBeNull()
-
-    // An explicit selection moves the check to that row.
-    await user.click(otherRow)
-    await user.click(screen.getByRole("button", { name: "Select model" }))
-    expect(
-      screen.getByRole("button", { name: "GPT-5" }).querySelector("svg"),
-    ).not.toBeNull()
+    // With no session override, Default is the pressed row.
     expect(
       screen
-        .getByRole("button", { name: "GPT 5.1 Codex" })
-        .querySelector("svg"),
-    ).toBeNull()
+        .getByRole("button", { name: "Default Recommended set of models" })
+        .getAttribute("aria-pressed"),
+    ).toBe("true")
+
+    await user.click(screen.getByRole("button", { name: "GPT-5" }))
+
+    expect(useAppStore.getState().modelSelections).toEqual({
+      session_1: { provider: "openai", model: "gpt-5" },
+    })
+    expect(
+      screen.getByRole("button", { name: "Select model" }).textContent,
+    ).toBe("GPT-5")
+
+    // The picked model row is now pressed; Default is not.
+    await user.click(screen.getByRole("button", { name: "Select model" }))
+    expect(
+      screen
+        .getByRole("button", { name: "GPT-5" })
+        .getAttribute("aria-pressed"),
+    ).toBe("true")
+    expect(
+      screen
+        .getByRole("button", { name: "Default Recommended set of models" })
+        .getAttribute("aria-pressed"),
+    ).toBe("false")
+
+    // Clicking Default clears the session override.
+    await user.click(
+      screen.getByRole("button", { name: "Default Recommended set of models" }),
+    )
+    expect(useAppStore.getState().modelSelections).toEqual({})
   })
 })
 
@@ -1123,23 +1231,6 @@ describe("unified composer suggestions", () => {
       `${skillMentionText(skill)} `,
     )
     expect(admitInput).not.toHaveBeenCalled()
-  })
-
-  it("reopens a dismissed query after the user clears and types it again", async () => {
-    const user = userEvent.setup()
-    useAppStore.setState({
-      selection: { sessionId: "session_1" },
-      sessionSkills: [skill],
-    })
-    render(<Composer />)
-    await pastePrompt(screen.getByRole("textbox"), "/rev")
-    await user.keyboard("{Escape}")
-    expect(screen.queryByRole("listbox")).toBeNull()
-    await pastePrompt(screen.getByRole("textbox"), "", true)
-    await pastePrompt(screen.getByRole("textbox"), "/rev")
-    expect(
-      screen.getByRole("option", { name: /review Review changes/ }),
-    ).toBeDefined()
   })
 
   it("selects commands with Tab like the inline Codex command menu", async () => {

@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { cleanup, render, screen } from "@testing-library/react"
+import { act, cleanup, render, screen } from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { StatusSurface } from "../../src/gui/components/status-surface.tsx"
@@ -26,6 +26,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  vi.useRealTimers()
 })
 
 describe("status surface", () => {
@@ -91,6 +92,39 @@ describe("status surface", () => {
     expect(
       screen.getByRole("button", { name: "Cancel queued input" }),
     ).toHaveProperty("disabled", true)
+  })
+
+  it("routes interrupt clicks through cancelTurn", async () => {
+    const user = userEvent.setup()
+    const cancelTurn = vi.fn((_turnId: string) => Promise.resolve())
+    useAppStore.setState({
+      ...seedActiveTurn(),
+      cancelTurn,
+    })
+    render(
+      <TooltipProvider>
+        <StatusSurface />
+      </TooltipProvider>,
+    )
+
+    await user.click(screen.getByRole("button", { name: "Interrupt" }))
+    expect(cancelTurn).toHaveBeenCalledWith("turn_1")
+  })
+
+  it("advances the elapsed timer while a turn is active", () => {
+    vi.useFakeTimers()
+    useAppStore.setState(seedActiveTurn())
+    render(
+      <TooltipProvider>
+        <StatusSurface />
+      </TooltipProvider>,
+    )
+
+    expect(screen.getByText("· 0s")).toBeDefined()
+    act(() => {
+      vi.advanceTimersByTime(3000)
+    })
+    expect(screen.getByText("· 3s")).toBeDefined()
   })
 })
 

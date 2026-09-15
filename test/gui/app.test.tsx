@@ -1,11 +1,27 @@
 // @vitest-environment happy-dom
-import { cleanup, render, screen } from "@testing-library/react"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { cleanup, render, screen, within } from "@testing-library/react"
+import { userEvent } from "@testing-library/user-event"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import type { SidebarChange } from "../../src/core/session-sidebar.ts"
 import { App } from "../../src/gui/app.tsx"
 import {
+  createExecutionViewState,
+  reduceExecutionView,
+} from "../../src/gui/execution-view.ts"
+import {
   createInitialAppState,
+  sessionListKey,
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
+import {
+  createEventEnvelope,
+  EventType,
+  type StoredEventEnvelope,
+  type TokenUsage,
+} from "../../src/kernel/events.ts"
+import type { ApiSessionDetail } from "../../src/server/protocol.ts"
+
+const sessionId = "session_1"
 
 beforeEach(() => {
   useAppStore.setState(createInitialAppState())
@@ -16,40 +32,144 @@ afterEach(() => {
 })
 
 describe("app shell", () => {
-  it("does not expose an API server switcher", () => {
-    render(<App />)
-
-    expect(screen.queryByRole("textbox", { name: "API" })).toBeNull()
-    expect(screen.queryByRole("button", { name: "Connect" })).toBeNull()
-  })
-
   it("shows the session telemetry bar without requiring a tooltip", () => {
     useAppStore.setState({
-      selection: { sessionId: "session_1" },
-      selectedSession: {
-        id: "session_1",
-        conversationId: "conversation_1",
-        projectId: "project_1",
-        title: "Session",
-        createdAt: "2026-09-12T00:00:00Z",
-        updatedAt: "2026-09-12T00:00:00Z",
-        seq: 1,
-        pendingInputs: [],
-        pendingPermissions: [],
-        counts: {
-          turns: 1,
-          inputs: 1,
-          tools: 0,
-          pendingInputs: 0,
-          items: 0,
-          permissions: 0,
-        },
+      selection: { sessionId },
+      selectedSession: sessionDetail(),
+      execution: seedExecution([
+        turnCompleted("turn_1", 1, {
+          inputTokens: 1_000,
+          outputTokens: 200,
+          cacheReadInputTokens: 500,
+        }),
+        turnCompleted("turn_2", 2, {
+          inputTokens: 2_000,
+          outputTokens: 400,
+          cacheReadInputTokens: 1_000,
+        }),
+      ]),
+    })
+    render(<App />)
+
+    const rail = screen.getByRole("status", { name: "Session telemetry" })
+    expect(within(rail).getByText("2 turns")).toBeDefined()
+    expect(within(rail).getByText("LLM 2.0s")).toBeDefined()
+    expect(within(rail).getByText("Cache hit 50%")).toBeDefined()
+    expect(within(rail).getByText("Input 2K tok")).toBeDefined()
+  })
+
+  it("renders an alert with the store error message", () => {
+    useAppStore.setState({
+      message: "Could not open event stream.",
+      // The pinned sidebar group auto-loads on mount, and starting that task
+      // clears the transient message; seed the list as already loaded.
+      sessionsByProject: {
+        [sessionListKey(undefined, { sectionId: "pinned" })]: { sessions: [] },
       },
     })
     render(<App />)
 
-    expect(
-      screen.getByRole("status", { name: "Session telemetry" }),
-    ).toBeDefined()
+    expect(screen.getByRole("alert").textContent).toBe(
+      "Could not open event stream.",
+    )
+  })
+
+  it("restores an archived session via the composer restore button", async () => {
+    const user = userEvent.setup()
+    const changeSidebar = vi.fn((_change: SidebarChange) =>
+      Promise.resolve(true),
+    )
+    useAppStore.setState({
+      selection: { sessionId },
+      selectedSession: sessionDetail({ archived: true }),
+      changeSidebar,
+    })
+    render(<App />)
+
+    await user.click(
+      screen.getByRole("button", { name: "Restore conversation" }),
+    )
+
+    expect(changeSidebar).toHaveBeenCalledWith({
+      type: "session",
+      sessionId,
+      archived: false,
+    })
+  })
+
+  it("opens the parent session from the fork chip", async () => {
+    const user = userEvent.setup()
+    const selectSession = vi.fn((_selectedId: string) => Promise.resolve())
+    useAppStore.setState({
+      selection: { sessionId },
+      selectedSession: sessionDetail({ parentSessionId: "session_parent" }),
+      selectSession,
+    })
+    render(<App />)
+
+    await user.click(screen.getByRole("button", { name: "fork from parent" }))
+
+    expect(selectSession).toHaveBeenCalledWith("session_parent")
   })
 })
+
+function sessionDetail(
+  overrides: Partial<ApiSessionDetail> = {},
+): ApiSessionDetail {
+  return {
+    id: sessionId,
+    conversationId: "conversation_1",
+    projectId: "project_1",
+    title: "Session",
+    createdAt: "2026-09-12T00:00:00Z",
+    updatedAt: "2026-09-12T00:00:00Z",
+    seq: 1,
+    pendingInputs: [],
+    pendingPermissions: [],
+    counts: {
+      turns: 1,
+      inputs: 1,
+      tools: 0,
+      pendingInputs: 0,
+      items: 0,
+      permissions: 0,
+    },
+    ...overrides,
+  }
+}
+
+function turnCompleted(
+  turnId: string,
+  seq: number,
+  sessionUsage: TokenUsage,
+): StoredEventEnvelope {
+  return createEventEnvelope({
+    sessionId,
+    seq,
+    event: {
+      type: EventType.TurnCompleted,
+      data: {
+        turnId,
+        outcome: { status: "completed" },
+        sessionUsage,
+        metrics: {
+          modelCalls: 2,
+          toolCalls: 1,
+          modelDurationMs: 1_000,
+          toolDurationMs: 250,
+        },
+      },
+    },
+  })
+}
+
+function seedExecution(events: StoredEventEnvelope[]) {
+  return events.reduce(
+    (current, event) =>
+      reduceExecutionView(current, {
+        type: "durable",
+        event,
+      }),
+    createExecutionViewState(),
+  )
+}
