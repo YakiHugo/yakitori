@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { cleanup, render, screen } from "@testing-library/react"
+import { act, cleanup, render, screen, within } from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { ApprovalBar } from "../../src/gui/components/approval-bar.tsx"
@@ -24,11 +24,6 @@ afterEach(() => {
 })
 
 describe("approval bar", () => {
-  it("renders nothing when no permission is pending", () => {
-    const { container } = render(<ApprovalBar />)
-    expect(container.firstChild).toBeNull()
-  })
-
   it("routes allow and deny clicks through the store action", async () => {
     const user = userEvent.setup()
     const resolvePermission = vi.fn(
@@ -78,6 +73,41 @@ describe("approval bar", () => {
   })
 
   it("disappears once the permission is resolved", () => {
+    const requested: LiveSessionEvent = {
+      type: "permission.requested",
+      sessionId,
+      permissionRequestId: "permission_1",
+      turnId: "turn_1",
+      toolCallId: "tool_1",
+      action: "run_command",
+      createdAt: "2026-08-25T00:00:00.000Z",
+    }
+    useAppStore.setState({ execution: seedExecution([requested]) })
+    const { container } = render(<ApprovalBar />)
+
+    expect(screen.getByRole("button", { name: "Allow" })).not.toBeNull()
+
+    act(() => {
+      useAppStore.setState({
+        execution: seedExecution([
+          requested,
+          {
+            type: "permission.resolved",
+            sessionId,
+            permissionRequestId: "permission_1",
+            turnId: "turn_1",
+            outcome: "allow",
+            createdAt: "2026-08-25T00:00:01.000Z",
+          },
+        ]),
+      })
+    })
+
+    expect(screen.queryByRole("button", { name: "Allow" })).toBeNull()
+    expect(container.firstChild).toBeNull()
+  })
+
+  it("disables actions while the permission resolution is in flight", () => {
     useAppStore.setState({
       execution: seedExecution([
         {
@@ -89,18 +119,68 @@ describe("approval bar", () => {
           action: "run_command",
           createdAt: "2026-08-25T00:00:00.000Z",
         },
+      ]),
+      inFlightActions: new Set(["permission:permission_1"]),
+    })
+    render(<ApprovalBar />)
+
+    expect(screen.getByRole("button", { name: "Allow" })).toHaveProperty(
+      "disabled",
+      true,
+    )
+    expect(screen.getByRole("button", { name: "Deny" })).toHaveProperty(
+      "disabled",
+      true,
+    )
+  })
+
+  it("resolves only the clicked request when multiple permissions are pending", async () => {
+    const user = userEvent.setup()
+    const resolvePermission = vi.fn(
+      (
+        _turnId: string,
+        _permissionRequestId: string,
+        _behavior: "allow" | "deny",
+      ) => Promise.resolve(),
+    )
+    useAppStore.setState({
+      execution: seedExecution([
         {
-          type: "permission.resolved",
+          type: "permission.requested",
           sessionId,
           permissionRequestId: "permission_1",
           turnId: "turn_1",
-          outcome: "allow",
+          toolCallId: "tool_1",
+          action: "read_file",
+          subject: "/tmp/first.log",
+          createdAt: "2026-08-25T00:00:00.000Z",
+        },
+        {
+          type: "permission.requested",
+          sessionId,
+          permissionRequestId: "permission_2",
+          turnId: "turn_2",
+          toolCallId: "tool_2",
+          action: "read_file",
+          subject: "/tmp/second.log",
           createdAt: "2026-08-25T00:00:01.000Z",
         },
       ]),
+      resolvePermission,
     })
-    const { container } = render(<ApprovalBar />)
-    expect(container.firstChild).toBeNull()
+    render(<ApprovalBar />)
+
+    const secondRow = screen.getByRole("group", {
+      name: "Permission · read_file: /tmp/second.log",
+    })
+
+    await user.click(within(secondRow).getByRole("button", { name: "Allow" }))
+    expect(resolvePermission).toHaveBeenCalledTimes(1)
+    expect(resolvePermission).toHaveBeenCalledWith(
+      "turn_2",
+      "permission_2",
+      "allow",
+    )
   })
 })
 

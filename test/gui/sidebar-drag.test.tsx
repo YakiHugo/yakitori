@@ -111,3 +111,99 @@ it("cancels with Escape and preserves ordinary row clicks below the drag thresho
     document.documentElement.classList.contains("sidebar-is-dragging"),
   ).toBe(false)
 })
+
+it("dropping on the lower half of a row moves after it", async () => {
+  useAppStore.setState({
+    sessionsByProject: {
+      "sidebar:section:pinned": { sessions: [] },
+      "sidebar:section:section_work": {
+        sessions: ["a", "b", "c"].map((id) => ({
+          id: `session_${id}`,
+          navigationId: `session_${id}`,
+          conversationId: `conversation_${id}`,
+          seq: 1,
+          title: `Task ${id}`,
+          sectionId: "section_work",
+          createdAt: "2026-09-13T00:00:00Z",
+          updatedAt: "2026-09-13T00:00:00Z",
+        })),
+      },
+    },
+  })
+  render(<App />)
+  const source = screen.getByRole("button", { name: "Task c" })
+  const target = screen.getByRole("button", { name: "Task a" })
+  const row = target.parentElement?.parentElement as HTMLElement
+  vi.spyOn(document, "elementFromPoint").mockReturnValue(target)
+  vi.spyOn(row, "getBoundingClientRect").mockReturnValue(
+    new DOMRect(0, 40, 250, 32),
+  )
+  Object.defineProperty(row, "offsetHeight", { value: 32, configurable: true })
+  fireEvent.pointerDown(source, {
+    button: 0,
+    pointerId: 1,
+    pointerType: "mouse",
+    clientX: 40,
+    clientY: 120,
+  })
+  fireEvent.pointerMove(window, { pointerId: 1, clientX: 40, clientY: 64 })
+  await waitFor(() =>
+    expect(document.querySelector(".sidebar-drag-ghost")).not.toBeNull(),
+  )
+  expect(move).not.toHaveBeenCalled()
+  fireEvent.pointerUp(window, { pointerId: 1, clientX: 40, clientY: 64 })
+  expect(move).toHaveBeenCalledExactlyOnceWith({
+    type: "move-session",
+    sessionId: "session_c",
+    sectionId: "section_work",
+    beforeSessionId: "session_b",
+  })
+  expect(document.querySelector(".sidebar-drag-ghost")).toBeNull()
+})
+
+it("ignores pointer down while a sidebar update is in flight", async () => {
+  useAppStore.setState({ inFlightActions: new Set(["sidebar-update"]) })
+  render(<App />)
+  const source = screen.getByRole("button", { name: "Task b" })
+  const target = screen.getByRole("button", { name: "Task a" })
+  fireEvent.pointerDown(source, {
+    button: 0,
+    pointerId: 1,
+    pointerType: "mouse",
+    clientX: 40,
+    clientY: 80,
+  })
+  fireEvent.pointerMove(window, { pointerId: 1, clientX: 40, clientY: 40 })
+  expect(document.querySelector(".sidebar-drag-ghost")).toBeNull()
+  expect(
+    document.documentElement.classList.contains("sidebar-is-dragging"),
+  ).toBe(false)
+  fireEvent.pointerUp(window, { pointerId: 1, clientX: 40, clientY: 40 })
+  fireEvent.click(source)
+  expect(move).not.toHaveBeenCalled()
+  expect(select).toHaveBeenCalledTimes(1)
+  useAppStore.setState({ inFlightActions: new Set() })
+  vi.spyOn(document, "elementFromPoint").mockReturnValue(target)
+  vi.spyOn(
+    target.parentElement?.parentElement as HTMLElement,
+    "getBoundingClientRect",
+  ).mockReturnValue(new DOMRect(0, 40, 250, 32))
+  fireEvent.pointerDown(source, {
+    button: 0,
+    pointerId: 1,
+    pointerType: "mouse",
+    clientX: 40,
+    clientY: 80,
+  })
+  fireEvent.pointerMove(window, { pointerId: 1, clientX: 40, clientY: 40 })
+  await waitFor(() =>
+    expect(document.querySelector(".sidebar-drag-ghost")).not.toBeNull(),
+  )
+  fireEvent.pointerUp(window, { pointerId: 1, clientX: 40, clientY: 40 })
+  expect(move).toHaveBeenCalledExactlyOnceWith({
+    type: "move-session",
+    sessionId: "session_b",
+    sectionId: "section_work",
+    beforeSessionId: "session_a",
+  })
+})

@@ -62,7 +62,10 @@ export default defineConfig(({ mode }) => {
     // route can never silently 404 behind a missing proxy entry.
     test: {
       include: ["test/**/*.test.ts", "test/**/*.test.tsx"],
-      setupFiles: ["test/gui/setup-localstorage.ts"],
+      setupFiles: [
+        "test/gui/setup-localstorage.ts",
+        "test/gui/setup-app-store.ts",
+      ],
       restoreMocks: true,
     },
   }

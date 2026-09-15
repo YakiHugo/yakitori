@@ -114,6 +114,39 @@ it("does not treat inline editing keyboard navigation as transcript scrolling", 
   act(() => resize())
   expect(viewport.scrollTop).toBe(1000)
 })
+it("jumpToElement scrolls to the target and stops following growth", () => {
+  render(<Fixture />)
+  const viewport = geometry()
+  const target = document.createElement("div")
+  scroll.contentRef.current?.append(target)
+  Object.defineProperty(target, "getBoundingClientRect", {
+    value: () => ({ top: 600 - viewport.scrollTop }),
+  })
+  act(() => scroll.jumpToElement(target))
+  frame(300)
+  expect(viewport.scrollTop).toBe(576)
+  expect(scroll.atBottom).toBe(false)
+  Object.defineProperty(viewport, "scrollHeight", { value: 1400 })
+  act(() => resize())
+  expect(viewport.scrollTop).toBe(576)
+})
+it("arrow up on the transcript detaches from the bottom", () => {
+  render(<Fixture />)
+  const viewport = geometry()
+  act(() => resize())
+  fireEvent.keyDown(viewport, { key: "ArrowUp" })
+  viewport.scrollTop = 700
+  fireEvent.scroll(viewport)
+  Object.defineProperty(viewport, "scrollHeight", { value: 1400 })
+  act(() => resize())
+  expect(viewport.scrollTop).toBe(700)
+  viewport.scrollTop = 1000
+  fireEvent.scroll(viewport)
+  fireEvent.keyDown(viewport, { key: "ArrowDown" })
+  Object.defineProperty(viewport, "scrollHeight", { value: 1600 })
+  act(() => resize())
+  expect(viewport.scrollTop).toBe(1200)
+})
 it("animates a jump to the current bottom and lets user scrolling cancel it", () => {
   render(<Fixture />)
   const viewport = geometry()
