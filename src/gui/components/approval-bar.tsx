@@ -21,8 +21,13 @@ export function ApprovalBar() {
           `permission:${entry.permissionRequestId}`,
         )
         return (
-          <div
+          <fieldset
             key={entry.permissionRequestId}
+            aria-label={
+              entry.subject === undefined
+                ? `Permission · ${entry.action}`
+                : `Permission · ${entry.action}: ${entry.subject}`
+            }
             className="flex items-center gap-3"
           >
             <ShieldAlert className="size-4 shrink-0 text-amber-600" />
@@ -67,7 +72,7 @@ export function ApprovalBar() {
             >
               Deny
             </Button>
-          </div>
+          </fieldset>
         )
       })}
     </div>

@@ -173,6 +173,7 @@ export function ModelSelector() {
           </div>
           <button
             type="button"
+            aria-pressed={sessionCurrent === undefined}
             onClick={() => {
               setModelSelection(sessionId, undefined)
               setMenu(undefined)
@@ -186,7 +187,7 @@ export function ModelSelector() {
               </span>
             </span>
             {sessionCurrent === undefined ? (
-              <Check className="size-4 shrink-0" />
+              <Check aria-hidden="true" className="size-4 shrink-0" />
             ) : null}
           </button>
           {[...availableProviders]
@@ -205,22 +206,27 @@ export function ModelSelector() {
                       {provider.name}
                     </div>
                   ) : null}
-                  {provider.models.map((model) => (
-                    <button
-                      key={`${provider.name}/${model.id}`}
-                      type="button"
-                      onClick={() => selectModel(provider.name, model.id)}
-                      className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-accent"
-                    >
-                      <span className="min-w-0 flex-1 truncate">
-                        {model.displayName ?? model.id}
-                      </span>
-                      {effective?.provider === provider.name &&
-                      effective.model === model.id ? (
-                        <Check className="size-4 shrink-0" />
-                      ) : null}
-                    </button>
-                  ))}
+                  {provider.models.map((model) => {
+                    const selected =
+                      effective?.provider === provider.name &&
+                      effective.model === model.id
+                    return (
+                      <button
+                        key={`${provider.name}/${model.id}`}
+                        type="button"
+                        aria-pressed={selected}
+                        onClick={() => selectModel(provider.name, model.id)}
+                        className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-accent"
+                      >
+                        <span className="min-w-0 flex-1 truncate">
+                          {model.displayName ?? model.id}
+                        </span>
+                        {selected ? (
+                          <Check aria-hidden="true" className="size-4 shrink-0" />
+                        ) : null}
+                      </button>
+                    )
+                  })}
                 </div>
               ),
             )}
