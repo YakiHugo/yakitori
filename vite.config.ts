@@ -28,15 +28,21 @@ export default defineConfig(({ mode }) => {
         },
         outDir: "dist/desktop",
         rollupOptions: {
-          // Native addons must stay external so electron-builder can rebuild
-          // and package them for Electron's Node ABI.
-          external: ["electron", "fs-ext", "node-pty", "sharp", /^node:/],
+          // Native addons and executable packages resolve real files at runtime.
+          external: [
+            "electron",
+            "fs-ext",
+            "node-pty",
+            "sharp",
+            "@vscode/ripgrep",
+            /^node:/,
+          ],
         },
         sourcemap: true,
       },
       ssr: {
         // SSR builds externalize dependencies by default; the desktop bundle
-        // inlines every npm dependency except electron and node builtins.
+        // inlines dependencies except the explicit runtime externals above.
         noExternal: true,
       },
       test: {

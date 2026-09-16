@@ -315,7 +315,8 @@ function shouldRetry(
     failure.kind === "connection_failed" ||
     failure.kind === "rate_limited" ||
     failure.kind === "server_error" ||
-    failure.kind === "stream_disconnected"
+    failure.kind === "stream_disconnected" ||
+    failure.kind === "idle_timeout"
   )
 }
 

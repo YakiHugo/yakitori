@@ -8,12 +8,39 @@ import {
 } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { createGlobTool } from "../../../src/runtime/tools/glob.ts"
 import { createGrepTool } from "../../../src/runtime/tools/grep.ts"
 import { resolveWorkspaceRoot } from "../../../src/runtime/tools/path-policy.ts"
 
 describe("workspace search tools", () => {
+  it("runs grep and glob without a user-installed executable on PATH", async () => {
+    await withWorkspace(async (workspace) => {
+      await writeFile(join(workspace, "needle.ts"), "const needle = 1\n")
+      vi.stubEnv("PATH", "")
+      try {
+        const grep = await createGrepTool().execute(
+          { pattern: "needle", output_mode: "content" },
+          { workspaceRoot: workspace },
+        )
+        expect(grep).toMatchObject({
+          ok: true,
+          output: { count: 1, locations: [{ path: "needle.ts", line: 1 }] },
+        })
+        const glob = await createGlobTool().execute(
+          { pattern: "*.ts" },
+          { workspaceRoot: workspace },
+        )
+        expect(glob).toMatchObject({
+          ok: true,
+          output: { paths: ["needle.ts"] },
+        })
+      } finally {
+        vi.unstubAllEnvs()
+      }
+    })
+  })
+
   it("greps content with bounded ripgrep output and respects gitignore", async () => {
     await withWorkspace(async (workspace) => {
       await writeFile(join(workspace, "alpha.ts"), "const Needle = 1\n")

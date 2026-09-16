@@ -167,11 +167,11 @@ export function createUnifiedExecTools(
           description:
             "True allocates a PTY; false or omitted uses plain pipes.",
         },
-        "yield-time_ms": {
+        yield_time_ms: {
           type: "integer",
           minimum: MIN_YIELD_MS,
           maximum: MAX_YIELD_MS,
-          description: `Wait before yielding output. Defaults to ${DEFAULT_EXEC_YIELD_MS} ms.`,
+          description: `Wait before yielding output, from ${MIN_YIELD_MS} to ${MAX_YIELD_MS} ms. Defaults to ${DEFAULT_EXEC_YIELD_MS} ms. Longer commands return a session_id; continue with write_stdin.`,
         },
         max_output_tokens: {
           type: "integer",
@@ -263,7 +263,7 @@ export function createUnifiedExecTools(
           description:
             "Characters to write. Defaults to empty, which polls without writing.",
         },
-        "yield-time_ms": {
+        yield_time_ms: {
           type: "integer",
           minimum: MIN_YIELD_MS,
           maximum: MAX_EMPTY_POLL_MS,
@@ -786,7 +786,7 @@ function parseExecInput(
     return invalid("exec_command tty must be a boolean.")
   }
   const yieldTimeMs = integerField(
-    input["yield-time_ms"],
+    input.yield_time_ms,
     DEFAULT_EXEC_YIELD_MS,
     MIN_YIELD_MS,
     MAX_YIELD_MS,
@@ -800,7 +800,7 @@ function parseExecInput(
     return invalid(`exec_command ${maxOutputTokens.message}`)
   const unknown = Object.keys(input).filter(
     (name) =>
-      !["cmd", "workdir", "tty", "yield-time_ms", "max_output_tokens"].includes(
+      !["cmd", "workdir", "tty", "yield_time_ms", "max_output_tokens"].includes(
         name,
       ),
   )
@@ -836,7 +836,7 @@ function parseWriteInput(
   }
   const chars = input.chars ?? ""
   const yieldTimeMs = integerField(
-    input["yield-time_ms"],
+    input.yield_time_ms,
     chars.length === 0 ? DEFAULT_EMPTY_POLL_MS : MIN_YIELD_MS,
     MIN_YIELD_MS,
     MAX_EMPTY_POLL_MS,
@@ -850,7 +850,7 @@ function parseWriteInput(
     return invalid(`write_stdin ${maxOutputTokens.message}`)
   const unknown = Object.keys(input).filter(
     (name) =>
-      !["session_id", "chars", "yield-time_ms", "max_output_tokens"].includes(
+      !["session_id", "chars", "yield_time_ms", "max_output_tokens"].includes(
         name,
       ),
   )
@@ -884,7 +884,7 @@ function integerField(
     ? { ok: true, value: resolved }
     : {
         ok: false,
-        message: `yield-time-ms must be an integer from ${minimum} to ${maximum}.`,
+        message: `yield_time_ms must be an integer from ${minimum} to ${maximum}.`,
       }
 }
 

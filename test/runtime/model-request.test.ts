@@ -33,10 +33,15 @@ describe("model request runtime", () => {
     expect(sleeps).toEqual([500])
   })
 
-  it("does not retry after visible output", async () => {
-    const terminalFailure = failure("stream_disconnected")
+  it.each([
+    ["snapshot", "stream_disconnected"],
+    ["reasoning_snapshot", "stream_disconnected"],
+    ["snapshot", "idle_timeout"],
+    ["reasoning_snapshot", "idle_timeout"],
+  ] as const)("does not retry %s output followed by %s", async (type, kind) => {
+    const terminalFailure = failure(kind)
     const provider = scriptedStream([
-      [{ type: "snapshot", text: "partial" }, terminalFailure],
+      [{ type, text: "partial" }, terminalFailure],
       [success],
     ])
     const stream = createModelRequestStream(provider.stream, {
@@ -45,11 +50,11 @@ describe("model request runtime", () => {
     })
 
     expect(await collect(stream)).toEqual([
-      { type: "snapshot", text: "partial" },
+      { type, text: "partial" },
       expect.objectContaining({
         type: "failure",
         failure: expect.objectContaining({
-          kind: "stream_disconnected",
+          kind,
           attempt: 1,
           outputObserved: true,
           retryDecision: "fail",
@@ -113,9 +118,15 @@ describe("model request runtime", () => {
     ])
   })
 
-  it("times out a half-open attempt and aborts its transport", async () => {
+  it("aborts a stalled transport and recovers before visible output", async () => {
     let transportAborted = false
+    let attempts = 0
     const halfOpen: StreamFn = async function* (request) {
+      if (++attempts === 2) {
+        expect(transportAborted).toBe(true)
+        yield success
+        return
+      }
       await new Promise<void>((resolve) => {
         request.signal?.addEventListener(
           "abort",
@@ -129,17 +140,84 @@ describe("model request runtime", () => {
     }
     const stream = createModelRequestStream(halfOpen, {
       wireApi: "unknown",
-      maxAttempts: 1,
+      maxAttempts: 2,
       streamIdleTimeoutMs: 5,
+      sleep: async () => {},
+    })
+
+    expect(await collect(stream)).toEqual([
+      expect.objectContaining({
+        type: "retry",
+        failure: expect.objectContaining({
+          kind: "idle_timeout",
+          outputObserved: false,
+        }),
+      }),
+      success,
+    ])
+    expect(transportAborted).toBe(true)
+    expect(attempts).toBe(2)
+  })
+
+  it("stops repeated idle timeouts at the request attempt budget", async () => {
+    const provider = scriptedStream([
+      [failure("idle_timeout")],
+      [failure("idle_timeout")],
+      [success],
+    ])
+    const stream = createModelRequestStream(provider.stream, {
+      wireApi: "unknown",
+      maxAttempts: 2,
+      sleep: async () => {},
+    })
+
+    expect(await collect(stream)).toEqual([
+      expect.objectContaining({ type: "retry", nextAttempt: 2 }),
+      expect.objectContaining({
+        type: "failure",
+        failure: expect.objectContaining({
+          kind: "idle_timeout",
+          attempt: 2,
+          maxAttempts: 2,
+          retryDecision: "fail",
+        }),
+      }),
+    ])
+    expect(provider.calls()).toBe(2)
+  })
+
+  it("honors a server retry veto on an idle timeout", async () => {
+    const event = failure("idle_timeout")
+    const provider = scriptedStream([
+      [{ ...event, failure: { ...event.failure, serverShouldRetry: false } }],
+      [success],
+    ])
+    const stream = createModelRequestStream(provider.stream, {
+      wireApi: "unknown",
     })
 
     expect(await collect(stream)).toEqual([
       expect.objectContaining({
         type: "failure",
-        failure: expect.objectContaining({ kind: "idle_timeout" }),
+        failure: expect.objectContaining({ retryDecision: "fail" }),
       }),
     ])
-    expect(transportAborted).toBe(true)
+    expect(provider.calls()).toBe(1)
+  })
+
+  it("does not start another attempt when cancelled during retry backoff", async () => {
+    const controller = new AbortController()
+    const provider = scriptedStream([[failure("idle_timeout")], [success]])
+    const stream = createModelRequestStream(provider.stream, {
+      wireApi: "unknown",
+      sleep: async () => controller.abort(),
+    })
+
+    expect(await collect(stream, controller.signal)).toEqual([
+      expect.objectContaining({ type: "retry" }),
+      { type: "cancelled" },
+    ])
+    expect(provider.calls()).toBe(1)
   })
 
   it("reports cancellation only when the caller aborts", async () => {
@@ -252,7 +330,9 @@ const success: ModelStreamEvent = {
   },
 }
 
-function failure(kind: ModelFailure["kind"]): ModelStreamEvent {
+function failure(
+  kind: ModelFailure["kind"],
+): Extract<ModelStreamEvent, { type: "failure" }> {
   return {
     type: "failure",
     failure: {
