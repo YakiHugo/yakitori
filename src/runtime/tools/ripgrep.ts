@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process"
+import { rgPath } from "@vscode/ripgrep"
 
 export type RipgrepRecordStopReason =
   | "aborted"
@@ -27,7 +28,9 @@ export async function runRipgrepRecords(
   },
 ): Promise<RipgrepRecordResult> {
   return new Promise((resolve) => {
-    const child = spawn("rg", args, {
+    // Search owns its executable, independent of the desktop's PATH or the
+    // user's shell. Keep the package external and unpacked in desktop builds.
+    const child = spawn(rgPath, args, {
       cwd: input.cwd,
       stdio: ["ignore", "pipe", "pipe"],
     })
@@ -84,12 +87,15 @@ export async function runRipgrepRecords(
       stderr.push(accepted)
       stderrBytes += accepted.byteLength
     })
-    child.on("error", () => {
+    child.on("error", (error: NodeJS.ErrnoException) => {
       if (settled) return
       settled = true
       clearTimeout(timer)
       input.signal?.removeEventListener("abort", abort)
-      resolve({ ok: false, message: "ripgrep could not be launched." })
+      resolve({
+        ok: false,
+        message: `Could not launch ripgrep at ${rgPath}${error.code === undefined ? "" : ` (${error.code})`}: ${error.message}`,
+      })
     })
     child.on("close", (code) => {
       if (settled) return

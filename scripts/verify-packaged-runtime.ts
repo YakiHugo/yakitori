@@ -26,8 +26,17 @@ await access(runtimeDirectory)
 
 await new Promise<void>((resolve, reject) => {
   const probe = [
-    'Promise.all([import("fs-ext"), import("node-pty"), import("sharp")])',
-    ".then(async ([, pty, sharp]) => {",
+    'Promise.all([import("fs-ext"), import("node-pty"), import("sharp"), import("@vscode/ripgrep")])',
+    ".then(async ([, pty, sharp, { rgPath }]) => {",
+    'const { execFileSync } = await import("node:child_process");',
+    'const { mkdtemp, writeFile, rm } = await import("node:fs/promises");',
+    'const { tmpdir } = await import("node:os");',
+    'const { join } = await import("node:path");',
+    'const fixture = await mkdtemp(join(tmpdir(), "yakitori-packaged-search-"));',
+    'try { await writeFile(join(fixture, "needle.txt"), "packaged-search-ok\\n");',
+    'const result = execFileSync(rgPath, ["--no-config", "--no-heading", "-n", "--", "packaged-search-ok", "needle.txt"], { cwd: fixture, env: { PATH: "" }, encoding: "utf8" });',
+    'if (result !== "1:packaged-search-ok\\n") throw new Error("Packaged search failed: " + result);',
+    "} finally { await rm(fixture, { recursive: true, force: true }); }",
     'await sharp.default({ create: { width: 16, height: 16, channels: 3, background: "red" } }).resize(8, 8).png().toBuffer();',
     "const spawnPty = pty.spawn ?? pty.default?.spawn;",
     'if (spawnPty === undefined) throw new Error("node-pty spawn export missing");',

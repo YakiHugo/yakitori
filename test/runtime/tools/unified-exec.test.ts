@@ -19,12 +19,22 @@ describe("unified exec tools", () => {
     expect(execCommand).toMatchObject({
       toolName: { name: "exec_command" },
       supportsParallelToolCalls: true,
-      inputSchema: { required: ["cmd"] },
+      inputSchema: {
+        required: ["cmd"],
+        properties: {
+          yield_time_ms: { type: "integer", minimum: 250, maximum: 30_000 },
+        },
+      },
     })
     expect(writeStdin).toMatchObject({
       toolName: { name: "write_stdin" },
       supportsParallelToolCalls: true,
-      inputSchema: { required: ["session_id"] },
+      inputSchema: {
+        required: ["session_id"],
+        properties: {
+          yield_time_ms: { type: "integer", minimum: 250, maximum: 300_000 },
+        },
+      },
     })
   })
 
@@ -33,7 +43,7 @@ describe("unified exec tools", () => {
     if (execCommand === undefined) throw new Error("missing exec_command")
 
     const result = await execCommand.execute(
-      { cmd: "printf short", "yield-time_ms": 250 },
+      { cmd: "printf short", yield_time_ms: 250 },
       context,
     )
 
@@ -53,7 +63,7 @@ describe("unified exec tools", () => {
     const initial = await execCommand.execute(
       {
         cmd: "printf first; sleep 0.35; printf second",
-        "yield-time_ms": 250,
+        yield_time_ms: 250,
       },
       context,
     )
@@ -62,7 +72,7 @@ describe("unified exec tools", () => {
     expect(initialOutput.output).toBe("first")
     expect(initialOutput.session_id).toEqual(expect.any(Number))
     const completed = await writeStdin.execute(
-      { session_id: initialOutput.session_id, "yield-time_ms": 5_000 },
+      { session_id: initialOutput.session_id, yield_time_ms: 5_000 },
       context,
     )
 
@@ -83,7 +93,7 @@ describe("unified exec tools", () => {
         {
           cmd: "read value; printf 'got:%s' \"$value\"",
           tty: true,
-          "yield-time_ms": 250,
+          yield_time_ms: 250,
         },
         context,
       ),
@@ -92,7 +102,7 @@ describe("unified exec tools", () => {
       {
         session_id: initial.session_id,
         chars: "hello\n",
-        "yield-time_ms": 250,
+        yield_time_ms: 250,
       },
       context,
     )
@@ -104,7 +114,7 @@ describe("unified exec tools", () => {
             await writeStdin.execute(
               {
                 session_id: interactionOutput.session_id,
-                "yield-time_ms": 5_000,
+                yield_time_ms: 5_000,
               },
               context,
             ),
@@ -122,7 +132,7 @@ describe("unified exec tools", () => {
     }
     const initial = requireOutput(
       await execCommand.execute(
-        { cmd: "sleep 10", "yield-time_ms": 250 },
+        { cmd: "sleep 10", yield_time_ms: 250 },
         context,
       ),
     )
@@ -138,7 +148,7 @@ describe("unified exec tools", () => {
         {
           session_id: initial.session_id,
           chars: "\u0003",
-          "yield-time_ms": 5_000,
+          yield_time_ms: 5_000,
         },
         context,
       ),
@@ -157,7 +167,7 @@ describe("unified exec tools", () => {
         {
           cmd: 'while IFS= read -r value; do printf \'<%s>\' "$value"; test "$value" = stop && break; done',
           tty: true,
-          "yield-time_ms": 250,
+          yield_time_ms: 250,
         },
         context,
       ),
@@ -167,7 +177,7 @@ describe("unified exec tools", () => {
       {
         session_id: initial.session_id,
         chars: "one\n",
-        "yield-time_ms": 250,
+        yield_time_ms: 250,
       },
       context,
     )
@@ -175,7 +185,7 @@ describe("unified exec tools", () => {
       {
         session_id: initial.session_id,
         chars: "stop\n",
-        "yield-time_ms": 250,
+        yield_time_ms: 250,
       },
       context,
     )
@@ -215,7 +225,7 @@ describe("unified exec tools", () => {
       {
         cmd: "if test -t 0; then printf tty-yes; else printf tty-no; fi",
         tty: true,
-        "yield-time_ms": 250,
+        yield_time_ms: 250,
       },
       context,
     )
@@ -298,7 +308,7 @@ describe("unified exec tools", () => {
           {
             cmd: `yak_smoke_alias; printf '|'; yak_smoke_fn; printf '|%s|%s|%s|%s|%s\\n' "$npm_config_registry" "$POLICY_VALUE" "\${PRIVATE_TOKEN-unset}" "\${NODE_REPL_AUTH_TOKEN-unset}" "$PWD"; yak_large_fn | wc -c; /usr/bin/env | /usr/bin/grep __YAKITORI_SHELL_SNAPSHOT_STATE_ || true`,
             tty,
-            "yield-time_ms": 1_000,
+            yield_time_ms: 1_000,
           },
           { workspaceRoot: home },
         )

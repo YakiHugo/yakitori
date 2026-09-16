@@ -13,8 +13,8 @@ asarUnpack:
   - node_modules/@img/**
   - node_modules/detect-libc/**
   - node_modules/semver/**
-# JavaScript dependencies are inlined. Native addons remain external because
-# they must be rebuilt against and loaded by Electron's Node runtime.
+  - node_modules/@vscode/ripgrep*/**
+# Native addons and ripgrep remain external to resolve their runtime files.
 files:
   - dist/desktop/**
   - package.json
@@ -25,6 +25,7 @@ files:
   - node_modules/@img/**
   - node_modules/detect-libc/**
   - node_modules/semver/**
+  - node_modules/@vscode/ripgrep*/**
 extraResources:
   - from: dist/gui
     to: gui

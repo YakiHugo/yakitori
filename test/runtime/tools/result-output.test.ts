@@ -101,7 +101,7 @@ describe("tool result persistence and model projection", () => {
       const result = await exec.execute(
         {
           cmd: `node -e 'process.stdout.write("HEAD\\n" + "x".repeat(70000) + "\\nMIDDLE\\n" + "y".repeat(70000) + "\\nTAIL");setTimeout(()=>{},1000)'`,
-          "yield-time_ms": 250,
+          yield_time_ms: 250,
         },
         ctx,
       )
