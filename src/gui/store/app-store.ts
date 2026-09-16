@@ -409,6 +409,27 @@ export const useAppStore = create<AppStore>()((set, get) => {
         client.subscribeToProjectChanges(() => {
           void get().loadProjects()
         })
+        client.subscribeToSessionActivity((activeSessionIds) => {
+          if (activeSessionIds === undefined) {
+            void get().refreshSidebar()
+            return
+          }
+          const active = new Set(activeSessionIds)
+          set((state) => ({
+            sessionsByProject: Object.fromEntries(
+              Object.entries(state.sessionsByProject).map(([key, list]) => [
+                key,
+                {
+                  ...list,
+                  sessions: list.sessions.map((session) => ({
+                    ...session,
+                    active: active.has(session.id),
+                  })),
+                },
+              ]),
+            ),
+          }))
+        })
       }
       await get().loadSidebar()
       await get().loadProviders()
@@ -1098,7 +1119,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
     admitInput: async (text, attachments = []) => {
       if (get().selection.sessionId === undefined) {
         if (text === COMPACT_DIRECTIVE) return
-        const sessionId = await get().createSession(text.slice(0, 80))
+        // Conversations start untitled; the server names the first input.
+        const sessionId = await get().createSession()
         if (sessionId === undefined || get().selection.sessionId !== sessionId)
           return
         if (get().promptDraft === undefined) set({ promptDraft: text })

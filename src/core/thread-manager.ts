@@ -108,6 +108,12 @@ export class ThreadManager {
     ).length
   }
 
+  // Live "is it working" ids for status broadcasts; threads leave the set on
+  // turn completion exactly as runningTurnCount transitions notify.
+  get runningSessionIds(): readonly string[] {
+    return [...this.#runningThreadIds]
+  }
+
   get residentThreadCount(): number {
     return this.#threads.size
   }

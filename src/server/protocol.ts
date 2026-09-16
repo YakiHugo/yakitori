@@ -309,6 +309,8 @@ export type ApiSessionSummary = Readonly<{
   createdAt: string
   updatedAt: string
   title?: string
+  // True while a Turn is running in this Session.
+  active?: boolean
   workingDirectory?: string
   // Set when the Session belongs to a live Project; omitted for orphaned
   // projectIds (orphan-on-delete, see ThreadMetadata.projectId).

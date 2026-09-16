@@ -41,6 +41,11 @@ type YakitoriHttpServerCommonOptions = {
   readonly reportOperationalFailure?: OperationalFailureReporter
   readonly requestGate?: RequestGate
   readonly messageProcessor?: MessageProcessor
+  // Server-initiated notifications (session activity, server-side renames)
+  // reach every connected client through the processor's broadcast.
+  readonly onMessageProcessor?: (
+    processor: Pick<MessageProcessor, "broadcastNotification">,
+  ) => void
   readonly userAgent?: string
   readonly diagnostics?: () => Readonly<Record<string, number>>
 }
@@ -120,6 +125,7 @@ export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
         ? {}
         : { diagnostics: options.diagnostics }),
     })
+  options.onMessageProcessor?.(messageProcessor)
   attachWebsocketRpcTransport(server, {
     processor: messageProcessor,
     reportOperationalFailure: reporter,

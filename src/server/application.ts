@@ -70,6 +70,7 @@ import {
   type SessionCreateDefaults,
 } from "./handlers.ts"
 import { createYakitoriHttpServer } from "./http.ts"
+import { createSessionTitleGenerator } from "./session-title.ts"
 import { createModelDirectory, type ModelDirectory } from "./model-directory.ts"
 import {
   consoleOperationalFailureReporter,
@@ -183,6 +184,12 @@ export async function createYakitoriApplication(
   let agentGraphStoreForCleanup: SqliteAgentGraphStore | undefined
   let mateStore: SqliteMateStore | undefined
   let projectStoreForCleanup: SqliteProjectStore | undefined
+  // Attached when an HTTP server binds a message processor; server-initiated
+  // notifications (session activity, server-side renames) stay silent until
+  // then, which keeps handler-only embedders unaffected.
+  let broadcastNotification:
+    | ((method: string, params: unknown) => void)
+    | undefined
 
   try {
     await mkdir(configuredSessionStoreRoot, { recursive: true })
@@ -559,6 +566,28 @@ export async function createYakitoriApplication(
     })
     threadManagerForCleanup = threadManager
 
+    // Naming rides the real provider registry only. Injected streams are the
+    // test/embedder path: their scripted responses must not be spent on title
+    // calls, and their provider names must not be mistaken for real
+    // credentials.
+    const sessionTitle =
+      options.stream === undefined && options.providerStreams === undefined
+        ? createSessionTitleGenerator({
+            stream: (request) => providerRegistry.stream(request),
+            store: threadStore,
+            availableProviders: providerRegistry.providers,
+            notifySidebarChanged: () =>
+              broadcastNotification?.("sidebar/changed", {}),
+          })
+        : undefined
+    // "Is it working" broadcasts: every running-turn transition refreshes the
+    // full active-id list so clients patch their session lists without a refetch.
+    threadManager.subscribeRunningTurnCount(() => {
+      broadcastNotification?.("sessions/activity", {
+        activeSessionIds: threadManager.runningSessionIds,
+      })
+    })
+
     const skillsLoader = createSkillsLoader()
     const handlers = createThreadServerHandlers({
       manager: threadManager,
@@ -570,6 +599,7 @@ export async function createYakitoriApplication(
       resolvePermission: (input) => permissionGate.resolve(input),
       listPendingPermissions: (sessionId) => permissionGate.list(sessionId),
       availableProviders: providerRegistry.providers,
+      ...(sessionTitle === undefined ? {} : { sessionTitle }),
       rolloutAssets,
       listSessionSkills: async ({ workingDirectory, projectId }) => {
         // Resolve the config root the same way the turn-processor path does:
@@ -625,6 +655,10 @@ export async function createYakitoriApplication(
           rolloutAssets,
           reportOperationalFailure: reporter,
           userAgent: serverUserAgent,
+          onMessageProcessor: (processor) => {
+            broadcastNotification = (method, params) =>
+              processor.broadcastNotification(method, params)
+          },
           diagnostics: () => {
             const mcp = [...mcpManagers].flatMap((manager) => manager.status())
             return {

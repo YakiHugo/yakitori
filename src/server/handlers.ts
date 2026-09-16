@@ -36,6 +36,7 @@ import {
 } from "../kernel/index.ts"
 import { createCoalescingDeltaPublisher } from "../runtime/live-events.ts"
 import type { SkillMetadata } from "../runtime/skills.ts"
+import type { SessionTitleGenerator } from "./session-title.ts"
 import type {
   RuntimePermissionReason,
   RuntimePermissionRequest,
@@ -100,6 +101,9 @@ export type ThreadServerHandlerOptions = {
   ) => readonly RuntimePermissionRequest[]
   readonly maxInputBytes?: number
   readonly availableProviders?: readonly string[]
+  // Fire-and-forget first-input title naming; absent in tests/embedders
+  // without a model directory.
+  readonly sessionTitle?: SessionTitleGenerator
   readonly rolloutAssets?: RolloutAssets
   // Lists the skills the runtime would discover for a session's working
   // directory. Absent in tests and embedders without skill discovery.
@@ -495,9 +499,13 @@ export function createThreadServerHandlers(
         })
         const liveProjects = await liveProjectIds(options, result.threads)
         return ok(200, {
-          sessions: result.threads.map((thread) =>
-            mapThreadSummary(thread, liveProjects),
-          ),
+          sessions: result.threads.map((thread) => {
+            const summary = mapThreadSummary(thread, liveProjects)
+            return options.manager.getThread(thread.id)?.snapshot()
+              .activeTurnId === undefined
+              ? summary
+              : { ...summary, active: true }
+          }),
           ...(result.nextCursor === undefined
             ? {}
             : {
@@ -910,6 +918,26 @@ export function createThreadServerHandlers(
                 "Submitted input did not map to a host event.",
               )
             }
+            // Name an untitled conversation once, from its first user input.
+            // The generator re-checks title ownership and never blocks this
+            // admission path.
+            if (options.sessionTitle !== undefined) {
+              const userInputs = stored.rollout.filter(
+                (entry) =>
+                  entry.item.type === "response_item" &&
+                  entry.item.item.item.role === "user" &&
+                  entry.item.item.id.startsWith("input_"),
+              )
+              if (userInputs.length <= 1 && content.text.trim() !== "") {
+                void options.sessionTitle.generate({
+                  sessionId: request.sessionId,
+                  text: content.text,
+                  ...(request.modelSelection === undefined
+                    ? {}
+                    : { modelSelection: request.modelSelection }),
+                })
+              }
+            }
             return ok(submitted.type === "replayed" ? 200 : 201, {
               requestId: request.requestId,
               inputId:
@@ -1116,7 +1144,7 @@ async function mapStoredThread(
     ...mapThreadSummary(summary, liveProjects),
     ...(live?.snapshot().activeTurnId === undefined
       ? {}
-      : { activeTurnId: live.snapshot().activeTurnId }),
+      : { active: true, activeTurnId: live.snapshot().activeTurnId }),
     ...(currentContext === undefined
       ? {}
       : { currentModel: currentContext.context.selection }),

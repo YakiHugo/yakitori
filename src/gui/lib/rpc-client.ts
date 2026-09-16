@@ -74,6 +74,11 @@ export type AppRpcClient = {
   subscribeToProjectChanges(
     listener: (notification: ProjectChangedNotification) => void,
   ): () => void
+  // Server-broadcast session activity. `undefined` means the connection
+  // re-initialized and the current active set is unknown: refetch lists.
+  subscribeToSessionActivity(
+    listener: (activeSessionIds: readonly string[] | undefined) => void,
+  ): () => void
   // Answers the pending session/permission/request for this permission;
   // throws when no answer channel is open (e.g. already answered, or the
   // request pruned while disconnected).
@@ -131,6 +136,9 @@ export function createAppRpcClient(options: {
   const sidebarChangeListeners = new Set<() => void>()
   const projectChangeListeners = new Set<
     (notification: ProjectChangedNotification) => void
+  >()
+  const sessionActivityListeners = new Set<
+    (activeSessionIds: readonly string[] | undefined) => void
   >()
 
   function send(frame: unknown): void {
@@ -192,8 +200,10 @@ export function createAppRpcClient(options: {
         inflight.delete(id)
         send({ method: "initialized" })
         resubscribeAll()
-        if (initializedOnce)
+        if (initializedOnce) {
           for (const listener of sidebarChangeListeners) listener()
+          for (const listener of sessionActivityListeners) listener(undefined)
+        }
         initializedOnce = true
         resolve()
       },
@@ -325,6 +335,22 @@ export function createAppRpcClient(options: {
     if (message.method === "sidebar/changed") {
       for (const listener of sidebarChangeListeners) listener()
     }
+    if (message.method === "sessions/activity") {
+      const params: unknown = message.params
+      const ids =
+        typeof params === "object" &&
+        params !== null &&
+        Array.isArray(
+          (params as { activeSessionIds?: unknown }).activeSessionIds,
+        )
+          ? ((
+              params as { activeSessionIds: unknown[] }
+            ).activeSessionIds.filter(
+              (id): id is string => typeof id === "string",
+            ) as readonly string[])
+          : []
+      for (const listener of sessionActivityListeners) listener(ids)
+    }
     if (message.method === "project/changed") {
       const params = message.params as ProjectChangedNotification
       for (const listener of projectChangeListeners) listener(params)
@@ -391,6 +417,12 @@ export function createAppRpcClient(options: {
       projectChangeListeners.add(listener)
       return () => {
         projectChangeListeners.delete(listener)
+      }
+    },
+    subscribeToSessionActivity(listener) {
+      sessionActivityListeners.add(listener)
+      return () => {
+        sessionActivityListeners.delete(listener)
       }
     },
     openSessionStream(sessionId, after, handlers) {
