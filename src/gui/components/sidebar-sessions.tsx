@@ -18,6 +18,7 @@ import {
 } from "../store/app-store.ts"
 import { SidebarDialog, SidebarMenu } from "./sidebar-surfaces.tsx"
 import { SidebarNameDialog } from "./sidebar-name-dialog.tsx"
+import { ActivitySpinner } from "./activity-spinner.tsx"
 import { Button } from "./ui/button.tsx"
 
 export function SessionItems({
@@ -181,6 +182,7 @@ export function SessionItems({
               }}
               className="sidebar-row min-w-0 flex-1 pl-8"
             >
+              {session.active === true && <ActivitySpinner />}
               <span className="min-w-0 flex-1 truncate text-left">
                 {session.title ?? "Untitled session"}
               </span>

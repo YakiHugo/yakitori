@@ -120,6 +120,24 @@ export class FakeRpcClient {
     }
   }
 
+  readonly sessionActivityListeners = new Set<
+    (activeSessionIds: readonly string[] | undefined) => void
+  >()
+  subscribeToSessionActivity(
+    listener: (activeSessionIds: readonly string[] | undefined) => void,
+  ): () => void {
+    this.sessionActivityListeners.add(listener)
+    return () => {
+      this.sessionActivityListeners.delete(listener)
+    }
+  }
+
+  emitSessionActivity(activeSessionIds: readonly string[] | undefined): void {
+    for (const listener of [...this.sessionActivityListeners]) {
+      listener(activeSessionIds)
+    }
+  }
+
   close(): void {}
 
   requestsFor(method: string): FakeRequest[] {

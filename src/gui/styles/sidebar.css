@@ -124,6 +124,14 @@
 .sidebar-session[data-selected="true"] {
   background: color-mix(in oklab, var(--foreground) 7%, transparent);
 }
+.session-activity-spinner {
+  width: 14px;
+  flex-shrink: 0;
+  text-align: center;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--muted-foreground);
+}
 .sidebar-session .sidebar-row,
 .sidebar-list-more {
   padding-left: 30px;
