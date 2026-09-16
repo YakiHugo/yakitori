@@ -67,6 +67,14 @@ export default defineConfig(({ mode }) => {
         "test/gui/setup-app-store.ts",
       ],
       restoreMocks: true,
+      // Runtime integration tests poll in-process turn state that finishes
+      // in ~100ms locally but can take seconds on CI, where all test workers
+      // share a handful of cores. These budgets are safety bounds for a
+      // genuinely stuck turn, sized ~10x above the slowest turn and test
+      // observed on CI (roughly 1s and 3s); they do not slow down passing
+      // runs. The defaults (1s poll, 5s test) were below that CI variance.
+      testTimeout: 30_000,
+      expect: { poll: { timeout: 10_000 } },
     },
   }
 })
