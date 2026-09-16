@@ -10,6 +10,7 @@ import {
 import { createRolloutAssets } from "../../src/kernel/rollout-assets.ts"
 import { isKernelEvent } from "../../src/kernel/events.ts"
 import { createFauxProvider } from "../support/faux-provider.ts"
+import { waitForValue } from "../support/wait-for-value.ts"
 import { createModelProvider } from "../../src/runtime/model-provider.ts"
 import { ModelStopReason, type StreamFn } from "../../src/runtime/model.ts"
 import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
@@ -677,13 +678,4 @@ function deferred<T>() {
     resolve = accept
   })
   return { promise, resolve }
-}
-
-async function waitForValue<T>(read: () => T | undefined): Promise<T> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    const value = read()
-    if (value !== undefined) return value
-    await new Promise((resolve) => setTimeout(resolve, 0))
-  }
-  throw new Error("Timed out waiting for a value.")
 }

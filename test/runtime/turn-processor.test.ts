@@ -32,6 +32,7 @@ import {
 } from "../../src/runtime/turn-processor.ts"
 import { MemoryThreadStore } from "../core/memory-thread-store.ts"
 import { createFauxProvider } from "../support/faux-provider.ts"
+import { waitForValue } from "../support/wait-for-value.ts"
 
 const testUserHome = vi.hoisted(() => ({ path: "" }))
 vi.mock("node:os", async (importOriginal) => ({
@@ -3037,15 +3038,6 @@ function rootOnlyAgentControl(
       },
     },
   })
-}
-
-async function waitForValue<T>(read: () => T | undefined): Promise<T> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    const value = read()
-    if (value !== undefined) return value
-    await new Promise((resolve) => setTimeout(resolve, 0))
-  }
-  throw new Error("Timed out waiting for a value.")
 }
 
 function deferred<T>() {
