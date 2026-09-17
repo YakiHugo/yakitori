@@ -20,6 +20,8 @@ import type {
   ApiSessionDetail,
   ApiSessionSummary,
   ApiSkillSummary,
+  ApiSubscriptionProvider,
+  ApiSubscriptionSummary,
   ApiUserModelPreference,
 } from "../../server/protocol.ts"
 import { acknowledgeAdmission, reserveAdmission } from "../admission-outbox.ts"
@@ -73,6 +75,13 @@ export type ProjectSessionList = Readonly<{
   error?: string
 }>
 
+export type SubscriptionUsageState = Readonly<{
+  subscription?: ApiSubscriptionSummary
+  loading: boolean
+  error?: string
+  updatedAt?: number
+}>
+
 export type AppStoreData = {
   sidebar: SessionSidebar
   collapsedSections: Record<string, boolean>
@@ -100,6 +109,10 @@ export type AppStoreData = {
   hydratingSessionId: string | undefined
   projects: ApiProject[]
   providers: ApiProviderSummary[]
+  subscriptionsByProvider: Record<
+    ApiSubscriptionProvider,
+    SubscriptionUsageState
+  >
   userPreference: ApiUserModelPreference | undefined
   selection: { readonly sessionId?: string }
   sessionSelectionIntentRevision: number
@@ -126,6 +139,7 @@ export type AppStoreActions = {
   changeSidebar(change: SidebarChange): Promise<boolean>
   loadProjects(): Promise<void>
   loadProviders(): Promise<void>
+  loadSubscriptions(): Promise<void>
   startNewSession(projectId?: string): void
   createSession(title?: string): Promise<string | undefined>
   deleteSession(sessionId: string): Promise<void>
@@ -169,6 +183,29 @@ export type AppStoreActions = {
 
 export type AppStore = AppStoreData & AppStoreActions
 
+function createInitialSubscriptionUsage(): Record<
+  ApiSubscriptionProvider,
+  SubscriptionUsageState
+> {
+  return {
+    codex: { loading: false },
+    grok: { loading: false },
+    kimi: { loading: false },
+  }
+}
+
+function subscriptionUsageLoading(
+  state: SubscriptionUsageState,
+): SubscriptionUsageState {
+  return {
+    ...(state.subscription === undefined
+      ? {}
+      : { subscription: state.subscription }),
+    ...(state.updatedAt === undefined ? {} : { updatedAt: state.updatedAt }),
+    loading: true,
+  }
+}
+
 export function createInitialAppState(): AppStoreData {
   return {
     sidebar: { sections: [], entries: {} },
@@ -195,6 +232,7 @@ export function createInitialAppState(): AppStoreData {
     hydratingSessionId: undefined,
     projects: [],
     providers: [],
+    subscriptionsByProvider: createInitialSubscriptionUsage(),
     userPreference: undefined,
     selection: {},
     sessionSelectionIntentRevision: 0,
@@ -211,6 +249,11 @@ let activeTaskCount = 0
 export const useAppStore = create<AppStore>()((set, get) => {
   const sessionListRevisions: Record<string, number> = {}
   let sidebarReadRevision = 0
+  const subscriptionReadRevisions: Record<ApiSubscriptionProvider, number> = {
+    codex: 0,
+    grok: 0,
+    kimi: 0,
+  }
   let projectChangesSubscribedClient: AppRpcClient | undefined
   const runTask = async (
     task: () => Promise<void>,
@@ -679,6 +722,59 @@ export const useAppStore = create<AppStore>()((set, get) => {
         // Servers without a provider catalog answer method-not-found; the
         // model selector stays hidden.
       }
+    },
+
+    loadSubscriptions: async () => {
+      const apiBase = get().apiBase
+      const providers = ["codex", "grok", "kimi"] as const
+      const revisions = Object.fromEntries(
+        providers.map((provider) => [
+          provider,
+          ++subscriptionReadRevisions[provider],
+        ]),
+      ) as Record<ApiSubscriptionProvider, number>
+      set((state) => ({
+        subscriptionsByProvider: {
+          codex: subscriptionUsageLoading(state.subscriptionsByProvider.codex),
+          grok: subscriptionUsageLoading(state.subscriptionsByProvider.grok),
+          kimi: subscriptionUsageLoading(state.subscriptionsByProvider.kimi),
+        },
+      }))
+      await Promise.all(
+        providers.map(async (provider) => {
+          try {
+            const response = await getAppRpcClient(apiBase).request(
+              "subscription/read",
+              { provider },
+            )
+            if (revisions[provider] !== subscriptionReadRevisions[provider])
+              return
+            set((state) => ({
+              subscriptionsByProvider: {
+                ...state.subscriptionsByProvider,
+                [provider]: {
+                  subscription: response.subscription,
+                  loading: false,
+                  updatedAt: response.fetchedAt,
+                },
+              },
+            }))
+          } catch {
+            if (revisions[provider] !== subscriptionReadRevisions[provider])
+              return
+            set((state) => ({
+              subscriptionsByProvider: {
+                ...state.subscriptionsByProvider,
+                [provider]: {
+                  ...state.subscriptionsByProvider[provider],
+                  loading: false,
+                  error: "Could not update usage.",
+                },
+              },
+            }))
+          }
+        }),
+      )
     },
 
     startNewSession: (projectId = get().currentProject) => {

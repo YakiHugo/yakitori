@@ -6,7 +6,12 @@ import {
   type OperationalFailureReporter,
   reportOperationalFailure,
 } from "../operational-errors.ts"
-import { ApiErrorCode, type ApiListProvidersResponse } from "../protocol.ts"
+import {
+  ApiErrorCode,
+  type ApiListProvidersResponse,
+  type ApiReadSubscriptionResponse,
+  type ApiSubscriptionProvider,
+} from "../protocol.ts"
 import type { ProjectStore } from "../sqlite-project-store.ts"
 import {
   ConfigVersionConflictError,
@@ -56,6 +61,9 @@ export type MessageProcessorOptions = Readonly<{
   eventHub?: SessionEventHub
   projectStore?: ProjectStore
   providers?: () => Promise<ApiListProvidersResponse>
+  subscriptionUsage?: (
+    provider: ApiSubscriptionProvider,
+  ) => Promise<ApiReadSubscriptionResponse>
   userConfig?: UserConfigStore
   availableProviders?: readonly string[]
   reportOperationalFailure?: OperationalFailureReporter
@@ -95,6 +103,11 @@ export class MessageProcessor {
   private readonly providers:
     | (() => Promise<ApiListProvidersResponse>)
     | undefined
+  private readonly subscriptionUsage:
+    | ((
+        provider: ApiSubscriptionProvider,
+      ) => Promise<ApiReadSubscriptionResponse>)
+    | undefined
   private readonly userConfig: UserConfigStore | undefined
   private readonly availableProviders: readonly string[] | undefined
   private readonly reporter: OperationalFailureReporter
@@ -112,6 +125,7 @@ export class MessageProcessor {
     this.handlers = options.handlers
     this.projectStore = options.projectStore
     this.providers = options.providers
+    this.subscriptionUsage = options.subscriptionUsage
     this.userConfig = options.userConfig
     this.availableProviders = options.availableProviders
     this.reporter =
@@ -276,6 +290,7 @@ export class MessageProcessor {
       subscriptions: this.subscriptions,
       projectStore: this.projectStore,
       providers: this.providers,
+      subscriptionUsage: this.subscriptionUsage,
       userConfig: this.userConfig,
       availableProviders: this.availableProviders,
       diagnostics: () => ({

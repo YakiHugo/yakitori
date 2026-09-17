@@ -55,6 +55,9 @@ import {
   ModelStopReason,
   type RuntimeLock,
   readCodexLogin,
+  readCodexUsage,
+  readGrokUsage,
+  readKimiUsage,
   resolveCodexAccessToken,
   resolveGrokAccessToken,
   resolveModel,
@@ -81,6 +84,8 @@ import type {
   ApiListProvidersResponse,
   ApiProviderModel,
   ApiProviderSummary,
+  ApiReadSubscriptionResponse,
+  ApiSubscriptionProvider,
 } from "./protocol.ts"
 import type { RequestGate } from "./request-gate.ts"
 import {
@@ -299,7 +304,7 @@ export async function createYakitoriApplication(
       },
     }
     const providers = async (): Promise<ApiListProvidersResponse> => {
-      const credentialStates = await providerCredentialStates()
+      const credentialStates = await providerCredentialStates(false)
       const names = [
         ...new Set([...providerRegistry.providers, "codex", "grok", "kimi"]),
       ]
@@ -340,6 +345,24 @@ export async function createYakitoriApplication(
         defaultProvider: provider.provider,
         defaultModel: provider.model,
         ...(userPreference === undefined ? {} : { userPreference }),
+      }
+    }
+    const subscriptionUsage = async (
+      providerName: ApiSubscriptionProvider,
+    ): Promise<ApiReadSubscriptionResponse> => {
+      const state = await providerCredentialState(providerName, true)
+      return {
+        subscription: {
+          provider: providerName,
+          displayName: subscriptionDisplayNames[providerName],
+          availability: state.availability ?? "requires_login",
+          ...(state.credentialKind === undefined
+            ? {}
+            : { credentialKind: state.credentialKind }),
+          ...(state.plan === undefined ? {} : { plan: state.plan }),
+          usage: state.rateLimits ?? { status: "unavailable" },
+        },
+        fetchedAt: Date.now(),
       }
     }
     const threadStore = new JsonlThreadStore({ root: sessionStoreRoot })
@@ -650,6 +673,7 @@ export async function createYakitoriApplication(
           handlers,
           projectStore: ownedProjectStore,
           providers,
+          subscriptionUsage,
           userConfig: routedUserConfig,
           availableProviders: providerRegistry.providers,
           rolloutAssets,
@@ -859,48 +883,108 @@ async function providerSummary(
   return { name, defaultModel: configuredModel, models: ordered, ...state }
 }
 
-async function providerCredentialStates(): Promise<
-  Readonly<
-    Record<
-      string,
-      Readonly<{
-        availability: "available" | "requires_login"
-        credentialKind?: "api_key" | "oauth"
-        rateLimits: Readonly<{ status: "unavailable" }>
-      }>
-    >
-  >
-> {
-  const codexLogin = await readCodexLogin().catch(() => undefined)
-  const grokAvailable =
-    process.env.XAI_API_KEY !== undefined ||
-    (await resolveGrokAccessToken()
-      .then(() => true)
-      .catch(() => false))
-  return {
-    codex: {
-      availability:
-        codexLogin?.kind === "chatgpt" ? "available" : "requires_login",
-      ...(codexLogin?.kind !== "chatgpt" ? {} : { credentialKind: "oauth" }),
-      rateLimits: { status: "unavailable" },
-    },
-    grok: {
-      availability: grokAvailable ? "available" : "requires_login",
-      ...(grokAvailable
-        ? { credentialKind: process.env.XAI_API_KEY ? "api_key" : "oauth" }
+async function providerCredentialStates(
+  includeUsage: boolean,
+): Promise<Readonly<Record<string, ProviderCredentialState>>> {
+  const [codex, grok, kimi] = await Promise.all([
+    providerCredentialState("codex", includeUsage),
+    providerCredentialState("grok", includeUsage),
+    providerCredentialState("kimi", includeUsage),
+  ])
+  return { codex, grok, kimi }
+}
+
+async function providerCredentialState(
+  provider: ApiSubscriptionProvider,
+  includeUsage: boolean,
+): Promise<ProviderCredentialState> {
+  if (provider === "codex") {
+    const login = await readCodexLogin().catch(() => undefined)
+    const shouldReadUsage = includeUsage && login?.kind === "chatgpt"
+    const usage = shouldReadUsage
+      ? await readCodexUsage().catch(() => undefined)
+      : undefined
+    return {
+      availability: login?.kind === "chatgpt" ? "available" : "requires_login",
+      ...(login?.kind !== "chatgpt" ? {} : { credentialKind: "oauth" }),
+      ...(usage?.plan === undefined ? {} : { plan: usage.plan }),
+      rateLimits:
+        usage === undefined
+          ? unavailableUsage(
+              includeUsage,
+              shouldReadUsage ? "temporarily_unavailable" : "not_supported",
+            )
+          : { status: "available", buckets: usage.buckets },
+    }
+  }
+
+  if (provider === "grok") {
+    const apiKey = process.env.XAI_API_KEY
+    const available =
+      apiKey !== undefined ||
+      (await resolveGrokAccessToken()
+        .then(() => true)
+        .catch(() => false))
+    const shouldReadUsage = includeUsage && available && apiKey === undefined
+    const usage = shouldReadUsage
+      ? await readGrokUsage().catch(() => undefined)
+      : undefined
+    return {
+      availability: available ? "available" : "requires_login",
+      ...(available
+        ? { credentialKind: apiKey === undefined ? "oauth" : "api_key" }
         : {}),
-      rateLimits: { status: "unavailable" },
-    },
-    kimi: {
-      availability:
-        process.env.KIMI_API_KEY === undefined ? "requires_login" : "available",
-      ...(process.env.KIMI_API_KEY === undefined
-        ? {}
-        : { credentialKind: "api_key" }),
-      rateLimits: { status: "unavailable" },
-    },
+      ...(usage?.plan === undefined ? {} : { plan: usage.plan }),
+      rateLimits:
+        usage === undefined
+          ? unavailableUsage(
+              includeUsage,
+              shouldReadUsage ? "temporarily_unavailable" : "not_supported",
+            )
+          : { status: "available", buckets: usage.buckets },
+    }
+  }
+
+  const apiKey = process.env.KIMI_API_KEY
+  const shouldReadUsage = includeUsage && apiKey !== undefined
+  const usage = shouldReadUsage
+    ? await readKimiUsage(apiKey).catch(() => undefined)
+    : undefined
+  return {
+    availability: apiKey === undefined ? "requires_login" : "available",
+    ...(apiKey === undefined ? {} : { credentialKind: "api_key" }),
+    rateLimits:
+      usage === undefined
+        ? unavailableUsage(
+            includeUsage,
+            shouldReadUsage ? "temporarily_unavailable" : "not_supported",
+          )
+        : { status: "available", buckets: usage.buckets },
   }
 }
+
+function unavailableUsage(
+  includeUsage: boolean,
+  reason: "not_supported" | "temporarily_unavailable",
+) {
+  return includeUsage
+    ? ({ status: "unavailable", reason } as const)
+    : ({ status: "unavailable" } as const)
+}
+
+const subscriptionDisplayNames: Readonly<
+  Record<ApiSubscriptionProvider, string>
+> = {
+  codex: "Codex",
+  grok: "Grok",
+  kimi: "Kimi",
+}
+
+type ProviderCredentialState = Readonly<
+  Pick<ApiProviderSummary, "availability" | "credentialKind" | "rateLimits"> & {
+    plan?: string
+  }
+>
 
 async function configureProviders(input: {
   readonly provider: string

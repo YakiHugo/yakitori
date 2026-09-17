@@ -33,6 +33,8 @@ import {
   type ApiListSessionsResponse,
   type ApiListSkillsResponse,
   type ApiPendingPermission,
+  type ApiReadSubscriptionRequest,
+  type ApiReadSubscriptionResponse,
   type ApiReadProjectResponse,
   type ApiReadSessionRequest,
   type ApiReadSessionResponse,
@@ -42,6 +44,7 @@ import {
   type ApiSearchSessionsRequest,
   type ApiSearchSessionsResponse,
   type ApiServerDiagnostics,
+  type ApiSubscriptionProvider,
   type ApiUpdateProjectResponse,
   type ApiUpdateUserModelPreferenceResponse,
   type ApiUserModelPreference,
@@ -190,6 +193,11 @@ export type RpcMethodContext = Readonly<{
   subscriptions: SessionSubscriptions
   projectStore: ProjectStore | undefined
   providers: (() => Promise<ApiListProvidersResponse>) | undefined
+  subscriptionUsage:
+    | ((
+        provider: ApiSubscriptionProvider,
+      ) => Promise<ApiReadSubscriptionResponse>)
+    | undefined
   userConfig: UserConfigStore | undefined
   availableProviders: readonly string[] | undefined
   diagnostics(): Readonly<Record<string, number>>
@@ -947,6 +955,23 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
     },
   },
   {
+    method: "subscription/read",
+    scope: () => undefined,
+    async invoke(params, context) {
+      if (context.subscriptionUsage === undefined)
+        throw unavailable("subscription/read")
+      const record = requireParamsRecord(params, "subscription/read")
+      if (
+        record.provider !== "codex" &&
+        record.provider !== "grok" &&
+        record.provider !== "kimi"
+      ) {
+        throw invalidParams("provider must be codex, grok, or kimi.")
+      }
+      return { result: await context.subscriptionUsage(record.provider) }
+    },
+  },
+  {
     method: "config/read",
     scope: () => ({ kind: "globalSharedRead", name: "config" }),
     async invoke(params, context) {
@@ -1057,6 +1082,7 @@ export type RpcMethodParams = Readonly<{
   "project/move": ProjectMoveParams
   "project/delete": ProjectDeleteParams
   "provider/list": Readonly<Record<string, never>>
+  "subscription/read": ApiReadSubscriptionRequest
   "config/read": ConfigReadParams
   "config/write": ConfigWriteParams
   "userPreference/write": ApiUserModelPreference
@@ -1090,6 +1116,7 @@ export type RpcMethodResponses = Readonly<{
   "project/move": Readonly<Record<string, never>>
   "project/delete": Readonly<Record<string, never>>
   "provider/list": ApiListProvidersResponse
+  "subscription/read": ApiReadSubscriptionResponse
   "config/read": ConfigurationSnapshot
   "config/write": ConfigurationSnapshot
   "userPreference/write": ApiUpdateUserModelPreferenceResponse

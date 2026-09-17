@@ -2,7 +2,10 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
-import { resolveGrokAccessToken } from "../../src/runtime/grok-credentials.ts"
+import {
+  resolveGrokAccessToken,
+  resolveGrokCredentials,
+} from "../../src/runtime/grok-credentials.ts"
 
 describe("Grok OIDC credentials (read-only)", () => {
   let dir: string
@@ -17,7 +20,7 @@ describe("Grok OIDC credentials (read-only)", () => {
     await rm(dir, { recursive: true, force: true })
   })
 
-  const writeAuth = (expiresAt: string) =>
+  const writeAuth = (expiresAt: string, userId: string | null = "user-1") =>
     writeFile(
       path,
       JSON.stringify({
@@ -28,6 +31,7 @@ describe("Grok OIDC credentials (read-only)", () => {
           expires_at: expiresAt,
           oidc_issuer: "https://auth.x.ai",
           oidc_client_id: "client-1",
+          ...(userId === null ? {} : { user_id: userId }),
         },
       }),
     )
@@ -36,6 +40,27 @@ describe("Grok OIDC credentials (read-only)", () => {
     await writeAuth(new Date(1_000_000_000).toISOString())
     const token = await resolveGrokAccessToken({ path, now: () => 500_000 })
     expect(token).toBe("stored-access")
+  })
+
+  it("returns the user identity needed for subscription billing", async () => {
+    await writeAuth(new Date(1_000_000_000).toISOString())
+    await expect(
+      resolveGrokCredentials({ path, now: () => 500_000 }),
+    ).resolves.toEqual({
+      accessToken: "stored-access",
+      userId: "user-1",
+      expiresAt: 1_000_000,
+    })
+  })
+
+  it("keeps model access usable when an older login lacks a billing identity", async () => {
+    await writeAuth(new Date(1_000_000_000).toISOString(), null)
+    await expect(
+      resolveGrokAccessToken({ path, now: () => 500_000 }),
+    ).resolves.toBe("stored-access")
+    await expect(
+      resolveGrokCredentials({ path, now: () => 500_000 }),
+    ).rejects.toThrow(/user identity/)
   })
 
   it("rejects a near-expiry token with a re-login hint", async () => {

@@ -26,6 +26,34 @@ export function defaultGrokCredentialsPath(): string {
 export async function resolveGrokAccessToken(
   options: GrokCredentialsOptions = {},
 ): Promise<string> {
+  return (await resolveStoredGrokCredentials(options)).accessToken
+}
+
+export async function resolveGrokCredentials(
+  options: GrokCredentialsOptions = {},
+): Promise<
+  Readonly<{
+    accessToken: string
+    userId: string
+    expiresAt: number
+  }>
+> {
+  const credentials = await resolveStoredGrokCredentials(options)
+  if (credentials.userId === undefined) {
+    throw new Error(
+      "The Grok CLI login has no user identity. Run `grok` and log in again.",
+    )
+  }
+  return {
+    accessToken: credentials.accessToken,
+    userId: credentials.userId,
+    expiresAt: credentials.expiresAt,
+  }
+}
+
+async function resolveStoredGrokCredentials(
+  options: GrokCredentialsOptions,
+): Promise<GrokCredentials> {
   const path = options.path ?? defaultGrokCredentialsPath()
   const now = options.now ?? (() => Math.floor(Date.now() / 1000))
   const credentials = await readGrokCredentials(path)
@@ -34,12 +62,13 @@ export async function resolveGrokAccessToken(
       "The Grok CLI login has expired. Run `grok` and log in again, or set XAI_API_KEY.",
     )
   }
-  return credentials.accessToken
+  return credentials
 }
 
 type GrokCredentials = {
   readonly accessToken: string
   readonly expiresAt: number
+  readonly userId: string | undefined
 }
 
 async function readGrokCredentials(path: string): Promise<GrokCredentials> {
@@ -71,5 +100,12 @@ async function readGrokCredentials(path: string): Promise<GrokCredentials> {
   if (Number.isNaN(expiresAt)) {
     throw new Error(`Grok credentials at ${path} carry a bad expires_at.`)
   }
-  return { accessToken: entry.key as string, expiresAt }
+  return {
+    accessToken: entry.key as string,
+    expiresAt,
+    userId:
+      typeof entry.user_id === "string" && entry.user_id.trim() !== ""
+        ? entry.user_id
+        : undefined,
+  }
 }
