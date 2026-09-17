@@ -357,4 +357,95 @@ describe("app RPC client", () => {
     expect((failures[0] as ApiRequestError).code).toBe("not_found")
     client.close()
   })
+
+  it("closes a failed replay stream and only subscribes again when explicitly reopened", async () => {
+    vi.useFakeTimers()
+    const received: string[] = []
+    const onError = vi.fn()
+    const handlers: SessionStreamHandlers = {
+      onSnapshot: () => received.push("snapshot"),
+      onEvent: () => received.push("event"),
+      onTransient: () => received.push("transient"),
+      onReplayComplete: () => received.push("replayComplete"),
+      onError,
+    }
+    const client = createAppRpcClient({ apiBase: "http://api.test" })
+    const failedStream = client.openSessionStream("session_1", 0, handlers)
+    const first = completeHandshake(FakeWebSocket.instances[0])
+    await flushMicrotasks()
+    first.emitMessage({ id: 1, result: { session: { id: "session_1" } } })
+    await flushMicrotasks()
+
+    const failure = {
+      method: "session/subscriptionError",
+      params: {
+        sessionId: "session_1",
+        message: "Session event replay failed.",
+      },
+    }
+    first.emitMessage(failure)
+    first.emitMessage(failure)
+    first.emitMessage({
+      method: "session/event",
+      params: { sessionId: "session_1", seq: 2, event: { seq: 2 } },
+    })
+    first.emitMessage({
+      method: "session/transient",
+      params: { type: "assistant.delta", sessionId: "session_1" },
+    })
+    first.emitMessage({
+      method: "session/replayComplete",
+      params: { sessionId: "session_1", seq: 1 },
+    })
+    expect(onError).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        name: "ApiRequestError",
+        message: "Session event replay failed.",
+      }),
+    )
+    expect(received).toEqual(["snapshot"])
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(
+      first
+        .sentFrames()
+        .filter((frame) => frame.method === "session/subscribe"),
+    ).toHaveLength(1)
+
+    first.emitClose()
+    await vi.advanceTimersByTimeAsync(250)
+    const second = completeHandshake(FakeWebSocket.instances[1])
+    await flushMicrotasks()
+    expect(
+      second
+        .sentFrames()
+        .filter((frame) => frame.method === "session/subscribe"),
+    ).toHaveLength(0)
+
+    client.openSessionStream("session_1", 0, handlers)
+    // A stale handle cannot close the explicitly reopened stream.
+    failedStream.close()
+    await flushMicrotasks()
+    const reopened = second
+      .sentFrames()
+      .find((frame) => frame.method === "session/subscribe")
+    expect(reopened).toMatchObject({
+      params: { sessionId: "session_1", after: 0 },
+    })
+    expect(
+      second
+        .sentFrames()
+        .filter((frame) => frame.method === "session/unsubscribe"),
+    ).toHaveLength(0)
+    second.emitMessage({
+      id: reopened?.id,
+      result: { session: { id: "session_1" } },
+    })
+    await flushMicrotasks()
+    second.emitMessage({
+      method: "session/replayComplete",
+      params: { sessionId: "session_1", seq: 0 },
+    })
+    expect(received).toEqual(["snapshot", "snapshot", "replayComplete"])
+    client.close()
+  })
 })

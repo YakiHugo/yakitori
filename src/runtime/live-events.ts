@@ -2,6 +2,7 @@ import type {
   EventMetadata,
   StartedExecutionItem,
   TokenUsage,
+  TurnOutcome,
 } from "../kernel/events.ts"
 import type { RuntimePermissionEvent } from "./permission-gate.ts"
 
@@ -49,6 +50,14 @@ export type LiveSessionUsage = {
   readonly createdAt: string
 }
 
+export type LiveTurnFinished = Readonly<{
+  type: "turn.finished"
+  sessionId: string
+  turnId: string
+  outcome: TurnOutcome
+  createdAt: string
+}>
+
 export type LiveSessionError = {
   readonly type: "session.error"
   readonly sessionId: string
@@ -74,6 +83,7 @@ export type LiveSessionEvent =
   | LiveAssistantDelta
   | LiveReasoningDelta
   | LiveSessionUsage
+  | LiveTurnFinished
   | LiveSessionError
   | LiveRuntimeWarning
   | RuntimePermissionEvent

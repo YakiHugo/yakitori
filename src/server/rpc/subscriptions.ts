@@ -16,6 +16,7 @@ import {
   sessionPermissionRequestMethod,
   type SessionPermissionRequestParams,
   type SessionPermissionRequestResult,
+  type SessionSubscriptionErrorNotification,
 } from "./methods.ts"
 import { INTERNAL_ERROR } from "./messages.ts"
 import {
@@ -357,17 +358,15 @@ export function createSessionSubscriptions(
         live = true
       } catch (error) {
         // The subscribe response is already sent, so a replay failure cannot
-        // become an error response; mirror the SSE stream teardown with a
-        // session error and drop the subscription.
-        remove(input.connectionId, input.sessionId)
-        const failure: LiveSessionEvent = {
-          type: "session.error",
-          sessionId: input.sessionId,
-          operation: "persistence",
-          message: "Session event replay failed.",
-          createdAt: new Date().toISOString(),
+        // become an error response. A replaced or closed subscription must
+        // not terminate the current subscription for the same session.
+        if (!closed) {
+          remove(input.connectionId, input.sessionId)
+          options.notify(input.connectionId, "session/subscriptionError", {
+            sessionId: input.sessionId,
+            message: "Session event replay failed.",
+          } satisfies SessionSubscriptionErrorNotification)
         }
-        options.notify(input.connectionId, "session/transient", failure)
         reportOperationalFailure(reporter, {
           component: "session-subscriptions",
           operation: "replay",
@@ -414,7 +413,7 @@ export function unbufferedPendingPermissions(
 }
 
 // Reconciles client-only display events buffered during replay against the
-// snapshot and the durable lifecycle facts that arrived after it. This closes
+// snapshot and lifecycle events that arrived after it. This closes
 // the commit→publish window where a terminal Turn is already in the snapshot
 // but an older buffered delta reaches the connection afterward.
 export function reconcileBufferedSessionDeliveries(
@@ -422,12 +421,51 @@ export function reconcileBufferedSessionDeliveries(
   activeTurnId: string | undefined,
   deliver: (delivery: SessionDelivery) => void,
 ): void {
+  // Progress can already have been replayed from the snapshot watermark, so
+  // its buffered duplicate will be skipped by the durable cursor. Do not let
+  // an older buffered retry revive an activity that this progress superseded.
+  const supersededRetries = new Set<SessionDelivery>()
+  const progressedTurns = new Set<string>()
+  for (let index = buffered.length - 1; index >= 0; index -= 1) {
+    const delivery = buffered[index]
+    if (delivery?.kind === "durable") {
+      for (const event of delivery.events) {
+        if (
+          isKernelEvent(event) &&
+          (event.type === "turn.started" ||
+            event.type === "turn.completed" ||
+            event.type === "item.started" ||
+            event.type === "item.completed" ||
+            event.type === "context.compacted")
+        ) {
+          progressedTurns.add(event.data.turnId)
+        }
+      }
+    } else if (delivery?.kind === "transient") {
+      const event = delivery.event
+      if (event.type === "runtime.warning") {
+        if (event.code !== "model.retry") continue
+        if (progressedTurns.has(event.turnId)) supersededRetries.add(delivery)
+        progressedTurns.add(event.turnId)
+      } else if ("turnId" in event && event.type !== "session.usage") {
+        progressedTurns.add(event.turnId)
+      }
+    }
+  }
   let liveTurnId = activeTurnId
   for (const delivery of buffered) {
+    if (supersededRetries.has(delivery)) continue
     if (delivery.kind === "transient" && isLiveDisplayEvent(delivery.event)) {
       if (delivery.event.turnId !== liveTurnId) continue
     }
     deliver(delivery)
+    if (
+      delivery.kind === "transient" &&
+      delivery.event.type === "turn.finished" &&
+      delivery.event.turnId === liveTurnId
+    ) {
+      liveTurnId = undefined
+    }
     if (delivery.kind === "durable") {
       for (const event of delivery.events) {
         if (!isKernelEvent(event)) continue

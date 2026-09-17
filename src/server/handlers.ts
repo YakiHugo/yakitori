@@ -233,20 +233,28 @@ export function createThreadServerHandlers(
           if (event.type === "rollout.appended") {
             for (const publisher of streams.values()) publisher.flush()
             streams.clear()
-            for (;;) {
-              try {
-                await publishNewRollout(thread.id, event.throughSeq)
-                break
-              } catch (error) {
-                if (thread.status === "shutdown" || closing) throw error
-                reportOperationalFailure(reporter, {
-                  component: "thread-event-pump",
-                  operation: "replay-rollout",
-                  cause: error,
-                  sessionId: thread.id,
-                })
-                await new Promise((resolve) => setTimeout(resolve, 100))
-              }
+            try {
+              await publishNewRollout(thread.id, event.throughSeq)
+            } catch (error) {
+              reportOperationalFailure(reporter, {
+                component: "thread-event-pump",
+                operation: "replay-rollout",
+                cause: error,
+                sessionId: thread.id,
+              })
+              // A failed history read must not block runtime terminal events.
+              // A later append can catch up from the unchanged durable cursor.
+              options.eventHub?.publishTransient({
+                type: "session.error",
+                sessionId: thread.id,
+                operation: "persistence",
+                message: `Session history could not be read: ${
+                  error instanceof Error
+                    ? error.message
+                    : "unknown storage error"
+                }`,
+                createdAt: new Date().toISOString(),
+              })
             }
             continue
           }
@@ -298,6 +306,34 @@ export function createThreadServerHandlers(
             options.eventHub?.publishTransient(event.event)
             continue
           }
+          if (
+            event.type === "turn.completed" ||
+            event.type === "turn.failed" ||
+            event.type === "turn.interrupted"
+          ) {
+            for (const publisher of streams.values()) publisher.flush()
+            streams.clear()
+            // Runtime completion remains deliverable when its rollout append
+            // or flush failed. Only persisted records advance durable history.
+            options.eventHub?.publishTransient({
+              type: "turn.finished",
+              sessionId: event.threadId,
+              turnId: event.input.submissionId,
+              outcome:
+                event.type === "turn.failed"
+                  ? { status: "failed", error: event.error }
+                  : event.type === "turn.interrupted"
+                    ? {
+                        status: "interrupted",
+                        ...(event.reason === undefined
+                          ? {}
+                          : { reason: event.reason }),
+                      }
+                    : { status: "completed" },
+              createdAt: new Date().toISOString(),
+            })
+            continue
+          }
           if (event.type === "session.error") {
             options.eventHub?.publishTransient({
               type: "session.error",
@@ -309,6 +345,11 @@ export function createThreadServerHandlers(
             continue
           }
           if (event.type === "runtime.warning") {
+            if (event.code === "model.retry") {
+              // Buffered pre-failure output must precede the retry status.
+              // Keep publishers so resumed snapshots retain their suffix cursor.
+              for (const publisher of streams.values()) publisher.flush()
+            }
             options.eventHub?.publishTransient({
               type: "runtime.warning",
               sessionId: event.threadId,
