@@ -1,4 +1,4 @@
-import { ArrowDown, ChevronRight } from "lucide-react"
+import { ArrowDown, ChevronRight, Info } from "lucide-react"
 import {
   type ReactNode,
   useId,
@@ -7,10 +7,15 @@ import {
   useRef,
   useState,
 } from "react"
-import type { ExecutionEntry, TurnTiming } from "../execution-view.ts"
+import type {
+  ActiveModelRetry,
+  ExecutionEntry,
+  TurnTiming,
+} from "../execution-view.ts"
 import { ConversationScrollContext } from "../hooks/conversation-scroll-context.ts"
 import { usePinnedScroll } from "../hooks/use-pinned-scroll.ts"
 import { formatElapsed } from "../lib/format.ts"
+import { cn } from "../lib/utils.ts"
 import { useAppStore, useExecutionView } from "../store/app-store.ts"
 import { AssistantMessageCell } from "./cells/assistant-message-cell.tsx"
 import { CompactionCell } from "./cells/compaction-cell.tsx"
@@ -22,6 +27,7 @@ import { UserMessageCell } from "./cells/user-message-cell.tsx"
 import { ResponseActions } from "./response-actions.tsx"
 import { ConversationNavigation } from "./conversation-navigation.tsx"
 import { ScrollArea } from "./ui/scroll-area.tsx"
+import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip.tsx"
 
 // Keep admission order, including queued/steering inputs between turn items.
 // Only adjacent items of the same turn share a disclosure.
@@ -68,6 +74,16 @@ export function Transcript({ children }: Readonly<{ children?: ReactNode }>) {
     new Set(),
   )
   const blocks = useMemo(() => groupEntries(view.entries), [view.entries])
+  // Steering inputs can split a turn into several blocks. Its current retry
+  // belongs only to the latest block, even when earlier activity is expanded.
+  const activeBlockIndex =
+    view.activeTurnId === undefined
+      ? -1
+      : blocks.reduce(
+          (last, block, index) =>
+            block.turnId === view.activeTurnId ? index : last,
+          -1,
+        )
   const finalAnswers = useMemo(() => {
     const turns = new Map<
       string,
@@ -139,12 +155,12 @@ export function Transcript({ children }: Readonly<{ children?: ReactNode }>) {
             ref={scroll.contentRef}
             className="conversation-content mx-auto flex w-full flex-col gap-8 py-8"
           >
-            {view.entries.length === 0 ? (
+            {view.entries.length === 0 && view.activeTurnId === undefined ? (
               <p className="py-12 text-center text-sm text-muted-foreground">
                 Conversation will appear here
               </p>
             ) : (
-              blocks.map((block) => {
+              blocks.map((block, index) => {
                 const first = block.entries[0]
                 if (first?.kind === "user_input")
                   return (
@@ -168,6 +184,9 @@ export function Transcript({ children }: Readonly<{ children?: ReactNode }>) {
                     active={view.activeTurnId === block.turnId}
                     timing={view.turnTimings[block.turnId]}
                     finalAnswerId={finalAnswers.get(block.turnId)}
+                    retry={
+                      index === activeBlockIndex ? view.activeRetry : undefined
+                    }
                   />
                 ) : (
                   block.entries.map((entry) => (
@@ -176,6 +195,16 @@ export function Transcript({ children }: Readonly<{ children?: ReactNode }>) {
                 )
               })
             )}
+            {view.activeTurnId !== undefined && activeBlockIndex === -1 ? (
+              <TurnBlock
+                key={view.activeTurnId}
+                entries={[]}
+                active
+                timing={view.turnTimings[view.activeTurnId]}
+                finalAnswerId={undefined}
+                retry={view.activeRetry}
+              />
+            ) : null}
           </div>
         </ScrollArea>
         <ConversationNavigation
@@ -210,11 +239,13 @@ function TurnBlock({
   active,
   timing,
   finalAnswerId,
+  retry,
 }: Readonly<{
   entries: readonly ExecutionEntry[]
   active: boolean
   timing: TurnTiming | undefined
   finalAnswerId: string | undefined
+  retry: ActiveModelRetry | undefined
 }>) {
   const [expandedOverride, setExpanded] = useState<boolean>()
   const contentId = useId()
@@ -240,31 +271,75 @@ function TurnBlock({
           ),
         )
       : undefined
+  const retryLabel =
+    retry?.kind === "rate_limited"
+      ? "Waiting for rate limit"
+      : retry?.kind === "connection_failed" ||
+          retry?.kind === "stream_disconnected" ||
+          retry?.kind === "idle_timeout"
+        ? "Reconnecting"
+        : "Retrying request"
+  const activityLabel = (
+    <span
+      className={active ? "tool-running-label" : undefined}
+      role={active ? "status" : undefined}
+    >
+      {retry
+        ? `${retryLabel} · attempt ${retry.nextAttempt}/${retry.maxAttempts}`
+        : active
+          ? "Working"
+          : seconds === undefined
+            ? "Activity"
+            : `Worked for ${formatElapsed(seconds)}`}
+    </span>
+  )
   return (
     <section
       className="flex flex-col gap-5"
       aria-label={active ? "Current response" : "Response"}
     >
-      {activity.length > 0 ? (
+      {activity.length > 0 || active ? (
         <div>
-          <button
-            type="button"
-            aria-expanded={expanded}
-            aria-controls={contentId}
-            onClick={() => setExpanded(!expanded)}
-            className={`flex w-full items-center gap-1.5 text-left text-[14px] text-muted-foreground hover:text-foreground ${finalAnswer ? "border-b pb-3" : "pb-1"}`}
+          <div
+            className={cn(
+              "flex items-center gap-1.5 text-left text-[14px] text-muted-foreground",
+              finalAnswer ? "border-b pb-3" : "pb-1",
+            )}
           >
-            <span className={active ? "tool-running-label" : undefined}>
-              {active
-                ? "Working"
-                : seconds === undefined
-                  ? "Activity"
-                  : `Worked for ${formatElapsed(seconds)}`}
-            </span>
-            <ChevronRight
-              className={`size-3.5 transition-transform duration-150 ${expanded ? "rotate-90" : ""}`}
-            />
-          </button>
+            {activity.length > 0 ? (
+              <button
+                type="button"
+                aria-expanded={expanded}
+                aria-controls={contentId}
+                onClick={() => setExpanded(!expanded)}
+                className="flex items-center gap-1.5 text-left hover:text-foreground"
+              >
+                {activityLabel}
+                <ChevronRight
+                  className={cn(
+                    "size-3.5 transition-transform duration-150",
+                    expanded && "rotate-90",
+                  )}
+                />
+              </button>
+            ) : (
+              activityLabel
+            )}
+            {retry ? (
+              <Tooltip>
+                <TooltipTrigger
+                  type="button"
+                  aria-label="Retry details"
+                  className="inline-flex items-center hover:text-foreground"
+                >
+                  <Info className="size-3.5" />
+                </TooltipTrigger>
+                <TooltipContent className="max-w-sm">
+                  {retry.message}
+                </TooltipContent>
+              </Tooltip>
+            ) : null}
+          </div>
           <div
             id={contentId}
             className="conversation-disclosure"

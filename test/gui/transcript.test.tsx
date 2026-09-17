@@ -10,9 +10,11 @@ import {
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import { App } from "../../src/gui/app.tsx"
 import { Transcript } from "../../src/gui/components/transcript.tsx"
+import { TooltipProvider } from "../../src/gui/components/ui/tooltip.tsx"
 import {
   createExecutionViewState,
   type ExecutionEntry,
+  reduceExecutionView,
 } from "../../src/gui/execution-view.ts"
 import {
   createInitialAppState,
@@ -159,6 +161,117 @@ it("keeps live process history available until the turn has a final answer", () 
       .closest("[aria-hidden]")
       ?.getAttribute("aria-hidden"),
   ).toBe("false")
+})
+
+it("shows retry activity before any output and restores the activity heading on recovery", () => {
+  useAppStore.setState({
+    execution: {
+      ...createExecutionViewState(),
+      entries: entries.slice(0, 1),
+      activeTurnId: "turn_1",
+    },
+  })
+  render(
+    <TooltipProvider>
+      <Transcript />
+    </TooltipProvider>,
+  )
+  expect(screen.getByRole("status").textContent).toBe("Working")
+  act(() => {
+    useAppStore.setState((state) => ({
+      execution: reduceExecutionView(state.execution, {
+        type: "transient",
+        event: {
+          type: "runtime.warning",
+          sessionId: "session_1",
+          turnId: "turn_1",
+          code: "model.retry",
+          message:
+            "Model request failed (connection_failed); retrying in 336 ms.",
+          details: {
+            kind: "connection_failed",
+            nextAttempt: 2,
+            maxAttempts: 4,
+            delayMs: 336,
+          },
+          createdAt: at,
+        },
+      }),
+    }))
+  })
+  const status = screen.getByRole("status")
+  expect(status.textContent).toBe("Reconnecting · attempt 2/4")
+  expect(status.closest("section")?.getAttribute("aria-label")).toBe(
+    "Current response",
+  )
+  expect(screen.getByRole("button", { name: "Retry details" })).toBeDefined()
+  expect(screen.queryByText(/336 ms/)).toBeNull()
+  expect(screen.queryByRole("alert")).toBeNull()
+
+  act(() => {
+    useAppStore.setState((state) => ({
+      execution: reduceExecutionView(
+        reduceExecutionView(state.execution, {
+          type: "transient",
+          event: {
+            type: "item.started",
+            sessionId: "session_1",
+            turnId: "turn_1",
+            item: { type: "agent_message", itemId: "answer" },
+            createdAt: at,
+          },
+        }),
+        {
+          type: "transient",
+          event: {
+            type: "assistant.delta",
+            sessionId: "session_1",
+            turnId: "turn_1",
+            itemId: "answer",
+            delta: "Connection recovered",
+            createdAt: at,
+          },
+        },
+      ),
+    }))
+  })
+  expect(screen.getByRole("button", { name: "Working" })).toBeDefined()
+  expect(screen.queryByText(/Reconnecting/)).toBeNull()
+  expect(screen.queryByRole("button", { name: "Retry details" })).toBeNull()
+  expect(screen.getByText("Connection recovered")).toBeDefined()
+})
+
+it("shows the current retry once when steering input splits the turn", () => {
+  useAppStore.setState({
+    execution: {
+      ...createExecutionViewState(),
+      activeTurnId: "turn_1",
+      activeRetry: {
+        turnId: "turn_1",
+        kind: "rate_limited",
+        nextAttempt: 3,
+        maxAttempts: 4,
+        delayMs: 1000,
+        message: "Rate limit reached; retrying.",
+      },
+      entries: [
+        ...entries.slice(0, 2),
+        { kind: "user_input", inputId: "input_2", text: "Follow-up", at },
+        ...entries.slice(2),
+      ],
+    },
+  })
+  render(
+    <TooltipProvider>
+      <Transcript />
+    </TooltipProvider>,
+  )
+  expect(
+    screen.getAllByText("Waiting for rate limit · attempt 3/4"),
+  ).toHaveLength(1)
+  expect(screen.getAllByRole("button", { name: "Retry details" })).toHaveLength(
+    1,
+  )
 })
 
 it("keeps failures visible even when the preceding activity is collapsed", () => {

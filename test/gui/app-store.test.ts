@@ -96,6 +96,276 @@ afterEach(() => {
 })
 
 describe("app store event stream", () => {
+  it("keeps model retries and terminal turn errors out of the global message", async () => {
+    await useAppStore.getState().selectSession("session_1")
+    const stream = fakeRef.current.streams[0]
+    emitSnapshot(stream, { ...sessionDetail, activeTurnId: "turn_1" })
+    stream?.emitReplayComplete()
+    stream?.emitTransient({
+      type: "runtime.warning",
+      sessionId: "session_1",
+      turnId: "turn_1",
+      code: "model.retry",
+      message: "Model request failed; retrying.",
+      details: {
+        kind: "connection_failed",
+        nextAttempt: 2,
+        maxAttempts: 4,
+        delayMs: 336,
+      },
+      createdAt: sessionDetail.createdAt,
+    })
+    expect(useAppStore.getState().message).toBeUndefined()
+    expect(
+      projectExecutionView(useAppStore.getState().execution).activeRetry,
+    ).toMatchObject({ nextAttempt: 2, maxAttempts: 4 })
+
+    stream?.emitTransient({
+      type: "session.error",
+      sessionId: "session_1",
+      operation: "turn_input",
+      message: "Connection failed",
+      createdAt: sessionDetail.createdAt,
+    })
+    stream?.emitTransient({
+      type: "turn.finished",
+      sessionId: "session_1",
+      turnId: "turn_1",
+      outcome: {
+        status: "failed",
+        error: { message: "Connection failed" },
+      },
+      createdAt: sessionDetail.createdAt,
+    })
+    const view = projectExecutionView(useAppStore.getState().execution)
+    expect(useAppStore.getState().message).toBeUndefined()
+    expect(view.activeRetry).toBeUndefined()
+    expect(view.entries).toContainEqual(
+      expect.objectContaining({
+        kind: "turn_terminal",
+        state: "failed",
+        message: "Connection failed",
+      }),
+    )
+  })
+
+  it("continues to surface operational failures and other runtime warnings", async () => {
+    await useAppStore.getState().selectSession("session_1")
+    const stream = fakeRef.current.streams[0]
+    emitSnapshot(stream)
+    stream?.emitReplayComplete()
+    stream?.emitTransient({
+      type: "session.error",
+      sessionId: "session_1",
+      operation: "persistence",
+      message: "Could not save the session",
+      createdAt: sessionDetail.createdAt,
+    })
+    expect(useAppStore.getState().message).toBe("Could not save the session")
+    stream?.emitTransient({
+      type: "runtime.warning",
+      sessionId: "session_1",
+      turnId: "turn_1",
+      code: "other.warning",
+      message: "Another warning",
+      createdAt: sessionDetail.createdAt,
+    })
+    expect(useAppStore.getState().message).toBe("Another warning")
+  })
+
+  it("reconciles orphaned history with the idle session after replay", async () => {
+    await useAppStore.getState().selectSession("session_1")
+    const stream = fakeRef.current.streams[0]
+    emitSnapshot(stream, { ...sessionDetail, seq: 3 })
+    stream?.emitEvent(
+      createEventEnvelope({
+        sessionId: "session_1",
+        seq: 2,
+        event: {
+          type: EventType.TurnStarted,
+          data: { turnId: "orphan", inputId: "input_1" },
+        },
+      }),
+    )
+    stream?.emitEvent(
+      createEventEnvelope({
+        sessionId: "session_1",
+        seq: 3,
+        event: {
+          type: EventType.ItemCompleted,
+          data: {
+            turnId: "orphan",
+            item: {
+              type: "reasoning",
+              itemId: "reasoning_1",
+              text: "Checking",
+            },
+          },
+        },
+      }),
+    )
+    stream?.emitReplayComplete()
+
+    const view = projectExecutionView(useAppStore.getState().execution)
+    expect(view.activeTurnId).toBeUndefined()
+    expect(view.activeActivity).toBeUndefined()
+    expect(view.entries).toEqual([
+      expect.objectContaining({ kind: "reasoning", text: "Checking" }),
+      expect.objectContaining({
+        kind: "turn_terminal",
+        turnId: "orphan",
+        state: "interrupted",
+      }),
+    ])
+    expect(useAppStore.getState().hydratingSessionId).toBeUndefined()
+
+    // A later live start belongs to the new execution, beyond the snapshot.
+    stream?.emitEvent(
+      createEventEnvelope({
+        sessionId: "session_1",
+        seq: 4,
+        event: {
+          type: EventType.TurnStarted,
+          data: { turnId: "new_turn", inputId: "input_2" },
+        },
+      }),
+    )
+    expect(
+      projectExecutionView(useAppStore.getState().execution).activeTurnId,
+    ).toBe("new_turn")
+  })
+
+  it("preserves the resident turn while reconciling older abandoned turns", async () => {
+    await useAppStore.getState().selectSession("session_1")
+    const stream = fakeRef.current.streams[0]
+    emitSnapshot(stream, {
+      ...sessionDetail,
+      seq: 3,
+      activeTurnId: "resident",
+    })
+    for (const [seq, turnId] of [
+      [2, "orphan"],
+      [3, "resident"],
+    ] as const) {
+      stream?.emitEvent(
+        createEventEnvelope({
+          sessionId: "session_1",
+          seq,
+          event: {
+            type: EventType.TurnStarted,
+            data: { turnId, inputId: `input_${turnId}` },
+          },
+        }),
+      )
+    }
+    stream?.emitReplayComplete()
+    const view = projectExecutionView(useAppStore.getState().execution)
+    expect(view.activeTurnId).toBe("resident")
+    expect(view.activeActivity).toEqual({ kind: "reasoning" })
+    expect(view.entries).toEqual([
+      expect.objectContaining({
+        kind: "turn_terminal",
+        turnId: "orphan",
+        state: "interrupted",
+      }),
+    ])
+  })
+
+  it("does not restore a snapshot's active turn over a newer completion", async () => {
+    await useAppStore.getState().selectSession("session_1")
+    const stream = fakeRef.current.streams[0]
+    emitSnapshot(stream, { ...sessionDetail, seq: 2, activeTurnId: "turn_1" })
+    stream?.emitEvent(
+      createEventEnvelope({
+        sessionId: "session_1",
+        seq: 3,
+        event: {
+          type: EventType.TurnCompleted,
+          data: { turnId: "turn_1", outcome: { status: "completed" } },
+        },
+      }),
+    )
+    stream?.emitReplayComplete()
+    expect(
+      projectExecutionView(useAppStore.getState().execution).activeTurnId,
+    ).toBeUndefined()
+  })
+
+  it("stops presenting active execution when the subscription fails", async () => {
+    await useAppStore.getState().selectSession("session_1")
+    const stream = fakeRef.current.streams[0]
+    emitSnapshot(stream, { ...sessionDetail, activeTurnId: "turn_1" })
+    stream?.emitTransient({
+      sessionId: "session_1",
+      type: "item.started",
+      turnId: "turn_1",
+      createdAt: sessionDetail.updatedAt,
+      item: { type: "reasoning", itemId: "reasoning_1" },
+    })
+    stream?.emitTransient({
+      sessionId: "session_1",
+      type: "reasoning.delta",
+      turnId: "turn_1",
+      itemId: "reasoning_1",
+      delta: "Checking",
+      createdAt: sessionDetail.updatedAt,
+    })
+    stream?.failSubscription(new Error("Session event replay failed."))
+    const view = projectExecutionView(useAppStore.getState().execution)
+    expect(view.activeTurnId).toBeUndefined()
+    expect(view.activeActivity).toBeUndefined()
+    expect(view.entries).toEqual([
+      expect.objectContaining({
+        kind: "reasoning",
+        text: "Checking",
+        status: "completed",
+      }),
+    ])
+    expect(useAppStore.getState().stream).toBeUndefined()
+    expect(useAppStore.getState().hydratingSessionId).toBeUndefined()
+    expect(useAppStore.getState().message).toBe("Session event replay failed.")
+  })
+
+  it("resubscribes after a stale interrupt without cancelling a newer turn", async () => {
+    await useAppStore.getState().selectSession("session_1")
+    const initialStream = fakeRef.current.streams[0]
+    emitSnapshot(initialStream, {
+      ...sessionDetail,
+      seq: 4,
+      activeTurnId: "old_turn",
+    })
+    initialStream?.emitReplayComplete()
+    fakeRef.current.respond = () => {
+      throw new ApiRequestError(
+        "Active Turn old_turn was not found.",
+        "not_found",
+      )
+    }
+    await useAppStore.getState().cancelTurn("old_turn")
+    expect(initialStream?.closed).toBe(true)
+    const replacement = fakeRef.current.streams[1]
+    expect(replacement?.after).toBe(4)
+    emitSnapshot(replacement, {
+      ...sessionDetail,
+      seq: 5,
+      activeTurnId: "new_turn",
+    })
+    replacement?.emitReplayComplete()
+    expect(
+      projectExecutionView(useAppStore.getState().execution).activeTurnId,
+    ).toBe("new_turn")
+    expect(fakeRef.current.requestsFor("session/turn/cancel")).toEqual([
+      {
+        method: "session/turn/cancel",
+        params: {
+          sessionId: "session_1",
+          turnId: "old_turn",
+          reason: "user_cancel",
+        },
+      },
+    ])
+  })
+
   it("falls back from stale selections to the available default model", () => {
     const providers: readonly ApiProviderSummary[] = [
       {

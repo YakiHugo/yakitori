@@ -40,8 +40,16 @@ export function StatusSurface() {
     <div className="space-y-1 border-t bg-muted/40 px-4 py-2">
       {activeTurnId !== undefined && (
         <div className="flex items-center gap-2 text-sm" aria-live="polite">
-          <ActivityIcon activity={view.activeActivity} stopping={stopping} />
-          <span>{activityLabel(view.activeActivity, stopping)}</span>
+          {view.activeRetry && !stopping ? (
+            <LoaderCircle className="size-4 animate-spin text-muted-foreground" />
+          ) : (
+            <ActivityIcon activity={view.activeActivity} stopping={stopping} />
+          )}
+          <span>
+            {view.activeRetry && !stopping
+              ? "Working"
+              : activityLabel(view.activeActivity, stopping)}
+          </span>
           <span className="text-muted-foreground">
             · {formatElapsed(elapsed)}
           </span>
