@@ -11,6 +11,7 @@ import type {
   SessionPermissionRequestResult,
   SessionReplayCompleteNotification,
   SessionSubscribeResponse,
+  SessionSubscriptionErrorNotification,
 } from "../../server/rpc/methods.ts"
 
 // The GUI's only server channel: JSON-RPC over one WebSocket at /rpc,
@@ -330,6 +331,15 @@ export function createAppRpcClient(options: {
       const record = streams.get(params.sessionId)
       if (record === undefined || record.closed) return
       record.handlers.onReplayComplete()
+      return
+    }
+    if (message.method === "session/subscriptionError") {
+      const params = message.params as SessionSubscriptionErrorNotification
+      const record = streams.get(params.sessionId)
+      if (record === undefined || record.closed) return
+      streams.delete(params.sessionId)
+      record.closed = true
+      record.handlers.onError?.(new ApiRequestError(params.message))
       return
     }
     if (message.method === "sidebar/changed") {

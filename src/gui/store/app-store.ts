@@ -331,6 +331,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
     closeStream()
     if (after === 0) set({ hydratingSessionId: selection.sessionId })
 
+    let replaySnapshot: ApiSessionDetail | undefined
     try {
       const source = getAppRpcClient(get().apiBase).openSessionStream(
         selection.sessionId,
@@ -340,6 +341,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
             if (get().stream !== source || !isCurrentSelection(selection)) {
               return
             }
+            replaySnapshot = response.session
             let modelSelections = get().modelSelections
             let restoringModelSelectionFor = get().restoringModelSelectionFor
             if (
@@ -368,7 +370,18 @@ export const useAppStore = create<AppStore>()((set, get) => {
             if (get().stream !== source || !isCurrentSelection(selection)) {
               return
             }
-            set({ hydratingSessionId: undefined })
+            const snapshot = replaySnapshot
+            replaySnapshot = undefined
+            set((state) => ({
+              hydratingSessionId: undefined,
+              execution:
+                snapshot === undefined
+                  ? state.execution
+                  : reduceExecutionView(state.execution, {
+                      type: "replay_completed",
+                      session: snapshot,
+                    }),
+            }))
             if (get().restoringModelSelectionFor === selection.sessionId) {
               set({ restoringModelSelectionFor: undefined })
             }
@@ -410,7 +423,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
                 type: "transient",
                 event,
               }),
-              ...(event.type === "runtime.warning"
+              ...((event.type === "runtime.warning" &&
+                event.code !== "model.retry") ||
+              (event.type === "session.error" &&
+                event.operation !== "turn_input")
                 ? { message: event.message }
                 : {}),
             }))
@@ -422,6 +438,9 @@ export const useAppStore = create<AppStore>()((set, get) => {
             set({
               stream: undefined,
               hydratingSessionId: undefined,
+              execution: reduceExecutionView(get().execution, {
+                type: "stream_unavailable",
+              }),
               message: errorMessage(error, "Could not open event stream."),
             })
           },
@@ -1348,11 +1367,25 @@ export const useAppStore = create<AppStore>()((set, get) => {
       }))
       await runTask(
         async () => {
-          await getAppRpcClient(get().apiBase).request("session/turn/cancel", {
-            sessionId: selection.sessionId,
-            turnId,
-            reason: "user_cancel",
-          })
+          try {
+            await getAppRpcClient(get().apiBase).request(
+              "session/turn/cancel",
+              {
+                sessionId: selection.sessionId,
+                turnId,
+                reason: "user_cancel",
+              },
+            )
+          } catch (error) {
+            if (
+              error instanceof ApiRequestError &&
+              error.code === "not_found" &&
+              isCurrentSelection(selection)
+            ) {
+              connectEvents(selection, get().execution.lastSeq)
+            }
+            throw error
+          }
         },
         () => isCurrentSelection(selection),
       )
@@ -1647,6 +1680,10 @@ function applyTransientSessionDetail(
   event: LiveSessionEvent,
 ): ApiSessionDetail | undefined {
   if (session === undefined || event.sessionId !== session.id) return session
+  if (event.type === "turn.finished" && event.turnId === session.activeTurnId) {
+    const { activeTurnId: _, ...withoutActiveTurn } = session
+    return { ...withoutActiveTurn, active: false }
+  }
   if (event.type === "session.usage") return { ...session, usage: event.usage }
   if (event.type === "permission.requested") {
     if (

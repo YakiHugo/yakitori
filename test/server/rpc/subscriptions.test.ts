@@ -1,7 +1,13 @@
-import { describe, expect, it } from "vitest"
-import type { StoredEventEnvelope } from "../../../src/kernel/index.ts"
+import { describe, expect, it, vi } from "vitest"
+import {
+  createEventEnvelope,
+  EventType,
+  type StoredEventEnvelope,
+} from "../../../src/kernel/index.ts"
+import type { LiveRuntimeWarning } from "../../../src/runtime/live-events.ts"
 import {
   createSessionEventHub,
+  type SessionDelivery,
   type SessionEventHub,
 } from "../../../src/server/event-hub.ts"
 import { MessageProcessor } from "../../../src/server/rpc/message-processor.ts"
@@ -14,6 +20,7 @@ import type {
   ApiPendingPermission,
   ApiSessionDetail,
 } from "../../../src/server/protocol.ts"
+import { reconcileBufferedSessionDeliveries } from "../../../src/server/rpc/subscriptions.ts"
 import {
   createFakeHandlers,
   createTestProcessor,
@@ -79,7 +86,174 @@ function frameIndex(connection: TestConnection, method: string): number {
   )
 }
 
+describe("buffered turn lifecycle", () => {
+  it("delivers runtime finish in order and drops later display events for that turn", () => {
+    const before: SessionDelivery = {
+      kind: "transient",
+      event: makeAssistantDelta(sessionId, "turn_1", "before"),
+    }
+    const finished: SessionDelivery = {
+      kind: "transient",
+      event: {
+        type: "turn.finished",
+        sessionId,
+        turnId: "turn_1",
+        outcome: { status: "completed" },
+        createdAt: "2026-09-17T00:00:00.000Z",
+      },
+    }
+    const lateDelta = makeAssistantDelta(sessionId, "turn_1", "late")
+    const delivered: SessionDelivery[] = []
+    reconcileBufferedSessionDeliveries(
+      [
+        before,
+        finished,
+        { kind: "transient", event: lateDelta },
+        {
+          kind: "transient",
+          event: {
+            type: "reasoning.delta",
+            sessionId,
+            turnId: "turn_1",
+            itemId: "late_reasoning",
+            delta: "late",
+            createdAt: lateDelta.createdAt,
+          },
+        },
+        {
+          kind: "transient",
+          event: {
+            type: "item.started",
+            sessionId,
+            turnId: "turn_1",
+            item: { type: "reasoning", itemId: "late_item" },
+            createdAt: lateDelta.createdAt,
+          },
+        },
+      ],
+      "turn_1",
+      (delivery) => delivered.push(delivery),
+    )
+    expect(delivered).toEqual([before, finished])
+  })
+
+  it.each([
+    "snapshot",
+    "buffer",
+  ])("keeps the newer turn from the %s active when an old turn finishes", (source) => {
+    const buffered: SessionDelivery[] = []
+    if (source === "buffer") {
+      buffered.push({
+        kind: "durable",
+        events: [makeTurnStarted(sessionId, 2, "turn_new")],
+      })
+    }
+    buffered.push(
+      {
+        kind: "transient",
+        event: {
+          type: "turn.finished",
+          sessionId,
+          turnId: "turn_old",
+          outcome: { status: "completed" },
+          createdAt: "2026-09-17T00:00:00.000Z",
+        },
+      },
+      {
+        kind: "transient",
+        event: makeAssistantDelta(sessionId, "turn_new", "current"),
+      },
+    )
+    const delivered: SessionDelivery[] = []
+    reconcileBufferedSessionDeliveries(
+      buffered,
+      source === "snapshot" ? "turn_new" : "turn_old",
+      (delivery) => delivered.push(delivery),
+    )
+    expect(delivered).toEqual(buffered)
+  })
+})
+
 describe("session/subscribe", () => {
+  it.each([
+    false,
+    true,
+  ])("reconciles retry against progress already in the snapshot (newer retry: %s)", async (retryAfterProgress) => {
+    const progress = createEventEnvelope({
+      sessionId,
+      seq: 2,
+      event: {
+        type: EventType.ItemCompleted,
+        data: {
+          turnId: "turn_1",
+          item: {
+            type: "context_compaction",
+            itemId: "compaction_1",
+            status: "completed",
+          },
+        },
+      },
+    })
+    const retry: LiveRuntimeWarning = {
+      type: "runtime.warning",
+      sessionId,
+      turnId: "turn_1",
+      code: "model.retry",
+      message: "Retrying model request",
+      details: {
+        kind: "rate_limited",
+        nextAttempt: 2,
+        maxAttempts: 4,
+        delayMs: 1000,
+      },
+      createdAt: progress.createdAt,
+    }
+    const handlers = createFakeHandlers({
+      readSession: async () => {
+        // These events are buffered while the initial snapshot is read.
+        eventHub.publishTransient(retry)
+        eventHub.publishDurable([progress])
+        if (retryAfterProgress) {
+          eventHub.publishTransient({
+            ...retry,
+            message: "Retrying the next model request",
+          })
+        }
+        return okResult({
+          session: makeSessionDetail(sessionId, {
+            seq: 2,
+            activeTurnId: "turn_1",
+          }),
+        })
+      },
+      readSessionEvents: pagedEventsHandler([
+        makeTurnStarted(sessionId, 1, "turn_1"),
+        progress,
+      ]),
+    })
+    const { processor, eventHub } = createTestProcessor({ handlers })
+    const connection = openTestConnection(processor)
+    await initializeConnection(connection)
+    await subscribe(connection)
+    await connection.waitForFrame(
+      (frame) => "method" in frame && frame.method === "session/replayComplete",
+    )
+    await flush()
+
+    // The duplicate progress is deduplicated after replay. Its earlier retry
+    // must also be discarded; a retry that followed it still describes live work.
+    expect(connection.notifications("session/event")).toHaveLength(2)
+    expect(
+      connection
+        .notifications("session/transient")
+        .map((frame) => frame.params),
+    ).toEqual(
+      retryAfterProgress
+        ? [{ ...retry, message: "Retrying the next model request" }]
+        : [],
+    )
+  })
+
   it("does not retire another interaction using a permission snapshot", async () => {
     const { processor } = subscribeSetup({ events: [], detail: { seq: 0 } })
     const request = processor.pendingServerRequests.register({
@@ -357,6 +531,98 @@ describe("session/subscribe", () => {
     eventHub.publishDurable([makeTurnStarted(sessionId, 1, "turn_1")])
     await flush()
     expect(connection.notifications("session/event")).toHaveLength(0)
+  })
+
+  it.each([
+    "error result",
+    "rejection",
+  ])("terminates a failed replay with a subscription error (%s)", async (failureMode) => {
+    const pageGate = deferred<void>()
+    const reportOperationalFailure = vi.fn()
+    const { processor, eventHub } = createTestProcessor({
+      handlers: createFakeHandlers({
+        readSessionEvents: async () => {
+          await pageGate.promise
+          if (failureMode === "rejection") throw new Error("Replay read failed")
+          return errorResult("internal_error", "Replay read failed")
+        },
+      }),
+      reportOperationalFailure,
+    })
+    const connection = openTestConnection(processor)
+    await initializeConnection(connection)
+    await subscribe(connection)
+    eventHub.publishDurable([makeTurnStarted(sessionId, 1, "turn_1")])
+    eventHub.publishTransient(
+      makeAssistantDelta(sessionId, "turn_1", "buffered"),
+    )
+    pageGate.resolve()
+
+    await connection.waitForFrame(
+      (frame) =>
+        "method" in frame && frame.method === "session/subscriptionError",
+    )
+    eventHub.publishDurable([makeTurnCompleted(sessionId, 2, "turn_1")])
+    eventHub.publishTransient(makeAssistantDelta(sessionId, "turn_1", "late"))
+    await flush()
+
+    expect(connection.notifications("session/subscriptionError")).toEqual([
+      {
+        method: "session/subscriptionError",
+        params: { sessionId, message: "Session event replay failed." },
+      },
+    ])
+    expect(connection.notifications("session/replayComplete")).toHaveLength(0)
+    expect(connection.notifications("session/event")).toHaveLength(0)
+    expect(connection.notifications("session/transient")).toHaveLength(0)
+    expect(reportOperationalFailure).toHaveBeenCalledWith(
+      expect.objectContaining({
+        component: "session-subscriptions",
+        operation: "replay",
+        sessionId,
+        cause: expect.objectContaining({ message: "Replay read failed" }),
+      }),
+    )
+  })
+
+  it("keeps a replacement subscription alive when the old replay fails", async () => {
+    const oldPageGate = deferred<void>()
+    let readCount = 0
+    const reportOperationalFailure = vi.fn()
+    const { processor, eventHub } = createTestProcessor({
+      handlers: createFakeHandlers({
+        readSessionEvents: async () => {
+          readCount += 1
+          if (readCount === 1) {
+            await oldPageGate.promise
+            throw new Error("Old replay failed")
+          }
+          return okResult({ events: [] })
+        },
+      }),
+      reportOperationalFailure,
+    })
+    const connection = openTestConnection(processor)
+    await initializeConnection(connection)
+    await subscribe(connection)
+    await waitForCondition(() => readCount === 1)
+    await subscribe(connection)
+    await connection.waitForFrame(
+      (frame) => "method" in frame && frame.method === "session/replayComplete",
+    )
+    oldPageGate.resolve()
+    await waitForCondition(
+      () => reportOperationalFailure.mock.calls.length === 1,
+    )
+
+    eventHub.publishDurable([makeTurnStarted(sessionId, 1, "turn_1")])
+    await connection.waitForFrame(
+      (frame) => "method" in frame && frame.method === "session/event",
+    )
+    expect(connection.notifications("session/subscriptionError")).toHaveLength(
+      0,
+    )
+    expect(connection.notifications("session/event")).toHaveLength(1)
   })
 
   it("does not block same-session methods behind a slow replay", async () => {

@@ -605,6 +605,12 @@ export class Session {
         operation: "turn_input",
         message,
       })
+      this.#events.send({
+        type: "turn.failed",
+        threadId: this.id,
+        input: active.input,
+        error,
+      })
       this.#setAgentStatus({ errored: message })
       this.#releaseTurn(active)
       return

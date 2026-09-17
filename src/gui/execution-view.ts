@@ -6,8 +6,10 @@ import {
   type TokenUsage,
   type ToolExecutionItem,
   type TurnMetrics,
+  type TurnOutcome,
 } from "../kernel/events.ts"
 import type { LiveSessionEvent } from "../runtime/live-events.ts"
+import type { ModelFailureKind } from "../runtime/model.ts"
 import type {
   ApiPendingInput,
   ApiPendingPermission,
@@ -115,7 +117,20 @@ export type ActiveTurnActivity =
   | { readonly kind: "running_tool"; readonly name: string }
   | { readonly kind: "compacting" }
 
-export type TurnTiming = Readonly<{ startedAt?: string; completedAt?: string }>
+export type ActiveModelRetry = Readonly<{
+  turnId: string
+  kind: ModelFailureKind
+  nextAttempt: number
+  maxAttempts: number
+  delayMs: number
+  message: string
+}>
+
+export type TurnTiming = Readonly<{
+  inputId?: string
+  startedAt?: string
+  completedAt?: string
+}>
 
 export type ExecutionView = Readonly<{
   turnTimings: Readonly<Record<string, TurnTiming>>
@@ -131,6 +146,7 @@ export type ExecutionView = Readonly<{
   telemetry: SessionTelemetry
   activeTurnStartedAt?: string
   activeActivity?: ActiveTurnActivity
+  activeRetry?: ActiveModelRetry
 }>
 
 export type ExecutionViewState = Readonly<{
@@ -145,6 +161,7 @@ export type ExecutionViewState = Readonly<{
   lastTurnMetrics: TurnMetrics | undefined
   telemetry: SessionTelemetry
   activeTurnStartedAt: string | undefined
+  activeRetry: ActiveModelRetry | undefined
   lastSeq: number
   itemEntryIndexes: Readonly<Record<string, number>>
   permissionEntryIndexes: Readonly<Record<string, number>>
@@ -156,6 +173,8 @@ export type ExecutionViewState = Readonly<{
 
 export type ExecutionViewAction =
   | { readonly type: "snapshot"; readonly session: ApiSessionDetail }
+  | { readonly type: "replay_completed"; readonly session: ApiSessionDetail }
+  | { readonly type: "stream_unavailable" }
   | { readonly type: "durable"; readonly event: StoredEventEnvelope }
   | { readonly type: "transient"; readonly event: LiveSessionEvent }
   | {
@@ -195,6 +214,7 @@ export function createExecutionViewState(
     lastTurnMetrics: undefined,
     telemetry: EMPTY_TELEMETRY,
     activeTurnStartedAt: undefined,
+    activeRetry: undefined,
     lastSeq: 0,
     itemEntryIndexes: {},
     permissionEntryIndexes: {},
@@ -213,6 +233,27 @@ export function reduceExecutionView(
   action: ExecutionViewAction,
 ): ExecutionViewState {
   if (action.type === "snapshot") return applySnapshot(state, action.session)
+  if (action.type === "replay_completed") {
+    // History describes past execution. At the replay boundary, the resident
+    // Session decides which task still exists (including an idle Session).
+    // Events beyond the snapshot watermark already describe newer live work.
+    const next =
+      state.lastSeq > action.session.seq
+        ? state
+        : applySnapshot(state, action.session)
+    return reconcileExecution(next, true)
+  }
+  if (action.type === "stream_unavailable") {
+    return reconcileExecution(
+      {
+        ...state,
+        activeTurnId: undefined,
+        activeTurnStartedAt: undefined,
+        activeRetry: undefined,
+      },
+      false,
+    )
+  }
   if (action.type === "permission_resolving") {
     return updatePermission(state, action.permissionRequestId, {
       state: "resolving",
@@ -268,6 +309,9 @@ export function projectExecutionView(state: ExecutionViewState): ExecutionView {
       ? {}
       : { activeTurnStartedAt: state.activeTurnStartedAt }),
     ...(activeActivity === undefined ? {} : { activeActivity }),
+    ...(state.activeRetry === undefined
+      ? {}
+      : { activeRetry: state.activeRetry }),
   }
 }
 
@@ -282,9 +326,15 @@ function applySnapshot(
     ...state,
     lastSeq: Math.max(state.lastSeq, session.seq),
     queuedInputs,
-    ...(session.activeTurnId === undefined
-      ? { activeTurnId: undefined, activeTurnStartedAt: undefined }
-      : { activeTurnId: session.activeTurnId }),
+    activeTurnId: session.activeTurnId,
+    activeRetry:
+      session.activeTurnId === state.activeRetry?.turnId
+        ? state.activeRetry
+        : undefined,
+    activeTurnStartedAt:
+      session.activeTurnId === undefined
+        ? undefined
+        : state.turnTimings[session.activeTurnId]?.startedAt,
     ...(session.mateId === undefined ? {} : { mateId: session.mateId }),
     ...(session.mateRevisionId === undefined
       ? {}
@@ -319,11 +369,149 @@ function applySnapshot(
   return next
 }
 
+function reconcileExecution(
+  state: ExecutionViewState,
+  authoritative: boolean,
+): ExecutionViewState {
+  const interrupted = new Set(
+    authoritative
+      ? Object.entries(state.turnTimings)
+          .filter(
+            ([turnId, timing]) =>
+              turnId !== state.activeTurnId && timing.completedAt === undefined,
+          )
+          .map(([turnId]) => turnId)
+      : [],
+  )
+  let entries = state.entries.flatMap((entry): readonly ExecutionEntry[] => {
+    if (!("turnId" in entry) || entry.turnId === state.activeTurnId) {
+      return [entry]
+    }
+    if (entry.kind === "turn_terminal") interrupted.delete(entry.turnId)
+    if (
+      (entry.kind === "assistant" || entry.kind === "reasoning") &&
+      entry.status === "streaming"
+    ) {
+      return entry.text.length === 0 ? [] : [{ ...entry, status: "completed" }]
+    }
+    if (
+      entry.kind === "tool" &&
+      (entry.state === "requested" || entry.state === "unknown")
+    ) {
+      // A disconnected subscription cannot tell whether the tool stopped.
+      return [{ ...entry, state: authoritative ? "interrupted" : "unknown" }]
+    }
+    if (entry.kind === "permission" && entry.state !== "resolved") {
+      const { behavior: _, ...withoutBehavior } = entry
+      return [{ ...withoutBehavior, state: "resolved" }]
+    }
+    return [entry]
+  })
+  const terminalEntry = (turnId: string): ExecutionEntry => ({
+    kind: "turn_terminal",
+    turnId,
+    state: "interrupted",
+    message: "This turn is no longer running.",
+  })
+  const lastEntryIndexes = new Map(
+    entries.flatMap((entry, index) =>
+      "turnId" in entry ? [[entry.turnId, index] as const] : [],
+    ),
+  )
+  for (const turnId of interrupted) {
+    if (lastEntryIndexes.has(turnId)) continue
+    const inputId = state.turnTimings[turnId]?.inputId
+    const index = entries.findIndex(
+      (entry) => entry.kind === "user_input" && entry.inputId === inputId,
+    )
+    if (index !== -1) lastEntryIndexes.set(turnId, index)
+  }
+  const interruptedAfter = new Map(
+    [...interrupted].flatMap((turnId) => {
+      const index = lastEntryIndexes.get(turnId)
+      return index === undefined ? [] : [[index, turnId] as const]
+    }),
+  )
+  entries = entries.flatMap((entry, index) => {
+    const turnId = interruptedAfter.get(index)
+    if (turnId !== undefined) {
+      interrupted.delete(turnId)
+      return [entry, terminalEntry(turnId)]
+    }
+    return [entry]
+  })
+  for (const turnId of interrupted) {
+    entries.push(terminalEntry(turnId))
+  }
+  return {
+    ...state,
+    entries,
+    ...indexEntries(entries),
+    openCompactionItems: Object.fromEntries(
+      Object.entries(state.openCompactionItems).filter(
+        ([, turnId]) => turnId === state.activeTurnId,
+      ),
+    ),
+  }
+}
+
 function applyTransient(
   state: ExecutionViewState,
   event: LiveSessionEvent,
 ): ExecutionViewState {
+  if (event.type === "runtime.warning") {
+    if (event.code !== "model.retry" || event.turnId !== state.activeTurnId) {
+      return state
+    }
+    const { kind, nextAttempt, maxAttempts, delayMs } = event.details ?? {}
+    switch (kind) {
+      case "authentication":
+      case "connection_failed":
+      case "idle_timeout":
+      case "invalid_request":
+      case "protocol_error":
+      case "provider_error":
+      case "rate_limited":
+      case "server_error":
+      case "stream_disconnected":
+        break
+      default:
+        return state
+    }
+    if (
+      typeof nextAttempt !== "number" ||
+      !Number.isSafeInteger(nextAttempt) ||
+      nextAttempt < 2 ||
+      typeof maxAttempts !== "number" ||
+      !Number.isSafeInteger(maxAttempts) ||
+      maxAttempts < nextAttempt ||
+      typeof delayMs !== "number" ||
+      !Number.isFinite(delayMs) ||
+      delayMs < 0
+    ) {
+      return state
+    }
+    return {
+      ...state,
+      activeRetry: {
+        turnId: event.turnId,
+        kind,
+        nextAttempt,
+        maxAttempts,
+        delayMs,
+        message: event.message,
+      },
+    }
+  }
+  if (event.type === "turn.finished") {
+    state = clearActiveRetry(state, event.turnId)
+    if (state.turnTimings[event.turnId]?.completedAt !== undefined) return state
+    // Runtime completion can survive a failed history write. Preserve visible
+    // output, but leave usage and durable cursors to the persisted events.
+    return finishTurn(state, event.turnId, event.outcome, event.createdAt, true)
+  }
   if (event.type === "item.started") {
+    state = clearActiveRetry(state, event.turnId)
     const item = event.item
     if (item.type === "context_compaction") {
       return {
@@ -370,7 +558,7 @@ function applyTransient(
       return state
     }
     return {
-      ...state,
+      ...clearActiveRetry(state, event.turnId),
       entries: replaceAt(state.entries, index, {
         ...current,
         text: `${current.text}${event.delta}`,
@@ -380,12 +568,16 @@ function applyTransient(
   if (event.type === "session.usage")
     return { ...state, telemetry: replaceUsage(state.telemetry, event.usage) }
   if (event.type === "permission.requested")
-    return upsertPermission(state, event)
+    return upsertPermission(clearActiveRetry(state, event.turnId), event)
   if (event.type === "permission.resolved") {
-    return updatePermission(state, event.permissionRequestId, {
-      state: "resolved",
-      behavior: event.outcome,
-    })
+    return updatePermission(
+      clearActiveRetry(state, event.turnId),
+      event.permissionRequestId,
+      {
+        state: "resolved",
+        behavior: event.outcome,
+      },
+    )
   }
   return state
 }
@@ -433,9 +625,13 @@ function applyDurable(
         ...next,
         activeTurnId: event.data.turnId,
         activeTurnStartedAt: event.createdAt,
+        activeRetry: undefined,
         turnTimings: {
           ...next.turnTimings,
-          [event.data.turnId]: { startedAt: event.createdAt },
+          [event.data.turnId]: {
+            inputId: event.data.inputId,
+            startedAt: event.createdAt,
+          },
         },
       }
     case "turn.completed": {
@@ -482,56 +678,21 @@ function applyDurable(
         telemetry,
         timeToFirstTokenWeightedMs,
         timeToFirstTokenSamples,
-        turnTimings: {
-          ...next.turnTimings,
-          [event.data.turnId]: {
-            ...next.turnTimings[event.data.turnId],
-            completedAt: event.createdAt,
-          },
-        },
         ...(event.data.usage === undefined
           ? {}
           : { lastTurnUsage: event.data.usage }),
         ...(metrics === undefined ? {} : { lastTurnMetrics: metrics }),
-        ...(next.activeTurnId === event.data.turnId
-          ? {
-              activeTurnId: undefined,
-              activeTurnStartedAt: undefined,
-            }
-          : {}),
-        openCompactionItems: Object.fromEntries(
-          Object.entries(next.openCompactionItems).filter(
-            ([, turnId]) => turnId !== event.data.turnId,
-          ),
-        ),
       }
-      next = settleStreamingEntries(
+      return finishTurn(
         next,
         event.data.turnId,
+        event.data.outcome,
+        event.createdAt,
         event.data.outcome.status !== "completed",
       )
-      if (event.data.outcome.status === "completed") return next
-      const outcome = event.data.outcome
-      return {
-        ...next,
-        entries: [
-          ...next.entries,
-          {
-            kind: "turn_terminal",
-            turnId: event.data.turnId,
-            state: outcome.status,
-            message:
-              outcome.status === "failed"
-                ? outcome.error.message
-                : (outcome.reason ??
-                  (outcome.status === "cancelled"
-                    ? "Turn cancelled."
-                    : "Turn interrupted.")),
-          },
-        ],
-      }
     }
     case "item.started": {
+      next = clearActiveRetry(next, event.data.turnId)
       const item = event.data.item
       if (item.type === "context_compaction") {
         return {
@@ -555,6 +716,7 @@ function applyDurable(
       )
     }
     case "item.completed": {
+      next = clearActiveRetry(next, event.data.turnId)
       const item = event.data.item
       if (item.type === "context_compaction") {
         const { [item.itemId]: _, ...openCompactionItems } =
@@ -612,7 +774,7 @@ function applyDurable(
     }
     case "context.compacted":
       return {
-        ...next,
+        ...clearActiveRetry(next, event.data.turnId),
         entries: [
           ...next.entries,
           {
@@ -626,6 +788,73 @@ function applyDurable(
     default:
       return next
   }
+}
+
+function finishTurn(
+  state: ExecutionViewState,
+  turnId: string,
+  outcome: TurnOutcome,
+  completedAt: string,
+  preserveText: boolean,
+): ExecutionViewState {
+  const settled = settleStreamingEntries(state, turnId, preserveText)
+  const entries = settled.entries
+    .filter(
+      (entry) => entry.kind !== "turn_terminal" || entry.turnId !== turnId,
+    )
+    .map((entry): ExecutionEntry => {
+      if (!("turnId" in entry) || entry.turnId !== turnId) return entry
+      if (entry.kind === "tool" && entry.state === "requested") {
+        return {
+          ...entry,
+          state: outcome.status === "completed" ? "unknown" : "interrupted",
+        }
+      }
+      if (entry.kind === "permission" && entry.state !== "resolved") {
+        return { ...entry, state: "resolved" }
+      }
+      return entry
+    })
+  if (outcome.status !== "completed") {
+    entries.push({
+      kind: "turn_terminal",
+      turnId,
+      state: outcome.status,
+      message:
+        outcome.status === "failed"
+          ? outcome.error.message
+          : (outcome.reason ??
+            (outcome.status === "cancelled"
+              ? "Turn cancelled."
+              : "Turn interrupted.")),
+    })
+  }
+  return {
+    ...clearActiveRetry(settled, turnId),
+    entries,
+    ...indexEntries(entries),
+    turnTimings: {
+      ...state.turnTimings,
+      [turnId]: { ...state.turnTimings[turnId], completedAt },
+    },
+    ...(state.activeTurnId === turnId
+      ? { activeTurnId: undefined, activeTurnStartedAt: undefined }
+      : {}),
+    openCompactionItems: Object.fromEntries(
+      Object.entries(state.openCompactionItems).filter(
+        ([, id]) => id !== turnId,
+      ),
+    ),
+  }
+}
+
+function clearActiveRetry(
+  state: ExecutionViewState,
+  turnId: string,
+): ExecutionViewState {
+  return state.activeRetry?.turnId === turnId
+    ? { ...state, activeRetry: undefined }
+    : state
 }
 
 function appendItemEntry(

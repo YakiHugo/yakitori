@@ -1,6 +1,7 @@
 import type {
   StartedExecutionItem,
   EventMetadata,
+  KernelError,
   ModelSelection,
   TextContent,
 } from "../kernel/events.ts"
@@ -173,6 +174,12 @@ export type SessionEvent =
       readonly input: TurnInput
       readonly reason?: string
     }
+  | Readonly<{
+      type: "turn.failed"
+      threadId: string
+      input: TurnInput
+      error: KernelError
+    }>
   | {
       readonly type: "session.error"
       readonly threadId: string

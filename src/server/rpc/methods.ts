@@ -146,6 +146,12 @@ export type SessionReplayCompleteNotification = Readonly<{
   seq: number
 }>
 
+// Terminal for this subscription; reopening requires an explicit subscribe.
+export type SessionSubscriptionErrorNotification = Readonly<{
+  sessionId: string
+  message: string
+}>
+
 export type SessionPermissionRequestedNotification = Readonly<
   { sessionId: string } & ApiPendingPermission
 >
