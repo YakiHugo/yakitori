@@ -177,23 +177,48 @@ export type ApiProviderModel = {
   readonly imageDetailModes?: readonly ("high" | "original")[]
 }
 
+export type ApiRateLimits =
+  | Readonly<{
+      status: "unavailable"
+      reason?: "not_supported" | "temporarily_unavailable"
+    }>
+  | Readonly<{
+      status: "available"
+      buckets: readonly Readonly<{
+        name: string
+        usedPercent: number
+        resetsAt?: number
+      }>[]
+    }>
+
 export type ApiProviderSummary = {
   readonly name: string
   readonly availability?: "available" | "requires_login"
   readonly credentialKind?: "api_key" | "oauth"
-  readonly rateLimits?:
-    | Readonly<{ status: "unavailable" }>
-    | Readonly<{
-        status: "available"
-        buckets: readonly Readonly<{
-          name: string
-          usedPercent: number
-          resetsAt?: number
-        }>[]
-      }>
+  readonly rateLimits?: ApiRateLimits
   readonly defaultModel?: string
   readonly models: readonly ApiProviderModel[]
 }
+
+export type ApiSubscriptionProvider = "codex" | "grok" | "kimi"
+
+export type ApiSubscriptionSummary = Readonly<{
+  provider: ApiSubscriptionProvider
+  displayName: string
+  availability: "available" | "requires_login"
+  credentialKind?: "api_key" | "oauth"
+  plan?: string
+  usage: ApiRateLimits
+}>
+
+export type ApiReadSubscriptionRequest = Readonly<{
+  provider: ApiSubscriptionProvider
+}>
+
+export type ApiReadSubscriptionResponse = Readonly<{
+  subscription: ApiSubscriptionSummary
+  fetchedAt: number
+}>
 
 export type ApiUserModelPreference = {
   readonly provider: string

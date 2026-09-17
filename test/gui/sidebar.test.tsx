@@ -6,6 +6,7 @@ import { App } from "../../src/gui/app.tsx"
 import type {
   ApiProject,
   ApiSessionSummary,
+  ApiSubscriptionSummary,
 } from "../../src/server/protocol.ts"
 import {
   createInitialAppState,
@@ -96,6 +97,128 @@ describe("sidebar", () => {
       screen.getByRole("combobox", { name: "New session project" }),
     ).toBeDefined()
     expect(useAppStore.getState().selection.sessionId).toBeUndefined()
+  })
+
+  it("opens the account panel with live subscription states", async () => {
+    const loadSubscriptions = vi.fn().mockResolvedValue(undefined)
+    const subscriptions = [
+      {
+        provider: "codex",
+        displayName: "Codex",
+        availability: "available",
+        credentialKind: "oauth",
+        plan: "pro",
+        usage: {
+          status: "available",
+          buckets: [
+            {
+              name: "Codex · 5-hour limit",
+              usedPercent: 42,
+              resetsAt: Date.now() + 3_600_000,
+            },
+          ],
+        },
+      },
+      {
+        provider: "grok",
+        displayName: "Grok",
+        availability: "available",
+        credentialKind: "oauth",
+        usage: { status: "unavailable" },
+      },
+      {
+        provider: "kimi",
+        displayName: "Kimi",
+        availability: "requires_login",
+        usage: { status: "unavailable" },
+      },
+    ] as const satisfies readonly ApiSubscriptionSummary[]
+    useAppStore.setState({
+      subscriptionsByProvider: {
+        codex: {
+          subscription: subscriptions[0],
+          loading: false,
+          updatedAt: Date.now(),
+        },
+        grok: {
+          subscription: subscriptions[1],
+          loading: true,
+          updatedAt: Date.now(),
+        },
+        kimi: {
+          subscription: subscriptions[2],
+          loading: false,
+          updatedAt: Date.now(),
+        },
+      },
+      loadSubscriptions,
+    })
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(screen.getByLabelText("Open subscription usage"))
+
+    expect(
+      screen.getByRole("dialog", { name: "Account & usage" }),
+    ).toBeDefined()
+    expect(screen.getByText("Pro plan")).toBeDefined()
+    expect(screen.getByText("42% used")).toBeDefined()
+    expect(
+      screen.getByRole("progressbar", {
+        name: "Codex · 5-hour limit: 42% used",
+      }),
+    ).toBeDefined()
+    expect(
+      screen.getByText(
+        "This provider does not currently expose subscription limits here.",
+      ),
+    ).toBeDefined()
+    expect(screen.getByText("Not connected")).toBeDefined()
+    const codexCard = screen
+      .getByRole("heading", { name: "Codex" })
+      .closest("section")
+    const grokCard = screen
+      .getByRole("heading", { name: "Grok" })
+      .closest("section")
+    expect(codexCard?.getAttribute("aria-busy")).toBe("false")
+    expect(grokCard?.getAttribute("aria-busy")).toBe("true")
+    expect(within(grokCard as HTMLElement).getByText("Updating")).toBeDefined()
+    expect(screen.queryByRole("button", { name: "Refresh" })).toBeNull()
+    expect(loadSubscriptions).toHaveBeenCalledOnce()
+  })
+
+  it("does not present an API key connection as a subscription account", async () => {
+    const loadSubscriptions = vi.fn().mockResolvedValue(undefined)
+    const kimi: ApiSubscriptionSummary = {
+      provider: "kimi",
+      displayName: "Kimi",
+      availability: "available",
+      credentialKind: "api_key",
+      usage: { status: "unavailable", reason: "not_supported" },
+    }
+    useAppStore.setState({
+      subscriptionsByProvider: {
+        codex: { loading: false },
+        grok: { loading: false },
+        kimi: { subscription: kimi, loading: false },
+      },
+      loadSubscriptions,
+    })
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(screen.getByLabelText("Open subscription usage"))
+
+    const kimiCard = screen
+      .getByRole("heading", { name: "Kimi" })
+      .closest("section") as HTMLElement
+    expect(within(kimiCard).getByText("API key connection")).toBeDefined()
+    expect(within(kimiCard).getByText("API key connected")).toBeDefined()
+    expect(
+      within(kimiCard).getByText(
+        "Subscription usage is not available for API key connections.",
+      ),
+    ).toBeDefined()
   })
 
   it("confirms before deleting a session", async () => {

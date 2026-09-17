@@ -254,8 +254,9 @@ describe("method dispatch", () => {
     expect(frame).toMatchObject({ id: null, error: { code: PARSE_ERROR } })
   })
 
-  it("serves project and provider methods from the injected dependencies", async () => {
+  it("serves project, provider, and subscription methods from injected dependencies", async () => {
     const projectStore = createSqliteProjectStore({ databasePath: ":memory:" })
+    const requestedSubscriptions: string[] = []
     const { processor } = createTestProcessor({
       handlers: createFakeHandlers(),
       projectStore,
@@ -264,6 +265,21 @@ describe("method dispatch", () => {
         defaultProvider: "fake",
         defaultModel: "fake-model",
       }),
+      subscriptionUsage: async (provider) => {
+        requestedSubscriptions.push(provider)
+        return {
+          subscription: {
+            provider,
+            displayName: "Codex",
+            availability: "available",
+            usage: {
+              status: "available",
+              buckets: [{ name: "Daily", usedPercent: 25 }],
+            },
+          },
+          fetchedAt: 123,
+        }
+      },
     })
     const connection = openTestConnection(processor)
     await initializeConnection(connection)
@@ -284,6 +300,19 @@ describe("method dispatch", () => {
     ).resolves.toMatchObject({
       result: { defaultProvider: "fake" },
     })
+    await expect(
+      connection.sendRequest("subscription/read", { provider: "codex" }),
+    ).resolves.toMatchObject({
+      result: {
+        subscription: { provider: "codex", usage: { status: "available" } },
+        fetchedAt: 123,
+      },
+    })
+    expect(requestedSubscriptions).toEqual(["codex"])
+    await expect(
+      connection.sendRequest("subscription/read", { provider: "unknown" }),
+    ).resolves.toMatchObject({ error: { code: INVALID_PARAMS } })
+    expect(requestedSubscriptions).toEqual(["codex"])
     projectStore.close()
   })
 

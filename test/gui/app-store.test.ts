@@ -62,6 +62,16 @@ function notFound(): never {
   throw new ApiRequestError("not found", "not_found")
 }
 
+function deferredResponse() {
+  let resolve!: (value: unknown) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<unknown>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
+
 function makeProject(id: string, root: string, name = ""): ApiProject {
   return {
     id,
@@ -1180,6 +1190,101 @@ describe("model selection", () => {
 
     expect(useAppStore.getState().providers).toHaveLength(2)
     expect(useAppStore.getState().message).toBeUndefined()
+  })
+
+  it("updates subscription providers independently and preserves stale data on failure", async () => {
+    const pending = {
+      codex: deferredResponse(),
+      grok: deferredResponse(),
+      kimi: deferredResponse(),
+    }
+    fakeRef.current.respond = (method, params) => {
+      if (method !== "subscription/read") return notFound()
+      return pending[(params as { provider: keyof typeof pending }).provider]
+        .promise
+    }
+    useAppStore.setState({
+      subscriptionsByProvider: {
+        codex: { loading: false },
+        grok: {
+          loading: false,
+          updatedAt: 100,
+          subscription: {
+            provider: "grok",
+            displayName: "Grok",
+            availability: "available",
+            usage: { status: "unavailable" },
+          },
+        },
+        kimi: { loading: false },
+      },
+    })
+
+    const loading = useAppStore.getState().loadSubscriptions()
+
+    expect(fakeRef.current.requestsFor("subscription/read")).toEqual([
+      { method: "subscription/read", params: { provider: "codex" } },
+      { method: "subscription/read", params: { provider: "grok" } },
+      { method: "subscription/read", params: { provider: "kimi" } },
+    ])
+    pending.codex.resolve({
+      subscription: {
+        provider: "codex",
+        displayName: "Codex",
+        availability: "available",
+        plan: "pro",
+        usage: {
+          status: "available",
+          buckets: [{ name: "5-hour limit", usedPercent: 42 }],
+        },
+      },
+      fetchedAt: 123_456,
+    })
+    await vi.waitFor(() => {
+      expect(useAppStore.getState().subscriptionsByProvider.codex.loading).toBe(
+        false,
+      )
+    })
+    expect(useAppStore.getState().subscriptionsByProvider.grok.loading).toBe(
+      true,
+    )
+    expect(useAppStore.getState().subscriptionsByProvider.kimi.loading).toBe(
+      true,
+    )
+
+    pending.grok.reject(new Error("billing unavailable"))
+    pending.kimi.resolve({
+      subscription: {
+        provider: "kimi",
+        displayName: "Kimi",
+        availability: "requires_login",
+        usage: { status: "unavailable" },
+      },
+      fetchedAt: 123_457,
+    })
+    await loading
+
+    expect(
+      useAppStore.getState().subscriptionsByProvider.codex.subscription,
+    ).toMatchObject({
+      provider: "codex",
+      plan: "pro",
+      usage: {
+        status: "available",
+        buckets: [{ name: "5-hour limit", usedPercent: 42 }],
+      },
+    })
+    expect(useAppStore.getState().subscriptionsByProvider.grok).toMatchObject({
+      loading: false,
+      error: "Could not update usage.",
+      updatedAt: 100,
+      subscription: { provider: "grok" },
+    })
+    expect(useAppStore.getState().subscriptionsByProvider.kimi).toMatchObject({
+      loading: false,
+      updatedAt: 123_457,
+      subscription: { provider: "kimi" },
+    })
   })
 
   it("submits inline skill mentions unchanged and clears the admitted draft", async () => {

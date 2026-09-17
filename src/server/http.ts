@@ -18,6 +18,8 @@ import {
   ApiErrorCode,
   type ApiHandlerResult,
   type ApiListProvidersResponse,
+  type ApiReadSubscriptionResponse,
+  type ApiSubscriptionProvider,
   type ApiUserModelPreference,
 } from "./protocol.ts"
 import { createRequestGate, type RequestGate } from "./request-gate.ts"
@@ -35,6 +37,9 @@ type YakitoriHttpServerCommonOptions = {
   readonly staticAssets?: YakitoriStaticAssets
   readonly projectStore?: ProjectStore
   readonly providers?: () => Promise<ApiListProvidersResponse>
+  readonly subscriptionUsage?: (
+    provider: ApiSubscriptionProvider,
+  ) => Promise<ApiReadSubscriptionResponse>
   readonly userConfig?: UserConfigStore
   readonly availableProviders?: readonly string[]
   readonly rolloutAssets?: RolloutAssets
@@ -69,6 +74,7 @@ export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
   const handlers = options.handlers
   const projectStore = options.projectStore
   const providers = options.providers
+  const subscriptionUsage = options.subscriptionUsage
   const userConfig = options.userConfig
   const availableProviders = options.availableProviders
   const rolloutAssets = options.rolloutAssets
@@ -116,6 +122,7 @@ export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
       reportOperationalFailure: reporter,
       ...(projectStore === undefined ? {} : { projectStore }),
       ...(providers === undefined ? {} : { providers }),
+      ...(subscriptionUsage === undefined ? {} : { subscriptionUsage }),
       ...(userConfig === undefined ? {} : { userConfig }),
       ...(availableProviders === undefined ? {} : { availableProviders }),
       ...(options.userAgent === undefined
