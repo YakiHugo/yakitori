@@ -1,12 +1,14 @@
-import { ArrowUp, LoaderCircle, Plus, ShieldCheck, X } from "lucide-react"
+import { ArrowUp, LoaderCircle, Plus, Square, X } from "lucide-react"
 import { useContext, useLayoutEffect, useRef, useState } from "react"
 import { ConversationScrollContext } from "../hooks/conversation-scroll-context.ts"
-import { COMPACT_DIRECTIVE } from "../../kernel/events.ts"
+import { COMPACT_DIRECTIVE, type ImageAttachment } from "../../kernel/events.ts"
 import {
   appendImageFiles,
   appendPickedImages,
   discardDraftImages,
   imageAttachmentUrl,
+  requireDesktopBridge,
+  validateImageFiles,
 } from "../composer-attachments.ts"
 import {
   normalizeKimiModelSelection,
@@ -67,6 +69,7 @@ export function Composer() {
     (state) => state.setPromptAttachments,
   )
   const admitInput = useAppStore((state) => state.admitInput)
+  const cancelTurn = useAppStore((state) => state.cancelTurn)
   const view = useExecutionView()
   const editorRef = useRef<PromptEditorHandle | null>(null)
   const [attachmentError, setAttachmentError] = useState<string>()
@@ -159,6 +162,9 @@ export function Composer() {
   const text = draft.trim()
   const sending =
     sessionId !== undefined && inFlightActions.has(`admit:${sessionId}`)
+  const activeTurnId = view.activeTurnId
+  const stopping =
+    activeTurnId !== undefined && inFlightActions.has(`cancel:${activeTurnId}`)
   const previewAttachment =
     previewIndex === undefined ? undefined : attachments[previewIndex]
   const containsInput = text.length > 0 || attachments.length > 0
@@ -171,14 +177,31 @@ export function Composer() {
     !readingImages &&
     !compactBlocked
 
-  const addFiles = async (files: readonly File[]) => {
-    if (files.length === 0 || sessionId === undefined) return
-    const importSessionId = sessionId
-    const importSelectionRevision = sessionSelectionIntentRevision
+  const importImages = async (
+    collect: (sessionId: string) => Promise<readonly ImageAttachment[]>,
+    validate?: () => void,
+  ) => {
+    if (readingImages) return
     setReadingImages(true)
     setAttachmentError(undefined)
+    let importSessionId = sessionId
+    let importSelectionRevision = sessionSelectionIntentRevision
     try {
-      const next = await appendImageFiles(attachments, importSessionId, files)
+      // Reject unusable files before a lazy createSession can litter an
+      // empty session.
+      validate?.()
+      if (importSessionId === undefined) {
+        // Attachments are desktop-only: fail before creating a session.
+        requireDesktopBridge()
+        // No session yet: create it lazily, like admitInput does on first
+        // send. The store drops a re-entrant createSession, so a second
+        // attach while creation is in flight is a no-op.
+        importSessionId = await useAppStore.getState().createSession()
+        if (importSessionId === undefined) return
+        importSelectionRevision =
+          useAppStore.getState().sessionSelectionIntentRevision
+      }
+      const next = await collect(importSessionId)
       const current = useAppStore.getState()
       if (
         current.selection.sessionId !== importSessionId ||
@@ -205,38 +228,19 @@ export function Composer() {
     }
   }
 
+  const addFiles = async (files: readonly File[]) => {
+    if (files.length === 0) return
+    await importImages(
+      (importSessionId) =>
+        appendImageFiles(attachments, importSessionId, files),
+      () => validateImageFiles(files),
+    )
+  }
+
   const pickImages = async () => {
-    if (sessionId === undefined) return
-    const importSessionId = sessionId
-    const importSelectionRevision = sessionSelectionIntentRevision
-    setReadingImages(true)
-    setAttachmentError(undefined)
-    try {
-      const next = await appendPickedImages(attachments, importSessionId)
-      const current = useAppStore.getState()
-      if (
-        current.selection.sessionId !== importSessionId ||
-        current.sessionSelectionIntentRevision !== importSelectionRevision
-      ) {
-        await discardDraftImages(next.slice(attachments.length))
-        return
-      }
-      setPromptAttachments(next)
-    } catch (error) {
-      const current = useAppStore.getState()
-      if (
-        current.selection.sessionId === importSessionId &&
-        current.sessionSelectionIntentRevision === importSelectionRevision
-      ) {
-        setAttachmentError(
-          error instanceof Error
-            ? error.message
-            : "Images could not be attached.",
-        )
-      }
-    } finally {
-      setReadingImages(false)
-    }
+    await importImages((importSessionId) =>
+      appendPickedImages(attachments, importSessionId),
+    )
   }
 
   const submit = () => {
@@ -515,7 +519,7 @@ export function Composer() {
                 type="button"
                 variant="ghost"
                 size="icon-sm"
-                disabled={sessionId === undefined || readingImages}
+                disabled={readingImages}
                 aria-label="Attach images"
                 title="Attach images"
                 className="rounded-full bg-muted/70"
@@ -527,36 +531,54 @@ export function Composer() {
                   <Plus />
                 )}
               </Button>
-              <div
-                className="flex min-w-0 items-center gap-1.5 px-2 text-xs text-muted-foreground"
-                title="YOLO mode: tools run without approval prompts; hard safety bounds still apply."
-              >
-                <ShieldCheck className="size-4 shrink-0" />
-                <span className="truncate">Full access</span>
-              </div>
             </div>
 
             <div className="flex shrink-0 items-center gap-1">
               <ModelSelector />
-              <Button
-                type="submit"
-                size="icon"
-                disabled={!canSend}
-                aria-label={sending ? "Sending" : "Send"}
-                title={
-                  compactBlocked
-                    ? "Remove images before compacting"
-                    : "Send message"
-                }
-                className="rounded-full"
-              >
-                {sending ? (
-                  <LoaderCircle className="animate-spin" />
-                ) : (
-                  <ArrowUp />
-                )}
-                <span className="sr-only">{sending ? "Sending" : "Send"}</span>
-              </Button>
+              {activeTurnId === undefined ? (
+                <Button
+                  type="submit"
+                  size="icon"
+                  disabled={!canSend}
+                  aria-label={sending ? "Sending" : "Send"}
+                  title={
+                    compactBlocked
+                      ? "Remove images before compacting"
+                      : "Send message"
+                  }
+                  className="rounded-full"
+                >
+                  {sending ? (
+                    <LoaderCircle className="animate-spin" />
+                  ) : (
+                    <ArrowUp />
+                  )}
+                  <span className="sr-only">
+                    {sending ? "Sending" : "Send"}
+                  </span>
+                </Button>
+              ) : (
+                // A stop action, not a submit: Enter in the editor still
+                // queues a follow-up through the unchanged submit path.
+                <Button
+                  type="button"
+                  size="icon"
+                  disabled={stopping}
+                  aria-label={stopping ? "Stopping" : "Interrupt"}
+                  title={stopping ? "Stopping" : "Interrupt"}
+                  className="rounded-full"
+                  onClick={() => void cancelTurn(activeTurnId)}
+                >
+                  {stopping ? (
+                    <LoaderCircle className="animate-spin" />
+                  ) : (
+                    <Square />
+                  )}
+                  <span className="sr-only">
+                    {stopping ? "Stopping" : "Interrupt"}
+                  </span>
+                </Button>
+              )}
             </div>
           </div>
         </div>

@@ -1,8 +1,8 @@
 import { GitFork, Info } from "lucide-react"
 import { ApprovalBar } from "./components/approval-bar.tsx"
 import { Composer } from "./components/composer.tsx"
+import { QueuedInputs } from "./components/queued-inputs.tsx"
 import { SidebarFrame } from "./components/sidebar-frame.tsx"
-import { StatusSurface } from "./components/status-surface.tsx"
 import { TelemetryRail } from "./components/telemetry-rail.tsx"
 import { Transcript } from "./components/transcript.tsx"
 import {
@@ -47,7 +47,7 @@ export function App() {
               <SessionHeader />
               <Transcript>
                 <ApprovalBar />
-                <StatusSurface />
+                <QueuedInputs />
                 <SessionComposer />
               </Transcript>
               <TelemetryRail />

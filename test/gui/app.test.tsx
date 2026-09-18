@@ -16,6 +16,7 @@ import {
 import {
   createEventEnvelope,
   EventType,
+  InputRole,
   type StoredEventEnvelope,
   type TokenUsage,
 } from "../../src/kernel/events.ts"
@@ -110,6 +111,46 @@ describe("app shell", () => {
     await user.click(screen.getByRole("button", { name: "fork from parent" }))
 
     expect(selectSession).toHaveBeenCalledWith("session_parent")
+  })
+
+  it("lists queued follow-ups without the removed activity status bar", () => {
+    useAppStore.setState({
+      selection: { sessionId },
+      selectedSession: sessionDetail({ activeTurnId: "turn_1" }),
+      execution: seedExecution([
+        createEventEnvelope({
+          sessionId,
+          seq: 1,
+          event: {
+            type: EventType.TurnStarted,
+            data: { turnId: "turn_1", inputId: "input_1" },
+          },
+        }),
+        createEventEnvelope({
+          sessionId,
+          seq: 2,
+          event: {
+            type: EventType.InputAdmitted,
+            data: {
+              requestId: "request:2",
+              inputId: "input_2",
+              role: InputRole.User,
+              content: { kind: "text", text: "queued follow-up" },
+            },
+          },
+        }),
+      ]),
+    })
+    render(<App />)
+
+    const cancel = screen.getByRole("button", { name: "Cancel queued input" })
+    const row = cancel.closest("div")
+    if (row === null) throw new Error("Expected the queued input row")
+    expect(within(row).getByText("queued follow-up")).toBeDefined()
+    expect(within(row).getByText("queued")).toBeDefined()
+    // The old status bar's activity label and elapsed time are gone.
+    expect(screen.queryByText("Reasoning")).toBeNull()
+    expect(screen.queryByText(/· 0s/)).toBeNull()
   })
 })
 

@@ -9,21 +9,24 @@ export async function appendPickedImages(
   return [...current, ...added]
 }
 
+export function validateImageFiles(files: readonly File[]): void {
+  if (files.some((file) => !file.type.startsWith("image/"))) {
+    throw new Error("Only PNG, JPEG, GIF, and WebP images can be attached.")
+  }
+  if (files.some((file) => file.size > 50_000_000)) {
+    throw new Error("Image must be no larger than 50 MB.")
+  }
+}
+
 export async function appendImageFiles(
   current: readonly ImageAttachment[],
   sessionId: string,
   files: readonly File[],
 ): Promise<readonly ImageAttachment[]> {
-  const candidates = files.filter((file) => file.type.startsWith("image/"))
-  if (candidates.length !== files.length) {
-    throw new Error("Only PNG, JPEG, GIF, and WebP images can be attached.")
-  }
-  if (candidates.some((file) => file.size > 50_000_000)) {
-    throw new Error("Image must be no larger than 50 MB.")
-  }
+  validateImageFiles(files)
   const added = await requireDesktopBridge().importImageFiles({
     sessionId,
-    files: candidates,
+    files,
   })
   return [...current, ...added]
 }
@@ -47,7 +50,7 @@ export function imageAttachmentUrl(
   )
 }
 
-function requireDesktopBridge(): YakitoriDesktopBridge {
+export function requireDesktopBridge(): YakitoriDesktopBridge {
   if (window.yakitoriDesktop === undefined) {
     throw new Error("Image attachments require the Yakitori desktop app.")
   }
