@@ -1244,27 +1244,106 @@ describe("project state", () => {
     expect(fakeRef.current.requestsFor("session/create")).toHaveLength(0)
   })
 
-  it("toggleProjectPinned flips pinned via project/update and reloads projects", async () => {
+  it("toggleProjectPinned reorders immediately and absorbs the update response", async () => {
+    const gate = deferredResponse()
     fakeRef.current.respond = (method) => {
-      if (method === "project/update") {
-        return { project: { ...projectA, pinned: true } }
-      }
-      if (method === "project/list") {
-        return { projects: [{ ...projectA, pinned: true }, projectB] }
-      }
+      if (method === "project/update") return gate.promise
       return notFound()
     }
-    useAppStore.setState({ projects: [projectA, projectB] })
+    useAppStore.setState({ projects: [projectB, projectA] })
 
-    await useAppStore.getState().toggleProjectPinned("project_a")
+    const pinning = useAppStore.getState().toggleProjectPinned("project_a")
 
+    expect(
+      useAppStore.getState().projects.map((project) => project.id),
+    ).toEqual(["project_a", "project_b"])
+    expect(useAppStore.getState().projects[0]?.pinned).toBe(true)
     expect(fakeRef.current.requestsFor("project/update")).toEqual([
       {
         method: "project/update",
         params: { projectId: "project_a", pinned: true },
       },
     ])
+    expect(fakeRef.current.requestsFor("project/list")).toHaveLength(0)
+
+    gate.resolve({ project: { ...projectA, pinned: true, updatedAt: 1 } })
+    expect(await pinning).toBe(true)
+    expect(fakeRef.current.requestsFor("project/list")).toHaveLength(0)
     expect(useAppStore.getState().projects[0]?.pinned).toBe(true)
+    expect(useAppStore.getState().projects[0]?.updatedAt).toBe(1)
+  })
+
+  it("restores only a project's pinned field when persistence fails", async () => {
+    const gate = deferredResponse()
+    fakeRef.current.respond = (method) => {
+      if (method === "project/update") return gate.promise
+      return notFound()
+    }
+    useAppStore.setState({ projects: [projectA, projectB] })
+
+    const pinning = useAppStore.getState().toggleProjectPinned("project_a")
+    expect(useAppStore.getState().projects[0]?.pinned).toBe(true)
+    useAppStore.setState((state) => ({
+      projects: state.projects.map((project) =>
+        project.id === "project_a"
+          ? { ...project, name: "Updated elsewhere" }
+          : project,
+      ),
+    }))
+    gate.reject(new ApiRequestError("Could not save.", "internal_error"))
+
+    expect(await pinning).toBe(false)
+    expect(
+      useAppStore
+        .getState()
+        .projects.find((project) => project.id === "project_a"),
+    ).toMatchObject({ name: "Updated elsewhere", pinned: false })
+  })
+
+  it("does not restore a project deleted while pin persistence is pending", async () => {
+    const gate = deferredResponse()
+    fakeRef.current.respond = (method) => {
+      if (method === "project/update") return gate.promise
+      return notFound()
+    }
+    useAppStore.setState({ projects: [projectA, projectB] })
+
+    const pinning = useAppStore.getState().toggleProjectPinned("project_a")
+    useAppStore.setState({ projects: [projectB] })
+    gate.reject(new ApiRequestError("Could not save.", "internal_error"))
+
+    expect(await pinning).toBe(false)
+    expect(useAppStore.getState().projects).toEqual([projectB])
+  })
+
+  it("restores the last confirmed project pin after overlapping failures", async () => {
+    const first = deferredResponse()
+    const second = deferredResponse()
+    let calls = 0
+    fakeRef.current.respond = (method) => {
+      if (method !== "project/update") return notFound()
+      calls += 1
+      return calls === 1 ? first.promise : second.promise
+    }
+    useAppStore.setState({ projects: [projectA, projectB] })
+
+    const pinning = useAppStore.getState().toggleProjectPinned("project_a")
+    const unpinning = useAppStore.getState().toggleProjectPinned("project_a")
+    expect(
+      useAppStore
+        .getState()
+        .projects.find((project) => project.id === "project_a")?.pinned,
+    ).toBe(false)
+    first.reject(new ApiRequestError("First failed.", "internal_error"))
+    second.reject(new ApiRequestError("Second failed.", "internal_error"))
+
+    expect(await pinning).toBe(false)
+    expect(await unpinning).toBe(false)
+    expect(
+      useAppStore
+        .getState()
+        .projects.find((project) => project.id === "project_a")?.pinned,
+    ).toBe(false)
   })
 
   it("removeProject deletes, reloads, and retargets the current project", async () => {
@@ -2167,7 +2246,455 @@ it("reveals a grouped search result in its section without inserting it into the
   expect(useAppStore.getState().currentProject).toBe("project_a")
 })
 
-it("clears removed section membership and refreshes every loaded list after restoring a conversation", async () => {
+it("moves a session into pinned before persistence completes", async () => {
+  const gate = deferredResponse()
+  const session = { ...sessionDetail, projectId: "project_a" }
+  const pinnedSidebar = {
+    sections: [],
+    entries: {
+      session_1: { sectionId: "pinned", sectionPosition: 7_000_000 },
+    },
+  }
+  fakeRef.current.respond = (method) => {
+    if (method === "sidebar/update") return gate.promise
+    return notFound()
+  }
+  useAppStore.setState({
+    sidebar: { sections: [], entries: {} },
+    sessionsByProject: {
+      project_a: { sessions: [session] },
+      "sidebar:section:pinned": { sessions: [] },
+    },
+  })
+
+  const pinning = useAppStore.getState().changeSidebar({
+    type: "session",
+    sessionId: session.id,
+    sectionId: "pinned",
+  })
+  await Promise.resolve()
+
+  expect(fakeRef.current.requestsFor("sidebar/update")).toHaveLength(1)
+  expect(useAppStore.getState().sessionsByProject.project_a?.sessions).toEqual(
+    [],
+  )
+  expect(
+    useAppStore.getState().sessionsByProject["sidebar:section:pinned"]
+      ?.sessions,
+  ).toEqual([expect.objectContaining({ id: session.id, sectionId: "pinned" })])
+
+  gate.resolve(pinnedSidebar)
+  expect(await pinning).toBe(true)
+  expect(fakeRef.current.requestsFor("session/list")).toHaveLength(0)
+  expect(
+    useAppStore.getState().sidebar.entries.session_1?.sectionPosition,
+  ).toBe(7_000_000)
+  expect(
+    useAppStore.getState().sessionsByProject["sidebar:section:pinned"]
+      ?.sessions[0]?.sectionPosition,
+  ).toBe(7_000_000)
+})
+
+it("projects rich sidebar notifications without refetching session lists", async () => {
+  fakeRef.current.respond = (method) => {
+    if (method === "provider/list") {
+      return { providers: [], defaultProvider: "faux", defaultModel: "m" }
+    }
+    if (method === "project/list") return { projects: [] }
+    if (method === "session/list") return { sessions: [] }
+    return notFound()
+  }
+  await useAppStore.getState().boot()
+  const session = { ...sessionDetail, projectId: "project_a" }
+  useAppStore.setState({
+    sidebar: { sections: [], entries: {} },
+    sessionsByProject: {
+      project_a: { sessions: [session] },
+      "sidebar:section:pinned": { sessions: [] },
+    },
+  })
+  fakeRef.current.requests.length = 0
+
+  fakeRef.current.emitSidebarChanged({
+    sessionId: session.id,
+    sidebar: {
+      sections: [],
+      entries: {
+        session_1: { sectionId: "pinned", sectionPosition: 1_000_000 },
+      },
+    },
+  })
+
+  expect(useAppStore.getState().sessionsByProject.project_a?.sessions).toEqual(
+    [],
+  )
+  expect(
+    useAppStore.getState().sessionsByProject["sidebar:section:pinned"]
+      ?.sessions[0]?.id,
+  ).toBe(session.id)
+  expect(fakeRef.current.requestsFor("session/list")).toHaveLength(0)
+})
+
+it("keeps a pin confirmed by notification when its response is lost", async () => {
+  const gate = deferredResponse()
+  fakeRef.current.respond = (method) => {
+    if (method === "provider/list") {
+      return { providers: [], defaultProvider: "faux", defaultModel: "m" }
+    }
+    if (method === "project/list") return { projects: [] }
+    if (method === "session/list") return { sessions: [] }
+    if (method === "sidebar/update") return gate.promise
+    return notFound()
+  }
+  await useAppStore.getState().boot()
+  const session = { ...sessionDetail, projectId: "project_a" }
+  useAppStore.setState({
+    sidebar: { sections: [], entries: {} },
+    sessionsByProject: {
+      project_a: { sessions: [session] },
+      "sidebar:section:pinned": { sessions: [] },
+    },
+  })
+  fakeRef.current.requests.length = 0
+
+  const pinning = useAppStore.getState().changeSidebar({
+    type: "session",
+    sessionId: session.id,
+    sectionId: "pinned",
+  })
+  await Promise.resolve()
+  const sidebar = {
+    sections: [],
+    entries: {
+      session_1: { sectionId: "pinned", sectionPosition: 1_000_000 },
+    },
+  }
+  fakeRef.current.emitSidebarChanged({ sessionId: session.id, sidebar })
+  gate.reject(new ApiRequestError("Connection lost.", "internal_error"))
+
+  expect(await pinning).toBe(true)
+  expect(useAppStore.getState().message).toBeUndefined()
+  expect(useAppStore.getState().sidebar).toEqual(sidebar)
+  expect(
+    useAppStore.getState().sessionsByProject["sidebar:section:pinned"]
+      ?.sessions[0]?.id,
+  ).toBe(session.id)
+  expect(fakeRef.current.requestsFor("session/list")).toHaveLength(0)
+})
+
+it("keeps a newer external section when local pin persistence fails", async () => {
+  const gate = deferredResponse()
+  fakeRef.current.respond = (method) => {
+    if (method === "provider/list") {
+      return { providers: [], defaultProvider: "faux", defaultModel: "m" }
+    }
+    if (method === "project/list") return { projects: [] }
+    if (method === "session/list") return { sessions: [] }
+    if (method === "sidebar/update") return gate.promise
+    return notFound()
+  }
+  await useAppStore.getState().boot()
+  const session = { ...sessionDetail, projectId: "project_a" }
+  useAppStore.setState({
+    sidebar: { sections: [{ id: "work", name: "Work" }], entries: {} },
+    sessionsByProject: {
+      project_a: { sessions: [session] },
+      "sidebar:section:pinned": { sessions: [] },
+      "sidebar:section:work": { sessions: [] },
+    },
+  })
+
+  const pinning = useAppStore.getState().changeSidebar({
+    type: "session",
+    sessionId: session.id,
+    sectionId: "pinned",
+  })
+  await Promise.resolve()
+  const movedElsewhere = {
+    sections: [{ id: "work", name: "Work" }],
+    entries: {
+      session_1: { sectionId: "work", sectionPosition: 1_000_000 },
+    },
+  }
+  fakeRef.current.emitSidebarChanged({
+    sessionId: session.id,
+    sidebar: movedElsewhere,
+  })
+  gate.reject(new ApiRequestError("Could not save.", "internal_error"))
+
+  expect(await pinning).toBe(false)
+  expect(useAppStore.getState().sidebar).toEqual(movedElsewhere)
+  expect(
+    useAppStore.getState().sessionsByProject["sidebar:section:work"]
+      ?.sessions[0]?.id,
+  ).toBe(session.id)
+  expect(
+    useAppStore.getState().sessionsByProject["sidebar:section:pinned"]
+      ?.sessions,
+  ).toEqual([])
+})
+
+it("does not let an older session-list response overwrite a pin", async () => {
+  const stalePinnedList = deferredResponse()
+  const session = { ...sessionDetail, projectId: "project_a" }
+  const sidebar = {
+    sections: [],
+    entries: {
+      session_1: { sectionId: "pinned", sectionPosition: 1_000_000 },
+    },
+  }
+  fakeRef.current.respond = (method) => {
+    if (method === "session/list") return stalePinnedList.promise
+    if (method === "sidebar/update") return sidebar
+    return notFound()
+  }
+  useAppStore.setState({
+    sidebar: { sections: [], entries: {} },
+    sessionsByProject: {
+      project_a: { sessions: [session] },
+      "sidebar:section:pinned": { sessions: [] },
+    },
+  })
+  const staleRead = useAppStore
+    .getState()
+    .loadSessions(undefined, { sectionId: "pinned" })
+
+  const pinning = useAppStore.getState().changeSidebar({
+    type: "session",
+    sessionId: session.id,
+    sectionId: "pinned",
+  })
+  expect(await pinning).toBe(true)
+  stalePinnedList.resolve({ sessions: [] })
+  expect(await staleRead).toBe(false)
+
+  expect(
+    useAppStore.getState().sessionsByProject["sidebar:section:pinned"]
+      ?.sessions[0]?.id,
+  ).toBe(session.id)
+  expect(
+    useAppStore.getState().sessionsByProject["sidebar:section:pinned"]?.loading,
+  ).toBeUndefined()
+})
+
+it("keeps a newly pinned session beyond an already loaded page cursor", async () => {
+  const session = { ...sessionDetail, projectId: "project_a" }
+  const existing = {
+    ...sessionDetail,
+    id: "session_2",
+    navigationId: "session_2",
+    sectionId: "pinned",
+    sectionPosition: 1_000_000,
+  }
+  const sidebar = {
+    sections: [],
+    entries: {
+      session_1: { sectionId: "pinned", sectionPosition: 2_000_000 },
+      session_2: { sectionId: "pinned", sectionPosition: 1_000_000 },
+    },
+  }
+  fakeRef.current.respond = (method) => {
+    if (method === "sidebar/update") return sidebar
+    return notFound()
+  }
+  useAppStore.setState({
+    sidebar: {
+      sections: [],
+      entries: {
+        session_2: { sectionId: "pinned", sectionPosition: 1_000_000 },
+      },
+    },
+    sessionsByProject: {
+      project_a: { sessions: [session] },
+      "sidebar:section:pinned": {
+        sessions: [existing],
+        nextCursor: "opaque-server-cursor",
+      },
+    },
+  })
+
+  expect(
+    await useAppStore.getState().changeSidebar({
+      type: "session",
+      sessionId: session.id,
+      sectionId: "pinned",
+    }),
+  ).toBe(true)
+
+  expect(
+    useAppStore.getState().sessionsByProject["sidebar:section:pinned"]
+      ?.sessions,
+  ).toEqual([expect.objectContaining({ id: existing.id })])
+  expect(useAppStore.getState().sessionsByProject.project_a?.sessions).toEqual(
+    [],
+  )
+})
+
+it("drops the page anchor after it moves beyond its old cursor", async () => {
+  const moved = {
+    ...sessionDetail,
+    sectionId: "pinned",
+    sectionPosition: 1_000_000,
+  }
+  const preceding = {
+    ...sessionDetail,
+    id: "session_2",
+    navigationId: "session_2",
+    sectionId: "pinned",
+    sectionPosition: 500_000,
+  }
+  const sidebar = {
+    sections: [],
+    entries: {
+      session_1: { sectionId: "pinned", sectionPosition: 2_000_000 },
+      session_2: { sectionId: "pinned", sectionPosition: 500_000 },
+    },
+  }
+  fakeRef.current.respond = (method) => {
+    if (method === "sidebar/update") return sidebar
+    return notFound()
+  }
+  useAppStore.setState({
+    sidebar: {
+      sections: [],
+      entries: {
+        session_1: { sectionId: "pinned", sectionPosition: 1_000_000 },
+        session_2: { sectionId: "pinned", sectionPosition: 500_000 },
+      },
+    },
+    sessionsByProject: {
+      "sidebar:section:pinned": {
+        sessions: [preceding, moved],
+        nextCursor: "opaque-server-cursor",
+      },
+    },
+  })
+
+  expect(
+    await useAppStore.getState().changeSidebar({
+      type: "move-session",
+      sessionId: moved.id,
+      sectionId: "pinned",
+    }),
+  ).toBe(true)
+
+  expect(
+    useAppStore.getState().sessionsByProject["sidebar:section:pinned"]
+      ?.sessions,
+  ).toEqual([expect.objectContaining({ id: preceding.id })])
+})
+
+it("moves a session out of pinned before persistence completes", async () => {
+  const gate = deferredResponse()
+  const session = {
+    ...sessionDetail,
+    projectId: "project_a",
+    sectionId: "pinned",
+    sectionPosition: 1_000_000,
+  }
+  fakeRef.current.respond = (method) => {
+    if (method === "sidebar/update") return gate.promise
+    return notFound()
+  }
+  useAppStore.setState({
+    sidebar: {
+      sections: [],
+      entries: {
+        session_1: { sectionId: "pinned", sectionPosition: 1_000_000 },
+      },
+    },
+    sessionsByProject: {
+      project_a: { sessions: [] },
+      "sidebar:section:pinned": { sessions: [session] },
+    },
+  })
+
+  const unpinning = useAppStore.getState().changeSidebar({
+    type: "move-session",
+    sessionId: session.id,
+    sectionId: null,
+  })
+  await Promise.resolve()
+
+  expect(fakeRef.current.requestsFor("sidebar/update")).toHaveLength(1)
+  expect(
+    useAppStore.getState().sessionsByProject["sidebar:section:pinned"]
+      ?.sessions,
+  ).toEqual([])
+  const unpinned =
+    useAppStore.getState().sessionsByProject.project_a?.sessions[0]
+  expect(unpinned?.id).toBe(session.id)
+  expect(unpinned?.sectionId).toBeUndefined()
+  expect(unpinned?.sectionPosition).toBeUndefined()
+
+  gate.resolve({ sections: [], entries: { session_1: {} } })
+  expect(await unpinning).toBe(true)
+  expect(fakeRef.current.requestsFor("session/list")).toHaveLength(0)
+})
+
+it("restores an unpinned session when pin persistence fails", async () => {
+  const gate = deferredResponse()
+  const session = { ...sessionDetail, projectId: "project_a" }
+  fakeRef.current.respond = (method) => {
+    if (method === "sidebar/update") return gate.promise
+    return notFound()
+  }
+  useAppStore.setState({
+    sidebar: { sections: [], entries: {} },
+    sessionsByProject: {
+      project_a: { sessions: [session] },
+      "sidebar:section:pinned": { sessions: [] },
+    },
+  })
+
+  const pinning = useAppStore.getState().changeSidebar({
+    type: "session",
+    sessionId: session.id,
+    sectionId: "pinned",
+  })
+  await Promise.resolve()
+  expect(
+    useAppStore.getState().sessionsByProject["sidebar:section:pinned"]
+      ?.sessions[0]?.id,
+  ).toBe(session.id)
+  useAppStore.setState((state) => ({
+    sidebar: {
+      ...state.sidebar,
+      entries: {
+        ...state.sidebar.entries,
+        session_1: {
+          ...state.sidebar.entries.session_1,
+          title: "Renamed elsewhere",
+        },
+      },
+    },
+  }))
+  gate.reject(new ApiRequestError("Could not save.", "internal_error"))
+
+  expect(await pinning).toBe(false)
+  expect(
+    useAppStore.getState().sessionsByProject.project_a?.sessions[0],
+  ).toMatchObject({
+    id: session.id,
+    title: "Renamed elsewhere",
+  })
+  expect(
+    useAppStore.getState().sessionsByProject.project_a?.sessions[0]?.sectionId,
+  ).toBeUndefined()
+  expect(
+    useAppStore.getState().sessionsByProject["sidebar:section:pinned"]
+      ?.sessions,
+  ).toEqual([])
+  expect(useAppStore.getState().sidebar.entries.session_1).toEqual({
+    title: "Renamed elsewhere",
+  })
+  expect(
+    useAppStore.getState().sessionsByProject.project_a?.sessions[0]?.title,
+  ).toBe("Renamed elsewhere")
+  expect(useAppStore.getState().message).toBe("Could not save.")
+})
+
+it("clears removed section membership from every loaded list without refetching", async () => {
   const archived = { ...sessionDetail, archived: true, sectionId: "pinned" }
   useAppStore.setState({
     selectedSession: archived,
@@ -2177,19 +2704,13 @@ it("clears removed section membership and refreshes every loaded list after rest
       "sidebar:archived": { sessions: [archived] },
     },
   })
-  fakeRef.current.respond = (method, params) => {
+  fakeRef.current.respond = (method) => {
     if (method === "sidebar/update") {
       fakeRef.current.sidebarResponse = {
         sections: [],
         entries: { session_1: { archived: false } },
       }
       return fakeRef.current.sidebarResponse
-    }
-    if (method === "session/list") {
-      const filter = params as { sectionId?: string; archived?: boolean }
-      return {
-        sessions: filter.archived || filter.sectionId ? [] : [sessionDetail],
-      }
     }
     return notFound()
   }
@@ -2210,9 +2731,8 @@ it("clears removed section membership and refreshes every loaded list after rest
   expect(
     useAppStore.getState().sessionsByProject["sidebar:archived"]?.sessions,
   ).toEqual([])
-  expect(
-    useAppStore.getState().sessionsByProject[""]?.sessions.map((s) => s.id),
-  ).toEqual(["session_1"])
+  expect(useAppStore.getState().sessionsByProject[""]).toBeUndefined()
+  expect(fakeRef.current.requestsFor("session/list")).toHaveLength(0)
 })
 
 it("serializes rapid sidebar changes so every request reaches the server in click order", async () => {

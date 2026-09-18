@@ -10,6 +10,7 @@ import type { ApiReadSessionResponse } from "../../src/server/protocol.ts"
 import type {
   ProjectChangedNotification,
   SessionPermissionRequestResult,
+  SidebarChangedNotification,
 } from "../../src/server/rpc/methods.ts"
 
 // Test double for the GUI's RPC channel: subscriptions are driven explicitly
@@ -57,12 +58,19 @@ export type FakeRequest = {
 
 export class FakeRpcClient {
   sidebarResponse: SessionSidebar = { sections: [], entries: {} }
-  readonly sidebarChangeListeners = new Set<() => void>()
-  subscribeToSidebarChanges(listener: () => void) {
+  readonly sidebarChangeListeners = new Set<
+    (notification: SidebarChangedNotification) => void
+  >()
+  subscribeToSidebarChanges(
+    listener: (notification: SidebarChangedNotification) => void,
+  ) {
     this.sidebarChangeListeners.add(listener)
     return () => {
       this.sidebarChangeListeners.delete(listener)
     }
+  }
+  emitSidebarChanged(notification: SidebarChangedNotification): void {
+    for (const listener of this.sidebarChangeListeners) listener(notification)
   }
   readonly streams: FakeSessionStream[] = []
   readonly requests: FakeRequest[] = []

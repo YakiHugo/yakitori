@@ -1,9 +1,9 @@
+import { useMemo } from "react"
+import { create } from "zustand"
 import type {
   SessionSidebar,
   SidebarChange,
 } from "../../core/session-sidebar.ts"
-import { useMemo } from "react"
-import { create } from "zustand"
 import {
   COMPACT_DIRECTIVE,
   type ImageAttachment,
@@ -265,6 +265,16 @@ export const useAppStore = create<AppStore>()((set, get) => {
   let sidebarQueue: Promise<boolean> = Promise.resolve(true)
   let sidebarQueueDepth = 0
   let sidebarQueueError: string | undefined
+  const pendingSidebarSessionIds = new Set<string>()
+  const pendingSidebarPins = new Map<
+    string,
+    { readonly navigationId: string; readonly sectionId: string | null }
+  >()
+  const confirmedSidebarPins = new Set<string>()
+  const supersededSidebarPins = new Set<string>()
+  const projectPinRevisions: Record<string, number> = {}
+  const confirmedProjectPins: Record<string, boolean> = {}
+  const pendingProjectPins: Record<string, number> = {}
   const subscriptionReadRevisions: Record<ApiSubscriptionProvider, number> = {
     codex: 0,
     grok: 0,
@@ -290,6 +300,11 @@ export const useAppStore = create<AppStore>()((set, get) => {
       set({ busy: activeTaskCount > 0 })
     }
   }
+  const invalidateSessionListReads = (): void => {
+    for (const key of Object.keys(get().sessionsByProject)) {
+      sessionListRevisions[key] = (sessionListRevisions[key] ?? 0) + 1
+    }
+  }
 
   const enqueueSidebarChange = (
     resolveChange: () => SidebarChange | undefined,
@@ -305,27 +320,118 @@ export const useAppStore = create<AppStore>()((set, get) => {
     const run = sidebarQueue.then(async () => {
       const change = resolveChange()
       if (change === undefined) return false
-      const completed = await runTask(
+      const sessionChange =
+        change.type === "session" || change.type === "move-session"
+          ? change
+          : undefined
+      const pinChange =
+        (change.type === "session" ||
+          (change.type === "move-session" &&
+            change.beforeSessionId === undefined)) &&
+        (change.sectionId === "pinned" || change.sectionId === null)
+          ? change
+          : undefined
+      const changedSession =
+        sessionChange === undefined
+          ? undefined
+          : findCachedSession(get(), sessionChange.sessionId)
+      if (sessionChange !== undefined)
+        pendingSidebarSessionIds.add(sessionChange.sessionId)
+      if (pinChange !== undefined && changedSession !== undefined) {
+        confirmedSidebarPins.delete(pinChange.sessionId)
+        supersededSidebarPins.delete(pinChange.sessionId)
+        pendingSidebarPins.set(pinChange.sessionId, {
+          navigationId: changedSession.navigationId ?? changedSession.id,
+          sectionId: pinChange.sectionId ?? null,
+        })
+      }
+      const previousSidebar =
+        pinChange === undefined ? undefined : get().sidebar
+      if (previousSidebar !== undefined && pinChange !== undefined) {
+        const sidebar = optimisticPinnedSidebar(get(), {
+          sessionId: pinChange.sessionId,
+          sectionId: pinChange.sectionId ?? null,
+        })
+        if (sidebar !== undefined) {
+          sidebarReadRevision += 1
+          invalidateSessionListReads()
+          set((state) =>
+            projectSidebarSession(
+              state,
+              sidebar,
+              pinChange.sessionId,
+              changedSession,
+            ),
+          )
+        }
+      }
+      let completed = await runTask(
         async () => {
           const sidebar = await getAppRpcClient(get().apiBase).request(
             "sidebar/update",
             change,
           )
           sidebarReadRevision += 1
-          set({ sidebar })
-          if (
-            (change.type === "session" || change.type === "move-session") &&
-            change.sectionId
+          invalidateSessionListReads()
+          set((state) =>
+            sessionChange !== undefined
+              ? projectSidebarSession(
+                  state,
+                  sidebar,
+                  sessionChange.sessionId,
+                  changedSession,
+                )
+              : { sidebar },
           )
-            get().setSectionOpen(change.sectionId, true)
-          await get().refreshSidebar()
+          if (sessionChange?.sectionId)
+            get().setSectionOpen(sessionChange.sectionId, true)
         },
         () => true,
         false,
       )
-      if (!completed) sidebarQueueError = get().message
-      else if (sidebarQueueError !== undefined) {
+      if (
+        !completed &&
+        pinChange !== undefined &&
+        confirmedSidebarPins.has(pinChange.sessionId)
+      ) {
+        completed = true
+        set({ message: undefined })
+      }
+      if (!completed) {
+        sidebarQueueError = get().message
+        if (
+          previousSidebar !== undefined &&
+          pinChange !== undefined &&
+          !supersededSidebarPins.has(pinChange.sessionId)
+        ) {
+          sidebarReadRevision += 1
+          invalidateSessionListReads()
+          set((state) => {
+            const sidebar =
+              changedSession === undefined
+                ? previousSidebar
+                : restoreSidebarSection(
+                    state.sidebar,
+                    previousSidebar,
+                    changedSession.navigationId ?? changedSession.id,
+                  )
+            return projectSidebarSession(
+              state,
+              sidebar,
+              pinChange.sessionId,
+              changedSession,
+            )
+          })
+        }
+      } else if (sidebarQueueError !== undefined) {
         set({ message: sidebarQueueError })
+      }
+      if (sessionChange !== undefined)
+        pendingSidebarSessionIds.delete(sessionChange.sessionId)
+      if (pinChange !== undefined) {
+        pendingSidebarPins.delete(pinChange.sessionId)
+        confirmedSidebarPins.delete(pinChange.sessionId)
+        supersededSidebarPins.delete(pinChange.sessionId)
       }
       return completed
     })
@@ -533,7 +639,33 @@ export const useAppStore = create<AppStore>()((set, get) => {
       const client = getAppRpcClient(get().apiBase)
       if (projectChangesSubscribedClient !== client) {
         projectChangesSubscribedClient = client
-        client.subscribeToSidebarChanges(() => {
+        client.subscribeToSidebarChanges((notification) => {
+          const sidebar = notification.sidebar
+          const sessionId = notification.sessionId
+          if (sidebar !== undefined && sessionId !== undefined) {
+            const pendingPin = pendingSidebarPins.get(sessionId)
+            if (
+              pendingPin !== undefined &&
+              (sidebar.entries[pendingPin.navigationId]?.sectionId ?? null) ===
+                pendingPin.sectionId
+            ) {
+              confirmedSidebarPins.add(sessionId)
+            } else if (pendingPin !== undefined) {
+              supersededSidebarPins.add(sessionId)
+            }
+            const session = findCachedSession(get(), sessionId)
+            if (
+              session !== undefined ||
+              pendingSidebarSessionIds.has(sessionId)
+            ) {
+              sidebarReadRevision += 1
+              invalidateSessionListReads()
+              set((state) =>
+                projectSidebarSession(state, sidebar, sessionId, session),
+              )
+              return
+            }
+          }
           void get().refreshSidebar()
         })
         client.subscribeToProjectChanges(() => {
@@ -748,6 +880,11 @@ export const useAppStore = create<AppStore>()((set, get) => {
         )
         if (revision !== projectReadRevision) return
         const projects = [...response.projects]
+        for (const project of projects) {
+          if ((pendingProjectPins[project.id] ?? 0) > 0) {
+            confirmedProjectPins[project.id] = project.pinned
+          }
+        }
         set((state) => {
           const liveIds = new Set(projects.map((project) => project.id))
           const sessionsByProject = Object.fromEntries(
@@ -1220,13 +1357,47 @@ export const useAppStore = create<AppStore>()((set, get) => {
         (candidate) => candidate.id === projectId,
       )
       if (project === undefined) return false
+      const revision = (projectPinRevisions[projectId] ?? 0) + 1
+      projectPinRevisions[projectId] = revision
+      if ((pendingProjectPins[projectId] ?? 0) === 0)
+        confirmedProjectPins[projectId] = project.pinned
+      pendingProjectPins[projectId] = (pendingProjectPins[projectId] ?? 0) + 1
+      const optimistic = { ...project, pinned: !project.pinned }
+      set((state) => ({
+        projects: replaceProject(state.projects, optimistic),
+      }))
       const completed = await runTask(async () => {
-        await getAppRpcClient(get().apiBase).request("project/update", {
+        const { project: updated } = await getAppRpcClient(
+          get().apiBase,
+        ).request("project/update", {
           projectId,
-          pinned: !project.pinned,
+          pinned: optimistic.pinned,
         })
+        confirmedProjectPins[projectId] = updated.pinned
+        if (projectPinRevisions[projectId] !== revision) return
+        set((state) => ({
+          projects: replaceProject(state.projects, updated),
+        }))
       })
-      if (completed) await get().loadProjects()
+      if (!completed && projectPinRevisions[projectId] === revision) {
+        set((state) => {
+          const current = state.projects.find(
+            (candidate) => candidate.id === projectId,
+          )
+          if (current === undefined) return {}
+          return {
+            projects: replaceProject(state.projects, {
+              ...current,
+              pinned: confirmedProjectPins[projectId] ?? project.pinned,
+            }),
+          }
+        })
+      }
+      pendingProjectPins[projectId] -= 1
+      if (pendingProjectPins[projectId] === 0) {
+        delete pendingProjectPins[projectId]
+        delete confirmedProjectPins[projectId]
+      }
       return completed
     },
 
@@ -1592,6 +1763,179 @@ export const useAppStore = create<AppStore>()((set, get) => {
     },
   }
 })
+
+function replaceProject(
+  projects: readonly ApiProject[],
+  updated: ApiProject,
+): ApiProject[] {
+  return projects
+    .map((project) => (project.id === updated.id ? updated : project))
+    .sort(
+      (left, right) =>
+        Number(right.pinned) - Number(left.pinned) ||
+        left.position - right.position,
+    )
+}
+
+function optimisticPinnedSidebar(
+  state: AppStoreData,
+  change: Readonly<{ sessionId: string; sectionId: string | null }>,
+): SessionSidebar | undefined {
+  const session = findCachedSession(state, change.sessionId)
+  if (session === undefined) return
+  const navigationId = session.navigationId ?? session.id
+  const entry = { ...state.sidebar.entries[navigationId] }
+  if (change.sectionId === null) {
+    delete entry.sectionId
+    delete entry.sectionPosition
+  } else if (entry.sectionId !== change.sectionId) {
+    entry.sectionId = change.sectionId
+    entry.sectionPosition =
+      Math.max(
+        0,
+        ...Object.values(state.sidebar.entries)
+          .filter((candidate) => candidate.sectionId === change.sectionId)
+          .map((candidate) => candidate.sectionPosition ?? 0),
+      ) + 1_000_000
+  }
+  return {
+    ...state.sidebar,
+    entries: {
+      ...state.sidebar.entries,
+      [navigationId]: entry,
+    },
+  }
+}
+
+function restoreSidebarSection(
+  current: SessionSidebar,
+  previous: SessionSidebar,
+  navigationId: string,
+): SessionSidebar {
+  const entries = { ...current.entries }
+  const entry = { ...entries[navigationId] }
+  const previousEntry = previous.entries[navigationId]
+  if (previousEntry?.sectionId === undefined) delete entry.sectionId
+  else entry.sectionId = previousEntry.sectionId
+  if (previousEntry?.sectionPosition === undefined) delete entry.sectionPosition
+  else entry.sectionPosition = previousEntry.sectionPosition
+  if (Object.keys(entry).length === 0) delete entries[navigationId]
+  else entries[navigationId] = entry
+  return { ...current, entries }
+}
+
+function projectSidebarSession(
+  state: AppStoreData,
+  sidebar: SessionSidebar,
+  sessionId: string,
+  cachedSession?: ApiSessionSummary,
+): Partial<AppStoreData> {
+  const session = findCachedSession(state, sessionId) ?? cachedSession
+  if (session === undefined) return { sidebar }
+  const navigationId = session.navigationId ?? session.id
+  const projected = withSidebarPresentation(session, sidebar)
+  const sessionsByProject = Object.fromEntries(
+    Object.entries(state.sessionsByProject).map(([key, list]) => {
+      const sessions = list.sessions
+        .filter(
+          (candidate) =>
+            (candidate.navigationId ?? candidate.id) !== navigationId,
+        )
+        .map((candidate) => withSidebarPresentation(candidate, sidebar))
+      // The opaque cursor describes the pre-mutation row, so keep that
+      // presentation as the page boundary instead of reprojecting it.
+      const anchor = list.sessions.at(-1)
+      if (
+        sessionMatchesList(projected, key) &&
+        (list.nextCursor === undefined ||
+          anchor === undefined ||
+          compareSidebarSessions(key, projected, anchor) <= 0)
+      ) {
+        sessions.push(projected)
+      }
+      sessions.sort((left, right) => compareSidebarSessions(key, left, right))
+      const { loading: _loading, ...settled } = list
+      return [key, { ...settled, sessions }]
+    }),
+  )
+  const selectedSession =
+    state.selectedSession !== undefined &&
+    (state.selectedSession.navigationId ?? state.selectedSession.id) ===
+      navigationId
+      ? withSidebarPresentation(state.selectedSession, sidebar)
+      : state.selectedSession
+  return { sidebar, sessionsByProject, selectedSession }
+}
+
+function findCachedSession(
+  state: AppStoreData,
+  sessionId: string,
+): ApiSessionSummary | undefined {
+  for (const list of Object.values(state.sessionsByProject)) {
+    const session = list.sessions.find(
+      (candidate) => candidate.id === sessionId,
+    )
+    if (session !== undefined) return session
+  }
+  return state.selectedSession?.id === sessionId
+    ? state.selectedSession
+    : undefined
+}
+
+function withSidebarPresentation<T extends ApiSessionSummary>(
+  session: T,
+  sidebar: SessionSidebar,
+): T {
+  const {
+    archived: _archived,
+    sectionId: _sectionId,
+    sectionPosition: _sectionPosition,
+    ...base
+  } = session
+  return {
+    ...base,
+    ...sidebar.entries[session.navigationId ?? session.id],
+  } as T
+}
+
+function sessionMatchesList(session: ApiSessionSummary, key: string): boolean {
+  if (key === "sidebar:archived") return session.archived === true
+  if (session.archived === true) return false
+  if (key.startsWith("sidebar:section:")) {
+    return session.sectionId === key.slice("sidebar:section:".length)
+  }
+  if (key === allSessionsListKey) return true
+  return session.projectId === key && session.sectionId === undefined
+}
+
+function compareSidebarSessions(
+  key: string,
+  left: Pick<
+    ApiSessionSummary,
+    "id" | "navigationId" | "sectionPosition" | "updatedAt"
+  >,
+  right: Pick<
+    ApiSessionSummary,
+    "id" | "navigationId" | "sectionPosition" | "updatedAt"
+  >,
+): number {
+  if (key.startsWith("sidebar:section:")) {
+    const position =
+      (left.sectionPosition ?? Number.MAX_SAFE_INTEGER) -
+      (right.sectionPosition ?? Number.MAX_SAFE_INTEGER)
+    if (position !== 0) return position
+    return (
+      right.updatedAt.localeCompare(left.updatedAt) ||
+      (right.navigationId ?? right.id).localeCompare(
+        left.navigationId ?? left.id,
+      )
+    )
+  }
+  return (
+    right.updatedAt.localeCompare(left.updatedAt) ||
+    right.id.localeCompare(left.id)
+  )
+}
 
 export function resolveEffectiveModel(input: {
   readonly sessionCurrent: ModelSelection | undefined
