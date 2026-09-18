@@ -86,6 +86,7 @@ export function ModelSelector() {
   const fast = effective?.speed === "fast"
   const effortMenuAvailable =
     (efforts !== undefined && efforts.length > 0) || speeds !== undefined
+  const ultra = effective?.effort === "ultra"
 
   const update = (patch: {
     provider: string
@@ -194,8 +195,8 @@ export function ModelSelector() {
       </button>
 
       {menu === "effort" && effective !== undefined ? (
-        <div className="composer-control-popover absolute right-0 bottom-full z-20 mb-2 w-80 rounded-2xl border bg-popover p-3 text-sm shadow-[0_14px_38px_-12px_color-mix(in_oklab,var(--foreground)_22%,transparent),0_3px_10px_-5px_color-mix(in_oklab,var(--foreground)_15%,transparent)]">
-          <div className="grid grid-cols-[2rem_1fr_2rem] items-center">
+        <div className="composer-control-popover absolute right-0 bottom-full z-20 mb-2 w-80 rounded-[22px] border bg-popover p-4 text-sm shadow-[0_16px_42px_-14px_color-mix(in_oklab,var(--foreground)_24%,transparent),0_3px_10px_-5px_color-mix(in_oklab,var(--foreground)_14%,transparent)]">
+          <div className="grid grid-cols-[2.25rem_1fr_2.25rem] items-start">
             {speeds !== undefined ? (
               <button
                 type="button"
@@ -216,11 +217,27 @@ export function ModelSelector() {
             ) : (
               <span />
             )}
-            <span className="text-center text-sm font-semibold">
-              {effective.effort === undefined
-                ? "Default effort"
-                : displayEffort(effective.effort)}
-            </span>
+            <button
+              type="button"
+              aria-label="Select model"
+              onClick={() => setMenu("model")}
+              className="mx-auto flex max-w-full flex-col items-center rounded-lg px-2 py-0.5 text-center transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <span
+                className={cn(
+                  "flex items-center gap-0.5 text-[15px] leading-5 font-semibold",
+                  ultra && "effort-ultra-label",
+                )}
+              >
+                {effective.effort === undefined
+                  ? "Default effort"
+                  : displayEffort(effective.effort)}
+                <ChevronRight className="size-3.5 shrink-0" />
+              </span>
+              <span className="mt-0.5 max-w-full truncate text-xs font-normal text-muted-foreground">
+                {displayName(providers, effective)}
+              </span>
+            </button>
             <button
               type="button"
               aria-label="Reset effort to default"
@@ -232,18 +249,6 @@ export function ModelSelector() {
               <RotateCcw className="size-3.5" />
             </button>
           </div>
-
-          <button
-            type="button"
-            aria-label="Select model"
-            onClick={() => setMenu("model")}
-            className="mx-auto mt-0.5 flex max-w-full items-center gap-1 rounded-lg px-2 py-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            <span className="truncate">
-              {displayName(providers, effective)}
-            </span>
-            <ChevronRight className="size-3.5 shrink-0" />
-          </button>
 
           {efforts !== undefined && efforts.length > 0 ? (
             <EffortSlider
@@ -351,7 +356,9 @@ function EffortSlider({
   const track = useRef<HTMLDivElement>(null)
   const index = current === undefined ? -1 : efforts.indexOf(current)
   const last = efforts.length - 1
-  const position = (stop: number) => (last === 0 ? 50 : (stop / last) * 100)
+  const ultra = current === "ultra"
+  const position = (stop: number) =>
+    last === 0 ? "50%" : `calc(12px + (100% - 24px) * ${stop / last})`
 
   const pickFromPointer = (clientX: number) => {
     const rect = track.current?.getBoundingClientRect()
@@ -363,7 +370,7 @@ function EffortSlider({
   }
 
   return (
-    <div className="px-2 pt-5 pb-1.5">
+    <div className="px-1 pt-5 pb-1">
       <div
         ref={track}
         role="slider"
@@ -372,6 +379,7 @@ function EffortSlider({
         aria-valuemax={last}
         aria-valuenow={index}
         aria-valuetext={current ?? "Default"}
+        data-ultra={ultra}
         tabIndex={0}
         onKeyDown={(event) => {
           const step =
@@ -397,12 +405,13 @@ function EffortSlider({
           if (event.currentTarget.hasPointerCapture(event.pointerId))
             pickFromPointer(event.clientX)
         }}
-        className="relative h-6 w-full cursor-pointer rounded-full bg-muted outline-none ring-1 ring-foreground/5 focus-visible:ring-2 focus-visible:ring-ring"
+        className="effort-slider-track relative h-6 w-full cursor-pointer rounded-full bg-muted outline-none ring-1 ring-foreground/5 focus-visible:ring-2 focus-visible:ring-ring"
       >
         {index >= 0 ? (
           <div
-            className="absolute inset-y-0 left-0 rounded-full bg-blue-500 transition-[width] duration-200 ease-out"
-            style={{ width: `${position(index)}%` }}
+            data-ultra={ultra}
+            className="effort-slider-fill absolute inset-y-0 left-0 rounded-full transition-[width] duration-300 ease-out"
+            style={{ width: position(index) }}
           />
         ) : null}
         {efforts.map((effort, stop) => (
@@ -414,7 +423,7 @@ function EffortSlider({
             tabIndex={-1}
             onClick={() => onChange(effort)}
             className="absolute top-1/2 grid size-6 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full"
-            style={{ left: `${position(stop)}%` }}
+            style={{ left: position(stop) }}
           >
             <span
               aria-hidden="true"
@@ -429,7 +438,7 @@ function EffortSlider({
           <span
             aria-hidden="true"
             className="absolute top-1/2 size-6 -translate-x-1/2 -translate-y-1/2 rounded-full border border-black/5 bg-white shadow-[0_1px_4px_#0003] transition-[left] duration-200 ease-out"
-            style={{ left: `${position(index)}%` }}
+            style={{ left: position(index) }}
           />
         ) : null}
       </div>

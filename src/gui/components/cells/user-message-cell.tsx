@@ -67,7 +67,7 @@ export function UserMessageCell({
     <div className="group flex flex-col items-end gap-1.5">
       {mode !== "edit" ? (
         <>
-          <div className="max-w-[85%] overflow-hidden rounded-3xl bg-primary text-[15px] leading-6 text-primary-foreground">
+          <div className="max-w-[85%] overflow-hidden rounded-2xl bg-primary text-[15px] leading-6 text-primary-foreground">
             {attachments.length > 0 ? (
               <div
                 className={`grid gap-1.5 p-1.5 ${attachments.length > 1 ? "grid-cols-2" : "grid-cols-1"}`}
@@ -159,7 +159,7 @@ export function UserMessageCell({
 
       {mode === "edit" ? (
         <form
-          className="conversation-inline-edit w-full rounded-3xl bg-muted p-4"
+          className="conversation-inline-edit w-full rounded-2xl bg-muted p-4"
           onSubmit={(event) => {
             event.preventDefault()
             if ((edited.length === 0 && attachments.length === 0) || busy)

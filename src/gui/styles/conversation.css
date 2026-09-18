@@ -9,6 +9,30 @@
   max-width: calc(var(--conversation-width) + 64px);
   padding-inline: 32px;
 }
+.conversation-content {
+  /* The transcript owns following and restoration. Native scroll anchoring
+     otherwise moves a disclosure trigger while content grows below it. */
+  overflow-anchor: none;
+  padding-bottom: calc(var(--conversation-dock-height, 0px) + 32px);
+}
+.conversation-dock {
+  position: absolute;
+  inset-inline: 0;
+  bottom: 0;
+  z-index: 30;
+  pointer-events: none;
+}
+.conversation-dock > * {
+  pointer-events: auto;
+}
+.conversation-composer-footer {
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    color-mix(in oklab, var(--background) 92%, transparent) 16px,
+    var(--background) 34px
+  );
+}
 .conversation-navigation {
   position: absolute;
   top: 50%;
@@ -78,7 +102,7 @@
 }
 .conversation-jump {
   position: absolute;
-  bottom: 16px;
+  bottom: calc(var(--conversation-dock-height, 0px) + 12px);
   left: 50%;
   z-index: 10;
   display: grid;

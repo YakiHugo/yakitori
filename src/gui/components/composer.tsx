@@ -435,7 +435,7 @@ export function Composer() {
   }
 
   return (
-    <footer className="bg-background pt-3 pb-3">
+    <footer className="conversation-composer-footer pt-3 pb-3">
       <form
         className="conversation-composer mx-auto w-full"
         onSubmit={(event) => {
@@ -451,7 +451,7 @@ export function Composer() {
           void addFiles(Array.from(event.dataTransfer.files))
         }}
       >
-        <div className="relative overflow-visible rounded-3xl border bg-card shadow-[0_1px_2px_color-mix(in_oklab,var(--foreground)_7%,transparent),0_8px_24px_-10px_color-mix(in_oklab,var(--foreground)_14%,transparent)] transition-shadow focus-within:shadow-[0_1px_2px_color-mix(in_oklab,var(--foreground)_8%,transparent),0_10px_30px_-10px_color-mix(in_oklab,var(--foreground)_20%,transparent)]">
+        <div className="relative overflow-visible rounded-[18px] border bg-card shadow-[0_1px_2px_color-mix(in_oklab,var(--foreground)_7%,transparent),0_8px_24px_-10px_color-mix(in_oklab,var(--foreground)_14%,transparent)] transition-shadow focus-within:shadow-[0_1px_2px_color-mix(in_oklab,var(--foreground)_8%,transparent),0_10px_30px_-10px_color-mix(in_oklab,var(--foreground)_20%,transparent)]">
           <ComposerSuggestions
             open={menuOpen}
             items={suggestions}

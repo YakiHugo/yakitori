@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { act, cleanup, fireEvent, render } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import { usePinnedScroll } from "../../src/gui/hooks/use-pinned-scroll.ts"
 
@@ -86,6 +86,21 @@ it("does not resume following when layout changes during history reading", () =>
   expect(viewport.scrollTop).toBe(100)
   expect(scroll.atBottom).toBe(false)
 })
+it("follows explicit layout changes that do not resize the content box", () => {
+  render(<Fixture />)
+  const viewport = geometry()
+  act(() => resize())
+  Object.defineProperty(viewport, "scrollHeight", { value: 1400 })
+  act(() => scroll.onLayoutChange())
+  expect(viewport.scrollTop).toBe(1000)
+
+  fireEvent.wheel(viewport, { deltaY: -20 })
+  viewport.scrollTop = 700
+  fireEvent.scroll(viewport)
+  Object.defineProperty(viewport, "scrollHeight", { value: 1600 })
+  act(() => scroll.onLayoutChange())
+  expect(viewport.scrollTop).toBe(700)
+})
 it.each([
   "click",
   "wheel",
@@ -102,6 +117,32 @@ it.each([
   Object.defineProperty(viewport, "scrollHeight", { value: 1400 })
   act(() => resize())
   expect(viewport.scrollTop).toBe(1000)
+})
+it.each([
+  ["pointer", () => fireEvent.pointerDown(screen.getByRole("button"))],
+  [
+    "keyboard",
+    () => fireEvent.keyDown(screen.getByRole("button"), { key: "Enter" }),
+  ],
+])("keeps a disclosure trigger stationary for %s activation", (_, activate) => {
+  render(<Fixture />)
+  const viewport = geometry()
+  const trigger = document.createElement("button")
+  trigger.setAttribute("aria-expanded", "false")
+  trigger.setAttribute("aria-controls", "details")
+  scroll.contentRef.current?.append(trigger)
+  act(() => resize())
+
+  activate()
+  // Native scroll anchoring can emit a scroll event during the first few
+  // pixels of growth, while the viewport is still inside the bottom threshold.
+  Object.defineProperty(viewport, "scrollHeight", { value: 1210 })
+  fireEvent.scroll(viewport)
+  Object.defineProperty(viewport, "scrollHeight", { value: 1400 })
+  act(() => resize())
+
+  expect(viewport.scrollTop).toBe(800)
+  expect(scroll.atBottom).toBe(false)
 })
 it("does not treat inline editing keyboard navigation as transcript scrolling", () => {
   render(<Fixture />)

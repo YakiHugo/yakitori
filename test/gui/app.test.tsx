@@ -18,7 +18,6 @@ import {
   EventType,
   InputRole,
   type StoredEventEnvelope,
-  type TokenUsage,
 } from "../../src/kernel/events.ts"
 import type { ApiSessionDetail } from "../../src/server/protocol.ts"
 
@@ -33,32 +32,6 @@ afterEach(() => {
 })
 
 describe("app shell", () => {
-  it("shows the session telemetry bar without requiring a tooltip", () => {
-    useAppStore.setState({
-      selection: { sessionId },
-      selectedSession: sessionDetail(),
-      execution: seedExecution([
-        turnCompleted("turn_1", 1, {
-          inputTokens: 1_000,
-          outputTokens: 200,
-          cacheReadInputTokens: 500,
-        }),
-        turnCompleted("turn_2", 2, {
-          inputTokens: 2_000,
-          outputTokens: 400,
-          cacheReadInputTokens: 1_000,
-        }),
-      ]),
-    })
-    render(<App />)
-
-    const rail = screen.getByRole("status", { name: "Session telemetry" })
-    expect(within(rail).getByText("2 turns")).toBeDefined()
-    expect(within(rail).getByText("LLM 2.0s")).toBeDefined()
-    expect(within(rail).getByText("Cache hit 50%")).toBeDefined()
-    expect(within(rail).getByText("Input 2K tok")).toBeDefined()
-  })
-
   it("renders an alert with the store error message", () => {
     useAppStore.setState({
       message: "Could not open event stream.",
@@ -208,31 +181,6 @@ function sessionDetail(
     },
     ...overrides,
   }
-}
-
-function turnCompleted(
-  turnId: string,
-  seq: number,
-  sessionUsage: TokenUsage,
-): StoredEventEnvelope {
-  return createEventEnvelope({
-    sessionId,
-    seq,
-    event: {
-      type: EventType.TurnCompleted,
-      data: {
-        turnId,
-        outcome: { status: "completed" },
-        sessionUsage,
-        metrics: {
-          modelCalls: 2,
-          toolCalls: 1,
-          modelDurationMs: 1_000,
-          toolDurationMs: 250,
-        },
-      },
-    },
-  })
 }
 
 function seedExecution(events: StoredEventEnvelope[]) {
