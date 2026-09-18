@@ -1,6 +1,7 @@
-import { ArrowDown, ChevronRight, Info } from "lucide-react"
+import { ArrowDown, ChevronRight, Info, Wrench } from "lucide-react"
 import {
   type ReactNode,
+  useEffect,
   useId,
   useLayoutEffect,
   useMemo,
@@ -17,6 +18,7 @@ import { usePinnedScroll } from "../hooks/use-pinned-scroll.ts"
 import { formatElapsed } from "../lib/format.ts"
 import { cn } from "../lib/utils.ts"
 import { useAppStore, useExecutionView } from "../store/app-store.ts"
+import { presentTool } from "../tool-presentation.ts"
 import { AssistantMessageCell } from "./cells/assistant-message-cell.tsx"
 import { CompactionCell } from "./cells/compaction-cell.tsx"
 import { PermissionCell } from "./cells/permission-cell.tsx"
@@ -26,6 +28,12 @@ import { TurnTerminalCell } from "./cells/turn-terminal-cell.tsx"
 import { UserMessageCell } from "./cells/user-message-cell.tsx"
 import { ResponseActions } from "./response-actions.tsx"
 import { ConversationNavigation } from "./conversation-navigation.tsx"
+import { MarkdownView } from "./markdown.tsx"
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "./ui/collapsible.tsx"
 import { ScrollArea } from "./ui/scroll-area.tsx"
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip.tsx"
 
@@ -69,6 +77,8 @@ export function Transcript({ children }: Readonly<{ children?: ReactNode }>) {
   const view = useExecutionView()
   const sessionId = useAppStore((state) => state.selection.sessionId)
   const scroll = usePinnedScroll(sessionId)
+  const surfaceRef = useRef<HTMLDivElement>(null)
+  const dockRef = useRef<HTMLDivElement>(null)
   const anchors = useRef(new Map<string, HTMLDivElement>())
   const [visibleInputs, setVisibleInputs] = useState<ReadonlySet<string>>(
     new Set(),
@@ -142,10 +152,32 @@ export function Transcript({ children }: Readonly<{ children?: ReactNode }>) {
   useLayoutEffect(() => {
     updateVisibleInputs()
   })
+  useLayoutEffect(() => {
+    const surface = surfaceRef.current
+    const dock = dockRef.current
+    if (!surface || !dock) return
+    const updateDockHeight = () => {
+      surface.style.setProperty(
+        "--conversation-dock-height",
+        `${Math.ceil(dock.getBoundingClientRect().height)}px`,
+      )
+      scroll.onLayoutChange()
+    }
+    updateDockHeight()
+    const observer = new ResizeObserver(updateDockHeight)
+    observer.observe(dock)
+    return () => {
+      observer.disconnect()
+      surface.style.removeProperty("--conversation-dock-height")
+    }
+  }, [scroll.onLayoutChange])
 
   return (
     <ConversationScrollContext.Provider value={scroll}>
-      <div className="relative flex min-h-0 flex-1">
+      <div
+        ref={surfaceRef}
+        className="conversation-surface relative flex min-h-0 flex-1"
+      >
         <ScrollArea
           className="min-h-0 flex-1"
           viewportRef={scroll.viewportRef}
@@ -153,7 +185,7 @@ export function Transcript({ children }: Readonly<{ children?: ReactNode }>) {
         >
           <div
             ref={scroll.contentRef}
-            className="conversation-content mx-auto flex w-full flex-col gap-8 py-8"
+            className="conversation-content mx-auto flex w-full flex-col gap-8 pt-8"
           >
             {view.entries.length === 0 && view.activeTurnId === undefined ? (
               <p className="py-12 text-center text-sm text-muted-foreground">
@@ -228,8 +260,12 @@ export function Transcript({ children }: Readonly<{ children?: ReactNode }>) {
             <ArrowDown className="size-5" />
           </button>
         }
+        {children === undefined ? null : (
+          <div ref={dockRef} className="conversation-dock">
+            {children}
+          </div>
+        )}
       </div>
-      {children}
     </ConversationScrollContext.Provider>
   )
 }
@@ -247,8 +283,9 @@ function TurnBlock({
   finalAnswerId: string | undefined
   retry: ActiveModelRetry | undefined
 }>) {
-  const [expandedOverride, setExpanded] = useState<boolean>()
+  const [reasoningExpanded, setReasoningExpanded] = useState(false)
   const contentId = useId()
+  const workspaceRoot = useAppStore((state) => state.execution.workingDirectory)
   const finalAnswer = entries.find(
     (entry): entry is Extract<ExecutionEntry, { kind: "assistant" }> =>
       entry.kind === "assistant" && entry.itemId === finalAnswerId,
@@ -259,8 +296,19 @@ function TurnBlock({
       entry.kind === "turn_terminal" ||
       (entry.kind === "permission" && entry.state !== "resolved"),
   )
-  const activity = entries.filter((entry) => !persistent.includes(entry))
-  const expanded = expandedOverride ?? finalAnswerId === undefined
+  const reasoning = entries.filter(
+    (entry): entry is Extract<ExecutionEntry, { kind: "reasoning" }> =>
+      entry.kind === "reasoning",
+  )
+  const timeline = groupTurnTimeline(
+    entries.filter(
+      (entry) => !persistent.includes(entry) && entry.kind !== "reasoning",
+    ),
+  )
+  const reasoningText = reasoning
+    .map((entry) => entry.text.trim())
+    .filter(Boolean)
+    .join("\n\n")
   const seconds =
     timing?.startedAt && timing.completedAt
       ? Math.max(
@@ -298,7 +346,7 @@ function TurnBlock({
       className="flex flex-col gap-5"
       aria-label={active ? "Current response" : "Response"}
     >
-      {activity.length > 0 || active ? (
+      {entries.length > 0 || active ? (
         <div>
           <div
             className={cn(
@@ -306,19 +354,19 @@ function TurnBlock({
               finalAnswer ? "border-b pb-3" : "pb-1",
             )}
           >
-            {activity.length > 0 ? (
+            {reasoningText !== "" ? (
               <button
                 type="button"
-                aria-expanded={expanded}
+                aria-expanded={reasoningExpanded}
                 aria-controls={contentId}
-                onClick={() => setExpanded(!expanded)}
+                onClick={() => setReasoningExpanded(!reasoningExpanded)}
                 className="flex items-center gap-1.5 text-left hover:text-foreground"
               >
                 {activityLabel}
                 <ChevronRight
                   className={cn(
                     "size-3.5 transition-transform duration-150",
-                    expanded && "rotate-90",
+                    reasoningExpanded && "rotate-90",
                   )}
                 />
               </button>
@@ -340,23 +388,32 @@ function TurnBlock({
               </Tooltip>
             ) : null}
           </div>
-          <div
-            id={contentId}
-            className="conversation-disclosure"
-            data-expanded={expanded}
-            aria-hidden={!expanded}
-            inert={!expanded}
-          >
-            <div className="min-h-0 overflow-hidden">
-              <div className="flex flex-col gap-4 pt-4">
-                {activity.map((entry) => (
-                  <EntryCell key={entryKey(entry)} entry={entry} />
-                ))}
+          {reasoningText === "" ? null : (
+            <div
+              id={contentId}
+              className="conversation-disclosure"
+              data-expanded={reasoningExpanded}
+              aria-hidden={!reasoningExpanded}
+              inert={!reasoningExpanded}
+            >
+              <div className="min-h-0 overflow-hidden">
+                <MarkdownView
+                  text={reasoningText}
+                  className="markdown max-w-2xl pt-4 text-sm leading-6 text-muted-foreground"
+                  workspaceRoot={workspaceRoot}
+                />
               </div>
             </div>
-          </div>
+          )}
         </div>
       ) : null}
+      {timeline.map((item) =>
+        item.kind === "entry" ? (
+          <EntryCell key={entryKey(item.entry)} entry={item.entry} />
+        ) : (
+          <ActionGroup key={entryKey(item.entries[0])} entries={item.entries} />
+        ),
+      )}
       {persistent.map((entry) => (
         <EntryCell key={entryKey(entry)} entry={entry} />
       ))}
@@ -367,6 +424,107 @@ function TurnBlock({
         />
       ) : null}
     </section>
+  )
+}
+
+type TurnTimelineItem =
+  | { readonly kind: "entry"; readonly entry: ExecutionEntry }
+  | {
+      readonly kind: "actions"
+      readonly entries: readonly [ExecutionEntry, ...ExecutionEntry[]]
+    }
+
+function groupTurnTimeline(
+  entries: readonly ExecutionEntry[],
+): readonly TurnTimelineItem[] {
+  const timeline: TurnTimelineItem[] = []
+  let actions: ExecutionEntry[] = []
+  const flushActions = () => {
+    const [first, ...rest] = actions
+    if (first === undefined) return
+    timeline.push({ kind: "actions", entries: [first, ...rest] })
+    actions = []
+  }
+  for (const entry of entries) {
+    if (entry.kind === "tool" || entry.kind === "permission") {
+      actions.push(entry)
+      continue
+    }
+    flushActions()
+    timeline.push({ kind: "entry", entry })
+  }
+  flushActions()
+  return timeline
+}
+
+function ActionGroup({
+  entries,
+}: Readonly<{ entries: readonly ExecutionEntry[] }>) {
+  const workspaceRoot = useAppStore((state) => state.execution.workingDirectory)
+  const tools = entries.filter(
+    (entry): entry is Extract<ExecutionEntry, { kind: "tool" }> =>
+      entry.kind === "tool",
+  )
+  const active = tools.some((entry) => entry.state === "requested")
+  const failed = tools.some((entry) => entry.state === "failed")
+  const interrupted = tools.some((entry) => entry.state === "interrupted")
+  const hasProblem = failed || interrupted
+  const [open, setOpen] = useState(hasProblem)
+  useEffect(() => {
+    if (hasProblem) setOpen(true)
+  }, [hasProblem])
+  const verbCounts = new Map<string, number>()
+  for (const tool of tools) {
+    const verb = presentTool(tool, workspaceRoot).verb
+    verbCounts.set(verb, (verbCounts.get(verb) ?? 0) + 1)
+  }
+  const summary = [
+    ...[...verbCounts].map(([verb, count]) =>
+      count === 1 ? verb : `${verb} ${count}`,
+    ),
+    ...(entries.some((entry) => entry.kind === "permission")
+      ? ["Approval"]
+      : []),
+  ].join(" · ")
+
+  return (
+    <Collapsible open={open} onOpenChange={setOpen} className="group/actions">
+      <CollapsibleTrigger
+        className={cn(
+          "flex max-w-full items-center gap-2 py-1 text-left text-sm text-muted-foreground transition-colors hover:text-foreground",
+          hasProblem && "text-destructive hover:text-destructive",
+        )}
+      >
+        <Wrench className="size-4 shrink-0" />
+        <span className={cn(active && "tool-running-label")}>
+          {failed
+            ? "Tool failed"
+            : interrupted
+              ? "Tool interrupted"
+              : active
+                ? "Using tools"
+                : "Used tools"}
+        </span>
+        {summary === "" ? null : (
+          <span
+            className={cn(
+              "min-w-0 truncate text-muted-foreground/80",
+              hasProblem && "text-destructive/80",
+            )}
+          >
+            · {summary}
+          </span>
+        )}
+        <ChevronRight className="size-3.5 shrink-0 transition-transform group-data-[state=open]/actions:rotate-90" />
+      </CollapsibleTrigger>
+      <CollapsibleContent className="pt-2">
+        <div className="flex flex-col gap-1 border-l border-foreground/10 pl-3">
+          {entries.map((entry) => (
+            <EntryCell key={entryKey(entry)} entry={entry} />
+          ))}
+        </div>
+      </CollapsibleContent>
+    </Collapsible>
   )
 }
 

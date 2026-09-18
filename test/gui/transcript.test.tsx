@@ -20,6 +20,7 @@ import {
   createInitialAppState,
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
+import { fileReadExecution } from "../../src/runtime/tools/execution-descriptors.ts"
 
 const at = "2026-09-12T00:00:00Z"
 const entries: ExecutionEntry[] = [
@@ -49,6 +50,31 @@ const entries: ExecutionEntry[] = [
     at,
   },
 ]
+
+function readTool(
+  toolCallId: string,
+  path: string,
+  state = "completed",
+): ExecutionEntry {
+  return {
+    kind: "tool",
+    toolCallId,
+    turnId: "turn_1",
+    execution: {
+      ...fileReadExecution({ path }),
+      itemId: `item_${toolCallId}`,
+      toolCallId,
+      name: "read_file",
+      input: { path },
+      requiresPermission: false,
+    },
+    state,
+    resultText: `${path} contents`,
+    ...(state === "failed"
+      ? { resultError: true, resultErrorMessage: "Could not read file" }
+      : {}),
+  }
+}
 
 let frames: Map<number, FrameRequestCallback>
 let nextFrame: number
@@ -104,29 +130,125 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-it("shows the final answer and lets the reader expand and collapse earlier activity", () => {
+it("keeps intent updates visible and consolidates reasoning behind the turn summary", () => {
+  useAppStore.setState({
+    execution: {
+      ...useAppStore.getState().execution,
+      entries: [
+        ...entries.slice(0, 3),
+        readTool("tool_between_reasoning", "src/index.ts"),
+        {
+          kind: "reasoning",
+          itemId: "reasoning_2",
+          turnId: "turn_1",
+          text: "More reasoning details",
+          status: "completed",
+          at,
+        },
+        ...entries.slice(3),
+      ],
+    },
+  })
   render(<Transcript />)
   expect(screen.getByText("Final answer")).toBeDefined()
   expect(
     screen
       .getByText("Checking the implementation", { selector: "p" })
+      .closest("[aria-hidden]"),
+  ).toBeNull()
+  expect(
+    screen
+      .getByText("Reasoning details", { selector: "p" })
       .closest("[aria-hidden]")
       ?.getAttribute("aria-hidden"),
   ).toBe("true")
-  const toggle = screen.getByRole("button", { name: "Worked for 1m 49s" })
+  const toggles = screen.getAllByRole("button", { name: "Worked for 1m 49s" })
+  expect(toggles).toHaveLength(1)
+  const [toggle] = toggles
+  if (toggle === undefined) throw new Error("Expected a reasoning disclosure")
   expect(toggle.getAttribute("aria-expanded")).toBe("false")
   fireEvent.click(toggle)
   expect(
-    screen.getByText("Checking the implementation", { selector: "p" }),
-  ).toBeDefined()
+    screen
+      .getByText("Reasoning details", { selector: "p" })
+      .closest("[aria-hidden]")
+      ?.getAttribute("aria-hidden"),
+  ).toBe("false")
+  expect(
+    screen
+      .getByText("More reasoning details", { selector: "p" })
+      .closest("[aria-hidden]")
+      ?.getAttribute("aria-hidden"),
+  ).toBe("false")
   fireEvent.click(toggle)
   expect(
     screen
-      .getByText("Checking the implementation", { selector: "p" })
+      .getByText("Reasoning details", { selector: "p" })
       .closest("[aria-hidden]")
       ?.getAttribute("aria-hidden"),
   ).toBe("true")
   expect(screen.getByText("Final answer")).toBeDefined()
+})
+
+it("groups adjacent tool actions behind a deterministic collapsed summary", () => {
+  useAppStore.setState({
+    execution: {
+      ...useAppStore.getState().execution,
+      entries: [
+        ...entries.slice(0, 2),
+        readTool("tool_1", "src/first.ts"),
+        readTool("tool_2", "src/second.ts"),
+        ...entries.slice(2),
+      ],
+    },
+  })
+  render(<Transcript />)
+
+  expect(
+    screen
+      .getByText("Checking the implementation", { selector: "p" })
+      .closest("[aria-hidden]"),
+  ).toBeNull()
+  const tools = screen.getByRole("button", {
+    name: "Used tools · Read 2",
+  })
+  expect(tools.getAttribute("aria-expanded")).toBe("false")
+  expect(
+    screen.queryByRole("button", { name: /Read src\/first\.ts/ }),
+  ).toBeNull()
+
+  fireEvent.click(tools)
+
+  expect(
+    screen.getByRole("button", { name: /Read src\/first\.ts/ }),
+  ).toBeDefined()
+  expect(
+    screen.getByRole("button", { name: /Read src\/second\.ts/ }),
+  ).toBeDefined()
+})
+
+it("surfaces a failed action instead of hiding it in a closed tool group", () => {
+  useAppStore.setState({
+    execution: {
+      ...useAppStore.getState().execution,
+      entries: [
+        ...entries.slice(0, 2),
+        readTool("tool_failed", "src/missing.ts", "failed"),
+        ...entries.slice(2),
+      ],
+    },
+  })
+  render(<Transcript />)
+
+  expect(
+    screen
+      .getByRole("button", { name: "Tool failed · Read" })
+      .getAttribute("aria-expanded"),
+  ).toBe("true")
+  expect(
+    screen.getByRole("button", { name: /Read src\/missing\.ts/ }),
+  ).toBeDefined()
+  expect(screen.getByText("Could not read file")).toBeDefined()
 })
 
 it("keeps live process history available until the turn has a final answer", () => {
@@ -155,12 +277,7 @@ it("keeps live process history available until the turn has a final answer", () 
     }),
   )
   expect(screen.getByText("Latest output")).toBeDefined()
-  expect(
-    screen
-      .getByText("Final answer")
-      .closest("[aria-hidden]")
-      ?.getAttribute("aria-hidden"),
-  ).toBe("false")
+  expect(screen.getByText("Final answer").closest("[aria-hidden]")).toBeNull()
 })
 
 it("shows retry activity before any output and restores the activity heading on recovery", () => {
@@ -235,7 +352,7 @@ it("shows retry activity before any output and restores the activity heading on 
       ),
     }))
   })
-  expect(screen.getByRole("button", { name: "Working" })).toBeDefined()
+  expect(screen.getByRole("status").textContent).toBe("Working")
   expect(screen.queryByText(/Reconnecting/)).toBeNull()
   expect(screen.queryByRole("button", { name: "Retry details" })).toBeNull()
   expect(screen.getByText("Connection recovered")).toBeDefined()
@@ -274,7 +391,7 @@ it("shows the current retry once when steering input splits the turn", () => {
   )
 })
 
-it("keeps failures visible even when the preceding activity is collapsed", () => {
+it("keeps failures and intent updates visible while reasoning is collapsed", () => {
   useAppStore.setState({
     execution: {
       ...useAppStore.getState().execution,
@@ -294,9 +411,8 @@ it("keeps failures visible even when the preceding activity is collapsed", () =>
   expect(
     screen
       .getByText("Checking the implementation", { selector: "p" })
-      .closest("[aria-hidden]")
-      ?.getAttribute("aria-hidden"),
-  ).toBe("true")
+      .closest("[aria-hidden]"),
+  ).toBeNull()
   expect(
     screen.getByText(/Provider disconnected/).closest("[aria-hidden]"),
   ).toBeNull()
@@ -444,7 +560,7 @@ it("does not display replayed activity until the selected session finishes resto
   expect(screen.queryByRole("textbox", { name: "Message the Mate" })).toBeNull()
 })
 
-it("keeps pending approvals outside the collapsed activity", () => {
+it("keeps pending approvals visible alongside intent updates", () => {
   useAppStore.setState({
     execution: {
       ...useAppStore.getState().execution,
@@ -465,9 +581,8 @@ it("keeps pending approvals outside the collapsed activity", () => {
   expect(
     screen
       .getByText("Checking the implementation", { selector: "p" })
-      .closest("[aria-hidden]")
-      ?.getAttribute("aria-hidden"),
-  ).toBe("true")
+      .closest("[aria-hidden]"),
+  ).toBeNull()
   expect(
     screen.getByText("Permission · Write config").closest("[aria-hidden]"),
   ).toBeNull()
@@ -494,9 +609,8 @@ it("promotes only the final answer of a completed turn split by another input", 
   expect(
     screen
       .getByText("Checking the implementation", { selector: "p" })
-      .closest("[aria-hidden]")
-      ?.getAttribute("aria-hidden"),
-  ).toBe("true")
+      .closest("[aria-hidden]"),
+  ).toBeNull()
   expect(
     screen
       .getByText("Final answer", { selector: "p" })
@@ -525,11 +639,8 @@ it("keeps every fragment of a failed turn as activity", () => {
   expect(screen.queryByRole("button", { name: "Copy response" })).toBeNull()
   for (const text of ["Checking the implementation", "Final answer"])
     expect(
-      screen
-        .getByText(text, { selector: "p" })
-        .closest("[aria-hidden]")
-        ?.getAttribute("aria-hidden"),
-    ).toBe("false")
+      screen.getByText(text, { selector: "p" }).closest("[aria-hidden]"),
+    ).toBeNull()
   expect(screen.getByText(/Provider disconnected/)).toBeDefined()
 })
 
@@ -545,9 +656,8 @@ it("does not promote inactive text until its turn has completed", () => {
   expect(
     screen
       .getByText("Final answer", { selector: "p" })
-      .closest("[aria-hidden]")
-      ?.getAttribute("aria-hidden"),
-  ).toBe("false")
+      .closest("[aria-hidden]"),
+  ).toBeNull()
 })
 
 it("reveals a jump-to-latest button when the reader scrolls up and returns to the bottom on click", () => {

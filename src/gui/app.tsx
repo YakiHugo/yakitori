@@ -3,7 +3,6 @@ import { ApprovalBar } from "./components/approval-bar.tsx"
 import { Composer } from "./components/composer.tsx"
 import { QueuedInputs } from "./components/queued-inputs.tsx"
 import { SidebarFrame } from "./components/sidebar-frame.tsx"
-import { TelemetryRail } from "./components/telemetry-rail.tsx"
 import { Transcript } from "./components/transcript.tsx"
 import {
   Tooltip,
@@ -50,7 +49,6 @@ export function App() {
                 <QueuedInputs />
                 <SessionComposer />
               </Transcript>
-              <TelemetryRail />
             </>
           ) : (
             <EmptyState />

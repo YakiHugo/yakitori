@@ -1124,7 +1124,7 @@ describe("model selector", () => {
               id: "gpt-5.6-sol",
               displayName: "GPT-5.6 Sol",
               instructionProfileId: "codex",
-              efforts: ["low", "medium", "high", "xhigh"],
+              efforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
               speeds: ["standard", "fast"],
             },
           ],
@@ -1385,6 +1385,35 @@ describe("model selector", () => {
     expect(useAppStore.getState().modelSelections).toEqual({
       session_1: { provider: "openai", model: "gpt-5.1-codex" },
     })
+  })
+
+  it("gives Ultra effort its dedicated animated presentation", async () => {
+    const user = userEvent.setup()
+    window.localStorage.clear()
+    useAppStore.setState({
+      ...selectModelState(),
+      modelSelections: {
+        session_1: {
+          provider: "codex",
+          model: "gpt-5.6-sol",
+          effort: "ultra",
+        },
+      },
+    })
+    render(<Composer />)
+
+    await openEffortMenu(user)
+
+    expect(
+      screen
+        .getByRole("slider", { name: "Reasoning effort" })
+        .getAttribute("data-ultra"),
+    ).toBe("true")
+    expect(
+      screen
+        .getByRole("button", { name: "Select model" })
+        .querySelector(".effort-ultra-label")?.textContent,
+    ).toContain("Ultra")
   })
 
   it("opens model selection directly when the effective model offers no effort", async () => {

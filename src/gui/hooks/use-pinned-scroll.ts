@@ -6,6 +6,7 @@ export function usePinnedScroll(sessionId?: string) {
   const viewportRef = useRef<HTMLDivElement | null>(null)
   const contentRef = useRef<HTMLDivElement | null>(null)
   const following = useRef(true)
+  const followingPaused = useRef(false)
   const animation = useRef<number | undefined>(undefined)
   const [atBottom, setAtBottom] = useState(true)
 
@@ -19,11 +20,13 @@ export function usePinnedScroll(sessionId?: string) {
     const bottom =
       viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= 24
     setAtBottom(bottom)
-    if (animation.current === undefined && bottom) following.current = true
+    if (animation.current === undefined && !followingPaused.current && bottom)
+      following.current = true
   }, [])
   const pauseFollowing = useCallback(() => {
     cancelAnimation()
     following.current = false
+    followingPaused.current = true
   }, [cancelAnimation])
 
   const scrollTo = useCallback(
@@ -32,6 +35,7 @@ export function usePinnedScroll(sessionId?: string) {
       const viewport = viewportRef.current
       if (!viewport) return
       following.current = false
+      followingPaused.current = !follow
       const start = viewport.scrollTop
       const startedAt = performance.now()
       const reduced = window.matchMedia(
@@ -80,11 +84,21 @@ export function usePinnedScroll(sessionId?: string) {
     },
     [scrollTo],
   )
+  const onLayoutChange = useCallback(() => {
+    const viewport = viewportRef.current
+    if (!viewport) return
+    if (following.current && animation.current === undefined)
+      viewport.scrollTop = viewport.scrollHeight
+    setAtBottom(
+      viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= 24,
+    )
+  }, [])
 
   useLayoutEffect(() => {
     if (sessionId === undefined) return
     cancelAnimation()
     following.current = true
+    followingPaused.current = false
     const viewport = viewportRef.current
     if (viewport) viewport.scrollTop = viewport.scrollHeight
     setAtBottom(true)
@@ -94,16 +108,9 @@ export function usePinnedScroll(sessionId?: string) {
     const viewport = viewportRef.current
     const content = contentRef.current
     if (!viewport || !content) return
-    const follow = () => {
-      if (following.current && animation.current === undefined)
-        viewport.scrollTop = viewport.scrollHeight
-      setAtBottom(
-        viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <=
-          24,
-      )
-    }
     const interrupt = (away: boolean) => {
       cancelAnimation()
+      followingPaused.current = false
       following.current =
         !away &&
         viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= 24
@@ -123,8 +130,17 @@ export function usePinnedScroll(sessionId?: string) {
     }
     let draggingScrollbar = false
     const pointerInterrupt = (event: PointerEvent) => {
-      // Only scrollbar interaction implies scrolling. Clicking transcript text
-      // or a disclosure must not detach a reader who is still at the bottom.
+      if (
+        event.target instanceof Element &&
+        event.target.closest("button[aria-expanded][aria-controls]")
+      ) {
+        // A disclosure must grow below its stationary trigger. Remaining pinned
+        // would move the trigger upward on every animated height change.
+        pauseFollowing()
+        return
+      }
+      // Outside a disclosure, only scrollbar interaction implies scrolling.
+      // Selecting transcript text must not detach a reader at the bottom.
       if (
         event.target instanceof Element &&
         event.target.closest('[data-slot="scroll-area-scrollbar"]')
@@ -139,6 +155,14 @@ export function usePinnedScroll(sessionId?: string) {
       interrupt(false)
     }
     const keyInterrupt = (event: globalThis.KeyboardEvent) => {
+      if (
+        ["Enter", " "].includes(event.key) &&
+        event.target instanceof Element &&
+        event.target.closest("button[aria-expanded][aria-controls]")
+      ) {
+        pauseFollowing()
+        return
+      }
       if (
         event.defaultPrevented ||
         (event.target instanceof HTMLElement &&
@@ -170,8 +194,8 @@ export function usePinnedScroll(sessionId?: string) {
     document.addEventListener("pointerup", pointerEnd)
     document.addEventListener("pointercancel", pointerEnd)
     viewport.addEventListener("keydown", keyInterrupt)
-    follow()
-    const observer = new ResizeObserver(follow)
+    onLayoutChange()
+    const observer = new ResizeObserver(onLayoutChange)
     observer.observe(viewport)
     observer.observe(content)
     return () => {
@@ -188,7 +212,7 @@ export function usePinnedScroll(sessionId?: string) {
       document.removeEventListener("pointerup", pointerEnd)
       document.removeEventListener("pointercancel", pointerEnd)
     }
-  }, [pauseFollowing, cancelAnimation])
+  }, [pauseFollowing, cancelAnimation, onLayoutChange])
 
   useLayoutEffect(() => {
     const viewport = viewportRef.current
@@ -203,5 +227,6 @@ export function usePinnedScroll(sessionId?: string) {
     jumpToBottom,
     jumpToElement,
     pauseFollowing,
+    onLayoutChange,
   }
 }
