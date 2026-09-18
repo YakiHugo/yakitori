@@ -20,6 +20,7 @@
     "dev:desktop:gui": "vite --host 127.0.0.1 --strictPort",
     "dev:desktop:shell": "YAKITORI_STORE_DIR=.yakitori-desktop ELECTRON_RENDERER_URL=http://127.0.0.1:5173 electron .",
     "package:desktop": "pnpm build:gui && pnpm build:desktop && node scripts/package-desktop-runtime.ts",
+    "install:main": "node scripts/install-main-app.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
