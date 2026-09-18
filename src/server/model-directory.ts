@@ -10,6 +10,7 @@ export type DirectoryModel = {
   readonly instructionProfileId: InstructionProfileId
   readonly effortStyle?: "none" | "levels"
   readonly efforts?: readonly string[]
+  readonly defaultEffort?: string
   readonly speeds?: readonly string[]
   readonly inputModalities?: readonly ("image" | "text" | "video")[]
   readonly imageDetailModes?: readonly ("high" | "original")[]
@@ -36,6 +37,9 @@ export function createModelDirectory(
           ? {}
           : { effortStyle: entry.effortStyle }),
         ...(entry.efforts === undefined ? {} : { efforts: entry.efforts }),
+        ...(entry.defaultEffort === undefined
+          ? {}
+          : { defaultEffort: entry.defaultEffort }),
         ...(entry.speeds === undefined ? {} : { speeds: entry.speeds }),
         inputModalities: entry.inputModalities,
         imageDetailModes: entry.imageDetailModes,

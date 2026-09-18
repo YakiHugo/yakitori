@@ -1125,6 +1125,7 @@ describe("model selector", () => {
               displayName: "GPT-5.6 Sol",
               instructionProfileId: "codex",
               efforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
+              defaultEffort: "low",
               speeds: ["standard", "fast"],
             },
           ],
@@ -1387,7 +1388,7 @@ describe("model selector", () => {
     })
   })
 
-  it("gives Ultra effort its dedicated animated presentation", async () => {
+  it("gives each model's top effort stop its dedicated animated presentation", async () => {
     const user = userEvent.setup()
     window.localStorage.clear()
     useAppStore.setState({
@@ -1407,13 +1408,65 @@ describe("model selector", () => {
     expect(
       screen
         .getByRole("slider", { name: "Reasoning effort" })
-        .getAttribute("data-ultra"),
+        .getAttribute("data-peak"),
     ).toBe("true")
     expect(
       screen
         .getByRole("button", { name: "Select model" })
-        .querySelector(".effort-ultra-label")?.textContent,
+        .querySelector(".effort-peak-label")?.textContent,
     ).toContain("Ultra")
+
+    // One stop below the top loses the presentation.
+    await user.click(screen.getByRole("button", { name: "max" }))
+    expect(
+      screen
+        .getByRole("slider", { name: "Reasoning effort" })
+        .getAttribute("data-peak"),
+    ).toBe("false")
+
+    // K3's top stop is max: the effect follows the stop, not the ultra name.
+    await user.click(screen.getByRole("button", { name: "Select model" }))
+    await user.click(screen.getByRole("button", { name: "K3" }))
+    await openEffortMenu(user)
+    expect(
+      screen
+        .getByRole("slider", { name: "Reasoning effort" })
+        .getAttribute("data-peak"),
+    ).toBe("true")
+    expect(
+      screen
+        .getByRole("button", { name: "Select model" })
+        .querySelector(".effort-peak-label")?.textContent,
+    ).toContain("Max")
+  })
+
+  it("shows the model's catalog default stop when no effort is pinned", async () => {
+    const user = userEvent.setup()
+    window.localStorage.clear()
+    useAppStore.setState({
+      ...selectModelState(),
+      modelSelections: {
+        session_1: { provider: "codex", model: "gpt-5.6-sol" },
+      },
+    })
+    render(<Composer />)
+
+    expect(combinedSelector().textContent).toContain("Low")
+
+    await openEffortMenu(user)
+    const slider = screen.getByRole("slider", { name: "Reasoning effort" })
+    expect(slider.getAttribute("aria-valuenow")).toBe("0")
+    expect(slider.getAttribute("aria-valuetext")).toBe("low")
+    expect(slider.getAttribute("data-peak")).toBe("false")
+
+    // The default is display-only: nothing is pinned and reset stays disabled.
+    expect(useAppStore.getState().modelSelections.session_1).toEqual({
+      provider: "codex",
+      model: "gpt-5.6-sol",
+    })
+    expect(
+      screen.getByRole("button", { name: "Reset effort to default" }),
+    ).toHaveProperty("disabled", true)
   })
 
   it("opens model selection directly when the effective model offers no effort", async () => {

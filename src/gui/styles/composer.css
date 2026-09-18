@@ -83,7 +83,7 @@
   overflow: hidden;
   background: oklch(0.63 0.2 255);
 }
-.effort-slider-fill[data-ultra="true"] {
+.effort-slider-fill[data-peak="true"] {
   isolation: isolate;
   background-image: linear-gradient(
     105deg,
@@ -93,9 +93,9 @@
     rgb(82 92 238)
   );
   background-size: 240% 100%;
-  animation: effort-ultra-flow 3.2s linear infinite;
+  animation: effort-peak-flow 3.2s linear infinite;
 }
-.effort-slider-fill[data-ultra="true"]::before {
+.effort-slider-fill[data-peak="true"]::before {
   position: absolute;
   inset: -70% -20%;
   content: "";
@@ -107,9 +107,9 @@
     radial-gradient(circle, rgb(230 220 255 / 75%) 0 0.8px, transparent 1.5px)
     7px 4px / 19px 31px;
   opacity: 0.8;
-  animation: effort-ultra-stars 2.8s linear infinite;
+  animation: effort-peak-stars 2.8s linear infinite;
 }
-.effort-slider-fill[data-ultra="true"]::after {
+.effort-slider-fill[data-peak="true"]::after {
   position: absolute;
   inset-block: -30%;
   left: -35%;
@@ -123,9 +123,9 @@
   );
   filter: blur(3px);
   transform: skewX(-16deg);
-  animation: effort-ultra-glint 2.4s ease-in-out infinite;
+  animation: effort-peak-glint 2.4s ease-in-out infinite;
 }
-.effort-ultra-label {
+.effort-peak-label {
   color: rgb(124 58 217);
   background-image: linear-gradient(
     90deg,
@@ -137,14 +137,14 @@
   background-size: 220% 100%;
   background-clip: text;
   -webkit-text-fill-color: transparent;
-  animation: effort-ultra-flow 4s linear infinite;
+  animation: effort-peak-flow 4s linear infinite;
 }
-@keyframes effort-ultra-flow {
+@keyframes effort-peak-flow {
   to {
     background-position: -240% 0;
   }
 }
-@keyframes effort-ultra-stars {
+@keyframes effort-peak-stars {
   0% {
     transform: translate3d(-8%, 4%, 0);
   }
@@ -155,7 +155,7 @@
     transform: translate3d(10%, -4%, 0);
   }
 }
-@keyframes effort-ultra-glint {
+@keyframes effort-peak-glint {
   0%,
   28% {
     transform: translateX(0) skewX(-16deg);
@@ -187,10 +187,10 @@
     transition: none;
     animation: none;
   }
-  .effort-slider-fill[data-ultra="true"],
-  .effort-slider-fill[data-ultra="true"]::before,
-  .effort-slider-fill[data-ultra="true"]::after,
-  .effort-ultra-label {
+  .effort-slider-fill[data-peak="true"],
+  .effort-slider-fill[data-peak="true"]::before,
+  .effort-slider-fill[data-peak="true"]::after,
+  .effort-peak-label {
     animation: none;
   }
 }

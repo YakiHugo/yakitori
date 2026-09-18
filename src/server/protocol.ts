@@ -172,6 +172,8 @@ export type ApiProviderModel = {
   readonly instructionProfileId: string
   readonly effortStyle?: "none" | "levels"
   readonly efforts?: readonly string[]
+  // Effort the model runs at when the Session pins none.
+  readonly defaultEffort?: string
   readonly speeds?: readonly string[]
   readonly inputModalities?: readonly ("image" | "text" | "video")[]
   readonly imageDetailModes?: readonly ("high" | "original")[]
