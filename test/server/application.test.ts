@@ -113,6 +113,38 @@ function testApplicationOptions(input: {
 }
 
 describe("application composition", () => {
+  // The packaged app exports provider env (YAKITORI_PROVIDER, KIMI_API_KEY, …)
+  // into shells it spawns; these tests must see a clean slate.
+  const touchedEnv = [
+    "YAKITORI_PROVIDER",
+    "YAKITORI_MODEL",
+    "YAKITORI_FAUX_SCENARIO",
+    "CODEX_HOME",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "XAI_API_KEY",
+    "KIMI_API_KEY",
+    "GROK_CREDENTIALS",
+  ] as const
+  let savedEnv: Record<(typeof touchedEnv)[number], string | undefined>
+
+  beforeEach(() => {
+    savedEnv = Object.fromEntries(
+      touchedEnv.map((key) => [key, process.env[key]]),
+    ) as typeof savedEnv
+    for (const key of touchedEnv) delete process.env[key]
+    process.env.CODEX_HOME = join(tmpdir(), "yakitori-test-missing-codex-home")
+    process.env.GROK_CREDENTIALS = join(tmpdir(), "missing-grok-auth.json")
+  })
+
+  afterEach(() => {
+    for (const key of touchedEnv) {
+      const value = savedEnv[key]
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  })
+
   it("creates the workspace default project once across restarts", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const application = await createYakitoriApplication(
@@ -1984,6 +2016,9 @@ describe("application composition", () => {
 
 describe("codex login registration", () => {
   const touchedEnv = [
+    "YAKITORI_PROVIDER",
+    "YAKITORI_MODEL",
+    "YAKITORI_FAUX_SCENARIO",
     "CODEX_HOME",
     "OPENAI_API_KEY",
     "XAI_API_KEY",
@@ -1996,6 +2031,9 @@ describe("codex login registration", () => {
     savedEnv = Object.fromEntries(
       touchedEnv.map((key) => [key, process.env[key]]),
     ) as typeof savedEnv
+    delete process.env.YAKITORI_PROVIDER
+    delete process.env.YAKITORI_MODEL
+    delete process.env.YAKITORI_FAUX_SCENARIO
     delete process.env.OPENAI_API_KEY
     delete process.env.XAI_API_KEY
     delete process.env.KIMI_API_KEY
