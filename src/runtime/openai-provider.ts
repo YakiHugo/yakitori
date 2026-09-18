@@ -7,6 +7,7 @@ import type {
 import type { ReasoningEffort } from "openai/resources/shared"
 import { isJsonObject, isJsonValue } from "../kernel/index.ts"
 import { nativeDeferredToolProtocol } from "./deferred-tool-loading.ts"
+import { resolveModelWireEffort } from "./model-catalog.ts"
 import {
   failureKindForStatus,
   modelFailureFromUnknown,
@@ -73,6 +74,7 @@ async function* streamOpenAI(
       request,
       nativeDeferredLoading,
     )
+    const effort = resolveModelWireEffort(request.target)
     const pending = client.responses.create(
       {
         model: request.target.model || defaultModel,
@@ -103,14 +105,14 @@ async function* streamOpenAI(
         ...(request.cacheKey === undefined
           ? {}
           : { prompt_cache_key: request.cacheKey }),
-        ...(request.target.effort === undefined &&
+        ...(effort === undefined &&
         !REASONING_SUMMARY_PROVIDERS.has(request.target.provider)
           ? {}
           : {
               reasoning: {
-                ...(request.target.effort === undefined
+                ...(effort === undefined
                   ? {}
-                  : { effort: request.target.effort as ReasoningEffort }),
+                  : { effort: effort as ReasoningEffort }),
                 ...(REASONING_SUMMARY_PROVIDERS.has(request.target.provider)
                   ? { summary: "auto" as const }
                   : {}),

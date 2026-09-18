@@ -4,6 +4,7 @@ import {
   catalogModelCapabilities,
   catalogModelCapacity,
   resolveModel,
+  resolveModelWireEffort,
   validateModelSelection,
 } from "../../src/runtime/model-catalog.ts"
 
@@ -207,5 +208,78 @@ describe("model catalog context windows", () => {
       supportsNativeToolSearch: false,
       usedFallbackModelMetadata: true,
     })
+  })
+
+  it("resolves the ultra alias to the model's real top effort on the wire", () => {
+    // gpt-6-astra declares a multi-agent effort, so ultra delegates at xhigh.
+    expect(
+      resolveModelWireEffort({
+        provider: "codex",
+        model: "gpt-6-astra",
+        effort: "ultra",
+      }),
+    ).toBe("xhigh")
+    // Models without a multi-agent effort resolve ultra to max.
+    expect(
+      resolveModelWireEffort({
+        provider: "codex",
+        model: "gpt-5.6-sol",
+        effort: "ultra",
+      }),
+    ).toBe("max")
+    expect(
+      resolveModelWireEffort({
+        provider: "codex",
+        model: "gpt-5.6-terra",
+        effort: "ultra",
+      }),
+    ).toBe("max")
+    // Non-ultra efforts and models without the alias pass through unchanged.
+    expect(
+      resolveModelWireEffort({
+        provider: "codex",
+        model: "gpt-5.6-sol",
+        effort: "high",
+      }),
+    ).toBe("high")
+    expect(
+      resolveModelWireEffort({
+        provider: "codex",
+        model: "gpt-5.6-luna",
+        effort: "max",
+      }),
+    ).toBe("max")
+    expect(
+      resolveModelWireEffort({
+        provider: "faux",
+        model: "scripted",
+        effort: "ultra",
+      }),
+    ).toBe("ultra")
+  })
+
+  it("resolves an unset effort to the catalog default", () => {
+    expect(
+      resolveModelWireEffort({ provider: "codex", model: "gpt-6-astra" }),
+    ).toBe("low")
+    expect(
+      resolveModelWireEffort({ provider: "codex", model: "gpt-5.6-terra" }),
+    ).toBe("medium")
+    expect(
+      resolveModelWireEffort({
+        provider: "codex",
+        model: "gpt-5.3-codex-spark",
+      }),
+    ).toBe("high")
+    // Models without a declared default keep the provider default.
+    expect(
+      resolveModelWireEffort({ provider: "kimi", model: "k3" }),
+    ).toBeUndefined()
+    expect(
+      resolveModelWireEffort({ provider: "openai", model: "gpt-6-astra" }),
+    ).toBeUndefined()
+    expect(
+      resolveModelWireEffort({ provider: "codex", model: "gpt-future" }),
+    ).toBeUndefined()
   })
 })

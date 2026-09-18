@@ -33,6 +33,8 @@ export type CatalogModel = Readonly<{
   displayName?: string
   effortStyle?: "none" | "levels"
   efforts?: readonly string[]
+  defaultEffort?: string
+  multiAgentReasoningEffort?: string
   speeds?: readonly string[]
   inputModalities: readonly ModelInputModality[]
   imageDetailModes: readonly ModelImageDetailMode[]
@@ -101,6 +103,25 @@ export function listCatalogModels(provider: string): CatalogModel[] {
         : {}),
       ...("efforts" in entry && entry.efforts !== undefined
         ? { efforts: entry.efforts }
+        : {}),
+      ...("defaultEffort" in entry && entry.defaultEffort !== undefined
+        ? {
+            defaultEffort: requireCatalogEffort(
+              entry,
+              "efforts" in entry ? entry.efforts : undefined,
+              entry.defaultEffort,
+            ),
+          }
+        : {}),
+      ...("multiAgentReasoningEffort" in entry &&
+      entry.multiAgentReasoningEffort !== undefined
+        ? {
+            multiAgentReasoningEffort: requireCatalogEffort(
+              entry,
+              "efforts" in entry ? entry.efforts : undefined,
+              entry.multiAgentReasoningEffort,
+            ),
+          }
         : {}),
       ...("speeds" in entry && entry.speeds !== undefined
         ? { speeds: entry.speeds }
@@ -216,6 +237,42 @@ export function catalogContextWindowTokens(input: {
   return entry.contextWindowTokens
 }
 
+// Mirrors Codex's ModelInfo::resolve_reasoning_effort: "ultra" is a picker
+// alias for delegation mode and never reaches the wire. It resolves to the
+// model's multi-agent effort when declared, then to "max", then to the last
+// listed non-ultra stop. An unset effort resolves to the catalog default so
+// codex requests always carry the model's default reasoning level.
+export function resolveModelWireEffort(target: {
+  readonly provider: string
+  readonly model: string
+  readonly effort?: string
+}): string | undefined {
+  const entry = findCatalogEntry(target)
+  if (entry === undefined) return target.effort
+  const efforts = "efforts" in entry ? entry.efforts : undefined
+  if (target.effort === "ultra" && efforts?.includes("ultra")) {
+    const multiAgent =
+      "multiAgentReasoningEffort" in entry
+        ? entry.multiAgentReasoningEffort
+        : undefined
+    if (
+      typeof multiAgent === "string" &&
+      multiAgent !== "ultra" &&
+      efforts.includes(multiAgent)
+    ) {
+      return multiAgent
+    }
+    if (efforts.includes("max")) return "max"
+    return (
+      [...efforts].reverse().find((effort) => effort !== "ultra") ?? "medium"
+    )
+  }
+  if (target.effort === undefined && "defaultEffort" in entry) {
+    return entry.defaultEffort
+  }
+  return target.effort
+}
+
 export function catalogModelCapacity(input: {
   readonly provider: string
   readonly model: string
@@ -242,6 +299,24 @@ export function requireInstructionProfileId(
   if (Object.hasOwn(instructionManifest, value))
     return value as InstructionProfileId
   throw new Error(`Unknown instruction profile ID in model catalog: ${value}`)
+}
+
+function requireCatalogEffort(
+  entry: { readonly provider: string; readonly model: string },
+  efforts: readonly string[] | undefined,
+  effort: string,
+): string {
+  if (efforts === undefined || !efforts.includes(effort)) {
+    throw new Error(
+      `Model catalog effort ${effort} is not in the effort list of ${entry.provider}/${entry.model}.`,
+    )
+  }
+  if (effort === "ultra") {
+    throw new Error(
+      `Model catalog default for ${entry.provider}/${entry.model} cannot be the ultra alias.`,
+    )
+  }
+  return effort
 }
 
 function requireShellToolType(value: string): ModelShellToolType {

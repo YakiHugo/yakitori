@@ -1141,6 +1141,59 @@ describe("OpenAI Responses provider", () => {
     })
   })
 
+  it("resolves the codex ultra alias and catalog defaults on the wire", async () => {
+    const cases = [
+      // gpt-6-astra declares a multi-agent effort, so ultra delegates at xhigh.
+      { model: "gpt-6-astra", effort: "ultra", expected: "xhigh" },
+      // Models without a multi-agent effort resolve ultra to max.
+      { model: "gpt-5.6-sol", effort: "ultra", expected: "max" },
+      // An unset effort resolves to the model's catalog default.
+      { model: "gpt-6-astra", effort: undefined, expected: "low" },
+      { model: "gpt-5.6-terra", effort: undefined, expected: "medium" },
+      // Ordinary stops pass through unchanged.
+      { model: "gpt-5.6-luna", effort: "max", expected: "max" },
+    ] as const
+    for (const entry of cases) {
+      let body: unknown
+      const client = {
+        responses: {
+          async create(input: unknown) {
+            body = input
+            return (async function* () {
+              yield {
+                type: "response.completed",
+                response: responseFixture({ output: [] }),
+              }
+            })()
+          },
+        },
+      } as unknown as OpenAI
+      const stream = createOpenAIProvider({
+        apiKey: "test",
+        model: "gpt-default",
+        client,
+      })
+
+      for await (const _event of stream(
+        requestFixture({
+          target: {
+            provider: "codex",
+            model: entry.model,
+            instructionProfileId: "codex",
+            ...(entry.effort === undefined ? {} : { effort: entry.effort }),
+          },
+        }),
+      )) {
+        // Drain the stream.
+      }
+
+      expect(body).toMatchObject({
+        model: entry.model,
+        reasoning: { effort: entry.expected, summary: "auto" },
+      })
+    }
+  })
+
   it("maps a pinned fast speed to the priority service tier", async () => {
     let body: unknown
     const client = {
