@@ -120,6 +120,16 @@
   background: transparent;
   padding: 0;
 }
+/* Shiki dual-theme output: token colors arrive as CSS variables; the .dark
+   variant flips them. The block background stays the app's muted surface. */
+.markdown .shiki,
+.markdown .shiki span {
+  color: var(--shiki-light);
+}
+.dark .markdown .shiki,
+.dark .markdown .shiki span {
+  color: var(--shiki-dark);
+}
 .markdown a {
   color: var(--primary);
   text-decoration: underline;

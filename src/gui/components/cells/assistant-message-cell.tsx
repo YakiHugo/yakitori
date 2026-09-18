@@ -1,15 +1,18 @@
-import Markdown from "react-markdown"
-import remarkGfm from "remark-gfm"
 import type { ExecutionEntry } from "../../execution-view.ts"
+import { MarkdownView } from "../markdown.tsx"
 
 export function AssistantMessageCell({
   entry,
+  workspaceRoot,
 }: {
   readonly entry: Extract<ExecutionEntry, { kind: "assistant" }>
+  readonly workspaceRoot?: string | undefined
 }) {
   return (
-    <div className="markdown text-[15px] leading-7" data-assistant-message="">
-      <Markdown remarkPlugins={[remarkGfm]}>{entry.text}</Markdown>
-    </div>
+    <MarkdownView
+      text={entry.text}
+      className="markdown text-[15px] leading-7"
+      workspaceRoot={workspaceRoot}
+    />
   )
 }
