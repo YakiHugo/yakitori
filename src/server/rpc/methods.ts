@@ -1,9 +1,9 @@
+import { realpath, stat } from "node:fs/promises"
+import { basename, isAbsolute, normalize } from "node:path"
 import type {
   SessionSidebar,
   SidebarChange,
 } from "../../core/session-sidebar.ts"
-import { realpath, stat } from "node:fs/promises"
-import { basename, isAbsolute, normalize } from "node:path"
 import {
   isYakitoriError,
   type StoredEventEnvelope,
@@ -33,11 +33,11 @@ import {
   type ApiListSessionsResponse,
   type ApiListSkillsResponse,
   type ApiPendingPermission,
-  type ApiReadSubscriptionRequest,
-  type ApiReadSubscriptionResponse,
   type ApiReadProjectResponse,
   type ApiReadSessionRequest,
   type ApiReadSessionResponse,
+  type ApiReadSubscriptionRequest,
+  type ApiReadSubscriptionResponse,
   type ApiResolvePermissionRequest,
   type ApiSearchSessionOccurrencesRequest,
   type ApiSearchSessionOccurrencesResponse,
@@ -167,6 +167,11 @@ export type ProjectChangeType = "created" | "updated" | "deleted"
 export type ProjectChangedNotification = Readonly<{
   projectId: string
   changeType: ProjectChangeType
+}>
+
+export type SidebarChangedNotification = Readonly<{
+  sidebar?: SessionSidebar
+  sessionId?: string
 }>
 
 // The session/permission/request server→client method (Codex parity:
@@ -619,7 +624,14 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
       const result = adaptHandlerResult(
         await context.handlers.updateSidebar(params),
       )
-      context.broadcastNotification("sidebar/changed", {})
+      context.broadcastNotification("sidebar/changed", {
+        sidebar: result,
+        ...(isRecord(params) &&
+        (params.type === "session" || params.type === "move-session") &&
+        typeof params.sessionId === "string"
+          ? { sessionId: params.sessionId }
+          : {}),
+      } satisfies SidebarChangedNotification)
       return { result }
     },
   },

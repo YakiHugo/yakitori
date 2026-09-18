@@ -1,7 +1,6 @@
-import { imageAttachmentUrl } from "../../composer-attachments.ts"
-import { useAppStore } from "../../store/app-store.ts"
 import { ChevronRight, ExternalLink } from "lucide-react"
 import { useEffect, useState } from "react"
+import { imageAttachmentUrl } from "../../composer-attachments.ts"
 import type { ExecutionEntry } from "../../execution-view.ts"
 import {
   fileActionLabel,
@@ -9,6 +8,7 @@ import {
   openUrlTarget,
 } from "../../lib/open-resource.ts"
 import { cn } from "../../lib/utils.ts"
+import { useAppStore } from "../../store/app-store.ts"
 import { presentTool, type ToolTarget } from "../../tool-presentation.ts"
 import {
   Collapsible,
@@ -93,7 +93,7 @@ export function ToolCell({
           />
         )}
       </div>
-      <CollapsibleContent className="ml-5 pt-1 pb-2 pl-2">
+      <CollapsibleContent className="pt-1 pb-2">
         <div className="rounded-md bg-muted/35 px-3 py-2.5">
           {(entry.attachments ?? []).map((attachment) => (
             <img

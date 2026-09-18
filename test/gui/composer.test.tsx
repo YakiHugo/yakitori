@@ -8,13 +8,13 @@ import {
 } from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { ConversationScrollContext } from "../../src/gui/hooks/conversation-scroll-context.ts"
-import { skillMentionText } from "../../src/gui/components/prompt-document.ts"
 import { Composer } from "../../src/gui/components/composer.tsx"
+import { skillMentionText } from "../../src/gui/components/prompt-document.ts"
 import {
   createExecutionViewState,
   reduceExecutionView,
 } from "../../src/gui/execution-view.ts"
+import { ConversationScrollContext } from "../../src/gui/hooks/conversation-scroll-context.ts"
 import { ApiRequestError } from "../../src/gui/lib/rpc-client.ts"
 import {
   createInitialAppState,
@@ -26,8 +26,8 @@ import {
   InputRole,
 } from "../../src/kernel/events.ts"
 import type { ApiSessionDetail } from "../../src/server/protocol.ts"
-import { pastePrompt, selectPrompt } from "./prompt-editor-helpers.ts"
 import { FakeRpcClient } from "./fake-rpc-client.ts"
+import { pastePrompt, selectPrompt } from "./prompt-editor-helpers.ts"
 
 const fakeRef = vi.hoisted(() => ({
   current: undefined as unknown as FakeRpcClient,
@@ -200,7 +200,8 @@ describe("composer", () => {
       selection: { sessionId: "session_1" },
     })
     render(<Composer />)
-    await user.click(screen.getByRole("button", { name: "Attach images" }))
+    await user.click(screen.getByRole("button", { name: "Add attachment" }))
+    await user.click(screen.getByRole("button", { name: "Upload image" }))
     await waitFor(() => {
       expect(useAppStore.getState().promptAttachments).toHaveLength(1)
     })
@@ -223,6 +224,29 @@ describe("composer", () => {
         },
       },
     ])
+  })
+
+  it("opens a local upload choice before invoking the image picker", async () => {
+    const user = userEvent.setup()
+    const bridge = window.yakitoriDesktop
+    if (bridge === undefined) throw new Error("Expected the desktop bridge")
+    useAppStore.setState({ selection: { sessionId: "session_1" } })
+    render(<Composer />)
+
+    await user.click(screen.getByRole("button", { name: "Add attachment" }))
+
+    expect(bridge.pickImages).not.toHaveBeenCalled()
+    expect(screen.getByRole("button", { name: "Upload image" })).toBeDefined()
+
+    await user.keyboard("{Escape}")
+    expect(screen.queryByRole("button", { name: "Upload image" })).toBeNull()
+    expect(bridge.pickImages).not.toHaveBeenCalled()
+
+    await user.click(screen.getByRole("button", { name: "Add attachment" }))
+    await user.click(screen.getByRole("button", { name: "Upload image" }))
+    await waitFor(() => {
+      expect(bridge.pickImages).toHaveBeenCalledOnce()
+    })
   })
 
   it("previews an attached image with zoom controls", async () => {
@@ -338,9 +362,10 @@ describe("composer", () => {
     respondWithSessionCreate()
     render(<Composer />)
 
-    const attach = screen.getByRole("button", { name: "Attach images" })
+    const attach = screen.getByRole("button", { name: "Add attachment" })
     expect(attach).toHaveProperty("disabled", false)
     await user.click(attach)
+    await user.click(screen.getByRole("button", { name: "Upload image" }))
 
     await waitFor(() => {
       expect(useAppStore.getState().promptAttachments).toHaveLength(1)
@@ -367,10 +392,11 @@ describe("composer", () => {
     respondWithSessionCreate()
     render(<Composer />)
 
-    await user.click(screen.getByRole("button", { name: "Attach images" }))
+    await user.click(screen.getByRole("button", { name: "Add attachment" }))
+    await user.click(screen.getByRole("button", { name: "Upload image" }))
     await waitFor(() => {
       expect(
-        screen.getByRole("button", { name: "Attach images" }),
+        screen.getByRole("button", { name: "Add attachment" }),
       ).toHaveProperty("disabled", false)
     })
 
@@ -392,7 +418,8 @@ describe("composer", () => {
     useAppStore.setState({ promptDraft: "keep this draft" })
     render(<Composer />)
 
-    await user.click(screen.getByRole("button", { name: "Attach images" }))
+    await user.click(screen.getByRole("button", { name: "Add attachment" }))
+    await user.click(screen.getByRole("button", { name: "Upload image" }))
 
     await waitFor(() => {
       expect(fakeRef.current.requestsFor("session/delete")).toHaveLength(1)
@@ -410,7 +437,8 @@ describe("composer", () => {
     })
     render(<Composer />)
 
-    await user.click(screen.getByRole("button", { name: "Attach images" }))
+    await user.click(screen.getByRole("button", { name: "Add attachment" }))
+    await user.click(screen.getByRole("button", { name: "Upload image" }))
     const bridge = window.yakitoriDesktop
     if (bridge === undefined) throw new Error("Expected the desktop bridge")
     expect(bridge.importPickedImages).not.toHaveBeenCalled()
@@ -444,7 +472,8 @@ describe("composer", () => {
     })
     render(<Composer />)
 
-    await user.click(screen.getByRole("button", { name: "Attach images" }))
+    await user.click(screen.getByRole("button", { name: "Add attachment" }))
+    await user.click(screen.getByRole("button", { name: "Upload image" }))
     useAppStore.setState({
       inFlightActions: new Set(),
       selection: { sessionId: "session_1" },
@@ -493,7 +522,8 @@ describe("composer", () => {
     respondWithSessionCreate()
     render(<Composer />)
 
-    await user.click(screen.getByRole("button", { name: "Attach images" }))
+    await user.click(screen.getByRole("button", { name: "Add attachment" }))
+    await user.click(screen.getByRole("button", { name: "Upload image" }))
 
     await waitFor(() => {
       expect(screen.getByRole("alert").textContent).toBe(
@@ -1142,6 +1172,19 @@ describe("model selector", () => {
     }
   }
 
+  const combinedSelector = () =>
+    screen.getByRole("button", { name: "Select model and effort" })
+
+  async function openEffortMenu(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(combinedSelector())
+  }
+
+  async function openModelMenu(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(combinedSelector())
+    const modelStep = screen.queryByRole("button", { name: "Select model" })
+    if (modelStep !== null) await user.click(modelStep)
+  }
+
   it("labels the pill with session current instead of the last started turn", () => {
     const started = createEventEnvelope({
       sessionId: "session_1",
@@ -1170,12 +1213,8 @@ describe("model selector", () => {
     })
     render(<Composer />)
 
-    expect(
-      screen.getByRole("button", { name: "Select model" }).textContent,
-    ).toBe("Claude Sonnet 4.6")
-    expect(
-      screen.getByRole("button", { name: "Select effort" }).textContent,
-    ).toBe("low")
+    expect(combinedSelector().textContent).toContain("Claude Sonnet 4.6")
+    expect(combinedSelector().textContent).toContain("Low")
   })
 
   it("groups model rows by provider under a Select model header", async () => {
@@ -1184,7 +1223,7 @@ describe("model selector", () => {
     useAppStore.setState({ ...selectModelState(), modelSelections: {} })
     render(<Composer />)
 
-    await user.click(screen.getByRole("button", { name: "Select model" }))
+    await openModelMenu(user)
 
     expect(screen.getByText("Select model")).toBeDefined()
     expect(screen.getByText("Recommended set of models")).toBeDefined()
@@ -1205,7 +1244,7 @@ describe("model selector", () => {
     useAppStore.setState({ ...selectModelState(), modelSelections: {} })
     render(<Composer />)
 
-    await user.click(screen.getByRole("button", { name: "Select effort" }))
+    await openEffortMenu(user)
 
     // The effective default model is a reasoning model: effort stops show.
     expect(screen.getByRole("slider", { name: "Reasoning effort" }))
@@ -1232,7 +1271,7 @@ describe("model selector", () => {
     })
     render(<Composer />)
 
-    await user.click(screen.getByRole("button", { name: "Select model" }))
+    await openModelMenu(user)
 
     expect(screen.queryByText("codex")).toBeNull()
     expect(screen.queryByRole("button", { name: "GPT-5.6 Sol" })).toBeNull()
@@ -1250,7 +1289,7 @@ describe("model selector", () => {
     })
     render(<Composer />)
 
-    await user.click(screen.getByRole("button", { name: "Select model" }))
+    await openModelMenu(user)
     await user.click(screen.getByRole("button", { name: "GPT 5.1 Codex" }))
 
     expect(useAppStore.getState().modelSelections).toEqual({
@@ -1277,7 +1316,7 @@ describe("model selector", () => {
     })
 
     // Claude offers the same effort levels, so the pinned effort survives.
-    await user.click(screen.getByRole("button", { name: "Select model" }))
+    await openModelMenu(user)
     await user.click(screen.getByRole("button", { name: "Claude Sonnet 4.6" }))
 
     expect(useAppStore.getState().modelSelections).toEqual({
@@ -1298,12 +1337,30 @@ describe("model selector", () => {
         },
       },
     })
-    await user.click(screen.getByRole("button", { name: "Select model" }))
+    await openModelMenu(user)
     await user.click(screen.getByRole("button", { name: "K3" }))
 
     expect(useAppStore.getState().modelSelections).toEqual({
       session_1: { provider: "kimi", model: "k3" },
     })
+  })
+
+  it("rebuilds the effort stops from the newly selected model", async () => {
+    const user = userEvent.setup()
+    window.localStorage.clear()
+    useAppStore.setState({ ...selectModelState(), modelSelections: {} })
+    render(<Composer />)
+
+    await openEffortMenu(user)
+    expect(screen.getByRole("button", { name: "medium" })).toBeDefined()
+    await user.click(screen.getByRole("button", { name: "Select model" }))
+    await user.click(screen.getByRole("button", { name: "K3" }))
+
+    await openEffortMenu(user)
+    expect(screen.getByRole("button", { name: "low" })).toBeDefined()
+    expect(screen.getByRole("button", { name: "high" })).toBeDefined()
+    expect(screen.getByRole("button", { name: "max" })).toBeDefined()
+    expect(screen.queryByRole("button", { name: "medium" })).toBeNull()
   })
 
   it("pins an effort for the effective model and resets it to default", async () => {
@@ -1312,15 +1369,13 @@ describe("model selector", () => {
     useAppStore.setState({ ...selectModelState(), modelSelections: {} })
     render(<Composer />)
 
-    await user.click(screen.getByRole("button", { name: "Select effort" }))
+    await openEffortMenu(user)
     await user.click(screen.getByRole("button", { name: "high" }))
 
     expect(useAppStore.getState().modelSelections).toEqual({
       session_1: { provider: "openai", model: "gpt-5.1-codex", effort: "high" },
     })
-    expect(
-      screen.getByRole("button", { name: "Select effort" }).textContent,
-    ).toBe("high")
+    expect(combinedSelector().textContent).toContain("High")
 
     // The reset control clears only the effort, keeping the model.
     await user.click(
@@ -1332,7 +1387,7 @@ describe("model selector", () => {
     })
   })
 
-  it("hides the effort pill when the effective model offers none", async () => {
+  it("opens model selection directly when the effective model offers no effort", async () => {
     const user = userEvent.setup()
     window.localStorage.clear()
     useAppStore.setState({
@@ -1343,10 +1398,10 @@ describe("model selector", () => {
     })
     render(<Composer />)
 
-    expect(screen.queryByRole("button", { name: "Select effort" })).toBeNull()
-
-    // The non-reasoning model is the pressed row in the model menu.
-    await user.click(screen.getByRole("button", { name: "Select model" }))
+    await user.click(combinedSelector())
+    expect(
+      screen.queryByRole("slider", { name: "Reasoning effort" }),
+    ).toBeNull()
     expect(
       screen
         .getByRole("button", { name: "Grok 4.20 Non-Reasoning" })
@@ -1370,7 +1425,7 @@ describe("model selector", () => {
     })
     render(<Composer />)
 
-    await user.click(screen.getByRole("button", { name: "Select effort" }))
+    await openEffortMenu(user)
     await user.click(screen.getByRole("button", { name: "Use fast speed" }))
 
     // Picking a speed keeps the pinned effort.
@@ -1417,7 +1472,7 @@ describe("model selector", () => {
     })
     render(<Composer />)
 
-    await user.click(screen.getByRole("button", { name: "Select effort" }))
+    await openEffortMenu(user)
 
     expect(screen.getByRole("button", { name: "Use fast speed" })).toBeDefined()
     expect(
@@ -1436,7 +1491,7 @@ describe("model selector", () => {
     })
     render(<Composer />)
 
-    await user.click(screen.getByRole("button", { name: "Select effort" }))
+    await openEffortMenu(user)
 
     expect(
       screen.getByRole("slider", { name: "Reasoning effort" }),
@@ -1450,7 +1505,7 @@ describe("model selector", () => {
     useAppStore.setState({ ...selectModelState(), modelSelections: {} })
     render(<Composer />)
 
-    await user.click(screen.getByRole("button", { name: "Select model" }))
+    await openModelMenu(user)
 
     // With no session override, Default is the pressed row.
     expect(
@@ -1464,12 +1519,10 @@ describe("model selector", () => {
     expect(useAppStore.getState().modelSelections).toEqual({
       session_1: { provider: "openai", model: "gpt-5" },
     })
-    expect(
-      screen.getByRole("button", { name: "Select model" }).textContent,
-    ).toBe("GPT-5")
+    expect(combinedSelector().textContent).toContain("GPT-5")
 
     // The picked model row is now pressed; Default is not.
-    await user.click(screen.getByRole("button", { name: "Select model" }))
+    await openModelMenu(user)
     expect(
       screen
         .getByRole("button", { name: "GPT-5" })

@@ -1054,6 +1054,18 @@ it("publishes sidebar changes across connections and requires restoring an archi
     sectionId: "pinned",
   })
   expect(second.notifications("sidebar/changed")).toHaveLength(2)
+  expect(second.notifications("sidebar/changed").at(-1)?.params).toMatchObject({
+    sessionId: session.id,
+    sidebar: {
+      entries: {
+        [session.navigationId ?? session.id]: {
+          title: "Renamed",
+          archived: true,
+          sectionId: "pinned",
+        },
+      },
+    },
+  })
   expect(
     (
       await rpc<ApiReadSessionResponse>(second, "session/read", {

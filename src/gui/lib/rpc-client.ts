@@ -12,6 +12,7 @@ import type {
   SessionReplayCompleteNotification,
   SessionSubscribeResponse,
   SessionSubscriptionErrorNotification,
+  SidebarChangedNotification,
 } from "../../server/rpc/methods.ts"
 
 // The GUI's only server channel: JSON-RPC over one WebSocket at /rpc,
@@ -71,7 +72,9 @@ export type AppRpcClient = {
   ): SessionStream
   // Registers a listener for server-broadcast project/changed notifications;
   // returns the unsubscribe function.
-  subscribeToSidebarChanges(listener: () => void): () => void
+  subscribeToSidebarChanges(
+    listener: (notification: SidebarChangedNotification) => void,
+  ): () => void
   subscribeToProjectChanges(
     listener: (notification: ProjectChangedNotification) => void,
   ): () => void
@@ -134,7 +137,9 @@ export function createAppRpcClient(options: {
   // permissionRequestId; ids are process-global on the server, so a responder
   // stays valid across reconnects until answered or pruned.
   const permissionResponders = new Map<string, { readonly id: number }>()
-  const sidebarChangeListeners = new Set<() => void>()
+  const sidebarChangeListeners = new Set<
+    (notification: SidebarChangedNotification) => void
+  >()
   const projectChangeListeners = new Set<
     (notification: ProjectChangedNotification) => void
   >()
@@ -202,7 +207,7 @@ export function createAppRpcClient(options: {
         send({ method: "initialized" })
         resubscribeAll()
         if (initializedOnce) {
-          for (const listener of sidebarChangeListeners) listener()
+          for (const listener of sidebarChangeListeners) listener({})
           for (const listener of sessionActivityListeners) listener(undefined)
         }
         initializedOnce = true
@@ -343,7 +348,8 @@ export function createAppRpcClient(options: {
       return
     }
     if (message.method === "sidebar/changed") {
-      for (const listener of sidebarChangeListeners) listener()
+      const notification = (message.params ?? {}) as SidebarChangedNotification
+      for (const listener of sidebarChangeListeners) listener(notification)
     }
     if (message.method === "sessions/activity") {
       const params: unknown = message.params
