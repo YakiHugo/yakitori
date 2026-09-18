@@ -86,7 +86,13 @@ export function ModelSelector() {
   const fast = effective?.speed === "fast"
   const effortMenuAvailable =
     (efforts !== undefined && efforts.length > 0) || speeds !== undefined
-  const ultra = effective?.effort === "ultra"
+  // An unpinned effort runs at the model's catalog default; show that stop
+  // instead of an empty slider.
+  const currentEffort = effective?.effort ?? effectiveEntry?.defaultEffort
+  const peak =
+    currentEffort !== undefined &&
+    efforts !== undefined &&
+    currentEffort === efforts[efforts.length - 1]
 
   const update = (patch: {
     provider: string
@@ -181,9 +187,9 @@ export function ModelSelector() {
             ? "Select model"
             : displayName(providers, effective)}
         </span>
-        {effective?.effort === undefined ? null : (
+        {currentEffort === undefined ? null : (
           <span className="shrink-0 text-muted-foreground">
-            {displayEffort(effective.effort)}
+            {displayEffort(currentEffort)}
           </span>
         )}
         <ChevronDown
@@ -226,12 +232,12 @@ export function ModelSelector() {
               <span
                 className={cn(
                   "flex items-center gap-0.5 text-[15px] leading-5 font-semibold",
-                  ultra && "effort-ultra-label",
+                  peak && "effort-peak-label",
                 )}
               >
-                {effective.effort === undefined
+                {currentEffort === undefined
                   ? "Default effort"
-                  : displayEffort(effective.effort)}
+                  : displayEffort(currentEffort)}
                 <ChevronRight className="size-3.5 shrink-0" />
               </span>
               <span className="mt-0.5 max-w-full truncate text-xs font-normal text-muted-foreground">
@@ -253,7 +259,7 @@ export function ModelSelector() {
           {efforts !== undefined && efforts.length > 0 ? (
             <EffortSlider
               efforts={efforts}
-              current={effective.effort}
+              current={currentEffort}
               onChange={selectEffort}
             />
           ) : (
@@ -356,7 +362,7 @@ function EffortSlider({
   const track = useRef<HTMLDivElement>(null)
   const index = current === undefined ? -1 : efforts.indexOf(current)
   const last = efforts.length - 1
-  const ultra = current === "ultra"
+  const peak = index >= 0 && index === last
   const position = (stop: number) =>
     last === 0 ? "50%" : `calc(12px + (100% - 24px) * ${stop / last})`
 
@@ -379,7 +385,7 @@ function EffortSlider({
         aria-valuemax={last}
         aria-valuenow={index}
         aria-valuetext={current ?? "Default"}
-        data-ultra={ultra}
+        data-peak={peak}
         tabIndex={0}
         onKeyDown={(event) => {
           const step =
@@ -409,7 +415,7 @@ function EffortSlider({
       >
         {index >= 0 ? (
           <div
-            data-ultra={ultra}
+            data-peak={peak}
             className="effort-slider-fill absolute inset-y-0 left-0 rounded-full transition-[width] duration-300 ease-out"
             style={{ width: position(index) }}
           />

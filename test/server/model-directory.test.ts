@@ -78,6 +78,7 @@ describe("model directory", () => {
       displayName: "GPT-6-Astra",
       instructionProfileId: "gpt-6-astra",
       efforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
+      defaultEffort: "low",
       speeds: ["standard", "fast"],
       inputModalities: ["text", "image"],
       imageDetailModes: ["high", "original"],
@@ -87,6 +88,7 @@ describe("model directory", () => {
       displayName: "GPT-5.3-Codex-Spark",
       instructionProfileId: "gpt-5.3-codex-spark",
       efforts: ["low", "medium", "high", "xhigh"],
+      defaultEffort: "high",
       inputModalities: ["text"],
       imageDetailModes: [],
     })

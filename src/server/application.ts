@@ -851,6 +851,9 @@ async function providerSummary(
         ? {}
         : { effortStyle: entry.effortStyle }),
       ...(entry.efforts === undefined ? {} : { efforts: entry.efforts }),
+      ...(entry.defaultEffort === undefined
+        ? {}
+        : { defaultEffort: entry.defaultEffort }),
       ...(entry.speeds === undefined ? {} : { speeds: entry.speeds }),
       ...(entry.inputModalities === undefined
         ? {}
