@@ -1,6 +1,5 @@
-import { ArrowUp, LoaderCircle, Plus, Square, X } from "lucide-react"
-import { useContext, useLayoutEffect, useRef, useState } from "react"
-import { ConversationScrollContext } from "../hooks/conversation-scroll-context.ts"
+import { ArrowUp, ImagePlus, LoaderCircle, Plus, Square, X } from "lucide-react"
+import { useContext, useEffect, useLayoutEffect, useRef, useState } from "react"
 import { COMPACT_DIRECTIVE, type ImageAttachment } from "../../kernel/events.ts"
 import {
   appendImageFiles,
@@ -8,10 +7,11 @@ import {
   discardDraftImages,
   discardPickedImages,
   imageAttachmentUrl,
-  pickImages as selectImages,
   requireDesktopBridge,
+  pickImages as selectImages,
   validateImageFiles,
 } from "../composer-attachments.ts"
+import { ConversationScrollContext } from "../hooks/conversation-scroll-context.ts"
 import {
   normalizeKimiModelSelection,
   resolveEffectiveModel,
@@ -19,13 +19,13 @@ import {
   useExecutionView,
 } from "../store/app-store.ts"
 import {
-  ComposerSuggestions,
   type ComposerSuggestion,
+  ComposerSuggestions,
 } from "./composer-suggestions.tsx"
 import { ImageLightbox } from "./image-lightbox.tsx"
-import { PromptEditor, type PromptEditorHandle } from "./prompt-editor.tsx"
-import { skillMentionText } from "./prompt-document.ts"
 import { ModelSelector } from "./model-selector.tsx"
+import { skillMentionText } from "./prompt-document.ts"
+import { PromptEditor, type PromptEditorHandle } from "./prompt-editor.tsx"
 import { Button } from "./ui/button.tsx"
 
 type SlashCommand = Readonly<{
@@ -72,6 +72,7 @@ export function Composer() {
   const view = useExecutionView()
   const editorRef = useRef<PromptEditorHandle | null>(null)
   const [attachmentError, setAttachmentError] = useState<string>()
+  const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false)
   const [previewIndex, setPreviewIndex] = useState<number>()
   const [readingImages, setReadingImages] = useState(false)
   const [historyNavigation, setHistoryNavigation] = useState<{
@@ -109,6 +110,15 @@ export function Composer() {
   useLayoutEffect(() => {
     if (focusRevision > 0) editorRef.current?.focus()
   }, [focusRevision])
+
+  useEffect(() => {
+    if (!attachmentMenuOpen) return
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setAttachmentMenuOpen(false)
+    }
+    window.addEventListener("keydown", closeOnEscape)
+    return () => window.removeEventListener("keydown", closeOnEscape)
+  }, [attachmentMenuOpen])
 
   // Navigation parked for another session must not leak into this one.
   const activeHistoryNavigation =
@@ -286,6 +296,7 @@ export function Composer() {
   }
 
   const pickImages = async () => {
+    setAttachmentMenuOpen(false)
     await importImages(async () => {
       const selection = await selectImages()
       if (selection === undefined) return
@@ -451,17 +462,17 @@ export function Composer() {
             onPick={pickSuggestion}
           />
           {attachments.length > 0 ? (
-            <div className="flex gap-2 overflow-x-auto px-3 pt-3">
+            <div className="flex gap-2 overflow-x-auto px-4 pt-3">
               {attachments.map((attachment, index) => (
                 <div
                   key={`${attachment.file.rolloutId}:${attachment.file.path}`}
-                  className="group/image relative size-18 shrink-0 overflow-hidden rounded-xl border bg-muted"
+                  className="group/image relative size-14 shrink-0 rounded-xl border bg-muted shadow-sm"
                 >
                   <button
                     type="button"
                     aria-label={`Preview ${attachment.name}`}
                     onClick={() => setPreviewIndex(index)}
-                    className="block size-full cursor-zoom-in"
+                    className="block size-full cursor-zoom-in overflow-hidden rounded-[calc(var(--radius-xl)-1px)]"
                   >
                     <img
                       src={imageAttachmentUrl(attachment, apiBase)}
@@ -487,7 +498,7 @@ export function Composer() {
                         )
                       })
                     }}
-                    className="absolute top-1 right-1 grid size-5 place-items-center rounded-full bg-black/65 text-white opacity-90 transition-opacity hover:bg-black focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
+                    className="absolute -top-1.5 -right-1.5 grid size-5 place-items-center rounded-full border border-white/80 bg-black/75 text-white shadow-sm transition-[transform,background-color] hover:scale-105 hover:bg-black focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   >
                     <X className="size-3" />
                   </button>
@@ -514,15 +525,17 @@ export function Composer() {
                         ),
                       )
                     }
-                    className="absolute top-1 left-1 rounded bg-black/65 px-1 py-0.5 text-[9px] font-medium text-white transition-colors hover:bg-black focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white disabled:cursor-not-allowed disabled:opacity-70"
+                    title={
+                      supportsOriginal
+                        ? "Toggle image detail"
+                        : "Original detail unavailable"
+                    }
+                    className="absolute bottom-1 left-1 rounded-md bg-black/65 px-1.5 py-0.5 text-[9px] leading-none font-medium text-white opacity-0 backdrop-blur-sm transition-opacity group-hover/image:opacity-100 hover:bg-black focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white disabled:cursor-not-allowed disabled:opacity-70"
                   >
                     {supportsOriginal && attachment.detail === "original"
                       ? "Original"
                       : "High"}
                   </button>
-                  <span className="absolute right-1 bottom-1 left-1 truncate rounded bg-black/55 px-1 py-0.5 text-[9px] text-white opacity-0 transition-opacity group-hover/image:opacity-100">
-                    {attachment.name}
-                  </span>
                 </div>
               ))}
             </div>
@@ -572,23 +585,55 @@ export function Composer() {
           />
 
           <div className="flex min-h-12 items-center justify-between gap-3 px-2.5 pb-2.5">
-            <div className="flex min-w-0 items-center gap-1">
+            <div className="relative flex min-w-0 items-center gap-1">
+              {attachmentMenuOpen ? (
+                <div
+                  aria-hidden="true"
+                  className="fixed inset-0 z-10"
+                  onClick={() => setAttachmentMenuOpen(false)}
+                />
+              ) : null}
               <Button
                 type="button"
                 variant="ghost"
                 size="icon-sm"
                 disabled={readingImages}
-                aria-label="Attach images"
-                title="Attach images"
-                className="rounded-full bg-muted/70"
-                onClick={() => void pickImages()}
+                aria-label="Add attachment"
+                aria-expanded={attachmentMenuOpen}
+                title="Add attachment"
+                className={`relative rounded-full text-muted-foreground hover:text-foreground ${attachmentMenuOpen ? "z-20" : ""}`}
+                onClick={() => setAttachmentMenuOpen((open) => !open)}
               >
                 {readingImages ? (
                   <LoaderCircle className="animate-spin" />
                 ) : (
-                  <Plus />
+                  <Plus
+                    className={`transition-transform duration-150 ${attachmentMenuOpen ? "rotate-45" : ""}`}
+                  />
                 )}
               </Button>
+              {attachmentMenuOpen ? (
+                <div className="composer-control-popover absolute bottom-full left-0 z-20 mb-2 w-56 rounded-xl border bg-popover p-1.5 shadow-[0_12px_32px_-12px_color-mix(in_oklab,var(--foreground)_22%,transparent),0_3px_8px_-5px_color-mix(in_oklab,var(--foreground)_15%,transparent)]">
+                  <button
+                    type="button"
+                    aria-label="Upload image"
+                    onClick={() => void pickImages()}
+                    className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    <span className="grid size-7 shrink-0 place-items-center rounded-md bg-muted text-muted-foreground">
+                      <ImagePlus className="size-4" />
+                    </span>
+                    <span className="min-w-0">
+                      <span className="block text-sm font-medium">
+                        Upload image
+                      </span>
+                      <span className="block truncate text-[11px] text-muted-foreground">
+                        PNG, JPEG, GIF, or WebP
+                      </span>
+                    </span>
+                  </button>
+                </div>
+              ) : null}
             </div>
 
             <div className="flex shrink-0 items-center gap-1">
@@ -596,7 +641,7 @@ export function Composer() {
               {activeTurnId === undefined ? (
                 <Button
                   type="submit"
-                  size="icon"
+                  size="icon-sm"
                   disabled={!canSend}
                   aria-label={sending ? "Sending" : "Send"}
                   title={
@@ -620,7 +665,7 @@ export function Composer() {
                 // queues a follow-up through the unchanged submit path.
                 <Button
                   type="button"
-                  size="icon"
+                  size="icon-sm"
                   disabled={stopping}
                   aria-label={stopping ? "Stopping" : "Interrupt"}
                   title={stopping ? "Stopping" : "Interrupt"}

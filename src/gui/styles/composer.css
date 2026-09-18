@@ -75,6 +75,20 @@
   opacity: 0;
   transform: translateY(4px) scale(0.98);
 }
+.composer-control-popover {
+  transform-origin: bottom right;
+  animation: composer-control-enter 180ms var(--conversation-ease);
+}
+@keyframes composer-control-enter {
+  from {
+    opacity: 0;
+    transform: translateY(5px) scale(0.975);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
 @starting-style {
   .composer-suggestion-panel:not([hidden]) {
     opacity: 0;
@@ -82,7 +96,9 @@
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .composer-suggestion-panel {
+  .composer-suggestion-panel,
+  .composer-control-popover {
     transition: none;
+    animation: none;
   }
 }

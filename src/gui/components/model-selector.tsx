@@ -1,5 +1,12 @@
-import { Check, ChevronDown, RotateCcw, Zap } from "lucide-react"
-import { useRef, useState } from "react"
+import {
+  Check,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  RotateCcw,
+  Zap,
+} from "lucide-react"
+import { useEffect, useRef, useState } from "react"
 import type { ModelSelection } from "../../kernel/events.ts"
 import type { ApiProviderSummary } from "../../server/protocol.ts"
 import { cn } from "../lib/utils.ts"
@@ -19,8 +26,16 @@ function displayName(
   return entry?.displayName ?? `${selection.provider}/${selection.model}`
 }
 
-// Codex splits the control into a model pill with a checklist popover and an
-// effort pill with a discrete level slider; speed rides on the slider's bolt.
+function displayEffort(effort: string): string {
+  return effort
+    .split(/[-_]/)
+    .map((part) => `${part.charAt(0).toUpperCase()}${part.slice(1)}`)
+    .join(" ")
+}
+
+// Model capabilities own the available effort stops and speed tiers. The
+// composer exposes them as one control: effort first, then model selection as a
+// second-level destination, matching the Codex app's information hierarchy.
 export function ModelSelector() {
   const sessionId = useAppStore((state) => state.selection.sessionId)
   const providers = useAppStore((state) => state.providers)
@@ -35,12 +50,20 @@ export function ModelSelector() {
   const setModelSelection = useAppStore((state) => state.setModelSelection)
   const [menu, setMenu] = useState<"model" | "effort">()
 
+  useEffect(() => {
+    if (menu === undefined) return
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMenu(undefined)
+    }
+    window.addEventListener("keydown", closeOnEscape)
+    return () => window.removeEventListener("keydown", closeOnEscape)
+  }, [menu])
+
   if (providers.length === 0) return null
 
   const availableProviders = providers.filter(
     (provider) => provider.availability !== "requires_login",
   )
-
   const effective = normalizeKimiModelSelection(
     resolveEffectiveModel({
       sessionCurrent,
@@ -61,6 +84,8 @@ export function ModelSelector() {
     effectiveEntry?.effortStyle === "none" ? undefined : effectiveEntry?.efforts
   const speeds = effectiveEntry?.speeds
   const fast = effective?.speed === "fast"
+  const effortMenuAvailable =
+    (efforts !== undefined && efforts.length > 0) || speeds !== undefined
 
   const update = (patch: {
     provider: string
@@ -80,7 +105,6 @@ export function ModelSelector() {
     const entry = providers
       .find((candidate) => candidate.name === provider)
       ?.models.find((candidate) => candidate.id === model)
-    // Keep the current effort/speed only when the newly picked model offers it.
     const keepEffort =
       effective?.effort !== undefined &&
       entry?.effortStyle !== "none" &&
@@ -121,10 +145,18 @@ export function ModelSelector() {
     })
   }
 
-  const effortMenuAvailable = efforts !== undefined || speeds !== undefined
+  const openFirstLevel = () => {
+    setMenu((current) =>
+      current === undefined
+        ? effective !== undefined && effortMenuAvailable
+          ? "effort"
+          : "model"
+        : undefined,
+    )
+  }
 
   return (
-    <div className="relative flex items-center gap-1">
+    <div className="relative flex min-w-0 items-center">
       {menu !== undefined ? (
         <div
           aria-hidden="true"
@@ -132,44 +164,117 @@ export function ModelSelector() {
           onClick={() => setMenu(undefined)}
         />
       ) : null}
+
       <button
         type="button"
-        aria-label="Select model"
-        aria-expanded={menu === "model"}
-        onClick={() => setMenu(menu === "model" ? undefined : "model")}
-        className="flex items-center gap-1 rounded-full px-2 py-1 text-xs hover:bg-accent"
+        aria-label="Select model and effort"
+        aria-expanded={menu !== undefined}
+        onClick={openFirstLevel}
+        className="flex h-8 max-w-64 min-w-0 items-center gap-1.5 rounded-full bg-muted/70 px-3 text-xs transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
-        {fast ? <Zap className="size-3.5 fill-blue-500 text-blue-500" /> : null}
-        <span className="max-w-40 truncate">
+        {fast ? (
+          <Zap className="size-3.5 shrink-0 fill-blue-500 text-blue-500" />
+        ) : null}
+        <span className="min-w-0 truncate">
           {effective === undefined
             ? "Select model"
             : displayName(providers, effective)}
         </span>
-        <ChevronDown className="size-3.5 text-muted-foreground" />
-      </button>
-      {effective !== undefined && effortMenuAvailable ? (
-        <button
-          type="button"
-          aria-label="Select effort"
-          aria-expanded={menu === "effort"}
-          onClick={() => setMenu(menu === "effort" ? undefined : "effort")}
-          className="flex items-center gap-1 rounded-full bg-muted/70 px-2 py-1 text-xs hover:bg-accent"
-        >
-          <span>
-            {efforts !== undefined
-              ? (effective.effort ?? "Select effort")
-              : fast
-                ? "Fast"
-                : "Standard"}
+        {effective?.effort === undefined ? null : (
+          <span className="shrink-0 text-muted-foreground">
+            {displayEffort(effective.effort)}
           </span>
-          <ChevronDown className="size-3.5 text-muted-foreground" />
-        </button>
+        )}
+        <ChevronDown
+          className={cn(
+            "size-3.5 shrink-0 text-muted-foreground transition-transform duration-150",
+            menu !== undefined && "rotate-180",
+          )}
+        />
+      </button>
+
+      {menu === "effort" && effective !== undefined ? (
+        <div className="composer-control-popover absolute right-0 bottom-full z-20 mb-2 w-80 rounded-2xl border bg-popover p-3 text-sm shadow-[0_14px_38px_-12px_color-mix(in_oklab,var(--foreground)_22%,transparent),0_3px_10px_-5px_color-mix(in_oklab,var(--foreground)_15%,transparent)]">
+          <div className="grid grid-cols-[2rem_1fr_2rem] items-center">
+            {speeds !== undefined ? (
+              <button
+                type="button"
+                aria-label={fast ? "Use standard speed" : "Use fast speed"}
+                title={fast ? "Fast speed" : "Standard speed"}
+                onClick={toggleSpeed}
+                className="grid size-8 place-items-center rounded-full transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <Zap
+                  className={cn(
+                    "size-4",
+                    fast
+                      ? "fill-blue-500 text-blue-500"
+                      : "text-muted-foreground",
+                  )}
+                />
+              </button>
+            ) : (
+              <span />
+            )}
+            <span className="text-center text-sm font-semibold">
+              {effective.effort === undefined
+                ? "Default effort"
+                : displayEffort(effective.effort)}
+            </span>
+            <button
+              type="button"
+              aria-label="Reset effort to default"
+              title="Reset effort to default"
+              disabled={effective.effort === undefined}
+              onClick={() => selectEffort(undefined)}
+              className="grid size-8 place-items-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-35"
+            >
+              <RotateCcw className="size-3.5" />
+            </button>
+          </div>
+
+          <button
+            type="button"
+            aria-label="Select model"
+            onClick={() => setMenu("model")}
+            className="mx-auto mt-0.5 flex max-w-full items-center gap-1 rounded-lg px-2 py-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <span className="truncate">
+              {displayName(providers, effective)}
+            </span>
+            <ChevronRight className="size-3.5 shrink-0" />
+          </button>
+
+          {efforts !== undefined && efforts.length > 0 ? (
+            <EffortSlider
+              efforts={efforts}
+              current={effective.effort}
+              onChange={selectEffort}
+            />
+          ) : (
+            <p className="px-2 pt-4 pb-2 text-center text-xs text-muted-foreground">
+              This model has no reasoning effort levels.
+            </p>
+          )}
+        </div>
       ) : null}
 
       {menu === "model" ? (
-        <div className="absolute bottom-full left-0 z-20 mb-2 max-h-[60vh] w-64 overflow-y-auto rounded-2xl border bg-popover p-2 text-sm shadow-lg">
-          <div className="px-2 pt-1 pb-2 text-xs text-muted-foreground">
-            Select model
+        <div className="composer-control-popover absolute right-0 bottom-full z-20 mb-2 max-h-[min(32rem,50vh)] w-72 overflow-y-auto rounded-2xl border bg-popover p-2 text-sm shadow-[0_14px_38px_-12px_color-mix(in_oklab,var(--foreground)_22%,transparent),0_3px_10px_-5px_color-mix(in_oklab,var(--foreground)_15%,transparent)]">
+          <div className="flex items-center gap-1 px-1 pt-0.5 pb-1.5">
+            {effortMenuAvailable ? (
+              <button
+                type="button"
+                aria-label="Back to effort"
+                onClick={() => setMenu("effort")}
+                className="grid size-7 place-items-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <ChevronLeft className="size-4" />
+              </button>
+            ) : null}
+            <span className="px-1 text-xs font-medium text-muted-foreground">
+              Select model
+            </span>
           </div>
           <button
             type="button"
@@ -178,7 +283,7 @@ export function ModelSelector() {
               setModelSelection(sessionId, undefined)
               setMenu(undefined)
             }}
-            className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-accent"
+            className="flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             <span className="min-w-0 flex-1">
               <span className="block truncate font-medium">Default</span>
@@ -186,14 +291,9 @@ export function ModelSelector() {
                 Recommended set of models
               </span>
             </span>
-            {sessionCurrent === undefined ? (
-              <Check aria-hidden="true" className="size-4 shrink-0" />
-            ) : null}
           </button>
           {[...availableProviders]
             .sort((left, right) => {
-              // The configured default provider leads, like codex pinning the
-              // active model's group on top.
               if (left.name === defaultProvider) return -1
               if (right.name === defaultProvider) return 1
               return 0
@@ -202,7 +302,7 @@ export function ModelSelector() {
               provider.models.length === 0 ? null : (
                 <div key={provider.name}>
                   {availableProviders.length > 1 ? (
-                    <div className="px-2 pt-2 text-xs text-muted-foreground">
+                    <div className="px-2.5 pt-2.5 pb-0.5 text-[10px] font-medium tracking-[0.08em] text-muted-foreground uppercase">
                       {provider.name}
                     </div>
                   ) : null}
@@ -216,13 +316,16 @@ export function ModelSelector() {
                         type="button"
                         aria-pressed={selected}
                         onClick={() => selectModel(provider.name, model.id)}
-                        className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-accent"
+                        className="flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                       >
                         <span className="min-w-0 flex-1 truncate">
                           {model.displayName ?? model.id}
                         </span>
                         {selected ? (
-                          <Check aria-hidden="true" className="size-4 shrink-0" />
+                          <Check
+                            aria-hidden="true"
+                            className="size-4 shrink-0"
+                          />
                         ) : null}
                       </button>
                     )
@@ -230,56 +333,6 @@ export function ModelSelector() {
                 </div>
               ),
             )}
-        </div>
-      ) : null}
-
-      {menu === "effort" && effective !== undefined ? (
-        <div className="absolute right-0 bottom-full z-20 mb-2 w-72 rounded-2xl border bg-popover p-3 text-sm shadow-lg">
-          <div className="flex items-center justify-between gap-2">
-            {speeds !== undefined ? (
-              <button
-                type="button"
-                aria-label={fast ? "Use standard speed" : "Use fast speed"}
-                title={fast ? "Fast speed" : "Standard speed"}
-                onClick={toggleSpeed}
-                className="rounded-md p-1 hover:bg-accent"
-              >
-                <Zap
-                  className={cn(
-                    "size-4",
-                    fast
-                      ? "fill-blue-500 text-blue-500"
-                      : "text-muted-foreground",
-                  )}
-                />
-              </button>
-            ) : (
-              <span className="size-6" />
-            )}
-            <span className="text-xs font-medium">
-              {effective.effort ?? "Default"}
-            </span>
-            <button
-              type="button"
-              aria-label="Reset effort to default"
-              title="Reset effort to default"
-              disabled={effective.effort === undefined}
-              onClick={() => selectEffort(undefined)}
-              className="rounded-md p-1 hover:bg-accent disabled:opacity-40"
-            >
-              <RotateCcw className="size-3.5" />
-            </button>
-          </div>
-          <div className="pt-1 text-center text-xs text-muted-foreground">
-            {displayName(providers, effective)}
-          </div>
-          {efforts !== undefined && efforts.length > 0 ? (
-            <EffortSlider
-              efforts={efforts}
-              current={effective.effort}
-              onChange={selectEffort}
-            />
-          ) : null}
         </div>
       ) : null}
     </div>
@@ -310,7 +363,7 @@ function EffortSlider({
   }
 
   return (
-    <div className="px-1 pt-4 pb-2">
+    <div className="px-2 pt-5 pb-1.5">
       <div
         ref={track}
         role="slider"
@@ -344,11 +397,11 @@ function EffortSlider({
           if (event.currentTarget.hasPointerCapture(event.pointerId))
             pickFromPointer(event.clientX)
         }}
-        className="relative h-5 w-full cursor-pointer rounded-full bg-muted outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className="relative h-6 w-full cursor-pointer rounded-full bg-muted outline-none ring-1 ring-foreground/5 focus-visible:ring-2 focus-visible:ring-ring"
       >
         {index >= 0 ? (
           <div
-            className="absolute inset-y-0 left-0 rounded-full bg-blue-500"
+            className="absolute inset-y-0 left-0 rounded-full bg-blue-500 transition-[width] duration-200 ease-out"
             style={{ width: `${position(index)}%` }}
           />
         ) : null}
@@ -360,14 +413,14 @@ function EffortSlider({
             aria-pressed={stop === index}
             tabIndex={-1}
             onClick={() => onChange(effort)}
-            className="absolute top-1/2 grid size-5 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full"
+            className="absolute top-1/2 grid size-6 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full"
             style={{ left: `${position(stop)}%` }}
           >
             <span
               aria-hidden="true"
               className={cn(
-                "size-1 rounded-full",
-                stop <= index ? "bg-white/70" : "bg-muted-foreground/50",
+                "size-1.5 rounded-full transition-colors",
+                stop <= index ? "bg-white/65" : "bg-muted-foreground/45",
               )}
             />
           </button>
@@ -375,14 +428,14 @@ function EffortSlider({
         {index >= 0 ? (
           <span
             aria-hidden="true"
-            className="absolute top-1/2 size-5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-white shadow"
+            className="absolute top-1/2 size-6 -translate-x-1/2 -translate-y-1/2 rounded-full border border-black/5 bg-white shadow-[0_1px_4px_#0003] transition-[left] duration-200 ease-out"
             style={{ left: `${position(index)}%` }}
           />
         ) : null}
       </div>
-      <div className="flex justify-between pt-1.5 text-[10px] text-muted-foreground">
-        <span>{efforts[0]}</span>
-        <span>{efforts[last]}</span>
+      <div className="flex justify-between pt-2 text-[10px] font-medium text-muted-foreground">
+        <span>{displayEffort(efforts[0] ?? "")}</span>
+        <span>{displayEffort(efforts[last] ?? "")}</span>
       </div>
     </div>
   )
