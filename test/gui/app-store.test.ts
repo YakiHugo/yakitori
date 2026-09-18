@@ -2194,6 +2194,132 @@ it("clears removed section membership and refreshes every loaded list after rest
   ).toEqual(["session_1"])
 })
 
+it("serializes rapid sidebar changes so every request reaches the server in click order", async () => {
+  const gate = deferredResponse()
+  let updateCalls = 0
+  fakeRef.current.respond = (method) => {
+    if (method === "sidebar/update") {
+      updateCalls += 1
+      return updateCalls === 1 ? gate.promise : fakeRef.current.sidebarResponse
+    }
+    if (method === "session/list") return { sessions: [] }
+    return notFound()
+  }
+  const pinFirst = useAppStore.getState().changeSidebar({
+    type: "session",
+    sessionId: "session_a",
+    sectionId: "pinned",
+  })
+  const pinSecond = useAppStore.getState().changeSidebar({
+    type: "session",
+    sessionId: "session_b",
+    sectionId: "pinned",
+  })
+  // Flush the queue so the first request is in flight while the second waits.
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  expect(
+    fakeRef.current
+      .requestsFor("sidebar/update")
+      .map((request) => (request.params as { sessionId: string }).sessionId),
+  ).toEqual(["session_a"])
+  gate.resolve(fakeRef.current.sidebarResponse)
+  expect(await pinFirst).toBe(true)
+  expect(await pinSecond).toBe(true)
+  expect(
+    fakeRef.current
+      .requestsFor("sidebar/update")
+      .map((request) => (request.params as { sessionId: string }).sessionId),
+  ).toEqual(["session_a", "session_b"])
+})
+
+it("keeps the sidebar queue moving after a failed change", async () => {
+  let updateCalls = 0
+  fakeRef.current.respond = (method) => {
+    if (method === "sidebar/update") {
+      updateCalls += 1
+      if (updateCalls === 1) throw new ApiRequestError("boom", "internal_error")
+      return fakeRef.current.sidebarResponse
+    }
+    if (method === "session/list") return { sessions: [] }
+    return notFound()
+  }
+  const failed = useAppStore.getState().changeSidebar({
+    type: "session",
+    sessionId: "session_a",
+    sectionId: "pinned",
+  })
+  const queued = useAppStore.getState().changeSidebar({
+    type: "session",
+    sessionId: "session_b",
+    sectionId: "pinned",
+  })
+  expect(await failed).toBe(false)
+  expect(await queued).toBe(true)
+  expect(
+    fakeRef.current
+      .requestsFor("sidebar/update")
+      .map((request) => (request.params as { sessionId: string }).sessionId),
+  ).toEqual(["session_a", "session_b"])
+  expect(useAppStore.getState().inFlightActions.has("sidebar-update")).toBe(
+    false,
+  )
+})
+
+it("rebuilds only the lists containing the selected session on durable stream events", async () => {
+  useAppStore.setState({
+    sessionsByProject: {
+      "": { sessions: [{ ...sessionDetail }] },
+      project_b: { sessions: [{ ...sessionDetail, id: "session_2" }] },
+    },
+  })
+  await useAppStore.getState().selectSession("session_1")
+  const stream = fakeRef.current.streams[0]
+  emitSnapshot(stream, sessionDetail)
+  const before = useAppStore.getState().sessionsByProject
+  stream?.emitEvent(
+    createEventEnvelope({
+      sessionId: "session_1",
+      seq: 2,
+      event: {
+        type: EventType.TurnStarted,
+        data: { turnId: "turn_1", inputId: "input_1" },
+      },
+    }),
+  )
+  const after = useAppStore.getState().sessionsByProject
+  expect(after[""]).not.toBe(before[""])
+  expect(after[""]?.sessions[0]?.seq).toBe(2)
+  expect(after.project_b).toBe(before.project_b)
+
+  // An event that does not advance the session leaves every list untouched.
+  stream?.emitEvent(
+    createEventEnvelope({
+      sessionId: "session_1",
+      seq: 2,
+      event: {
+        type: EventType.TurnStarted,
+        data: { turnId: "turn_1", inputId: "input_1" },
+      },
+    }),
+  )
+  expect(useAppStore.getState().sessionsByProject).toBe(after)
+})
+
+it("keeps session lists stable when an activity broadcast changes no active flags", async () => {
+  useAppStore.setState({
+    sessionsByProject: {
+      "": { sessions: [{ ...sessionDetail, active: true }] },
+    },
+  })
+  await useAppStore.getState().boot()
+  const before = useAppStore.getState().sessionsByProject
+  fakeRef.current.emitSessionActivity(["session_1"])
+  expect(useAppStore.getState().sessionsByProject).toBe(before)
+  fakeRef.current.emitSessionActivity([])
+  const after = useAppStore.getState().sessionsByProject
+  expect(after[""]?.sessions[0]?.active).toBe(false)
+})
+
 it("keeps the sidebar order when an already listed search result is selected", async () => {
   const first = { ...sessionDetail, id: "session_first" }
   const second = { ...sessionDetail, id: "session_second" }

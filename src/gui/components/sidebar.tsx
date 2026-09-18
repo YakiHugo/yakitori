@@ -130,6 +130,8 @@ export function Sidebar({ onSearch }: Readonly<{ onSearch(): void }>) {
 
 function ProjectsSection() {
   const projects = useAppStore((state) => state.projects)
+  const projectsError = useAppStore((state) => state.projectsError)
+  const loadProjects = useAppStore((state) => state.loadProjects)
 
   return (
     <div className="flex flex-col gap-1">
@@ -143,6 +145,14 @@ function ProjectsSection() {
         </span>
         <AddProjectButton />
       </div>
+      {projectsError !== undefined && (
+        <div className="sidebar-list-note">
+          <p>{projectsError}</p>
+          <button type="button" onClick={() => void loadProjects()}>
+            Retry
+          </button>
+        </div>
+      )}
       {projects
         .filter((project) => !project.pinned)
         .map((project) => (

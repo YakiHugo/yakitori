@@ -69,6 +69,23 @@ describe("sidebar", () => {
     expect(screen.queryByText("hidden work")).toBeNull()
   })
 
+  it("surfaces a project-list load failure with a retry action", async () => {
+    const loadProjects = vi.fn(async () => {})
+    useAppStore.setState({
+      projects: [project("project_1", "yakitori")],
+      projectsError: "Could not load projects.",
+      loadProjects,
+    })
+    render(<App />)
+
+    expect(screen.getByText("Could not load projects.")).toBeDefined()
+    // The last good list stays visible behind the error note.
+    expect(screen.getByRole("button", { name: "yakitori" })).toBeDefined()
+    const user = userEvent.setup()
+    await user.click(screen.getByRole("button", { name: "Retry" }))
+    expect(loadProjects).toHaveBeenCalledOnce()
+  })
+
   it("toggles a project from its row", async () => {
     const toggleProject = vi.fn()
     useAppStore.setState({
