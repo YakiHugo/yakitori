@@ -193,3 +193,23 @@ pnpm package:desktop
 The build writes the GUI to `dist/gui`, and the Electron main bundle plus
 sidecar server entry to `dist/desktop`. `pnpm package:desktop` produces an unsigned, unnotarized,
 unpacked app under `release/`.
+
+### Installing the latest main build
+
+The Desktop workflow packages the app on every push to `main` and keeps the
+result as the `yakitori-macos-arm64` workflow artifact. With the `gh` CLI
+authenticated, one command downloads that build and installs it to
+`/Applications`:
+
+```sh
+pnpm install:main
+```
+
+When no CI build is available (or for a build straight from the local
+checkout's `origin/main`), append `--local` to package it in a throwaway git
+worktree instead; the current checkout and its native module builds stay
+untouched:
+
+```sh
+pnpm install:main --local
+```
