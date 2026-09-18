@@ -98,6 +98,37 @@ describe("app shell", () => {
     })
   })
 
+  it("keeps the interrupt action available for an archived active turn", async () => {
+    const user = userEvent.setup()
+    const cancelTurn = vi.fn((_turnId: string) => Promise.resolve())
+    useAppStore.setState({
+      selection: { sessionId },
+      selectedSession: sessionDetail({
+        archived: true,
+        activeTurnId: "turn_1",
+      }),
+      execution: seedExecution([
+        createEventEnvelope({
+          sessionId,
+          seq: 1,
+          event: {
+            type: EventType.TurnStarted,
+            data: { turnId: "turn_1", inputId: "input_1" },
+          },
+        }),
+      ]),
+      cancelTurn,
+    })
+    render(<App />)
+
+    await user.click(screen.getByRole("button", { name: "Interrupt" }))
+
+    expect(cancelTurn).toHaveBeenCalledWith("turn_1")
+    expect(
+      screen.getByRole("button", { name: "Restore conversation" }),
+    ).toBeDefined()
+  })
+
   it("opens the parent session from the fork chip", async () => {
     const user = userEvent.setup()
     const selectSession = vi.fn((_selectedId: string) => Promise.resolve())

@@ -12,6 +12,7 @@ export async function openFileTarget(
     await window.yakitoriDesktop.openFile({
       path: target.path,
       ...(target.line === undefined ? {} : { line: target.line }),
+      ...(workspaceRoot === undefined ? {} : { workspaceRoot }),
     })
     return
   }

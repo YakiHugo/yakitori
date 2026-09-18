@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto"
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { type BrowserWindow, dialog, ipcMain, nativeImage } from "electron"
@@ -8,6 +8,8 @@ import type { ServerProcess } from "./server-process.ts"
 import { requireTrustedSender } from "./resource-opener.ts"
 
 const pickImagesChannel = "yakitori:pick-images"
+const importPickedImagesChannel = "yakitori:import-picked-images"
+const discardPickedImagesChannel = "yakitori:discard-picked-images"
 const importImageFilesChannel = "yakitori:import-image-files"
 const discardDraftImagesChannel = "yakitori:discard-draft-images"
 const maxImageFileBytes = 50_000_000
@@ -16,9 +18,11 @@ export function registerAttachmentImporter(
   server: ServerProcess,
   trustedWindow: BrowserWindow,
 ): void {
-  ipcMain.handle(pickImagesChannel, async (event, input: unknown) => {
+  const selections = new Map<string, readonly string[]>()
+  trustedWindow.once("closed", () => selections.clear())
+
+  ipcMain.handle(pickImagesChannel, async (event) => {
     requireTrustedSender(event.sender, event.senderFrame, trustedWindow)
-    const sessionId = requireSessionId(input)
     const picked = await dialog.showOpenDialog(trustedWindow, {
       title: "Attach images",
       properties: ["openFile", "multiSelections"],
@@ -29,18 +33,38 @@ export function registerAttachmentImporter(
         },
       ],
     })
-    if (picked.canceled || picked.filePaths.length === 0) return []
+    if (picked.canceled || picked.filePaths.length === 0) return
+    await validateSelectedImagePaths(picked.filePaths)
+    const selectionId = `image_selection_${randomUUID().replaceAll("-", "")}`
+    selections.set(selectionId, picked.filePaths)
+    return { selectionId }
+  })
+
+  ipcMain.handle(importPickedImagesChannel, async (event, input: unknown) => {
+    requireTrustedSender(event.sender, event.senderFrame, trustedWindow)
+    const request = requirePickedImagesRequest(input)
+    const paths = selections.get(request.selectionId)
+    if (paths === undefined) {
+      throw new Error("The selected images are no longer available.")
+    }
+    // A selection is single-use even when the sidecar import fails.
+    selections.delete(request.selectionId)
     return validateImportedImages(
       server,
       requireAttachments(
         await server.request({
           type: "import_image_paths",
-          sessionId,
+          sessionId: request.sessionId,
           ownerId: createDraftOwnerId(),
-          paths: picked.filePaths,
+          paths,
         }),
       ),
     )
+  })
+
+  ipcMain.handle(discardPickedImagesChannel, (event, input: unknown) => {
+    requireTrustedSender(event.sender, event.senderFrame, trustedWindow)
+    selections.delete(requireSelectionId(input))
   })
 
   ipcMain.handle(importImageFilesChannel, async (event, input: unknown) => {
@@ -86,6 +110,20 @@ export function registerAttachmentImporter(
     })
     if (!response.ok) throw new Error(response.error)
   })
+}
+
+async function validateSelectedImagePaths(
+  paths: readonly string[],
+): Promise<void> {
+  for (const path of paths) {
+    const metadata = await stat(path)
+    if (!metadata.isFile() || metadata.size > maxImageFileBytes) {
+      throw new Error("Image must be a file no larger than 50 MB.")
+    }
+    if (nativeImage.createFromPath(path).isEmpty()) {
+      throw new Error(`${path} is not a valid image.`)
+    }
+  }
 }
 
 async function validateImportedImages(
@@ -142,6 +180,29 @@ function requireSessionId(value: unknown): string {
     throw new TypeError("Attachment import requires a Session ID.")
   }
   return value.sessionId
+}
+
+function requireSelectionId(value: unknown): string {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    !("selectionId" in value) ||
+    typeof value.selectionId !== "string" ||
+    value.selectionId.length === 0
+  ) {
+    throw new TypeError("Picked image import requires a selection ID.")
+  }
+  return value.selectionId
+}
+
+function requirePickedImagesRequest(value: unknown): {
+  readonly sessionId: string
+  readonly selectionId: string
+} {
+  return {
+    sessionId: requireSessionId(value),
+    selectionId: requireSelectionId(value),
+  }
 }
 
 function requireImageFilesRequest(value: unknown): {

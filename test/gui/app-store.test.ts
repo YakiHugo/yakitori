@@ -1084,6 +1084,27 @@ describe("project state", () => {
     expect(useAppStore.getState().currentProject).toBe("project_b")
   })
 
+  it("ignores an older project-list failure after a newer read succeeds", async () => {
+    const older = deferredResponse()
+    const newer = deferredResponse()
+    let calls = 0
+    fakeRef.current.respond = (method) => {
+      if (method !== "project/list") return notFound()
+      calls += 1
+      return calls === 1 ? older.promise : newer.promise
+    }
+
+    const olderRead = useAppStore.getState().loadProjects()
+    const newerRead = useAppStore.getState().loadProjects()
+    newer.resolve({ projects: [projectB] })
+    await newerRead
+    older.reject(new ApiRequestError("stale failure", "internal_error"))
+    await olderRead
+
+    expect(useAppStore.getState().projects).toEqual([projectB])
+    expect(useAppStore.getState().projectsError).toBeUndefined()
+  })
+
   it("refreshes the project list on project/changed notifications", async () => {
     window.localStorage.clear()
     let listed = [projectA]
@@ -2232,6 +2253,63 @@ it("serializes rapid sidebar changes so every request reaches the server in clic
   ).toEqual(["session_a", "session_b"])
 })
 
+it("resolves queued relative section moves against the latest sidebar", async () => {
+  const gate = deferredResponse()
+  const initial = {
+    sections: [
+      { id: "a", name: "A" },
+      { id: "b", name: "B" },
+      { id: "c", name: "C" },
+    ],
+    entries: {},
+  }
+  const [sectionA, sectionB, sectionC] = initial.sections
+  if (
+    sectionA === undefined ||
+    sectionB === undefined ||
+    sectionC === undefined
+  ) {
+    throw new Error("Expected three sidebar sections")
+  }
+  const afterFirst = {
+    ...initial,
+    sections: [sectionB, sectionA, sectionC],
+  }
+  const afterSecond = {
+    ...initial,
+    sections: [sectionB, sectionC, sectionA],
+  }
+  useAppStore.setState({ sidebar: initial })
+  let updateCalls = 0
+  fakeRef.current.respond = (method) => {
+    if (method === "sidebar/update") {
+      updateCalls += 1
+      if (updateCalls === 1) return gate.promise
+      fakeRef.current.sidebarResponse = afterSecond
+      return afterSecond
+    }
+    if (method === "session/list") return { sessions: [] }
+    return notFound()
+  }
+
+  const moveA = useAppStore.getState().moveSidebarSection("a", "down")
+  const moveC = useAppStore.getState().moveSidebarSection("c", "up")
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  expect(fakeRef.current.requestsFor("sidebar/update")[0]?.params).toEqual({
+    type: "reorder-sections",
+    sectionIds: ["b", "a", "c"],
+  })
+
+  fakeRef.current.sidebarResponse = afterFirst
+  gate.resolve(afterFirst)
+  expect(await moveA).toBe(true)
+  expect(await moveC).toBe(true)
+  expect(fakeRef.current.requestsFor("sidebar/update")[1]?.params).toEqual({
+    type: "reorder-sections",
+    sectionIds: ["b", "c", "a"],
+  })
+})
+
 it("keeps the sidebar queue moving after a failed change", async () => {
   let updateCalls = 0
   fakeRef.current.respond = (method) => {
@@ -2263,6 +2341,7 @@ it("keeps the sidebar queue moving after a failed change", async () => {
   expect(useAppStore.getState().inFlightActions.has("sidebar-update")).toBe(
     false,
   )
+  expect(useAppStore.getState().message).toBe("boom")
 })
 
 it("rebuilds only the lists containing the selected session on durable stream events", async () => {

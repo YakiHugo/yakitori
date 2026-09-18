@@ -54,7 +54,9 @@ beforeEach(() => {
   Object.defineProperty(window, "yakitoriDesktop", {
     configurable: true,
     value: {
-      pickImages: vi.fn(async () => [draftImage("high")]),
+      pickImages: vi.fn(async () => ({ selectionId: "selection_1" })),
+      importPickedImages: vi.fn(async () => [draftImage("high")]),
+      discardPickedImages: vi.fn(async () => {}),
       importImageFiles: vi.fn(async () => [draftImage("high")]),
       discardDraftImages: vi.fn(async () => {}),
       openFile: vi.fn(async () => {}),
@@ -347,7 +349,115 @@ describe("composer", () => {
     expect(fakeRef.current.requestsFor("session/create")).toHaveLength(1)
     const bridge = window.yakitoriDesktop
     if (bridge === undefined) throw new Error("Expected the desktop bridge")
-    expect(bridge.pickImages).toHaveBeenCalledWith({ sessionId: "session_1" })
+    expect(bridge.pickImages).toHaveBeenCalledWith()
+    expect(bridge.importPickedImages).toHaveBeenCalledWith({
+      sessionId: "session_1",
+      selectionId: "selection_1",
+    })
+    expect(bridge.discardPickedImages).toHaveBeenCalledWith({
+      selectionId: "selection_1",
+    })
+  })
+
+  it("does not create a session when the image picker is canceled", async () => {
+    const user = userEvent.setup()
+    const bridge = window.yakitoriDesktop
+    if (bridge === undefined) throw new Error("Expected the desktop bridge")
+    vi.mocked(bridge.pickImages).mockResolvedValueOnce(undefined)
+    respondWithSessionCreate()
+    render(<Composer />)
+
+    await user.click(screen.getByRole("button", { name: "Attach images" }))
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Attach images" }),
+      ).toHaveProperty("disabled", false)
+    })
+
+    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(0)
+    expect(useAppStore.getState().selection.sessionId).toBeUndefined()
+  })
+
+  it("rolls back a lazily created session when picked-image import fails", async () => {
+    const user = userEvent.setup()
+    const bridge = window.yakitoriDesktop
+    if (bridge === undefined) throw new Error("Expected the desktop bridge")
+    vi.mocked(bridge.importPickedImages).mockRejectedValueOnce(
+      new Error("Image import failed."),
+    )
+    respondWithSessionCreate()
+    const respond = fakeRef.current.respond
+    fakeRef.current.respond = (method, params) =>
+      method === "session/delete" ? {} : respond(method, params)
+    useAppStore.setState({ promptDraft: "keep this draft" })
+    render(<Composer />)
+
+    await user.click(screen.getByRole("button", { name: "Attach images" }))
+
+    await waitFor(() => {
+      expect(fakeRef.current.requestsFor("session/delete")).toHaveLength(1)
+    })
+    expect(useAppStore.getState().selection.sessionId).toBeUndefined()
+    expect(useAppStore.getState().promptDraft).toBe("keep this draft")
+    expect(screen.getByRole("alert").textContent).toBe("Image import failed.")
+  })
+
+  it("waits for an in-flight session creation before importing picked images", async () => {
+    const user = userEvent.setup()
+    useAppStore.setState({
+      inFlightActions: new Set(["create-session"]),
+      sessionSelectionIntentRevision: 1,
+    })
+    render(<Composer />)
+
+    await user.click(screen.getByRole("button", { name: "Attach images" }))
+    const bridge = window.yakitoriDesktop
+    if (bridge === undefined) throw new Error("Expected the desktop bridge")
+    expect(bridge.importPickedImages).not.toHaveBeenCalled()
+
+    useAppStore.setState({
+      inFlightActions: new Set(),
+      selection: { sessionId: "session_1" },
+    })
+
+    await waitFor(() => {
+      expect(bridge.importPickedImages).toHaveBeenCalledWith({
+        sessionId: "session_1",
+        selectionId: "selection_1",
+      })
+    })
+  })
+
+  it("reuses a session that finishes creating while the picker is open", async () => {
+    const user = userEvent.setup()
+    const bridge = window.yakitoriDesktop
+    if (bridge === undefined) throw new Error("Expected the desktop bridge")
+    let resolvePick!: (selection: { readonly selectionId: string }) => void
+    vi.mocked(bridge.pickImages).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolvePick = resolve
+      }),
+    )
+    useAppStore.setState({
+      inFlightActions: new Set(["create-session"]),
+      sessionSelectionIntentRevision: 1,
+    })
+    render(<Composer />)
+
+    await user.click(screen.getByRole("button", { name: "Attach images" }))
+    useAppStore.setState({
+      inFlightActions: new Set(),
+      selection: { sessionId: "session_1" },
+    })
+    resolvePick({ selectionId: "selection_during_create" })
+
+    await waitFor(() => {
+      expect(bridge.importPickedImages).toHaveBeenCalledWith({
+        sessionId: "session_1",
+        selectionId: "selection_during_create",
+      })
+    })
+    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(0)
   })
 
   it("creates a session before importing dropped images when none exists", async () => {

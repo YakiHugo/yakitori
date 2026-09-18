@@ -6,7 +6,9 @@ import {
   appendImageFiles,
   appendPickedImages,
   discardDraftImages,
+  discardPickedImages,
   imageAttachmentUrl,
+  pickImages as selectImages,
   requireDesktopBridge,
   validateImageFiles,
 } from "../composer-attachments.ts"
@@ -56,9 +58,6 @@ export function Composer() {
   const userPreference = useAppStore((state) => state.userPreference)
   const inFlightActions = useAppStore((state) => state.inFlightActions)
   const sessionId = useAppStore((state) => state.selection.sessionId)
-  const sessionSelectionIntentRevision = useAppStore(
-    (state) => state.sessionSelectionIntentRevision,
-  )
   const sessionCurrent = useAppStore((state) =>
     state.selection.sessionId === undefined
       ? state.draftModelSelection
@@ -178,30 +177,60 @@ export function Composer() {
     !compactBlocked
 
   const importImages = async (
-    collect: (sessionId: string) => Promise<readonly ImageAttachment[]>,
+    prepare: () => Promise<
+      | {
+          readonly collect: (
+            sessionId: string,
+          ) => Promise<readonly ImageAttachment[]>
+          readonly cleanup?: (() => Promise<void>) | undefined
+        }
+      | undefined
+    >,
     validate?: () => void,
   ) => {
     if (readingImages) return
     setReadingImages(true)
     setAttachmentError(undefined)
     let importSessionId = sessionId
-    let importSelectionRevision = sessionSelectionIntentRevision
+    const importIntentRevision =
+      useAppStore.getState().sessionSelectionIntentRevision
+    let importSelectionRevision = importIntentRevision
+    let createdSessionId: string | undefined
+    let draftBeforeCreate: string | undefined
+    let cleanup: (() => Promise<void>) | undefined
     try {
       // Reject unusable files before a lazy createSession can litter an
       // empty session.
       validate?.()
+      requireDesktopBridge()
+      const prepared = await prepare()
+      if (prepared === undefined) return
+      cleanup = prepared.cleanup
       if (importSessionId === undefined) {
-        // Attachments are desktop-only: fail before creating a session.
-        requireDesktopBridge()
-        // No session yet: create it lazily, like admitInput does on first
-        // send. The store drops a re-entrant createSession, so a second
-        // attach while creation is in flight is a no-op.
+        let current = useAppStore.getState()
+        if (current.sessionSelectionIntentRevision !== importIntentRevision)
+          return
+        importSessionId = current.selection.sessionId
+        if (
+          importSessionId === undefined &&
+          current.inFlightActions.has("create-session")
+        ) {
+          await waitForAction("create-session")
+          current = useAppStore.getState()
+          if (current.sessionSelectionIntentRevision !== importIntentRevision)
+            return
+          importSessionId = current.selection.sessionId
+        }
+      }
+      if (importSessionId === undefined) {
+        draftBeforeCreate = useAppStore.getState().promptDraft
         importSessionId = await useAppStore.getState().createSession()
         if (importSessionId === undefined) return
+        createdSessionId = importSessionId
         importSelectionRevision =
           useAppStore.getState().sessionSelectionIntentRevision
       }
-      const next = await collect(importSessionId)
+      const next = await prepared.collect(importSessionId)
       const current = useAppStore.getState()
       if (
         current.selection.sessionId !== importSessionId ||
@@ -213,10 +242,16 @@ export function Composer() {
       setPromptAttachments(next)
     } catch (error) {
       const current = useAppStore.getState()
-      if (
+      const stillSelected =
         current.selection.sessionId === importSessionId &&
         current.sessionSelectionIntentRevision === importSelectionRevision
-      ) {
+      if (createdSessionId !== undefined && stillSelected) {
+        await current.deleteSession(createdSessionId)
+        if (draftBeforeCreate !== undefined) {
+          useAppStore.getState().setPromptDraft(draftBeforeCreate)
+        }
+      }
+      if (stillSelected || createdSessionId !== undefined) {
         setAttachmentError(
           error instanceof Error
             ? error.message
@@ -224,6 +259,17 @@ export function Composer() {
         )
       }
     } finally {
+      if (cleanup !== undefined) {
+        try {
+          await cleanup()
+        } catch (error) {
+          setAttachmentError(
+            error instanceof Error
+              ? error.message
+              : "Image selection could not be released.",
+          )
+        }
+      }
       setReadingImages(false)
     }
   }
@@ -231,16 +277,28 @@ export function Composer() {
   const addFiles = async (files: readonly File[]) => {
     if (files.length === 0) return
     await importImages(
-      (importSessionId) =>
-        appendImageFiles(attachments, importSessionId, files),
+      async () => ({
+        collect: (importSessionId) =>
+          appendImageFiles(attachments, importSessionId, files),
+      }),
       () => validateImageFiles(files),
     )
   }
 
   const pickImages = async () => {
-    await importImages((importSessionId) =>
-      appendPickedImages(attachments, importSessionId),
-    )
+    await importImages(async () => {
+      const selection = await selectImages()
+      if (selection === undefined) return
+      return {
+        collect: (importSessionId: string) =>
+          appendPickedImages(
+            attachments,
+            importSessionId,
+            selection.selectionId,
+          ),
+        cleanup: () => discardPickedImages(selection.selectionId),
+      }
+    })
   }
 
   const submit = () => {
@@ -598,4 +656,15 @@ export function Composer() {
       )}
     </footer>
   )
+}
+
+function waitForAction(key: string): Promise<void> {
+  if (!useAppStore.getState().inFlightActions.has(key)) return Promise.resolve()
+  return new Promise((resolve) => {
+    const unsubscribe = useAppStore.subscribe((state) => {
+      if (state.inFlightActions.has(key)) return
+      unsubscribe()
+      resolve()
+    })
+  })
 }

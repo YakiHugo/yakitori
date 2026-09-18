@@ -64,33 +64,35 @@ const languageAliases: Readonly<Record<string, string>> = {
   zsh: "shellscript",
 }
 
-function normalizeLanguage(label: string): string | undefined {
+type BundledLanguage = keyof typeof languageLoaders
+
+function normalizeLanguage(label: string): BundledLanguage | undefined {
   const lowered = label.trim().toLowerCase()
   const resolved = languageAliases[lowered] ?? lowered
-  return resolved in languageLoaders ? resolved : undefined
+  return resolved in languageLoaders ? (resolved as BundledLanguage) : undefined
 }
 
 let highlighterPromise: Promise<HighlighterCore> | undefined
 let resolvedHighlighter: HighlighterCore | undefined
+const loadedLanguages = new Set<BundledLanguage>()
+const languagePromises = new Map<BundledLanguage, Promise<HighlighterCore>>()
+// Model streams commonly deliver several deltas within one animation window;
+// this brief quiet period coalesces them while keeping completed blocks prompt.
+const highlightSettleMs = 120
 
-// Shiki ships as a lazy chunk: grammars and themes load only when a fenced
-// code block first renders.
+// The shared engine and themes load only for a recognized fenced language.
+// Individual grammars remain separate chunks and are registered on demand.
 function loadHighlighter(): Promise<HighlighterCore> {
   highlighterPromise ??= Promise.all([
     import("shiki/core"),
     import("shiki/engine/javascript"),
     import("shiki/dist/themes/github-light.mjs"),
     import("shiki/dist/themes/github-dark.mjs"),
-    Promise.all(
-      Object.values(languageLoaders).map((load) =>
-        load().then((module) => module.default),
-      ),
-    ),
   ])
-    .then(async ([core, engineModule, light, dark, languages]) => {
+    .then(async ([core, engineModule, light, dark]) => {
       const highlighter = await core.createHighlighterCore({
         themes: [light.default, dark.default],
-        langs: languages.flat(),
+        langs: [],
         engine: engineModule.createJavaScriptRegexEngine(),
       })
       resolvedHighlighter = highlighter
@@ -105,14 +107,43 @@ function loadHighlighter(): Promise<HighlighterCore> {
   return highlighterPromise
 }
 
-function useHighlighter(): HighlighterCore | undefined {
-  const [highlighter, setHighlighter] = useState(resolvedHighlighter)
+function loadLanguage(language: BundledLanguage): Promise<HighlighterCore> {
+  const existing = languagePromises.get(language)
+  if (existing !== undefined) return existing
+  const pending = loadHighlighter()
+    .then(async (highlighter) => {
+      if (!loadedLanguages.has(language)) {
+        const grammar = await languageLoaders[language]()
+        await highlighter.loadLanguage(grammar.default)
+        loadedLanguages.add(language)
+      }
+      return highlighter
+    })
+    .catch((error: unknown) => {
+      languagePromises.delete(language)
+      throw error
+    })
+  languagePromises.set(language, pending)
+  return pending
+}
+
+function useHighlighter(
+  language: BundledLanguage | undefined,
+): HighlighterCore | undefined {
+  const [loaded, setLoaded] = useState<{
+    readonly language: BundledLanguage
+    readonly highlighter: HighlighterCore
+  }>()
   useEffect(() => {
-    if (highlighter !== undefined) return
+    if (language === undefined) return
+    if (resolvedHighlighter !== undefined && loadedLanguages.has(language)) {
+      setLoaded({ language, highlighter: resolvedHighlighter })
+      return
+    }
     let active = true
-    void loadHighlighter().then(
-      (loaded) => {
-        if (active) setHighlighter(loaded)
+    void loadLanguage(language).then(
+      (highlighter) => {
+        if (active) setLoaded({ language, highlighter })
       },
       () => {
         // Plain fallback stays; a later mount retries the load.
@@ -121,26 +152,19 @@ function useHighlighter(): HighlighterCore | undefined {
     return () => {
       active = false
     }
-  }, [highlighter])
-  return highlighter
+  }, [language])
+  return loaded !== undefined && loaded.language === language
+    ? loaded.highlighter
+    : undefined
 }
 
-// Streaming re-renders a block per token; the cache is capped so
-// intermediate snapshots cannot grow memory unbounded.
-const highlightCache = new Map<string, string>()
-const highlightCacheLimit = 200
-
-function highlightCached(
+function highlight(
   highlighter: HighlighterCore,
   code: string,
   language: string,
 ): string | undefined {
-  const key = `${language} ${code}`
-  const cached = highlightCache.get(key)
-  if (cached !== undefined) return cached
-  let html: string
   try {
-    html = highlighter.codeToHtml(code, {
+    return highlighter.codeToHtml(code, {
       lang: language,
       themes: { light: "github-light", dark: "github-dark" },
       defaultColor: false,
@@ -148,12 +172,6 @@ function highlightCached(
   } catch {
     return undefined
   }
-  if (highlightCache.size >= highlightCacheLimit) {
-    const oldest = highlightCache.keys().next()
-    if (!oldest.done) highlightCache.delete(oldest.value)
-  }
-  highlightCache.set(key, html)
-  return html
 }
 
 function FencedCode({
@@ -163,16 +181,29 @@ function FencedCode({
   readonly code: string
   readonly language: string | undefined
 }) {
-  const highlighter = useHighlighter()
   const normalized =
     language === undefined ? undefined : normalizeLanguage(language)
-  const html = useMemo(
-    () =>
-      highlighter === undefined || normalized === undefined
-        ? undefined
-        : highlightCached(highlighter, code, normalized),
-    [highlighter, code, normalized],
-  )
+  const highlighter = useHighlighter(normalized)
+  const [highlighted, setHighlighted] = useState<{
+    readonly code: string
+    readonly language: BundledLanguage
+    readonly html: string
+  }>()
+  useEffect(() => {
+    if (highlighter === undefined || normalized === undefined) return
+    // Stream deltas replace this timer, so the renderer stays cheap and shows
+    // current plain text until the block has settled.
+    const timer = window.setTimeout(() => {
+      const html = highlight(highlighter, code, normalized)
+      if (html !== undefined)
+        setHighlighted({ code, language: normalized, html })
+    }, highlightSettleMs)
+    return () => window.clearTimeout(timer)
+  }, [highlighter, code, normalized])
+  const html =
+    highlighted?.code === code && highlighted.language === normalized
+      ? highlighted.html
+      : undefined
   if (html === undefined) {
     return (
       <pre>

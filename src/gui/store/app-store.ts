@@ -140,6 +140,10 @@ export type AppStoreActions = {
   loadSidebar(): Promise<void>
   refreshSidebar(): Promise<void>
   changeSidebar(change: SidebarChange): Promise<boolean>
+  moveSidebarSection(
+    sectionId: string,
+    direction: "up" | "down",
+  ): Promise<boolean>
   loadProjects(): Promise<void>
   loadProviders(): Promise<void>
   loadSubscriptions(): Promise<void>
@@ -253,11 +257,14 @@ let activeTaskCount = 0
 export const useAppStore = create<AppStore>()((set, get) => {
   const sessionListRevisions: Record<string, number> = {}
   let sidebarReadRevision = 0
+  let projectReadRevision = 0
   // Sidebar mutations are serialized through this chain so rapid pin/move
   // clicks each reach the server in click order instead of being dropped
   // while an earlier change is in flight. runTask never rejects, so a failed
   // change cannot wedge the queue.
-  let sidebarQueue: Promise<unknown> = Promise.resolve()
+  let sidebarQueue: Promise<boolean> = Promise.resolve(true)
+  let sidebarQueueDepth = 0
+  let sidebarQueueError: string | undefined
   const subscriptionReadRevisions: Record<ApiSubscriptionProvider, number> = {
     codex: 0,
     grok: 0,
@@ -267,10 +274,11 @@ export const useAppStore = create<AppStore>()((set, get) => {
   const runTask = async (
     task: () => Promise<void>,
     isCurrent: () => boolean = () => true,
+    clearMessage = true,
   ): Promise<boolean> => {
     activeTaskCount += 1
     set({ busy: true })
-    if (isCurrent()) set({ message: undefined })
+    if (clearMessage && isCurrent()) set({ message: undefined })
     try {
       await task()
       return true
@@ -281,6 +289,57 @@ export const useAppStore = create<AppStore>()((set, get) => {
       activeTaskCount -= 1
       set({ busy: activeTaskCount > 0 })
     }
+  }
+
+  const enqueueSidebarChange = (
+    resolveChange: () => SidebarChange | undefined,
+  ): Promise<boolean> => {
+    if (sidebarQueueDepth === 0) {
+      sidebarQueueError = undefined
+      set({ message: undefined })
+    }
+    sidebarQueueDepth += 1
+    set((state) => ({
+      inFlightActions: new Set(state.inFlightActions).add("sidebar-update"),
+    }))
+    const run = sidebarQueue.then(async () => {
+      const change = resolveChange()
+      if (change === undefined) return false
+      const completed = await runTask(
+        async () => {
+          const sidebar = await getAppRpcClient(get().apiBase).request(
+            "sidebar/update",
+            change,
+          )
+          sidebarReadRevision += 1
+          set({ sidebar })
+          if (
+            (change.type === "session" || change.type === "move-session") &&
+            change.sectionId
+          )
+            get().setSectionOpen(change.sectionId, true)
+          await get().refreshSidebar()
+        },
+        () => true,
+        false,
+      )
+      if (!completed) sidebarQueueError = get().message
+      else if (sidebarQueueError !== undefined) {
+        set({ message: sidebarQueueError })
+      }
+      return completed
+    })
+    sidebarQueue = run
+    void run.then(() => {
+      sidebarQueueDepth -= 1
+      if (sidebarQueueDepth !== 0) return
+      set((state) => {
+        const inFlightActions = new Set(state.inFlightActions)
+        inFlightActions.delete("sidebar-update")
+        return { inFlightActions }
+      })
+    })
+    return run
   }
 
   const activateSession = (sessionId: string): SessionSelection => {
@@ -666,46 +725,28 @@ export const useAppStore = create<AppStore>()((set, get) => {
         ),
       )
     },
-    changeSidebar: (change) => {
-      set((state) => ({
-        inFlightActions: new Set(state.inFlightActions).add("sidebar-update"),
-      }))
-      const run = sidebarQueue.then(() =>
-        runTask(async () => {
-          const sidebar = await getAppRpcClient(get().apiBase).request(
-            "sidebar/update",
-            change,
-          )
-          sidebarReadRevision += 1
-          set({ sidebar })
-          if (
-            (change.type === "session" || change.type === "move-session") &&
-            change.sectionId
-          )
-            get().setSectionOpen(change.sectionId, true)
-          await get().refreshSidebar()
-        }),
-      )
-      sidebarQueue = run
-      // Clear the flag only once the queue has drained so controls gated on
-      // it do not flicker enabled between queued changes.
-      void run.then(() => {
-        if (sidebarQueue !== run) return
-        set((state) => {
-          const inFlightActions = new Set(state.inFlightActions)
-          inFlightActions.delete("sidebar-update")
-          return { inFlightActions }
-        })
-      })
-      return run
-    },
+    changeSidebar: (change) => enqueueSidebarChange(() => change),
+
+    moveSidebarSection: (sectionId, direction) =>
+      enqueueSidebarChange(() => {
+        const sectionIds = get().sidebar.sections.map((section) => section.id)
+        const index = sectionIds.indexOf(sectionId)
+        const target = index + (direction === "up" ? -1 : 1)
+        if (index < 0 || target < 0 || target >= sectionIds.length) return
+        const [removed] = sectionIds.splice(index, 1)
+        if (removed === undefined) return
+        sectionIds.splice(target, 0, removed)
+        return { type: "reorder-sections", sectionIds }
+      }),
 
     loadProjects: async () => {
+      const revision = ++projectReadRevision
       try {
         const response = await getAppRpcClient(get().apiBase).request(
           "project/list",
           {},
         )
+        if (revision !== projectReadRevision) return
         const projects = [...response.projects]
         set((state) => {
           const liveIds = new Set(projects.map((project) => project.id))
@@ -740,11 +781,14 @@ export const useAppStore = create<AppStore>()((set, get) => {
           }
         })
       } catch (error) {
+        if (revision !== projectReadRevision) return
         // Servers without a project store answer not_found; the switcher
         // stays hidden there. Other failures keep the last good list and
         // surface a retry note instead of silently showing an empty sidebar.
-        if (error instanceof ApiRequestError && error.code === "not_found")
+        if (error instanceof ApiRequestError && error.code === "not_found") {
+          set({ projectsError: undefined })
           return
+        }
         set({ projectsError: "Could not load projects." })
       }
     },

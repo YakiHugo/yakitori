@@ -4,9 +4,23 @@ import { apiUrl } from "./lib/api-client.ts"
 export async function appendPickedImages(
   current: readonly ImageAttachment[],
   sessionId: string,
+  selectionId: string,
 ): Promise<readonly ImageAttachment[]> {
-  const added = await requireDesktopBridge().pickImages({ sessionId })
+  const added = await requireDesktopBridge().importPickedImages({
+    sessionId,
+    selectionId,
+  })
   return [...current, ...added]
+}
+
+export async function pickImages(): Promise<
+  { readonly selectionId: string } | undefined
+> {
+  return requireDesktopBridge().pickImages()
+}
+
+export async function discardPickedImages(selectionId: string): Promise<void> {
+  await requireDesktopBridge().discardPickedImages({ selectionId })
 }
 
 export function validateImageFiles(files: readonly File[]): void {

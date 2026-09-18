@@ -102,6 +102,7 @@ function SidebarGroup({
   const sections = useAppStore((state) => state.sidebar.sections)
   const loadSessions = useAppStore((state) => state.loadSessions)
   const changeSidebar = useAppStore((state) => state.changeSidebar)
+  const moveSidebarSection = useAppStore((state) => state.moveSidebarSection)
   const pending = useAppStore((state) =>
     state.inFlightActions.has("sidebar-update"),
   )
@@ -115,13 +116,6 @@ function SidebarGroup({
     return list !== undefined && !list.error && list.sessions.length === 0
   })
   const index = sections.findIndex((section) => section.id === id)
-  const move = (offset: number) => {
-    const ids = sections.map((section) => section.id)
-    const removed = ids.splice(index, 1)[0]
-    if (!removed) return
-    ids.splice(index + offset, 0, removed)
-    void changeSidebar({ type: "reorder-sections", sectionIds: ids })
-  }
   const toggle = (
     <button
       type="button"
@@ -175,7 +169,7 @@ function SidebarGroup({
                     {
                       label: "Move section up",
                       icon: <ChevronUp size={15} />,
-                      action: () => move(-1),
+                      action: () => void moveSidebarSection(id, "up"),
                     },
                   ]
                 : []),
@@ -184,7 +178,7 @@ function SidebarGroup({
                     {
                       label: "Move section down",
                       icon: <ChevronDown size={15} />,
-                      action: () => move(1),
+                      action: () => void moveSidebarSection(id, "down"),
                     },
                   ]
                 : []),

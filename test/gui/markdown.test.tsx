@@ -86,6 +86,7 @@ describe("links", () => {
     expect(openFile).toHaveBeenCalledWith({
       path: "src/core/session.ts",
       line: 1037,
+      workspaceRoot: "/workspaces/app",
     })
   })
 
@@ -132,6 +133,27 @@ describe("code blocks", () => {
     expect(container.querySelector(".shiki")?.textContent).toContain(
       "const answer",
     )
+  })
+
+  it("keeps rapid streaming prefixes plain and highlights only the settled code", async () => {
+    const { container, rerender } = render(
+      <MarkdownView text={"```ts\nconst first = 1\n```"} />,
+    )
+    await waitFor(() => {
+      expect(container.querySelector(".shiki")).not.toBeNull()
+    })
+
+    rerender(<MarkdownView text={"```ts\nconst second = 2\n```"} />)
+    rerender(<MarkdownView text={"```ts\nconst final = 3\n```"} />)
+
+    expect(container.querySelector(".shiki")).toBeNull()
+    expect(container.querySelector("pre")?.textContent).toContain("const final")
+    await waitFor(() => {
+      expect(container.querySelector(".shiki")?.textContent).toContain(
+        "const final",
+      )
+    })
+    expect(container.textContent).not.toContain("const second")
   })
 
   it("keeps unknown languages plain once the highlighter is ready", async () => {

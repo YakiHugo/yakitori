@@ -5,8 +5,14 @@ contextBridge.exposeInMainWorld("yakitoriDesktop", {
   pickProjectFolder() {
     return ipcRenderer.invoke("yakitori:pick-project-folder")
   },
-  pickImages(input) {
-    return ipcRenderer.invoke("yakitori:pick-images", input)
+  pickImages() {
+    return ipcRenderer.invoke("yakitori:pick-images")
+  },
+  importPickedImages(input) {
+    return ipcRenderer.invoke("yakitori:import-picked-images", input)
+  },
+  discardPickedImages(input) {
+    return ipcRenderer.invoke("yakitori:discard-picked-images", input)
   },
   async importImageFiles(input) {
     const items = []
