@@ -25,6 +25,7 @@ import {
   EventType,
   InputRole,
 } from "../../src/kernel/events.ts"
+import type { ApiSessionDetail } from "../../src/server/protocol.ts"
 import { pastePrompt, selectPrompt } from "./prompt-editor-helpers.ts"
 import { FakeRpcClient } from "./fake-rpc-client.ts"
 
@@ -53,7 +54,9 @@ beforeEach(() => {
   Object.defineProperty(window, "yakitoriDesktop", {
     configurable: true,
     value: {
-      pickImages: vi.fn(async () => [draftImage("high")]),
+      pickImages: vi.fn(async () => ({ selectionId: "selection_1" })),
+      importPickedImages: vi.fn(async () => [draftImage("high")]),
+      discardPickedImages: vi.fn(async () => {}),
       importImageFiles: vi.fn(async () => [draftImage("high")]),
       discardDraftImages: vi.fn(async () => {}),
       openFile: vi.fn(async () => {}),
@@ -278,9 +281,7 @@ describe("composer", () => {
     )
 
     expect(useAppStore.getState().promptAttachments).toEqual([])
-    expect(bridge.discardDraftImages).toHaveBeenCalledWith([
-      draftImage("high"),
-    ])
+    expect(bridge.discardDraftImages).toHaveBeenCalledWith([draftImage("high")])
   })
 
   it("explains and normalizes original detail for a model without that mode", async () => {
@@ -331,6 +332,236 @@ describe("composer", () => {
       expect.objectContaining({ detail: "high" }),
     ])
   })
+
+  it("creates a session before importing picked images when none exists", async () => {
+    const user = userEvent.setup()
+    respondWithSessionCreate()
+    render(<Composer />)
+
+    const attach = screen.getByRole("button", { name: "Attach images" })
+    expect(attach).toHaveProperty("disabled", false)
+    await user.click(attach)
+
+    await waitFor(() => {
+      expect(useAppStore.getState().promptAttachments).toHaveLength(1)
+    })
+    expect(useAppStore.getState().selection.sessionId).toBe("session_1")
+    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(1)
+    const bridge = window.yakitoriDesktop
+    if (bridge === undefined) throw new Error("Expected the desktop bridge")
+    expect(bridge.pickImages).toHaveBeenCalledWith()
+    expect(bridge.importPickedImages).toHaveBeenCalledWith({
+      sessionId: "session_1",
+      selectionId: "selection_1",
+    })
+    expect(bridge.discardPickedImages).toHaveBeenCalledWith({
+      selectionId: "selection_1",
+    })
+  })
+
+  it("does not create a session when the image picker is canceled", async () => {
+    const user = userEvent.setup()
+    const bridge = window.yakitoriDesktop
+    if (bridge === undefined) throw new Error("Expected the desktop bridge")
+    vi.mocked(bridge.pickImages).mockResolvedValueOnce(undefined)
+    respondWithSessionCreate()
+    render(<Composer />)
+
+    await user.click(screen.getByRole("button", { name: "Attach images" }))
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Attach images" }),
+      ).toHaveProperty("disabled", false)
+    })
+
+    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(0)
+    expect(useAppStore.getState().selection.sessionId).toBeUndefined()
+  })
+
+  it("rolls back a lazily created session when picked-image import fails", async () => {
+    const user = userEvent.setup()
+    const bridge = window.yakitoriDesktop
+    if (bridge === undefined) throw new Error("Expected the desktop bridge")
+    vi.mocked(bridge.importPickedImages).mockRejectedValueOnce(
+      new Error("Image import failed."),
+    )
+    respondWithSessionCreate()
+    const respond = fakeRef.current.respond
+    fakeRef.current.respond = (method, params) =>
+      method === "session/delete" ? {} : respond(method, params)
+    useAppStore.setState({ promptDraft: "keep this draft" })
+    render(<Composer />)
+
+    await user.click(screen.getByRole("button", { name: "Attach images" }))
+
+    await waitFor(() => {
+      expect(fakeRef.current.requestsFor("session/delete")).toHaveLength(1)
+    })
+    expect(useAppStore.getState().selection.sessionId).toBeUndefined()
+    expect(useAppStore.getState().promptDraft).toBe("keep this draft")
+    expect(screen.getByRole("alert").textContent).toBe("Image import failed.")
+  })
+
+  it("waits for an in-flight session creation before importing picked images", async () => {
+    const user = userEvent.setup()
+    useAppStore.setState({
+      inFlightActions: new Set(["create-session"]),
+      sessionSelectionIntentRevision: 1,
+    })
+    render(<Composer />)
+
+    await user.click(screen.getByRole("button", { name: "Attach images" }))
+    const bridge = window.yakitoriDesktop
+    if (bridge === undefined) throw new Error("Expected the desktop bridge")
+    expect(bridge.importPickedImages).not.toHaveBeenCalled()
+
+    useAppStore.setState({
+      inFlightActions: new Set(),
+      selection: { sessionId: "session_1" },
+    })
+
+    await waitFor(() => {
+      expect(bridge.importPickedImages).toHaveBeenCalledWith({
+        sessionId: "session_1",
+        selectionId: "selection_1",
+      })
+    })
+  })
+
+  it("reuses a session that finishes creating while the picker is open", async () => {
+    const user = userEvent.setup()
+    const bridge = window.yakitoriDesktop
+    if (bridge === undefined) throw new Error("Expected the desktop bridge")
+    let resolvePick!: (selection: { readonly selectionId: string }) => void
+    vi.mocked(bridge.pickImages).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolvePick = resolve
+      }),
+    )
+    useAppStore.setState({
+      inFlightActions: new Set(["create-session"]),
+      sessionSelectionIntentRevision: 1,
+    })
+    render(<Composer />)
+
+    await user.click(screen.getByRole("button", { name: "Attach images" }))
+    useAppStore.setState({
+      inFlightActions: new Set(),
+      selection: { sessionId: "session_1" },
+    })
+    resolvePick({ selectionId: "selection_during_create" })
+
+    await waitFor(() => {
+      expect(bridge.importPickedImages).toHaveBeenCalledWith({
+        sessionId: "session_1",
+        selectionId: "selection_during_create",
+      })
+    })
+    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(0)
+  })
+
+  it("creates a session before importing dropped images when none exists", async () => {
+    respondWithSessionCreate()
+    render(<Composer />)
+
+    const form = screen.getByRole("textbox").closest("form")
+    if (form === null) throw new Error("Expected the composer form")
+    const file = new File(["image-bytes"], "shot.png", { type: "image/png" })
+    fireEvent.drop(form, {
+      dataTransfer: { types: ["Files"], files: [file] },
+    })
+
+    await waitFor(() => {
+      expect(useAppStore.getState().promptAttachments).toHaveLength(1)
+    })
+    expect(useAppStore.getState().selection.sessionId).toBe("session_1")
+    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(1)
+    const bridge = window.yakitoriDesktop
+    if (bridge === undefined) throw new Error("Expected the desktop bridge")
+    expect(bridge.importImageFiles).toHaveBeenCalledWith({
+      sessionId: "session_1",
+      files: [file],
+    })
+  })
+
+  it("keeps attachments desktop-only without creating a session in a plain browser", async () => {
+    const user = userEvent.setup()
+    Object.defineProperty(window, "yakitoriDesktop", {
+      configurable: true,
+      value: undefined,
+    })
+    respondWithSessionCreate()
+    render(<Composer />)
+
+    await user.click(screen.getByRole("button", { name: "Attach images" }))
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert").textContent).toBe(
+        "Image attachments require the Yakitori desktop app.",
+      )
+    })
+    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(0)
+    expect(useAppStore.getState().selection.sessionId).toBeUndefined()
+    expect(useAppStore.getState().promptAttachments).toHaveLength(0)
+  })
+
+  it("does not show the full-access chip", () => {
+    useAppStore.setState({ selection: { sessionId: "session_1" } })
+    render(<Composer />)
+
+    expect(screen.queryByText("Full access")).toBeNull()
+  })
+
+  it("turns the send button into an interrupt action while a turn runs", async () => {
+    const user = userEvent.setup()
+    const cancelTurn = vi.fn((_turnId: string) => Promise.resolve())
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      execution: executionWithActiveTurn(),
+      cancelTurn,
+      promptDraft: "follow up",
+    })
+    render(<Composer />)
+
+    expect(screen.queryByRole("button", { name: "Send" })).toBeNull()
+    const interrupt = screen.getByRole("button", { name: "Interrupt" })
+    expect(interrupt).toHaveProperty("disabled", false)
+    await user.click(interrupt)
+    expect(cancelTurn).toHaveBeenCalledWith("turn_1")
+  })
+
+  it("disables the interrupt button while the cancel is in flight", () => {
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      execution: executionWithActiveTurn(),
+      inFlightActions: new Set(["cancel:turn_1"]),
+    })
+    render(<Composer />)
+
+    expect(screen.getByRole("button", { name: "Stopping" })).toHaveProperty(
+      "disabled",
+      true,
+    )
+  })
+
+  it("still admits a follow-up on Enter while a turn runs", async () => {
+    const user = userEvent.setup()
+    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    useAppStore.setState({
+      admitInput,
+      selection: { sessionId: "session_1" },
+      execution: executionWithActiveTurn(),
+      promptDraft: "follow up",
+    })
+    render(<Composer />)
+
+    const textarea = screen.getByRole("textbox")
+    await user.click(textarea)
+    await user.keyboard("{Enter}")
+
+    expect(admitInput).toHaveBeenCalledTimes(1)
+    expect(admitInput).toHaveBeenCalledWith("follow up")
+  })
 })
 
 function draftImage(detail: "high" | "original") {
@@ -344,6 +575,56 @@ function draftImage(detail: "high" | "original") {
       path: "attachments/staging/draft_1/1.png",
     },
   }
+}
+
+const createdSession: ApiSessionDetail = {
+  id: "session_1",
+  conversationId: "conversation_1",
+  seq: 1,
+  createdAt: "2026-09-18T00:00:00.000Z",
+  updatedAt: "2026-09-18T00:00:00.000Z",
+  pendingInputs: [],
+  pendingPermissions: [],
+  counts: {
+    inputs: 0,
+    pendingInputs: 0,
+    turns: 0,
+    items: 0,
+    permissions: 0,
+    tools: 0,
+  },
+}
+
+function respondWithSessionCreate() {
+  fakeRef.current.respond = (method) => {
+    if (method === "session/create") {
+      return {
+        session: createdSession,
+        event: createEventEnvelope({
+          sessionId: "session_1",
+          seq: 1,
+          event: { type: EventType.SessionCreated, data: {} },
+        }),
+      }
+    }
+    if (method === "session/list") return { sessions: [] }
+    if (method === "session/skills") return { skills: [] }
+    throw new ApiRequestError("not found", "not_found")
+  }
+}
+
+function executionWithActiveTurn() {
+  return reduceExecutionView(createExecutionViewState(), {
+    type: "durable",
+    event: createEventEnvelope({
+      sessionId: "session_1",
+      seq: 1,
+      event: {
+        type: EventType.TurnStarted,
+        data: { turnId: "turn_1", inputId: "input_1" },
+      },
+    }),
+  })
 }
 
 function executionWithHistory(...texts: readonly string[]) {

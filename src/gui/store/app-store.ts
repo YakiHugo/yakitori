@@ -108,6 +108,9 @@ export type AppStoreData = {
   sessionSkillsError: string | undefined
   hydratingSessionId: string | undefined
   projects: ApiProject[]
+  // Last project-list load failure; the sidebar keeps the last good list and
+  // shows a retry note while this is set.
+  projectsError: string | undefined
   providers: ApiProviderSummary[]
   subscriptionsByProvider: Record<
     ApiSubscriptionProvider,
@@ -137,6 +140,10 @@ export type AppStoreActions = {
   loadSidebar(): Promise<void>
   refreshSidebar(): Promise<void>
   changeSidebar(change: SidebarChange): Promise<boolean>
+  moveSidebarSection(
+    sectionId: string,
+    direction: "up" | "down",
+  ): Promise<boolean>
   loadProjects(): Promise<void>
   loadProviders(): Promise<void>
   loadSubscriptions(): Promise<void>
@@ -231,6 +238,7 @@ export function createInitialAppState(): AppStoreData {
     sessionSkillsError: undefined,
     hydratingSessionId: undefined,
     projects: [],
+    projectsError: undefined,
     providers: [],
     subscriptionsByProvider: createInitialSubscriptionUsage(),
     userPreference: undefined,
@@ -249,6 +257,14 @@ let activeTaskCount = 0
 export const useAppStore = create<AppStore>()((set, get) => {
   const sessionListRevisions: Record<string, number> = {}
   let sidebarReadRevision = 0
+  let projectReadRevision = 0
+  // Sidebar mutations are serialized through this chain so rapid pin/move
+  // clicks each reach the server in click order instead of being dropped
+  // while an earlier change is in flight. runTask never rejects, so a failed
+  // change cannot wedge the queue.
+  let sidebarQueue: Promise<boolean> = Promise.resolve(true)
+  let sidebarQueueDepth = 0
+  let sidebarQueueError: string | undefined
   const subscriptionReadRevisions: Record<ApiSubscriptionProvider, number> = {
     codex: 0,
     grok: 0,
@@ -258,10 +274,11 @@ export const useAppStore = create<AppStore>()((set, get) => {
   const runTask = async (
     task: () => Promise<void>,
     isCurrent: () => boolean = () => true,
+    clearMessage = true,
   ): Promise<boolean> => {
     activeTaskCount += 1
     set({ busy: true })
-    if (isCurrent()) set({ message: undefined })
+    if (clearMessage && isCurrent()) set({ message: undefined })
     try {
       await task()
       return true
@@ -272,6 +289,57 @@ export const useAppStore = create<AppStore>()((set, get) => {
       activeTaskCount -= 1
       set({ busy: activeTaskCount > 0 })
     }
+  }
+
+  const enqueueSidebarChange = (
+    resolveChange: () => SidebarChange | undefined,
+  ): Promise<boolean> => {
+    if (sidebarQueueDepth === 0) {
+      sidebarQueueError = undefined
+      set({ message: undefined })
+    }
+    sidebarQueueDepth += 1
+    set((state) => ({
+      inFlightActions: new Set(state.inFlightActions).add("sidebar-update"),
+    }))
+    const run = sidebarQueue.then(async () => {
+      const change = resolveChange()
+      if (change === undefined) return false
+      const completed = await runTask(
+        async () => {
+          const sidebar = await getAppRpcClient(get().apiBase).request(
+            "sidebar/update",
+            change,
+          )
+          sidebarReadRevision += 1
+          set({ sidebar })
+          if (
+            (change.type === "session" || change.type === "move-session") &&
+            change.sectionId
+          )
+            get().setSectionOpen(change.sectionId, true)
+          await get().refreshSidebar()
+        },
+        () => true,
+        false,
+      )
+      if (!completed) sidebarQueueError = get().message
+      else if (sidebarQueueError !== undefined) {
+        set({ message: sidebarQueueError })
+      }
+      return completed
+    })
+    sidebarQueue = run
+    void run.then(() => {
+      sidebarQueueDepth -= 1
+      if (sidebarQueueDepth !== 0) return
+      set((state) => {
+        const inFlightActions = new Set(state.inFlightActions)
+        inFlightActions.delete("sidebar-update")
+        return { inFlightActions }
+      })
+    })
+    return run
   }
 
   const activateSession = (sessionId: string): SessionSelection => {
@@ -477,20 +545,24 @@ export const useAppStore = create<AppStore>()((set, get) => {
             return
           }
           const active = new Set(activeSessionIds)
-          set((state) => ({
-            sessionsByProject: Object.fromEntries(
-              Object.entries(state.sessionsByProject).map(([key, list]) => [
-                key,
-                {
-                  ...list,
-                  sessions: list.sessions.map((session) => ({
-                    ...session,
-                    active: active.has(session.id),
-                  })),
-                },
-              ]),
-            ),
-          }))
+          set((state) => {
+            let changed = false
+            const sessionsByProject = Object.fromEntries(
+              Object.entries(state.sessionsByProject).map(([key, list]) => {
+                let listChanged = false
+                const sessions = list.sessions.map((session) => {
+                  const nextActive = active.has(session.id)
+                  if ((session.active ?? false) === nextActive) return session
+                  listChanged = true
+                  return { ...session, active: nextActive }
+                })
+                if (!listChanged) return [key, list]
+                changed = true
+                return [key, { ...list, sessions }]
+              }),
+            )
+            return changed ? { sessionsByProject } : {}
+          })
         })
       }
       await get().loadSidebar()
@@ -653,39 +725,28 @@ export const useAppStore = create<AppStore>()((set, get) => {
         ),
       )
     },
-    changeSidebar: async (change) => {
-      if (get().inFlightActions.has("sidebar-update")) return false
-      set((state) => ({
-        inFlightActions: new Set(state.inFlightActions).add("sidebar-update"),
-      }))
-      const completed = await runTask(async () => {
-        const sidebar = await getAppRpcClient(get().apiBase).request(
-          "sidebar/update",
-          change,
-        )
-        sidebarReadRevision += 1
-        set({ sidebar })
-        if (
-          (change.type === "session" || change.type === "move-session") &&
-          change.sectionId
-        )
-          get().setSectionOpen(change.sectionId, true)
-        await get().refreshSidebar()
-      })
-      set((state) => {
-        const inFlightActions = new Set(state.inFlightActions)
-        inFlightActions.delete("sidebar-update")
-        return { inFlightActions }
-      })
-      return completed
-    },
+    changeSidebar: (change) => enqueueSidebarChange(() => change),
+
+    moveSidebarSection: (sectionId, direction) =>
+      enqueueSidebarChange(() => {
+        const sectionIds = get().sidebar.sections.map((section) => section.id)
+        const index = sectionIds.indexOf(sectionId)
+        const target = index + (direction === "up" ? -1 : 1)
+        if (index < 0 || target < 0 || target >= sectionIds.length) return
+        const [removed] = sectionIds.splice(index, 1)
+        if (removed === undefined) return
+        sectionIds.splice(target, 0, removed)
+        return { type: "reorder-sections", sectionIds }
+      }),
 
     loadProjects: async () => {
+      const revision = ++projectReadRevision
       try {
         const response = await getAppRpcClient(get().apiBase).request(
           "project/list",
           {},
         )
+        if (revision !== projectReadRevision) return
         const projects = [...response.projects]
         set((state) => {
           const liveIds = new Set(projects.map((project) => project.id))
@@ -713,14 +774,22 @@ export const useAppStore = create<AppStore>()((set, get) => {
                 : projects[0]?.id
           return {
             projects,
+            projectsError: undefined,
             currentProject,
             sessionsByProject,
             collapsedProjects,
           }
         })
-      } catch {
-        // Servers without the project store answer method-not-found;
-        // project state stays empty and the switcher stays hidden.
+      } catch (error) {
+        if (revision !== projectReadRevision) return
+        // Servers without a project store answer not_found; the switcher
+        // stays hidden there. Other failures keep the last good list and
+        // surface a retry note instead of silently showing an empty sidebar.
+        if (error instanceof ApiRequestError && error.code === "not_found") {
+          set({ projectsError: undefined })
+          return
+        }
+        set({ projectsError: "Could not load projects." })
       }
     },
 
@@ -1728,19 +1797,32 @@ function applyTransientSessionDetail(
   return session
 }
 
+// Both sides are Object.is-stable when no summary field would change, so
+// durable stream events do not rebuild lists the selected session is not in.
 function updateSessionSummary(
-  sessions: readonly ApiSessionSummary[],
+  sessions: ApiSessionSummary[],
   selectedSession: ApiSessionDetail | undefined,
 ): ApiSessionSummary[] {
-  if (selectedSession === undefined) return [...sessions]
-  return sessions.map((session) =>
-    session.id === selectedSession.id
+  if (selectedSession === undefined) return sessions
+  const index = sessions.findIndex(
+    (session) => session.id === selectedSession.id,
+  )
+  const session = index < 0 ? undefined : sessions[index]
+  if (
+    session === undefined ||
+    (session.seq === selectedSession.seq &&
+      session.updatedAt === selectedSession.updatedAt)
+  ) {
+    return sessions
+  }
+  return sessions.map((entry, entryIndex) =>
+    entryIndex === index
       ? {
-          ...session,
+          ...entry,
           seq: selectedSession.seq,
           updatedAt: selectedSession.updatedAt,
         }
-      : session,
+      : entry,
   )
 }
 
@@ -1749,15 +1831,16 @@ function updateSessionSummaryInLists(
   selectedSession: ApiSessionDetail | undefined,
 ): Record<string, ProjectSessionList> {
   if (selectedSession === undefined) return lists
-  return Object.fromEntries(
-    Object.entries(lists).map(([key, list]) => [
-      key,
-      {
-        ...list,
-        sessions: updateSessionSummary(list.sessions, selectedSession),
-      },
-    ]),
+  let changed = false
+  const next = Object.fromEntries(
+    Object.entries(lists).map(([key, list]) => {
+      const sessions = updateSessionSummary(list.sessions, selectedSession)
+      if (sessions === list.sessions) return [key, list]
+      changed = true
+      return [key, { ...list, sessions }]
+    }),
   )
+  return changed ? next : lists
 }
 
 export function findSessionSummary(

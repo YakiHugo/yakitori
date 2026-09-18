@@ -3,9 +3,12 @@
 type YakitoriDesktopBridge = {
   platform: string
   pickProjectFolder(): Promise<string | null>
-  pickImages(input: {
+  pickImages(): Promise<{ readonly selectionId: string } | undefined>
+  importPickedImages(input: {
     readonly sessionId: string
+    readonly selectionId: string
   }): Promise<readonly import("../kernel/events.ts").ImageAttachment[]>
+  discardPickedImages(input: { readonly selectionId: string }): Promise<void>
   importImageFiles(input: {
     readonly sessionId: string
     readonly files: readonly File[]
@@ -16,6 +19,7 @@ type YakitoriDesktopBridge = {
   openFile(input: {
     readonly path: string
     readonly line?: number
+    readonly workspaceRoot?: string
   }): Promise<void>
   openUrl(input: { readonly url: string }): Promise<void>
 }

@@ -375,9 +375,11 @@ function EntryCell({ entry }: Readonly<{ entry: ExecutionEntry }>) {
   const selectSession = useAppStore((state) => state.selectSession)
   switch (entry.kind) {
     case "assistant":
-      return <AssistantMessageCell entry={entry} />
+      return (
+        <AssistantMessageCell entry={entry} workspaceRoot={workspaceRoot} />
+      )
     case "reasoning":
-      return <ReasoningCell entry={entry} />
+      return <ReasoningCell entry={entry} workspaceRoot={workspaceRoot} />
     case "tool":
       return (
         <ToolCell

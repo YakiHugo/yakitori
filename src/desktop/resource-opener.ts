@@ -1,6 +1,5 @@
-import { realpath } from "node:fs/promises"
-import path from "node:path"
 import { type BrowserWindow, ipcMain, shell } from "electron"
+import { resolveOpenableWorkspaceFile } from "./resource-path.ts"
 
 const openFileChannel = "yakitori:open-file"
 const openUrlChannel = "yakitori:open-url"
@@ -12,11 +11,10 @@ export function registerResourceOpener(
   ipcMain.handle(openFileChannel, async (event, input: unknown) => {
     requireTrustedSender(event.sender, event.senderFrame, trustedWindow)
     const request = requireFileRequest(input)
-    const workspacePath = await realpath(workspace)
-    const requestedPath = path.isAbsolute(request.path)
-      ? request.path
-      : path.resolve(workspacePath, request.path)
-    const targetPath = await realpath(requestedPath)
+    const targetPath = await resolveOpenableWorkspaceFile(
+      request.workspaceRoot ?? workspace,
+      request.path,
+    )
     const error = await shell.openPath(targetPath)
     if (error !== "") throw new Error(error)
   })
@@ -45,6 +43,7 @@ export function requireTrustedSender(
 function requireFileRequest(input: unknown): {
   readonly path: string
   readonly line?: number
+  readonly workspaceRoot?: string
 } {
   if (
     typeof input !== "object" ||
@@ -63,10 +62,21 @@ function requireFileRequest(input: unknown): {
   ) {
     throw new TypeError("File open request line must be a positive integer.")
   }
+  if (
+    "workspaceRoot" in input &&
+    input.workspaceRoot !== undefined &&
+    (typeof input.workspaceRoot !== "string" ||
+      input.workspaceRoot.length === 0)
+  ) {
+    throw new TypeError("File open request workspace root must not be empty.")
+  }
   return {
     path: input.path,
     ...("line" in input && typeof input.line === "number"
       ? { line: input.line }
+      : {}),
+    ...("workspaceRoot" in input && typeof input.workspaceRoot === "string"
+      ? { workspaceRoot: input.workspaceRoot }
       : {}),
   }
 }

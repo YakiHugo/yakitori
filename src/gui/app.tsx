@@ -1,8 +1,8 @@
-import { GitFork, Info } from "lucide-react"
+import { GitFork, Info, LoaderCircle, Square } from "lucide-react"
 import { ApprovalBar } from "./components/approval-bar.tsx"
 import { Composer } from "./components/composer.tsx"
+import { QueuedInputs } from "./components/queued-inputs.tsx"
 import { SidebarFrame } from "./components/sidebar-frame.tsx"
-import { StatusSurface } from "./components/status-surface.tsx"
 import { TelemetryRail } from "./components/telemetry-rail.tsx"
 import { Transcript } from "./components/transcript.tsx"
 import {
@@ -47,7 +47,7 @@ export function App() {
               <SessionHeader />
               <Transcript>
                 <ApprovalBar />
-                <StatusSurface />
+                <QueuedInputs />
                 <SessionComposer />
               </Transcript>
               <TelemetryRail />
@@ -64,27 +64,49 @@ export function App() {
 function SessionComposer() {
   const session = useAppStore((state) => state.selectedSession)
   const changeSidebar = useAppStore((state) => state.changeSidebar)
+  const cancelTurn = useAppStore((state) => state.cancelTurn)
+  const inFlightActions = useAppStore((state) => state.inFlightActions)
+  const activeTurnId = useExecutionView().activeTurnId
   const pending = useAppStore((state) =>
     state.inFlightActions.has("sidebar-update"),
   )
   if (!session?.archived) return <Composer />
+  const stopping =
+    activeTurnId !== undefined && inFlightActions.has(`cancel:${activeTurnId}`)
   return (
     <div className="mx-auto mb-5 flex max-w-3xl items-center justify-between gap-4 rounded-xl border bg-muted/40 px-4 py-3 text-sm">
       <span>This conversation is archived.</span>
-      <button
-        type="button"
-        className="rounded-md bg-primary px-3 py-1.5 text-primary-foreground"
-        disabled={pending}
-        onClick={() =>
-          void changeSidebar({
-            type: "session",
-            sessionId: session.id,
-            archived: false,
-          })
-        }
-      >
-        Restore conversation
-      </button>
+      <div className="flex items-center gap-2">
+        {activeTurnId !== undefined && (
+          <button
+            type="button"
+            className="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5"
+            disabled={stopping}
+            onClick={() => void cancelTurn(activeTurnId)}
+          >
+            {stopping ? (
+              <LoaderCircle className="size-4 animate-spin" />
+            ) : (
+              <Square className="size-4" />
+            )}
+            {stopping ? "Stopping…" : "Interrupt"}
+          </button>
+        )}
+        <button
+          type="button"
+          className="rounded-md bg-primary px-3 py-1.5 text-primary-foreground"
+          disabled={pending}
+          onClick={() =>
+            void changeSidebar({
+              type: "session",
+              sessionId: session.id,
+              archived: false,
+            })
+          }
+        >
+          Restore conversation
+        </button>
+      </div>
     </div>
   )
 }
