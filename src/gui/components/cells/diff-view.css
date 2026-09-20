@@ -1,0 +1,193 @@
+.review-diff {
+  --diff-add: #197744;
+  --diff-delete: #b23b3b;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--background);
+  font-size: 12px;
+}
+.dark .review-diff {
+  --diff-add: #81c995;
+  --diff-delete: #e99898;
+}
+.review-diff-toolbar,
+.review-diff-file-header {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 10px;
+  padding: 8px 12px;
+  color: var(--muted-foreground);
+}
+.review-diff-toolbar {
+  min-height: 37px;
+  font-size: 11px;
+}
+.review-diff-controls {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+}
+.review-diff-controls button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-radius: 4px;
+  padding: 3px 6px;
+}
+.review-diff-controls button:hover,
+.review-diff-controls button[aria-pressed="true"] {
+  color: var(--foreground);
+  background: var(--muted);
+}
+.review-diff-controls button:focus-visible,
+.review-diff-scroll:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+.review-diff-notice {
+  border-left: 1px solid var(--border);
+  padding-left: 10px;
+}
+.review-diff-file-header {
+  border-block: 1px solid var(--border);
+  background: color-mix(in oklab, var(--muted) 45%, transparent);
+}
+.review-diff-file-header > svg {
+  flex-shrink: 0;
+}
+.review-diff-path {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.review-diff-file-status {
+  font-size: 10px;
+}
+.review-diff-stats {
+  display: flex;
+  flex: none;
+  gap: 8px;
+  margin-left: auto;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.review-diff-stats [data-kind="addition"] {
+  color: var(--diff-add);
+}
+.review-diff-stats [data-kind="deletion"] {
+  color: var(--diff-delete);
+}
+.review-diff-scroll {
+  max-height: 480px;
+  overflow: auto;
+}
+.review-diff-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 21px;
+  tab-size: 4;
+}
+.review-diff-number {
+  width: 4ch;
+  min-width: 4ch;
+  padding: 0 7px;
+  color: var(--muted-foreground);
+  text-align: right;
+  vertical-align: top;
+  user-select: none;
+  font-variant-numeric: tabular-nums;
+  border-right: 1px solid color-mix(in oklab, var(--border) 55%, transparent);
+}
+.review-diff-line-column {
+  width: 6ch;
+}
+.review-diff-token {
+  color: var(--shiki-light);
+}
+.dark .review-diff-token {
+  color: var(--shiki-dark);
+}
+.review-diff-code {
+  padding: 0 12px;
+  white-space: pre;
+}
+.review-diff-code code {
+  font: inherit;
+}
+.review-diff-context {
+  padding: 5px 12px;
+  color: var(--muted-foreground);
+  background: color-mix(in oklab, var(--muted) 55%, transparent);
+  white-space: pre;
+}
+.review-diff-table [data-kind="note"] .review-diff-context {
+  padding-block: 0;
+  background: transparent;
+  font-style: italic;
+}
+.review-diff-table [data-kind="addition"] {
+  background: color-mix(in oklab, var(--diff-add) 9%, var(--background));
+}
+.review-diff-table [data-kind="deletion"] {
+  background: color-mix(in oklab, var(--diff-delete) 9%, var(--background));
+}
+.review-diff-table [data-kind="addition"] .review-diff-number {
+  color: var(--diff-add);
+}
+.review-diff-table [data-kind="addition"] > :first-child {
+  box-shadow: inset 3px 0 var(--diff-add);
+}
+.review-diff-table [data-kind="deletion"] > :first-child {
+  box-shadow: inset 3px 0 var(--diff-delete);
+}
+.review-diff-table [data-kind="deletion"] .review-diff-number {
+  color: var(--diff-delete);
+}
+.review-diff-raw {
+  max-height: 480px;
+  overflow: auto;
+  margin: 0;
+  padding: 12px;
+  border-top: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 21px;
+  tab-size: 4;
+  white-space: pre;
+}
+.review-diff-explanation {
+  padding: 0 12px 8px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+.review-diff[data-wrap="true"] .review-diff-table {
+  table-layout: fixed;
+}
+.review-diff[data-wrap="true"] .review-diff-number {
+  width: 5ch;
+}
+.review-diff[data-wrap="true"]
+  :is(.review-diff-code, .review-diff-context, .review-diff-raw) {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* The Changes workspace scrolls as one review document; transcript tool cards
+   keep their bounded viewport so a patch cannot swallow the conversation. */
+.workspace-change-diff .review-diff-scroll,
+.workspace-change-diff .review-diff-raw {
+  max-height: none;
+}
+.workspace-change-diff .review-diff-table {
+  font-size: 12px;
+  line-height: 23px;
+}

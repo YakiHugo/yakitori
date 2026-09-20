@@ -121,6 +121,31 @@ describe("links", () => {
     })
   })
 
+  it("resolves document links from the file directory before opening a preview", async () => {
+    const user = userEvent.setup()
+    render(
+      <MarkdownView
+        text="[Parent](../README.md) and [Sibling](./usage.md)"
+        workspaceRoot="/repo"
+        documentPath="/repo/docs/guide.md"
+      />,
+    )
+    await user.click(screen.getByRole("link", { name: "Parent" }))
+    await user.click(screen.getByRole("link", { name: "Sibling" }))
+    expect(useWorkspaceStore.getState().tabs).toEqual([
+      expect.objectContaining({
+        kind: "file",
+        path: "README.md",
+        cwd: "/repo",
+      }),
+      expect.objectContaining({
+        kind: "file",
+        path: "usage.md",
+        cwd: "/repo/docs",
+      }),
+    ])
+  })
+
   it("never opens non-http scheme links", async () => {
     const openUrl = vi.fn(async () => {})
     Object.defineProperty(window, "yakitoriDesktop", {

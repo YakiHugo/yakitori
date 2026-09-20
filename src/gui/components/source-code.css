@@ -1,0 +1,65 @@
+.source-code {
+  min-width: 0;
+  overflow-x: auto;
+  padding-block: 0.75rem;
+  background: var(--background);
+}
+
+.source-code-table {
+  width: 100%;
+  border-collapse: collapse;
+  color: var(--foreground);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.8;
+  tab-size: 4;
+}
+
+.source-code-line:hover {
+  background: color-mix(in oklch, var(--foreground) 3%, transparent);
+}
+
+.source-code-number {
+  width: 1%;
+  min-width: 3.25rem;
+  padding: 0 0.875rem;
+  border-right: 1px solid var(--border);
+  color: color-mix(in oklch, var(--muted-foreground) 70%, transparent);
+  background: color-mix(in oklch, var(--muted) 45%, transparent);
+  text-align: right;
+  vertical-align: top;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.source-code-content {
+  padding: 0 1.25rem;
+  vertical-align: top;
+  white-space: pre;
+}
+
+.source-code-content code {
+  font: inherit;
+}
+
+.source-code[data-wrap="true"] .source-code-table {
+  table-layout: fixed;
+}
+
+.source-code[data-wrap="true"] .source-code-number {
+  width: 3.75rem;
+}
+
+.source-code[data-wrap="true"] .source-code-content {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.source-code-token {
+  color: var(--shiki-light, inherit);
+}
+
+.dark .source-code-token {
+  color: var(--shiki-dark, inherit);
+}
