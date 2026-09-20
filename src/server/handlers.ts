@@ -1,3 +1,4 @@
+import { isContextExcerpts } from "../kernel/input-context.ts"
 import {
   parseSidebarChange,
   type SessionSidebar,
@@ -162,11 +163,7 @@ export type ThreadServerHandlers = ServerHandlers & {
 const sessionListOrder = "updated_at_desc"
 const maxCancelReasonLength = 512
 
-type AdmissionTextContent = {
-  readonly kind: "text"
-  readonly text: string
-  readonly attachments?: readonly ImageAttachment[]
-}
+type AdmissionTextContent = TextContent
 
 // App-server projection over the live Session actor and canonical rollout.
 // It translates host DTOs only; execution never reads this projection.
@@ -760,6 +757,15 @@ export function createThreadServerHandlers(
         )
         const beforeTurnId = turnIdForInput(source, request.atInputId)
         const sourceAttachments = inputAttachments(source, request.atInputId)
+        const sourceInput = source.rollout.find(
+          ({ item }) =>
+            item.type === "response_item" && item.item.id === request.atInputId,
+        )?.item
+        const sourceContext =
+          sourceInput?.type === "response_item" &&
+          sourceInput.item.item.role === "user"
+            ? sourceInput.item.item.contextAttachments
+            : undefined
         await options.store.setSessionHead(request.sessionId, request.sessionId)
         const forked = await options.manager.forkThread({
           sourceThreadId: request.sessionId,
@@ -785,6 +791,10 @@ export function createThreadServerHandlers(
               submissionId,
               content: {
                 ...request.content,
+                ...(request.content.contextAttachments === undefined &&
+                sourceContext !== undefined
+                  ? { contextAttachments: sourceContext }
+                  : {}),
                 ...(attachments === undefined ? {} : { attachments }),
               },
               ...(request.modelSelection === undefined
@@ -1297,6 +1307,9 @@ function mapRolloutEvent(
           content: {
             kind: "text",
             text,
+            ...(item.item.item.contextAttachments === undefined
+              ? {}
+              : { contextAttachments: item.item.item.contextAttachments }),
             ...(item.item.item.images === undefined
               ? {}
               : {
@@ -1941,7 +1954,7 @@ function requireForkTextContent(
     )
   }
   const content = requireAdmissionTextContent(value, maxInputBytes)
-  return { kind: "text", text: content.text }
+  return content
 }
 
 function requireAdmissionTextContent(
@@ -1962,9 +1975,27 @@ function requireAdmissionTextContent(
       )
     }
     const attachments = requireImageAttachments(value.attachments)
+    if (
+      value.contextAttachments !== undefined &&
+      !isContextExcerpts(value.contextAttachments)
+    )
+      throw invalidInput(
+        "content.contextAttachments must contain valid context excerpts.",
+      )
+    if (
+      value.contextAttachments !== undefined &&
+      Buffer.byteLength(JSON.stringify(value.contextAttachments), "utf8") >
+        maxInputBytes
+    )
+      throw invalidInput(
+        `content.contextAttachments must not exceed ${maxInputBytes} bytes.`,
+      )
     return {
       kind: "text",
       text: value.text,
+      ...(value.contextAttachments === undefined
+        ? {}
+        : { contextAttachments: value.contextAttachments }),
       ...(attachments.length === 0 ? {} : { attachments }),
     }
   }

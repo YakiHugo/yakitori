@@ -34,6 +34,7 @@ export type ToolExecutionContext = Readonly<{
   workspaceRoot: string
   rolloutId?: string
   toolCallId?: string
+  turnId?: string
   rolloutAssets?: RolloutAssets
   signal?: AbortSignal
   visibleFileObservations?: VisibleFileObservations

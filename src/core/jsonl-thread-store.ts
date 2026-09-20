@@ -120,6 +120,7 @@ export class JsonlThreadStore implements ThreadStore {
   readonly #coordinationLockPath: string
   readonly #writers = new Map<string, LiveWriter>()
   readonly #reservations = new Map<string, ForkReservation>()
+  readonly #ephemeralAssetOwners = new Set<string>()
   readonly #ready: Promise<void>
   readonly #searchProjectionErrors = new Map<string, unknown>()
   #searchProjectionDirty = false
@@ -152,6 +153,18 @@ export class JsonlThreadStore implements ThreadStore {
     await this.#ready
   }
 
+  // Ephemeral Sessions own files without a durable thread index. A live host
+  // lease protects those files from GC; restart deliberately drops the lease.
+  retainEphemeralRolloutAssets(rolloutId: string): () => void {
+    requireThreadId(rolloutId)
+    if (this.#ephemeralAssetOwners.has(rolloutId))
+      throw new Error(`Ephemeral rollout ${rolloutId} already has an owner.`)
+    this.#ephemeralAssetOwners.add(rolloutId)
+    return () => {
+      this.#ephemeralAssetOwners.delete(rolloutId)
+    }
+  }
+
   async withRolloutAssetMutation<T>(
     rolloutId: string,
     mutate: () => Promise<T>,
@@ -165,6 +178,7 @@ export class JsonlThreadStore implements ThreadStore {
       true,
     )
     try {
+      if (this.#ephemeralAssetOwners.has(rolloutId)) return await mutate()
       const metadataFiles = (await readdir(this.#threadsDirectory)).filter(
         (file) => file.endsWith(".json"),
       )
@@ -1323,7 +1337,11 @@ export class JsonlThreadStore implements ThreadStore {
     const unreferenced = rolloutDirectories
       .filter((entry) => entry.isDirectory() && isStorageKey(entry.name))
       .map((entry) => entry.name)
-      .filter((rolloutId) => !retained.has(rolloutId))
+      .filter(
+        (rolloutId) =>
+          !retained.has(rolloutId) &&
+          !this.#ephemeralAssetOwners.has(rolloutId),
+      )
     await Promise.all(
       unreferenced.map((rolloutId) =>
         rm(join(this.#rolloutsDirectory, rolloutId), {

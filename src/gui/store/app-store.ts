@@ -25,6 +25,7 @@ import type {
   ApiUserModelPreference,
 } from "../../server/protocol.ts"
 import { acknowledgeAdmission, reserveAdmission } from "../admission-outbox.ts"
+import type { ContextExcerpt } from "../conversation-context.ts"
 import {
   createExecutionViewState,
   type ExecutionView,
@@ -47,6 +48,7 @@ type SessionSelection = {
 export type SessionDraft = Readonly<{
   text: string | undefined
   attachments: readonly ImageAttachment[]
+  excerpts: readonly ContextExcerpt[]
 }>
 
 // The sidebar loads each expanded Project's sessions independently; the empty
@@ -100,8 +102,10 @@ export type AppStoreData = {
   // persistence or attachment-lifecycle authority.
   draftModelSelection: ModelSelection | undefined
   newSessionPrompt: string | undefined
+  newSessionExcerpts: readonly ContextExcerpt[]
   promptDraft: string | undefined
   promptAttachments: readonly ImageAttachment[]
+  promptExcerpts: readonly ContextExcerpt[]
   sessionDrafts: Record<string, SessionDraft>
   // Skills discoverable in the selected session's working directory.
   sessionSkills: readonly ApiSkillSummary[]
@@ -182,6 +186,9 @@ export type AppStoreActions = {
   ): Promise<void>
   setPromptDraft(text: string): void
   setPromptAttachments(attachments: readonly ImageAttachment[]): void
+  addPromptExcerpt(excerpt: ContextExcerpt): void
+  removePromptExcerpt(id: string): void
+  updatePromptExcerpt(excerpt: ContextExcerpt): void
   setModelSelection(
     sessionId: string | undefined,
     selection: ModelSelection | undefined,
@@ -231,8 +238,10 @@ export function createInitialAppState(): AppStoreData {
     restoringModelSelectionFor: undefined,
     draftModelSelection: undefined,
     newSessionPrompt: undefined,
+    newSessionExcerpts: [],
     promptDraft: undefined,
     promptAttachments: [],
+    promptExcerpts: [],
     sessionDrafts: {},
     sessionSkills: [],
     sessionSkillsError: undefined,
@@ -1014,6 +1023,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
         hydratingSessionId: undefined,
         sessionSkills: [],
         promptAttachments: [],
+        promptExcerpts:
+          state.selection.sessionId === undefined
+            ? state.promptExcerpts
+            : state.newSessionExcerpts,
         promptDraft:
           state.selection.sessionId === undefined
             ? state.promptDraft
@@ -1070,11 +1083,13 @@ export const useAppStore = create<AppStore>()((set, get) => {
             set({ modelSelections })
             persistModelSelections(modelSelections)
           }
-          set({ newSessionPrompt: undefined })
+          set({ newSessionPrompt: undefined, newSessionExcerpts: [] })
           const draftAtCreation =
             get().selection.sessionId === undefined
               ? get().promptDraft
               : undefined
+          const excerptsAtCreation =
+            get().selection.sessionId === undefined ? get().promptExcerpts : []
           const parkedDrafts = stashSessionDraft(get())
           const selection = activateSession(response.session.id)
           set({
@@ -1088,6 +1103,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
             ...(draftAtCreation === undefined
               ? {}
               : { promptDraft: draftAtCreation }),
+            promptExcerpts: excerptsAtCreation,
           })
           connectEvents(selection, response.event.seq)
           loadSessionSkills(response.session.id)
@@ -1219,6 +1235,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
               execution: createExecutionViewState(),
               promptDraft: undefined,
               promptAttachments: [],
+              promptExcerpts: [],
               sessionSkills: [],
               sessionDrafts,
             }
@@ -1443,7 +1460,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
           get().setSectionOpen(suppliedSummary.sectionId, true)
       }
       if (get().selection.sessionId === undefined)
-        set({ newSessionPrompt: get().promptDraft })
+        set({
+          newSessionPrompt: get().promptDraft,
+          newSessionExcerpts: get().promptExcerpts,
+        })
       if (summary !== undefined) {
         set({ currentProject: summary.projectId })
         window.localStorage.setItem("yakitori.project", summary.projectId ?? "")
@@ -1472,6 +1492,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
     },
 
     admitInput: async (text, attachments = []) => {
+      const excerpts = get().promptExcerpts
+      if (text === COMPACT_DIRECTIVE && excerpts.length > 0) return
       if (get().selection.sessionId === undefined) {
         if (text === COMPACT_DIRECTIVE) return
         // Conversations start untitled; the server names the first input.
@@ -1546,6 +1568,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
             sessionId: selection.sessionId,
             text,
             ...(attachments.length === 0 ? {} : { attachments }),
+            ...(excerpts.length === 0 ? {} : { contextAttachments: excerpts }),
           })
           if (!isCurrentSelection(selection)) return
           const response = await getAppRpcClient(get().apiBase).request(
@@ -1557,6 +1580,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
                 kind: "text",
                 text,
                 ...(attachments.length === 0 ? {} : { attachments }),
+                ...(excerpts.length === 0 ? {} : { contextAttachments: excerpts }),
               },
               ...(admittedModelSelection === undefined
                 ? {}
@@ -1571,6 +1595,13 @@ export const useAppStore = create<AppStore>()((set, get) => {
           }
           await acknowledgeAdmission(window.localStorage, pendingAdmission)
           if (!isCurrentSelection(selection)) return
+          set((state) => ({
+            // A new or edited excerpt queued during admission belongs to the
+            // next input. Immutable snapshots identify only what was sent.
+            promptExcerpts: state.promptExcerpts.filter(
+              (excerpt) => !excerpts.includes(excerpt),
+            ),
+          }))
           if (
             (get().promptDraft ?? "").trim() === text &&
             sameAttachments(get().promptAttachments, attachments)
@@ -1726,6 +1757,37 @@ export const useAppStore = create<AppStore>()((set, get) => {
 
     setPromptAttachments: (attachments) => {
       set({ promptAttachments: [...attachments] })
+    },
+
+    addPromptExcerpt: (excerpt) => {
+      set((state) => ({
+        promptExcerpts: [
+          ...state.promptExcerpts,
+          { ...excerpt, source: { ...excerpt.source } },
+        ],
+        composerFocusRevision:
+          excerpt.kind === "annotation"
+            ? state.composerFocusRevision
+            : state.composerFocusRevision + 1,
+      }))
+    },
+
+    removePromptExcerpt: (id) => {
+      set((state) => ({
+        promptExcerpts: state.promptExcerpts.filter(
+          (excerpt) => excerpt.id !== id,
+        ),
+      }))
+    },
+
+    updatePromptExcerpt: (excerpt) => {
+      set((state) => ({
+        promptExcerpts: state.promptExcerpts.map((current) =>
+          current.id === excerpt.id
+            ? { ...excerpt, source: { ...excerpt.source } }
+            : current,
+        ),
+      }))
     },
 
     setModelSelection: (sessionId, selection) => {
@@ -2209,12 +2271,14 @@ function stashSessionDraft(state: AppStoreData): Record<string, SessionDraft> {
   if (sessionId === undefined) return state.sessionDrafts
   const hasContent =
     (state.promptDraft ?? "").trim().length > 0 ||
-    state.promptAttachments.length > 0
+    state.promptAttachments.length > 0 ||
+    state.promptExcerpts.length > 0
   const sessionDrafts = { ...state.sessionDrafts }
   if (hasContent) {
     sessionDrafts[sessionId] = {
       text: state.promptDraft,
       attachments: state.promptAttachments,
+      excerpts: state.promptExcerpts,
     }
   } else {
     delete sessionDrafts[sessionId]
@@ -2225,7 +2289,10 @@ function stashSessionDraft(state: AppStoreData): Record<string, SessionDraft> {
 function takeSessionDraft(
   sessionDrafts: Record<string, SessionDraft>,
   sessionId: string,
-): Pick<AppStoreData, "sessionDrafts" | "promptDraft" | "promptAttachments"> {
+): Pick<
+  AppStoreData,
+  "sessionDrafts" | "promptDraft" | "promptAttachments" | "promptExcerpts"
+> {
   const next = { ...sessionDrafts }
   const draft = next[sessionId]
   delete next[sessionId]
@@ -2233,6 +2300,7 @@ function takeSessionDraft(
     sessionDrafts: next,
     promptDraft: draft?.text,
     promptAttachments: draft?.attachments ?? [],
+    promptExcerpts: draft?.excerpts ?? [],
   }
 }
 

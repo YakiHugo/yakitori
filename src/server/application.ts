@@ -9,6 +9,7 @@ import {
   sep,
 } from "node:path"
 import { Agent as UndiciAgent } from "undici"
+import type { TurnProcessor } from "../core/session.ts"
 import packageJson from "../../package.json" with { type: "json" }
 import {
   createSqliteAgentGraphStore,
@@ -74,6 +75,11 @@ import {
 } from "./handlers.ts"
 import { createYakitoriHttpServer } from "./http.ts"
 import { createSessionTitleGenerator } from "./session-title.ts"
+import {
+  createSideChatService,
+  sideChatInstructions,
+  type SideChatService,
+} from "./side-chat.ts"
 import { createModelDirectory, type ModelDirectory } from "./model-directory.ts"
 import {
   consoleOperationalFailureReporter,
@@ -141,6 +147,7 @@ export type YakitoriApplicationOptions = {
 }
 
 export type YakitoriApplication = {
+  readonly sideChats: SideChatService
   readonly handlers: ServerHandlers
   readonly mateKernel: MateKernel
   readonly mateDatabasePath: string
@@ -189,6 +196,7 @@ export async function createYakitoriApplication(
   let agentGraphStoreForCleanup: SqliteAgentGraphStore | undefined
   let mateStore: SqliteMateStore | undefined
   let projectStoreForCleanup: SqliteProjectStore | undefined
+  let sideChatsForCleanup: SideChatService | undefined
   // Attached when an HTTP server binds a message processor; server-initiated
   // notifications (session activity, server-side renames) stay silent until
   // then, which keeps handler-only embedders unaffected.
@@ -266,12 +274,19 @@ export async function createYakitoriApplication(
           ? {}
           : { shellEnvironmentPolicy: configuredShellEnvironmentPolicy }),
       })
-    const createTrustedTools = (userShellEnv: UserShellEnv) =>
+    const createTrustedTools = (
+      userShellEnv: UserShellEnv,
+      includeMultiAgent = true,
+    ) =>
       createDefaultTools({
         userShellEnv,
+        includeMultiAgent,
         execCommandLog: (message) => console.log(message),
       })
     const mcpManagers = new Set<McpConnectionManager>()
+    // One physical desktop is shared by every session in this server. Hold
+    // ownership across model steps so focus/input from two turns cannot mix.
+    let computerOwner: string | undefined
     const activeMate = await resolveActiveMate(mateKernel, activeMateId)
     const sessionDefaults: SessionCreateDefaults = {
       workingDirectory: workspace,
@@ -367,9 +382,17 @@ export async function createYakitoriApplication(
     }
     const threadStore = new JsonlThreadStore({ root: sessionStoreRoot })
     await threadStore.initialize()
+    const ephemeralAssetOwners = new Map<string, () => void>()
     const rolloutAssets = createRolloutAssets(sessionStoreRoot, {
-      withMutationLease: (rolloutId, mutate) =>
-        threadStore.withRolloutAssetMutation(rolloutId, mutate),
+      withMutationLease: async (rolloutId, mutate) => {
+        return threadStore.withRolloutAssetMutation(rolloutId, async () => {
+          if (ephemeralAssetOwners.has(rolloutId))
+            await mkdir(join(sessionStoreRoot, "rollouts", rolloutId), {
+              recursive: true,
+            })
+          return mutate()
+        })
+      },
     })
     await rolloutAssets.cleanupStagingImageAttachments()
     const agentGraphStore = createSqliteAgentGraphStore({
@@ -390,186 +413,258 @@ export async function createYakitoriApplication(
       },
     })
     agentRuntimeForCleanup = agentRuntime
+    const createSessionProcessor = async (
+      stored: StoredThread,
+      sideConversation = false,
+    ): Promise<TurnProcessor> => {
+      const workingDirectory = stored.metadata.workingDirectory ?? workspace
+      const configRoot = await resolveProjectConfigRoot(
+        ownedProjectStore,
+        workingDirectory,
+        stored.metadata.projectId,
+      )
+      const sessionUserConfig = createSessionUserConfig(configRoot)
+      const config = await sessionUserConfig.readSnapshot({
+        cwd: workingDirectory,
+      })
+      const sessionConfiguration = config.configuration
+      const shellEnvironmentPolicy =
+        options.shellEnvironmentPolicy ??
+        sessionConfiguration.shellEnvironmentPolicy
+      const baseInstructions =
+        options.baseInstructions ?? sessionConfiguration.baseInstructions
+      const modelContextWindowTokens =
+        options.modelContextWindowTokens ??
+        sessionConfiguration.modelContextWindowTokens
+      const sessionShellEnv =
+        options.userShellEnv ??
+        createUserShellEnv({
+          ...(shellEnvironmentPolicy === undefined
+            ? {}
+            : { shellEnvironmentPolicy }),
+        })
+      const toolRegistry = createToolRegistry(
+        createTrustedTools(sessionShellEnv, !sideConversation),
+      )
+      const mcpManager = createMcpConnectionManager({
+        // Codex's bundled Computer Use Stop/Interrupt/SubagentStop hook.
+        turnEndTools: {
+          cua_repl: {
+            name: "turn_ended",
+            input(context) {
+              if (context.turnId === undefined)
+                throw new Error("Computer cleanup requires a turn identity.")
+              return {
+                hook_event_name: context.signal?.aborted
+                  ? "Interrupt"
+                  : isSubagentThread(stored)
+                    ? "SubagentStop"
+                    : "Stop",
+                session_id: stored.metadata.id,
+                turn_id: context.turnId,
+              }
+            },
+          },
+        },
+        installTools: (name, tools) => {
+          toolRegistry.replaceExternalSource(
+            `mcp:${name}`,
+            name !== "cua_repl"
+              ? tools
+              : tools.map((tool) => ({
+                  ...tool,
+                  async execute(input, context) {
+                    context.signal?.throwIfAborted()
+                    if (context.turnId === undefined)
+                      throw new Error("Computer use requires an active turn.")
+                    if (
+                      computerOwner !== undefined &&
+                      computerOwner !== context.turnId
+                    )
+                      return {
+                        ok: false,
+                        code: "computer_busy",
+                        message:
+                          "Computer use is busy in another conversation.",
+                        content:
+                          "Computer use is busy in another conversation. Wait for that turn to finish before retrying.",
+                      }
+                    computerOwner = context.turnId
+                    return tool.execute(input, context)
+                  },
+                })),
+          )
+        },
+        onBackgroundError: (cause) =>
+          reportOperationalFailure(reporter, {
+            component: "mcp",
+            operation: "background",
+            cause,
+            sessionId: stored.metadata.id,
+          }),
+      })
+      try {
+        await mcpManager.update(
+          resolveSessionMcpServers(config, workingDirectory),
+        )
+      } catch (error) {
+        await Promise.allSettled([toolRegistry.dispose(), mcpManager.close()])
+        throw error
+      }
+      let mcpConfiguration = JSON.stringify(
+        resolveSessionMcpServers(config, workingDirectory),
+      )
+      let processor: ReturnType<typeof createTurnProcessor>
+      let hookRunner: ReturnType<typeof createHookRunner> | undefined
+      try {
+        hookRunner =
+          sessionConfiguration.hooks === undefined
+            ? undefined
+            : createHookRunner(sessionConfiguration.hooks)
+        processor = createTurnProcessor({
+          ...(sideConversation
+            ? {
+                additionalInstructions: {
+                  id: "side-conversation",
+                  revision: "1",
+                  text: sideChatInstructions,
+                },
+              }
+            : {}),
+          prepareStepExtensions: async (signal) => {
+            const snapshot = await sessionUserConfig.readSnapshot({
+              cwd: workingDirectory,
+            })
+            const servers = resolveSessionMcpServers(snapshot, workingDirectory)
+            const fingerprint = JSON.stringify(servers)
+            if (fingerprint !== mcpConfiguration) {
+              await mcpManager.update(servers, signal)
+              mcpConfiguration = fingerprint
+            }
+            return snapshot.configuration
+          },
+          loadModelTransport: async () =>
+            (
+              await sessionUserConfig.readSnapshot({
+                cwd: workingDirectory,
+              })
+            ).configuration.modelTransport,
+          modelClient: providerRegistry.createClient(),
+          provider: provider.provider,
+          model: provider.model,
+          ...(baseInstructions === undefined ? {} : { baseInstructions }),
+          ...(modelContextWindowTokens === undefined
+            ? {}
+            : { modelContextWindowTokens }),
+          ...(sessionConfiguration.modelAutoCompactTokenLimit === undefined
+            ? {}
+            : {
+                modelAutoCompactTokenLimit:
+                  sessionConfiguration.modelAutoCompactTokenLimit,
+              }),
+          ...(sessionConfiguration.modelAutoCompactTokenLimitScope === undefined
+            ? {}
+            : {
+                modelAutoCompactTokenLimitScope:
+                  sessionConfiguration.modelAutoCompactTokenLimitScope,
+              }),
+          permissionGate,
+          resolveShellName: () => sessionShellEnv.shellName(),
+          // Each Session owns both its external catalog and process manager.
+          toolRegistry,
+          ...(hookRunner === undefined ? {} : { hookRunner }),
+          ...(hookRunner === undefined ||
+          stored.metadata.workingDirectory === undefined
+            ? {}
+            : {
+                sessionHookContext: {
+                  sessionId: stored.metadata.id,
+                  workspaceRoot: stored.metadata.workingDirectory,
+                  source: stored.rollout.some(
+                    ({ item }) => item.type === "turn_started",
+                  )
+                    ? "resume"
+                    : "startup",
+                  isSubagent: isSubagentThread(stored),
+                },
+              }),
+          ...(sideConversation
+            ? {}
+            : {
+                agentControl: agentRuntime.registerThread(
+                  stored,
+                  sessionConfiguration.rolloutBudget,
+                ),
+              }),
+          rolloutAssets,
+          approvalPolicy,
+          onOperationalFailure: (failure) => {
+            reportOperationalFailure(reporter, {
+              component: "turn-processor",
+              operation: failure.operation,
+              cause: failure.cause,
+              sessionId: stored.metadata.id,
+            })
+          },
+        })
+      } catch (error) {
+        await Promise.allSettled([
+          hookRunner?.dispose(),
+          toolRegistry.dispose(),
+          mcpManager.close(),
+        ])
+        throw error
+      }
+      mcpManagers.add(mcpManager)
+      return {
+        prepare: processor.prepare,
+        ...(processor.prepareSteering === undefined
+          ? {}
+          : { prepareSteering: processor.prepareSteering }),
+        start(runtime, input, context, control) {
+          const running = processor.start(runtime, input, context, control)
+          return {
+            ...running,
+            completion: running.completion.finally(async () => {
+              if (computerOwner !== input.submissionId) return
+              try {
+                await mcpManager.finishTurn()
+              } finally {
+                if (computerOwner === input.submissionId)
+                  computerOwner = undefined
+              }
+            }),
+          }
+        },
+        async dispose() {
+          mcpManagers.delete(mcpManager)
+          const processorResult = await Promise.allSettled([
+            processor.dispose?.(),
+          ])
+          const resourceResults = await Promise.allSettled([
+            hookRunner?.dispose(),
+            mcpManager.close(),
+          ])
+          const results = [...processorResult, ...resourceResults]
+          const errors = results.flatMap((result) =>
+            result.status === "rejected" ? [result.reason] : [],
+          )
+          if (errors.length > 0) {
+            throw new AggregateError(
+              errors,
+              `Failed to dispose Session ${stored.metadata.id}.`,
+            )
+          }
+        },
+      }
+    }
     threadManager = new ThreadManager({
       store: threadStore,
       // Codex bounds only resumable subagent residency. Yakitori's existing
       // live-tree limit is four agents including the root, so at most three
       // completed child runtimes stay resident; rollouts remain resumable.
       maxResidentSubagentThreads: 3,
-      createTurnProcessor: async (stored) => {
-        const workingDirectory = stored.metadata.workingDirectory ?? workspace
-        const configRoot = await resolveProjectConfigRoot(
-          ownedProjectStore,
-          workingDirectory,
-          stored.metadata.projectId,
-        )
-        const sessionUserConfig = createSessionUserConfig(configRoot)
-        const config = await sessionUserConfig.readSnapshot({
-          cwd: workingDirectory,
-        })
-        const sessionConfiguration = config.configuration
-        const shellEnvironmentPolicy =
-          options.shellEnvironmentPolicy ??
-          sessionConfiguration.shellEnvironmentPolicy
-        const baseInstructions =
-          options.baseInstructions ?? sessionConfiguration.baseInstructions
-        const modelContextWindowTokens =
-          options.modelContextWindowTokens ??
-          sessionConfiguration.modelContextWindowTokens
-        const sessionShellEnv =
-          options.userShellEnv ??
-          createUserShellEnv({
-            ...(shellEnvironmentPolicy === undefined
-              ? {}
-              : { shellEnvironmentPolicy }),
-          })
-        const toolRegistry = createToolRegistry(
-          createTrustedTools(sessionShellEnv),
-        )
-        const mcpManager = createMcpConnectionManager({
-          installTools: (name, tools) => {
-            toolRegistry.replaceExternalSource(`mcp:${name}`, tools)
-          },
-          onBackgroundError: (cause) =>
-            reportOperationalFailure(reporter, {
-              component: "mcp",
-              operation: "background",
-              cause,
-              sessionId: stored.metadata.id,
-            }),
-        })
-        try {
-          await mcpManager.update(
-            resolveSessionMcpServers(config, workingDirectory),
-          )
-        } catch (error) {
-          await Promise.allSettled([toolRegistry.dispose(), mcpManager.close()])
-          throw error
-        }
-        let mcpConfiguration = JSON.stringify(
-          resolveSessionMcpServers(config, workingDirectory),
-        )
-        let processor: ReturnType<typeof createTurnProcessor>
-        let hookRunner: ReturnType<typeof createHookRunner> | undefined
-        try {
-          hookRunner =
-            sessionConfiguration.hooks === undefined
-              ? undefined
-              : createHookRunner(sessionConfiguration.hooks)
-          processor = createTurnProcessor({
-            prepareStepExtensions: async (signal) => {
-              const snapshot = await sessionUserConfig.readSnapshot({
-                cwd: workingDirectory,
-              })
-              const servers = resolveSessionMcpServers(
-                snapshot,
-                workingDirectory,
-              )
-              const fingerprint = JSON.stringify(servers)
-              if (fingerprint !== mcpConfiguration) {
-                await mcpManager.update(servers, signal)
-                mcpConfiguration = fingerprint
-              }
-              return snapshot.configuration
-            },
-            loadModelTransport: async () =>
-              (
-                await sessionUserConfig.readSnapshot({
-                  cwd: workingDirectory,
-                })
-              ).configuration.modelTransport,
-            modelClient: providerRegistry.createClient(),
-            provider: provider.provider,
-            model: provider.model,
-            ...(baseInstructions === undefined ? {} : { baseInstructions }),
-            ...(modelContextWindowTokens === undefined
-              ? {}
-              : { modelContextWindowTokens }),
-            ...(sessionConfiguration.modelAutoCompactTokenLimit === undefined
-              ? {}
-              : {
-                  modelAutoCompactTokenLimit:
-                    sessionConfiguration.modelAutoCompactTokenLimit,
-                }),
-            ...(sessionConfiguration.modelAutoCompactTokenLimitScope ===
-            undefined
-              ? {}
-              : {
-                  modelAutoCompactTokenLimitScope:
-                    sessionConfiguration.modelAutoCompactTokenLimitScope,
-                }),
-            permissionGate,
-            resolveShellName: () => sessionShellEnv.shellName(),
-            // Each Session owns both its external catalog and process manager.
-            toolRegistry,
-            ...(hookRunner === undefined ? {} : { hookRunner }),
-            ...(hookRunner === undefined ||
-            stored.metadata.workingDirectory === undefined
-              ? {}
-              : {
-                  sessionHookContext: {
-                    sessionId: stored.metadata.id,
-                    workspaceRoot: stored.metadata.workingDirectory,
-                    source: stored.rollout.some(
-                      ({ item }) => item.type === "turn_started",
-                    )
-                      ? "resume"
-                      : "startup",
-                    isSubagent: isSubagentThread(stored),
-                  },
-                }),
-            agentControl: agentRuntime.registerThread(
-              stored,
-              sessionConfiguration.rolloutBudget,
-            ),
-            rolloutAssets,
-            approvalPolicy,
-            onOperationalFailure: (failure) => {
-              reportOperationalFailure(reporter, {
-                component: "turn-processor",
-                operation: failure.operation,
-                cause: failure.cause,
-                sessionId: stored.metadata.id,
-              })
-            },
-          })
-        } catch (error) {
-          await Promise.allSettled([
-            hookRunner?.dispose(),
-            toolRegistry.dispose(),
-            mcpManager.close(),
-          ])
-          throw error
-        }
-        mcpManagers.add(mcpManager)
-        return {
-          prepare: processor.prepare,
-          ...(processor.prepareSteering === undefined
-            ? {}
-            : { prepareSteering: processor.prepareSteering }),
-          start: processor.start,
-          async dispose() {
-            mcpManagers.delete(mcpManager)
-            const processorResult = await Promise.allSettled([
-              processor.dispose?.(),
-            ])
-            const resourceResults = await Promise.allSettled([
-              hookRunner?.dispose(),
-              mcpManager.close(),
-            ])
-            const results = [...processorResult, ...resourceResults]
-            const errors = results.flatMap((result) =>
-              result.status === "rejected" ? [result.reason] : [],
-            )
-            if (errors.length > 0) {
-              throw new AggregateError(
-                errors,
-                `Failed to dispose Session ${stored.metadata.id}.`,
-              )
-            }
-          },
-        }
-      },
+      createTurnProcessor: createSessionProcessor,
       onPersistenceError: (error, threadId) => {
         reportOperationalFailure(reporter, {
           component: "thread-store",
@@ -650,8 +745,48 @@ export async function createYakitoriApplication(
       reportOperationalFailure: reporter,
     })
 
+    const sideChats = createSideChatService({
+      defaultCwd: workspace,
+      defaultModel: { provider: provider.provider, model: provider.model },
+      mateId: activeMate.id,
+      mateRevisionId: activeMate.currentRevision.id,
+      readSource: (id) => threadStore.readThread(id),
+      resolvePermission: (input) => permissionGate.resolve(input),
+      rolloutAssets,
+      createProcessor: async (stored) => {
+        const release = threadStore.retainEphemeralRolloutAssets(
+          stored.metadata.rolloutId,
+        )
+        ephemeralAssetOwners.set(stored.metadata.rolloutId, release)
+        try {
+          return await createSessionProcessor(stored, true)
+        } catch (error) {
+          release()
+          ephemeralAssetOwners.delete(stored.metadata.rolloutId)
+          throw error
+        }
+      },
+      releaseAssets: async (id) => {
+        try {
+          await rolloutAssets.discardEphemeralRolloutFiles(id)
+        } finally {
+          ephemeralAssetOwners.get(id)?.()
+          ephemeralAssetOwners.delete(id)
+        }
+      },
+      changed: (sideChat) =>
+        broadcastNotification?.("sideChat/changed", { sideChat }),
+      reportError: (cause) =>
+        reportOperationalFailure(reporter, {
+          component: "turn-processor",
+          operation: "side-chat-events",
+          cause,
+        }),
+    })
+    sideChatsForCleanup = sideChats
     let closePromise: Promise<void> | undefined
     return {
+      sideChats,
       handlers,
       mateKernel,
       mateDatabasePath,
@@ -669,6 +804,7 @@ export async function createYakitoriApplication(
       },
       createHttpServer(httpOptions = {}) {
         return createYakitoriHttpServer({
+          sideChats,
           eventHub,
           handlers,
           projectStore: ownedProjectStore,
@@ -713,6 +849,7 @@ export async function createYakitoriApplication(
           agentRuntime.close,
           agentGraphStore.close,
           runtimeLock,
+          sideChats,
         )
         await closePromise
       },
@@ -727,6 +864,7 @@ export async function createYakitoriApplication(
         agentRuntimeForCleanup?.close,
         agentGraphStoreForCleanup?.close,
         runtimeLock,
+        sideChatsForCleanup,
       )
     } catch (cleanupError) {
       throw new AggregateError(
@@ -1225,8 +1363,14 @@ async function closeApplicationResources(
   closeAgentRuntime: (() => Promise<void>) | undefined,
   closeAgentGraphStore: (() => void) | undefined,
   runtimeLock: RuntimeLock | undefined,
+  sideChats?: SideChatService,
 ): Promise<void> {
   const errors: unknown[] = []
+  try {
+    await sideChats?.close()
+  } catch (error) {
+    errors.push(error)
+  }
   try {
     await closeAgentRuntime?.()
   } catch (error) {

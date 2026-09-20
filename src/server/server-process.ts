@@ -21,6 +21,7 @@ import {
 } from "./shutdown.ts"
 import { createRequestGate } from "./request-gate.ts"
 import { createServerControlMessageHandler } from "./server-control-handler.ts"
+import { SideChatError } from "./side-chat.ts"
 
 export type YakitoriServerProcessInput = Readonly<{
   host: string
@@ -187,13 +188,27 @@ export async function runYakitoriServerProcess(
 }
 
 export async function handleServerControlRequest(
-  application: Pick<YakitoriApplication, "rolloutAssets" | "threadStore">,
+  application: Pick<YakitoriApplication, "rolloutAssets" | "threadStore"> &
+    Partial<Pick<YakitoriApplication, "sideChats">>,
   request: ServerControlRequest,
 ): Promise<ServerControlResponse> {
   try {
     if (request.type === "import_image_paths") {
       const thread = await application.threadStore.readThread(request.sessionId)
       if (thread === undefined) {
+        if (application.sideChats !== undefined) {
+          try {
+            const attachments = await application.sideChats.importImagePaths(
+              request.sessionId,
+              request.ownerId,
+              request.paths,
+            )
+            return { requestId: request.requestId, ok: true, attachments }
+          } catch (error) {
+            if (!(error instanceof SideChatError && error.code === "not_found"))
+              throw error
+          }
+        }
         throw new Error(`Session ${request.sessionId} was not found.`)
       }
       const attachments = await application.rolloutAssets.importImagePaths(

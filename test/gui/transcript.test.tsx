@@ -103,6 +103,19 @@ function scrollGeometry(viewport: HTMLElement) {
   })
 }
 
+function centeredConversationGeometry() {
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(
+    function (this: HTMLElement) {
+      return new DOMRect(
+        this.classList.contains("conversation-content") ? 48 : 0,
+        0,
+        this.classList.contains("conversation-content") ? 768 : 864,
+        400,
+      )
+    },
+  )
+}
+
 beforeEach(() => {
   frames = new Map()
   nextFrame = 0
@@ -418,7 +431,76 @@ it("keeps failures and intent updates visible while reasoning is collapsed", () 
   ).toBeNull()
 })
 
+it("shows navigation only while the centered body leaves 48 layout pixels of margin", () => {
+  let margin = 48
+  // A transformed surface must use layout pixels, not its scaled screen gap.
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(
+    function (this: HTMLElement) {
+      return new DOMRect(
+        100 +
+          (this.classList.contains("conversation-content") ? margin * 2 : 0),
+        0,
+        1728,
+        800,
+      )
+    },
+  )
+  vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(864)
+  const observers: { callback: () => void; targets: Element[] }[] = []
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      targets: Element[] = []
+      constructor(callback: () => void) {
+        observers.push({ callback, targets: this.targets })
+      }
+      observe(target: Element) {
+        this.targets.push(target)
+      }
+      unobserve() {}
+      disconnect() {}
+    },
+  )
+  useAppStore.setState({
+    execution: {
+      ...useAppStore.getState().execution,
+      entries: [
+        ...entries,
+        { kind: "user_input", inputId: "input_2", text: "Follow-up", at },
+      ],
+    },
+  })
+  render(<Transcript />)
+  expect(
+    screen.getByRole("navigation", { name: "Conversation messages" }),
+  ).toBeDefined()
+  const viewport = document.querySelector(".conversation-transcript-viewport")
+  const content = document.querySelector(".conversation-content")
+  const observer = observers.find(
+    ({ targets }) =>
+      targets.includes(viewport as Element) &&
+      targets.includes(content as Element),
+  )
+  expect(observer).toBeDefined()
+  for (const [nextMargin, visible] of [
+    [47, false],
+    [0, false],
+    [48, true],
+    [100, true],
+  ] as const) {
+    act(() => {
+      margin = nextMargin
+      observer?.callback()
+    })
+    expect(
+      screen.queryByRole("navigation", { name: "Conversation messages" }) !==
+        null,
+    ).toBe(visible)
+  }
+})
+
 it("offers an anchor for every input including inputs received during a turn", () => {
+  centeredConversationGeometry()
   useAppStore.setState({
     execution: {
       ...useAppStore.getState().execution,
@@ -475,6 +557,7 @@ it("offers an anchor for every input including inputs received during a turn", (
 })
 
 it("marks only the rail markers whose turns intersect the viewport", () => {
+  centeredConversationGeometry()
   useAppStore.setState({
     execution: {
       ...createExecutionViewState(),

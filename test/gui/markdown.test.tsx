@@ -1,12 +1,18 @@
 // @vitest-environment happy-dom
 import { cleanup, render, screen, waitFor } from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
-import { afterEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { MarkdownView } from "../../src/gui/components/markdown.tsx"
+import { useWorkspaceStore } from "../../src/gui/store/workspace-store.ts"
+
+beforeEach(() => {
+  useWorkspaceStore.setState({ tabs: [], activeId: undefined })
+})
 
 afterEach(() => {
   cleanup()
   vi.restoreAllMocks()
+  useWorkspaceStore.setState({ tabs: [], activeId: undefined })
   Object.defineProperty(window, "yakitoriDesktop", {
     configurable: true,
     value: undefined,
@@ -14,7 +20,7 @@ afterEach(() => {
 })
 
 describe("links", () => {
-  it("opens external links through the desktop bridge instead of navigating", async () => {
+  it("opens web links in workspace browser tabs", async () => {
     const openUrl = vi.fn(async () => {})
     Object.defineProperty(window, "yakitoriDesktop", {
       configurable: true,
@@ -24,7 +30,13 @@ describe("links", () => {
     render(<MarkdownView text="See [the docs](https://example.com/docs)." />)
 
     await user.click(screen.getByRole("link", { name: "the docs" }))
-    expect(openUrl).toHaveBeenCalledWith({ url: "https://example.com/docs" })
+    expect(openUrl).not.toHaveBeenCalled()
+    expect(useWorkspaceStore.getState().tabs).toEqual([
+      expect.objectContaining({
+        kind: "browser",
+        initialUrl: "https://example.com/docs",
+      }),
+    ])
   })
 
   it("opens external links on ctrl+click as well", async () => {
@@ -47,7 +59,9 @@ describe("links", () => {
     const user = userEvent.setup()
     render(<MarkdownView text="See [the docs](https://example.com/docs)." />)
 
+    await user.keyboard("{Control>}")
     await user.click(screen.getByRole("link", { name: "the docs" }))
+    await user.keyboard("{/Control}")
     expect(openSpy).toHaveBeenCalledWith(
       "https://example.com/docs",
       "_blank",
@@ -55,7 +69,7 @@ describe("links", () => {
     )
   })
 
-  it("opens uppercase schemes externally too", async () => {
+  it("routes uppercase web schemes to the workspace too", async () => {
     const openUrl = vi.fn(async () => {})
     Object.defineProperty(window, "yakitoriDesktop", {
       configurable: true,
@@ -65,10 +79,16 @@ describe("links", () => {
     render(<MarkdownView text="See [the docs](HTTPS://example.com)." />)
 
     await user.click(screen.getByRole("link", { name: "the docs" }))
-    expect(openUrl).toHaveBeenCalledWith({ url: "HTTPS://example.com" })
+    expect(openUrl).not.toHaveBeenCalled()
+    expect(useWorkspaceStore.getState().tabs).toEqual([
+      expect.objectContaining({
+        kind: "browser",
+        initialUrl: "HTTPS://example.com",
+      }),
+    ])
   })
 
-  it("opens file links in the editor with their line number", async () => {
+  it("opens files alongside the conversation and uses the editor on modifier click", async () => {
     const openFile = vi.fn(async () => {})
     Object.defineProperty(window, "yakitoriDesktop", {
       configurable: true,
@@ -83,6 +103,17 @@ describe("links", () => {
     )
 
     await user.click(screen.getByRole("link", { name: "the store" }))
+    expect(openFile).not.toHaveBeenCalled()
+    expect(useWorkspaceStore.getState().tabs).toEqual([
+      expect.objectContaining({
+        kind: "file",
+        path: "src/core/session.ts",
+        cwd: "/workspaces/app",
+      }),
+    ])
+    await user.keyboard("{Control>}")
+    await user.click(screen.getByRole("link", { name: "the store" }))
+    await user.keyboard("{/Control}")
     expect(openFile).toHaveBeenCalledWith({
       path: "src/core/session.ts",
       line: 1037,
