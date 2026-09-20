@@ -5,6 +5,7 @@ import { app, BrowserWindow, dialog } from "electron"
 import { loadLocalEnvFile, resolveYakitoriHome } from "../server/env-file.ts"
 import { registerAttachmentImporter } from "./attachment-importer.ts"
 import { registerClipboardWriter } from "./clipboard-writer.ts"
+import { registerCompletionNotifications } from "./completion-notifications.ts"
 import { registerProjectPicker } from "./project-picker.ts"
 import { registerResourceOpener } from "./resource-opener.ts"
 import { type ServerProcess, spawnServerProcess } from "./server-process.ts"
@@ -235,6 +236,7 @@ function openMainWindow(
   registerProjectPicker(window)
   registerResourceOpener(workspace, window)
   registerClipboardWriter(window)
+  registerCompletionNotifications(window)
   registerAttachmentImporter(server, window)
   registerWorkspaceBrowser(window)
   window.once("ready-to-show", () => {

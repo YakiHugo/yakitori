@@ -2,6 +2,10 @@ const { contextBridge, ipcRenderer, webUtils } = require("electron")
 
 contextBridge.exposeInMainWorld("yakitoriDesktop", {
   platform: process.platform,
+  notifications: {
+    permission: () => ipcRenderer.invoke("yakitori:notification-permission"),
+    show: (input) => ipcRenderer.invoke("yakitori:notification-show", input),
+  },
   writeClipboardText(text) {
     return ipcRenderer.invoke("yakitori:write-clipboard-text", text)
   },

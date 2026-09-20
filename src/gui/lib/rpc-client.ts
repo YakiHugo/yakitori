@@ -8,6 +8,7 @@ import type {
   RpcMethodParams,
   RpcMethodResponses,
   SessionEventNotification,
+  SessionCompletedNotification,
   SessionPermissionRequestParams,
   SessionPermissionRequestResult,
   SessionReplayCompleteNotification,
@@ -62,6 +63,9 @@ type AppMethod = Exclude<
 >
 
 export type AppRpcClient = {
+  subscribeToCompletions(
+    listener: (notification: SessionCompletedNotification) => void,
+  ): () => void
   subscribeToSideChatChanges(
     listener: (snapshot: SideChatSnapshot | undefined) => void,
   ): () => void
@@ -152,6 +156,9 @@ export function createAppRpcClient(options: {
   >()
   const sideChatListeners = new Set<
     (snapshot: SideChatSnapshot | undefined) => void
+  >()
+  const completionListeners = new Set<
+    (notification: SessionCompletedNotification) => void
   >()
 
   function send(frame: unknown): void {
@@ -320,6 +327,11 @@ export function createAppRpcClient(options: {
   }
 
   function onNotification(message: { method: string; params?: unknown }): void {
+    if (message.method === "session/completed") {
+      const params = message.params as SessionCompletedNotification
+      for (const listener of completionListeners) listener(params)
+      return
+    }
     if (message.method === "sideChat/changed") {
       const params = message.params as { sideChat: SideChatSnapshot }
       for (const listener of sideChatListeners) listener(params.sideChat)
@@ -436,6 +448,12 @@ export function createAppRpcClient(options: {
 
   return {
     request,
+    subscribeToCompletions(listener) {
+      completionListeners.add(listener)
+      return () => {
+        completionListeners.delete(listener)
+      }
+    },
     subscribeToSidebarChanges(listener) {
       sidebarChangeListeners.add(listener)
       return () => {

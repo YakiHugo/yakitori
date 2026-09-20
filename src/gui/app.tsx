@@ -1,6 +1,7 @@
 import { GitFork, Info, LoaderCircle, Square } from "lucide-react"
 import { ApprovalBar } from "./components/approval-bar.tsx"
 import { Composer } from "./components/composer.tsx"
+import { PreferencesEffects } from "./components/preferences-effects.tsx"
 import { QueuedInputs } from "./components/queued-inputs.tsx"
 import { Transcript } from "./components/transcript.tsx"
 import {
@@ -23,6 +24,7 @@ export function App() {
 
   return (
     <TooltipProvider>
+      <PreferencesEffects />
       <WorkspaceFrame>
         <main className="flex min-w-0 flex-1 flex-col bg-background">
           {message !== undefined && message !== "" && (

@@ -99,6 +99,54 @@ afterEach(() => {
 })
 
 describe("app RPC client", () => {
+  it("delivers live completions without a session stream and does not replay them on reconnect", async () => {
+    vi.useFakeTimers()
+    const client = createAppRpcClient({ apiBase: "http://api.test" })
+    const completed = vi.fn()
+    const unsubscribe = client.subscribeToCompletions(completed)
+    const pending = client.request("provider/list", {})
+    const socket = completeHandshake(FakeWebSocket.instances[0])
+    await flushMicrotasks()
+    socket.emitMessage({ id: 1, result: { providers: [] } })
+    await pending
+    const completion = {
+      sessionId: "background",
+      turnId: "turn_1",
+      title: "Task",
+    }
+    socket.emitMessage({ method: "session/completed", params: completion })
+    expect(completed).toHaveBeenCalledExactlyOnceWith(completion)
+
+    socket.emitClose()
+    await vi.advanceTimersByTimeAsync(250)
+    const reconnected = completeHandshake(FakeWebSocket.instances[1])
+    reconnected.emitMessage({
+      method: "session/event",
+      params: {
+        sessionId: "background",
+        seq: 5,
+        event: { type: "turn.completed", data: { turnId: "turn_1" } },
+      },
+    })
+    reconnected.emitMessage({
+      method: "session/replayComplete",
+      params: { sessionId: "background", seq: 5 },
+    })
+    expect(completed).toHaveBeenCalledOnce()
+    reconnected.emitMessage({
+      method: "session/completed",
+      params: { ...completion, turnId: "turn_2" },
+    })
+    expect(completed).toHaveBeenCalledTimes(2)
+    unsubscribe()
+    reconnected.emitMessage({
+      method: "session/completed",
+      params: { ...completion, turnId: "turn_3" },
+    })
+    expect(completed).toHaveBeenCalledTimes(2)
+    client.close()
+  })
+
   it("delivers side-chat snapshots and requests a refetch after reconnection", async () => {
     vi.useFakeTimers()
     const client = createAppRpcClient({ apiBase: "http://api.test" })

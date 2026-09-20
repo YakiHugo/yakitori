@@ -10,6 +10,7 @@ import {
 import { COMPACT_DIRECTIVE, type ImageAttachment } from "../../kernel/events.ts"
 import type { ContextExcerpt } from "../../kernel/input-context.ts"
 import type { ApiSkillSummary } from "../../server/protocol.ts"
+import { usePreferencesStore } from "../store/preferences-store.ts"
 import {
   appendImageFiles,
   appendPickedImages,
@@ -122,6 +123,7 @@ export function ComposerSurface({
   stopLabel?: string
 }>) {
   const suggestionsId = useId()
+  const sendShortcut = usePreferencesStore((state) => state.sendShortcut)
   const editorRef = useRef<PromptEditorHandle | null>(null)
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false)
   const [previewIndex, setPreviewIndex] = useState<number>()
@@ -346,7 +348,12 @@ export function ComposerSurface({
       setPromptDraft(entry)
       return true
     }
-    if (event.key === "Enter" && !event.shiftKey) {
+    if (
+      event.key === "Enter" &&
+      !event.shiftKey &&
+      !event.altKey &&
+      (sendShortcut === "enter" || event.metaKey || event.ctrlKey)
+    ) {
       event.preventDefault()
       submit()
       return true

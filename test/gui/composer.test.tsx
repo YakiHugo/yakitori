@@ -21,6 +21,10 @@ import {
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
 import {
+  defaultPreferences,
+  usePreferencesStore,
+} from "../../src/gui/store/preferences-store.ts"
+import {
   createEventEnvelope,
   EventType,
   InputRole,
@@ -43,6 +47,7 @@ vi.mock("../../src/gui/lib/rpc-client.ts", async (importOriginal) => {
 })
 
 beforeEach(() => {
+  usePreferencesStore.setState(defaultPreferences)
   fakeRef.current = new FakeRpcClient()
   fakeRef.current.respond = (method, params) => {
     if (method === "userPreference/write") {
@@ -124,6 +129,33 @@ describe("composer", () => {
 
     expect(admitInput).not.toHaveBeenCalled()
     expect(useAppStore.getState().promptDraft).toBe("hello\n")
+  })
+
+  it.each([
+    "Control",
+    "Meta",
+  ])("inserts Enter and Shift+Enter newlines, then sends with %s+Enter when configured", async (modifier) => {
+    const user = userEvent.setup()
+    const admitInput = vi.fn(async (_text: string) => {})
+    usePreferencesStore.setState({ sendShortcut: "mod-enter" })
+    useAppStore.setState({
+      admitInput,
+      selection: { sessionId: "session_1" },
+      promptDraft: "hello",
+    })
+    render(<Composer />)
+
+    await user.click(screen.getByRole("textbox"))
+    await user.keyboard("{Enter}")
+    expect(admitInput).not.toHaveBeenCalled()
+    expect(useAppStore.getState().promptDraft).toBe("hello\n")
+
+    await user.keyboard("{Shift>}{Enter}{/Shift}")
+    expect(admitInput).not.toHaveBeenCalled()
+    expect(useAppStore.getState().promptDraft).toBe("hello\n\n")
+
+    await user.keyboard(`{${modifier}>}{Enter}{/${modifier}}`)
+    expect(admitInput).toHaveBeenCalledExactlyOnceWith("hello")
   })
 
   it("keeps the send button disabled for an empty draft", () => {
