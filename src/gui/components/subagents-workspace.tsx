@@ -24,6 +24,9 @@ export function SubagentsWorkspace({
     sourceSessionId,
     active && !selectedAgentId,
   )
+  const workingCount = agents.filter(
+    (agent) => agent.status === "running" || agent.status === "pending_init",
+  ).length
   if (selectedAgentId)
     return (
       <SubagentPanel
@@ -41,7 +44,7 @@ export function SubagentsWorkspace({
         <div>
           <Users size={17} />
           <h2>Subagents</h2>
-          {agents.length > 0 && <span>{agents.length}</span>}
+          {agents.length > 0 ? <span>{agents.length}</span> : null}
         </div>
         <button
           type="button"
@@ -81,31 +84,46 @@ export function SubagentsWorkspace({
               </p>
             </div>
           ) : (
-            <ul className="subagents-list">
-              {agents.map((agent) => {
-                const status = agentStatusLabel(agent.status)
-                return (
-                  <li key={agent.agentId}>
-                    <button
-                      type="button"
-                      onClick={() => onSelect(agent.agentId)}
-                      aria-label={`View ${agent.taskName} trace`}
-                    >
-                      <span
-                        className="subagent-status-dot"
-                        data-status={status}
-                      />
-                      <span className="subagent-list-name">
-                        <strong>{agent.taskName}</strong>
-                        <small title={agent.path}>{agent.path}</small>
-                      </span>
-                      <span className="subagent-list-status">{status}</span>
-                      <ChevronRight size={14} />
-                    </button>
-                  </li>
-                )
-              })}
-            </ul>
+            <>
+              <p className="subagents-list-caption">
+                {workingCount > 0
+                  ? `${workingCount} ${workingCount === 1 ? "agent" : "agents"} working`
+                  : "Delegated work"}
+                <span>Open an agent to follow its progress.</span>
+              </p>
+              <ul className="subagents-list" aria-label="Delegated agents">
+                {agents.map((agent) => {
+                  const status = agentStatusLabel(agent.status)
+                  return (
+                    <li key={agent.agentId}>
+                      <button
+                        type="button"
+                        onClick={() => onSelect(agent.agentId)}
+                        aria-label={`View ${agent.taskName} trace`}
+                      >
+                        <span
+                          className="subagent-status-dot"
+                          data-status={status}
+                        />
+                        <span className="subagent-list-name">
+                          <strong title={agent.taskName}>
+                            {agent.taskName}
+                          </strong>
+                          <small title={agent.path}>{agent.path}</small>
+                        </span>
+                        <span
+                          className="subagent-list-status"
+                          data-status={status}
+                        >
+                          {status}
+                        </span>
+                        <ChevronRight size={14} />
+                      </button>
+                    </li>
+                  )
+                })}
+              </ul>
+            </>
           )}
         </>
       )}

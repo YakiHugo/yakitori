@@ -85,6 +85,7 @@ export type ToolDetail =
     }
   | {
       readonly kind: "collaboration"
+      readonly request?: string
       readonly text?: string
       readonly receivers: readonly {
         readonly sessionId: string
@@ -402,7 +403,7 @@ function presentCollaboration(
   entry: ToolEntry,
   execution: ExecutionOf<"collaboration_tool_call">,
 ): ToolPresentation {
-  const description = execution.description
+  const input = recordOf(execution.input)
   const [verb, activeVerb] = (
     {
       spawn: ["Spawn agent", "Spawning agent"],
@@ -415,11 +416,28 @@ function presentCollaboration(
   )[execution.action]
   const receiver =
     execution.receivers.length === 1 ? execution.receivers[0] : undefined
+  const target =
+    receiver?.path ??
+    stringOf(input?.task_name) ??
+    stringOf(input?.target) ??
+    stringOf(input?.path_prefix)
+  const request =
+    stringOf(input?.message) ??
+    (execution.description === execution.action
+      ? undefined
+      : execution.description)
   return {
     verb,
     activeVerb,
     subject:
-      description === execution.action ? "" : truncateLine(description, 180),
+      execution.receivers.length > 1
+        ? `${execution.receivers.length} agents`
+        : target === undefined
+          ? ""
+          : truncateLine(
+              target.split("/").filter(Boolean).at(-1) ?? target,
+              80,
+            ),
     subjectTone: "text",
     meta:
       execution.receivers.length === 0
@@ -437,6 +455,7 @@ function presentCollaboration(
         }),
     detail: {
       kind: "collaboration",
+      ...(request === undefined ? {} : { request }),
       ...(entry.resultText === undefined ? {} : { text: entry.resultText }),
       receivers: execution.receivers,
     },
