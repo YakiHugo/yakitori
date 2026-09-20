@@ -29,6 +29,7 @@ import { ToolCell } from "./cells/tool-cell.tsx"
 import { TurnTerminalCell } from "./cells/turn-terminal-cell.tsx"
 import { UserMessageCell } from "./cells/user-message-cell.tsx"
 import { ConversationNavigation } from "./conversation-navigation.tsx"
+import { ConversationFind } from "./conversation-find.tsx"
 import { MarkdownView } from "./markdown.tsx"
 import { ResponseActions } from "./response-actions.tsx"
 import {
@@ -181,6 +182,14 @@ export function Transcript({ children }: Readonly<{ children?: ReactNode }>) {
         ref={surfaceRef}
         className="conversation-surface relative flex min-h-0 flex-1"
       >
+        {sessionId ? (
+          <ConversationFind
+            key={sessionId}
+            sessionId={sessionId}
+            contentRef={scroll.contentRef}
+            onJump={scroll.jumpToFindMatch}
+          />
+        ) : null}
         <ScrollArea
           className="min-h-0 min-w-0 flex-1"
           viewportClassName="conversation-transcript-viewport"

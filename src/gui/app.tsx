@@ -1,6 +1,7 @@
-import { GitFork, Info, LoaderCircle, Square } from "lucide-react"
+import { GitFork, Info, LoaderCircle, Search, Square } from "lucide-react"
 import { ApprovalBar } from "./components/approval-bar.tsx"
 import { Composer } from "./components/composer.tsx"
+import { openConversationFind } from "./components/conversation-find.tsx"
 import { QueuedInputs } from "./components/queued-inputs.tsx"
 import { PreferencesEffects } from "./components/preferences-effects.tsx"
 import { SessionSummary } from "./components/session-summary.tsx"
@@ -146,6 +147,15 @@ function SessionHeader() {
         ) : null}
       </div>
       <div className="flex shrink-0 items-center gap-1">
+        <button
+          type="button"
+          aria-label="Find in conversation"
+          title="Find in conversation (⌘F / Ctrl+F)"
+          onClick={openConversationFind}
+          className="shrink-0 rounded-md p-1.5 text-muted-foreground hover:bg-accent"
+        >
+          <Search className="size-4" />
+        </button>
         <SessionSummary />
         <Tooltip>
           <TooltipTrigger asChild>

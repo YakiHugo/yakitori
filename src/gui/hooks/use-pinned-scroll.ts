@@ -84,6 +84,21 @@ export function usePinnedScroll(sessionId?: string) {
     },
     [scrollTo],
   )
+  const jumpToFindMatch = useCallback(
+    (target: Range | HTMLElement) => {
+      const viewport = viewportRef.current
+      if (!viewport) return
+      // Find navigation is immediate: syntax highlighting can replace text
+      // nodes and invalidate a Range during an animated jump.
+      pauseFollowing()
+      viewport.scrollTop +=
+        target.getBoundingClientRect().top -
+        viewport.getBoundingClientRect().top -
+        80
+      onScroll()
+    },
+    [pauseFollowing, onScroll],
+  )
   const onLayoutChange = useCallback(() => {
     const viewport = viewportRef.current
     if (!viewport) return
@@ -226,6 +241,7 @@ export function usePinnedScroll(sessionId?: string) {
     atBottom,
     jumpToBottom,
     jumpToElement,
+    jumpToFindMatch,
     pauseFollowing,
     onLayoutChange,
   }
