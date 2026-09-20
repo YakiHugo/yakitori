@@ -10,6 +10,64 @@ import { SessionConfiguration } from "../../src/runtime/session-configuration.ts
 import { MemoryThreadStore } from "./memory-thread-store.ts"
 
 describe("live Session actor", () => {
+  it("awaits installation listeners before exposing an actor for admission", async () => {
+    const manager = createManager({ run: async () => undefined })
+    const installing = deferred<string>()
+    const attached = deferred<void>()
+    const unsubscribe = manager.subscribeThreadInstalled(async (thread) => {
+      installing.resolve(thread.id)
+      await attached.promise
+    })
+    try {
+      const created = manager.createThread()
+      const threadId = await installing.promise
+      expect(manager.getThread(threadId)).toBeUndefined()
+      expect(manager.residentThreadCount).toBe(0)
+      attached.resolve()
+      const thread = await created
+      expect(manager.getThread(threadId)).toBe(thread)
+      unsubscribe()
+      await manager.closeThread(threadId)
+      expect(await manager.resumeThread(threadId)).not.toBe(thread)
+    } finally {
+      attached.resolve()
+      unsubscribe()
+      await manager.shutdown()
+    }
+  })
+
+  it("preserves stored history and releases an actor when its installation listener fails", async () => {
+    const store = new MemoryThreadStore()
+    let disposed = 0
+    const manager = createManager(
+      {
+        run: async () => undefined,
+        dispose() {
+          disposed += 1
+        },
+      },
+      store,
+    )
+    const thread = await manager.createThread()
+    await manager.closeThread(thread.id)
+    const unsubscribe = manager.subscribeThreadInstalled(async () => {
+      throw new Error("listener attachment failed")
+    })
+    try {
+      await expect(manager.resumeThread(thread.id)).rejects.toThrow(
+        "listener attachment failed",
+      )
+      expect(manager.getThread(thread.id)).toBeUndefined()
+      expect(disposed).toBe(2)
+      expect(await store.readThread(thread.id)).toBeDefined()
+      unsubscribe()
+      expect(await manager.resumeThread(thread.id)).toBeDefined()
+    } finally {
+      unsubscribe()
+      await manager.shutdown()
+    }
+  })
+
   it("an explicit fork of an edited thread remains a separate navigation entry", async () => {
     const store = new MemoryThreadStore()
     const manager = createManager({ run: async () => undefined }, store)

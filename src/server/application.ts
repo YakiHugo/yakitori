@@ -709,10 +709,13 @@ export async function createYakitoriApplication(
     const skillsLoader = createSkillsLoader()
     const handlers = createThreadServerHandlers({
       manager: threadManager,
+      listAgents: (stored) => agentRuntime.listAgents(stored),
       discardThread: (threadId) => agentRuntime.discardThread(threadId),
       store: threadStore,
       eventHub,
       sessionDefaults,
+      onRootTurnCompleted: (event) =>
+        broadcastNotification?.("session/completed", event),
       projectStore: ownedProjectStore,
       resolvePermission: (input) => permissionGate.resolve(input),
       listPendingPermissions: (sessionId) => permissionGate.list(sessionId),

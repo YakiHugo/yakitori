@@ -51,10 +51,12 @@ describe("runtime terminal delivery", () => {
           }),
         })
         const eventHub = createSessionEventHub()
+        const onRootTurnCompleted = vi.fn()
         const handlers = createThreadServerHandlers({
           manager,
           store,
           eventHub,
+          onRootTurnCompleted,
         })
         const processor = new MessageProcessor({ handlers, eventHub })
         const client = openTestConnection(processor)
@@ -124,6 +126,14 @@ describe("runtime terminal delivery", () => {
             },
           ])
           expect(terminal[0]).not.toHaveProperty("seq")
+          if (outcome === "completed") {
+            expect(onRootTurnCompleted).toHaveBeenCalledExactlyOnceWith({
+              sessionId,
+              turnId,
+            })
+          } else {
+            expect(onRootTurnCompleted).not.toHaveBeenCalled()
+          }
           expect(manager.getThread(sessionId)?.status).toBe("idle")
           expect(persistenceErrors).toHaveLength(
             failure === "append and flush" ? 2 : 1,
@@ -174,6 +184,63 @@ describe("runtime terminal delivery", () => {
       })
     }
   }
+
+  it("does not publish root completion notifications for successful subagent Turns", async () => {
+    const store = new MemoryThreadStore()
+    const manager = new ThreadManager({
+      store,
+      createTurnProcessor: () => ({
+        prepare: prepareTurn,
+        start: () => ({ completion: Promise.resolve(), abort() {} }),
+      }),
+    })
+    const eventHub = createSessionEventHub()
+    const onRootTurnCompleted = vi.fn()
+    const handlers = createThreadServerHandlers({
+      manager,
+      store,
+      eventHub,
+      onRootTurnCompleted,
+    })
+    const processor = new MessageProcessor({ handlers, eventHub })
+    const client = openTestConnection(processor)
+    try {
+      await initializeConnection(client)
+      const created = await handlers.createSession({
+        metadata: {
+          agent: {
+            kind: "subagent",
+            rootThreadId: "root",
+            path: "/root/child",
+          },
+        },
+      })
+      if (!created.ok) throw new Error(created.body.error.message)
+      const sessionId = created.body.session.id
+      await client.sendRequest("session/subscribe", { sessionId })
+      await client.waitForFrame(
+        (frame) =>
+          "method" in frame && frame.method === "session/replayComplete",
+      )
+      const admitted = await handlers.admitInput({
+        sessionId,
+        requestId: "child_request",
+        content: { kind: "text", text: "Child task" },
+      })
+      if (!admitted.ok) throw new Error(admitted.body.error.message)
+      await client.waitForFrame(
+        (frame) =>
+          "method" in frame &&
+          frame.method === "session/transient" &&
+          (frame.params as LiveSessionEvent).type === "turn.finished",
+      )
+      expect(onRootTurnCompleted).not.toHaveBeenCalled()
+    } finally {
+      await manager.shutdown()
+      await handlers.close()
+      await processor.closeConnection(client.id)
+    }
+  })
 
   it("delivers runtime finish and an error when history reads keep failing", async () => {
     const store = new MemoryThreadStore()

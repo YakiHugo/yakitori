@@ -37,6 +37,7 @@ import {
 } from "../kernel/index.ts"
 import { createCoalescingDeltaPublisher } from "../runtime/live-events.ts"
 import type { SkillMetadata } from "../runtime/skills.ts"
+import type { AgentSummary } from "../runtime/agent-control.ts"
 import type { SessionTitleGenerator } from "./session-title.ts"
 import type {
   RuntimePermissionReason,
@@ -57,6 +58,7 @@ import {
   ApiErrorCode,
   type ApiForkSessionResponse,
   type ApiHandlerResult,
+  type ApiListAgentsResponse,
   type ApiListSessionsResponse,
   type ApiListSkillsResponse,
   type ApiReadSessionEventsResponse,
@@ -68,6 +70,7 @@ import {
   type ApiSessionSummary,
 } from "./protocol.ts"
 import type { ProjectStore } from "./sqlite-project-store.ts"
+import type { SessionCompletedNotification } from "./rpc/methods.ts"
 
 // Input payload allocation boundary for local RPC commands, independent of
 // model context capacity. Retains the existing 256 KiB admission bound.
@@ -83,6 +86,9 @@ export type ThreadServerHandlerOptions = {
   readonly manager: ThreadManager
   readonly discardThread?: (threadId: string) => Promise<void>
   readonly store: ThreadStore
+  readonly listAgents?: (
+    stored: StoredThread,
+  ) => Promise<readonly AgentSummary[]>
   readonly eventHub?: {
     publishDurable(events: readonly StoredEventEnvelope[]): void
     publishTransient(
@@ -116,9 +122,11 @@ export type ThreadServerHandlerOptions = {
   // Enables projectId on session create/list and orphan suppression on reads.
   readonly projectStore?: ProjectStore
   readonly reportOperationalFailure?: OperationalFailureReporter
+  readonly onRootTurnCompleted?: (event: SessionCompletedNotification) => void
 }
 
 export type ServerHandlers = {
+  listAgents(input: unknown): Promise<ApiHandlerResult<ApiListAgentsResponse>>
   readSidebar(): Promise<ApiHandlerResult<SessionSidebar>>
   updateSidebar(input: unknown): Promise<ApiHandlerResult<SessionSidebar>>
   createSession(
@@ -172,8 +180,8 @@ export function createThreadServerHandlers(
 ): ThreadServerHandlers {
   const reporter =
     options.reportOperationalFailure ?? consoleOperationalFailureReporter
-  const pumps = new Map<string, Promise<void>>()
-  const pumpReady = new Map<string, Promise<void>>()
+  const pumps = new Map<AgentThread, Promise<void>>()
+  const pumpReady = new Map<AgentThread, Promise<void>>()
   const publishedThrough = new Map<string, number>()
   const admissionTails = new Map<string, Promise<void>>()
   let closing = false
@@ -203,12 +211,17 @@ export function createThreadServerHandlers(
 
   async function ensureEventPump(thread: AgentThread): Promise<void> {
     if (closing) throw new Error("Server handlers are shutting down.")
-    const existing = pumpReady.get(thread.id)
+    const existing = pumpReady.get(thread)
     if (existing !== undefined) {
       await existing
       return
     }
     const ready = (async () => {
+      // An evicted actor can still be draining its final events when its
+      // replacement is installed. Preserve delivery order across generations.
+      for (const [previous, pump] of pumps) {
+        if (previous.id === thread.id) await pump
+      }
       const stored = await options.store.readThread(thread.id)
       if (!publishedThrough.has(thread.id)) {
         publishedThrough.set(
@@ -329,6 +342,29 @@ export function createThreadServerHandlers(
                     : { status: "completed" },
               createdAt: new Date().toISOString(),
             })
+            if (event.type === "turn.completed") {
+              const snapshot = thread.snapshot()
+              const agent = snapshot.metadata.metadata?.agent
+              const subagent =
+                typeof agent === "object" &&
+                agent !== null &&
+                !Array.isArray(agent) &&
+                "kind" in agent &&
+                agent.kind === "subagent"
+              if (
+                !subagent &&
+                (snapshot.activeTurnId === undefined ||
+                  snapshot.activeTurnId === event.input.submissionId)
+              ) {
+                options.onRootTurnCompleted?.({
+                  sessionId: event.threadId,
+                  turnId: event.input.submissionId,
+                  ...(snapshot.metadata.title === undefined
+                    ? {}
+                    : { title: snapshot.metadata.title }),
+                })
+              }
+            }
             continue
           }
           if (event.type === "session.error") {
@@ -372,16 +408,16 @@ export function createThreadServerHandlers(
           })
         })
         .finally(() => {
-          pumps.delete(thread.id)
-          pumpReady.delete(thread.id)
+          pumps.delete(thread)
+          pumpReady.delete(thread)
         })
-      pumps.set(thread.id, pump)
+      pumps.set(thread, pump)
     })()
-    pumpReady.set(thread.id, ready)
+    pumpReady.set(thread, ready)
     try {
       await ready
     } catch (error) {
-      pumpReady.delete(thread.id)
+      pumpReady.delete(thread)
       throw error
     }
   }
@@ -418,9 +454,13 @@ export function createThreadServerHandlers(
     }
   }
 
+  const unsubscribeThreadInstalled =
+    options.manager.subscribeThreadInstalled(ensureEventPump)
+
   return {
     async close() {
       closing = true
+      unsubscribeThreadInstalled()
       stopPumps?.()
       await Promise.allSettled([...admissionTails.values()])
       await Promise.allSettled([...pumpReady.values()])
@@ -650,19 +690,34 @@ export function createThreadServerHandlers(
     async readSession(input) {
       try {
         const { sessionId } = requireReadSessionRequest(input)
+        const live = options.manager.getThread(sessionId)
+        // Spawned children bypass handler admission. Attach their one event
+        // consumer before the subscription snapshot establishes its watermark.
+        if (live !== undefined) await ensureEventPump(live)
         const stored = await options.store.readThread(sessionId)
         if (stored === undefined) {
           throw notFound(`Session ${sessionId} was not found.`, { sessionId })
         }
         return ok(200, {
-          session: await mapStoredThread(
-            stored,
-            options.manager.getThread(sessionId),
-            options,
-          ),
+          session: await mapStoredThread(stored, live, options),
         })
       } catch (error) {
         return fail(error, reporter, "read-session")
+      }
+    },
+
+    async listAgents(input) {
+      try {
+        const { sessionId } = requireReadSessionRequest(input)
+        const stored = await options.store.readThread(sessionId)
+        if (stored === undefined) {
+          throw notFound(`Session ${sessionId} was not found.`, { sessionId })
+        }
+        return ok(200, {
+          agents: (await options.listAgents?.(stored)) ?? [],
+        })
+      } catch (error) {
+        return fail(error, reporter, "list-agents")
       }
     },
 

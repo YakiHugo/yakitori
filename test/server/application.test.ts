@@ -26,9 +26,12 @@ import {
 import {
   ApiErrorCode,
   type ApiHandlerResult,
+  type ApiListAgentsResponse,
+  type ApiListSessionsResponse,
   type ApiListProvidersResponse,
 } from "../../src/server/protocol.ts"
 import type { ConfigurationSnapshot } from "../../src/server/user-config.ts"
+import { deferred } from "./rpc/testkit.ts"
 
 async function listen(server: HttpServer): Promise<string> {
   await new Promise<void>((resolve) => {
@@ -145,6 +148,110 @@ describe("application composition", () => {
     }
   })
 
+  it("broadcasts successful background completions without replaying them to later subscribers", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const application = await createYakitoriApplication({
+        ...testApplicationOptions({ rootDir, workspace }),
+        stream: createFauxProvider([
+          { content: [{ type: "text", text: "Task finished" }] },
+        ]).stream,
+      })
+      const server = application.createHttpServer()
+      const baseUrl = await listen(server)
+      const socket = new WebSocket(`${baseUrl.replace(/^http/, "ws")}/rpc`)
+      const frames: {
+        id?: number
+        method?: string
+        params?: unknown
+        result?: unknown
+      }[] = []
+      socket.on("message", (data) => frames.push(JSON.parse(data.toString())))
+      try {
+        await new Promise<void>((resolve, reject) => {
+          socket.once("open", resolve)
+          socket.once("error", reject)
+        })
+        socket.send(
+          JSON.stringify({
+            id: 1,
+            method: "initialize",
+            params: {
+              clientInfo: { name: "completion-test", version: "0.0.0" },
+            },
+          }),
+        )
+        await vi.waitFor(() =>
+          expect(frames.find((frame) => frame.id === 1)).toHaveProperty(
+            "result",
+          ),
+        )
+
+        const created = await application.handlers.createSession({
+          title: "Background task",
+        })
+        expectOk(created)
+        const sessionId = created.body.session.id
+        const input = {
+          sessionId,
+          requestId: "request_completion",
+          content: { kind: "text" as const, text: "Finish the task" },
+        }
+        expectOk(await application.handlers.admitInput(input))
+        await vi.waitFor(() => {
+          expect(
+            frames.filter((frame) => frame.method === "session/completed"),
+          ).toEqual([
+            {
+              method: "session/completed",
+              params: {
+                sessionId,
+                turnId: "request_completion",
+                title: "Background task",
+              },
+            },
+          ])
+        })
+
+        // The client never subscribed to this Session while the Turn ran.
+        expect(frames.some((frame) => frame.method === "session/event")).toBe(
+          false,
+        )
+        frames.length = 0
+        socket.send(
+          JSON.stringify({
+            id: 2,
+            method: "session/subscribe",
+            params: { sessionId, after: 0 },
+          }),
+        )
+        await vi.waitFor(() =>
+          expect(
+            frames.some((frame) => frame.method === "session/replayComplete"),
+          ).toBe(true),
+        )
+        expect(
+          frames.filter((frame) => frame.method === "session/event"),
+        ).not.toHaveLength(0)
+        expect(
+          frames.filter((frame) => frame.method === "session/completed"),
+        ).toEqual([])
+
+        expectOk(await application.handlers.admitInput(input))
+        await waitForThreadIdle(application, sessionId)
+        expect(
+          frames.filter((frame) => frame.method === "session/completed"),
+        ).toEqual([])
+      } finally {
+        await new Promise<void>((resolve) => {
+          socket.once("close", resolve)
+          socket.close()
+        })
+        await closeServer(server)
+        await application.close()
+      }
+    })
+  })
+
   it("creates the workspace default project once across restarts", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const application = await createYakitoriApplication(
@@ -166,6 +273,547 @@ describe("application composition", () => {
         const secondPage = await restarted.projectStore.listProjects()
         expect(secondPage.projects).toEqual(firstPage.projects)
       } finally {
+        await restarted.close()
+      }
+    })
+  })
+
+  it("lists only the current root's agents over RPC with live and stored status", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const childMayFinish = deferred<void>()
+      const options = testApplicationOptions({ rootDir, workspace })
+      const application = await createYakitoriApplication({
+        ...options,
+        stream: async function* (request) {
+          const isChild = request.messages.some(
+            (message) =>
+              message.role === "user" &&
+              message.content.some((block) => block.text === "inspect child"),
+          )
+          if (isChild) await childMayFinish.promise
+          const hasToolResult = request.messages.some(
+            (message) => message.role === "tool",
+          )
+          yield {
+            type: "response",
+            response:
+              isChild || hasToolResult
+                ? {
+                    stopReason: ModelStopReason.EndTurn,
+                    content: [
+                      {
+                        type: "text",
+                        text: isChild ? "child findings" : "parent finished",
+                      },
+                    ],
+                  }
+                : {
+                    stopReason: ModelStopReason.ToolUse,
+                    content: [
+                      {
+                        type: "tool_call",
+                        id: "tool_spawn_listing",
+                        name: "spawn_agent",
+                        input: {
+                          task_name: "survey",
+                          message: "inspect child",
+                        },
+                      },
+                    ],
+                  },
+          }
+        },
+      })
+      const server = application.createHttpServer()
+      const baseUrl = await listen(server)
+      let rootThreadId = ""
+      let childThreadId = ""
+      try {
+        const created = await application.handlers.createSession()
+        expectOk(created)
+        rootThreadId = created.body.session.id
+        const other = await application.handlers.createSession()
+        expectOk(other)
+        const admitted = await application.handlers.admitInput({
+          sessionId: rootThreadId,
+          requestId: "request_agent_listing",
+          content: { kind: "text", text: "delegate" },
+        })
+        expectOk(admitted)
+        await waitForThreadIdle(application, rootThreadId)
+
+        await vi.waitFor(async () => {
+          const listed = await rpcRequest<ApiListAgentsResponse>(
+            baseUrl,
+            "agent/list",
+            { sessionId: rootThreadId },
+          )
+          expect(listed.agents).toEqual([
+            {
+              agentId: expect.any(String),
+              taskName: "survey",
+              path: "/root/survey",
+              parentPath: "/root",
+              status: "running",
+            },
+          ])
+          childThreadId = listed.agents[0]?.agentId ?? ""
+        })
+        const listRoots = await rpcRequest<ApiListSessionsResponse>(
+          baseUrl,
+          "session/list",
+          {},
+        )
+        expect(listRoots.sessions.map((session) => session.id).sort()).toEqual(
+          [rootThreadId, other.body.session.id].sort(),
+        )
+        expect(
+          await rpcRequest(baseUrl, "agent/list", {
+            sessionId: other.body.session.id,
+          }),
+        ).toEqual({ agents: [] })
+        expect(
+          await rpcRequest(baseUrl, "agent/list", { sessionId: childThreadId }),
+        ).toEqual(
+          await rpcRequest(baseUrl, "agent/list", { sessionId: rootThreadId }),
+        )
+        await expect(
+          rpcRequest(baseUrl, "agent/list", { sessionId: "" }),
+        ).rejects.toThrow()
+        await expect(
+          rpcRequest(baseUrl, "agent/list", {
+            sessionId: "session_00000000-0000-4000-8000-000000000000",
+          }),
+        ).rejects.toThrow("was not found")
+
+        childMayFinish.resolve()
+        await vi.waitFor(async () => {
+          const listed = await rpcRequest<ApiListAgentsResponse>(
+            baseUrl,
+            "agent/list",
+            { sessionId: rootThreadId },
+          )
+          expect(listed.agents[0]?.status).toEqual({
+            completed: "child findings",
+          })
+        })
+      } finally {
+        childMayFinish.resolve()
+        await new Promise<void>((resolve) => server.close(() => resolve()))
+        await application.close()
+      }
+
+      const restarted = await createYakitoriApplication(options)
+      try {
+        const before = await restarted.threadStore.readThread(rootThreadId)
+        const listed = await restarted.handlers.listAgents({
+          sessionId: rootThreadId,
+        })
+        expectOk(listed)
+        expect(listed.body.agents).toEqual([
+          {
+            agentId: childThreadId,
+            taskName: "survey",
+            path: "/root/survey",
+            parentPath: "/root",
+            status: { completed: "child findings" },
+          },
+        ])
+        expect(restarted.threadManager.residentThreadCount).toBe(0)
+        expect(await restarted.threadStore.readThread(rootThreadId)).toEqual(
+          before,
+        )
+      } finally {
+        await restarted.close()
+      }
+    })
+  })
+
+  it("streams a spawned child after subscribing without replacing the root subscription", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const childMayFinish = deferred<void>()
+      const application = await createYakitoriApplication({
+        ...testApplicationOptions({ rootDir, workspace }),
+        stream: async function* (request) {
+          const isChild = request.messages.some(
+            (message) =>
+              message.role === "user" &&
+              message.content.some((block) => block.text === "child task"),
+          )
+          if (isChild) {
+            yield { type: "snapshot", text: "child " }
+            await childMayFinish.promise
+            yield { type: "snapshot", text: "child live answer" }
+          }
+          const hasToolResult = request.messages.some(
+            (message) => message.role === "tool",
+          )
+          yield {
+            type: "response",
+            response:
+              isChild || hasToolResult
+                ? {
+                    stopReason: ModelStopReason.EndTurn,
+                    content: [
+                      {
+                        type: "text",
+                        text: isChild ? "child live answer" : "root answer",
+                      },
+                    ],
+                  }
+                : {
+                    stopReason: ModelStopReason.ToolUse,
+                    content: [
+                      {
+                        type: "tool_call",
+                        id: "tool_spawn_live",
+                        name: "spawn_agent",
+                        input: { task_name: "live", message: "child task" },
+                      },
+                    ],
+                  },
+          }
+        },
+      })
+      const server = application.createHttpServer()
+      const baseUrl = await listen(server)
+      const socket = new WebSocket(`${baseUrl.replace(/^http/, "ws")}/rpc`)
+      const frames: {
+        id?: number
+        method?: string
+        params?: unknown
+        result?: unknown
+      }[] = []
+      socket.on("message", (data) => frames.push(JSON.parse(data.toString())))
+      let nextId = 0
+      const send = async (method: string, params: unknown) => {
+        const id = ++nextId
+        socket.send(JSON.stringify({ id, method, params }))
+        await vi.waitFor(() =>
+          expect(frames.find((frame) => frame.id === id)).toHaveProperty(
+            "result",
+          ),
+        )
+      }
+      const subscribe = async (sessionId: string) => {
+        await send("session/subscribe", { sessionId })
+        await vi.waitFor(() =>
+          expect(frames).toContainEqual({
+            method: "session/replayComplete",
+            params: expect.objectContaining({ sessionId }),
+          }),
+        )
+      }
+      try {
+        await new Promise<void>((resolve, reject) => {
+          socket.once("open", resolve)
+          socket.once("error", reject)
+        })
+        await send("initialize", {
+          clientInfo: { name: "child-stream-test", version: "0.0.0" },
+        })
+        const created = await application.handlers.createSession()
+        expectOk(created)
+        const rootSessionId = created.body.session.id
+        await subscribe(rootSessionId)
+        expectOk(
+          await application.handlers.admitInput({
+            sessionId: rootSessionId,
+            requestId: "request_live_spawn",
+            content: { kind: "text", text: "delegate" },
+          }),
+        )
+        await waitForThreadIdle(application, rootSessionId)
+        const listed = await application.handlers.listAgents({
+          sessionId: rootSessionId,
+        })
+        expectOk(listed)
+        const childSessionId = listed.body.agents[0]?.agentId
+        if (childSessionId === undefined)
+          throw new Error("Child was not spawned.")
+        await subscribe(childSessionId)
+        frames.length = 0
+        childMayFinish.resolve()
+        await vi.waitFor(() =>
+          expect(frames).toContainEqual({
+            method: "session/transient",
+            params: expect.objectContaining({
+              type: "turn.finished",
+              sessionId: childSessionId,
+              outcome: { status: "completed" },
+            }),
+          }),
+        )
+        expect(frames).toContainEqual({
+          method: "session/event",
+          params: expect.objectContaining({
+            sessionId: childSessionId,
+            event: expect.objectContaining({
+              type: "item.completed",
+              data: expect.objectContaining({
+                item: expect.objectContaining({
+                  type: "agent_message",
+                  content: [{ type: "text", text: "child live answer" }],
+                }),
+              }),
+            }),
+          }),
+        })
+        expect(frames).toContainEqual({
+          method: "session/transient",
+          params: expect.objectContaining({
+            sessionId: childSessionId,
+            type: "assistant.delta",
+            delta: "live answer",
+          }),
+        })
+
+        expectOk(
+          await application.handlers.admitInput({
+            sessionId: rootSessionId,
+            requestId: "request_root_still_subscribed",
+            content: { kind: "text", text: "continue" },
+          }),
+        )
+        await vi.waitFor(() =>
+          expect(frames).toContainEqual({
+            method: "session/transient",
+            params: expect.objectContaining({
+              type: "turn.finished",
+              sessionId: rootSessionId,
+              turnId: "request_root_still_subscribed",
+              outcome: { status: "completed" },
+            }),
+          }),
+        )
+      } finally {
+        childMayFinish.resolve()
+        await new Promise<void>((resolve) => {
+          socket.once("close", resolve)
+          socket.close()
+        })
+        await closeServer(server)
+        await application.close()
+      }
+    })
+  })
+
+  it("keeps a stored child subscription live when runtime followup installs and reinstalls its actor", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const options = testApplicationOptions({ rootDir, workspace })
+      const first = await createYakitoriApplication({
+        ...options,
+        stream: async function* (request) {
+          const child = request.messages.some(
+            (message) =>
+              message.role === "user" &&
+              message.content.some((block) => block.text === "initial child"),
+          )
+          yield {
+            type: "response",
+            response:
+              child ||
+              request.messages.some((message) => message.role === "tool")
+                ? {
+                    stopReason: ModelStopReason.EndTurn,
+                    content: [{ type: "text", text: "initial result" }],
+                  }
+                : {
+                    stopReason: ModelStopReason.ToolUse,
+                    content: [
+                      {
+                        type: "tool_call",
+                        id: "tool_spawn_observer",
+                        name: "spawn_agent",
+                        input: {
+                          task_name: "observer",
+                          message: "initial child",
+                        },
+                      },
+                    ],
+                  },
+          }
+        },
+      })
+      let rootSessionId = ""
+      let childSessionId = ""
+      try {
+        const created = await first.handlers.createSession()
+        expectOk(created)
+        rootSessionId = created.body.session.id
+        expectOk(
+          await first.handlers.admitInput({
+            sessionId: rootSessionId,
+            requestId: "request_spawn_observer",
+            content: { kind: "text", text: "delegate" },
+          }),
+        )
+        await waitForThreadIdle(first, rootSessionId)
+        await vi.waitFor(async () => {
+          const listed = await first.handlers.listAgents({
+            sessionId: rootSessionId,
+          })
+          expectOk(listed)
+          expect(listed.body.agents[0]?.status).toEqual({
+            completed: "initial result",
+          })
+          childSessionId = listed.body.agents[0]?.agentId ?? ""
+        })
+      } finally {
+        await first.close()
+      }
+
+      let mayFinish = deferred<void>()
+      let needsFollowup = true
+      let turn = 1
+      const restarted = await createYakitoriApplication({
+        ...options,
+        stream: async function* (request) {
+          const child = request.messages.some(
+            (message) =>
+              message.role === "user" &&
+              message.content.some((block) => block.text === "resume child"),
+          )
+          if (child) {
+            yield { type: "snapshot", text: `live followup ${turn}` }
+            await mayFinish.promise
+          }
+          const followup = !child && needsFollowup
+          if (followup) needsFollowup = false
+          yield {
+            type: "response",
+            response: followup
+              ? {
+                  stopReason: ModelStopReason.ToolUse,
+                  content: [
+                    {
+                      type: "tool_call",
+                      id: `tool_followup_${turn}`,
+                      name: "followup_task",
+                      input: { target: "observer", message: "resume child" },
+                    },
+                  ],
+                }
+              : {
+                  stopReason: ModelStopReason.EndTurn,
+                  content: [
+                    {
+                      type: "text",
+                      text: child ? `final followup ${turn}` : "root finished",
+                    },
+                  ],
+                },
+          }
+        },
+      })
+      const server = restarted.createHttpServer()
+      const baseUrl = await listen(server)
+      const socket = new WebSocket(`${baseUrl.replace(/^http/, "ws")}/rpc`)
+      const frames: {
+        id?: number
+        method?: string
+        params?: unknown
+        result?: unknown
+      }[] = []
+      socket.on("message", (data) => frames.push(JSON.parse(data.toString())))
+      try {
+        await new Promise<void>((resolve, reject) => {
+          socket.once("open", resolve)
+          socket.once("error", reject)
+        })
+        socket.send(
+          JSON.stringify({
+            id: 1,
+            method: "initialize",
+            params: {
+              clientInfo: { name: "resumed-child-test", version: "0.0.0" },
+            },
+          }),
+        )
+        await vi.waitFor(() =>
+          expect(frames.find((frame) => frame.id === 1)).toHaveProperty(
+            "result",
+          ),
+        )
+        socket.send(
+          JSON.stringify({
+            id: 2,
+            method: "session/subscribe",
+            params: { sessionId: childSessionId },
+          }),
+        )
+        await vi.waitFor(() =>
+          expect(frames).toContainEqual({
+            method: "session/replayComplete",
+            params: expect.objectContaining({ sessionId: childSessionId }),
+          }),
+        )
+        expect(restarted.threadManager.residentThreadCount).toBe(0)
+
+        for (turn = 1; turn <= 2; turn += 1) {
+          frames.length = 0
+          needsFollowup = true
+          mayFinish = deferred<void>()
+          expectOk(
+            await restarted.handlers.admitInput({
+              sessionId: rootSessionId,
+              requestId: `request_resume_child_${turn}`,
+              content: { kind: "text", text: "resume observer" },
+            }),
+          )
+          await vi.waitFor(() =>
+            expect(frames).toContainEqual({
+              method: "session/transient",
+              params: expect.objectContaining({
+                sessionId: childSessionId,
+                type: "assistant.delta",
+                delta: `live followup ${turn}`,
+              }),
+            }),
+          )
+          mayFinish.resolve()
+          await vi.waitFor(() =>
+            expect(frames).toContainEqual({
+              method: "session/transient",
+              params: expect.objectContaining({
+                sessionId: childSessionId,
+                type: "turn.finished",
+                outcome: { status: "completed" },
+              }),
+            }),
+          )
+          expect(frames).toContainEqual({
+            method: "session/event",
+            params: expect.objectContaining({
+              sessionId: childSessionId,
+              event: expect.objectContaining({
+                type: "item.completed",
+                data: expect.objectContaining({
+                  item: expect.objectContaining({
+                    type: "agent_message",
+                    content: [{ type: "text", text: `final followup ${turn}` }],
+                  }),
+                }),
+              }),
+            }),
+          })
+          await waitForThreadIdle(restarted, rootSessionId)
+          expectOk(
+            await restarted.handlers.closeSession({
+              sessionId: childSessionId,
+            }),
+          )
+          expect(
+            restarted.threadManager.getThread(childSessionId),
+          ).toBeUndefined()
+        }
+      } finally {
+        mayFinish.resolve()
+        await new Promise<void>((resolve) => {
+          socket.once("close", resolve)
+          socket.close()
+        })
+        await closeServer(server)
         await restarted.close()
       }
     })
