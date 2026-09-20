@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { type RefObject, useLayoutEffect, useState } from "react"
 import type { ExecutionEntry } from "../execution-view.ts"
 
 function previewText(text: string): string {
@@ -12,12 +12,43 @@ export function ConversationNavigation({
   entries,
   visibleInputs,
   onJump,
+  viewportRef,
+  contentRef,
 }: Readonly<{
   entries: readonly ExecutionEntry[]
   visibleInputs: ReadonlySet<string>
   onJump(inputId: string): void
+  viewportRef: RefObject<HTMLDivElement | null>
+  contentRef: RefObject<HTMLDivElement | null>
 }>) {
   const [hovered, setHovered] = useState<number>()
+  const [hasRoom, setHasRoom] = useState(false)
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current
+    const content = contentRef.current
+    if (!viewport || !content) return
+    const measure = () => {
+      const bounds = viewport.getBoundingClientRect()
+      const scale =
+        viewport.offsetWidth > 0 ? bounds.width / viewport.offsetWidth : 1
+      // Like Codex, use the existing centered margin; never reserve body space
+      // for the rail. Normalize transforms to measure the 48px in layout units.
+      const room =
+        (content.getBoundingClientRect().left - bounds.left) /
+        (scale > 0 ? scale : 1)
+      setHasRoom(room >= 48)
+      if (room < 48) setHovered(undefined)
+    }
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(viewport)
+    observer.observe(content)
+    window.addEventListener("resize", measure)
+    return () => {
+      observer.disconnect()
+      window.removeEventListener("resize", measure)
+    }
+  }, [viewportRef, contentRef])
   const messages: { id: string; text: string; response: string }[] = []
   for (const entry of entries) {
     if (entry.kind === "user_input")
@@ -27,7 +58,7 @@ export function ConversationNavigation({
       if (message) message.response = entry.text
     }
   }
-  if (messages.length < 2) return null
+  if (!hasRoom || messages.length < 2) return null
   return (
     <nav
       aria-label="Conversation messages"

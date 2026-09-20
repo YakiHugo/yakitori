@@ -1,10 +1,12 @@
-import { isValidElement, useEffect, useMemo, useState } from "react"
 import type { MouseEvent, ReactNode } from "react"
-import Markdown from "react-markdown"
+import { isValidElement, useEffect, useMemo, useState } from "react"
 import type { Components } from "react-markdown"
+import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import type { HighlighterCore } from "shiki/core"
 import { openFileTarget, openUrlTarget } from "../lib/open-resource.ts"
+import { useWorkspaceStore } from "../store/workspace-store.ts"
+import { CopyIconButton } from "./response-actions.tsx"
 
 // Canonical shiki grammars bundled for fenced code blocks; anything else
 // falls back to plain rendering. Each entry is its own lazy module.
@@ -204,15 +206,21 @@ function FencedCode({
     highlighted?.code === code && highlighted.language === normalized
       ? highlighted.html
       : undefined
-  if (html === undefined) {
-    return (
-      <pre>
-        <code>{code}</code>
-      </pre>
-    )
-  }
-  // biome-ignore lint/security/noDangerouslySetInnerHtml: shiki escapes the code text when generating this markup.
-  return <div dangerouslySetInnerHTML={{ __html: html }} />
+  return (
+    <div className="group/code relative min-w-0">
+      <div className="absolute top-2 right-2 z-10 rounded-md bg-background/90 text-xs text-muted-foreground opacity-0 transition-opacity group-hover/code:opacity-100 focus-within:opacity-100">
+        <CopyIconButton text={code} label="code" />
+      </div>
+      {html === undefined ? (
+        <pre>
+          <code>{code}</code>
+        </pre>
+      ) : (
+        // biome-ignore lint/security/noDangerouslySetInnerHtml: shiki escapes the code text when generating this markup.
+        <div dangerouslySetInnerHTML={{ __html: html }} />
+      )}
+    </div>
+  )
 }
 
 function MarkdownPre({ children }: { readonly children?: ReactNode }) {
@@ -259,7 +267,9 @@ function MarkdownLink({
         href={href}
         onClick={(event: MouseEvent) => {
           event.preventDefault()
-          void openUrlTarget({ kind: "url", url: href })
+          if (event.metaKey || event.ctrlKey)
+            void openUrlTarget({ kind: "url", url: href })
+          else useWorkspaceStore.getState().openBrowser(href)
         }}
       >
         {children}
@@ -290,6 +300,22 @@ function MarkdownLink({
       onClick={(event: MouseEvent) => {
         event.preventDefault()
         setOpenError(undefined)
+        if (!event.metaKey && !event.ctrlKey) {
+          if (file.path.startsWith("/")) {
+            const separator = file.path.lastIndexOf("/")
+            useWorkspaceStore
+              .getState()
+              .openFile(
+                file.path.slice(separator + 1),
+                file.path.slice(0, separator) || "/",
+              )
+            return
+          }
+          if (workspaceRoot) {
+            useWorkspaceStore.getState().openFile(file.path, workspaceRoot)
+            return
+          }
+        }
         void openFileTarget(
           {
             kind: "file",

@@ -1,3 +1,4 @@
+import type { ContextExcerpt } from "../kernel/input-context.ts"
 import {
   type ImageAttachment,
   isKernelEvent,
@@ -19,6 +20,7 @@ import type {
 export type ExecutionEntry =
   | {
       readonly kind: "user_input"
+      readonly contextAttachments?: readonly ContextExcerpt[]
       readonly inputId: string
       readonly text: string
       readonly attachments?: readonly ImageAttachment[]
@@ -611,6 +613,12 @@ function applyDurable(
                   inputId: event.data.inputId,
                   text: event.data.content.text,
                   attachments: event.data.content.attachments ?? [],
+                  ...(event.data.content.contextAttachments === undefined
+                    ? {}
+                    : {
+                        contextAttachments:
+                          event.data.content.contextAttachments,
+                      }),
                   at: event.createdAt,
                 },
               ]

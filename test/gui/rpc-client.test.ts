@@ -99,6 +99,42 @@ afterEach(() => {
 })
 
 describe("app RPC client", () => {
+  it("delivers side-chat snapshots and requests a refetch after reconnection", async () => {
+    vi.useFakeTimers()
+    const client = createAppRpcClient({ apiBase: "http://api.test" })
+    const changes = vi.fn()
+    const unsubscribe = client.subscribeToSideChatChanges(changes)
+    const pending = client.request("sideChat/create", {})
+    const socket = completeHandshake(FakeWebSocket.instances[0])
+    await flushMicrotasks()
+    const sideChat = {
+      id: "side",
+      revision: 0,
+      cwd: "/workspace",
+      modelSelection: { provider: "faux", model: "scripted" },
+      messages: [],
+    }
+    socket.emitMessage({ id: 1, result: sideChat })
+    await pending
+    socket.emitMessage({
+      method: "sideChat/changed",
+      params: { sideChat: { ...sideChat, revision: 1 } },
+    })
+    expect(changes).toHaveBeenCalledWith({ ...sideChat, revision: 1 })
+    socket.emitClose()
+    await vi.advanceTimersByTimeAsync(250)
+    completeHandshake(FakeWebSocket.instances[1])
+    expect(changes).toHaveBeenLastCalledWith(undefined)
+    unsubscribe()
+    changes.mockClear()
+    FakeWebSocket.instances[1]?.emitMessage({
+      method: "sideChat/changed",
+      params: { sideChat },
+    })
+    expect(changes).not.toHaveBeenCalled()
+    client.close()
+  })
+
   it("derives the WebSocket URL from the api base", async () => {
     const client = createAppRpcClient({ apiBase: "https://api.test:8443/base" })
     const pending = client.request("provider/list", {})

@@ -2,6 +2,7 @@ import packageJson from "../../../package.json" with { type: "json" }
 import type { StoredEventEnvelope } from "../../kernel/index.ts"
 import type { LiveSessionEvent } from "../../runtime/live-events.ts"
 import type { ApiErrorCode } from "../../server/protocol.ts"
+import type { SideChatSnapshot } from "../../server/side-chat.ts"
 import type {
   ProjectChangedNotification,
   RpcMethodParams,
@@ -61,6 +62,9 @@ type AppMethod = Exclude<
 >
 
 export type AppRpcClient = {
+  subscribeToSideChatChanges(
+    listener: (snapshot: SideChatSnapshot | undefined) => void,
+  ): () => void
   request<M extends AppMethod>(
     method: M,
     params: RpcMethodParams[M],
@@ -146,6 +150,9 @@ export function createAppRpcClient(options: {
   const sessionActivityListeners = new Set<
     (activeSessionIds: readonly string[] | undefined) => void
   >()
+  const sideChatListeners = new Set<
+    (snapshot: SideChatSnapshot | undefined) => void
+  >()
 
   function send(frame: unknown): void {
     socket?.send(JSON.stringify(frame))
@@ -209,6 +216,7 @@ export function createAppRpcClient(options: {
         if (initializedOnce) {
           for (const listener of sidebarChangeListeners) listener({})
           for (const listener of sessionActivityListeners) listener(undefined)
+          for (const listener of sideChatListeners) listener(undefined)
         }
         initializedOnce = true
         resolve()
@@ -312,6 +320,11 @@ export function createAppRpcClient(options: {
   }
 
   function onNotification(message: { method: string; params?: unknown }): void {
+    if (message.method === "sideChat/changed") {
+      const params = message.params as { sideChat: SideChatSnapshot }
+      for (const listener of sideChatListeners) listener(params.sideChat)
+      return
+    }
     if (message.method === "session/event") {
       const params = message.params as SessionEventNotification
       const record = streams.get(params.sessionId)
@@ -439,6 +452,12 @@ export function createAppRpcClient(options: {
       sessionActivityListeners.add(listener)
       return () => {
         sessionActivityListeners.delete(listener)
+      }
+    },
+    subscribeToSideChatChanges(listener) {
+      sideChatListeners.add(listener)
+      return () => {
+        sideChatListeners.delete(listener)
       }
     },
     openSessionStream(sessionId, after, handlers) {

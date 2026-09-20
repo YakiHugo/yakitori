@@ -7,6 +7,44 @@ import {
 } from "../../src/gui/admission-outbox.ts"
 
 describe("admission outbox", () => {
+  it("retries the same structured context and reserves a new input after an annotation changes", async () => {
+    const storage = createMemoryStorage()
+    const annotation = {
+      id: "annotation-1",
+      kind: "annotation" as const,
+      text: "Selected answer",
+      comment: "Explain this",
+      anchor: { startOffset: 0, endOffset: 15 },
+      source: {
+        kind: "message" as const,
+        label: "Assistant",
+        messageId: "answer-1",
+      },
+    }
+    const draft = {
+      apiBase: "http://localhost:4141",
+      sessionId: "session_one",
+      text: "",
+      contextAttachments: [annotation],
+    }
+    const first = await reserveAdmission(storage, draft, () => "request_first")
+    expect(
+      await reserveAdmission(
+        storage,
+        structuredClone(draft),
+        () => "request_unused",
+      ),
+    ).toEqual(first)
+    const edited = await reserveAdmission(
+      storage,
+      {
+        ...draft,
+        contextAttachments: [{ ...annotation, comment: "Check this instead" }],
+      },
+      () => "request_edited",
+    )
+    expect(edited.requestId).toBe("request_edited")
+  })
   it("reuses a request id for the same API, session, and draft", async () => {
     const storage = createMemoryStorage()
     const draft = {

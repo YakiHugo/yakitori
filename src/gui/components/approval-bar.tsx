@@ -12,14 +12,35 @@ export function ApprovalBar() {
     (entry): entry is Extract<ExecutionEntry, { kind: "permission" }> =>
       entry.kind === "permission" && entry.state === "requested",
   )
+  return (
+    <ApprovalRequests
+      pending={pending}
+      isResolving={(id) => inFlightActions.has(`permission:${id}`)}
+      onResolve={(turnId, id, behavior) =>
+        void resolvePermission(turnId, id, behavior)
+      }
+    />
+  )
+}
+
+export function ApprovalRequests({
+  pending,
+  isResolving,
+  onResolve,
+}: Readonly<{
+  pending: readonly Pick<
+    Extract<ExecutionEntry, { kind: "permission" }>,
+    "permissionRequestId" | "turnId" | "action" | "subject" | "reason"
+  >[]
+  isResolving(id: string): boolean
+  onResolve(turnId: string, id: string, behavior: "allow" | "deny"): void
+}>) {
   if (pending.length === 0) return null
 
   return (
     <div className="space-y-2 border-t border-amber-200 bg-amber-50 px-4 py-2 dark:border-amber-900 dark:bg-amber-950/40">
       {pending.map((entry) => {
-        const busy = inFlightActions.has(
-          `permission:${entry.permissionRequestId}`,
-        )
+        const busy = isResolving(entry.permissionRequestId)
         return (
           <fieldset
             key={entry.permissionRequestId}
@@ -48,11 +69,7 @@ export function ApprovalBar() {
               size="sm"
               disabled={busy}
               onClick={() =>
-                void resolvePermission(
-                  entry.turnId,
-                  entry.permissionRequestId,
-                  "allow",
-                )
+                onResolve(entry.turnId, entry.permissionRequestId, "allow")
               }
             >
               Allow
@@ -63,11 +80,7 @@ export function ApprovalBar() {
               variant="outline"
               disabled={busy}
               onClick={() =>
-                void resolvePermission(
-                  entry.turnId,
-                  entry.permissionRequestId,
-                  "deny",
-                )
+                onResolve(entry.turnId, entry.permissionRequestId, "deny")
               }
             >
               Deny

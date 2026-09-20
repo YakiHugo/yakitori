@@ -1,11 +1,13 @@
 import type { ImageAttachment } from "../kernel/events.ts"
 import { createRequestId, isRequestId } from "../kernel/ids.ts"
+import type { ContextExcerpt } from "../kernel/input-context.ts"
 
 export type AdmissionDraft = {
   readonly apiBase: string
   readonly sessionId: string
   readonly text: string
   readonly attachments?: readonly ImageAttachment[]
+  readonly contextAttachments?: readonly ContextExcerpt[]
 }
 
 export type PendingAdmission = AdmissionDraft & {
@@ -69,6 +71,7 @@ async function storageKey(draft: AdmissionDraft): Promise<string> {
         draft.sessionId,
         draft.text,
         draft.attachments ?? [],
+        draft.contextAttachments ?? [],
       ]),
     ),
   )

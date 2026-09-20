@@ -1,18 +1,32 @@
-import { SidebarDragSurface } from "./sidebar-drag.tsx"
-import { useEffect, useState, type CSSProperties } from "react"
 import { PanelLeft } from "lucide-react"
-import { Sidebar } from "./sidebar.tsx"
-import { SessionSearch } from "./session-search.tsx"
+import { type CSSProperties, useEffect, useState } from "react"
 import { useAppStore } from "../store/app-store.ts"
+import { useWorkspaceStore } from "../store/workspace-store.ts"
+import { SessionSearch } from "./session-search.tsx"
+import { Sidebar } from "./sidebar.tsx"
+import { SidebarDragSurface } from "./sidebar-drag.tsx"
 
 export function SidebarFrame() {
   const [open, setOpen] = useState(
     () => localStorage.getItem("yakitori.sidebarOpen") !== "false",
   )
-  const [width, setWidth] = useState(() => {
+  const [preferredWidth, setPreferredWidth] = useState(() => {
     const saved = Number(localStorage.getItem("yakitori.sidebarWidth"))
-    return Number.isFinite(saved) && saved >= 220 && saved <= 480 ? saved : 352
+    return Number.isFinite(saved) && saved >= 240 && saved <= 520 ? saved : 275
   })
+  const [windowWidth, setWindowWidth] = useState(window.innerWidth)
+  const split = useWorkspaceStore((state) => state.open && !state.expanded)
+  // Resizing the sidebar must leave room for both the chat and content pane.
+  const maximumWidth = Math.max(
+    240,
+    Math.min(
+      520,
+      windowWidth - (split && windowWidth >= 912 ? 320 + 352 : 240),
+    ),
+  )
+  const width = Math.min(preferredWidth, maximumWidth)
+  const setWidth = (value: number) =>
+    setPreferredWidth(Math.max(240, Math.min(maximumWidth, value)))
   const [resizing, setResizing] = useState(false)
   const [searching, setSearching] = useState(false)
   const startNewSession = useAppStore((state) => state.startNewSession)
@@ -20,8 +34,14 @@ export function SidebarFrame() {
     localStorage.setItem("yakitori.sidebarOpen", String(open))
   }, [open])
   useEffect(() => {
-    if (!resizing) localStorage.setItem("yakitori.sidebarWidth", String(width))
-  }, [width, resizing])
+    if (!resizing)
+      localStorage.setItem("yakitori.sidebarWidth", String(preferredWidth))
+  }, [preferredWidth, resizing])
+  useEffect(() => {
+    const resize = () => setWindowWidth(window.innerWidth)
+    window.addEventListener("resize", resize)
+    return () => window.removeEventListener("resize", resize)
+  }, [])
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => {
       if (
@@ -80,20 +100,15 @@ export function SidebarFrame() {
           tabIndex={open ? 0 : -1}
           aria-label="Sidebar width"
           aria-orientation="vertical"
-          aria-valuemin={220}
-          aria-valuemax={480}
+          aria-valuemin={240}
+          aria-valuemax={maximumWidth}
           aria-valuenow={width}
           className="sidebar-resize"
-          onDoubleClick={() => setWidth(352)}
+          onDoubleClick={() => setPreferredWidth(275)}
           onKeyDown={(event) => {
             if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return
             event.preventDefault()
-            setWidth((value) =>
-              Math.max(
-                220,
-                Math.min(480, value + (event.key === "ArrowLeft" ? -16 : 16)),
-              ),
-            )
+            setWidth(width + (event.key === "ArrowLeft" ? -16 : 16))
           }}
           onPointerDown={(event) => {
             if (event.button !== 0) return
@@ -102,12 +117,7 @@ export function SidebarFrame() {
           }}
           onPointerMove={(event) => {
             if (!event.currentTarget.hasPointerCapture(event.pointerId)) return
-            setWidth(
-              Math.max(
-                220,
-                Math.min(480, window.innerWidth * 0.6, event.clientX),
-              ),
-            )
+            setWidth(event.clientX)
           }}
           onPointerUp={(event) => {
             if (event.currentTarget.hasPointerCapture(event.pointerId))

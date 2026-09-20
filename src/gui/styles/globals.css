@@ -2,6 +2,8 @@
 @import "./conversation.css";
 @import "./composer.css";
 @import "./sidebar.css";
+@import "./workspace.css";
+@import "../components/selection-actions.css";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -82,6 +84,10 @@
 }
 
 /* Assistant markdown rendering. No typography plugin; keep it small. */
+.markdown {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .markdown > :first-child {
   margin-top: 0;
 }
@@ -149,6 +155,9 @@
   color: var(--muted-foreground);
 }
 .markdown table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
   border-collapse: collapse;
   font-size: 0.8125rem;
 }

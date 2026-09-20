@@ -1,15 +1,16 @@
 import { PencilLine, RotateCcw } from "lucide-react"
 import { type ReactNode, useLayoutEffect, useRef, useState } from "react"
+import { imageAttachmentUrl } from "../../composer-attachments.ts"
+import { contextSourceAttributes } from "../../conversation-context.ts"
 import type { ExecutionEntry } from "../../execution-view.ts"
 import { useAppStore } from "../../store/app-store.ts"
-import { imageAttachmentUrl } from "../../composer-attachments.ts"
+import { ImageLightbox } from "../image-lightbox.tsx"
+import { parsePrompt } from "../prompt-document.ts"
+import { PromptEditor, type PromptEditorHandle } from "../prompt-editor.tsx"
+import { CopyIconButton, MessageTimestamp } from "../response-actions.tsx"
+import { ContextExcerptChips } from "../selection-actions.tsx"
 import { Badge } from "../ui/badge.tsx"
 import { Button } from "../ui/button.tsx"
-import { CopyIconButton, MessageTimestamp } from "../response-actions.tsx"
-import { ImageLightbox } from "../image-lightbox.tsx"
-
-import { PromptEditor, type PromptEditorHandle } from "../prompt-editor.tsx"
-import { parsePrompt } from "../prompt-document.ts"
 
 function MessageText({ text }: Readonly<{ text: string }>) {
   const paragraphs: ReactNode[] = []
@@ -47,6 +48,7 @@ export function UserMessageCell({
   queued: boolean
 }>) {
   const busy = useAppStore((state) => state.busy)
+  const sessionId = useAppStore((state) => state.selection.sessionId)
   const apiBase = useAppStore((state) => state.apiBase)
   const forkSession = useAppStore((state) => state.forkSession)
   const [mode, setMode] = useState<"undo" | "edit" | undefined>()
@@ -68,6 +70,13 @@ export function UserMessageCell({
       {mode !== "edit" ? (
         <>
           <div className="max-w-[85%] overflow-hidden rounded-2xl bg-primary text-[15px] leading-6 text-primary-foreground">
+            {(entry.contextAttachments?.length ?? 0) > 0 && (
+              <div className="border-b border-current/10 px-3 py-2">
+                <ContextExcerptChips
+                  excerpts={entry.contextAttachments ?? []}
+                />
+              </div>
+            )}
             {attachments.length > 0 ? (
               <div
                 className={`grid gap-1.5 p-1.5 ${attachments.length > 1 ? "grid-cols-2" : "grid-cols-1"}`}
@@ -89,7 +98,18 @@ export function UserMessageCell({
                 ))}
               </div>
             ) : null}
-            {entry.text ? <MessageText text={entry.text} /> : null}
+            {entry.text ? (
+              <div
+                {...contextSourceAttributes({
+                  kind: "message",
+                  label: "User message",
+                  messageId: entry.inputId,
+                  ...(sessionId ? { sessionId } : {}),
+                })}
+              >
+                <MessageText text={entry.text} />
+              </div>
+            ) : null}
           </div>
           <div className="flex min-h-5 items-center gap-1">
             {queued ? <Badge variant="secondary">queued</Badge> : null}

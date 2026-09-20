@@ -1,7 +1,7 @@
-import { Slice } from "prosemirror-model"
 import { baseKeymap, selectAll, splitBlock } from "prosemirror-commands"
 import { closeHistory, history, redo, undo } from "prosemirror-history"
 import { keymap } from "prosemirror-keymap"
+import { Slice } from "prosemirror-model"
 import { EditorState, TextSelection } from "prosemirror-state"
 import { EditorView } from "prosemirror-view"
 import { type Ref, useImperativeHandle, useLayoutEffect, useRef } from "react"
@@ -26,6 +26,7 @@ type Props = Readonly<{
   className?: string
   activeSuggestion?: string | undefined
   menuOpen?: boolean
+  suggestionsId?: string
   onChange(text: string): void
   onSelection?(from: number, to: number): void
   onKeyDown?(event: globalThis.KeyboardEvent): boolean
@@ -194,7 +195,9 @@ export function PromptEditor(props: Props) {
         "aria-autocomplete": "list",
         "aria-disabled": String(!!props.disabled),
         "data-placeholder": props.placeholder ?? "",
-        ...(props.menuOpen ? { "aria-controls": "composer-suggestions" } : {}),
+        ...(props.menuOpen && props.suggestionsId
+          ? { "aria-controls": props.suggestionsId }
+          : {}),
         ...(props.activeSuggestion
           ? { "aria-activedescendant": props.activeSuggestion }
           : {}),
@@ -204,6 +207,7 @@ export function PromptEditor(props: Props) {
     props.value,
     props.disabled,
     props.menuOpen,
+    props.suggestionsId,
     props.activeSuggestion,
     props.label,
     props.placeholder,

@@ -36,7 +36,13 @@ function displayEffort(effort: string): string {
 // Model capabilities own the available effort stops and speed tiers. The
 // composer exposes them as one control: effort first, then model selection as a
 // second-level destination, matching the Codex app's information hierarchy.
-export function ModelSelector() {
+export function ModelSelector({
+  selection,
+  onChange,
+}: Readonly<{
+  selection?: ModelSelection | undefined
+  onChange?: (selection: ModelSelection | undefined) => void
+}> = {}) {
   const sessionId = useAppStore((state) => state.selection.sessionId)
   const providers = useAppStore((state) => state.providers)
   const defaultProvider = useAppStore((state) => state.defaultProvider)
@@ -48,6 +54,11 @@ export function ModelSelector() {
       : state.modelSelections[state.selection.sessionId],
   )
   const setModelSelection = useAppStore((state) => state.setModelSelection)
+  const current = onChange === undefined ? sessionCurrent : selection
+  const changeSelection = (value: ModelSelection | undefined) => {
+    if (onChange) onChange(value)
+    else setModelSelection(sessionId, value)
+  }
   const [menu, setMenu] = useState<"model" | "effort">()
 
   useEffect(() => {
@@ -66,7 +77,7 @@ export function ModelSelector() {
   )
   const effective = normalizeKimiModelSelection(
     resolveEffectiveModel({
-      sessionCurrent,
+      sessionCurrent: current,
       userPreference,
       defaultProvider,
       defaultModel,
@@ -100,7 +111,7 @@ export function ModelSelector() {
     effort?: string
     speed?: string
   }) => {
-    setModelSelection(sessionId, {
+    changeSelection({
       provider: patch.provider,
       model: patch.model,
       ...(patch.effort === undefined ? {} : { effort: patch.effort }),
@@ -289,9 +300,9 @@ export function ModelSelector() {
           </div>
           <button
             type="button"
-            aria-pressed={sessionCurrent === undefined}
+            aria-pressed={current === undefined}
             onClick={() => {
-              setModelSelection(sessionId, undefined)
+              changeSelection(undefined)
               setMenu(undefined)
             }}
             className="flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"

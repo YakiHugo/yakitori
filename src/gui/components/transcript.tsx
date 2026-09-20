@@ -26,9 +26,9 @@ import { ReasoningCell } from "./cells/reasoning-cell.tsx"
 import { ToolCell } from "./cells/tool-cell.tsx"
 import { TurnTerminalCell } from "./cells/turn-terminal-cell.tsx"
 import { UserMessageCell } from "./cells/user-message-cell.tsx"
-import { ResponseActions } from "./response-actions.tsx"
 import { ConversationNavigation } from "./conversation-navigation.tsx"
 import { MarkdownView } from "./markdown.tsx"
+import { ResponseActions } from "./response-actions.tsx"
 import {
   Collapsible,
   CollapsibleContent,
@@ -179,7 +179,8 @@ export function Transcript({ children }: Readonly<{ children?: ReactNode }>) {
         className="conversation-surface relative flex min-h-0 flex-1"
       >
         <ScrollArea
-          className="min-h-0 flex-1"
+          className="min-h-0 min-w-0 flex-1"
+          viewportClassName="conversation-transcript-viewport"
           viewportRef={scroll.viewportRef}
           onScroll={updateScroll}
         >
@@ -242,6 +243,8 @@ export function Transcript({ children }: Readonly<{ children?: ReactNode }>) {
         <ConversationNavigation
           entries={view.entries}
           visibleInputs={visibleInputs}
+          viewportRef={scroll.viewportRef}
+          contentRef={scroll.contentRef}
           onJump={(inputId) => {
             const node = anchors.current.get(inputId)
             if (node) scroll.jumpToElement(node)

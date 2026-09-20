@@ -1,4 +1,5 @@
 import type { FileTarget, UrlTarget } from "../tool-presentation.ts"
+import { writeClipboardText } from "./clipboard.ts"
 
 export function fileActionLabel(): "Open in editor" | "Copy path" {
   return window.yakitoriDesktop === undefined ? "Copy path" : "Open in editor"
@@ -17,7 +18,7 @@ export async function openFileTarget(
     return
   }
   const path = absoluteDisplayPath(workspaceRoot, target.path)
-  await navigator.clipboard.writeText(
+  await writeClipboardText(
     target.line === undefined ? path : `${path}:${target.line}`,
   )
 }

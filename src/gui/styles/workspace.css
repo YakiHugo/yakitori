@@ -1,0 +1,293 @@
+.workspace-shell {
+  position: relative;
+}
+.workspace-frame {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 var(--workspace-width);
+  width: var(--workspace-width);
+  min-width: 0;
+  border-left: 1px solid var(--border);
+  background: var(--background);
+}
+.workspace-header {
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.workspace-frame[data-open="false"] {
+  display: none;
+}
+.workspace-shell[data-workspace-expanded="true"] > main {
+  display: none;
+}
+.workspace-frame[data-expanded="true"] {
+  position: relative;
+  flex: 1;
+  width: auto;
+  max-width: none;
+}
+.workspace-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.workspace-tab {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  border-radius: 7px;
+  max-width: 170px;
+}
+.workspace-tab[data-active="true"] {
+  background: var(--muted);
+}
+.workspace-tab > [role="tab"] {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 8px;
+  font-size: 12px;
+  color: var(--muted-foreground);
+  border-radius: 6px;
+  min-width: 0;
+  white-space: nowrap;
+}
+.workspace-tab > [role="tab"] svg {
+  flex-shrink: 0;
+}
+.workspace-tab > [role="tab"] span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.workspace-tab > [aria-selected="true"] {
+  color: var(--foreground);
+  background: var(--muted);
+  font-weight: 500;
+}
+.workspace-tab button:hover {
+  color: var(--foreground);
+}
+.workspace-tab-close {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 24px;
+  flex-shrink: 0;
+  margin-right: 3px;
+  color: var(--muted-foreground);
+  border-radius: 5px;
+}
+.workspace-tab-close:hover {
+  background: color-mix(in oklab, var(--foreground) 8%, transparent);
+}
+.workspace-add {
+  position: relative;
+}
+.workspace-add-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 40;
+  width: 220px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--popover);
+  box-shadow: 0 12px 32px #0002;
+}
+.workspace-add-menu button {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  gap: 10px;
+  border-radius: 7px;
+  padding: 9px;
+  text-align: left;
+  font-size: 13px;
+}
+.workspace-add-menu button:hover {
+  background: var(--accent);
+}
+.workspace-add-menu kbd {
+  margin-left: auto;
+  color: var(--muted-foreground);
+  font-family: inherit;
+  font-size: 11px;
+}
+.workspace-content {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow: auto;
+}
+.workspace-content[hidden] {
+  display: none;
+}
+.side-chat-panel {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+.side-chat-transcript {
+  flex: 1;
+  overflow-y: auto;
+  padding: 18px 16px;
+  min-height: 0;
+}
+.side-chat-empty {
+  height: 100%;
+  padding: 20px;
+}
+.side-chat-empty h3 {
+  font-size: 18px;
+  font-weight: 500;
+  color: var(--foreground);
+}
+.side-chat-message {
+  margin-bottom: 22px;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  line-height: 1.7;
+}
+.side-chat-user {
+  padding: 10px 13px;
+  border-radius: 14px;
+  background: var(--muted);
+}
+.side-chat-composer {
+  padding: 8px 16px 16px;
+  flex-shrink: 0;
+}
+.side-chat-composer .conversation-composer {
+  padding-inline: 0;
+  max-width: none;
+}
+.side-chat-close-dialog {
+  margin: auto;
+  width: min(400px, calc(100vw - 40px));
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--background);
+  color: var(--foreground);
+  box-shadow: 0 16px 64px #0003;
+}
+.side-chat-close-dialog::backdrop {
+  background: #0004;
+}
+.side-chat-close-dialog h2 {
+  font-size: 17px;
+  font-weight: 600;
+}
+.side-chat-close-dialog p {
+  margin-top: 10px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.side-chat-close-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 24px;
+}
+.side-chat-close-actions button {
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+}
+.side-chat-close-actions button:last-child {
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+.workspace-root {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px;
+  color: var(--muted-foreground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.workspace-empty {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 36px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+.workspace-empty strong {
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 500;
+}
+.workspace-empty p {
+  max-width: 260px;
+  line-height: 1.7;
+}
+.workspace-resize {
+  position: absolute;
+  inset: 0 auto 0 -3px;
+  width: 6px;
+  height: auto;
+  border: 0;
+  margin: 0;
+  cursor: col-resize;
+  touch-action: none;
+  z-index: 15;
+}
+.workspace-resize:hover,
+.workspace-resize:focus-visible {
+  background: color-mix(in oklab, var(--ring) 30%, transparent);
+}
+.workspace-frame[data-expanded="true"] .workspace-resize {
+  display: none;
+}
+.workspace-frame[data-resizing="true"] {
+  user-select: none;
+}
+.workspace-show {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  z-index: 10;
+  background: var(--background);
+}
+.workspace-shell[data-workspace-open="false"] > main > header {
+  padding-right: 52px;
+}
+.workspace-frame button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+/* Below the sum of the three minimum widths, the content pane is a drawer. */
+@media (max-width: 911px) {
+  .workspace-frame {
+    position: absolute;
+    inset: 0 0 0 auto;
+    z-index: 20;
+    max-width: calc(100vw - 48px);
+    box-shadow: -12px 0 36px #0001;
+  }
+}

@@ -12,6 +12,7 @@ export type ComposerSuggestion =
     }>
 
 export function ComposerSuggestions({
+  id,
   open,
   items,
   activeIndex,
@@ -20,6 +21,7 @@ export function ComposerSuggestions({
   onHighlight,
   onPick,
 }: Readonly<{
+  id: string
   open: boolean
   items: readonly ComposerSuggestion[]
   activeIndex: number
@@ -33,7 +35,7 @@ export function ComposerSuggestions({
     if (!open) return
     const list = listRef.current
     const option = list?.querySelector<HTMLElement>(
-      `#composer-suggestion-${activeIndex}`,
+      `[id="${id}-${activeIndex}"]`,
     )
     if (!list || !option) return
     if (option.offsetTop < list.scrollTop) list.scrollTop = option.offsetTop
@@ -44,7 +46,7 @@ export function ComposerSuggestions({
       list.scrollTop =
         option.offsetTop + option.offsetHeight - list.clientHeight
     }
-  }, [activeIndex, open])
+  }, [activeIndex, open, id])
   return (
     <div
       hidden={!open}
@@ -54,7 +56,7 @@ export function ComposerSuggestions({
     >
       <div
         ref={listRef}
-        id="composer-suggestions"
+        id={id}
         role="listbox"
         aria-label={skillOnly ? "Skills" : "Slash commands"}
         className="relative max-h-72 overflow-y-auto"
@@ -68,7 +70,7 @@ export function ComposerSuggestions({
             ) : null}
             <button
               key={item.kind === "skill" ? item.skill.path : item.name}
-              id={`composer-suggestion-${index}`}
+              id={`${id}-${index}`}
               type="button"
               role="option"
               tabIndex={-1}

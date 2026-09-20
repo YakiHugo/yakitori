@@ -2,7 +2,6 @@ import { GitFork, Info, LoaderCircle, Square } from "lucide-react"
 import { ApprovalBar } from "./components/approval-bar.tsx"
 import { Composer } from "./components/composer.tsx"
 import { QueuedInputs } from "./components/queued-inputs.tsx"
-import { SidebarFrame } from "./components/sidebar-frame.tsx"
 import { Transcript } from "./components/transcript.tsx"
 import {
   Tooltip,
@@ -10,6 +9,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "./components/ui/tooltip.tsx"
+import { WorkspaceFrame } from "./components/workspace-frame.tsx"
 import { useAppStore, useExecutionView } from "./store/app-store.ts"
 
 export function App() {
@@ -23,8 +23,7 @@ export function App() {
 
   return (
     <TooltipProvider>
-      <div className="app-shell flex h-screen overflow-hidden text-foreground">
-        <SidebarFrame />
+      <WorkspaceFrame>
         <main className="flex min-w-0 flex-1 flex-col bg-background">
           {message !== undefined && message !== "" && (
             <div
@@ -54,7 +53,7 @@ export function App() {
             <EmptyState />
           )}
         </main>
-      </div>
+      </WorkspaceFrame>
     </TooltipProvider>
   )
 }
@@ -74,7 +73,7 @@ function SessionComposer() {
   return (
     <div className="mx-auto mb-5 flex max-w-3xl items-center justify-between gap-4 rounded-xl border bg-muted/40 px-4 py-3 text-sm">
       <span>This conversation is archived.</span>
-      <div className="flex items-center gap-2">
+      <div className="flex min-w-0 flex-1 items-center gap-2">
         {activeTurnId !== undefined && (
           <button
             type="button"
@@ -146,7 +145,7 @@ function SessionHeader() {
           <button
             type="button"
             aria-label="Session details"
-            className="rounded-md p-1.5 text-muted-foreground hover:bg-accent"
+            className="shrink-0 rounded-md p-1.5 text-muted-foreground hover:bg-accent"
           >
             <Info className="size-4" />
           </button>
@@ -169,7 +168,7 @@ function EmptyState() {
   const currentProject = useAppStore((state) => state.currentProject)
   const project = projects.find((candidate) => candidate.id === currentProject)
   return (
-    <div className="flex min-h-0 flex-1 flex-col justify-center px-6">
+    <div className="flex min-h-0 flex-1 flex-col justify-center">
       <div className="mx-auto w-full max-w-3xl">
         <h2 className="mb-3 text-center text-xl font-medium">
           {project

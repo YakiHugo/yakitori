@@ -1,5 +1,6 @@
 import { Check, Copy } from "lucide-react"
 import { useEffect, useRef, useState } from "react"
+import { writeClipboardText } from "../lib/clipboard.ts"
 
 export function CopyIconButton({
   text,
@@ -7,6 +8,7 @@ export function CopyIconButton({
 }: Readonly<{ text: string; label: string }>) {
   const [copied, setCopied] = useState(false)
   const [error, setError] = useState<string>()
+  const [copying, setCopying] = useState(false)
   const reset = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   useEffect(() => () => clearTimeout(reset.current), [])
   return (
@@ -15,17 +17,22 @@ export function CopyIconButton({
         type="button"
         aria-label={copied ? `Copied ${label}` : `Copy ${label}`}
         title={copied ? "Copied" : `Copy ${label}`}
+        disabled={copying}
         className="rounded-md p-1 transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
         onClick={async () => {
+          setCopying(true)
+          setCopied(false)
+          setError(undefined)
+          clearTimeout(reset.current)
           try {
-            await navigator.clipboard.writeText(text)
-            setError(undefined)
+            await writeClipboardText(text)
             setCopied(true)
             clearTimeout(reset.current)
             reset.current = setTimeout(() => setCopied(false), 1500)
-          } catch (error) {
-            if (!(error instanceof DOMException)) throw error
+          } catch {
             setError("Could not copy. Select the text and copy it manually.")
+          } finally {
+            setCopying(false)
           }
         }}
       >
