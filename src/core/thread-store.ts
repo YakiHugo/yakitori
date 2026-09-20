@@ -120,3 +120,10 @@ export type ThreadStore = {
   ): Promise<ThreadStoreOccurrenceSearchResult | undefined>
   deleteThread(threadId: string): Promise<void>
 }
+
+// Session execution needs only its rollout writer. Ephemeral sessions keep
+// this writer in memory without exposing durable navigation or fork APIs.
+export type SessionRolloutStore = Pick<
+  ThreadStore,
+  "appendItems" | "persistThread" | "flushThread" | "shutdownThread"
+>

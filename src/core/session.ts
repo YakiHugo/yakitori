@@ -34,7 +34,7 @@ import {
   type TurnInput,
   type TurnInputSubmission,
 } from "./session-io.ts"
-import { PersistContext, type ThreadStore } from "./thread-store.ts"
+import { PersistContext, type SessionRolloutStore } from "./thread-store.ts"
 
 const submissionCapacity = 512
 const gracefulInterruptionTimeoutMs = 100
@@ -159,7 +159,7 @@ export class Session {
     string,
     { readonly fingerprint: string; readonly inputItemId: string }
   >()
-  readonly #store: ThreadStore
+  readonly #store: SessionRolloutStore
   readonly #processor: TurnProcessor
   readonly #submissions = new BoundedQueue<SessionCommand>(submissionCapacity)
   readonly #events = new AsyncQueue<SessionEvent>()
@@ -177,7 +177,7 @@ export class Session {
 
   constructor(input: {
     stored: StoredThread
-    store: ThreadStore
+    store: SessionRolloutStore
     processor: TurnProcessor
     onPersistenceError?: (error: unknown) => void
   }) {
@@ -420,6 +420,9 @@ export class Session {
           input.content.text.length === 0
             ? []
             : [{ type: "text", text: input.content.text }],
+        ...(input.content.contextAttachments === undefined
+          ? {}
+          : { contextAttachments: input.content.contextAttachments }),
         ...(input.content.attachments === undefined ||
         input.content.attachments.length === 0
           ? {}

@@ -9,6 +9,7 @@ import {
   ToolListChangedNotificationSchema,
   ListToolsResultSchema,
   CallToolResultSchema,
+  ElicitRequestSchema,
   type CallToolResult,
   McpError,
   ErrorCode,
@@ -54,8 +55,10 @@ const MAX_CURSOR_BYTES = 64 * 1024
 const MAX_STDIO_BUFFER_BYTES = 8 * 1024 * 1024
 
 export class McpClient {
-  readonly #client = new Client({ name: "yakitori", version: "0.0.0" })
+  readonly #client: Client
   readonly #config: McpServerConfig
+  readonly #computerUse: boolean
+  #activeComputerCalls = 0
   #running = false
   #closing = false
   #close: Promise<void> | undefined
@@ -78,6 +81,42 @@ export class McpClient {
     onClosed: () => void,
   ) {
     this.#config = config
+    this.#computerUse = name === "cua_repl"
+    this.#client = new Client(
+      { name: "yakitori", version: "0.0.0" },
+      this.#computerUse ? { capabilities: { elicitation: { form: {} } } } : {},
+    )
+    if (this.#computerUse) {
+      this.#client.setRequestHandler(ElicitRequestSchema, async (request) => {
+        const params = request.params
+        const metadata = params._meta
+        const target = metadata?.tool_params
+        // Execution has already passed the host permission gate. The native
+        // service additionally requests app access; this acceptance lasts only
+        // for the current call and never writes Codex's persistent app grants.
+        if (
+          this.#activeComputerCalls > 0 &&
+          params.mode !== "url" &&
+          Object.keys(params.requestedSchema.properties).length === 0 &&
+          (params.requestedSchema.required?.length ?? 0) === 0 &&
+          metadata?.codex_approval_kind === "mcp_tool_call" &&
+          metadata.connector_id === "computer-use" &&
+          metadata.codex_request_type === undefined &&
+          typeof target === "object" &&
+          target !== null &&
+          "app" in target &&
+          typeof target.app === "string" &&
+          target.app.trim() !== ""
+        ) {
+          return {
+            action: "accept",
+            content: {},
+            _meta: { persist: "session" },
+          }
+        }
+        return { action: "decline" }
+      })
+    }
     this.#client.onerror = (error) => {
       this.#lastError = error
     }
@@ -276,17 +315,24 @@ export class McpClient {
           "MCP tool arguments must be an object.",
         )
       // A failed side-effecting call is never automatically replayed.
-      const result = await this.#client.request(
-        {
-          method: "tools/call",
-          params: { name, arguments: input as Record<string, unknown> },
-        },
-        CallToolResultSchema,
-        {
-          timeout: this.#config.toolTimeoutMs ?? 60_000,
-          ...(signal === undefined ? {} : { signal }),
-        },
-      )
+      const computerCall = this.#computerUse && name === "js"
+      if (computerCall) this.#activeComputerCalls += 1
+      let result: CallToolResult
+      try {
+        result = await this.#client.request(
+          {
+            method: "tools/call",
+            params: { name, arguments: input as Record<string, unknown> },
+          },
+          CallToolResultSchema,
+          {
+            timeout: this.#config.toolTimeoutMs ?? 60_000,
+            ...(signal === undefined ? {} : { signal }),
+          },
+        )
+      } finally {
+        if (computerCall) this.#activeComputerCalls -= 1
+      }
       if (validate !== undefined) {
         if (result.structuredContent === undefined && !result.isError)
           throw new McpError(

@@ -129,6 +129,47 @@ if(m.method==='tools/call'){appendFileSync(process.argv[2],'effect');reply({cont
   )
 })
 
+it("accepts only empty native app access forms during an authorized computer call", async () => {
+  await withServer(
+    `
+if(m.method==='tools/list')reply({tools:[{name:'js',inputSchema:{type:'object'}},{name:'js_reset',inputSchema:{type:'object'}}]});
+if(m.method==='tools/call'){
+  globalThis.callId=m.id;
+  const sensitive=m.params.arguments.sensitive;
+  send({id:'app-access',method:'elicitation/create',params:{
+    mode:'form',message:'Allow app access?',
+    _meta:{codex_approval_kind:'mcp_tool_call',connector_id:'computer-use',tool_params:{app:'com.example.App'}},
+    requestedSchema:{type:'object',properties:sensitive?{password:{type:'string'}}:{},required:sensitive?['password']:[]}
+  }});
+}
+if(m.id==='app-access'&&m.result)send({id:globalThis.callId,result:{content:[{type:'text',text:JSON.stringify(m.result)}]}});`,
+    async ({ root, manager, config }) => {
+      await manager.update({ cua_repl: config.demo })
+      const js = manager.tools().find((tool) => tool.toolName.name === "js")
+      const reset = manager
+        .tools()
+        .find((tool) => tool.toolName.name === "js_reset")
+      if (js === undefined || reset === undefined) {
+        throw new Error("The computer tools were not discovered.")
+      }
+      const accepted = await js.execute({}, { workspaceRoot: root })
+      expect(JSON.parse(accepted.content)).toMatchObject({
+        action: "accept",
+        _meta: { persist: "session" },
+      })
+      const sensitive = await js.execute(
+        { sensitive: true },
+        { workspaceRoot: root },
+      )
+      expect(JSON.parse(sensitive.content)).toMatchObject({ action: "decline" })
+      const outsideAction = await reset.execute({}, { workspaceRoot: root })
+      expect(JSON.parse(outsideAction.content)).toMatchObject({
+        action: "decline",
+      })
+    },
+  )
+})
+
 it("propagates a tool deadline as cancellation without replaying the side effect", async () => {
   await withServer(
     `

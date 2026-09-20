@@ -5,6 +5,58 @@ import { describe, expect, it } from "vitest"
 import { createMcpConnectionManager } from "../../src/runtime/mcp-connection-manager.ts"
 
 describe("MCP connection manager", () => {
+  it("cleans up the used connection once at turn end even after it is disabled", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yakitori-mcp-cleanup-"))
+    const script = join(root, "server.mjs")
+    const calls = join(root, "calls.txt")
+    await writeFile(
+      script,
+      [
+        "import {appendFileSync} from 'node:fs';",
+        "import readline from 'node:readline';",
+        "readline.createInterface({input:process.stdin}).on('line',line=>{const m=JSON.parse(line);if(m.id===undefined)return;",
+        "let result={protocolVersion:m.params?.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'fixture',version:'1'}};",
+        "if(m.method==='tools/list')result={tools:['js','turn_ended'].map(name=>({name,inputSchema:{type:'object'}}))};",
+        `if(m.method==='tools/call'){appendFileSync(${JSON.stringify(calls)},m.params.name+'\\n');result={content:[{type:'text',text:'ok'}]};}`,
+        "process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result})+'\\n');});",
+      ].join("\n"),
+    )
+    const manager = createMcpConnectionManager({
+      turnEndTools: {
+        computer: {
+          name: "turn_ended",
+          input: () => ({
+            hook_event_name: "Stop",
+            session_id: "session_test",
+            turn_id: "turn_test",
+          }),
+        },
+      },
+    })
+    try {
+      await manager.update({
+        computer: {
+          command: process.execPath,
+          args: [script],
+          enabledTools: ["js"],
+        },
+      })
+      expect(manager.tools().map((tool) => tool.toolName.name)).toEqual(["js"])
+      await manager.finishTurn()
+      const tool = manager.tools()[0]
+      await tool?.execute({}, { workspaceRoot: root })
+      await tool?.execute({}, { workspaceRoot: root })
+      await manager.update({})
+      await tool?.dispose?.()
+      await manager.finishTurn()
+      await manager.finishTurn()
+      expect(await readFile(calls, "utf8")).toBe("js\njs\nturn_ended\n")
+    } finally {
+      await manager.close()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it("starts a stdio server, lists tools, calls them, and reuses unchanged identity", async () => {
     const root = await mkdtemp(join(tmpdir(), "yakitori-mcp-"))
     const script = join(root, "server.mjs")

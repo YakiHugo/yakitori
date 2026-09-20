@@ -8,7 +8,7 @@ import { createHash } from "node:crypto"
 import type { JsonObject, JsonValue } from "../kernel/index.ts"
 import type { McpServerConfig } from "./mcp-config.ts"
 import type { ToolName } from "./tools/tool-name.ts"
-import type { RuntimeTool } from "./tools/types.ts"
+import type { RuntimeTool, ToolExecutionContext } from "./tools/types.ts"
 
 export type { McpServerConfig } from "./mcp-config.ts"
 
@@ -30,6 +30,7 @@ export type McpConnectionManager = Readonly<{
   subscribe(
     listener: (serverName: string, tools: readonly RuntimeTool[]) => void,
   ): () => void
+  finishTurn(): Promise<void>
   close(): Promise<void>
 }>
 
@@ -49,6 +50,15 @@ export function createMcpConnectionManager(
       name: string,
       tools: readonly RuntimeTool[],
     ) => void
+    readonly turnEndTools?: Readonly<
+      Record<
+        string,
+        Readonly<{
+          name: string
+          input(context: ToolExecutionContext): JsonObject
+        }>
+      >
+    >
   } = {},
 ): McpConnectionManager {
   const allocateServerName = createModelNameAllocator()
@@ -67,6 +77,7 @@ export function createMcpConnectionManager(
     }>
   >()
   const clients = new Set<McpClient>()
+  const turnCleanups = new Map<McpClient, () => Promise<void>>()
   const refreshing = new Map<McpClient, boolean>()
   const refreshTasks = new Set<Promise<void>>()
   let updateQueue = Promise.resolve()
@@ -77,6 +88,19 @@ export function createMcpConnectionManager(
   const maxRestartDelayMs = options.maxRestartDelayMs ?? 30_000
   const maxRestartAttempts = options.maxRestartAttempts ?? 5
   let closed = false
+
+  const finishTurn = async () => {
+    const cleanups = [...turnCleanups.values()]
+    turnCleanups.clear()
+    const results = await Promise.allSettled(
+      cleanups.map((cleanup) => cleanup()),
+    )
+    const errors = results.flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : [],
+    )
+    if (errors.length > 0)
+      throw new AggregateError(errors, "MCP turn cleanup failed.")
+  }
 
   const reportBackgroundError = (error: unknown) => {
     if (options.onBackgroundError) options.onBackgroundError(error)
@@ -160,6 +184,25 @@ export function createMcpConnectionManager(
     }
     let initialized = false
     let refreshPending = false
+    let turnEndTool: McpToolDescription | undefined
+    const markUsed = (context: ToolExecutionContext) => {
+      if (!turnEndTool || turnCleanups.has(client)) return
+      const call = client.bindTool(turnEndTool)
+      const hook = options.turnEndTools?.[name]
+      if (!hook) return
+      // Hold the exact connection until cleanup even if config changes retire
+      // it between steps. A replacement connection cannot release its state.
+      client.retain()
+      turnCleanups.set(client, async () => {
+        try {
+          const result = await call(hook.input(context))
+          if (result.isError)
+            throw new McpConnectionError(`MCP turn cleanup failed for ${name}.`)
+        } finally {
+          await client.release()
+        }
+      })
+    }
     const refresh = () => {
       if (!initialized) {
         refreshPending = true
@@ -178,7 +221,17 @@ export function createMcpConnectionManager(
             refreshing.set(client, false)
             const descriptions = await client.listTools()
             if (connections.get(name)?.client !== client) return
-            const tools = makeTools(name, client, descriptions, config, names)
+            turnEndTool = descriptions.find(
+              (tool) => tool.name === options.turnEndTools?.[name]?.name,
+            )
+            const tools = makeTools(
+              name,
+              client,
+              descriptions,
+              config,
+              names,
+              markUsed,
+            )
             publish(name, tools, () =>
               connections.set(name, { fingerprint: identity, client, tools }),
             )
@@ -231,7 +284,17 @@ export function createMcpConnectionManager(
           "MCP server disconnected during discovery.",
           { code: "disconnected", retryable: true },
         )
-      const tools = makeTools(name, client, descriptions, config, names)
+      turnEndTool = descriptions.find(
+        (tool) => tool.name === options.turnEndTools?.[name]?.name,
+      )
+      const tools = makeTools(
+        name,
+        client,
+        descriptions,
+        config,
+        names,
+        markUsed,
+      )
       publish(name, tools, () => {
         connections.set(name, { fingerprint: identity, client, tools })
         failures.delete(name)
@@ -345,11 +408,13 @@ export function createMcpConnectionManager(
       listeners.add(listener)
       return () => listeners.delete(listener)
     },
+    finishTurn,
     async close() {
       if (closed) return
       closed = true
       for (const timer of restartTimers.values()) clearTimeout(timer)
       restartTimers.clear()
+      const cleanup = await Promise.allSettled([finishTurn()])
       await Promise.all([...clients].map((client) => client.close()))
       await Promise.allSettled(
         [...connecting.values()].map((connection) => connection.promise),
@@ -362,6 +427,7 @@ export function createMcpConnectionManager(
       failures.clear()
       clients.clear()
       listeners.clear()
+      if (cleanup[0]?.status === "rejected") throw cleanup[0].reason
     },
   }
 }
@@ -371,6 +437,7 @@ function runtimeTool(
   client: McpClient,
   tool: McpToolDescription,
   toolName: ToolName,
+  markUsed: (context: ToolExecutionContext) => void,
 ): RuntimeTool {
   const call = client.bindTool(tool)
   return {
@@ -390,6 +457,7 @@ function runtimeTool(
             reason: "The MCP tool may have external side effects.",
           },
     async execute(input, context) {
+      markUsed(context)
       const result = await call(asJsonValue(input), context.signal)
       return mcpResult(asJsonValue(result), context)
     },
@@ -449,6 +517,7 @@ function makeTools(
   descriptions: readonly McpToolDescription[],
   config: McpServerConfig,
   names: Readonly<{ namespace: string; tool: (raw: string) => string }>,
+  markUsed: (context: ToolExecutionContext) => void,
 ): readonly RuntimeTool[] {
   const seen = new Set<string>()
   const tools = descriptions.flatMap((tool) => {
@@ -461,10 +530,13 @@ function makeTools(
       return []
     seen.add(tool.name)
     return [
-      runtimeTool(name, client, tool, {
-        namespace: names.namespace,
-        name: names.tool(tool.name),
-      }),
+      runtimeTool(
+        name,
+        client,
+        tool,
+        { namespace: names.namespace, name: names.tool(tool.name) },
+        markUsed,
+      ),
     ]
   })
   // Prepare the complete catalog before taking ownership; schema compilation

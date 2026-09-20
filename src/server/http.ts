@@ -27,12 +27,14 @@ import { MessageProcessor } from "./rpc/message-processor.ts"
 import { attachWebsocketRpcTransport } from "./rpc/websocket-transport.ts"
 import type { ProjectStore } from "./sqlite-project-store.ts"
 import type { UserConfigStore } from "./user-config.ts"
+import type { SideChatService } from "./side-chat.ts"
 
 export type YakitoriStaticAssets = {
   readonly directory: string
 }
 
 type YakitoriHttpServerCommonOptions = {
+  readonly sideChats?: SideChatService
   readonly eventHub?: SessionEventHub
   readonly staticAssets?: YakitoriStaticAssets
   readonly projectStore?: ProjectStore
@@ -117,6 +119,9 @@ export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
   const messageProcessor =
     options.messageProcessor ??
     new MessageProcessor({
+      ...(options.sideChats === undefined
+        ? {}
+        : { sideChats: options.sideChats }),
       handlers,
       eventHub,
       reportOperationalFailure: reporter,

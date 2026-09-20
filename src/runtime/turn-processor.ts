@@ -1,3 +1,4 @@
+import { formatInputContext } from "./input-context.ts"
 import { prepareModelImage } from "./prepare-model-image.ts"
 import { finalizeToolOutput } from "./tools/result-output.ts"
 import type { ResponseItemEnvelope, TurnContextItem } from "../core/rollout.ts"
@@ -112,6 +113,9 @@ export type TurnProcessorOptions = {
   readonly runtimeTiming?: RunnerTimingPolicy
   readonly approvalPolicy?: ApprovalPolicy
   readonly baseInstructions?: string
+  // Host-scoped constraints are reattached after compaction and never inherited
+  // from another Session's conversation history.
+  readonly additionalInstructions?: import("./model.ts").ModelSystemSection
   readonly modelContextWindowTokens?: number
   readonly modelAutoCompactTokenLimit?: number
   readonly modelAutoCompactTokenLimitScope?: import("../kernel/index.ts").AutoCompactTokenLimitScope
@@ -839,7 +843,12 @@ async function executeTurnModelLoop(
       const request: ModelRequest = {
         target: step.target,
         cacheKey: configuration.promptCacheKey,
-        system: [configuration.baseInstructions],
+        system: [
+          configuration.baseInstructions,
+          ...(input.options.additionalInstructions === undefined
+            ? []
+            : [input.options.additionalInstructions]),
+        ],
         messages: await resolveRolloutAssetMedia(
           adapted.messages,
           input.options.rolloutAssets,
@@ -1970,6 +1979,7 @@ async function executePreparedTool(
           workspaceRoot: input.workspaceRoot,
           rolloutId: input.rolloutId,
           toolCallId: prepared.call.id,
+          turnId: input.turnId,
           signal: input.signal,
           ...(input.rolloutAssets === undefined
             ? {}
@@ -2134,6 +2144,9 @@ function inputEnvelope(input: TurnInput, turnId: string): ResponseItemEnvelope {
         input.content.text.length === 0
           ? []
           : [{ type: "text", text: input.content.text }],
+      ...(input.content.contextAttachments === undefined
+        ? {}
+        : { contextAttachments: input.content.contextAttachments }),
       ...(input.content.attachments === undefined ||
       input.content.attachments.length === 0
         ? {}
@@ -2221,6 +2234,19 @@ async function resolveRolloutAssetMedia(
               }),
             )
           : undefined
+      if (message.role === "user") {
+        const { contextAttachments, ...user } = message
+        return {
+          ...user,
+          content: contextAttachments?.length
+            ? [
+                ...user.content,
+                { type: "text", text: formatInputContext(contextAttachments) },
+              ]
+            : user.content,
+          ...(images.length === 0 ? {} : { images }),
+        }
+      }
       return {
         ...message,
         ...(images.length === 0 ? {} : { images }),

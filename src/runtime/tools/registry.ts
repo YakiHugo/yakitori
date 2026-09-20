@@ -869,6 +869,7 @@ export function createDefaultTools(
   input: {
     readonly userShellEnv?: UserShellEnv
     readonly execCommandLog?: (message: string) => void
+    readonly includeMultiAgent?: boolean
   } = {},
 ): ReadonlyArray<RuntimeTool> {
   return [
@@ -890,7 +891,7 @@ export function createDefaultTools(
     }),
     createWebFetchTool(),
     createWebSearchTool(),
-    ...createMultiAgentTools(),
+    ...(input.includeMultiAgent === false ? [] : createMultiAgentTools()),
   ]
 }
 

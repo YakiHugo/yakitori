@@ -1,3 +1,4 @@
+import { isContextExcerpts, type ContextExcerpt } from "./input-context.ts"
 import { createEventId, isStorageKey } from "./ids.ts"
 import { jsonValuesEqual } from "./json-equality.ts"
 
@@ -69,11 +70,12 @@ export type JsonValue =
 export type JsonObject = { readonly [key: string]: JsonValue }
 export type EventMetadata = JsonObject
 
-export type TextContent = {
-  readonly kind: "text"
-  readonly text: string
-  readonly attachments?: readonly ImageAttachment[]
-}
+export type TextContent = Readonly<{
+  kind: "text"
+  text: string
+  attachments?: readonly ImageAttachment[]
+  contextAttachments?: readonly ContextExcerpt[]
+}>
 
 export type RolloutAssetReference = {
   readonly rolloutId: string
@@ -192,12 +194,13 @@ export type ModelHistoryContext =
       revision: string
     }>
 
-export type ModelUserMessage = {
-  readonly role: "user"
-  readonly content: readonly ModelTextBlock[]
-  readonly images?: readonly ModelImageBlock[]
-  readonly context?: ModelHistoryContext
-}
+export type ModelUserMessage = Readonly<{
+  role: "user"
+  content: readonly ModelTextBlock[]
+  images?: readonly ModelImageBlock[]
+  context?: ModelHistoryContext
+  contextAttachments?: readonly ContextExcerpt[]
+}>
 
 export type ModelDeveloperMessage = {
   readonly role: "developer"
@@ -1369,7 +1372,15 @@ export function isModelMessage(value: unknown): value is ModelMessage {
   }
   if (value.role !== "user" && value.role !== "developer") return false
   return (
-    onlyKeys(value, ["role", "content", "images", "context"]) &&
+    onlyKeys(value, [
+      "role",
+      "content",
+      "images",
+      "context",
+      "contextAttachments",
+    ]) &&
+    (value.contextAttachments === undefined ||
+      (value.role === "user" && isContextExcerpts(value.contextAttachments))) &&
     Array.isArray(value.content) &&
     value.content.every(
       (block) =>
@@ -1803,14 +1814,16 @@ function isTextContent(value: unknown): value is TextContent {
     isRecord(value) &&
     value.kind === "text" &&
     isString(value.text) &&
-    onlyKeys(value, ["kind", "text", "attachments"]) &&
+    onlyKeys(value, ["kind", "text", "attachments", "contextAttachments"]) &&
+    (value.contextAttachments === undefined ||
+      isContextExcerpts(value.contextAttachments)) &&
     (value.attachments === undefined ||
       (Array.isArray(value.attachments) &&
         value.attachments.every(isImageAttachment)))
   )
 }
 
-function isImageAttachment(value: unknown): value is ImageAttachment {
+export function isImageAttachment(value: unknown): value is ImageAttachment {
   return (
     isRecord(value) &&
     onlyKeys(value, ["name", "mediaType", "detail", "file", "sizeBytes"]) &&

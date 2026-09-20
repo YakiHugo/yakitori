@@ -76,6 +76,7 @@ export type RolloutAssets = {
     attachments: readonly ImageAttachment[],
   ): Promise<void>
   cleanupStagingImageAttachments(): Promise<void>
+  discardEphemeralRolloutFiles(rolloutId: string): Promise<void>
   read(reference: RolloutAssetReference): Promise<Buffer>
   readRange(
     reference: RolloutAssetReference,
@@ -107,6 +108,12 @@ export function createRolloutAssets(
   }
 
   return {
+    async discardEphemeralRolloutFiles(rolloutId) {
+      requireRolloutId(rolloutId)
+      await options.withMutationLease(rolloutId, () =>
+        rm(join(root, rolloutId), { recursive: true, force: true }),
+      )
+    },
     async importImagePaths(rolloutId, ownerId, paths) {
       requireRolloutId(rolloutId)
       requirePathSegment(ownerId, "attachment owner")
