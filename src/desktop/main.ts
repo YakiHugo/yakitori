@@ -243,6 +243,19 @@ function openMainWindow(
     window.show()
   })
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }))
+  window.webContents.on("will-prevent-unload", (event) => {
+    const choice = dialog.showMessageBoxSync(window, {
+      type: "warning",
+      title: "Unsaved file changes",
+      message: "Discard unsaved file changes?",
+      detail: "Your edits have not been saved to disk.",
+      buttons: ["Keep editing", "Discard changes"],
+      defaultId: 0,
+      cancelId: 0,
+    })
+    // Electron's preventDefault here permits the unload the renderer blocked.
+    if (choice === 1) event.preventDefault()
+  })
   // The GUI needs no renderer permissions; deny every request.
   window.webContents.session.setPermissionRequestHandler(
     (_webContents, _permission, callback) => {

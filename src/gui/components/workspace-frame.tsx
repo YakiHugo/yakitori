@@ -34,6 +34,7 @@ import { SidebarFrame } from "./sidebar-frame.tsx"
 import { WorkspaceChanges } from "./workspace-changes.tsx"
 import { SubagentsWorkspace } from "./subagents-workspace.tsx"
 import { WorkspaceFilePreview, WorkspaceFiles } from "./workspace-files.tsx"
+import { DiscardFileDialog } from "./file-editor.tsx"
 
 const views = [
   { id: "changes", label: "Changes", icon: GitCompareArrows },
@@ -57,6 +58,10 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
   const expanded = useWorkspaceStore((state) => state.expanded)
   const tabs = useWorkspaceStore((state) => state.tabs)
   const activeId = useWorkspaceStore((state) => state.activeId)
+  const activeFile = tabs.find(
+    (tab): tab is Extract<WorkspaceTab, { kind: "file" }> =>
+      tab.id === activeId && tab.kind === "file",
+  )
   const addTab = useWorkspaceStore((state) => state.addTab)
   const activate = useWorkspaceStore((state) => state.activate)
   const closeTab = useWorkspaceStore((state) => state.closeTab)
@@ -92,6 +97,8 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
     setWidthRatio(Math.min(maximumWidth, Math.max(320, value)) / available)
   const [closing, setClosing] =
     useState<Extract<WorkspaceTab, { kind: "chat" }>>()
+  const [closingFile, setClosingFile] =
+    useState<Extract<WorkspaceTab, { kind: "file" }>>()
   const [adding, setAdding] = useState(false)
   const [resizing, setResizing] = useState(false)
   const apiBase = useAppStore((state) => state.apiBase)
@@ -109,6 +116,10 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
     addPromptExcerpt(excerpt)
   }
   const requestClose = (tab: WorkspaceTab) => {
+    if (tab.kind === "file" && tab.dirty) {
+      setClosingFile(tab)
+      return
+    }
     if (
       tab.kind === "chat" &&
       (tab.hasMessages ||
@@ -171,7 +182,12 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
   }, [addTab, setOpen, sessionId])
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => {
-      if (document.querySelector("dialog[open]") || event.isComposing) return
+      if (
+        event.defaultPrevented ||
+        document.querySelector("dialog[open]") ||
+        event.isComposing
+      )
+        return
       if (
         (event.metaKey || event.ctrlKey) &&
         event.shiftKey &&
@@ -328,7 +344,10 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
                     }}
                   >
                     <Icon size={14} />
-                    <span>{label}</span>
+                    <span>
+                      {label}
+                      {tab.kind === "file" && tab.dirty ? " •" : ""}
+                    </span>
                   </button>
                   <button
                     type="button"
@@ -413,111 +432,138 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
             <X size={15} />
           </button>
         </header>
-        {tabs.map((tab) => (
-          <div
-            key={`${apiBase}:${tab.id}`}
-            id={`workspace-content-${tab.id}`}
-            role="tabpanel"
-            aria-labelledby={`workspace-tab-${tab.id}`}
-            className="workspace-content"
-            hidden={!open || activeId !== tab.id}
-          >
-            {tab.kind === "agents" ? (
-              <SubagentsWorkspace
-                apiBase={apiBase}
-                sourceSessionId={tab.sourceSessionId ?? sessionId}
-                selectedAgentId={tab.selectedAgentId}
-                active={open && activeId === tab.id}
-                onSelect={(id) =>
-                  useWorkspaceStore.getState().selectAgent(tab.id, id)
-                }
-              />
-            ) : tab.kind === "computer" ? (
-              <ComputerPanel apiBase={apiBase} />
-            ) : tab.kind === "chat" ? (
-              <SideChatPanel
-                tab={tab}
-                apiBase={apiBase}
-                cwd={cwd}
-                active={open && activeId === tab.id}
-              />
-            ) : tab.kind === "browser" ? (
-              <BrowserPanel
-                tabId={tab.id}
-                active={open && activeId === tab.id}
-                {...(tab.initialUrl === undefined
-                  ? {}
-                  : { initialUrl: tab.initialUrl })}
-                onTitleChange={(title) =>
-                  useWorkspaceStore.getState().setBrowserTitle(tab.id, title)
-                }
-                onSelection={(selection) => {
-                  const excerpt: ContextExcerpt = {
-                    kind: "selection",
-                    id: `excerpt_${crypto.randomUUID()}`,
-                    text: selection.text,
-                    source: {
-                      kind: "browser",
-                      label: selection.title || selection.url,
-                      url: selection.url,
-                    },
-                  }
-                  if (selection.action === "chat")
-                    askInSideChat(excerpt, sessionId)
-                  else addToMain(excerpt)
-                }}
-              />
-            ) : tab.kind === "file" ? (
-              <WorkspaceFilePreview
-                cwd={tab.cwd}
-                path={tab.path}
-                apiBase={apiBase}
-              />
-            ) : cwd ? (
-              <>
-                <div className="workspace-root" title={cwd}>
-                  {cwd}
-                </div>
-                {tab.kind === "files" ? (
-                  <WorkspaceFiles
-                    cwd={cwd}
-                    apiBase={apiBase}
-                    onOpenFile={(path) => openFile(path, cwd)}
-                  />
-                ) : (
-                  <WorkspaceChanges cwd={cwd} apiBase={apiBase} />
-                )}
-              </>
-            ) : (
-              <div className="workspace-empty">
-                <Files size={28} strokeWidth={1.25} />
-                <strong>Your workspace, alongside your conversation</strong>
-                <p>
-                  Select a project or open a conversation to browse files and
-                  review changes.
-                </p>
-              </div>
-            )}
-          </div>
-        ))}
-        {tabs.length === 0 && (
-          <div className="workspace-empty">
-            <MessageCirclePlus size={30} strokeWidth={1.25} />
-            <strong>Open something alongside your conversation</strong>
-            <p>
-              Browse the web, read a file, or ask a question in a temporary side
-              chat.
-            </p>
-            <button
-              type="button"
-              className="rounded-lg border px-3 py-2 text-foreground"
-              onClick={() => addTab("chat", sessionId)}
+        <div className="workspace-body">
+          {tabs.map((tab) => (
+            <div
+              key={`${apiBase}:${tab.id}`}
+              id={`workspace-content-${tab.id}`}
+              role="tabpanel"
+              aria-labelledby={`workspace-tab-${tab.id}`}
+              className="workspace-content"
+              hidden={!open || activeId !== tab.id}
             >
-              New side chat
-            </button>
-          </div>
-        )}
+              {tab.kind === "agents" ? (
+                <SubagentsWorkspace
+                  apiBase={apiBase}
+                  sourceSessionId={tab.sourceSessionId ?? sessionId}
+                  selectedAgentId={tab.selectedAgentId}
+                  active={open && activeId === tab.id}
+                  onSelect={(id) =>
+                    useWorkspaceStore.getState().selectAgent(tab.id, id)
+                  }
+                />
+              ) : tab.kind === "computer" ? (
+                <ComputerPanel apiBase={apiBase} />
+              ) : tab.kind === "chat" ? (
+                <SideChatPanel
+                  tab={tab}
+                  apiBase={apiBase}
+                  cwd={cwd}
+                  active={open && activeId === tab.id}
+                />
+              ) : tab.kind === "browser" ? (
+                <BrowserPanel
+                  tabId={tab.id}
+                  active={open && activeId === tab.id}
+                  {...(tab.initialUrl === undefined
+                    ? {}
+                    : { initialUrl: tab.initialUrl })}
+                  onTitleChange={(title) =>
+                    useWorkspaceStore.getState().setBrowserTitle(tab.id, title)
+                  }
+                  onSelection={(selection) => {
+                    const excerpt: ContextExcerpt = {
+                      kind: "selection",
+                      id: `excerpt_${crypto.randomUUID()}`,
+                      text: selection.text,
+                      source: {
+                        kind: "browser",
+                        label: selection.title || selection.url,
+                        url: selection.url,
+                      },
+                    }
+                    if (selection.action === "chat")
+                      askInSideChat(excerpt, sessionId)
+                    else addToMain(excerpt)
+                  }}
+                />
+              ) : tab.kind === "file" ? (
+                <WorkspaceFilePreview
+                  cwd={tab.cwd}
+                  path={tab.path}
+                  apiBase={apiBase}
+                  onDirtyChange={(dirty) =>
+                    useWorkspaceStore.getState().setFileDirty(tab.id, dirty)
+                  }
+                />
+              ) : cwd ? (
+                <>
+                  <div className="workspace-root" title={cwd}>
+                    {cwd}
+                  </div>
+                  {tab.kind === "files" ? (
+                    <WorkspaceFiles
+                      cwd={cwd}
+                      apiBase={apiBase}
+                      onOpenFile={(path) => openFile(path, cwd)}
+                    />
+                  ) : (
+                    <WorkspaceChanges cwd={cwd} apiBase={apiBase} />
+                  )}
+                </>
+              ) : (
+                <div className="workspace-empty">
+                  <Files size={28} strokeWidth={1.25} />
+                  <strong>Your workspace, alongside your conversation</strong>
+                  <p>
+                    Select a project or open a conversation to browse files and
+                    review changes.
+                  </p>
+                </div>
+              )}
+            </div>
+          ))}
+          {tabs.length === 0 && (
+            <div className="workspace-empty">
+              <MessageCirclePlus size={30} strokeWidth={1.25} />
+              <strong>Open something alongside your conversation</strong>
+              <p>
+                Browse the web, read a file, or ask a question in a temporary
+                side chat.
+              </p>
+              <button
+                type="button"
+                className="rounded-lg border px-3 py-2 text-foreground"
+                onClick={() => addTab("chat", sessionId)}
+              >
+                New side chat
+              </button>
+            </div>
+          )}
+          {activeFile && expanded ? (
+            <aside
+              className="workspace-file-explorer"
+              aria-label="Project files"
+            >
+              <WorkspaceFiles
+                cwd={activeFile.cwd}
+                apiBase={apiBase}
+                onOpenFile={(path) => openFile(path, activeFile.cwd)}
+              />
+            </aside>
+          ) : null}
+        </div>
       </aside>
+      {closingFile ? (
+        <DiscardFileDialog
+          name={tabLabel(closingFile)}
+          onCancel={() => setClosingFile(undefined)}
+          onDiscard={() => {
+            closeTab(closingFile.id)
+            setClosingFile(undefined)
+          }}
+        />
+      ) : null}
       <SelectionActions
         key={`${apiBase}:${sessionId ?? "draft"}`}
         annotations={excerpts.filter(

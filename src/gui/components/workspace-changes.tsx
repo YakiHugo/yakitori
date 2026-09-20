@@ -5,6 +5,7 @@ import {
   Minus,
   Plus,
   RefreshCw,
+  SquareArrowOutUpRight,
 } from "lucide-react"
 import { useEffect, useRef, useState } from "react"
 import type {
@@ -13,6 +14,7 @@ import type {
 } from "../../server/workspace.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import { useAppStore } from "../store/app-store.ts"
+import { useWorkspaceStore } from "../store/workspace-store.ts"
 import { DiffView } from "./cells/diff-view.tsx"
 
 const iconButton =
@@ -68,7 +70,11 @@ function ChangesBrowser({
   useEffect(() => {
     const refresh = () => setRevision((value) => value + 1)
     window.addEventListener("focus", refresh)
-    return () => window.removeEventListener("focus", refresh)
+    window.addEventListener("yakitori:workspace-file-saved", refresh)
+    return () => {
+      window.removeEventListener("focus", refresh)
+      window.removeEventListener("yakitori:workspace-file-saved", refresh)
+    }
   }, [])
 
   const entries = status?.entries ?? []
@@ -308,6 +314,19 @@ function ChangeEntry({
             {code}
           </span>
         </button>
+        {code !== "D" ? (
+          <button
+            type="button"
+            className={iconButton}
+            aria-label={`Open ${entry.path}`}
+            title="Open file"
+            onClick={() =>
+              useWorkspaceStore.getState().openFile(entry.path, cwd)
+            }
+          >
+            <SquareArrowOutUpRight size={13} />
+          </button>
+        ) : null}
         <button
           type="button"
           disabled={pending}
@@ -328,7 +347,7 @@ function ChangeEntry({
         <div className="workspace-change-diff min-w-0 px-2 pb-3">
           {diff ? (
             diff.text ? (
-              <DiffView diff={diff} />
+              <DiffView diff={diff} path={entry.path} />
             ) : (
               <p className="px-2 py-3 text-muted-foreground">
                 No text diff available.

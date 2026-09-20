@@ -1,22 +1,25 @@
 import {
-  ArrowLeft,
-  ChevronRight,
   File,
-  Folder,
-  Link,
-  RefreshCw,
+  FileCode2,
+  FileText,
+  Pencil,
   SquareArrowOutUpRight,
+  WrapText,
 } from "lucide-react"
 import { useEffect, useRef, useState } from "react"
-import type {
-  WorkspaceListResponse,
-  WorkspaceReadResponse,
-} from "../../server/workspace.ts"
+import type { WorkspaceReadResponse } from "../../server/workspace.ts"
 import { contextSourceAttributes } from "../conversation-context.ts"
 import { fileActionLabel, openFileTarget } from "../lib/open-resource.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
+import { languageForPath } from "../lib/syntax-highlighter.ts"
 import { useAppStore } from "../store/app-store.ts"
+import { useWorkspaceStore } from "../store/workspace-store.ts"
+import { MarkdownView } from "./markdown.tsx"
 import { CopyIconButton } from "./response-actions.tsx"
+import { SourceCode } from "./source-code.tsx"
+import { FileEditor } from "./file-editor.tsx"
+import { WorkspaceFileTree } from "./workspace-file-tree.tsx"
+import "./workspace-files.css"
 
 const iconButton =
   "inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-foreground/5 hover:text-foreground disabled:opacity-40"
@@ -28,206 +31,52 @@ export function WorkspaceFiles(
     onOpenFile?: (path: string) => void
   }>,
 ) {
-  return <FilesBrowser key={`${props.apiBase}:${props.cwd}`} {...props} />
-}
-
-function FilesBrowser({
-  cwd,
-  apiBase,
-  onOpenFile,
-}: Readonly<{
-  cwd: string
-  apiBase: string
-  onOpenFile?: (path: string) => void
-}>) {
-  const [path, setPath] = useState("")
-  const [file, setFile] = useState<string>()
-  const [listing, setListing] = useState<WorkspaceListResponse>()
-  const [error, setError] = useState<string>()
-  const [loading, setLoading] = useState(true)
-  const [revision, setRevision] = useState(0)
-  const activeTurnId = useAppStore((state) => state.execution.activeTurnId)
-  const rootName = cwd.replace(/\/$/, "").split("/").at(-1) || cwd
-  const segments = path.split("/").filter(Boolean)
-
-  // biome-ignore lint/correctness/useExhaustiveDependencies: revision explicitly invalidates filesystem data on refresh.
-  useEffect(() => {
-    let current = true
-    setLoading(true)
-    setError(undefined)
-    setListing(undefined)
-    void getAppRpcClient(apiBase)
-      .request("workspace/list", { cwd, path: path || "." })
-      .then(
-        (result) => {
-          if (current) {
-            setListing(result)
-            setLoading(false)
-          }
-        },
-        (cause: unknown) => {
-          if (current) {
-            setError(
-              cause instanceof Error ? cause.message : "Could not list files.",
-            )
-            setLoading(false)
-          }
-        },
-      )
-    return () => {
-      current = false
-    }
-  }, [apiBase, cwd, path, revision, activeTurnId])
-
-  useEffect(() => {
-    const refresh = () => setRevision((value) => value + 1)
-    window.addEventListener("focus", refresh)
-    return () => window.removeEventListener("focus", refresh)
-  }, [])
-
-  const navigate = (directory: string) => {
-    setFile(undefined)
-    setPath(directory)
-  }
-
   return (
-    <div className="workspace-files flex min-h-0 flex-1 flex-col text-xs">
-      <div className="flex min-h-11 items-center gap-1 border-b px-3">
-        <button
-          type="button"
-          className={iconButton}
-          aria-label={file ? "Back to directory" : "Parent directory"}
-          disabled={!file && path === ""}
-          onClick={() =>
-            file
-              ? setFile(undefined)
-              : navigate(segments.slice(0, -1).join("/"))
-          }
-        >
-          <ArrowLeft size={14} />
-        </button>
-        <nav
-          aria-label="File path"
-          className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto whitespace-nowrap text-muted-foreground"
-        >
-          <button
-            type="button"
-            className="hover:text-foreground"
-            title={cwd}
-            onClick={() => navigate("")}
-          >
-            {rootName}
-          </button>
-          {segments.map((segment, index) => (
-            <span
-              key={segments.slice(0, index + 1).join("/")}
-              className="inline-flex items-center gap-1"
-            >
-              <ChevronRight size={11} />
-              <button
-                type="button"
-                className="hover:text-foreground"
-                onClick={() => navigate(segments.slice(0, index + 1).join("/"))}
-              >
-                {segment}
-              </button>
-            </span>
-          ))}
-        </nav>
-        <button
-          type="button"
-          className={iconButton}
-          aria-label="Refresh files"
-          onClick={() => setRevision((value) => value + 1)}
-        >
-          <RefreshCw
-            size={13}
-            className={loading ? "animate-spin" : undefined}
-          />
-        </button>
-      </div>
-      {file ? (
-        <WorkspaceFilePreview
-          key={`${file}:${revision}:${activeTurnId ?? ""}`}
-          cwd={cwd}
-          apiBase={apiBase}
-          path={file}
-        />
-      ) : (
-        <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
-          {error ? (
-            <p role="alert" className="px-2 py-4 text-destructive">
-              {error}
-            </p>
-          ) : null}
-          {loading ? (
-            <p role="status" className="px-2 py-4 text-muted-foreground">
-              Loading files…
-            </p>
-          ) : null}
-          {listing?.entries.map((entry) => {
-            const Icon =
-              entry.kind === "directory"
-                ? Folder
-                : entry.kind === "symlink"
-                  ? Link
-                  : File
-            return (
-              <button
-                type="button"
-                key={entry.path}
-                disabled={entry.kind === "other"}
-                className="group flex w-full items-center gap-2.5 rounded-md px-2 py-2 text-left hover:bg-foreground/5 disabled:opacity-40"
-                title={entry.path}
-                onClick={() =>
-                  entry.kind === "directory"
-                    ? navigate(entry.path)
-                    : onOpenFile
-                      ? onOpenFile(entry.path)
-                      : setFile(entry.path)
-                }
-              >
-                <Icon size={15} className="shrink-0 text-muted-foreground" />
-                <span className="min-w-0 flex-1 truncate">{entry.name}</span>
-                {entry.kind === "directory" ? (
-                  <ChevronRight
-                    size={12}
-                    className="text-muted-foreground/60"
-                  />
-                ) : null}
-              </button>
-            )
-          })}
-          {listing?.entries.length === 0 ? (
-            <p className="px-2 py-4 text-muted-foreground">
-              This directory is empty.
-            </p>
-          ) : null}
-          {listing?.truncated ? (
-            <p className="px-2 py-3 text-muted-foreground">
-              Directory listing truncated.
-            </p>
-          ) : null}
-        </div>
-      )}
-    </div>
+    <WorkspaceFileTree
+      {...props}
+      onOpenFile={
+        props.onOpenFile ??
+        ((path) => useWorkspaceStore.getState().openFile(path, props.cwd))
+      }
+    />
   )
 }
 
 export function WorkspaceFilePreview(
-  props: Readonly<{ cwd: string; apiBase: string; path: string }>,
+  props: Readonly<{
+    cwd: string
+    apiBase: string
+    path: string
+    onDirtyChange?: (dirty: boolean) => void
+  }>,
 ) {
+  const [editing, setEditing] = useState(false)
   const activeTurnId = useAppStore((state) => state.execution.activeTurnId)
   const [revision, setRevision] = useState(0)
   useEffect(() => {
     const refresh = () => setRevision((value) => value + 1)
     window.addEventListener("focus", refresh)
-    return () => window.removeEventListener("focus", refresh)
+    window.addEventListener("yakitori:workspace-file-saved", refresh)
+    return () => {
+      window.removeEventListener("focus", refresh)
+      window.removeEventListener("yakitori:workspace-file-saved", refresh)
+    }
   }, [])
+  if (editing)
+    return (
+      <FileEditor
+        {...props}
+        onClose={() => {
+          setEditing(false)
+          setRevision((value) => value + 1)
+        }}
+      />
+    )
   return (
     <FilePreview
       key={`${props.apiBase}:${props.cwd}:${props.path}:${activeTurnId ?? ""}:${revision}`}
       {...props}
+      onEdit={() => setEditing(true)}
     />
   )
 }
@@ -236,10 +85,13 @@ function FilePreview({
   cwd,
   apiBase,
   path,
-}: Readonly<{ cwd: string; apiBase: string; path: string }>) {
+  onEdit,
+}: Readonly<{ cwd: string; apiBase: string; path: string; onEdit(): void }>) {
   const [preview, setPreview] = useState<WorkspaceReadResponse>()
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string>()
+  const [wrap, setWrap] = useState(false)
+  const [mode, setMode] = useState<"source" | "preview">("preview")
   const request = useRef(0)
   const sessionId = useAppStore((state) => state.selection.sessionId)
 
@@ -311,15 +163,38 @@ function FilePreview({
   const absolutePath = path.startsWith("/")
     ? path
     : `${cwd.replace(/\/$/, "")}/${path.replace(/^\.\//, "")}`
+  const language = languageForPath(path)
+  const markdown = language === "markdown"
+  const rendered = markdown && mode === "preview"
+  const source = contextSourceAttributes({
+    kind: "file",
+    label: path,
+    path: absolutePath,
+    ...(sessionId ? { sessionId } : {}),
+  })
 
   return (
     <div className="workspace-file-preview flex min-h-0 flex-1 flex-col">
-      <div className="flex items-center gap-2 border-b px-4 py-2">
-        <File size={13} className="shrink-0 text-muted-foreground" />
-        <span className="min-w-0 flex-1 truncate" title={path}>
-          {path.split("/").at(-1)}
-        </span>
+      <div className="file-preview-heading">
+        <div className="file-preview-emblem" aria-hidden="true">
+          {markdown ? <FileText size={18} /> : <FileCode2 size={18} />}
+        </div>
+        <div className="file-preview-identity">
+          <strong title={path}>{path.split("/").at(-1)}</strong>
+          <span title={absolutePath}>{absolutePath}</span>
+        </div>
         <CopyIconButton text={absolutePath} label="path" />
+        {preview && !preview.binary ? (
+          <button
+            type="button"
+            className={iconButton}
+            title="Edit file"
+            aria-label="Edit file"
+            onClick={onEdit}
+          >
+            <Pencil size={14} />
+          </button>
+        ) : null}
         {window.yakitoriDesktop !== undefined ? (
           <button
             type="button"
@@ -332,44 +207,81 @@ function FilePreview({
           </button>
         ) : null}
       </div>
-      <div className="min-h-0 flex-1 overflow-auto">
+      {preview && !preview.binary && lines.length > 0 ? (
+        <div className="file-preview-toolbar">
+          {markdown ? (
+            <fieldset className="file-preview-modes" aria-label="File view">
+              <button
+                type="button"
+                aria-pressed={rendered}
+                onClick={() => setMode("preview")}
+              >
+                Preview
+              </button>
+              <button
+                type="button"
+                aria-pressed={!rendered}
+                onClick={() => setMode("source")}
+              >
+                Source
+              </button>
+            </fieldset>
+          ) : (
+            <span className="file-preview-language">
+              {language ?? "Plain text"}
+            </span>
+          )}
+          <div className="file-preview-actions">
+            {!rendered ? (
+              <button
+                type="button"
+                className={iconButton}
+                aria-label="Wrap lines"
+                aria-pressed={wrap}
+                title="Wrap lines"
+                onClick={() => setWrap((value) => !value)}
+              >
+                <WrapText size={15} />
+              </button>
+            ) : null}
+            <CopyIconButton text={preview.content} label="file content" />
+          </div>
+        </div>
+      ) : null}
+      <div className="file-preview-viewport min-h-0 flex-1 overflow-auto">
         {error ? (
           <p role="alert" className="px-4 py-3 text-destructive">
             {error}
           </p>
         ) : null}
         {preview?.binary ? (
-          <p className="px-4 py-6 text-muted-foreground">
-            Binary file · {fileActionLabel().toLowerCase()} to view.
-          </p>
+          <div className="file-preview-empty">
+            <File size={28} aria-hidden="true" />
+            <strong>No text preview</strong>
+            <p>Binary file · {fileActionLabel().toLowerCase()} to view.</p>
+          </div>
         ) : null}
         {preview && !preview.binary ? (
           lines.length === 0 ? (
-            <p className="px-4 py-6 text-muted-foreground">
-              This file is empty.
-            </p>
+            <p className="file-preview-empty">This file is empty.</p>
           ) : (
-            <table
-              {...contextSourceAttributes({
-                kind: "file",
-                label: path,
-                path: absolutePath,
-                ...(sessionId ? { sessionId } : {}),
-              })}
-              className="w-full border-collapse font-mono text-[11px] leading-5"
-            >
-              <tbody>
-                {lines.map((line, index) => (
-                  // biome-ignore lint/suspicious/noArrayIndexKey: preview lines remain in source order
-                  <tr key={index}>
-                    <td className="w-10 select-none px-3 text-right align-top text-muted-foreground/50">
-                      {preview.offset + index}
-                    </td>
-                    <td className="whitespace-pre pr-4">{line || "\u00a0"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <div {...source}>
+              {rendered ? (
+                <MarkdownView
+                  text={preview.content}
+                  workspaceRoot={cwd}
+                  documentPath={absolutePath}
+                  className="markdown file-preview-markdown"
+                />
+              ) : (
+                <SourceCode
+                  code={preview.content}
+                  path={path}
+                  offset={preview.offset}
+                  wrap={wrap}
+                />
+              )}
+            </div>
           )
         ) : null}
         {loading ? (
@@ -381,7 +293,7 @@ function FilePreview({
           <button
             type="button"
             disabled={loading}
-            className="m-3 rounded-md px-3 py-2 text-muted-foreground hover:bg-foreground/5 hover:text-foreground disabled:opacity-40"
+            className="file-preview-load-more"
             onClick={() => void loadMore()}
           >
             Load more lines
@@ -392,6 +304,16 @@ function FilePreview({
           </p>
         ) : null}
       </div>
+      {preview && !preview.binary ? (
+        <div className="file-preview-status">
+          <span>
+            {lines.length.toLocaleString()}{" "}
+            {lines.length === 1 ? "line" : "lines"}
+            {preview.truncated ? " loaded · Partial file" : ""}
+          </span>
+          <span>Read only</span>
+        </div>
+      ) : null}
     </div>
   )
 }

@@ -25,7 +25,20 @@ vi.mock("../../src/gui/components/sidebar-frame.tsx", () => ({
 }))
 vi.mock("../../src/gui/components/workspace-files.tsx", () => ({
   WorkspaceFiles: ({ cwd }: { cwd: string }) => <p>Files at {cwd}</p>,
-  WorkspaceFilePreview: ({ path }: { path: string }) => <p>File {path}</p>,
+  WorkspaceFilePreview: ({
+    path,
+    onDirtyChange,
+  }: {
+    path: string
+    onDirtyChange?(dirty: boolean): void
+  }) => (
+    <div>
+      <p>File {path}</p>
+      <button type="button" onClick={() => onDirtyChange?.(true)}>
+        Change file
+      </button>
+    </div>
+  ),
 }))
 vi.mock("../../src/gui/components/workspace-changes.tsx", () => ({
   WorkspaceChanges: ({ cwd }: { cwd: string }) => <p>Changes at {cwd}</p>,
@@ -149,6 +162,26 @@ async function addView(user: ReturnType<typeof userEvent.setup>, name: string) {
     screen.getByRole("menuitem", { name: new RegExp(`^${name}`) }),
   )
 }
+
+it("keeps a dirty file tab until its edits are explicitly discarded", async () => {
+  const user = userEvent.setup()
+  useWorkspaceStore.getState().openFile("notes.txt", "/project/one")
+  render(
+    <WorkspaceFrame>
+      <main>Conversation</main>
+    </WorkspaceFrame>,
+  )
+  await user.click(screen.getByRole("button", { name: "Change file" }))
+  await user.click(screen.getByRole("button", { name: "Close notes.txt" }))
+  expect(screen.getByRole("dialog").textContent).toContain(
+    "Discard changes to notes.txt?",
+  )
+  await user.click(screen.getByRole("button", { name: "Keep editing" }))
+  expect(screen.getByRole("tab", { name: /notes.txt/ })).toBeDefined()
+  await user.click(screen.getByRole("button", { name: "Close notes.txt" }))
+  await user.click(screen.getByRole("button", { name: "Discard changes" }))
+  expect(screen.queryByRole("tab", { name: /notes.txt/ })).toBeNull()
+})
 
 it("restores the collapsed workspace, width, and selected tab after remounting", async () => {
   const user = userEvent.setup()
