@@ -342,6 +342,74 @@ describe("Turn processor", () => {
     ).toBe(true)
   })
 
+  it("pairs compaction token usage with model timing while excluding compaction hooks", async () => {
+    let now = 1_000
+    let normalCalls = 0
+    const dateNow = vi.spyOn(Date, "now").mockImplementation(() => now)
+    try {
+      const stream: StreamFn = async function* (request) {
+        const compacting = request.compaction === "local"
+        if (!compacting) normalCalls += 1
+        const text = compacting
+          ? "checkpoint"
+          : normalCalls === 1
+            ? "old ".repeat(9000)
+            : "done"
+        now += compacting ? 100 : 50
+        yield { type: "snapshot", text }
+        now += compacting ? 300 : 150
+        yield {
+          type: "response",
+          response: {
+            stopReason: ModelStopReason.EndTurn,
+            content: [{ type: "text", text }],
+            usage: {
+              inputTokens: compacting ? 80 : 20,
+              outputTokens: compacting ? 40 : 10,
+              activeContextTokens:
+                !compacting && normalCalls === 1 ? 40_000 : 100,
+            },
+          },
+        }
+      }
+      const runtime = await createRuntime(stream, createToolRegistry([]), {
+        modelContextWindowTokens: 60_000,
+        modelAutoCompactTokenLimit: 30_000,
+        hookRunner: {
+          async dispose() {},
+          async run(request) {
+            if (request.event === HookEvent.PreCompact) now += 1_000
+            if (request.event === HookEvent.PostCompact) now += 2_000
+            return { continue: true, additionalContext: [] }
+          },
+        },
+      })
+      const thread = await runtime.createThread()
+      for (const text of ["First.", "Continue."]) {
+        await thread.startIfIdle({ content: { kind: "text", text } })
+        await nextLifecycleEvent(thread)
+        await nextLifecycleEvent(thread)
+      }
+      expect(thread.agentStatus).toEqual({ completed: "done" })
+      const stored = await runtime.store.readThread(thread.id)
+      const completed = stored?.rollout
+        .filter(({ item }) => item.type === "turn_completed")
+        .at(-1)?.item
+      expect(completed).toMatchObject({
+        usage: { inputTokens: 100, outputTokens: 50 },
+        metrics: {
+          modelCalls: 2,
+          toolCalls: 0,
+          modelDurationMs: 600,
+          toolDurationMs: 0,
+          averageTimeToFirstTokenMs: 75,
+        },
+      })
+    } finally {
+      dateNow.mockRestore()
+    }
+  })
+
   it.each([
     45, 100,
   ])("accounts for compaction in the shared budget of %i tokens", async (limitTokens) => {
