@@ -1,5 +1,13 @@
 import { createHash, randomBytes } from "node:crypto"
-import { link, mkdir, open, readFile, rename, rm, unlink } from "node:fs/promises"
+import {
+  link,
+  mkdir,
+  open,
+  readFile,
+  rename,
+  rm,
+  unlink,
+} from "node:fs/promises"
 import { dirname, isAbsolute, join, resolve } from "node:path"
 import { ToolLimitDefaults } from "../limits.ts"
 import {
@@ -10,13 +18,15 @@ import {
 import type { ToolExecutionResult } from "./types.ts"
 import { createBoundedUnifiedDiff } from "./unified-diff.ts"
 
-export type CompareAndWriteTextFileInput = {
-  readonly workspaceRoot: string
-  readonly path: string
-  readonly content: string
-  readonly expectedSha256: string | null
-  readonly createParentDirectories?: boolean
-}
+export type CompareAndWriteTextFileInput = Readonly<{
+  workspaceRoot: string
+  path: string
+  content: string
+  expectedSha256: string | null
+  createParentDirectories?: boolean
+  // GUI writes enforce a narrower path boundary than agent file tools.
+  validateTarget?: (absolutePath: string) => Promise<void>
+}>
 
 export async function compareAndWriteTextFile(
   input: CompareAndWriteTextFileInput,
@@ -40,11 +50,19 @@ export async function compareAndWriteTextFile(
   }
   const resolved = await resolveWritePath(input.workspaceRoot, input.path)
   if (!resolved.ok) return pathError(resolved)
+  await input.validateTarget?.(resolved.absolutePath)
 
   try {
     return await withPathWriteLock(resolved.absolutePath, async () => {
       const target = await resolveWritePath(input.workspaceRoot, input.path)
       if (!target.ok) return pathError(target)
+      if (target.absolutePath !== resolved.absolutePath) {
+        return writeFailure(
+          "path_changed",
+          "File path changed before the write.",
+        )
+      }
+      await input.validateTarget?.(target.absolutePath)
 
       const checked = await checkPrecondition(target, input.expectedSha256)
       if (!checked.ok) return checked.result
@@ -81,9 +99,11 @@ export async function compareAndWriteTextFile(
             { suggestion: "Resolve the path again and retry the write." },
           )
         }
+        await input.validateTarget?.(latest.absolutePath)
 
         const rechecked = await checkPrecondition(latest, input.expectedSha256)
         if (!rechecked.ok) return rechecked.result
+        await input.validateTarget?.(latest.absolutePath)
 
         if (target.exists) {
           await rename(tempPath, target.absolutePath)
