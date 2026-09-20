@@ -686,10 +686,8 @@ function applyDurable(
         telemetry,
         timeToFirstTokenWeightedMs,
         timeToFirstTokenSamples,
-        ...(event.data.usage === undefined
-          ? {}
-          : { lastTurnUsage: event.data.usage }),
-        ...(metrics === undefined ? {} : { lastTurnMetrics: metrics }),
+        lastTurnUsage: event.data.usage,
+        lastTurnMetrics: metrics,
       }
       return finishTurn(
         next,

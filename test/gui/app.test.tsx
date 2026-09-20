@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { cleanup, render, screen, within } from "@testing-library/react"
+import { act, cleanup, render, screen, within } from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { SidebarChange } from "../../src/core/session-sidebar.ts"
@@ -32,6 +32,27 @@ afterEach(() => {
 })
 
 describe("app shell", () => {
+  it("makes session telemetry available from the conversation header", async () => {
+    const user = userEvent.setup()
+    render(<App />)
+    expect(screen.queryByLabelText("Session telemetry")).toBeNull()
+    act(() =>
+      useAppStore.setState({
+        selection: { sessionId },
+        selectedSession: sessionDetail(),
+      }),
+    )
+    const summary = screen.getByLabelText("Session telemetry")
+    expect(summary.textContent).toContain("Avg TTFT")
+    expect(summary.textContent).toContain("Tokens")
+    expect(summary.textContent).toContain("Cache hit")
+    expect(summary.textContent).toContain("TPS")
+    await user.click(summary)
+    expect(
+      screen.getByRole("region", { name: "Session metrics" }),
+    ).toBeDefined()
+  })
+
   it("renders an alert with the store error message", () => {
     useAppStore.setState({
       message: "Could not open event stream.",
