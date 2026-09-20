@@ -2,6 +2,8 @@
 
 type YakitoriDesktopBridge = {
   platform: string
+  writeClipboardText(text: string): Promise<void>
+  browser: import("../desktop/workspace-browser-types.ts").WorkspaceBrowserBridge
   pickProjectFolder(): Promise<string | null>
   pickImages(): Promise<{ readonly selectionId: string } | undefined>
   importPickedImages(input: {

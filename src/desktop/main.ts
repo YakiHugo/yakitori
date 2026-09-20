@@ -3,10 +3,12 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { app, BrowserWindow, dialog } from "electron"
 import { loadLocalEnvFile, resolveYakitoriHome } from "../server/env-file.ts"
-import { registerProjectPicker } from "./project-picker.ts"
 import { registerAttachmentImporter } from "./attachment-importer.ts"
+import { registerClipboardWriter } from "./clipboard-writer.ts"
+import { registerProjectPicker } from "./project-picker.ts"
 import { registerResourceOpener } from "./resource-opener.ts"
 import { type ServerProcess, spawnServerProcess } from "./server-process.ts"
+import { registerWorkspaceBrowser } from "./workspace-browser.ts"
 
 // The bundle lands at dist/desktop/main.js, so the repo root is two levels up.
 // (No new URL("./x", import.meta.url) — the bundler inlines that as a data: URL.)
@@ -232,7 +234,9 @@ function openMainWindow(
   })
   registerProjectPicker(window)
   registerResourceOpener(workspace, window)
+  registerClipboardWriter(window)
   registerAttachmentImporter(server, window)
+  registerWorkspaceBrowser(window)
   window.once("ready-to-show", () => {
     window.show()
   })
