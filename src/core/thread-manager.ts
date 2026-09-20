@@ -72,6 +72,9 @@ export class ThreadManager {
   readonly #threadStatusSubscriptions = new Map<string, () => void>()
   readonly #runningThreadIds = new Set<string>()
   readonly #runningTurnCountListeners = new Set<(count: number) => void>()
+  readonly #threadInstalledListeners = new Set<
+    (thread: AgentThread) => Promise<void>
+  >()
   readonly #loads = new Map<string, Promise<AgentThread | undefined>>()
   readonly #starting = new Set<Promise<unknown>>()
   readonly #closingThreads = new Set<string>()
@@ -121,6 +124,13 @@ export class ThreadManager {
   subscribeRunningTurnCount(listener: (count: number) => void): () => void {
     this.#runningTurnCountListeners.add(listener)
     return () => this.#runningTurnCountListeners.delete(listener)
+  }
+
+  subscribeThreadInstalled(
+    listener: (thread: AgentThread) => Promise<void>,
+  ): () => void {
+    this.#threadInstalledListeners.add(listener)
+    return () => this.#threadInstalledListeners.delete(listener)
   }
 
   getThread(threadId: string): AgentThread | undefined {
@@ -459,6 +469,16 @@ export class ThreadManager {
           "discard-failed-installation",
         )
       }
+      throw error
+    }
+    try {
+      // Host event consumers must attach before callers can admit work to a
+      // created or resumed actor. Reading stored threads never installs one.
+      for (const listener of this.#threadInstalledListeners) {
+        await listener(thread)
+      }
+    } catch (error) {
+      await thread.shutdownAndWait()
       throw error
     }
     this.#threads.set(threadId, thread)

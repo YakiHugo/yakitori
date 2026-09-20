@@ -28,6 +28,7 @@ import {
   type ApiForkSessionRequest,
   type ApiForkSessionResponse,
   type ApiHandlerResult,
+  type ApiListAgentsResponse,
   type ApiListProjectsResponse,
   type ApiListProvidersResponse,
   type ApiListSessionsResponse,
@@ -152,6 +153,13 @@ export type SessionEventNotification = Readonly<{
   sessionId: string
   seq: number
   event: StoredEventEnvelope
+}>
+
+// Live successful root Turns only. Never included in subscription replay.
+export type SessionCompletedNotification = Readonly<{
+  sessionId: string
+  turnId: string
+  title?: string
 }>
 
 export type SessionReplayCompleteNotification = Readonly<{
@@ -658,6 +666,11 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
     () => undefined,
     (handlers, params) => handlers.listSessions(params),
   ),
+  handlerEntry<ApiListAgentsResponse>(
+    "agent/list",
+    sessionScope,
+    (handlers, params) => handlers.listAgents(params),
+  ),
   handlerEntry<ApiSearchSessionsResponse>(
     "session/search",
     () => ({ kind: "global", name: "session-search" }),
@@ -1100,6 +1113,7 @@ export type RpcMethodParams = Readonly<
       "sidebar/read": Readonly<Record<string, never>>
       "sidebar/update": SidebarChange
       "session/list": SessionListParams
+      "agent/list": ApiReadSessionRequest
       "session/search": ApiSearchSessionsRequest
       "session/searchOccurrences": ApiSearchSessionOccurrencesRequest
       "session/create": ApiCreateSessionRequest
@@ -1140,6 +1154,7 @@ export type RpcMethodResponses = Readonly<
       "sidebar/read": SessionSidebar
       "sidebar/update": SessionSidebar
       "session/list": ApiListSessionsResponse
+      "agent/list": ApiListAgentsResponse
       "session/search": ApiSearchSessionsResponse
       "session/searchOccurrences": ApiSearchSessionOccurrencesResponse
       "session/create": ApiCreateSessionResponse

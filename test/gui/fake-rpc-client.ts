@@ -9,6 +9,7 @@ import type { LiveSessionEvent } from "../../src/runtime/live-events.ts"
 import type { ApiReadSessionResponse } from "../../src/server/protocol.ts"
 import type {
   ProjectChangedNotification,
+  SessionCompletedNotification,
   SessionPermissionRequestResult,
   SidebarChangedNotification,
 } from "../../src/server/rpc/methods.ts"
@@ -57,6 +58,20 @@ export type FakeRequest = {
 }
 
 export class FakeRpcClient {
+  readonly completionListeners = new Set<
+    (notification: SessionCompletedNotification) => void
+  >()
+  subscribeToCompletions(
+    listener: (notification: SessionCompletedNotification) => void,
+  ): () => void {
+    this.completionListeners.add(listener)
+    return () => {
+      this.completionListeners.delete(listener)
+    }
+  }
+  emitCompletion(notification: SessionCompletedNotification): void {
+    for (const listener of this.completionListeners) listener(notification)
+  }
   sidebarResponse: SessionSidebar = { sections: [], entries: {} }
   readonly sidebarChangeListeners = new Set<
     (notification: SidebarChangedNotification) => void

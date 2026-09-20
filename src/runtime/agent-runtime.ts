@@ -12,6 +12,7 @@ import {
   type AgentControl,
   type AgentControlAdapter,
   type AgentRegistration,
+  type AgentSummary,
   createAgentControl,
   type AgentType,
   type ForkTurns,
@@ -20,6 +21,7 @@ import {
 import { estimateHistoryTokens } from "./model-request-budget.ts"
 
 export type AgentRuntime = Readonly<{
+  listAgents(stored: StoredThread): Promise<readonly AgentSummary[]>
   registerThread(
     stored: StoredThread,
     rolloutBudget?: RolloutBudgetConfig,
@@ -274,6 +276,45 @@ export function createAgentRuntime(input: {
   }
 
   return {
+    async listAgents(stored) {
+      const manager = input.getThreadManager()
+      const rootThreadId =
+        readAgentRegistration(stored.metadata)?.rootSessionId ??
+        stored.metadata.id
+      // Listing must not restore actors, reconcile storage, or retry completion
+      // delivery as the model-facing AgentControl.list operation does.
+      const descendants = await input.graphStore.listThreadSpawnDescendants(
+        rootThreadId,
+        ThreadSpawnEdgeStatus.Open,
+      )
+      const agents = await Promise.all(
+        descendants.map(async (threadId): Promise<AgentSummary | undefined> => {
+          const child = await manager.readStoredThread(threadId)
+          // A missing rollout can be a deletion tombstone; recovery owns cleanup.
+          if (child === undefined) return undefined
+          const registration = readAgentRegistration(child.metadata)
+          if (registration?.rootSessionId !== rootThreadId) {
+            throw new Error(`Thread ${threadId} has invalid agent identity.`)
+          }
+          return {
+            agentId: threadId,
+            taskName: registration.taskName,
+            path: registration.path,
+            parentPath: registration.path.slice(
+              0,
+              registration.path.lastIndexOf("/"),
+            ),
+            status:
+              manager.getThread(threadId)?.agentStatus ??
+              agentStatusFromStoredThread(child),
+          }
+        }),
+      )
+      return agents
+        .filter((agent) => agent !== undefined)
+        .sort((left, right) => left.path.localeCompare(right.path))
+    },
+
     registerThread(stored, rolloutBudget) {
       const registration = readAgentRegistration(stored.metadata)
       const rootThreadId = registration?.rootSessionId ?? stored.metadata.id

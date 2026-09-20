@@ -2,6 +2,8 @@ import { GitFork, Info, LoaderCircle, Square } from "lucide-react"
 import { ApprovalBar } from "./components/approval-bar.tsx"
 import { Composer } from "./components/composer.tsx"
 import { QueuedInputs } from "./components/queued-inputs.tsx"
+import { PreferencesEffects } from "./components/preferences-effects.tsx"
+import { SessionSummary } from "./components/session-summary.tsx"
 import { Transcript } from "./components/transcript.tsx"
 import {
   Tooltip,
@@ -23,6 +25,7 @@ export function App() {
 
   return (
     <TooltipProvider>
+      <PreferencesEffects />
       <WorkspaceFrame>
         <main className="flex min-w-0 flex-1 flex-col bg-background">
           {message !== undefined && message !== "" && (
@@ -119,7 +122,7 @@ function SessionHeader() {
     .find((candidate) => candidate.id === session.parentSessionId)
   return (
     <header className="flex h-12 shrink-0 items-center justify-between gap-3 border-b px-5">
-      <div className="flex items-center gap-2">
+      <div className="flex min-w-0 items-center gap-2">
         <h2 className="truncate text-sm font-semibold">
           {session.title ?? "Untitled session"}
         </h2>
@@ -140,25 +143,28 @@ function SessionHeader() {
           </button>
         ) : null}
       </div>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <button
-            type="button"
-            aria-label="Session details"
-            className="shrink-0 rounded-md p-1.5 text-muted-foreground hover:bg-accent"
-          >
-            <Info className="size-4" />
-          </button>
-        </TooltipTrigger>
-        <TooltipContent side="bottom" className="max-w-sm">
-          <p>{view.workingDirectory}</p>
-          <p>
-            {session.counts.turns} turns · {session.counts.inputs} inputs ·{" "}
-            {session.counts.tools} tools
-          </p>
-          <p className="font-mono text-[10px]">{session.id}</p>
-        </TooltipContent>
-      </Tooltip>
+      <div className="flex shrink-0 items-center gap-1">
+        <SessionSummary />
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              aria-label="Session details"
+              className="shrink-0 rounded-md p-1.5 text-muted-foreground hover:bg-accent"
+            >
+              <Info className="size-4" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom" className="max-w-sm">
+            <p>{view.workingDirectory}</p>
+            <p>
+              {session.counts.turns} turns · {session.counts.inputs} inputs ·{" "}
+              {session.counts.tools} tools
+            </p>
+            <p className="font-mono text-[10px]">{session.id}</p>
+          </TooltipContent>
+        </Tooltip>
+      </div>
     </header>
   )
 }

@@ -151,6 +151,7 @@ export function createFakeHandlers(
         event: makeTurnStarted("session_created", 1, "turn_1"),
       }),
     listSessions: async () => okResult({ sessions: [] }),
+    listAgents: async () => okResult({ agents: [] }),
     searchSessions: async () => okResult({ data: [] }),
     searchSessionOccurrences: async () => okResult({ data: [] }),
     readSession: async () =>

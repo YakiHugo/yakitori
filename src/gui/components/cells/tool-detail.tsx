@@ -13,12 +13,10 @@ import { DiffView } from "./diff-view.tsx"
 export function ToolDetailView({
   detail,
   workspaceRoot,
-  onOpenSession,
-}: {
-  readonly detail?: ToolDetail | undefined
-  readonly workspaceRoot?: string | undefined
-  readonly onOpenSession?: ((sessionId: string) => Promise<void>) | undefined
-}) {
+}: Readonly<{
+  detail?: ToolDetail | undefined
+  workspaceRoot?: string | undefined
+}>) {
   if (detail === undefined) {
     return (
       <p className="text-xs text-muted-foreground">Waiting for a result…</p>
@@ -155,19 +153,10 @@ export function ToolDetailView({
         </div>
       )
     case "collaboration":
-      return (
-        <div className="space-y-2">
-          {detail.text === undefined ? null : <TextOutput text={detail.text} />}
-          {onOpenSession === undefined
-            ? null
-            : detail.receivers.map((receiver) => (
-                <ActionButton
-                  key={receiver.sessionId}
-                  label={receiver.path}
-                  action={() => onOpenSession(receiver.sessionId)}
-                />
-              ))}
-        </div>
+      return detail.text === undefined ? (
+        <p className="text-xs text-muted-foreground">Waiting for a result…</p>
+      ) : (
+        <TextOutput text={detail.text} />
       )
     case "text":
       return <TextOutput text={detail.text} />

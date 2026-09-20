@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { act, cleanup, render, screen } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { pastePrompt } from "./prompt-editor-helpers.ts"
@@ -8,9 +8,14 @@ import {
   createInitialAppState,
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
+import {
+  defaultPreferences,
+  usePreferencesStore,
+} from "../../src/gui/store/preferences-store.ts"
 
 beforeEach(() => {
   useAppStore.setState(createInitialAppState())
+  usePreferencesStore.setState(defaultPreferences)
 })
 
 afterEach(() => {
@@ -57,6 +62,53 @@ describe("attachments", () => {
     await user.click(screen.getByRole("button", { name: "Close preview" }))
     expect(screen.queryByRole("dialog")).toBeNull()
   })
+
+  it("replaces a failed thumbnail's loading indicator with an unavailable state", () => {
+    render(
+      <UserMessageCell
+        entry={{ ...entry, attachments: [image] }}
+        queued={false}
+      />,
+    )
+    expect(
+      screen.getByRole("status", { name: "Loading screenshot.png" }),
+    ).toBeDefined()
+    fireEvent.error(screen.getByRole("img", { name: "screenshot.png" }))
+    expect(screen.queryByRole("status")).toBeNull()
+    expect(screen.getByText("Preview unavailable")).toBeDefined()
+    expect(
+      screen.getByRole("button", { name: "Preview screenshot.png" }),
+    ).toBeDefined()
+  })
+
+  it("shows the full submitted source text when a source pill is expanded", async () => {
+    const user = userEvent.setup()
+    render(
+      <UserMessageCell
+        entry={{
+          ...entry,
+          contextAttachments: [
+            {
+              id: "excerpt_1",
+              kind: "selection",
+              text: "The original source excerpt.",
+              source: {
+                kind: "file",
+                label: "notes.md",
+                path: "/workspace/notes.md",
+              },
+            },
+          ],
+        }}
+        queued={false}
+      />,
+    )
+    await user.click(screen.getByText("notes.md"))
+    expect(
+      screen.getByText("The original source excerpt.").closest("details")?.open,
+    ).toBe(true)
+    expect(screen.getByText("/workspace/notes.md")).toBeDefined()
+  })
 })
 
 describe("skill mentions", () => {
@@ -78,6 +130,22 @@ describe("skill mentions", () => {
 })
 
 describe("user message fork actions", () => {
+  it("honors the configured send shortcut while editing a message", async () => {
+    const user = userEvent.setup()
+    const forkSession = vi.fn(async () => {})
+    usePreferencesStore.setState({ sendShortcut: "mod-enter" })
+    useAppStore.setState({ forkSession })
+    render(<UserMessageCell entry={entry} queued={false} />)
+    await user.click(screen.getByRole("button", { name: "Edit & resubmit" }))
+    await user.keyboard("{Enter}")
+    expect(forkSession).not.toHaveBeenCalled()
+    await user.keyboard("{Control>}{Enter}{/Control}")
+    expect(forkSession).toHaveBeenCalledWith(
+      "input_1",
+      "edit",
+      "Original request",
+    )
+  })
   it("confirms conversation-only undo before creating a branch", async () => {
     const user = userEvent.setup()
     const forkSession = vi.fn(async () => {})

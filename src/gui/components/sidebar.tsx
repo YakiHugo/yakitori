@@ -25,6 +25,7 @@ import { ScrollArea } from "./ui/scroll-area.tsx"
 import { Collapsible, CollapsibleContent } from "./ui/collapsible.tsx"
 import { SidebarDialog, SidebarMenu } from "./sidebar-surfaces.tsx"
 import { SubscriptionPanelButton } from "./subscription-panel.tsx"
+import { SettingsButton } from "./settings-panel.tsx"
 
 export function Sidebar({ onSearch }: Readonly<{ onSearch(): void }>) {
   const navRef = useSidebarMotion()
@@ -124,6 +125,7 @@ export function Sidebar({ onSearch }: Readonly<{ onSearch(): void }>) {
         </nav>
       </ScrollArea>
       <SubscriptionPanelButton />
+      <SettingsButton />
     </>
   )
 }

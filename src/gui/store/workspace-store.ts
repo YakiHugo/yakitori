@@ -8,10 +8,17 @@ export type WorkspaceView =
   | "browser"
   | "chat"
   | "computer"
+  | "agents"
 export type WorkspaceTab =
   | { id: string; kind: "changes" | "files" | "computer" }
   | { id: string; kind: "browser"; initialUrl?: string; title?: string }
   | { id: string; kind: "file"; path: string; cwd: string }
+  | {
+      id: string
+      kind: "agents"
+      sourceSessionId?: string
+      selectedAgentId?: string
+    }
   | {
       id: string
       kind: "chat"
@@ -37,6 +44,8 @@ type WorkspaceStore = {
   closeTab(id: string): void
   openFile(path: string, cwd: string): void
   openBrowser(url: string): void
+  openAgents(sourceSessionId: string, agentId?: string): void
+  selectAgent(tabId: string, agentId?: string): void
   askInSideChat(excerpt: ContextExcerpt, sourceSessionId?: string): void
   updateChatStatus(
     id: string,
@@ -61,14 +70,11 @@ function initialTabs(): WorkspaceTab[] {
 
 const tabs = initialTabs()
 export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
-  open: localStorage.getItem("yakitori.workspaceOpen") !== "false",
+  open: false,
   expanded: false,
   tabs,
   activeId: tabs[0]?.id,
-  setOpen(open) {
-    localStorage.setItem("yakitori.workspaceOpen", String(open))
-    set({ open })
-  },
+  setOpen: (open) => set({ open }),
   setExpanded: (expanded) => set({ expanded }),
   activate(id) {
     const tab = get().tabs.find((candidate) => candidate.id === id)
@@ -84,8 +90,16 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
   },
   addTab(kind, sourceSessionId) {
     const reusable =
-      kind === "changes" || kind === "files" || kind === "computer"
-        ? get().tabs.find((tab) => tab.kind === kind)
+      kind === "changes" ||
+      kind === "files" ||
+      kind === "computer" ||
+      kind === "agents"
+        ? get().tabs.find(
+            (tab) =>
+              tab.kind === kind &&
+              (tab.kind !== "agents" ||
+                tab.sourceSessionId === sourceSessionId),
+          )
         : undefined
     if (reusable) {
       get().activate(reusable.id)
@@ -104,7 +118,9 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
             title: count === 0 ? "Side chat" : `Side chat ${count + 1}`,
             ...(sourceSessionId === undefined ? {} : { sourceSessionId }),
           }
-        : { id, kind }
+        : kind === "agents"
+          ? { id, kind, ...(sourceSessionId ? { sourceSessionId } : {}) }
+          : { id, kind }
     set({ tabs: [...get().tabs, tab] })
     get().activate(id)
     return id
@@ -135,6 +151,20 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
     const id = `workspace_${crypto.randomUUID()}`
     set({ tabs: [...get().tabs, { id, kind: "browser", initialUrl }] })
     get().activate(id)
+  },
+  openAgents(sourceSessionId, agentId) {
+    const id = get().addTab("agents", sourceSessionId)
+    get().selectAgent(id, agentId)
+    set({ expanded: false })
+  },
+  selectAgent(tabId, agentId) {
+    set({
+      tabs: get().tabs.map((tab) => {
+        if (tab.id !== tabId || tab.kind !== "agents") return tab
+        const { selectedAgentId: _, ...rest } = tab
+        return { ...rest, ...(agentId ? { selectedAgentId: agentId } : {}) }
+      }),
+    })
   },
   askInSideChat(excerpt, sourceSessionId) {
     const state = get()

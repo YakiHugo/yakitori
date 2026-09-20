@@ -8,6 +8,7 @@ import type {
   TextContent,
   TokenUsage,
 } from "../kernel/index.ts"
+import type { AgentSummary } from "../runtime/agent-control.ts"
 
 export const ApiErrorCode = {
   Conflict: "conflict",
@@ -77,6 +78,10 @@ export type ApiListSessionsResponse = {
   readonly sessions: readonly ApiSessionSummary[]
   readonly nextCursor?: string
 }
+
+export type ApiListAgentsResponse = Readonly<{
+  agents: readonly AgentSummary[]
+}>
 
 export type ApiSearchSessionsRequest = {
   readonly archived?: boolean

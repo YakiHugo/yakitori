@@ -18,6 +18,7 @@ import { usePinnedScroll } from "../hooks/use-pinned-scroll.ts"
 import { formatElapsed } from "../lib/format.ts"
 import { cn } from "../lib/utils.ts"
 import { useAppStore, useExecutionView } from "../store/app-store.ts"
+import { useWorkspaceStore } from "../store/workspace-store.ts"
 import { presentTool } from "../tool-presentation.ts"
 import { AssistantMessageCell } from "./cells/assistant-message-cell.tsx"
 import { CompactionCell } from "./cells/compaction-cell.tsx"
@@ -449,7 +450,11 @@ function groupTurnTimeline(
     actions = []
   }
   for (const entry of entries) {
-    if (entry.kind === "tool" || entry.kind === "permission") {
+    if (
+      (entry.kind === "tool" &&
+        entry.execution.type !== "collaboration_tool_call") ||
+      entry.kind === "permission"
+    ) {
       actions.push(entry)
       continue
     }
@@ -533,7 +538,10 @@ function ActionGroup({
 
 function EntryCell({ entry }: Readonly<{ entry: ExecutionEntry }>) {
   const workspaceRoot = useAppStore((state) => state.execution.workingDirectory)
-  const selectSession = useAppStore((state) => state.selectSession)
+  const sessionId = useAppStore((state) => state.selection.sessionId)
+  const openAgent = async (agentId: string) => {
+    if (sessionId) useWorkspaceStore.getState().openAgents(sessionId, agentId)
+  }
   switch (entry.kind) {
     case "assistant":
       return (
@@ -546,7 +554,7 @@ function EntryCell({ entry }: Readonly<{ entry: ExecutionEntry }>) {
         <ToolCell
           entry={entry}
           workspaceRoot={workspaceRoot}
-          onOpenSession={selectSession}
+          onOpenSession={openAgent}
         />
       )
     case "permission":
