@@ -630,6 +630,9 @@ export function createThreadServerHandlers(
             session: mapThreadSummary(summary, liveProjects),
             snippet,
           })),
+          ...(result.unavailableThreadCount === undefined
+            ? {}
+            : { unavailableSessionCount: result.unavailableThreadCount }),
           ...(result.nextCursor === undefined
             ? {}
             : {

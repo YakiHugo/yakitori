@@ -758,8 +758,15 @@ export class JsonlThreadStore implements ThreadStore {
       const navigationIds = new Map(
         entries?.map((entry) => [entry.id, entry.navigationId]),
       )
+      const unavailableThreadCount =
+        entries === undefined
+          ? this.#searchProjectionErrors.size
+          : entries.filter((entry) =>
+              this.#searchProjectionErrors.has(entry.id),
+            ).length
       return {
         ...result,
+        ...(unavailableThreadCount === 0 ? {} : { unavailableThreadCount }),
         matches: result.matches.map((match) => {
           const navigationId = navigationIds.get(match.summary.id)
           return {
@@ -786,6 +793,11 @@ export class JsonlThreadStore implements ThreadStore {
     await this.#ready
     return this.#withSearchProjection(async () => {
       await this.#repairSearchProjection()
+      if (this.#searchProjectionErrors.has(input.threadId)) {
+        throw new Error(`Cannot search unreadable Thread ${input.threadId}.`, {
+          cause: this.#searchProjectionErrors.get(input.threadId),
+        })
+      }
       return this.#searchProjection.searchThreadOccurrences(input)
     })
   }
@@ -1226,13 +1238,9 @@ export class JsonlThreadStore implements ThreadStore {
   }
 
   async #repairSearchProjection(): Promise<void> {
+    // A retained invalid rollout must not disable search of healthy histories.
+    // Callers report unavailable sessions or fail only the requested Thread.
     if (this.#searchProjectionDirty) await this.#synchronizeSearchProjection()
-    if (this.#searchProjectionErrors.size > 0) {
-      throw new AggregateError(
-        [...this.#searchProjectionErrors.values()],
-        `Cannot search ${this.#searchProjectionErrors.size} unreadable Thread projection(s).`,
-      )
-    }
   }
 
   async #searchProjectionStamp(

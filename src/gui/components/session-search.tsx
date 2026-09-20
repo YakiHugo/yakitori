@@ -153,6 +153,15 @@ export function SessionSearch({ onClose }: Readonly<{ onClose(): void }>) {
                 ? "No matching sessions"
                 : "↑ ↓ to navigate · Enter to open"))}
       </p>
+      {result?.unavailableSessionCount ? (
+        <p className="mt-2 text-xs text-muted-foreground">
+          Partial results · {result.unavailableSessionCount}{" "}
+          {result.unavailableSessionCount === 1
+            ? "conversation could"
+            : "conversations could"}{" "}
+          not be searched because saved history could not be read.
+        </p>
+      ) : null}
       {error && (
         <button
           type="button"
