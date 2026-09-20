@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { cleanup, render, screen } from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { ToolCell } from "../../src/gui/components/cells/tool-cell.tsx"
 import type {
   CommandResult,
@@ -40,6 +40,72 @@ afterEach(() => {
 })
 
 describe("tool cell", () => {
+  it("opens a single recipient trace without expanding the actual tool output", async () => {
+    const user = userEvent.setup()
+    const onOpenSession = vi.fn(async (_sessionId: string) => {})
+    render(
+      <ToolCell
+        entry={collaborationEntry([
+          { sessionId: "session_child", path: "/root/review" },
+        ])}
+        onOpenSession={onOpenSession}
+      />,
+    )
+
+    expect(screen.getByText("Review authentication changes")).toBeTruthy()
+    expect(screen.getByText("/root/review")).toBeTruthy()
+    expect(
+      screen.queryByText("Agent accepted the task; child is working."),
+    ).toBeNull()
+    expect(screen.queryByText(/completed|success/i)).toBeNull()
+
+    await user.click(
+      screen.getByRole("button", { name: "View trace for /root/review" }),
+    )
+
+    expect(onOpenSession).toHaveBeenCalledExactlyOnceWith("session_child")
+    expect(
+      screen.queryByText("Agent accepted the task; child is working."),
+    ).toBeNull()
+
+    await user.click(
+      screen.getByRole("button", { name: /Spawn agent Review authentication/ }),
+    )
+
+    expect(
+      screen.getByText("Agent accepted the task; child is working."),
+    ).toBeTruthy()
+    expect(screen.getAllByRole("button", { name: /View trace/ })).toHaveLength(
+      1,
+    )
+  })
+
+  it("opens each recorded recipient directly from a collapsed multi-agent card", async () => {
+    const user = userEvent.setup()
+    const onOpenSession = vi.fn(async (_sessionId: string) => {})
+    render(
+      <ToolCell
+        entry={collaborationEntry([
+          { sessionId: "session_a", path: "/root/review_a" },
+          { sessionId: "session_b", path: "/root/review_b" },
+        ])}
+        onOpenSession={onOpenSession}
+      />,
+    )
+
+    await user.click(
+      screen.getByRole("button", { name: "View trace for /root/review_b" }),
+    )
+    await user.click(
+      screen.getByRole("button", { name: "View trace for /root/review_a" }),
+    )
+
+    expect(onOpenSession.mock.calls).toEqual([["session_b"], ["session_a"]])
+    expect(
+      screen.queryByText("Agent accepted the task; child is working."),
+    ).toBeNull()
+  })
+
   it("collapses to one row and expands to show the useful result", async () => {
     const user = userEvent.setup()
     render(
@@ -332,7 +398,16 @@ describe("tool cell", () => {
     expect(await screen.findByText(/partial build output/)).toBeTruthy()
   })
 
-  it("renders image attachments against the store apiBase", async () => {
+  it.each([
+    { apiBase: undefined, expected: "http://api.test:4444/base" },
+    {
+      apiBase: "http://child.test:5555/trace/",
+      expected: "http://child.test:5555/trace",
+    },
+  ])("renders image attachments using apiBase override $apiBase or the store", async ({
+    apiBase,
+    expected,
+  }) => {
     const user = userEvent.setup()
     useAppStore.setState({ apiBase: "http://api.test:4444/base/" })
     const screenshot: ImageAttachment = {
@@ -343,6 +418,7 @@ describe("tool cell", () => {
     }
     render(
       <ToolCell
+        apiBase={apiBase}
         entry={{
           ...toolEntry({
             kind: "tool",
@@ -366,10 +442,36 @@ describe("tool cell", () => {
 
     const image = await screen.findByRole("img", { name: "screenshot.png" })
     expect(image.getAttribute("src")).toBe(
-      "http://api.test:4444/base/rollouts/rollout_1/assets/captures/screenshot.png",
+      `${expected}/rollouts/rollout_1/assets/captures/screenshot.png`,
     )
   })
 })
+
+function collaborationEntry(
+  receivers: ReadonlyArray<Readonly<{ sessionId: string; path: string }>>,
+): ToolEntry {
+  return {
+    kind: "tool",
+    toolCallId: "tool_spawn",
+    turnId: "turn_1",
+    state: "completed",
+    resultText: "Agent accepted the task; child is working.",
+    execution: {
+      itemId: "item_spawn",
+      toolCallId: "tool_spawn",
+      name: "spawn_agent",
+      input: {
+        task_name: "unresolved_input_name",
+        message: "Review authentication changes",
+      },
+      requiresPermission: false,
+      type: "collaboration_tool_call",
+      action: "spawn",
+      description: "Review authentication changes",
+      receivers,
+    },
+  }
+}
 
 function toolEntry(input: LegacyToolEntry): ToolEntry {
   const {

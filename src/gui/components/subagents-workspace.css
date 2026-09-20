@@ -1,0 +1,100 @@
+.subagents-workspace {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+.subagents-list-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+}
+.subagents-list-heading > div {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 13px;
+}
+.subagents-list-heading h2 {
+  font-weight: 500;
+}
+.subagents-list-heading span {
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+.subagents-list {
+  overflow-y: auto;
+  padding: 8px;
+}
+.subagents-list button {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+  gap: 10px;
+  padding: 13px 10px;
+  border-radius: 9px;
+  text-align: left;
+}
+.subagents-list button:hover {
+  background: var(--accent);
+}
+.subagents-list button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+.subagent-list-name {
+  flex: 1;
+  min-width: 0;
+}
+.subagent-list-name strong,
+.subagent-list-name small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.subagent-list-name strong {
+  font-weight: 500;
+  font-size: 13px;
+}
+.subagent-list-name small {
+  margin-top: 4px;
+  color: var(--muted-foreground);
+  font-size: 10px;
+}
+.subagent-list-status {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+.subagent-status-dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--muted-foreground);
+}
+.subagent-status-dot[data-status="Working"],
+.subagent-status-dot[data-status="Starting"] {
+  background: #a47bd6;
+}
+.subagent-status-dot[data-status="Completed"] {
+  background: #2c996a;
+}
+.subagent-status-dot[data-status="Failed"] {
+  background: var(--destructive);
+}
+.subagents-list-empty,
+.subagents-list-error {
+  display: grid;
+  gap: 10px;
+  margin: 24px 20px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.7;
+}
+.subagents-list-error {
+  color: var(--destructive);
+}

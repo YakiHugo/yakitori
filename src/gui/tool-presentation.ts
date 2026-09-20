@@ -1,10 +1,9 @@
+import type { FileChange, ToolExecutionItem } from "../kernel/events.ts"
 import type {
   CommandResult,
   ExecutionEntry,
   ToolDiff,
 } from "./execution-view.ts"
-import type { ToolExecutionItem } from "../kernel/events.ts"
-import type { FileChange } from "../kernel/events.ts"
 
 type ToolEntry = Extract<ExecutionEntry, { readonly kind: "tool" }>
 type ExecutionOf<Type extends ToolExecutionItem["type"]> = Extract<
@@ -404,12 +403,23 @@ function presentCollaboration(
   execution: ExecutionOf<"collaboration_tool_call">,
 ): ToolPresentation {
   const description = execution.description
+  const [verb, activeVerb] = (
+    {
+      spawn: ["Spawn agent", "Spawning agent"],
+      send_message: ["Message agent", "Messaging agent"],
+      follow_up: ["Follow up", "Following up"],
+      wait: ["Wait for agents", "Waiting for agents"],
+      interrupt: ["Interrupt agent", "Interrupting agent"],
+      list: ["List agents", "Listing agents"],
+    } as const
+  )[execution.action]
   const receiver =
     execution.receivers.length === 1 ? execution.receivers[0] : undefined
   return {
-    verb: "Collaborate",
-    activeVerb: "Collaborating",
-    subject: `“${truncateLine(description, 110)}”`,
+    verb,
+    activeVerb,
+    subject:
+      description === execution.action ? "" : truncateLine(description, 180),
     subjectTone: "text",
     meta:
       execution.receivers.length === 0

@@ -9,6 +9,7 @@ import {
   PanelRight,
   Plus,
   X,
+  Users,
 } from "lucide-react"
 import {
   type CSSProperties,
@@ -31,6 +32,7 @@ import { SelectionActions } from "./selection-actions.tsx"
 import { SideChatPanel } from "./side-chat-panel.tsx"
 import { SidebarFrame } from "./sidebar-frame.tsx"
 import { WorkspaceChanges } from "./workspace-changes.tsx"
+import { SubagentsWorkspace } from "./subagents-workspace.tsx"
 import { WorkspaceFilePreview, WorkspaceFiles } from "./workspace-files.tsx"
 
 const views = [
@@ -39,6 +41,7 @@ const views = [
   { id: "files", label: "Files", icon: Files },
   { id: "chat", label: "Side chat", icon: MessageCirclePlus },
   { id: "computer", label: "Computer", icon: Monitor },
+  { id: "agents", label: "Subagents", icon: Users },
 ] as const
 
 function tabLabel(tab: WorkspaceTab): string {
@@ -68,17 +71,13 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
     Math.max(672, window.innerWidth - 275),
   )
   const [widthRatio, setWidthRatio] = useState<number | undefined>(() => {
-    const saved = Number(localStorage.getItem("yakitori.workspaceWidthRatio"))
+    const saved = Number(localStorage.getItem("yakitori.workspaceSplit"))
     return saved > 0 && saved < 1 ? saved : undefined
   })
-  const maximumWidth = Math.max(320, available - 352)
+  const maximumWidth = Math.max(320, available - 480)
   const defaultWidth = Math.min(
     maximumWidth,
-    Math.max(
-      320,
-      Math.min(window.innerHeight * 1.6, available - 500),
-      Math.min(640, available - 352),
-    ),
+    Math.max(320, Math.min(440, available * 0.38)),
   )
   const width = Math.round(
     Math.min(
@@ -131,20 +130,6 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
       const width = bounds.width - (sidebar?.getBoundingClientRect().width ?? 0)
       if (width > 0) {
         setAvailable(width)
-        // Initialize the split once from the actual remaining workspace.
-        // Subsequent window/sidebar resizing preserves that split ratio.
-        setWidthRatio(
-          (saved) =>
-            saved ??
-            Math.min(
-              Math.max(320, width - 352),
-              Math.max(
-                320,
-                Math.min(bounds.height * 1.6, width - 500),
-                Math.min(640, width - 352),
-              ),
-            ) / width,
-        )
       }
     }
     const observer = new ResizeObserver(update)
@@ -167,7 +152,7 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!resizing && widthRatio !== undefined)
-      localStorage.setItem("yakitori.workspaceWidthRatio", String(widthRatio))
+      localStorage.setItem("yakitori.workspaceSplit", String(widthRatio))
   }, [widthRatio, resizing])
   useEffect(() => {
     return window.yakitoriDesktop?.browser?.onShortcut((action) => {
@@ -437,7 +422,17 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
             className="workspace-content"
             hidden={!open || activeId !== tab.id}
           >
-            {tab.kind === "computer" ? (
+            {tab.kind === "agents" ? (
+              <SubagentsWorkspace
+                apiBase={apiBase}
+                sourceSessionId={tab.sourceSessionId ?? sessionId}
+                selectedAgentId={tab.selectedAgentId}
+                active={open && activeId === tab.id}
+                onSelect={(id) =>
+                  useWorkspaceStore.getState().selectAgent(tab.id, id)
+                }
+              />
+            ) : tab.kind === "computer" ? (
               <ComputerPanel apiBase={apiBase} />
             ) : tab.kind === "chat" ? (
               <SideChatPanel

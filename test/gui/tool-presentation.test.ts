@@ -6,8 +6,8 @@ import type {
   ToolExecutionDescriptor,
 } from "../../src/kernel/events.ts"
 import {
-  commandExecution,
   collaborationExecution,
+  commandExecution,
   completeCollaborationExecution,
   completeCommandExecution,
   completeFileChangeExecution,
@@ -26,6 +26,35 @@ import {
 type ToolEntry = Extract<ExecutionEntry, { readonly kind: "tool" }>
 
 describe("tool presentation", () => {
+  it.each([
+    ["spawn", "Spawn agent", "Spawning agent"],
+    ["send_message", "Message agent", "Messaging agent"],
+    ["follow_up", "Follow up", "Following up"],
+    ["wait", "Wait for agents", "Waiting for agents"],
+    ["interrupt", "Interrupt agent", "Interrupting agent"],
+    ["list", "List agents", "Listing agents"],
+  ] as const)("names the %s collaboration action without inferring child status", (action, verb, activeVerb) => {
+    const base = entry("spawn_agent", { resultText: "Actual output" })
+    expect(
+      presentTool({
+        ...base,
+        execution: {
+          ...base.execution,
+          type: "collaboration_tool_call",
+          action,
+          description: "Review the authentication flow",
+          receivers: [],
+        },
+      }),
+    ).toMatchObject({
+      verb,
+      activeVerb,
+      subject: "Review the authentication flow",
+      meta: [],
+      detail: { kind: "collaboration", text: "Actual output", receivers: [] },
+    })
+  })
+
   it("presents read ranges as a file preview target", () => {
     expect(
       presentTool(
@@ -495,7 +524,7 @@ describe("tool presentation", () => {
         }),
       ),
     ).toMatchObject({
-      verb: "Collaborate",
+      verb: "Spawn agent",
       target: { kind: "session", sessionId: "session_child" },
       detail: {
         kind: "collaboration",

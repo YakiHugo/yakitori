@@ -164,7 +164,7 @@ it("restores the collapsed workspace, width, and selected tab after remounting",
     screen
       .getByRole("separator", { name: "Workspace width" })
       .getAttribute("aria-valuenow"),
-  ).toBe("697")
+  ).toBe("472")
   await user.keyboard("{Control>}{Shift>}b{/Shift}{/Control}")
   view.unmount()
 
@@ -184,7 +184,7 @@ it("restores the collapsed workspace, width, and selected tab after remounting",
     screen
       .getByRole("separator", { name: "Workspace width" })
       .getAttribute("aria-valuenow"),
-  ).toBe("697")
+  ).toBe("472")
 })
 
 it("resizes from the keyboard and keeps the width within its accessible bounds", async () => {
@@ -197,9 +197,9 @@ it("resizes from the keyboard and keeps the width within its accessible bounds",
   const handle = screen.getByRole("separator", { name: "Workspace width" })
   handle.focus()
   await user.keyboard("{ArrowLeft>30/}")
-  expect(handle.getAttribute("aria-valuenow")).toBe("813")
+  expect(handle.getAttribute("aria-valuenow")).toBe("685")
   await user.keyboard("{ArrowRight}")
-  expect(handle.getAttribute("aria-valuenow")).toBe("797")
+  expect(handle.getAttribute("aria-valuenow")).toBe("669")
   await user.keyboard("{ArrowRight>30/}")
   expect(handle.getAttribute("aria-valuenow")).toBe("320")
   await user.keyboard("{ArrowLeft}")
@@ -208,7 +208,7 @@ it("resizes from the keyboard and keeps the width within its accessible bounds",
 })
 
 it("keeps the saved split proportion when the window resizes and reserves space for the conversation", () => {
-  localStorage.setItem("yakitori.workspaceWidthRatio", "0.5")
+  localStorage.setItem("yakitori.workspaceSplit", "0.5")
   measuredWidth = 1275
   render(
     <WorkspaceFrame>
@@ -226,7 +226,7 @@ it("keeps the saved split proportion when the window resizes and reserves space 
     measuredWidth = 960
     for (const update of resizeCallbacks) update()
   })
-  expect(handle.getAttribute("aria-valuenow")).toBe("333")
+  expect(handle.getAttribute("aria-valuenow")).toBe("320")
   act(() => {
     measuredWidth = 1275
     for (const update of resizeCallbacks) update()

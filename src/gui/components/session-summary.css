@@ -1,0 +1,219 @@
+.session-summary-trigger {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 7px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  -webkit-app-region: no-drag;
+}
+
+.session-summary-trigger:hover,
+.session-summary-trigger[aria-expanded="true"] {
+  background: var(--accent);
+  color: var(--foreground);
+}
+
+.session-summary-trigger:focus-visible,
+.session-summary-popover button:focus-visible,
+.session-summary-popover summary:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.session-summary-popover {
+  position: fixed;
+  z-index: 80;
+  width: min(360px, calc(100vw - 24px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--popover);
+  color: var(--popover-foreground);
+  box-shadow:
+    0 12px 42px #0000001a,
+    0 2px 8px #0000000a;
+  font-size: 12px;
+  outline: none;
+  animation: session-summary-enter 120ms ease-out;
+}
+
+.session-summary-section {
+  padding: 17px 18px;
+}
+
+.session-summary-section + .session-summary-section {
+  border-top: 1px solid var(--border);
+}
+
+.session-summary-section h3 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 12px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted-foreground);
+}
+
+.session-summary-section h3 > span {
+  font-variant-numeric: tabular-nums;
+}
+
+.session-summary-environment,
+.session-summary-branch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.session-summary-environment {
+  font-weight: 500;
+}
+
+.session-summary-environment-status {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--muted-foreground);
+}
+
+.session-summary-path {
+  margin: 11px 0 10px;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  line-height: 1.7;
+}
+
+.session-summary-branch {
+  color: var(--muted-foreground);
+  overflow-wrap: anywhere;
+}
+
+.session-summary-branch svg,
+.session-summary-sources svg {
+  flex-shrink: 0;
+}
+
+.session-summary-changes {
+  display: flex;
+  align-items: center;
+  width: calc(100% + 12px);
+  gap: 9px;
+  margin: -6px;
+  padding: 7px 6px;
+  border-radius: 7px;
+  text-align: left;
+}
+
+.session-summary-changes:hover,
+.session-summary-sources summary:hover {
+  background: var(--accent);
+}
+
+.session-summary-changes small {
+  display: block;
+  margin-top: 4px;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted-foreground);
+}
+
+.session-summary-view {
+  margin-left: auto;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.session-summary-empty {
+  margin: 0;
+  color: var(--muted-foreground);
+  line-height: 1.6;
+}
+
+.session-summary-error {
+  color: var(--destructive);
+  overflow-wrap: anywhere;
+}
+
+.session-summary-error button {
+  margin-top: 8px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.session-summary-sources summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 6px;
+  margin: 0 -6px;
+  list-style: none;
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.session-summary-sources summary::-webkit-details-marker {
+  display: none;
+}
+
+.session-summary-sources summary span {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.session-summary-sources details[open] summary > svg:last-child {
+  transform: rotate(180deg);
+}
+
+.session-summary-sources blockquote {
+  margin: 8px 0;
+  padding-left: 10px;
+  border-left: 2px solid var(--border);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.6;
+}
+
+.session-summary-source-location,
+.session-summary-annotation {
+  margin: 6px 0;
+  color: var(--muted-foreground);
+  overflow-wrap: anywhere;
+  line-height: 1.6;
+}
+
+.session-summary-source-location {
+  font-size: 10px;
+}
+
+.session-summary-sources img {
+  display: block;
+  max-width: 100%;
+  max-height: 220px;
+  margin: 8px auto;
+  border-radius: 6px;
+  object-fit: contain;
+}
+
+@keyframes session-summary-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .session-summary-popover {
+    animation: none;
+  }
+}

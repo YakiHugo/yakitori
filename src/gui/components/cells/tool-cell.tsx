@@ -23,13 +23,20 @@ export function ToolCell({
   entry,
   workspaceRoot,
   onOpenSession,
-}: {
-  readonly entry: ToolEntry
-  readonly workspaceRoot?: string | undefined
-  readonly onOpenSession?: ((sessionId: string) => Promise<void>) | undefined
-}) {
-  const apiBase = useAppStore((state) => state.apiBase)
+  apiBase: apiBaseOverride,
+}: Readonly<{
+  entry: ToolEntry
+  workspaceRoot?: string | undefined
+  onOpenSession?: ((sessionId: string) => Promise<void>) | undefined
+  apiBase?: string | undefined
+}>) {
+  const storeApiBase = useAppStore((state) => state.apiBase)
+  const apiBase = apiBaseOverride ?? storeApiBase
   const presentation = presentTool(entry, workspaceRoot)
+  const collaboration =
+    presentation.detail?.kind === "collaboration"
+      ? presentation.detail
+      : undefined
   const [open, setOpen] = useState(
     entry.state === "failed" || entry.state === "interrupted",
   )
@@ -43,7 +50,14 @@ export function ToolCell({
   }, [entry.state])
 
   return (
-    <Collapsible open={open} onOpenChange={setOpen} className="group/tool">
+    <Collapsible
+      open={open}
+      onOpenChange={setOpen}
+      className={cn(
+        "group/tool",
+        collaboration !== undefined && "rounded-lg border border-border/65 p-1",
+      )}
+    >
       <div className="flex min-w-0 items-center rounded-md transition-colors hover:bg-muted/35">
         <CollapsibleTrigger className="flex min-w-0 flex-1 items-center gap-2 px-1.5 py-1.5 text-left text-sm outline-none focus-visible:bg-muted/55">
           <ChevronRight className="size-3.5 shrink-0 text-muted-foreground/55 transition-transform group-data-[state=open]/tool:rotate-90" />
@@ -60,7 +74,8 @@ export function ToolCell({
           {presentation.subject !== "" ? (
             <span
               className={cn(
-                "min-w-0 truncate text-foreground/85",
+                "min-w-0 text-foreground/85",
+                collaboration === undefined ? "truncate" : "line-clamp-2",
                 presentation.subjectTone === "code" &&
                   "font-mono text-[0.8125rem]",
               )}
@@ -69,9 +84,11 @@ export function ToolCell({
             </span>
           ) : null}
           <span className="ml-auto hidden shrink-0 items-center gap-1.5 text-xs text-muted-foreground sm:flex">
-            {presentation.meta.map((part) => (
-              <span key={part}>{part}</span>
-            ))}
+            {(collaboration === undefined ? presentation.meta : []).map(
+              (part) => (
+                <span key={part}>{part}</span>
+              ),
+            )}
             {failure === undefined ? null : (
               <span
                 className={cn(
@@ -85,7 +102,8 @@ export function ToolCell({
             )}
           </span>
         </CollapsibleTrigger>
-        {presentation.target === undefined ? null : (
+        {presentation.target === undefined ||
+        collaboration !== undefined ? null : (
           <ResourceAction
             target={presentation.target}
             workspaceRoot={workspaceRoot}
@@ -93,6 +111,30 @@ export function ToolCell({
           />
         )}
       </div>
+      {collaboration === undefined ? null : (
+        <div className="flex flex-wrap gap-x-3 gap-y-1 px-6 pb-1">
+          {collaboration.receivers.map((receiver) => (
+            <div
+              key={receiver.sessionId}
+              className="flex min-w-0 max-w-full items-center gap-2 text-xs"
+            >
+              <span
+                className="truncate text-muted-foreground"
+                title={receiver.path}
+              >
+                {receiver.path}
+              </span>
+              {onOpenSession === undefined ? null : (
+                <ResourceAction
+                  target={{ kind: "session", sessionId: receiver.sessionId }}
+                  recipient={receiver.path}
+                  onOpenSession={onOpenSession}
+                />
+              )}
+            </div>
+          ))}
+        </div>
+      )}
       <CollapsibleContent className="pt-1 pb-2">
         <div className="rounded-md bg-muted/35 px-3 py-2.5">
           {(entry.attachments ?? []).map((attachment) => (
@@ -107,7 +149,6 @@ export function ToolCell({
           <ToolDetailView
             detail={presentation.detail}
             workspaceRoot={workspaceRoot}
-            onOpenSession={onOpenSession}
           />
         </div>
       </CollapsibleContent>
@@ -119,28 +160,36 @@ function ResourceAction({
   target,
   workspaceRoot,
   onOpenSession,
-}: {
-  readonly target: ToolTarget
-  readonly workspaceRoot?: string | undefined
-  readonly onOpenSession?: ((sessionId: string) => Promise<void>) | undefined
-}) {
+  recipient,
+}: Readonly<{
+  target: ToolTarget
+  workspaceRoot?: string | undefined
+  onOpenSession?: ((sessionId: string) => Promise<void>) | undefined
+  recipient?: string | undefined
+}>) {
   const [error, setError] = useState<string>()
   const label =
     target.kind === "file"
       ? fileActionLabel()
       : target.kind === "url"
         ? "Open in browser"
-        : "Open child task"
+        : recipient === undefined
+          ? "View trace"
+          : `View trace for ${recipient}`
   return (
     <button
       type="button"
       aria-label={error ?? label}
       title={error ?? label}
       className={cn(
-        "mr-1.5 rounded-sm p-1 text-muted-foreground opacity-0 outline-none transition-opacity hover:text-foreground focus-visible:bg-muted focus-visible:opacity-100 group-hover/tool:opacity-100",
+        "shrink-0 rounded-sm p-1 text-muted-foreground outline-none hover:text-foreground focus-visible:bg-muted",
+        target.kind === "session"
+          ? "inline-flex items-center gap-1 text-xs"
+          : "mr-1.5 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/tool:opacity-100",
         error !== undefined && "text-destructive opacity-100",
       )}
       onClick={() => {
+        setError(undefined)
         const action =
           target.kind === "file"
             ? openFileTarget(target, workspaceRoot)
@@ -156,6 +205,7 @@ function ResourceAction({
         })
       }}
     >
+      {target.kind === "session" ? <span>View trace</span> : null}
       <ExternalLink className="size-3.5" />
     </button>
   )
