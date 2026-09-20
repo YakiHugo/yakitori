@@ -1,14 +1,20 @@
-import { PencilLine, RotateCcw } from "lucide-react"
+import {
+  FileText,
+  ImageOff,
+  LoaderCircle,
+  PencilLine,
+  RotateCcw,
+} from "lucide-react"
 import { type ReactNode, useLayoutEffect, useRef, useState } from "react"
 import { imageAttachmentUrl } from "../../composer-attachments.ts"
 import { contextSourceAttributes } from "../../conversation-context.ts"
 import type { ExecutionEntry } from "../../execution-view.ts"
 import { useAppStore } from "../../store/app-store.ts"
+import { usePreferencesStore } from "../../store/preferences-store.ts"
 import { ImageLightbox } from "../image-lightbox.tsx"
 import { parsePrompt } from "../prompt-document.ts"
 import { PromptEditor, type PromptEditorHandle } from "../prompt-editor.tsx"
 import { CopyIconButton, MessageTimestamp } from "../response-actions.tsx"
-import { ContextExcerptChips } from "../selection-actions.tsx"
 import { Badge } from "../ui/badge.tsx"
 import { Button } from "../ui/button.tsx"
 
@@ -51,6 +57,7 @@ export function UserMessageCell({
   const sessionId = useAppStore((state) => state.selection.sessionId)
   const apiBase = useAppStore((state) => state.apiBase)
   const forkSession = useAppStore((state) => state.forkSession)
+  const sendShortcut = usePreferencesStore((state) => state.sendShortcut)
   const [mode, setMode] = useState<"undo" | "edit" | undefined>()
   const [draft, setDraft] = useState(entry.text)
   const [previewIndex, setPreviewIndex] = useState<number>()
@@ -62,6 +69,8 @@ export function UserMessageCell({
     }
   }, [mode])
   const attachments = entry.attachments ?? []
+  const contextAttachments = entry.contextAttachments ?? []
+  const hasAttachments = attachments.length > 0 || contextAttachments.length > 0
   const preview =
     previewIndex === undefined ? undefined : attachments[previewIndex]
 
@@ -69,48 +78,63 @@ export function UserMessageCell({
     <div className="group flex flex-col items-end gap-1.5">
       {mode !== "edit" ? (
         <>
-          <div className="max-w-[85%] overflow-hidden rounded-2xl bg-primary text-[15px] leading-6 text-primary-foreground">
-            {(entry.contextAttachments?.length ?? 0) > 0 && (
-              <div className="border-b border-current/10 px-3 py-2">
-                <ContextExcerptChips
-                  excerpts={entry.contextAttachments ?? []}
-                />
-              </div>
-            )}
-            {attachments.length > 0 ? (
-              <div
-                className={`grid gap-1.5 p-1.5 ${attachments.length > 1 ? "grid-cols-2" : "grid-cols-1"}`}
-              >
-                {attachments.map((attachment, index) => (
-                  <button
-                    key={`${attachment.name}:${attachment.sizeBytes}:${attachment.file.rolloutId}:${attachment.file.path}`}
-                    type="button"
-                    aria-label={`Preview ${attachment.name}`}
-                    onClick={() => setPreviewIndex(index)}
-                    className="cursor-zoom-in"
-                  >
-                    <img
+          {hasAttachments && (
+            <section
+              className="message-attachments"
+              aria-label="Message attachments"
+            >
+              {attachments.length > 0 ? (
+                <div className="message-image-row">
+                  {attachments.map((attachment, index) => (
+                    <MessageImage
+                      key={`${apiBase}:${attachment.file.rolloutId}:${attachment.file.path}`}
                       src={imageAttachmentUrl(attachment, apiBase)}
-                      alt={attachment.name}
-                      className="max-h-72 min-h-24 w-full rounded-lg bg-black/10 object-cover"
+                      name={attachment.name}
+                      onClick={() => setPreviewIndex(index)}
                     />
-                  </button>
-                ))}
-              </div>
-            ) : null}
-            {entry.text ? (
-              <div
-                {...contextSourceAttributes({
-                  kind: "message",
-                  label: "User message",
-                  messageId: entry.inputId,
-                  ...(sessionId ? { sessionId } : {}),
-                })}
-              >
-                <MessageText text={entry.text} />
-              </div>
-            ) : null}
-          </div>
+                  ))}
+                </div>
+              ) : null}
+              {contextAttachments.map((excerpt) => (
+                <details className="message-source" key={excerpt.id}>
+                  <summary
+                    title={
+                      excerpt.source.path ??
+                      excerpt.source.url ??
+                      excerpt.source.label
+                    }
+                  >
+                    <FileText size={14} aria-hidden="true" />
+                    <span>{excerpt.source.label}</span>
+                  </summary>
+                  <div className="message-source-content">
+                    <p>
+                      {excerpt.source.path ??
+                        excerpt.source.url ??
+                        excerpt.source.label}
+                    </p>
+                    <blockquote>{excerpt.text}</blockquote>
+                    {excerpt.kind === "annotation" && excerpt.comment && (
+                      <p>{excerpt.comment}</p>
+                    )}
+                  </div>
+                </details>
+              ))}
+            </section>
+          )}
+          {entry.text ? (
+            <div
+              className="message-bubble max-w-[85%] overflow-hidden rounded-2xl bg-primary text-[15px] leading-6 text-primary-foreground"
+              {...contextSourceAttributes({
+                kind: "message",
+                label: "User message",
+                messageId: entry.inputId,
+                ...(sessionId ? { sessionId } : {}),
+              })}
+            >
+              <MessageText text={entry.text} />
+            </div>
+          ) : null}
           <div className="flex min-h-5 items-center gap-1">
             {queued ? <Badge variant="secondary">queued</Badge> : null}
             {mode === undefined ? (
@@ -182,8 +206,7 @@ export function UserMessageCell({
           className="conversation-inline-edit w-full rounded-2xl bg-muted p-4"
           onSubmit={(event) => {
             event.preventDefault()
-            if ((edited.length === 0 && attachments.length === 0) || busy)
-              return
+            if ((edited.length === 0 && !hasAttachments) || busy) return
             void forkSession(entry.inputId, "edit", edited)
           }}
         >
@@ -210,8 +233,13 @@ export function UserMessageCell({
                 setMode(undefined)
                 return true
               }
-              if (event.key === "Enter" && !event.shiftKey) {
-                if (!busy && (edited.length > 0 || attachments.length > 0))
+              if (
+                event.key === "Enter" &&
+                !event.shiftKey &&
+                !event.altKey &&
+                (sendShortcut === "enter" || event.metaKey || event.ctrlKey)
+              ) {
+                if (!busy && (edited.length > 0 || hasAttachments))
                   void forkSession(entry.inputId, "edit", edited)
                 return true
               }
@@ -231,9 +259,7 @@ export function UserMessageCell({
             <Button
               type="submit"
               size="sm"
-              disabled={
-                busy || (edited.length === 0 && attachments.length === 0)
-              }
+              disabled={busy || (edited.length === 0 && !hasAttachments)}
             >
               Send
             </Button>
@@ -248,5 +274,50 @@ export function UserMessageCell({
         />
       )}
     </div>
+  )
+}
+
+function MessageImage({
+  src,
+  name,
+  onClick,
+}: Readonly<{ src: string; name: string; onClick(): void }>) {
+  const [status, setStatus] = useState<"loading" | "loaded" | "error">(
+    "loading",
+  )
+  return (
+    <button
+      type="button"
+      aria-label={`Preview ${name}`}
+      title={name}
+      className="message-image"
+      onClick={onClick}
+      data-status={status}
+    >
+      <img
+        src={src}
+        alt={name}
+        onLoad={() => setStatus("loaded")}
+        onError={() => setStatus("error")}
+      />
+      {status === "loading" && (
+        <span
+          className="message-image-placeholder"
+          role="status"
+          aria-label={`Loading ${name}`}
+        >
+          <LoaderCircle
+            size={16}
+            className="animate-spin motion-reduce:animate-none"
+          />
+        </span>
+      )}
+      {status === "error" && (
+        <span className="message-image-placeholder">
+          <ImageOff size={18} />
+          <span>Preview unavailable</span>
+        </span>
+      )}
+    </button>
   )
 }
