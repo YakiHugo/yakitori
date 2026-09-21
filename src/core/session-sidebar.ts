@@ -6,6 +6,7 @@ export type SessionPresentation = Readonly<{
   archived?: boolean
   sectionId?: string
   sectionPosition?: number
+  goal?: string
 }>
 export type SidebarSection = Readonly<{ id: string; name: string }>
 export type SessionSidebar = Readonly<{
@@ -19,6 +20,7 @@ export type SidebarChange =
       title?: string
       archived?: boolean
       sectionId?: string | null
+      goal?: string | null
     }>
   | Readonly<{
       type: "move-session"
@@ -55,10 +57,12 @@ export function parseSidebarChange(value: unknown): SidebarChange {
       const sessionId = nonempty(v.sessionId, "sessionId")
       if (v.archived !== undefined && typeof v.archived !== "boolean")
         invalid("archived must be a boolean.")
+      if (v.goal !== undefined && v.goal !== null) nonempty(v.goal, "goal")
       if (
         v.title === undefined &&
         v.archived === undefined &&
-        v.sectionId === undefined
+        v.sectionId === undefined &&
+        v.goal === undefined
       )
         invalid("No session changes supplied.")
       return {
@@ -76,6 +80,9 @@ export function parseSidebarChange(value: unknown): SidebarChange {
                   ? null
                   : nonempty(v.sectionId, "sectionId"),
             }),
+        ...(v.goal === undefined
+          ? {}
+          : { goal: v.goal === null ? null : nonempty(v.goal, "goal") }),
       }
     }
     case "move-session": {
@@ -144,6 +151,10 @@ export function changeSessionSidebar(
       const entry = { ...entries[session.navigationId] }
       if (change.title !== undefined) entry.title = change.title
       if (change.archived !== undefined) entry.archived = change.archived
+      if (change.goal !== undefined) {
+        if (change.goal === null) delete entry.goal
+        else entry.goal = change.goal
+      }
       entries[session.navigationId] = entry
       const next = { ...state, entries }
       return change.sectionId !== undefined &&

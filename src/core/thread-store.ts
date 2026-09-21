@@ -119,6 +119,9 @@ export type ThreadStore = {
   searchThreadOccurrences(
     input: ThreadStoreOccurrenceSearchInput,
   ): Promise<ThreadStoreOccurrenceSearchResult | undefined>
+  readUsageSummary(): Promise<
+    import("./sqlite-thread-usage-projection.ts").ThreadUsageSummary
+  >
   deleteThread(threadId: string): Promise<void>
 }
 

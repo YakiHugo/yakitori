@@ -145,6 +145,20 @@ export function createFakeHandlers(
   const base: ServerHandlers = {
     readSidebar: async () => okResult({ sections: [], entries: {} }),
     updateSidebar: async () => okResult({ sections: [], entries: {} }),
+    readUsage: async () =>
+      okResult({
+        usage: {
+          totals: {
+            turns: 0,
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadInputTokens: 0,
+            cacheWriteInputTokens: 0,
+          },
+          days: [],
+          threads: [],
+        },
+      }),
     createSession: async () =>
       okResult({
         session: makeSessionDetail("session_created"),

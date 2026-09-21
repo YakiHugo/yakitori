@@ -8,6 +8,7 @@ import {
   changeSessionSidebar,
   presentSession,
   sessionInView,
+  type SessionPresentation,
   type SessionSidebar,
   type SidebarChange,
 } from "./session-sidebar.ts"
@@ -57,6 +58,10 @@ import {
   SqliteThreadSearchProjection,
   type ThreadSearchProjectionStamp,
 } from "./sqlite-thread-search-projection.ts"
+import {
+  SqliteThreadUsageProjection,
+  type ThreadUsageSummary,
+} from "./sqlite-thread-usage-projection.ts"
 import {
   compareThreadSummaries,
   startAfterThreadCursor,
@@ -111,6 +116,7 @@ type OwnedFileLock = {
 
 export class JsonlThreadStore implements ThreadStore {
   readonly #searchProjection: SqliteThreadSearchProjection
+  readonly #usageProjection: SqliteThreadUsageProjection
   readonly #sessionSidebarPath: string
   readonly #sessionHeadsPath: string
   readonly #threadsDirectory: string
@@ -125,11 +131,15 @@ export class JsonlThreadStore implements ThreadStore {
   readonly #searchProjectionErrors = new Map<string, unknown>()
   #searchProjectionDirty = false
   #searchProjectionTail: Promise<void> = Promise.resolve()
+  #usageProjectionTail: Promise<void> = Promise.resolve()
 
   constructor(input: { readonly root: string }) {
     const root = resolve(input.root)
     this.#searchProjection = new SqliteThreadSearchProjection(
       join(root, "thread-search.sqlite"),
+    )
+    this.#usageProjection = new SqliteThreadUsageProjection(
+      join(root, "thread-usage.sqlite"),
     )
     this.#sessionSidebarPath = join(root, "session-sidebar.json")
     this.#sessionHeadsPath = join(root, "session-heads.json")
@@ -649,7 +659,8 @@ export class JsonlThreadStore implements ThreadStore {
               typeof entry.sectionId === "string") &&
             (entry.sectionPosition === undefined ||
               (typeof entry.sectionPosition === "number" &&
-                Number.isSafeInteger(entry.sectionPosition))),
+                Number.isSafeInteger(entry.sectionPosition))) &&
+            (entry.goal === undefined || typeof entry.goal === "string"),
         )
       ) {
         throw new Error("Invalid session sidebar state.")
@@ -662,7 +673,9 @@ export class JsonlThreadStore implements ThreadStore {
     }
   }
 
-  async sessionPresentation(threadId: string) {
+  async sessionPresentation(
+    threadId: string,
+  ): Promise<SessionPresentation & { navigationId?: string }> {
     const entries = sessionEntries(
       await this.#navigationMetadata(),
       await this.#readSessionHeads(),
@@ -845,6 +858,9 @@ export class JsonlThreadStore implements ThreadStore {
         this.#searchProjectionDirty = true
       }
     })
+    await this.#withUsageProjection(() =>
+      this.#usageProjection.delete(threadId),
+    )
     await this.#collectUnreferencedRollouts()
   }
 
@@ -1205,6 +1221,9 @@ export class JsonlThreadStore implements ThreadStore {
     await this.#withSearchProjection(() => {
       this.#searchProjection.delete(threadId)
     })
+    await this.#withUsageProjection(() =>
+      this.#usageProjection.delete(threadId),
+    )
   }
 
   async #synchronizeSearchProjection(): Promise<void> {
@@ -1241,6 +1260,54 @@ export class JsonlThreadStore implements ThreadStore {
     // A retained invalid rollout must not disable search of healthy histories.
     // Callers report unavailable sessions or fail only the requested Thread.
     if (this.#searchProjectionDirty) await this.#synchronizeSearchProjection()
+  }
+
+  // Usage is a rebuildable projection synchronized lazily on read: threads
+  // whose rollout files changed since the last read are rebuilt in full.
+  async readUsageSummary(): Promise<ThreadUsageSummary> {
+    await this.#ready
+    return this.#withUsageProjection(async () => {
+      await this.#synchronizeUsageProjection()
+      return this.#usageProjection.readUsage()
+    })
+  }
+
+  async #synchronizeUsageProjection(): Promise<void> {
+    const threadIds = new Set(
+      (await readdir(this.#threadsDirectory))
+        .filter((file) => file.endsWith(".json"))
+        .map((file) => basename(file, ".json"))
+        .filter(isStorageKey),
+    )
+    for (const threadId of threadIds) {
+      try {
+        const metadata = await this.#readMetadata(threadId)
+        const stamp = await this.#searchProjectionStamp(metadata)
+        if (this.#usageProjection.isCurrent(threadId, stamp)) continue
+        this.#usageProjection.rebuild(
+          await this.#readRequiredThread(threadId),
+          stamp,
+        )
+      } catch {
+        // A retained invalid rollout drops out of the usage summary, matching
+        // the search projection's isolation of corrupt histories.
+        this.#usageProjection.delete(threadId)
+      }
+    }
+    for (const indexedThreadId of this.#usageProjection.indexedThreadIds()) {
+      if (!threadIds.has(indexedThreadId)) {
+        this.#usageProjection.delete(indexedThreadId)
+      }
+    }
+  }
+
+  #withUsageProjection<T>(operation: () => T | Promise<T>): Promise<T> {
+    const result = this.#usageProjectionTail.then(operation)
+    this.#usageProjectionTail = result.then(
+      () => undefined,
+      () => undefined,
+    )
+    return result
   }
 
   async #searchProjectionStamp(

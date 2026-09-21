@@ -120,6 +120,7 @@ export type TurnProcessorOptions = {
   readonly modelAutoCompactTokenLimit?: number
   readonly modelAutoCompactTokenLimitScope?: import("../kernel/index.ts").AutoCompactTokenLimitScope
   readonly loadModelTransport?: () => Promise<ModelTransportPolicy | undefined>
+  readonly loadSessionGoal?: () => Promise<string | undefined>
   readonly loadProjectInstructions?: typeof loadProjectInstructions
   readonly prepareStepExtensions?: (signal: AbortSignal) => Promise<
     Readonly<{
@@ -687,6 +688,7 @@ async function executeTurnModelLoop(
         beforeStep.context.history,
         input.context,
       )
+      const sessionGoal = await input.options.loadSessionGoal?.()
       const worldState = buildWorldStateFromSnapshot({
         configuration,
         enabledToolNames: new Set(
@@ -701,6 +703,7 @@ async function executeTurnModelLoop(
         environment,
         ...(projectInstructions === undefined ? {} : { projectInstructions }),
         ...(skills === undefined ? {} : { skills }),
+        ...(sessionGoal === undefined ? {} : { goal: sessionGoal }),
         ...(input.options.agentControl === undefined
           ? {}
           : {

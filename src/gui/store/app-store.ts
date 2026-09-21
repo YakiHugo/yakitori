@@ -17,6 +17,7 @@ import type {
   ApiPendingPermission,
   ApiProject,
   ApiProviderSummary,
+  ApiReadUsageResponse,
   ApiSessionDetail,
   ApiSessionSummary,
   ApiSkillSummary,
@@ -84,6 +85,18 @@ export type SubscriptionUsageState = Readonly<{
   updatedAt?: number
 }>
 
+export type SettingsSection =
+  | "general"
+  | "notifications"
+  | "subscriptions"
+  | "usage"
+
+export type UsageState = Readonly<{
+  summary?: ApiReadUsageResponse["usage"]
+  loading: boolean
+  error?: string
+}>
+
 export type AppStoreData = {
   sidebar: SessionSidebar
   collapsedSections: Record<string, boolean>
@@ -132,6 +145,9 @@ export type AppStoreData = {
   // Project ids the user collapsed in the sidebar; projects expand by
   // default, so only collapsed ids are recorded (persisted locally).
   collapsedProjects: Record<string, boolean>
+  // The settings page replaces the main conversation area while set.
+  settingsSection: SettingsSection | undefined
+  usage: UsageState
 }
 
 export type AppStoreActions = {
@@ -193,6 +209,10 @@ export type AppStoreActions = {
     sessionId: string | undefined,
     selection: ModelSelection | undefined,
   ): void
+  openSettings(section?: SettingsSection): void
+  closeSettings(): void
+  setSettingsSection(section: SettingsSection): void
+  loadUsage(): Promise<void>
 }
 
 export type AppStore = AppStoreData & AppStoreActions
@@ -258,6 +278,8 @@ export function createInitialAppState(): AppStoreData {
     stream: undefined,
     currentProject: undefined,
     collapsedProjects: initialCollapsedProjects(),
+    settingsSection: undefined,
+    usage: { loading: false },
   }
 }
 
@@ -1022,6 +1044,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
         execution: createExecutionViewState(),
         hydratingSessionId: undefined,
         sessionSkills: [],
+        settingsSection: undefined,
         promptAttachments: [],
         promptExcerpts:
           state.selection.sessionId === undefined
@@ -1485,6 +1508,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
         execution: createExecutionViewState(),
         selectedSession: undefined,
         sessionSkills: [],
+        settingsSection: undefined,
         ...takeSessionDraft(get().sessionDrafts, sessionId),
       })
       connectEvents(selection, 0)
@@ -1580,7 +1604,9 @@ export const useAppStore = create<AppStore>()((set, get) => {
                 kind: "text",
                 text,
                 ...(attachments.length === 0 ? {} : { attachments }),
-                ...(excerpts.length === 0 ? {} : { contextAttachments: excerpts }),
+                ...(excerpts.length === 0
+                  ? {}
+                  : { contextAttachments: excerpts }),
               },
               ...(admittedModelSelection === undefined
                 ? {}
@@ -1823,6 +1849,44 @@ export const useAppStore = create<AppStore>()((set, get) => {
           sameModelSelection(get().modelSelections[sessionId], selection),
       )
     },
+
+    openSettings: (section = "general") => {
+      set({ settingsSection: section })
+    },
+    closeSettings: () => set({ settingsSection: undefined }),
+    setSettingsSection: (section) => {
+      set({ settingsSection: section })
+    },
+    loadUsage: async () => {
+      const apiBase = get().apiBase
+      set((state) => ({
+        usage: {
+          ...(state.usage.summary === undefined
+            ? {}
+            : { summary: state.usage.summary }),
+          loading: true,
+        },
+      }))
+      try {
+        const response = await getAppRpcClient(apiBase).request(
+          "usage/read",
+          {},
+        )
+        if (apiBase !== get().apiBase) return
+        set({ usage: { summary: response.usage, loading: false } })
+      } catch (error) {
+        if (apiBase !== get().apiBase) return
+        set((state) => ({
+          usage: {
+            ...(state.usage.summary === undefined
+              ? {}
+              : { summary: state.usage.summary }),
+            loading: false,
+            error: errorMessage(error, "Usage could not be loaded."),
+          },
+        }))
+      }
+    },
   }
 })
 
@@ -1952,6 +2016,7 @@ function withSidebarPresentation<T extends ApiSessionSummary>(
     archived: _archived,
     sectionId: _sectionId,
     sectionPosition: _sectionPosition,
+    goal: _goal,
     ...base
   } = session
   return {

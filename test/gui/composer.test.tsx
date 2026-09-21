@@ -946,6 +946,46 @@ describe("slash command menu", () => {
   })
 })
 
+describe("file mention popup", () => {
+  it("picks a file with Enter, replacing the @token with a chip", async () => {
+    const user = userEvent.setup()
+    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    fakeRef.current.respond = (method, params) => {
+      if (method === "workspace/findFiles") {
+        const body = params as { query: string }
+        return {
+          paths: body.query.includes("app")
+            ? ["src/gui/app.tsx", "src/gui/app-store.ts"]
+            : [],
+          truncated: false,
+        }
+      }
+      throw new ApiRequestError("not found", "not_found")
+    }
+    useAppStore.setState({
+      admitInput,
+      selection: { sessionId: "session_1" },
+      selectedSession: { ...createdSession, workingDirectory: "/repo" },
+    })
+    render(<Composer />)
+
+    await user.click(screen.getByRole("textbox"))
+    await pastePrompt(screen.getByRole("textbox"), "review @app")
+
+    const menu = await screen.findByRole("listbox", { name: "Files" })
+    await waitFor(() => expect(menu.textContent).toContain("app.tsx"))
+
+    await user.keyboard("{ArrowDown}{Enter}")
+    expect(useAppStore.getState().promptDraft).toBe(
+      "review [@app-store.ts](src/gui/app-store.ts) ",
+    )
+    expect(admitInput).not.toHaveBeenCalled()
+    expect(
+      screen.getByRole("textbox").querySelector("[data-file-path]"),
+    ).toBeDefined()
+  })
+})
+
 describe("skill mention popup", () => {
   const templateCreator = {
     name: "Template Creator",

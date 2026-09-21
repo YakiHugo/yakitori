@@ -15,6 +15,7 @@ import {
   sessionEntries,
   type SessionHeads,
 } from "../../src/core/session-navigation.ts"
+import { SqliteThreadUsageProjection } from "../../src/core/sqlite-thread-usage-projection.ts"
 import type {
   RolloutItem,
   StoredRolloutItem,
@@ -424,6 +425,19 @@ export class MemoryThreadStore implements ThreadStore {
       occurrences: structuredClone(occurrences),
       ...(nextOffset < all.length ? { nextCursor: String(nextOffset) } : {}),
     }
+  }
+
+  async readUsageSummary() {
+    const projection = new SqliteThreadUsageProjection(":memory:")
+    for (const stored of this.#threads.values()) {
+      projection.rebuild(stored, {
+        metadataSize: 0,
+        metadataMtimeMs: 0,
+        rolloutSize: 0,
+        rolloutMtimeMs: 0,
+      })
+    }
+    return projection.readUsage()
   }
 
   async deleteThread(threadId: string): Promise<void> {

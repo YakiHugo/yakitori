@@ -3,7 +3,8 @@ import { act, cleanup, render, screen } from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { PreferencesEffects } from "../../src/gui/components/preferences-effects.tsx"
-import { SettingsPanel } from "../../src/gui/components/settings-panel.tsx"
+import { SettingsPage } from "../../src/gui/components/settings-page.tsx"
+import { useAppStore } from "../../src/gui/store/app-store.ts"
 import {
   defaultPreferences,
   readPreferences,
@@ -160,10 +161,11 @@ describe("appearance", () => {
   })
 })
 
-describe("settings panel", () => {
+describe("settings page", () => {
   it("saves changes from general and notification controls", async () => {
     const user = userEvent.setup()
-    render(<SettingsPanel onClose={() => {}} />)
+    useAppStore.setState({ settingsSection: "general" })
+    render(<SettingsPage />)
 
     await user.selectOptions(
       screen.getByRole("combobox", { name: "Appearance" }),
@@ -199,7 +201,8 @@ describe("settings panel", () => {
 
   it("shows a failed save without changing the selected preference and allows retry", async () => {
     const user = userEvent.setup()
-    render(<SettingsPanel onClose={() => {}} />)
+    useAppStore.setState({ settingsSection: "general" })
+    render(<SettingsPage />)
     vi.spyOn(localStorage, "setItem").mockImplementationOnce(() => {
       throw new DOMException("Storage full", "QuotaExceededError")
     })

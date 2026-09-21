@@ -176,7 +176,7 @@ describe("sidebar", () => {
     await user.click(screen.getByLabelText("Open subscription usage"))
 
     expect(
-      screen.getByRole("dialog", { name: "Account & usage" }),
+      screen.getByRole("region", { name: "Subscription settings" }),
     ).toBeDefined()
     expect(screen.getByText("Pro plan")).toBeDefined()
     expect(screen.getByText("42% used")).toBeDefined()

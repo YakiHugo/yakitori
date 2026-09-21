@@ -333,19 +333,21 @@ describe("execution view", () => {
         },
       },
     })
-    const state = [turnCompleted("turn_1", 100), turnCompleted("turn_2", 150)]
-      .reduce(
-        (current, event, index) =>
-          reduceExecutionView(current, {
-            type: "durable",
-            event: createExecutionEnvelope({
-              sessionId,
-              seq: index + 1,
-              event,
-            }),
+    const state = [
+      turnCompleted("turn_1", 100),
+      turnCompleted("turn_2", 150),
+    ].reduce(
+      (current, event, index) =>
+        reduceExecutionView(current, {
+          type: "durable",
+          event: createExecutionEnvelope({
+            sessionId,
+            seq: index + 1,
+            event,
           }),
-        createExecutionViewState(),
-      )
+        }),
+      createExecutionViewState(),
+    )
 
     expect(projectExecutionView(state).telemetry).toMatchObject({
       turns: 2,

@@ -139,6 +139,10 @@ export type ApiDeleteSessionResponse = {
   readonly sessionId: string
 }
 
+export type ApiReadUsageResponse = {
+  readonly usage: import("../core/sqlite-thread-usage-projection.ts").ThreadUsageSummary
+}
+
 export type ApiListProjectsResponse = {
   readonly projects: readonly ApiProject[]
   readonly nextCursor?: string
@@ -342,6 +346,7 @@ export type ApiSessionSummary = Readonly<{
   createdAt: string
   updatedAt: string
   title?: string
+  goal?: string
   // True while a Turn is running in this Session.
   active?: boolean
   workingDirectory?: string

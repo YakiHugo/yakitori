@@ -25,6 +25,7 @@ export const WorldStateSectionId = {
   Skills: "skills",
   Permissions: "permissions",
   Tools: "tools",
+  Goal: "goal",
 } as const
 
 export type PreviousSectionState<T> =
@@ -58,6 +59,7 @@ export function buildWorldStateFromSnapshot(input: {
   readonly projectInstructions?: ProjectInstructions
   readonly multiAgent?: AgentRuntimeContext
   readonly skills?: SkillsCatalog
+  readonly goal?: string
 }): WorldState {
   return {
     sections: [
@@ -83,6 +85,7 @@ export function buildWorldStateFromSnapshot(input: {
       ),
       projectInstructionsSection(input.projectInstructions),
       skillsSection(input.skills),
+      goalSection(input.goal),
       environmentSection(input.environment),
     ],
   }
@@ -385,6 +388,48 @@ function projectInstructionsSection(
   })
 }
 
+type GoalSnapshot = Readonly<{ text?: string }>
+
+function goalSection(goal: string | undefined): ErasedWorldStateSection {
+  const snapshot: GoalSnapshot = goal === undefined ? {} : { text: goal }
+  return section({
+    id: WorldStateSectionId.Goal,
+    snapshot: snapshot as JsonObject,
+    decode: goalSnapshot,
+    render(previous) {
+      if (
+        previous.type === "known" &&
+        equalJson(previous.snapshot as JsonValue, snapshot as JsonValue)
+      ) {
+        return []
+      }
+      const previousMayContainGoal =
+        previous.type === "unknown" ||
+        (previous.type === "known" && previous.snapshot.text !== undefined)
+      if (goal !== undefined) {
+        return [
+          fragment(
+            WorldStateSectionId.Goal,
+            "developer",
+            previousMayContainGoal
+              ? `<session_goal_update>\nThis goal replaces the previous session goal. Keep working toward it across turns until it is met or the user changes it.\n\nGoal: ${goal}\n</session_goal_update>`
+              : `<session_goal>\nThe user has set a goal for this session. Keep working toward it across turns until it is met or the user changes it.\n\nGoal: ${goal}\n</session_goal>`,
+          ),
+        ]
+      }
+      return previousMayContainGoal
+        ? [
+            fragment(
+              WorldStateSectionId.Goal,
+              "developer",
+              "<session_goal_update>\nThe previous session goal has been cleared; it no longer applies.\n</session_goal_update>",
+            ),
+          ]
+        : []
+    },
+  })
+}
+
 function environmentSection(
   environment: EnvironmentSnapshot,
 ): ErasedWorldStateSection {
@@ -491,6 +536,13 @@ function projectInstructionsSnapshot(
     ...(directory === undefined ? {} : { directory }),
     ...(text === undefined ? {} : { text }),
   }
+}
+
+function goalSnapshot(value: JsonValue): GoalSnapshot | undefined {
+  if (!isJsonRecord(value)) return undefined
+  return value.text === undefined || typeof value.text === "string"
+    ? (value as GoalSnapshot)
+    : undefined
 }
 
 function environmentSnapshot(

@@ -1,11 +1,10 @@
 import { Check, CircleUserRound, LoaderCircle, Unplug } from "lucide-react"
-import { useEffect, useState } from "react"
+import { useEffect } from "react"
 import type {
   ApiSubscriptionProvider,
   ApiSubscriptionSummary,
 } from "../../server/protocol.ts"
 import { useAppStore } from "../store/app-store.ts"
-import { SidebarDialog } from "./sidebar-surfaces.tsx"
 
 const subscriptionProviderNames = new Set(["codex", "grok", "kimi"])
 const subscriptionProviders = [
@@ -18,7 +17,7 @@ const subscriptionProviders = [
 }>[]
 
 export function SubscriptionPanelButton() {
-  const [open, setOpen] = useState(false)
+  const openSettings = useAppStore((state) => state.openSettings)
   const connected = useAppStore(
     (state) =>
       state.providers.filter(
@@ -28,39 +27,35 @@ export function SubscriptionPanelButton() {
       ).length,
   )
   return (
-    <>
-      <div className="sidebar-account">
-        <button
-          type="button"
-          className="sidebar-account-trigger"
-          aria-label="Open subscription usage"
-          aria-haspopup="dialog"
-          onClick={() => setOpen(true)}
-        >
-          <span className="sidebar-account-avatar" aria-hidden="true">
-            <CircleUserRound size={17} />
-          </span>
-          <span className="min-w-0 flex-1 text-left">
-            <strong>Subscriptions</strong>
-            <small>
-              {connected === 0
-                ? "No accounts connected"
-                : `${connected} connected`}
-            </small>
-          </span>
-          <span
-            className="size-1.5 rounded-full bg-emerald-500"
-            aria-hidden="true"
-            data-visible={connected > 0}
-          />
-        </button>
-      </div>
-      {open ? <SubscriptionPanel onClose={() => setOpen(false)} /> : null}
-    </>
+    <div className="sidebar-account">
+      <button
+        type="button"
+        className="sidebar-account-trigger"
+        aria-label="Open subscription usage"
+        onClick={() => openSettings("subscriptions")}
+      >
+        <span className="sidebar-account-avatar" aria-hidden="true">
+          <CircleUserRound size={17} />
+        </span>
+        <span className="min-w-0 flex-1 text-left">
+          <strong>Subscriptions</strong>
+          <small>
+            {connected === 0
+              ? "No accounts connected"
+              : `${connected} connected`}
+          </small>
+        </span>
+        <span
+          className="size-1.5 rounded-full bg-emerald-500"
+          aria-hidden="true"
+          data-visible={connected > 0}
+        />
+      </button>
+    </div>
   )
 }
 
-export function SubscriptionPanel({ onClose }: Readonly<{ onClose(): void }>) {
+export function SubscriptionsSection() {
   const loadSubscriptions = useAppStore((state) => state.loadSubscriptions)
 
   useEffect(() => {
@@ -68,14 +63,10 @@ export function SubscriptionPanel({ onClose }: Readonly<{ onClose(): void }>) {
   }, [loadSubscriptions])
 
   return (
-    <SidebarDialog
-      title="Account & usage"
-      className="subscription-dialog"
-      onClose={onClose}
-    >
+    <>
       <div className="subscription-intro">
         <p>Subscription access and current limits from connected providers.</p>
-        <span>Usage refreshes each time this panel opens.</span>
+        <span>Usage refreshes each time this section opens.</span>
       </div>
 
       <div className="subscription-list">
@@ -83,7 +74,7 @@ export function SubscriptionPanel({ onClose }: Readonly<{ onClose(): void }>) {
           <ProviderUsageCard key={provider.provider} {...provider} />
         ))}
       </div>
-    </SidebarDialog>
+    </>
   )
 }
 

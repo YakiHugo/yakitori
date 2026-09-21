@@ -1,9 +1,10 @@
-import { useContext, useState } from "react"
+import { useCallback, useContext, useState } from "react"
 import {
   discardDraftImages,
   requireDesktopBridge,
 } from "../composer-attachments.ts"
 import { ConversationScrollContext } from "../hooks/conversation-scroll-context.ts"
+import { getAppRpcClient } from "../lib/rpc-client.ts"
 import {
   normalizeKimiModelSelection,
   resolveEffectiveModel,
@@ -51,6 +52,26 @@ export function Composer() {
   const view = useExecutionView()
   const [attachmentError, setAttachmentError] = useState<string>()
   const [readingImages, setReadingImages] = useState(false)
+  const fileSearchCwd = useAppStore(
+    (state) =>
+      state.selectedSession?.workingDirectory ??
+      state.projects.find((project) => project.id === state.currentProject)
+        ?.roots[0],
+  )
+  const searchFiles = useCallback(
+    async (query: string) => {
+      if (fileSearchCwd === undefined) return []
+      const response = await getAppRpcClient(apiBase).request(
+        "workspace/findFiles",
+        { cwd: fileSearchCwd, query },
+      )
+      return response.paths.map((path) => ({
+        name: path.split("/").at(-1) ?? path,
+        path,
+      }))
+    },
+    [fileSearchCwd, apiBase],
+  )
   const effectiveModel = normalizeKimiModelSelection(
     resolveEffectiveModel({
       sessionCurrent,
@@ -205,6 +226,7 @@ export function Composer() {
       readingImages={readingImages}
       attachmentError={attachmentError}
       onAttachmentError={setAttachmentError}
+      searchFiles={searchFiles}
       placeholder={
         sessionId === undefined
           ? "Describe what you want to work on"
