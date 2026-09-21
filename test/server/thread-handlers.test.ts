@@ -1,7 +1,8 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
 import {
   createYakitoriError,
@@ -38,6 +39,54 @@ afterEach(async () => {
 })
 
 describe("thread server handlers", () => {
+  it("returns healthy search results with an explicit count of unreadable sessions", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yakitori-partial-search-"))
+    const original = new JsonlThreadStore({ root })
+    for (const id of ["session_healthy", "session_unreadable"]) {
+      await original.createThread({
+        id,
+        conversationId: id,
+        title: "searchable project conversation",
+        createdAt: "2026-09-20T00:00:00.000Z",
+        updatedAt: "2026-09-20T00:00:00.000Z",
+      })
+      await original.shutdownThread(id)
+    }
+    await appendFile(
+      join(root, "rollouts", "session_unreadable", "rollout.jsonl"),
+      '{"invalid":"rollout item"}\n',
+    )
+    const store = new JsonlThreadStore({ root })
+    const manager = new ThreadManager({
+      store,
+      createTurnProcessor: () =>
+        createTurnProcessor({
+          stream: createFauxProvider([]).stream,
+          toolRegistry: createToolRegistry([]),
+        }),
+    })
+    const handlers = createThreadServerHandlers({ manager, store })
+    cleanups.push(async () => {
+      await manager.shutdown()
+      await handlers.close()
+      await rm(root, { recursive: true, force: true })
+    })
+
+    const result = await handlers.searchSessions({ searchTerm: "project" })
+    if (!result.ok) throw new Error(result.body.error.message)
+    expect(result.body.data.map(({ session }) => session.id)).toEqual([
+      "session_healthy",
+    ])
+    expect(result.body.unavailableSessionCount).toBe(1)
+
+    const archived = await handlers.searchSessions({
+      searchTerm: "project",
+      archived: true,
+    })
+    if (!archived.ok) throw new Error(archived.body.error.message)
+    expect(archived.body).toEqual({ data: [] })
+  })
+
   it("searches durable visible history after a Session is closed", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "yakitori-handler-search-"))
     const store = new MemoryThreadStore()

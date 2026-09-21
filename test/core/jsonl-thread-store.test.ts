@@ -894,10 +894,14 @@ describe("JsonlThreadStore", () => {
     )
   })
 
-  it("keeps healthy Threads available when another retained rollout is corrupt", async () => {
+  it("keeps healthy Threads searchable and reports unavailable histories until repaired", async () => {
     const { root, store } = await createStore()
     await store.createThread(metadata("thread_healthy_rollout"))
     await store.createThread(metadata("thread_broken_rollout"))
+    await store.appendItems("thread_healthy_rollout", [
+      response("turn_healthy", "healthy searchable message"),
+      terminal("turn_healthy"),
+    ])
     await store.shutdownThread("thread_healthy_rollout")
     await store.shutdownThread("thread_broken_rollout")
     const brokenPath = join(
@@ -906,6 +910,7 @@ describe("JsonlThreadStore", () => {
       "thread_broken_rollout",
       "rollout.jsonl",
     )
+    const original = await readFile(brokenPath, "utf8")
     await appendFile(
       brokenPath,
       `${JSON.stringify({
@@ -929,7 +934,38 @@ describe("JsonlThreadStore", () => {
     )
     await expect(
       restarted.searchThreads({ searchTerm: "healthy", limit: 10 }),
-    ).rejects.toThrow("Cannot search 1 unreadable Thread projection")
+    ).resolves.toMatchObject({
+      matches: [{ summary: { id: "thread_healthy_rollout" } }],
+      unavailableThreadCount: 1,
+    })
+    await expect(
+      restarted.searchThreadOccurrences({
+        threadId: "thread_healthy_rollout",
+        searchTerm: "searchable",
+        limit: 10,
+      }),
+    ).resolves.toMatchObject({
+      occurrences: [
+        { turnId: "turn_healthy", snippet: "healthy searchable message" },
+      ],
+    })
+    await expect(
+      restarted.searchThreadOccurrences({
+        threadId: "thread_broken_rollout",
+        searchTerm: "healthy",
+        limit: 10,
+      }),
+    ).rejects.toThrow("Cannot search unreadable Thread thread_broken_rollout")
+
+    await writeFile(brokenPath, original)
+    const repaired = await restarted.searchThreads({
+      searchTerm: "healthy",
+      limit: 10,
+    })
+    expect(repaired.matches.map(({ summary }) => summary.id)).toEqual([
+      "thread_healthy_rollout",
+    ])
+    expect(repaired.unavailableThreadCount).toBeUndefined()
   })
 
   it("persists and incrementally pages the visible-history search projection", async () => {

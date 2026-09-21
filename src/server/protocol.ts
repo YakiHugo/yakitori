@@ -90,13 +90,14 @@ export type ApiSearchSessionsRequest = {
   readonly cursor?: string
 }
 
-export type ApiSearchSessionsResponse = {
-  readonly data: readonly Readonly<{
+export type ApiSearchSessionsResponse = Readonly<{
+  data: readonly Readonly<{
     session: ApiSessionSummary
     snippet: string
   }>[]
-  readonly nextCursor?: string
-}
+  nextCursor?: string
+  unavailableSessionCount?: number
+}>
 
 export type ApiSearchSessionOccurrencesRequest = {
   readonly sessionId: string

@@ -75,6 +75,7 @@ export type ThreadStoreSearchInput = Readonly<{
 export type ThreadStoreSearchResult = Readonly<{
   matches: readonly Readonly<{ summary: ThreadSummary; snippet: string }>[]
   nextCursor?: string
+  unavailableThreadCount?: number
 }>
 
 export type ThreadStoreOccurrenceSearchInput = Readonly<{
