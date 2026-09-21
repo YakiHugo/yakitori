@@ -52,8 +52,9 @@ describe("tool cell", () => {
       />,
     )
 
-    expect(screen.getByText("Review authentication changes")).toBeTruthy()
-    expect(screen.getByText("/root/review")).toBeTruthy()
+    expect(screen.queryByText("Review authentication changes")).toBeNull()
+    expect(screen.getByText("review")).toBeTruthy()
+    expect(screen.queryByText("/root/review")).toBeNull()
     expect(
       screen.queryByText("Agent accepted the task; child is working."),
     ).toBeNull()
@@ -68,16 +69,50 @@ describe("tool cell", () => {
       screen.queryByText("Agent accepted the task; child is working."),
     ).toBeNull()
 
-    await user.click(
-      screen.getByRole("button", { name: /Spawn agent Review authentication/ }),
-    )
+    await user.click(screen.getByRole("button", { name: /Spawn agent review/ }))
 
+    expect(screen.getByText("Review authentication changes")).toBeTruthy()
     expect(
       screen.getByText("Agent accepted the task; child is working."),
     ).toBeTruthy()
     expect(screen.getAllByRole("button", { name: /View trace/ })).toHaveLength(
       1,
     )
+  })
+
+  it("keeps an agent message inside disclosure and shows the resolved recipient in its collapsed row", async () => {
+    const user = userEvent.setup()
+    const base = collaborationEntry([
+      { sessionId: "session_child", path: "/root/stream_performance" },
+    ])
+    render(
+      <ToolCell
+        entry={{
+          ...base,
+          execution: {
+            ...base.execution,
+            type: "collaboration_tool_call",
+            action: "send_message",
+            input: {
+              target: "session_child",
+              message: "My telemetry tests pass. Please finish your changes.",
+            },
+            description: "My telemetry tests pass. Please finish your changes.",
+            receivers: [
+              { sessionId: "session_child", path: "/root/stream_performance" },
+            ],
+          },
+        }}
+      />,
+    )
+    expect(screen.getByText("stream_performance")).toBeTruthy()
+    expect(screen.queryByText(/My telemetry tests pass/)).toBeNull()
+    await user.click(
+      screen.getByRole("button", { name: /Message agent stream_performance/ }),
+    )
+    expect(
+      screen.getByText("My telemetry tests pass. Please finish your changes."),
+    ).toBeTruthy()
   })
 
   it("opens each recorded recipient directly from a collapsed multi-agent card", async () => {

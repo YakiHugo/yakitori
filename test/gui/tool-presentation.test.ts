@@ -49,9 +49,42 @@ describe("tool presentation", () => {
     ).toMatchObject({
       verb,
       activeVerb,
-      subject: "Review the authentication flow",
+      subject: "",
       meta: [],
-      detail: { kind: "collaboration", text: "Actual output", receivers: [] },
+      detail: {
+        kind: "collaboration",
+        request: "Review the authentication flow",
+        text: "Actual output",
+        receivers: [],
+      },
+    })
+  })
+
+  it.each([
+    ["spawn", { task_name: "renderer" }, "renderer"],
+    ["send_message", { target: "/root/renderer" }, "renderer"],
+    ["follow_up", { target: "/root/renderer" }, "renderer"],
+    ["list", { path_prefix: "/root/renderer" }, "renderer"],
+  ] as const)("uses the %s task identity before a receiver is resolved", (action, input, subject) => {
+    const base = entry("spawn_agent", {})
+    expect(
+      presentTool({
+        ...base,
+        execution: {
+          ...base.execution,
+          type: "collaboration_tool_call",
+          action,
+          input: {
+            ...input,
+            message: "Long internal instructions\nSecond line",
+          },
+          description: "Long internal instructions\nSecond line",
+          receivers: [],
+        },
+      }),
+    ).toMatchObject({
+      subject,
+      detail: { request: "Long internal instructions\nSecond line" },
     })
   })
 
@@ -465,6 +498,7 @@ describe("tool presentation", () => {
         },
       }),
     ).toMatchObject({
+      subject: "2 agents",
       meta: ["2 agents"],
       detail: {
         kind: "collaboration",

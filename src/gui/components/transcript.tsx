@@ -1,5 +1,6 @@
 import { ArrowDown, ChevronRight, Info, Wrench } from "lucide-react"
 import {
+  memo,
   type ReactNode,
   useEffect,
   useId,
@@ -37,6 +38,7 @@ import {
 } from "./ui/collapsible.tsx"
 import { ScrollArea } from "./ui/scroll-area.tsx"
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip.tsx"
+import "./activity-timeline.css"
 
 // Keep admission order, including queued/steering inputs between turn items.
 // Only adjacent items of the same turn share a disclosure.
@@ -274,162 +276,189 @@ export function Transcript({ children }: Readonly<{ children?: ReactNode }>) {
   )
 }
 
-function TurnBlock({
-  entries,
-  active,
-  timing,
-  finalAnswerId,
-  retry,
-}: Readonly<{
-  entries: readonly ExecutionEntry[]
-  active: boolean
-  timing: TurnTiming | undefined
-  finalAnswerId: string | undefined
-  retry: ActiveModelRetry | undefined
-}>) {
-  const [reasoningExpanded, setReasoningExpanded] = useState(false)
-  const contentId = useId()
-  const workspaceRoot = useAppStore((state) => state.execution.workingDirectory)
-  const finalAnswer = entries.find(
-    (entry): entry is Extract<ExecutionEntry, { kind: "assistant" }> =>
-      entry.kind === "assistant" && entry.itemId === finalAnswerId,
-  )
-  const persistent = entries.filter(
-    (entry) =>
-      entry === finalAnswer ||
-      entry.kind === "turn_terminal" ||
-      (entry.kind === "permission" && entry.state !== "resolved"),
-  )
-  const reasoning = entries.filter(
-    (entry): entry is Extract<ExecutionEntry, { kind: "reasoning" }> =>
-      entry.kind === "reasoning",
-  )
-  const timeline = groupTurnTimeline(
-    entries.filter(
-      (entry) => !persistent.includes(entry) && entry.kind !== "reasoning",
-    ),
-  )
-  const reasoningText = reasoning
-    .map((entry) => entry.text.trim())
-    .filter(Boolean)
-    .join("\n\n")
-  const seconds =
-    timing?.startedAt && timing.completedAt
-      ? Math.max(
-          0,
-          Math.floor(
-            (Date.parse(timing.completedAt) - Date.parse(timing.startedAt)) /
-              1000,
-          ),
-        )
-      : undefined
-  const retryLabel =
-    retry?.kind === "rate_limited"
-      ? "Waiting for rate limit"
-      : retry?.kind === "connection_failed" ||
-          retry?.kind === "stream_disconnected" ||
-          retry?.kind === "idle_timeout"
-        ? "Reconnecting"
-        : "Retrying request"
-  const activityLabel = (
-    <span
-      className={active ? "tool-running-label" : undefined}
-      role={active ? "status" : undefined}
-    >
-      {retry
-        ? `${retryLabel} · attempt ${retry.nextAttempt}/${retry.maxAttempts}`
-        : active
-          ? "Working"
-          : seconds === undefined
-            ? "Activity"
-            : `Worked for ${formatElapsed(seconds)}`}
-    </span>
-  )
-  return (
-    <section
-      className="flex flex-col gap-5"
-      aria-label={active ? "Current response" : "Response"}
-    >
-      {entries.length > 0 || active ? (
-        <div>
-          <div
-            className={cn(
-              "flex items-center gap-1.5 text-left text-[14px] text-muted-foreground",
-              finalAnswer ? "border-b pb-3" : "pb-1",
-            )}
-          >
-            {reasoningText !== "" ? (
-              <button
-                type="button"
-                aria-expanded={reasoningExpanded}
-                aria-controls={contentId}
-                onClick={() => setReasoningExpanded(!reasoningExpanded)}
-                className="flex items-center gap-1.5 text-left hover:text-foreground"
-              >
-                {activityLabel}
-                <ChevronRight
-                  className={cn(
-                    "size-3.5 transition-transform duration-150",
-                    reasoningExpanded && "rotate-90",
-                  )}
-                />
-              </button>
-            ) : (
-              activityLabel
-            )}
-            {retry ? (
-              <Tooltip>
-                <TooltipTrigger
-                  type="button"
-                  aria-label="Retry details"
-                  className="inline-flex items-center hover:text-foreground"
-                >
-                  <Info className="size-3.5" />
-                </TooltipTrigger>
-                <TooltipContent className="max-w-sm">
-                  {retry.message}
-                </TooltipContent>
-              </Tooltip>
-            ) : null}
-          </div>
-          {reasoningText === "" ? null : (
+const TurnBlock = memo(
+  function TurnBlock({
+    entries,
+    active,
+    timing,
+    finalAnswerId,
+    retry,
+  }: Readonly<{
+    entries: readonly ExecutionEntry[]
+    active: boolean
+    timing: TurnTiming | undefined
+    finalAnswerId: string | undefined
+    retry: ActiveModelRetry | undefined
+  }>) {
+    const [reasoningExpanded, setReasoningExpanded] = useState(false)
+    const contentId = useId()
+    const workspaceRoot = useAppStore(
+      (state) => state.execution.workingDirectory,
+    )
+    const finalAnswer = entries.find(
+      (entry): entry is Extract<ExecutionEntry, { kind: "assistant" }> =>
+        entry.kind === "assistant" && entry.itemId === finalAnswerId,
+    )
+    const persistent = entries.filter(
+      (entry) =>
+        entry === finalAnswer ||
+        entry.kind === "turn_terminal" ||
+        (entry.kind === "permission" && entry.state !== "resolved"),
+    )
+    const reasoning = entries.filter(
+      (entry): entry is Extract<ExecutionEntry, { kind: "reasoning" }> =>
+        entry.kind === "reasoning",
+    )
+    const timeline = groupTurnTimeline(
+      entries.filter(
+        (entry) => !persistent.includes(entry) && entry.kind !== "reasoning",
+      ),
+    )
+    const reasoningText = reasoning
+      .map((entry) => entry.text.trim())
+      .filter(Boolean)
+      .join("\n\n")
+    const seconds =
+      timing?.startedAt && timing.completedAt
+        ? Math.max(
+            0,
+            Math.floor(
+              (Date.parse(timing.completedAt) - Date.parse(timing.startedAt)) /
+                1000,
+            ),
+          )
+        : undefined
+    const retryLabel =
+      retry?.kind === "rate_limited"
+        ? "Waiting for rate limit"
+        : retry?.kind === "connection_failed" ||
+            retry?.kind === "stream_disconnected" ||
+            retry?.kind === "idle_timeout"
+          ? "Reconnecting"
+          : "Retrying request"
+    const activityLabel = (
+      <span
+        className={active ? "tool-running-label" : undefined}
+        role={active ? "status" : undefined}
+      >
+        {retry
+          ? `${retryLabel} · attempt ${retry.nextAttempt}/${retry.maxAttempts}`
+          : active
+            ? "Working"
+            : seconds === undefined
+              ? "Activity"
+              : `Worked for ${formatElapsed(seconds)}`}
+      </span>
+    )
+    return (
+      <section
+        className="flex flex-col gap-5"
+        aria-label={active ? "Current response" : "Response"}
+      >
+        {entries.length > 0 || active ? (
+          <div>
             <div
-              id={contentId}
-              className="conversation-disclosure"
-              data-expanded={reasoningExpanded}
-              aria-hidden={!reasoningExpanded}
-              inert={!reasoningExpanded}
+              className={cn(
+                "flex items-center gap-1.5 text-left text-[14px] text-muted-foreground",
+                finalAnswer ? "border-b pb-3" : "pb-1",
+              )}
             >
-              <div className="min-h-0 overflow-hidden">
-                <MarkdownView
-                  text={reasoningText}
-                  className="markdown max-w-2xl pt-4 text-sm leading-6 text-muted-foreground"
-                  workspaceRoot={workspaceRoot}
-                />
-              </div>
+              {reasoningText !== "" ? (
+                <button
+                  type="button"
+                  aria-expanded={reasoningExpanded}
+                  aria-controls={contentId}
+                  onClick={() => setReasoningExpanded(!reasoningExpanded)}
+                  className="flex items-center gap-1.5 text-left hover:text-foreground"
+                >
+                  {activityLabel}
+                  <ChevronRight
+                    className={cn(
+                      "size-3.5 transition-transform duration-150",
+                      reasoningExpanded && "rotate-90",
+                    )}
+                  />
+                </button>
+              ) : (
+                activityLabel
+              )}
+              {retry ? (
+                <Tooltip>
+                  <TooltipTrigger
+                    type="button"
+                    aria-label="Retry details"
+                    className="inline-flex items-center hover:text-foreground"
+                  >
+                    <Info className="size-3.5" />
+                  </TooltipTrigger>
+                  <TooltipContent className="max-w-sm">
+                    {retry.message}
+                  </TooltipContent>
+                </Tooltip>
+              ) : null}
             </div>
-          )}
-        </div>
-      ) : null}
-      {timeline.map((item) =>
-        item.kind === "entry" ? (
-          <EntryCell key={entryKey(item.entry)} entry={item.entry} />
-        ) : (
-          <ActionGroup key={entryKey(item.entries[0])} entries={item.entries} />
-        ),
-      )}
-      {persistent.map((entry) => (
-        <EntryCell key={entryKey(entry)} entry={entry} />
-      ))}
-      {finalAnswer ? (
-        <ResponseActions
-          text={finalAnswer.text}
-          at={timing?.completedAt ?? finalAnswer.at}
-        />
-      ) : null}
-    </section>
-  )
-}
+            {reasoningText === "" ? null : (
+              <div
+                id={contentId}
+                className="conversation-disclosure"
+                data-expanded={reasoningExpanded}
+                aria-hidden={!reasoningExpanded}
+                inert={!reasoningExpanded}
+              >
+                <div className="min-h-0 overflow-hidden">
+                  {reasoningExpanded ? (
+                    <MarkdownView
+                      text={reasoningText}
+                      className="markdown max-w-2xl pt-4 text-sm leading-6 text-muted-foreground"
+                      workspaceRoot={workspaceRoot}
+                    />
+                  ) : null}
+                </div>
+              </div>
+            )}
+          </div>
+        ) : null}
+        {timeline.length > 0 ? (
+          <ol className="agent-timeline" aria-label="Agent activity">
+            {timeline.map((item) => (
+              <li
+                key={entryKey(
+                  item.kind === "entry" ? item.entry : item.entries[0],
+                )}
+                className="agent-timeline-item"
+                data-kind={item.kind === "entry" ? item.entry.kind : "actions"}
+              >
+                {item.kind === "entry" ? (
+                  <EntryCell entry={item.entry} />
+                ) : (
+                  <ActionGroup entries={item.entries} />
+                )}
+              </li>
+            ))}
+          </ol>
+        ) : null}
+        {persistent.map((entry) => (
+          <EntryCell key={entryKey(entry)} entry={entry} />
+        ))}
+        {finalAnswer ? (
+          <ResponseActions
+            text={finalAnswer.text}
+            at={timing?.completedAt ?? finalAnswer.at}
+          />
+        ) : null}
+      </section>
+    )
+  },
+  (previous, next) =>
+    previous.active === next.active &&
+    previous.timing === next.timing &&
+    previous.finalAnswerId === next.finalAnswerId &&
+    previous.retry === next.retry &&
+    // Grouping creates new arrays on each delta; the reducer preserves entries
+    // outside the changed item. Keep completed turns out of the render path.
+    previous.entries.length === next.entries.length &&
+    previous.entries.every((entry, index) => entry === next.entries[index]),
+)
 
 type TurnTimelineItem =
   | { readonly kind: "entry"; readonly entry: ExecutionEntry }
@@ -536,7 +565,9 @@ function ActionGroup({
   )
 }
 
-function EntryCell({ entry }: Readonly<{ entry: ExecutionEntry }>) {
+const EntryCell = memo(function EntryCell({
+  entry,
+}: Readonly<{ entry: ExecutionEntry }>) {
   const workspaceRoot = useAppStore((state) => state.execution.workingDirectory)
   const sessionId = useAppStore((state) => state.selection.sessionId)
   const openAgent = async (agentId: string) => {
@@ -566,4 +597,4 @@ function EntryCell({ entry }: Readonly<{ entry: ExecutionEntry }>) {
     case "user_input":
       return <UserMessageCell entry={entry} queued={false} />
   }
-}
+})

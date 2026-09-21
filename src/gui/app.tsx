@@ -4,6 +4,7 @@ import { Composer } from "./components/composer.tsx"
 import { QueuedInputs } from "./components/queued-inputs.tsx"
 import { PreferencesEffects } from "./components/preferences-effects.tsx"
 import { SessionSummary } from "./components/session-summary.tsx"
+import { TelemetryRail } from "./components/telemetry-rail.tsx"
 import { Transcript } from "./components/transcript.tsx"
 import {
   Tooltip,
@@ -46,6 +47,7 @@ export function App() {
           ) : hasSession ? (
             <>
               <SessionHeader />
+              <TelemetryRail />
               <Transcript>
                 <ApprovalBar />
                 <QueuedInputs />

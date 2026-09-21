@@ -169,17 +169,16 @@ it("keeps intent updates visible and consolidates reasoning behind the turn summ
       .getByText("Checking the implementation", { selector: "p" })
       .closest("[aria-hidden]"),
   ).toBeNull()
-  expect(
-    screen
-      .getByText("Reasoning details", { selector: "p" })
-      .closest("[aria-hidden]")
-      ?.getAttribute("aria-hidden"),
-  ).toBe("true")
+  expect(screen.queryByText("Reasoning details", { selector: "p" })).toBeNull()
   const toggles = screen.getAllByRole("button", { name: "Worked for 1m 49s" })
   expect(toggles).toHaveLength(1)
   const [toggle] = toggles
   if (toggle === undefined) throw new Error("Expected a reasoning disclosure")
   expect(toggle.getAttribute("aria-expanded")).toBe("false")
+  const disclosure = document.getElementById(
+    toggle.getAttribute("aria-controls") ?? "",
+  )
+  expect(disclosure?.getAttribute("aria-hidden")).toBe("true")
   fireEvent.click(toggle)
   expect(
     screen
@@ -194,12 +193,8 @@ it("keeps intent updates visible and consolidates reasoning behind the turn summ
       ?.getAttribute("aria-hidden"),
   ).toBe("false")
   fireEvent.click(toggle)
-  expect(
-    screen
-      .getByText("Reasoning details", { selector: "p" })
-      .closest("[aria-hidden]")
-      ?.getAttribute("aria-hidden"),
-  ).toBe("true")
+  expect(screen.queryByText("Reasoning details", { selector: "p" })).toBeNull()
+  expect(disclosure?.getAttribute("aria-hidden")).toBe("true")
   expect(screen.getByText("Final answer")).toBeDefined()
 })
 

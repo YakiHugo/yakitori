@@ -531,11 +531,25 @@ async function executeTurnModelLoop(
   const metadata = input.runtime.snapshot().metadata
   const usages: ModelUsage[] = []
   let modelCalls = 0
+  let compactionModelCalls = 0
   let toolCalls = 0
   let modelDurationMs = 0
   let toolDurationMs = 0
   let timeToFirstTokenTotalMs = 0
   let timeToFirstTokenSamples = 0
+  const onCompactionModelTiming = (
+    durationMs: number,
+    timeToFirstTokenMs: number | undefined,
+  ) => {
+    // modelCalls also controls normal-step admission and context injection.
+    // Compaction shares usage and metrics, but must not advance that counter.
+    compactionModelCalls += 1
+    modelDurationMs += durationMs
+    if (timeToFirstTokenMs !== undefined) {
+      timeToFirstTokenTotalMs += timeToFirstTokenMs
+      timeToFirstTokenSamples += 1
+    }
+  }
   let compactedAtModelCall = -1
   const pendingSkillInputs = [input.input]
   let previousDiagnostics = new Set<string>()
@@ -791,6 +805,7 @@ async function executeTurnModelLoop(
                 signal: input.signal,
                 rolloutAssets: input.options.rolloutAssets,
                 usages,
+                onModelTiming: onCompactionModelTiming,
                 rolloutBudget: budget,
                 onOperationalFailure: input.options.onOperationalFailure,
                 ...(input.options.hookRunner === undefined
@@ -870,6 +885,7 @@ async function executeTurnModelLoop(
           signal: input.signal,
           rolloutAssets: input.options.rolloutAssets,
           usages,
+          onModelTiming: onCompactionModelTiming,
           rolloutBudget: budget,
           onOperationalFailure: input.options.onOperationalFailure,
           ...(input.options.hookRunner === undefined
@@ -1123,7 +1139,7 @@ async function executeTurnModelLoop(
         stopHook?.additionalContext ?? [],
       )
       input.runtime.recordTurnMetrics({
-        modelCalls,
+        modelCalls: modelCalls + compactionModelCalls,
         toolCalls,
         modelDurationMs,
         toolDurationMs,
@@ -1327,28 +1343,32 @@ function assessModelRequest(input: {
   }
 }
 
-async function compactLiveHistory(input: {
-  readonly remoteCompaction?: boolean
-  readonly fallback?: Readonly<{ step: StepContext; stream: StreamFn }>
-  readonly injectWorldState?: boolean
-  readonly runtime: TurnRuntime
-  readonly turnId: string
-  readonly step: StepContext
-  readonly worldState: WorldState
-  readonly history: readonly ResponseItemEnvelope[]
-  readonly stream: StreamFn
-  readonly signal: AbortSignal
-  readonly rolloutAssets: RolloutAssets | undefined
-  readonly usages: ModelUsage[]
-  readonly rolloutBudget: RolloutBudget | undefined
-  readonly hookRunner?: HookRunner
-  readonly onOperationalFailure:
-    | TurnProcessorOperationalFailureReporter
-    | undefined
-  readonly setActiveStream: (
-    stream: AsyncIterator<ModelStreamEvent> | undefined,
-  ) => void
-}): Promise<boolean> {
+async function compactLiveHistory(
+  input: Readonly<{
+    remoteCompaction?: boolean
+    fallback?: Readonly<{ step: StepContext; stream: StreamFn }>
+    injectWorldState?: boolean
+    runtime: TurnRuntime
+    turnId: string
+    step: StepContext
+    worldState: WorldState
+    history: readonly ResponseItemEnvelope[]
+    stream: StreamFn
+    signal: AbortSignal
+    rolloutAssets: RolloutAssets | undefined
+    usages: ModelUsage[]
+    onModelTiming: (
+      durationMs: number,
+      timeToFirstTokenMs: number | undefined,
+    ) => void
+    rolloutBudget: RolloutBudget | undefined
+    hookRunner?: HookRunner
+    onOperationalFailure: TurnProcessorOperationalFailureReporter | undefined
+    setActiveStream: (
+      stream: AsyncIterator<ModelStreamEvent> | undefined,
+    ) => void
+  }>,
+): Promise<boolean> {
   let compactionStep = input.step
   let compactionStream = input.stream
   let usedFallback = false
@@ -1393,6 +1413,8 @@ async function compactLiveHistory(input: {
 
   try {
     const compact = async (request: ModelRequest) => {
+      const modelStartedAt = Date.now()
+      let firstTokenAt: number | undefined
       const response = await consumeModelStream({
         request,
         stream: compactionStream,
@@ -1403,6 +1425,9 @@ async function compactLiveHistory(input: {
         emitWarning: (message, diagnostic) =>
           input.runtime.emitWarning(message, diagnostic),
         onOperationalFailure: input.onOperationalFailure,
+        onFirstToken() {
+          firstTokenAt ??= Date.now()
+        },
         onUsage(usage) {
           input.usages.push(usage)
           const aggregate = aggregateTokenUsage(input.usages)
@@ -1411,6 +1436,10 @@ async function compactLiveHistory(input: {
         },
         setActiveStream: input.setActiveStream,
       })
+      input.onModelTiming(
+        Date.now() - modelStartedAt,
+        firstTokenAt === undefined ? undefined : firstTokenAt - modelStartedAt,
+      )
       if (response.stopReason === ModelStopReason.Length) {
         throw new Error("Compaction was truncated by the model output limit.")
       }

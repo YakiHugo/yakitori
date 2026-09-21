@@ -1,0 +1,80 @@
+.agent-timeline {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.agent-timeline-item {
+  position: relative;
+  min-width: 0;
+  padding: 0 0 20px 22px;
+}
+.agent-timeline-item::before {
+  content: "";
+  position: absolute;
+  top: 8px;
+  left: 3px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: color-mix(in oklab, var(--muted-foreground) 55%, transparent);
+}
+.agent-timeline-item:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  top: 17px;
+  bottom: 3px;
+  left: 5px;
+  width: 1px;
+  background: var(--border);
+}
+.agent-timeline-item:last-child {
+  padding-bottom: 0;
+}
+.agent-timeline-item[data-kind="assistant"]::before {
+  background: var(--muted-foreground);
+}
+.agent-collaboration {
+  min-width: 0;
+}
+.agent-collaboration-recipients {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin: 2px 0 2px 27px;
+  padding-left: 12px;
+  border-left: 1px solid var(--border);
+}
+.agent-collaboration-recipient {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+  gap: 6px;
+  font-size: 12px;
+}
+.agent-trace-link {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  gap: 6px;
+  border-radius: 4px;
+  padding: 3px 0;
+  color: var(--muted-foreground);
+  text-align: left;
+}
+.agent-trace-link span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-trace-link:hover {
+  color: var(--foreground);
+}
+.agent-trace-link:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 3px;
+}
+.agent-trace-link svg {
+  flex: none;
+  opacity: 0.6;
+}

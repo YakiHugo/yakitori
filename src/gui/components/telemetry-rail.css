@@ -1,0 +1,102 @@
+.telemetry-rail {
+  container: session-telemetry / inline-size;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.telemetry-rail > summary {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 9px 20px;
+  overflow-x: auto;
+  white-space: nowrap;
+  list-style: none;
+  cursor: pointer;
+}
+
+.telemetry-rail > summary::-webkit-details-marker {
+  display: none;
+}
+
+.telemetry-rail > summary:hover {
+  background: var(--accent);
+}
+
+.telemetry-rail > summary:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+.telemetry-rail strong {
+  margin-left: 5px;
+  color: var(--foreground);
+  font-weight: 500;
+}
+
+.telemetry-caption {
+  margin-right: auto;
+}
+
+.telemetry-chevron {
+  flex-shrink: 0;
+}
+
+.telemetry-rail[open] .telemetry-chevron {
+  transform: rotate(180deg);
+}
+
+.telemetry-dashboard {
+  max-width: 820px;
+  margin: 0 auto;
+  padding: 12px 20px 16px;
+}
+
+.telemetry-dashboard-heading {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.telemetry-dashboard-heading > :first-child {
+  color: var(--foreground);
+  font-weight: 500;
+}
+
+.telemetry-dashboard dl {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.telemetry-dashboard dd {
+  margin: 5px 0 0;
+  color: var(--foreground);
+  font-size: 15px;
+}
+
+.telemetry-dashboard p {
+  margin-top: 15px;
+  line-height: 1.6;
+  text-wrap: pretty;
+}
+
+@container session-telemetry (max-width: 600px) {
+  .telemetry-caption {
+    display: none;
+  }
+
+  .telemetry-rail > summary {
+    gap: 14px;
+    padding-inline: 14px;
+  }
+
+  .telemetry-dashboard dl {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}

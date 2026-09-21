@@ -1,5 +1,5 @@
 import type { MouseEvent, ReactNode } from "react"
-import { isValidElement, useEffect, useMemo, useState } from "react"
+import { isValidElement, memo, useEffect, useMemo, useState } from "react"
 import type { Components } from "react-markdown"
 import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
@@ -344,15 +344,15 @@ function createMarkdownComponents(
   }
 }
 
-export function MarkdownView({
+export const MarkdownView = memo(function MarkdownView({
   text,
   className,
   workspaceRoot,
-}: {
-  readonly text: string
-  readonly className?: string
-  readonly workspaceRoot?: string | undefined
-}) {
+}: Readonly<{
+  text: string
+  className?: string
+  workspaceRoot?: string | undefined
+}>) {
   const components = useMemo(
     () => createMarkdownComponents(workspaceRoot),
     [workspaceRoot],
@@ -364,4 +364,4 @@ export function MarkdownView({
       </Markdown>
     </div>
   )
-}
+})

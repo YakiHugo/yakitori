@@ -1,4 +1,4 @@
-import { ChevronRight, ExternalLink } from "lucide-react"
+import { ArrowUpRight, ChevronRight, ExternalLink } from "lucide-react"
 import { useEffect, useState } from "react"
 import { imageAttachmentUrl } from "../../composer-attachments.ts"
 import type { ExecutionEntry } from "../../execution-view.ts"
@@ -16,6 +16,7 @@ import {
   CollapsibleTrigger,
 } from "../ui/collapsible.tsx"
 import { ToolDetailView } from "./tool-detail.tsx"
+import "../activity-timeline.css"
 
 type ToolEntry = Extract<ExecutionEntry, { readonly kind: "tool" }>
 
@@ -55,7 +56,7 @@ export function ToolCell({
       onOpenChange={setOpen}
       className={cn(
         "group/tool",
-        collaboration !== undefined && "rounded-lg border border-border/65 p-1",
+        collaboration !== undefined && "agent-collaboration",
       )}
     >
       <div className="flex min-w-0 items-center rounded-md transition-colors hover:bg-muted/35">
@@ -71,11 +72,15 @@ export function ToolCell({
           >
             {active ? presentation.activeVerb : presentation.verb}
           </span>
+          {collaboration !== undefined && presentation.subject !== "" ? (
+            <span aria-hidden="true" className="text-muted-foreground">
+              ·
+            </span>
+          ) : null}
           {presentation.subject !== "" ? (
             <span
               className={cn(
-                "min-w-0 text-foreground/85",
-                collaboration === undefined ? "truncate" : "line-clamp-2",
+                "min-w-0 truncate text-foreground/85",
                 presentation.subjectTone === "code" &&
                   "font-mono text-[0.8125rem]",
               )}
@@ -83,15 +88,18 @@ export function ToolCell({
               {presentation.subject}
             </span>
           ) : null}
-          <span className="ml-auto hidden shrink-0 items-center gap-1.5 text-xs text-muted-foreground sm:flex">
+          <span className="ml-auto hidden min-w-0 max-w-[40%] shrink-0 items-center gap-1.5 overflow-hidden text-xs text-muted-foreground sm:flex">
             {(collaboration === undefined ? presentation.meta : []).map(
               (part) => (
-                <span key={part}>{part}</span>
+                <span key={part} className="truncate">
+                  {part}
+                </span>
               ),
             )}
             {failure === undefined ? null : (
               <span
                 className={cn(
+                  "truncate",
                   entry.state === "failed"
                     ? "text-destructive"
                     : "text-muted-foreground",
@@ -103,28 +111,32 @@ export function ToolCell({
           </span>
         </CollapsibleTrigger>
         {presentation.target === undefined ||
-        collaboration !== undefined ? null : (
+        (collaboration !== undefined && onOpenSession === undefined) ? null : (
           <ResourceAction
             target={presentation.target}
+            recipient={collaboration?.receivers[0]?.path}
+            compact={collaboration !== undefined}
             workspaceRoot={workspaceRoot}
             onOpenSession={onOpenSession}
           />
         )}
       </div>
-      {collaboration === undefined ? null : (
-        <div className="flex flex-wrap gap-x-3 gap-y-1 px-6 pb-1">
+      {collaboration === undefined ||
+      collaboration.receivers.length < 2 ? null : (
+        <div className="agent-collaboration-recipients">
           {collaboration.receivers.map((receiver) => (
             <div
               key={receiver.sessionId}
-              className="flex min-w-0 max-w-full items-center gap-2 text-xs"
+              className="agent-collaboration-recipient"
             >
-              <span
-                className="truncate text-muted-foreground"
-                title={receiver.path}
-              >
-                {receiver.path}
-              </span>
-              {onOpenSession === undefined ? null : (
+              {onOpenSession === undefined ? (
+                <span
+                  className="truncate text-muted-foreground"
+                  title={receiver.path}
+                >
+                  {receiver.path}
+                </span>
+              ) : (
                 <ResourceAction
                   target={{ kind: "session", sessionId: receiver.sessionId }}
                   recipient={receiver.path}
@@ -146,6 +158,11 @@ export function ToolCell({
               className="mb-2 max-h-96 max-w-full rounded object-contain"
             />
           ))}
+          {collaboration?.request === undefined ? null : (
+            <p className="mb-3 text-xs leading-5 whitespace-pre-wrap text-foreground/85">
+              {collaboration.request}
+            </p>
+          )}
           <ToolDetailView
             detail={presentation.detail}
             workspaceRoot={workspaceRoot}
@@ -161,11 +178,13 @@ function ResourceAction({
   workspaceRoot,
   onOpenSession,
   recipient,
+  compact = false,
 }: Readonly<{
   target: ToolTarget
   workspaceRoot?: string | undefined
   onOpenSession?: ((sessionId: string) => Promise<void>) | undefined
   recipient?: string | undefined
+  compact?: boolean
 }>) {
   const [error, setError] = useState<string>()
   const label =
@@ -182,10 +201,9 @@ function ResourceAction({
       aria-label={error ?? label}
       title={error ?? label}
       className={cn(
-        "shrink-0 rounded-sm p-1 text-muted-foreground outline-none hover:text-foreground focus-visible:bg-muted",
         target.kind === "session"
-          ? "inline-flex items-center gap-1 text-xs"
-          : "mr-1.5 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/tool:opacity-100",
+          ? "agent-trace-link text-xs"
+          : "mr-1.5 shrink-0 rounded-sm p-1 text-muted-foreground opacity-0 outline-none transition-opacity hover:text-foreground focus-visible:bg-muted focus-visible:opacity-100 group-hover/tool:opacity-100",
         error !== undefined && "text-destructive opacity-100",
       )}
       onClick={() => {
@@ -205,8 +223,14 @@ function ResourceAction({
         })
       }}
     >
-      {target.kind === "session" ? <span>View trace</span> : null}
-      <ExternalLink className="size-3.5" />
+      {target.kind === "session" ? (
+        <>
+          <span>{compact ? "View trace" : (recipient ?? "View trace")}</span>
+          <ArrowUpRight className="size-3.5" />
+        </>
+      ) : (
+        <ExternalLink className="size-3.5" />
+      )}
     </button>
   )
 }

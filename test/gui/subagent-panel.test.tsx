@@ -178,6 +178,89 @@ it("reconciles live output against an idle reconnect snapshot", () => {
   expect(screen.getByText("Partial result")).toBeDefined()
 })
 
+it("keeps delegated agent navigation available while routine child activity is folded", () => {
+  mount()
+  act(() => {
+    start()
+    emit({
+      type: "item.completed",
+      data: {
+        turnId: "turn",
+        item: {
+          type: "reasoning",
+          itemId: "reasoning",
+          text: "Choosing a reviewer",
+        },
+      },
+    })
+    emit({
+      type: "item.completed",
+      data: {
+        turnId: "turn",
+        item: {
+          type: "collaboration_tool_call",
+          itemId: "spawn",
+          toolCallId: "spawn",
+          resultItemId: "spawn_result",
+          name: "spawn_agent",
+          input: { message: "Review focus handling" },
+          requiresPermission: false,
+          action: "spawn",
+          description: "Review focus handling",
+          receivers: [
+            { sessionId: "grandchild", path: "/root/renderer/focus" },
+          ],
+          content: { kind: "text", text: "Reviewer started" },
+        },
+      },
+    })
+  })
+  expect(
+    screen
+      .getByRole("button", { name: /Activity/ })
+      .getAttribute("aria-expanded"),
+  ).toBe("false")
+  expect(screen.queryByText("Choosing a reviewer")).toBeNull()
+  expect(screen.queryByText("Reviewer started")).toBeNull()
+  fireEvent.click(
+    screen.getByRole("button", {
+      name: "View trace for /root/renderer/focus",
+    }),
+  )
+  expect(props.onOpenAgent).toHaveBeenCalledWith("grandchild")
+})
+
+it("surfaces failed child tool output without opening routine activity", () => {
+  mount()
+  act(() => {
+    start()
+    emit({
+      type: "item.completed",
+      data: {
+        turnId: "turn",
+        item: {
+          type: "file_read",
+          path: "src/missing.ts",
+          itemId: "read",
+          toolCallId: "read",
+          resultItemId: "read_result",
+          name: "read_file",
+          input: { path: "src/missing.ts" },
+          requiresPermission: false,
+          content: { kind: "text", text: "The requested file does not exist" },
+          error: { code: "not_found", message: "Could not read file" },
+        },
+      },
+    })
+  })
+  expect(
+    screen
+      .getByRole("button", { name: /Read src\/missing.ts/ })
+      .getAttribute("aria-expanded"),
+  ).toBe("true")
+  expect(screen.getByText(/The requested file does not exist/)).toBeDefined()
+})
+
 it("answers child permissions on its own connection and reports an unavailable answer channel", () => {
   mount()
   act(() => {

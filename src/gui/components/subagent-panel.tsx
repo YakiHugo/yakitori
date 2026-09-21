@@ -32,6 +32,7 @@ import {
   CollapsibleTrigger,
 } from "./ui/collapsible.tsx"
 import { ScrollArea } from "./ui/scroll-area.tsx"
+import "./activity-timeline.css"
 import "./subagent-panel.css"
 
 export type SubagentPanelProps = Readonly<{
@@ -166,21 +167,25 @@ function ChildTrace({
       activity: boolean
       entries: ExecutionEntry[]
     }[] = []
-    for (const [index, entry] of view.entries.entries()) {
+    for (const entry of view.entries) {
       const activity =
-        entry.kind === "tool" ||
+        (entry.kind === "tool" &&
+          entry.execution.type !== "collaboration_tool_call" &&
+          entry.state !== "failed" &&
+          entry.state !== "interrupted") ||
         entry.kind === "reasoning" ||
         entry.kind === "context_compacted" ||
         (entry.kind === "permission" && entry.state === "resolved")
       const previous = result.at(-1)
       if (activity && previous?.activity) previous.entries.push(entry)
-      else result.push({ key: String(index), activity, entries: [entry] })
+      else
+        result.push({ key: traceEntryKey(entry), activity, entries: [entry] })
     }
     return result
   }, [view.entries])
-  const renderEntry = (entry: ExecutionEntry, index: number) => (
+  const renderEntry = (entry: ExecutionEntry) => (
     <TraceEntry
-      key={index}
+      key={traceEntryKey(entry)}
       entry={entry}
       sessionId={sessionId}
       apiBase={apiBase}
@@ -201,12 +206,12 @@ function ChildTrace({
           <ArrowLeft size={15} />
         </button>
         <div className="subagent-heading">
-          <span className="subagent-eyebrow">Child agent</span>
+          <span className="subagent-eyebrow">Subagent</span>
           <h2 title={session?.title ?? sessionId}>
             {session?.title ?? sessionId}
           </h2>
         </div>
-        <span className="subagent-status" role="status">
+        <span className="subagent-status" data-status={status} role="status">
           <span data-running={Boolean(view.activeTurnId)} />
           {status}
         </span>
@@ -229,10 +234,26 @@ function ChildTrace({
                     <CollapsibleTrigger className="subagent-activity-trigger">
                       <ChevronRight size={14} />
                       Activity
-                      <span>{block.entries.length}</span>
+                      <span>
+                        {block.entries.length}{" "}
+                        {block.entries.length === 1 ? "step" : "steps"}
+                      </span>
                     </CollapsibleTrigger>
                     <CollapsibleContent className="subagent-activity-content">
-                      {block.entries.map(renderEntry)}
+                      <ol
+                        className="agent-timeline"
+                        aria-label="Subagent activity"
+                      >
+                        {block.entries.map((entry) => (
+                          <li
+                            key={traceEntryKey(entry)}
+                            className="agent-timeline-item"
+                            data-kind={entry.kind}
+                          >
+                            {renderEntry(entry)}
+                          </li>
+                        ))}
+                      </ol>
                     </CollapsibleContent>
                   </Collapsible>
                 ) : (
@@ -314,6 +335,24 @@ function ChildTrace({
       />
     </section>
   )
+}
+
+function traceEntryKey(entry: ExecutionEntry): string {
+  switch (entry.kind) {
+    case "user_input":
+      return entry.inputId
+    case "assistant":
+    case "reasoning":
+      return entry.itemId
+    case "tool":
+      return entry.toolCallId
+    case "permission":
+      return entry.permissionRequestId
+    case "turn_terminal":
+      return `${entry.turnId}:${entry.state}`
+    case "context_compacted":
+      return entry.compactionId
+  }
 }
 
 function TraceEntry({
