@@ -151,6 +151,69 @@ describe("world state", () => {
     expect(withoutTool?.fragments[0]?.text).not.toContain("spawn_agent")
     expect(withTool?.fragments[0]?.text).toContain("spawn")
   })
+
+  it("emits a session goal fragment, then a replacement, then a clearing", () => {
+    const initial = diffWorldState(undefined, worldState())
+    expect(initial?.fragments.map((fragment) => fragment.id)).not.toContain(
+      "goal",
+    )
+
+    const set = diffWorldState(
+      initial?.snapshot,
+      worldState(
+        undefined,
+        "2026-08-21",
+        [],
+        undefined,
+        "always_approve",
+        "ship the feature",
+      ),
+    )
+    expect(set).toMatchObject({
+      full: false,
+      state: { goal: { text: "ship the feature" } },
+      fragments: [
+        {
+          id: "goal",
+          role: "developer",
+          text: expect.stringContaining("ship the feature"),
+        },
+      ],
+    })
+
+    const replaced = diffWorldState(
+      applyJsonMergePatch(initial?.snapshot ?? {}, set?.state ?? {}),
+      worldState(
+        undefined,
+        "2026-08-21",
+        [],
+        undefined,
+        "always_approve",
+        "fix the regression",
+      ),
+    )
+    expect(replaced?.fragments).toEqual([
+      expect.objectContaining({
+        id: "goal",
+        text: expect.stringContaining("replaces the previous session goal"),
+      }),
+    ])
+
+    const cleared = diffWorldState(
+      applyJsonMergePatch(initial?.snapshot ?? {}, replaced?.state ?? {}),
+      worldState(),
+    )
+    expect(cleared).toMatchObject({
+      full: false,
+      state: { goal: { text: null } },
+      fragments: [
+        {
+          id: "goal",
+          text: expect.stringContaining("has been cleared"),
+        },
+      ],
+    })
+  })
 })
 
 function worldState(
@@ -159,6 +222,7 @@ function worldState(
   enabledTools: readonly string[] = [],
   multiAgent?: Parameters<typeof buildWorldStateFromSnapshot>[0]["multiAgent"],
   approvalPolicy: "always_approve" | "auto_file_tools" = "always_approve",
+  goal?: string,
 ) {
   const sessionConfiguration = SessionConfiguration.create({
     promptCacheKey: "session-cache",
@@ -182,6 +246,7 @@ function worldState(
     },
     ...(multiAgent === undefined ? {} : { multiAgent }),
     ...(project === undefined ? {} : { projectInstructions: project }),
+    ...(goal === undefined ? {} : { goal }),
   })
 }
 

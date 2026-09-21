@@ -549,6 +549,8 @@ export async function createYakitoriApplication(
                 cwd: workingDirectory,
               })
             ).configuration.modelTransport,
+          loadSessionGoal: async () =>
+            (await threadStore.sessionPresentation(stored.metadata.id)).goal,
           modelClient: providerRegistry.createClient(),
           provider: provider.provider,
           model: provider.model,

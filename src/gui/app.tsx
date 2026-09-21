@@ -5,6 +5,8 @@ import { openConversationFind } from "./components/conversation-find.tsx"
 import { QueuedInputs } from "./components/queued-inputs.tsx"
 import { PreferencesEffects } from "./components/preferences-effects.tsx"
 import { SessionSummary } from "./components/session-summary.tsx"
+import { SessionGoal } from "./components/session-goal.tsx"
+import { SettingsPage } from "./components/settings-page.tsx"
 import { TelemetryRail } from "./components/telemetry-rail.tsx"
 import { Transcript } from "./components/transcript.tsx"
 import {
@@ -24,6 +26,9 @@ export function App() {
       state.hydratingSessionId === state.selection.sessionId,
   )
   const hasSession = useAppStore((state) => state.selectedSession !== undefined)
+  const settingsOpen = useAppStore(
+    (state) => state.settingsSection !== undefined,
+  )
 
   return (
     <TooltipProvider>
@@ -38,7 +43,9 @@ export function App() {
               {message}
             </div>
           )}
-          {hydrating ? (
+          {settingsOpen ? (
+            <SettingsPage />
+          ) : hydrating ? (
             <div
               role="status"
               className="flex flex-1 items-center justify-center text-sm text-muted-foreground"
@@ -147,6 +154,7 @@ function SessionHeader() {
         ) : null}
       </div>
       <div className="flex shrink-0 items-center gap-1">
+        <SessionGoal />
         <button
           type="button"
           aria-label="Find in conversation"

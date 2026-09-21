@@ -63,6 +63,7 @@ import {
   type ApiListSkillsResponse,
   type ApiReadSessionEventsResponse,
   type ApiReadSessionResponse,
+  type ApiReadUsageResponse,
   type ApiResolvePermissionResponse,
   type ApiSearchSessionOccurrencesResponse,
   type ApiSearchSessionsResponse,
@@ -129,6 +130,7 @@ export type ServerHandlers = {
   listAgents(input: unknown): Promise<ApiHandlerResult<ApiListAgentsResponse>>
   readSidebar(): Promise<ApiHandlerResult<SessionSidebar>>
   updateSidebar(input: unknown): Promise<ApiHandlerResult<SessionSidebar>>
+  readUsage(): Promise<ApiHandlerResult<ApiReadUsageResponse>>
   createSession(
     input?: unknown,
   ): Promise<ApiHandlerResult<ApiCreateSessionResponse>>
@@ -532,6 +534,14 @@ export function createThreadServerHandlers(
         return ok(200, await options.store.updateSessionSidebar(change))
       } catch (error) {
         return fail(error, reporter, "update-sidebar")
+      }
+    },
+
+    async readUsage() {
+      try {
+        return ok(200, { usage: await options.store.readUsageSummary() })
+      } catch (error) {
+        return fail(error, reporter, "read-usage")
       }
     },
 

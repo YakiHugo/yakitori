@@ -1,4 +1,4 @@
-import { Package, Terminal } from "lucide-react"
+import { File, Package, Terminal } from "lucide-react"
 import { useLayoutEffect, useRef } from "react"
 import type { ApiSkillSummary } from "../../server/protocol.ts"
 
@@ -10,14 +10,29 @@ export type ComposerSuggestion =
       description: string
       skill: ApiSkillSummary
     }>
+  | Readonly<{
+      kind: "file"
+      name: string
+      description: string
+      file: Readonly<{ name: string; path: string }>
+    }>
+
+function suggestionKey(item: ComposerSuggestion): string {
+  return item.kind === "skill"
+    ? item.skill.path
+    : item.kind === "file"
+      ? item.file.path
+      : item.name
+}
 
 export function ComposerSuggestions({
   id,
   open,
   items,
   activeIndex,
-  skillOnly,
+  listLabel,
   error,
+  emptyLabel = "No matching commands or skills",
   onHighlight,
   onPick,
 }: Readonly<{
@@ -25,8 +40,9 @@ export function ComposerSuggestions({
   open: boolean
   items: readonly ComposerSuggestion[]
   activeIndex: number
-  skillOnly: boolean
+  listLabel: string
   error: string | undefined
+  emptyLabel?: string | undefined
   onHighlight(index: number): void
   onPick(item: ComposerSuggestion): void
 }>) {
@@ -58,18 +74,17 @@ export function ComposerSuggestions({
         ref={listRef}
         id={id}
         role="listbox"
-        aria-label={skillOnly ? "Skills" : "Slash commands"}
+        aria-label={listLabel}
         className="relative max-h-72 overflow-y-auto"
       >
         {items.map((item, index) => (
-          <div key={item.kind === "skill" ? item.skill.path : item.name}>
+          <div key={suggestionKey(item)}>
             {item.kind === "skill" && items[index - 1]?.kind !== "skill" ? (
               <div className="px-2 pt-2 pb-1 text-xs text-muted-foreground">
                 Skills
               </div>
             ) : null}
             <button
-              key={item.kind === "skill" ? item.skill.path : item.name}
               id={`${id}-${index}`}
               type="button"
               role="option"
@@ -81,13 +96,17 @@ export function ComposerSuggestions({
               title={
                 item.kind === "skill"
                   ? `${item.description}\n${item.skill.path}`
-                  : item.description
+                  : item.kind === "file"
+                    ? item.file.path
+                    : item.description
               }
               className={`flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left ${index === activeIndex ? "bg-accent" : "hover:bg-accent/60"}`}
             >
               <span className="flex size-5 shrink-0 items-center justify-center text-muted-foreground">
                 {item.kind === "skill" ? (
                   <Package className="size-4" />
+                ) : item.kind === "file" ? (
+                  <File className="size-4" />
                 ) : (
                   <Terminal className="size-4" />
                 )}
@@ -110,7 +129,7 @@ export function ComposerSuggestions({
         ))}
         {items.length === 0 ? (
           <p className="px-3 py-4 text-sm text-muted-foreground">
-            {error ?? "No matching commands or skills"}
+            {error ?? emptyLabel}
           </p>
         ) : null}
       </div>

@@ -39,6 +39,7 @@ import {
   type ApiReadSessionResponse,
   type ApiReadSubscriptionRequest,
   type ApiReadSubscriptionResponse,
+  type ApiReadUsageResponse,
   type ApiResolvePermissionRequest,
   type ApiSearchSessionOccurrencesRequest,
   type ApiSearchSessionOccurrencesResponse,
@@ -638,6 +639,11 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
     () => undefined,
     (handlers) => handlers.readSidebar(),
   ),
+  handlerEntry<ApiReadUsageResponse>(
+    "usage/read",
+    () => ({ kind: "global", name: "usage-read" }),
+    (handlers) => handlers.readUsage(),
+  ),
   {
     method: "sidebar/update",
     scope: (params) =>
@@ -1112,6 +1118,7 @@ export type RpcMethodParams = Readonly<
       "server/diagnostics": Readonly<Record<string, never>>
       "sidebar/read": Readonly<Record<string, never>>
       "sidebar/update": SidebarChange
+      "usage/read": Readonly<Record<string, never>>
       "session/list": SessionListParams
       "agent/list": ApiReadSessionRequest
       "session/search": ApiSearchSessionsRequest
@@ -1153,6 +1160,7 @@ export type RpcMethodResponses = Readonly<
       "server/diagnostics": ApiServerDiagnostics
       "sidebar/read": SessionSidebar
       "sidebar/update": SessionSidebar
+      "usage/read": ApiReadUsageResponse
       "session/list": ApiListSessionsResponse
       "agent/list": ApiListAgentsResponse
       "session/search": ApiSearchSessionsResponse

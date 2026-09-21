@@ -1,11 +1,17 @@
-import { Check, CircleUserRound, LoaderCircle, Unplug } from "lucide-react"
+import {
+  ChartColumn,
+  Check,
+  CircleUserRound,
+  LoaderCircle,
+  Settings2,
+  Unplug,
+} from "lucide-react"
 import { useEffect, useState } from "react"
 import type {
   ApiSubscriptionProvider,
   ApiSubscriptionSummary,
 } from "../../server/protocol.ts"
 import { useAppStore } from "../store/app-store.ts"
-import { SidebarDialog } from "./sidebar-surfaces.tsx"
 
 const subscriptionProviderNames = new Set(["codex", "grok", "kimi"])
 const subscriptionProviders = [
@@ -18,6 +24,9 @@ const subscriptionProviders = [
 }>[]
 
 export function SubscriptionPanelButton() {
+  const openSettings = useAppStore((state) => state.openSettings)
+  const loadSubscriptions = useAppStore((state) => state.loadSubscriptions)
+  const subscriptions = useAppStore((state) => state.subscriptionsByProvider)
   const [open, setOpen] = useState(false)
   const connected = useAppStore(
     (state) =>
@@ -27,55 +36,128 @@ export function SubscriptionPanelButton() {
           provider.availability === "available",
       ).length,
   )
+  const primary = subscriptionProviders
+    .map(({ provider }) => subscriptions[provider].subscription)
+    .find((summary) => summary?.availability === "available")
+  const primaryBucket =
+    primary?.usage.status === "available" ? primary.usage.buckets[0] : undefined
+
+  // The menu surfaces live quota, so refresh it on every open.
+  useEffect(() => {
+    if (open) void loadSubscriptions()
+  }, [open, loadSubscriptions])
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (
+        event.key !== "," ||
+        !(event.metaKey || event.ctrlKey) ||
+        event.shiftKey ||
+        event.altKey ||
+        event.isComposing ||
+        document.querySelector("dialog[open]")
+      )
+        return
+      event.preventDefault()
+      useAppStore.getState().openSettings()
+    }
+    window.addEventListener("keydown", onKeyDown)
+    return () => window.removeEventListener("keydown", onKeyDown)
+  }, [])
+
+  const openSection = (section: "general" | "subscriptions") => {
+    setOpen(false)
+    openSettings(section)
+  }
   return (
-    <>
-      <div className="sidebar-account">
-        <button
-          type="button"
-          className="sidebar-account-trigger"
-          aria-label="Open subscription usage"
-          aria-haspopup="dialog"
-          onClick={() => setOpen(true)}
-        >
-          <span className="sidebar-account-avatar" aria-hidden="true">
-            <CircleUserRound size={17} />
-          </span>
-          <span className="min-w-0 flex-1 text-left">
-            <strong>Subscriptions</strong>
-            <small>
-              {connected === 0
-                ? "No accounts connected"
-                : `${connected} connected`}
-            </small>
-          </span>
-          <span
-            className="size-1.5 rounded-full bg-emerald-500"
-            aria-hidden="true"
-            data-visible={connected > 0}
-          />
-        </button>
-      </div>
-      {open ? <SubscriptionPanel onClose={() => setOpen(false)} /> : null}
-    </>
+    <div className="sidebar-account">
+      {open ? (
+        <div
+          aria-hidden="true"
+          className="fixed inset-0 z-10"
+          onClick={() => setOpen(false)}
+        />
+      ) : null}
+      {open ? (
+        <div role="menu" aria-label="Account" className="account-menu">
+          <div className="account-menu-header">
+            <span className="sidebar-account-avatar" aria-hidden="true">
+              <CircleUserRound size={17} />
+            </span>
+            <span className="min-w-0 flex-1">
+              <strong>
+                {primary === undefined
+                  ? "No account"
+                  : (subscriptionProviders.find(
+                      (entry) => entry.provider === primary.provider,
+                    )?.displayName ?? primary.provider)}
+              </strong>
+              <small>
+                {primary === undefined ? "" : accountLabel(primary)}
+              </small>
+            </span>
+          </div>
+          <button
+            type="button"
+            role="menuitem"
+            className="account-menu-item"
+            onClick={() => openSection("subscriptions")}
+          >
+            <ChartColumn size={15} className="account-menu-icon" />
+            <span className="flex-1 text-left">Usage</span>
+            {primaryBucket === undefined ? null : (
+              <small className="account-menu-meta">
+                {Math.max(0, 100 - Math.round(primaryBucket.usedPercent))}% left
+              </small>
+            )}
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            className="account-menu-item"
+            onClick={() => openSection("general")}
+          >
+            <Settings2 size={15} className="account-menu-icon" />
+            <span className="flex-1 text-left">Settings</span>
+            <kbd className="account-menu-meta">⌘ ,</kbd>
+          </button>
+        </div>
+      ) : null}
+      <button
+        type="button"
+        className="sidebar-account-trigger"
+        aria-label="Open account menu"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <span className="sidebar-account-avatar" aria-hidden="true">
+          <CircleUserRound size={17} />
+        </span>
+        <span className="min-w-0 flex-1 text-left">
+          <strong>Subscriptions</strong>
+          <small>
+            {connected === 0
+              ? "No accounts connected"
+              : `${connected} connected`}
+          </small>
+        </span>
+        <span
+          className="size-1.5 rounded-full bg-emerald-500"
+          aria-hidden="true"
+          data-visible={connected > 0}
+        />
+      </button>
+    </div>
   )
 }
 
-export function SubscriptionPanel({ onClose }: Readonly<{ onClose(): void }>) {
-  const loadSubscriptions = useAppStore((state) => state.loadSubscriptions)
-
-  useEffect(() => {
-    void loadSubscriptions()
-  }, [loadSubscriptions])
-
+export function SubscriptionsSection() {
   return (
-    <SidebarDialog
-      title="Account & usage"
-      className="subscription-dialog"
-      onClose={onClose}
-    >
+    <>
       <div className="subscription-intro">
         <p>Subscription access and current limits from connected providers.</p>
-        <span>Usage refreshes each time this panel opens.</span>
+        <span>Usage refreshes each time this section opens.</span>
       </div>
 
       <div className="subscription-list">
@@ -83,7 +165,7 @@ export function SubscriptionPanel({ onClose }: Readonly<{ onClose(): void }>) {
           <ProviderUsageCard key={provider.provider} {...provider} />
         ))}
       </div>
-    </SidebarDialog>
+    </>
   )
 }
 

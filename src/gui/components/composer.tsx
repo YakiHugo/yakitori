@@ -1,9 +1,11 @@
-import { useContext, useState } from "react"
+import { useCallback, useContext, useRef, useState } from "react"
+import { GOAL_DIRECTIVE } from "../../kernel/events.ts"
 import {
   discardDraftImages,
   requireDesktopBridge,
 } from "../composer-attachments.ts"
 import { ConversationScrollContext } from "../hooks/conversation-scroll-context.ts"
+import { getAppRpcClient } from "../lib/rpc-client.ts"
 import {
   normalizeKimiModelSelection,
   resolveEffectiveModel,
@@ -48,9 +50,44 @@ export function Composer() {
   )
   const admitInput = useAppStore((state) => state.admitInput)
   const cancelTurn = useAppStore((state) => state.cancelTurn)
+  const changeSidebar = useAppStore((state) => state.changeSidebar)
+  const openGoalDialog = useAppStore((state) => state.openGoalDialog)
   const view = useExecutionView()
   const [attachmentError, setAttachmentError] = useState<string>()
   const [readingImages, setReadingImages] = useState(false)
+  const fileSearchCwd = useAppStore(
+    (state) =>
+      state.selectedSession?.workingDirectory ??
+      state.projects.find((project) => project.id === state.currentProject)
+        ?.roots[0],
+  )
+  // The @-mention picker fetches the workspace index once per directory and
+  // filters it locally; rescanning ripgrep per keystroke is slow enough on
+  // large repos that the picker could return nothing at all.
+  const fileIndexes = useRef(new Map<string, Promise<readonly string[]>>())
+  const searchFiles = useCallback(
+    async (query: string) => {
+      if (fileSearchCwd === undefined) return []
+      const key = `${apiBase}${fileSearchCwd}`
+      let index = fileIndexes.current.get(key)
+      if (index === undefined) {
+        index = getAppRpcClient(apiBase)
+          .request("workspace/findFiles", {
+            cwd: fileSearchCwd,
+            query: "",
+            limit: 20_000,
+          })
+          .then((response) => response.paths)
+        fileIndexes.current.set(key, index)
+        index.catch(() => fileIndexes.current.delete(key))
+      }
+      return rankFileMatches(await index, query, 20).map((path) => ({
+        name: path.split("/").at(-1) ?? path,
+        path,
+      }))
+    },
+    [fileSearchCwd, apiBase],
+  )
   const effectiveModel = normalizeKimiModelSelection(
     resolveEffectiveModel({
       sessionCurrent,
@@ -194,6 +231,30 @@ export function Composer() {
       updatePromptExcerpt={updatePromptExcerpt}
       onSubmit={(text, images) => {
         conversationScroll?.jumpToBottom()
+        const goalCommand =
+          text === GOAL_DIRECTIVE
+            ? ""
+            : text.startsWith(`${GOAL_DIRECTIVE} `)
+              ? text.slice(GOAL_DIRECTIVE.length + 1).trim()
+              : undefined
+        if (goalCommand !== undefined) {
+          if (sessionId === undefined) {
+            useAppStore.setState({
+              message:
+                "Goals attach to a conversation. Send a message first, then set the goal.",
+            })
+            return
+          }
+          setPromptDraft("")
+          if (goalCommand === "") openGoalDialog()
+          else
+            void changeSidebar({
+              type: "session",
+              sessionId,
+              goal: goalCommand,
+            })
+          return
+        }
         if (images.length === 0) void admitInput(text)
         else void admitInput(text, images)
       }}
@@ -205,6 +266,7 @@ export function Composer() {
       readingImages={readingImages}
       attachmentError={attachmentError}
       onAttachmentError={setAttachmentError}
+      searchFiles={searchFiles}
       placeholder={
         sessionId === undefined
           ? "Describe what you want to work on"
@@ -223,4 +285,27 @@ function waitForAction(key: string): Promise<void> {
       resolve()
     })
   })
+}
+
+function rankFileMatches(
+  index: readonly string[],
+  query: string,
+  limit: number,
+): string[] {
+  const needle = query.toLowerCase()
+  return index
+    .flatMap((path) => {
+      if (needle.length === 0) return [{ path, rank: 1 }]
+      const name = path.split("/").at(-1) ?? path
+      if (name.toLowerCase().includes(needle)) return [{ path, rank: 0 }]
+      return path.toLowerCase().includes(needle) ? [{ path, rank: 1 }] : []
+    })
+    .sort(
+      (left, right) =>
+        left.rank - right.rank ||
+        left.path.length - right.path.length ||
+        left.path.localeCompare(right.path),
+    )
+    .slice(0, limit)
+    .map((entry) => entry.path)
 }

@@ -31,3 +31,19 @@ it("leaves ordinary dollar expressions and incomplete mentions as editable text"
   expect(paragraph?.firstChild?.isText).toBe(true)
   expect(paragraph?.textContent).toBe(text)
 })
+
+it("roundtrips inline file mentions and maps caret offsets across them", () => {
+  const text = "看看 [@app.tsx](src/gui/app.tsx) 这页"
+  const doc = parsePrompt(text)
+  expect(serializePrompt(doc)).toBe(text)
+  expect(doc.firstChild?.child(1).type.name).toBe("file")
+  expect(doc.firstChild?.child(1).nodeSize).toBe(1)
+
+  const caret = parsePrompt("a [@x](/x) b\nc")
+  expect(promptOffset(caret, 3)).toBe(2)
+  expect(promptOffset(caret, 4)).toBe(10)
+  expect(promptOffset(caret, 8)).toBe(13)
+  expect(promptPosition(caret, 2)).toBe(3)
+  expect(promptPosition(caret, 10)).toBe(4)
+  expect(promptPosition(caret, 13)).toBe(8)
+})

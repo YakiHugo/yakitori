@@ -7,7 +7,11 @@ import {
   useRef,
   useState,
 } from "react"
-import { COMPACT_DIRECTIVE, type ImageAttachment } from "../../kernel/events.ts"
+import {
+  COMPACT_DIRECTIVE,
+  GOAL_DIRECTIVE,
+  type ImageAttachment,
+} from "../../kernel/events.ts"
 import type { ContextExcerpt } from "../../kernel/input-context.ts"
 import type { ApiSkillSummary } from "../../server/protocol.ts"
 import { usePreferencesStore } from "../store/preferences-store.ts"
@@ -25,7 +29,7 @@ import {
   ComposerSuggestions,
 } from "./composer-suggestions.tsx"
 import { ImageLightbox } from "./image-lightbox.tsx"
-import { skillMentionText } from "./prompt-document.ts"
+import { fileMentionText, skillMentionText } from "./prompt-document.ts"
 import { PromptEditor, type PromptEditorHandle } from "./prompt-editor.tsx"
 import { ContextExcerptChips } from "./selection-actions.tsx"
 import { Button } from "./ui/button.tsx"
@@ -39,6 +43,10 @@ const SLASH_COMMANDS: readonly SlashCommand[] = [
   {
     name: COMPACT_DIRECTIVE,
     description: "Compact the conversation context",
+  },
+  {
+    name: GOAL_DIRECTIVE,
+    description: "Set or clear the session goal",
   },
 ]
 
@@ -82,6 +90,7 @@ export function ComposerSurface({
   readingImages,
   attachmentError,
   onAttachmentError,
+  searchFiles,
   label = "Message the Mate",
   placeholder = "Ask anything",
   className = "conversation-composer-footer pt-3 pb-3",
@@ -115,6 +124,10 @@ export function ComposerSurface({
   readingImages: boolean
   attachmentError?: string | undefined
   onAttachmentError(error: string): void
+  // Powers the @-mention file picker; without it the @ trigger stays inert.
+  searchFiles?: (
+    query: string,
+  ) => Promise<readonly Readonly<{ name: string; path: string }>[]>
   label?: string
   placeholder?: string
   className?: string
@@ -139,6 +152,10 @@ export function ComposerSurface({
   const [highlight, setHighlight] = useState<{ query: string; index: number }>()
   const [cursor, setCursor] = useState(draft.length)
   const [hasSelection, setHasSelection] = useState(false)
+  const [fileMatches, setFileMatches] = useState<{
+    key: string
+    items: readonly Readonly<{ name: string; path: string }>[]
+  }>()
 
   useLayoutEffect(() => {
     if (focusRevision > 0) editorRef.current?.focus()
@@ -158,12 +175,12 @@ export function ComposerSurface({
     historyNavigation?.sessionId === sessionId ? historyNavigation : undefined
 
   const prefix = draft.slice(0, cursor)
-  const token = /(?:^|\s)([/$])([\p{L}\p{N}_:-]*)$/u.exec(prefix)
+  const token = /(?:^|\s)([/$@])([\p{L}\p{N}_:./-]*)$/u.exec(prefix)
   const query = token?.[2] ?? ""
   const trigger = token?.[1]
   const tokenStart = cursor - query.length - 1
   const tokenEnd =
-    cursor + (/^[\p{L}\p{N}_:-]*/u.exec(draft.slice(cursor))?.[0].length ?? 0)
+    cursor + (/^[\p{L}\p{N}_:./-]*/u.exec(draft.slice(cursor))?.[0].length ?? 0)
   const queryKey = `${sessionId}:${tokenStart}:${trigger}:${query}`
   const matchingSkills: ComposerSuggestion[] = [...sessionSkills]
     .sort((a, b) => a.name.localeCompare(b.name))
@@ -180,23 +197,58 @@ export function ComposerSurface({
       description: skill.description,
       skill,
     }))
-  const suggestions: ComposerSuggestion[] = [
-    ...(allowCommands &&
-    trigger === "/" &&
-    tokenStart === 0 &&
-    draft.slice(tokenEnd).trim().length === 0
-      ? SLASH_COMMANDS.filter((command) =>
-          command.name.slice(1).toLowerCase().startsWith(query.toLowerCase()),
-        ).map((command) => ({ ...command, kind: "command" as const }))
-      : []),
-    ...matchingSkills,
-  ]
+  const suggestions: ComposerSuggestion[] =
+    trigger === "@"
+      ? (fileMatches?.key === queryKey ? fileMatches.items : []).map(
+          (file) => ({
+            kind: "file",
+            name: file.name,
+            description: file.path,
+            file,
+          }),
+        )
+      : [
+          ...(allowCommands &&
+          trigger === "/" &&
+          tokenStart === 0 &&
+          draft.slice(tokenEnd).trim().length === 0
+            ? SLASH_COMMANDS.filter((command) =>
+                command.name
+                  .slice(1)
+                  .toLowerCase()
+                  .startsWith(query.toLowerCase()),
+              ).map((command) => ({ ...command, kind: "command" as const }))
+            : []),
+          ...matchingSkills,
+        ]
   const menuOpen =
-    token !== null && !hasSelection && dismissedQuery !== queryKey
+    token !== null &&
+    !hasSelection &&
+    dismissedQuery !== queryKey &&
+    (trigger !== "@" || searchFiles !== undefined)
   const activeHighlight =
     highlight?.query === queryKey
       ? Math.min(highlight.index, suggestions.length - 1)
       : 0
+
+  useEffect(() => {
+    if (trigger !== "@" || searchFiles === undefined || !menuOpen) return
+    let current = true
+    const timer = setTimeout(() => {
+      void searchFiles(query).then(
+        (items) => {
+          if (current) setFileMatches({ key: queryKey, items })
+        },
+        () => {
+          if (current) setFileMatches({ key: queryKey, items: [] })
+        },
+      )
+    }, 150)
+    return () => {
+      current = false
+      clearTimeout(timer)
+    }
+  }, [trigger, query, queryKey, menuOpen, searchFiles])
 
   const text = draft.trim()
   const previewAttachment =
@@ -259,6 +311,13 @@ export function ComposerSurface({
   const runSlashCommand = (command: SlashCommand): void => {
     setDismissedQuery(queryKey)
     setHighlight(undefined)
+    // /goal always takes an argument, so completing the text is the whole
+    // interaction; the submit path in Composer interprets the directive.
+    if (command.name === GOAL_DIRECTIVE) {
+      setPromptDraft(`${GOAL_DIRECTIVE} `)
+      editorRef.current?.focus()
+      return
+    }
     const blocked =
       sessionId === undefined ||
       busy ||
@@ -278,6 +337,12 @@ export function ComposerSurface({
     setDismissedQuery(queryKey)
     setHighlight(undefined)
     if (item.kind === "command") runSlashCommand(item)
+    else if (item.kind === "file")
+      editorRef.current?.replaceRange(
+        tokenStart,
+        tokenEnd,
+        `${fileMentionText(item.file)} `,
+      )
     else
       editorRef.current?.replaceRange(
         tokenStart,
@@ -384,8 +449,21 @@ export function ComposerSurface({
             open={menuOpen}
             items={suggestions}
             activeIndex={activeHighlight}
-            skillOnly={trigger === "$"}
-            error={sessionSkillsError}
+            listLabel={
+              trigger === "@"
+                ? "Files"
+                : trigger === "$"
+                  ? "Skills"
+                  : "Slash commands"
+            }
+            error={trigger === "@" ? undefined : sessionSkillsError}
+            emptyLabel={
+              trigger === "@"
+                ? query === ""
+                  ? "Type to search for files"
+                  : "No matching files"
+                : undefined
+            }
             onHighlight={(index) => setHighlight({ query: queryKey, index })}
             onPick={pickSuggestion}
           />
