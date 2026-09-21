@@ -1,51 +1,15 @@
-import { Bell, Keyboard, Monitor, Settings2 } from "lucide-react"
+import { Bell, Keyboard, Monitor } from "lucide-react"
 import { type ReactNode, useEffect, useState } from "react"
 import {
   getNotificationPermission,
   type NotificationPermissionState,
   sendTestNotification,
 } from "../completion-notifications.ts"
-import { useAppStore } from "../store/app-store.ts"
 import {
   type Preferences,
   usePreferencesStore,
 } from "../store/preferences-store.ts"
 import "../styles/settings.css"
-
-export function SettingsButton() {
-  const openSettings = useAppStore((state) => state.openSettings)
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (
-        event.key !== "," ||
-        !(event.metaKey || event.ctrlKey) ||
-        event.shiftKey ||
-        event.altKey ||
-        event.isComposing ||
-        document.querySelector("dialog[open]")
-      )
-        return
-      event.preventDefault()
-      useAppStore.getState().openSettings()
-    }
-    window.addEventListener("keydown", onKeyDown)
-    return () => window.removeEventListener("keydown", onKeyDown)
-  }, [])
-  return (
-    <div className="settings-entry">
-      <button
-        type="button"
-        className="sidebar-row w-full"
-        onClick={() => openSettings()}
-        title="Settings (⌘,)"
-      >
-        <Settings2 size={16} />
-        <span className="flex-1 text-left">Settings</span>
-        <kbd>⌘ ,</kbd>
-      </button>
-    </div>
-  )
-}
 
 export function GeneralSettingsSection() {
   const preferences = usePreferencesStore()

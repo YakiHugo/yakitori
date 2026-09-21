@@ -107,10 +107,6 @@ export function SettingsPage() {
 function UsageSection() {
   const usage = useAppStore((state) => state.usage)
   const loadUsage = useAppStore((state) => state.loadUsage)
-
-  useEffect(() => {
-    void loadUsage()
-  }, [loadUsage])
   const summary = usage.summary
   const maxDayTokens = Math.max(
     1,

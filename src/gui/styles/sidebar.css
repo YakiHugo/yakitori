@@ -159,6 +159,63 @@
 .sidebar-account-trigger > [data-visible="false"] {
   opacity: 0;
 }
+.sidebar-account {
+  position: relative;
+}
+.account-menu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 8px;
+  right: 8px;
+  z-index: 20;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--popover);
+  padding: 6px;
+  box-shadow:
+    0 12px 32px -12px color-mix(in oklab, var(--foreground) 22%, transparent),
+    0 3px 8px -5px color-mix(in oklab, var(--foreground) 15%, transparent);
+}
+.account-menu-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 8px 10px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+.account-menu-header strong,
+.account-menu-header small {
+  display: block;
+}
+.account-menu-header strong {
+  font-size: 13px;
+  font-weight: 500;
+}
+.account-menu-header small {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+.account-menu-item {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 10px;
+  border-radius: 9px;
+  padding: 8px;
+  font-size: 13px;
+  color: var(--foreground);
+}
+.account-menu-item:hover {
+  background: var(--accent);
+}
+.account-menu-icon {
+  color: var(--muted-foreground);
+}
+.account-menu-meta {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
 .sidebar-project,
 .sidebar-session {
   display: flex;

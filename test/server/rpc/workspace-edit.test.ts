@@ -327,9 +327,11 @@ it("finds literal case-insensitive paths including hidden files while respecting
       query: "[LITERAL]",
     }),
   ).toEqual({ paths: [".config/[literal].TS"], truncated: false })
+  // An empty query returns the workspace index itself (still honoring Git
+  // ignores); the @-mention picker caches it and filters client-side.
   expect(
     await rpc(connection, "workspace/findFiles", { cwd, query: "" }),
-  ).toEqual({ paths: [], truncated: false })
+  ).toEqual({ paths: [".config/[literal].TS", ".gitignore"], truncated: false })
 })
 
 it("bounds filename results and reports truncation", async () => {

@@ -173,7 +173,8 @@ describe("sidebar", () => {
     const user = userEvent.setup()
     render(<App />)
 
-    await user.click(screen.getByLabelText("Open subscription usage"))
+    await user.click(screen.getByLabelText("Open account menu"))
+    await user.click(screen.getByRole("menuitem", { name: /Usage/ }))
 
     expect(
       screen.getByRole("region", { name: "Subscription settings" }),
@@ -224,7 +225,8 @@ describe("sidebar", () => {
     const user = userEvent.setup()
     render(<App />)
 
-    await user.click(screen.getByLabelText("Open subscription usage"))
+    await user.click(screen.getByLabelText("Open account menu"))
+    await user.click(screen.getByRole("menuitem", { name: /Usage/ }))
 
     const kimiCard = screen
       .getByRole("heading", { name: "Kimi" })

@@ -22,6 +22,8 @@ const MAX_GIT_BYTES = 1024 * 1024
 const MAX_EDIT_FILE_BYTES = ToolLimitDefaults.fileWriteBytes
 // Bound filename results, scanning memory, and subprocess time for the GUI.
 const MAX_FIND_FILES = 200
+// One-shot index fetch for the @-mention picker's client-side filtering.
+const MAX_FIND_FILES_INDEX = 20_000
 const MAX_FIND_FILE_BYTES = 8 * 1024 * 1024
 const executeFile = promisify(execFile)
 
@@ -359,10 +361,13 @@ export async function writeWorkspaceFile(input: {
 export async function findWorkspaceFiles(input: {
   cwd: string
   query: string
+  limit?: number
 }): Promise<WorkspaceFindFilesResponse> {
   const cwd = await workspaceRoot(input.cwd)
   const query = input.query.toLowerCase()
-  if (query.length === 0) return { paths: [], truncated: false }
+  // An empty query lists the workspace index itself; the @-mention picker
+  // caches it and filters client-side instead of rescanning per keystroke.
+  const limit = Math.min(input.limit ?? MAX_FIND_FILES, MAX_FIND_FILES_INDEX)
   const paths: string[] = []
   const result = await runRipgrepRecords(
     [
@@ -384,7 +389,7 @@ export async function findWorkspaceFiles(input: {
       onRecord(record) {
         const path = record.replace(/^\.\//, "")
         if (!path.toLowerCase().includes(query)) return true
-        if (paths.length >= MAX_FIND_FILES) return false
+        if (paths.length >= limit) return false
         paths.push(path)
         return true
       },

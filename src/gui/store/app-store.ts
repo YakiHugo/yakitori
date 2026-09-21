@@ -148,6 +148,8 @@ export type AppStoreData = {
   // The settings page replaces the main conversation area while set.
   settingsSection: SettingsSection | undefined
   usage: UsageState
+  // Incremented to ask the session header to open its goal editor.
+  goalDialogRevision: number
 }
 
 export type AppStoreActions = {
@@ -213,6 +215,9 @@ export type AppStoreActions = {
   closeSettings(): void
   setSettingsSection(section: SettingsSection): void
   loadUsage(): Promise<void>
+  openGoalDialog(): void
+  // False while any provider's quota snapshot is missing or older than 30s.
+  subscriptionsFresh(): boolean
 }
 
 export type AppStore = AppStoreData & AppStoreActions
@@ -280,6 +285,7 @@ export function createInitialAppState(): AppStoreData {
     collapsedProjects: initialCollapsedProjects(),
     settingsSection: undefined,
     usage: { loading: false },
+    goalDialogRevision: 0,
   }
 }
 
@@ -1852,10 +1858,29 @@ export const useAppStore = create<AppStore>()((set, get) => {
 
     openSettings: (section = "general") => {
       set({ settingsSection: section })
+      if (section === "subscriptions" && !get().subscriptionsFresh())
+        void get().loadSubscriptions()
+      if (section === "usage") void get().loadUsage()
     },
     closeSettings: () => set({ settingsSection: undefined }),
     setSettingsSection: (section) => {
       set({ settingsSection: section })
+      if (section === "subscriptions" && !get().subscriptionsFresh())
+        void get().loadSubscriptions()
+      if (section === "usage") void get().loadUsage()
+    },
+    openGoalDialog: () =>
+      set((state) => ({ goalDialogRevision: state.goalDialogRevision + 1 })),
+    subscriptionsFresh: () => {
+      const states = get().subscriptionsByProvider
+      return (["codex", "grok", "kimi"] as const).every((provider) => {
+        const state = states[provider]
+        return (
+          (state.subscription !== undefined || state.error !== undefined) &&
+          state.updatedAt !== undefined &&
+          Date.now() - state.updatedAt < 30_000
+        )
+      })
     },
     loadUsage: async () => {
       const apiBase = get().apiBase

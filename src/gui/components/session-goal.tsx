@@ -1,5 +1,5 @@
 import { Target } from "lucide-react"
-import { useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { useAppStore } from "../store/app-store.ts"
 import { SidebarDialog } from "./sidebar-surfaces.tsx"
 import { Button } from "./ui/button.tsx"
@@ -7,7 +7,14 @@ import { Button } from "./ui/button.tsx"
 export function SessionGoal() {
   const session = useAppStore((state) => state.selectedSession)
   const changeSidebar = useAppStore((state) => state.changeSidebar)
+  const goalDialogRevision = useAppStore((state) => state.goalDialogRevision)
   const [editing, setEditing] = useState(false)
+  const seenRevision = useRef(goalDialogRevision)
+  useEffect(() => {
+    if (goalDialogRevision === seenRevision.current) return
+    seenRevision.current = goalDialogRevision
+    setEditing(true)
+  }, [goalDialogRevision])
   if (session === undefined) return null
   return (
     <>

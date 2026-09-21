@@ -34,7 +34,7 @@ export type WorkspaceRpcParams = {
     content: string
     expectedSha256: string
   }
-  "workspace/findFiles": { cwd: string; query: string }
+  "workspace/findFiles": { cwd: string; query: string; limit?: number }
   "git/status": { cwd: string }
   "git/diff": { cwd: string; path: string; staged: boolean }
   "git/stage": { cwd: string; path: string }
@@ -160,7 +160,13 @@ export const workspaceRpcMethods: readonly RpcMethodDefinition[] = [
   method("workspace/findFiles", (params) => {
     if (typeof params.query !== "string")
       throw new WorkspaceError("query is required.")
-    return findWorkspaceFiles({ cwd: params.cwd, query: params.query })
+    if (params.limit !== undefined && typeof params.limit !== "number")
+      throw new WorkspaceError("limit must be a number.")
+    return findWorkspaceFiles({
+      cwd: params.cwd,
+      query: params.query,
+      ...(params.limit === undefined ? {} : { limit: params.limit }),
+    })
   }),
   method("git/status", (params) => readWorkspaceGitStatus({ cwd: params.cwd })),
   method("git/diff", (params) => {

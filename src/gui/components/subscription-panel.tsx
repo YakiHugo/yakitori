@@ -1,5 +1,12 @@
-import { Check, CircleUserRound, LoaderCircle, Unplug } from "lucide-react"
-import { useEffect } from "react"
+import {
+  ChartColumn,
+  Check,
+  CircleUserRound,
+  LoaderCircle,
+  Settings2,
+  Unplug,
+} from "lucide-react"
+import { useEffect, useState } from "react"
 import type {
   ApiSubscriptionProvider,
   ApiSubscriptionSummary,
@@ -18,6 +25,9 @@ const subscriptionProviders = [
 
 export function SubscriptionPanelButton() {
   const openSettings = useAppStore((state) => state.openSettings)
+  const loadSubscriptions = useAppStore((state) => state.loadSubscriptions)
+  const subscriptions = useAppStore((state) => state.subscriptionsByProvider)
+  const [open, setOpen] = useState(false)
   const connected = useAppStore(
     (state) =>
       state.providers.filter(
@@ -26,13 +36,100 @@ export function SubscriptionPanelButton() {
           provider.availability === "available",
       ).length,
   )
+  const primary = subscriptionProviders
+    .map(({ provider }) => subscriptions[provider].subscription)
+    .find((summary) => summary?.availability === "available")
+  const primaryBucket =
+    primary?.usage.status === "available" ? primary.usage.buckets[0] : undefined
+
+  // The menu surfaces live quota, so refresh it on every open.
+  useEffect(() => {
+    if (open) void loadSubscriptions()
+  }, [open, loadSubscriptions])
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (
+        event.key !== "," ||
+        !(event.metaKey || event.ctrlKey) ||
+        event.shiftKey ||
+        event.altKey ||
+        event.isComposing ||
+        document.querySelector("dialog[open]")
+      )
+        return
+      event.preventDefault()
+      useAppStore.getState().openSettings()
+    }
+    window.addEventListener("keydown", onKeyDown)
+    return () => window.removeEventListener("keydown", onKeyDown)
+  }, [])
+
+  const openSection = (section: "general" | "subscriptions") => {
+    setOpen(false)
+    openSettings(section)
+  }
   return (
     <div className="sidebar-account">
+      {open ? (
+        <div
+          aria-hidden="true"
+          className="fixed inset-0 z-10"
+          onClick={() => setOpen(false)}
+        />
+      ) : null}
+      {open ? (
+        <div role="menu" aria-label="Account" className="account-menu">
+          <div className="account-menu-header">
+            <span className="sidebar-account-avatar" aria-hidden="true">
+              <CircleUserRound size={17} />
+            </span>
+            <span className="min-w-0 flex-1">
+              <strong>
+                {primary === undefined
+                  ? "No account"
+                  : (subscriptionProviders.find(
+                      (entry) => entry.provider === primary.provider,
+                    )?.displayName ?? primary.provider)}
+              </strong>
+              <small>
+                {primary === undefined ? "" : accountLabel(primary)}
+              </small>
+            </span>
+          </div>
+          <button
+            type="button"
+            role="menuitem"
+            className="account-menu-item"
+            onClick={() => openSection("subscriptions")}
+          >
+            <ChartColumn size={15} className="account-menu-icon" />
+            <span className="flex-1 text-left">Usage</span>
+            {primaryBucket === undefined ? null : (
+              <small className="account-menu-meta">
+                {Math.max(0, 100 - Math.round(primaryBucket.usedPercent))}% left
+              </small>
+            )}
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            className="account-menu-item"
+            onClick={() => openSection("general")}
+          >
+            <Settings2 size={15} className="account-menu-icon" />
+            <span className="flex-1 text-left">Settings</span>
+            <kbd className="account-menu-meta">⌘ ,</kbd>
+          </button>
+        </div>
+      ) : null}
       <button
         type="button"
         className="sidebar-account-trigger"
-        aria-label="Open subscription usage"
-        onClick={() => openSettings("subscriptions")}
+        aria-label="Open account menu"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
       >
         <span className="sidebar-account-avatar" aria-hidden="true">
           <CircleUserRound size={17} />
@@ -56,12 +153,6 @@ export function SubscriptionPanelButton() {
 }
 
 export function SubscriptionsSection() {
-  const loadSubscriptions = useAppStore((state) => state.loadSubscriptions)
-
-  useEffect(() => {
-    void loadSubscriptions()
-  }, [loadSubscriptions])
-
   return (
     <>
       <div className="subscription-intro">

@@ -946,17 +946,72 @@ describe("slash command menu", () => {
   })
 })
 
+describe("goal command", () => {
+  it("completes /goal from the menu and sets the session goal on submit", async () => {
+    const user = userEvent.setup()
+    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    const changeSidebar = vi.fn().mockResolvedValue(true)
+    useAppStore.setState({
+      admitInput,
+      changeSidebar,
+      selection: { sessionId: "session_1" },
+    })
+    render(<Composer />)
+
+    const textarea = screen.getByRole("textbox")
+    await user.click(textarea)
+    await pastePrompt(textarea, "/g")
+
+    const menu = screen.getByRole("listbox", { name: "Slash commands" })
+    expect(menu.textContent).toContain("/goal")
+    await user.keyboard("{Enter}")
+    expect(useAppStore.getState().promptDraft).toBe("/goal ")
+
+    await user.keyboard("ship the feature")
+    await user.keyboard("{Enter}")
+    expect(changeSidebar).toHaveBeenCalledWith({
+      type: "session",
+      sessionId: "session_1",
+      goal: "ship the feature",
+    })
+    expect(admitInput).not.toHaveBeenCalled()
+    expect(useAppStore.getState().promptDraft ?? "").toBe("")
+  })
+
+  it("opens the goal editor on a bare /goal submit", async () => {
+    const user = userEvent.setup()
+    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    useAppStore.setState({
+      admitInput,
+      selection: { sessionId: "session_1" },
+      promptDraft: "/goal",
+    })
+    render(<Composer />)
+
+    await user.click(screen.getByRole("textbox"))
+    // The first Enter lets the open command menu complete "/goal "; the
+    // second submits the bare directive.
+    await user.keyboard("{Enter}")
+    await user.keyboard("{Enter}")
+    expect(useAppStore.getState().goalDialogRevision).toBe(1)
+    expect(admitInput).not.toHaveBeenCalled()
+  })
+})
+
 describe("file mention popup", () => {
   it("picks a file with Enter, replacing the @token with a chip", async () => {
     const user = userEvent.setup()
     const admitInput = vi.fn((_text: string) => Promise.resolve())
     fakeRef.current.respond = (method, params) => {
       if (method === "workspace/findFiles") {
-        const body = params as { query: string }
+        // The picker caches a one-shot index fetch and filters client-side.
+        expect((params as { query: string }).query).toBe("")
         return {
-          paths: body.query.includes("app")
-            ? ["src/gui/app.tsx", "src/gui/app-store.ts"]
-            : [],
+          paths: [
+            "src/gui/app.tsx",
+            "src/gui/app-store.ts",
+            "src/gui/app.test.tsx",
+          ],
           truncated: false,
         }
       }

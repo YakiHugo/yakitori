@@ -7,7 +7,11 @@ import {
   useRef,
   useState,
 } from "react"
-import { COMPACT_DIRECTIVE, type ImageAttachment } from "../../kernel/events.ts"
+import {
+  COMPACT_DIRECTIVE,
+  GOAL_DIRECTIVE,
+  type ImageAttachment,
+} from "../../kernel/events.ts"
 import type { ContextExcerpt } from "../../kernel/input-context.ts"
 import type { ApiSkillSummary } from "../../server/protocol.ts"
 import { usePreferencesStore } from "../store/preferences-store.ts"
@@ -39,6 +43,10 @@ const SLASH_COMMANDS: readonly SlashCommand[] = [
   {
     name: COMPACT_DIRECTIVE,
     description: "Compact the conversation context",
+  },
+  {
+    name: GOAL_DIRECTIVE,
+    description: "Set or clear the session goal",
   },
 ]
 
@@ -303,6 +311,13 @@ export function ComposerSurface({
   const runSlashCommand = (command: SlashCommand): void => {
     setDismissedQuery(queryKey)
     setHighlight(undefined)
+    // /goal always takes an argument, so completing the text is the whole
+    // interaction; the submit path in Composer interprets the directive.
+    if (command.name === GOAL_DIRECTIVE) {
+      setPromptDraft(`${GOAL_DIRECTIVE} `)
+      editorRef.current?.focus()
+      return
+    }
     const blocked =
       sessionId === undefined ||
       busy ||
