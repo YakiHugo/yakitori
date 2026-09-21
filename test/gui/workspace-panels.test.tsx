@@ -48,7 +48,7 @@ function deferred<T>() {
   return { promise, resolve }
 }
 
-it("lists the real workspace root with a relative dot path on entry and return", async () => {
+it("lists the real workspace root with a relative dot path on entry and re-expansion", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "yakitori-workspace-panel-"))
   try {
     await mkdir(join(cwd, "src"))
@@ -65,7 +65,11 @@ it("lists the real workspace root with a relative dot path on entry and return",
     render(<WorkspaceFiles cwd={cwd} apiBase="http://localhost" />)
     await user.click(await screen.findByRole("button", { name: "src" }))
     await screen.findByText("This directory is empty.")
-    await user.click(screen.getByRole("button", { name: "Parent directory" }))
+    const root = screen.getByRole("button", {
+      name: cwd.split("/").at(-1) ?? cwd,
+    })
+    await user.click(root)
+    await user.click(root)
     expect(await screen.findByRole("button", { name: "src" })).toBeDefined()
     expect(request.mock.calls).toEqual([
       ["workspace/list", { cwd, path: "." }],
@@ -78,7 +82,7 @@ it("lists the real workspace root with a relative dot path on entry and return",
   }
 })
 
-it("ignores a previous directory response after navigating back", async () => {
+it("ignores a previous directory response after collapsing it", async () => {
   const directory = deferred<WorkspaceListResponse>()
   request.mockImplementation(async (_method, params) => {
     if (params.path === "src") return directory.promise
@@ -92,7 +96,7 @@ it("ignores a previous directory response after navigating back", async () => {
   const user = userEvent.setup()
   render(<WorkspaceFiles cwd="/repo" apiBase="http://localhost" />)
   await user.click(await screen.findByRole("button", { name: "src" }))
-  await user.click(screen.getByRole("button", { name: "Parent directory" }))
+  await user.click(screen.getByRole("button", { name: "src" }))
   await screen.findByRole("button", { name: "src" })
   await act(async () =>
     directory.resolve({
@@ -107,14 +111,7 @@ it("ignores a previous directory response after navigating back", async () => {
 })
 
 it("appends file pages with their source line numbers", async () => {
-  request.mockImplementation(async (method, params) => {
-    if (method === "workspace/list")
-      return {
-        cwd: "/repo",
-        path: ".",
-        entries: [{ name: "notes.txt", path: "notes.txt", kind: "file" }],
-        truncated: false,
-      }
+  request.mockImplementation(async (_method, params) => {
     return params.offset === 3
       ? {
           path: "notes.txt",
@@ -133,8 +130,13 @@ it("appends file pages with their source line numbers", async () => {
         }
   })
   const user = userEvent.setup()
-  render(<WorkspaceFiles cwd="/repo" apiBase="http://localhost" />)
-  await user.click(await screen.findByRole("button", { name: "notes.txt" }))
+  render(
+    <WorkspaceFilePreview
+      cwd="/repo"
+      path="notes.txt"
+      apiBase="http://localhost"
+    />,
+  )
   await user.click(
     await screen.findByRole("button", { name: "Load more lines" }),
   )
@@ -339,4 +341,82 @@ it("copies the full file path on desktop without opening the editor", async () =
       value: undefined,
     })
   }
+})
+
+it("switches Markdown between a rendered document and its unchanged source", async () => {
+  request.mockResolvedValue({
+    path: "docs/guide.md",
+    content:
+      "# Setup\n\n**Install** the package.\n\n<script>alert('no')</script>",
+    offset: 1,
+    truncated: false,
+    binary: false,
+  })
+  const user = userEvent.setup()
+  const { container } = render(
+    <WorkspaceFilePreview
+      path="docs/guide.md"
+      cwd="/repo"
+      apiBase="http://localhost"
+    />,
+  )
+  expect(await screen.findByRole("heading", { name: "Setup" })).toBeDefined()
+  expect(container.querySelector("script")).toBeNull()
+  await user.click(screen.getByRole("button", { name: "Source" }))
+  expect(screen.queryByRole("heading", { name: "Setup" })).toBeNull()
+  expect(screen.getAllByRole("row")[0]?.textContent).toBe("1# Setup")
+  expect(
+    screen
+      .getByRole("button", { name: "Wrap lines" })
+      .getAttribute("aria-pressed"),
+  ).toBe("false")
+  await user.click(screen.getByRole("button", { name: "Wrap lines" }))
+  expect(
+    screen
+      .getByRole("button", { name: "Wrap lines" })
+      .getAttribute("aria-pressed"),
+  ).toBe("true")
+  await user.click(screen.getByRole("button", { name: "Preview" }))
+  expect(screen.getByRole("heading", { name: "Setup" })).toBeDefined()
+})
+
+it("keeps partial file status visible while appending Markdown pages", async () => {
+  request.mockImplementation(async (_method, params) =>
+    params.offset === 3
+      ? {
+          path: "guide.md",
+          content: "## Usage",
+          offset: 3,
+          truncated: false,
+          binary: false,
+        }
+      : {
+          path: "guide.md",
+          content: "# Setup\n",
+          offset: 1,
+          nextOffset: 3,
+          truncated: true,
+          binary: false,
+        },
+  )
+  const user = userEvent.setup()
+  render(
+    <WorkspaceFilePreview
+      path="guide.md"
+      cwd="/repo"
+      apiBase="http://localhost"
+    />,
+  )
+  await screen.findByRole("heading", { name: "Setup" })
+  expect(screen.getByText("2 lines loaded · Partial file")).toBeDefined()
+  await user.click(screen.getByRole("button", { name: "Load more lines" }))
+  expect(await screen.findByRole("heading", { name: "Usage" })).toBeDefined()
+  expect(screen.getByText("3 lines")).toBeDefined()
+  expect(screen.queryByText(/Partial file/)).toBeNull()
+  await user.click(screen.getByRole("button", { name: "Source" }))
+  expect(screen.getAllByRole("row").map((row) => row.textContent)).toEqual([
+    "1# Setup",
+    "2",
+    "3## Usage",
+  ])
 })

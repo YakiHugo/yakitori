@@ -12,7 +12,7 @@ export type WorkspaceView =
 export type WorkspaceTab =
   | { id: string; kind: "changes" | "files" | "computer" }
   | { id: string; kind: "browser"; initialUrl?: string; title?: string }
-  | { id: string; kind: "file"; path: string; cwd: string }
+  | { id: string; kind: "file"; path: string; cwd: string; dirty?: boolean }
   | {
       id: string
       kind: "agents"
@@ -43,6 +43,7 @@ type WorkspaceStore = {
   addTab(kind: WorkspaceView, sourceSessionId?: string): string
   closeTab(id: string): void
   openFile(path: string, cwd: string): void
+  setFileDirty(id: string, dirty: boolean): void
   openBrowser(url: string): void
   openAgents(sourceSessionId: string, agentId?: string): void
   selectAgent(tabId: string, agentId?: string): void
@@ -146,6 +147,15 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
     const id = `workspace_${crypto.randomUUID()}`
     set({ tabs: [...get().tabs, { id, kind: "file", path, cwd }] })
     get().activate(id)
+  },
+  setFileDirty(id, dirty) {
+    const current = get().tabs.find((tab) => tab.id === id)
+    if (current?.kind !== "file" || Boolean(current.dirty) === dirty) return
+    set({
+      tabs: get().tabs.map((tab) =>
+        tab.id === id ? { ...current, dirty } : tab,
+      ),
+    })
   },
   openBrowser(initialUrl) {
     const id = `workspace_${crypto.randomUUID()}`

@@ -125,11 +125,31 @@
   font-family: inherit;
   font-size: 11px;
 }
+.workspace-body {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  container-type: inline-size;
+}
+.workspace-file-explorer {
+  display: none;
+  min-height: 0;
+  border-left: 1px solid var(--border);
+  background: var(--background);
+}
+@container (min-width: 760px) {
+  .workspace-file-explorer {
+    display: flex;
+    flex: 0 0 240px;
+  }
+}
 .workspace-content {
   display: flex;
   flex: 1;
   flex-direction: column;
   min-height: 0;
+  min-width: 0;
   overflow: auto;
 }
 .workspace-content[hidden] {

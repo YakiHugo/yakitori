@@ -99,7 +99,10 @@ export function ToolDetailView({
               workspaceRoot={workspaceRoot}
             />
           )}
-          <DiffView diff={detail.diff} />
+          <DiffView
+            diff={detail.diff}
+            {...(detail.path === undefined ? {} : { path: detail.path })}
+          />
         </div>
       )
     case "file_changes":
@@ -127,7 +130,7 @@ export function ToolDetailView({
                 )}
               </div>
               {change.diff === undefined ? null : (
-                <DiffView diff={change.diff} />
+                <DiffView diff={change.diff} path={change.path} />
               )}
             </div>
           ))}
