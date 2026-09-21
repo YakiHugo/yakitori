@@ -1,0 +1,96 @@
+.conversation-find {
+  position: absolute;
+  top: 8px;
+  right: 20px;
+  z-index: 35;
+  width: min(420px, calc(100% - 32px));
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--popover);
+  box-shadow: 0 4px 18px #00000012;
+  font-size: 12px;
+}
+.conversation-surface:has(.conversation-find) .conversation-content {
+  padding-top: 72px;
+}
+.conversation-find-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  padding: 6px 7px 6px 12px;
+  color: var(--muted-foreground);
+}
+.conversation-find-row > svg {
+  flex-shrink: 0;
+  margin-right: 3px;
+}
+.conversation-find input {
+  min-width: 40px;
+  width: 100%;
+  flex: 1;
+  padding: 4px 0;
+  border: 0;
+  outline: none;
+  color: var(--foreground);
+  background: transparent;
+}
+.conversation-find input::-webkit-search-cancel-button {
+  display: none;
+}
+.conversation-find-count {
+  flex: none;
+  max-width: 110px;
+  padding-inline: 5px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.conversation-find-row button {
+  display: grid;
+  flex-shrink: 0;
+  place-items: center;
+  width: 25px;
+  height: 27px;
+  border-radius: 5px;
+}
+.conversation-find button:hover:not(:disabled) {
+  color: var(--foreground);
+  background: var(--muted);
+}
+.conversation-find button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -1px;
+}
+.conversation-find button:disabled {
+  opacity: 0.35;
+}
+.conversation-find-message {
+  display: block;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+  color: var(--muted-foreground);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.conversation-find-message button {
+  margin-left: 8px;
+  text-decoration: underline;
+}
+.conversation-find-message mark {
+  color: var(--foreground);
+  background: #e2b94b55;
+}
+::highlight(conversation-find) {
+  color: inherit;
+  background-color: #e2b94b55;
+}
+::highlight(conversation-find-current) {
+  color: inherit;
+  background-color: #e2a13399;
+  text-decoration: underline;
+}
+[data-find-current][data-find-fallback] {
+  outline: 1px solid color-mix(in oklab, var(--foreground) 22%, transparent);
+  outline-offset: 5px;
+  border-radius: 4px;
+}

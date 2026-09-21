@@ -86,6 +86,22 @@ it("does not resume following when layout changes during history reading", () =>
   expect(viewport.scrollTop).toBe(100)
   expect(scroll.atBottom).toBe(false)
 })
+it("jumps to find matches immediately and keeps streaming growth from moving the match", () => {
+  render(<Fixture />)
+  const viewport = geometry()
+  act(() => resize())
+  const range = document.createRange()
+  Object.defineProperty(range, "getBoundingClientRect", {
+    value: () => ({ top: 300 - viewport.scrollTop }),
+  })
+  act(() => scroll.jumpToFindMatch(range))
+  expect(viewport.scrollTop).toBe(220)
+  expect(frames.size).toBe(0)
+  Object.defineProperty(viewport, "scrollHeight", { value: 1600 })
+  act(() => resize())
+  expect(viewport.scrollTop).toBe(220)
+  expect(scroll.atBottom).toBe(false)
+})
 it("follows explicit layout changes that do not resize the content box", () => {
   render(<Fixture />)
   const viewport = geometry()
