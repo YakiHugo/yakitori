@@ -1,12 +1,18 @@
 import {
   changeWorkspaceGitIndex,
+  findWorkspaceFiles,
   listWorkspaceDirectory,
   readWorkspaceFile,
+  readWorkspaceFileForEdit,
   readWorkspaceGitDiff,
   readWorkspaceGitStatus,
   WorkspaceError,
+  writeWorkspaceFile,
+  type WorkspaceFindFilesResponse,
   type WorkspaceListResponse,
   type WorkspaceReadResponse,
+  type WorkspaceReadForEditResponse,
+  type WorkspaceWriteResponse,
   type GitDiffResponse,
   type GitStatusResponse,
 } from "../workspace.ts"
@@ -21,6 +27,14 @@ export type WorkspaceRpcParams = {
     offset?: number
     limit?: number
   }
+  "workspace/readForEdit": { cwd: string; path: string }
+  "workspace/write": {
+    cwd: string
+    path: string
+    content: string
+    expectedSha256: string
+  }
+  "workspace/findFiles": { cwd: string; query: string }
   "git/status": { cwd: string }
   "git/diff": { cwd: string; path: string; staged: boolean }
   "git/stage": { cwd: string; path: string }
@@ -30,6 +44,9 @@ export type WorkspaceRpcParams = {
 export type WorkspaceRpcResponses = {
   "workspace/list": WorkspaceListResponse
   "workspace/read": WorkspaceReadResponse
+  "workspace/readForEdit": WorkspaceReadForEditResponse
+  "workspace/write": WorkspaceWriteResponse
+  "workspace/findFiles": WorkspaceFindFilesResponse
   "git/status": GitStatusResponse
   "git/diff": GitDiffResponse
   "git/stage": Record<string, never>
@@ -114,6 +131,36 @@ export const workspaceRpcMethods: readonly RpcMethodDefinition[] = [
       ...(params.offset === undefined ? {} : { offset: params.offset }),
       ...(params.limit === undefined ? {} : { limit: params.limit }),
     })
+  }),
+  method("workspace/readForEdit", (params) =>
+    readWorkspaceFileForEdit({ cwd: params.cwd, path: path(params) }),
+  ),
+  method("workspace/write", (params) => {
+    if (typeof params.content !== "string")
+      throw new WorkspaceError("content is required.")
+    if (typeof params.expectedSha256 !== "string")
+      throw new WorkspaceError("expectedSha256 is required.")
+    if (
+      Object.keys(params).some(
+        (key) =>
+          key !== "cwd" &&
+          key !== "path" &&
+          key !== "content" &&
+          key !== "expectedSha256",
+      )
+    )
+      throw new WorkspaceError("Unexpected workspace/write parameter.")
+    return writeWorkspaceFile({
+      cwd: params.cwd,
+      path: path(params),
+      content: params.content,
+      expectedSha256: params.expectedSha256,
+    })
+  }),
+  method("workspace/findFiles", (params) => {
+    if (typeof params.query !== "string")
+      throw new WorkspaceError("query is required.")
+    return findWorkspaceFiles({ cwd: params.cwd, query: params.query })
   }),
   method("git/status", (params) => readWorkspaceGitStatus({ cwd: params.cwd })),
   method("git/diff", (params) => {

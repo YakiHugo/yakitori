@@ -1,18 +1,28 @@
 import { execFile } from "node:child_process"
-import { opendir, realpath, stat } from "node:fs/promises"
+import { createHash } from "node:crypto"
+import { constants, type Stats } from "node:fs"
+import { open, opendir, realpath, stat } from "node:fs/promises"
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path"
 import { promisify } from "node:util"
+import { ToolLimitDefaults } from "../runtime/limits.ts"
 import {
   captureTextFilePage,
   FileChangedDuringReadError,
   UnsupportedTextFileTypeError,
 } from "../runtime/tools/read-file-page.ts"
+import { runRipgrepRecords } from "../runtime/tools/ripgrep.ts"
+import { compareAndWriteTextFile } from "../runtime/tools/text-file-write.ts"
 
 // These are implementation safety bounds for rendering and subprocess memory.
 const MAX_DIRECTORY_ENTRIES = 1_000
 const MAX_FILE_LINES = 1_000
 const MAX_FILE_BYTES = 256 * 1024
 const MAX_GIT_BYTES = 1024 * 1024
+// Complete editor documents share the tool writer's memory safety boundary.
+const MAX_EDIT_FILE_BYTES = ToolLimitDefaults.fileWriteBytes
+// Bound filename results, scanning memory, and subprocess time for the GUI.
+const MAX_FIND_FILES = 200
+const MAX_FIND_FILE_BYTES = 8 * 1024 * 1024
 const executeFile = promisify(execFile)
 
 export type WorkspaceListResponse = {
@@ -34,6 +44,22 @@ export type WorkspaceReadResponse = {
   truncated: boolean
   binary: boolean
 }
+
+export type WorkspaceReadForEditResponse = Readonly<{
+  path: string
+  content: string
+  sha256: string
+}>
+
+export type WorkspaceWriteResponse = Readonly<{
+  path: string
+  sha256: string
+}>
+
+export type WorkspaceFindFilesResponse = Readonly<{
+  paths: string[]
+  truncated: boolean
+}>
 
 export type WorkspaceGitEntry = {
   path: string
@@ -164,6 +190,210 @@ export async function readWorkspaceFile(input: {
     ...(hasMore ? { nextOffset: offset + lines.length } : {}),
     truncated: hasMore || shortened,
     binary: false,
+  }
+}
+
+export async function readWorkspaceFileForEdit(input: {
+  cwd: string
+  path: string
+}): Promise<WorkspaceReadForEditResponse> {
+  const cwd = await workspaceRoot(input.cwd)
+  const target = await workspacePath(cwd, input.path)
+  const flags =
+    constants.O_RDONLY |
+    (process.platform === "win32"
+      ? 0
+      : constants.O_NONBLOCK | (constants.O_NOFOLLOW ?? 0))
+  const handle = await open(target, flags)
+  try {
+    const before = await handle.stat()
+    if (!before.isFile())
+      throw new WorkspaceError("Only regular UTF-8 text files can be edited.")
+    if (before.size > MAX_EDIT_FILE_BYTES)
+      throw new WorkspaceError(
+        `File exceeds the ${MAX_EDIT_FILE_BYTES}-byte editor safety limit.`,
+      )
+    // One extra byte detects growth without allocating an unbounded document.
+    const buffer = Buffer.alloc(before.size + 1)
+    let length = 0
+    while (length < buffer.length) {
+      const read = await handle.read(
+        buffer,
+        length,
+        buffer.length - length,
+        null,
+      )
+      if (read.bytesRead === 0) break
+      length += read.bytesRead
+    }
+    const after = await handle.stat()
+    const currentTarget = await workspacePath(cwd, input.path)
+    const current = await stat(currentTarget)
+    if (
+      (await workspaceRoot(input.cwd)) !== cwd ||
+      currentTarget !== target ||
+      before.dev !== current.dev ||
+      before.ino !== current.ino ||
+      before.size !== current.size ||
+      before.mtimeMs !== current.mtimeMs ||
+      before.ctimeMs !== current.ctimeMs ||
+      before.size !== after.size ||
+      before.mtimeMs !== after.mtimeMs ||
+      before.ctimeMs !== after.ctimeMs ||
+      length !== before.size
+    ) {
+      throw new WorkspaceError(
+        "File changed while reading. Reload before editing.",
+        "conflict",
+      )
+    }
+    const bytes = buffer.subarray(0, length)
+    if (bytes.includes(0))
+      throw new WorkspaceError("Binary files cannot be edited as UTF-8 text.")
+    let content: string
+    try {
+      // ignoreBOM retains a UTF-8 BOM as text so saving preserves its bytes.
+      content = new TextDecoder("utf-8", {
+        fatal: true,
+        ignoreBOM: true,
+      }).decode(bytes)
+    } catch (error) {
+      if (
+        error instanceof TypeError &&
+        "code" in error &&
+        error.code === "ERR_ENCODING_INVALID_ENCODED_DATA"
+      )
+        throw new WorkspaceError("File is not valid UTF-8 text.")
+      throw error
+    }
+    return {
+      path: displayPath(cwd, target),
+      content,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+    }
+  } finally {
+    await handle.close()
+  }
+}
+
+export async function writeWorkspaceFile(input: {
+  cwd: string
+  path: string
+  content: string
+  expectedSha256: string
+}): Promise<WorkspaceWriteResponse> {
+  if (!/^[a-f0-9]{64}$/.test(input.expectedSha256))
+    throw new WorkspaceError("expectedSha256 must be a SHA-256 file revision.")
+  if (Buffer.byteLength(input.content, "utf8") > MAX_EDIT_FILE_BYTES)
+    throw new WorkspaceError(
+      `Content exceeds the ${MAX_EDIT_FILE_BYTES}-byte editor safety limit.`,
+    )
+  const contentBytes = Buffer.from(input.content, "utf8")
+  // Buffer replaces unpaired UTF-16 surrogates; reject rather than save bytes
+  // that differ from the submitted editor document.
+  if (
+    contentBytes.toString("utf8") !== input.content ||
+    contentBytes.includes(0)
+  )
+    throw new WorkspaceError("content must be valid UTF-8 text without NUL.")
+  const cwd = await workspaceRoot(input.cwd)
+  let target: string
+  try {
+    target = await workspacePath(cwd, input.path)
+  } catch (error) {
+    if (
+      (error as NodeJS.ErrnoException).code === "ENOENT" ||
+      (error as NodeJS.ErrnoException).code === "ENOTDIR"
+    )
+      throw new WorkspaceError("The file no longer exists.", "conflict")
+    throw error
+  }
+  let original: Stats | undefined
+  const written = await compareAndWriteTextFile({
+    workspaceRoot: cwd,
+    path: target,
+    content: input.content,
+    expectedSha256: input.expectedSha256,
+    async validateTarget(absolutePath) {
+      if (
+        (await workspaceRoot(input.cwd)) !== cwd ||
+        absolutePath !== target ||
+        (await workspacePath(cwd, input.path)) !== target ||
+        (await workspacePath(cwd, displayPath(cwd, target))) !== target
+      )
+        throw new WorkspaceError(
+          "File path changed. Reload before saving.",
+          "conflict",
+        )
+      const info = await stat(absolutePath)
+      if (!info.isFile())
+        throw new WorkspaceError("Only regular UTF-8 text files can be edited.")
+      if (info.size > MAX_EDIT_FILE_BYTES)
+        throw new WorkspaceError(
+          "File grew beyond the editor safety limit. Reload before saving.",
+          "conflict",
+        )
+      if (
+        original !== undefined &&
+        (info.dev !== original.dev ||
+          info.ino !== original.ino ||
+          info.size !== original.size ||
+          info.mtimeMs !== original.mtimeMs ||
+          info.ctimeMs !== original.ctimeMs)
+      )
+        throw new WorkspaceError("File changed while saving.", "conflict")
+      original = info
+    },
+  })
+  if (!written.ok)
+    throw new WorkspaceError(
+      `${written.message} Reload before saving; your changes have not been written.`,
+      "conflict",
+    )
+  return {
+    path: displayPath(cwd, target),
+    sha256: createHash("sha256").update(contentBytes).digest("hex"),
+  }
+}
+
+export async function findWorkspaceFiles(input: {
+  cwd: string
+  query: string
+}): Promise<WorkspaceFindFilesResponse> {
+  const cwd = await workspaceRoot(input.cwd)
+  const query = input.query.toLowerCase()
+  if (query.length === 0) return { paths: [], truncated: false }
+  const paths: string[] = []
+  const result = await runRipgrepRecords(
+    [
+      "--files",
+      "--hidden",
+      "--null",
+      "--no-config",
+      "--glob",
+      "!.git",
+      "--",
+      ".",
+    ],
+    {
+      cwd,
+      timeoutMs: 5_000,
+      maxBytes: MAX_FIND_FILE_BYTES,
+      maxRecordBytes: 64 * 1024,
+      delimiter: "null",
+      onRecord(record) {
+        const path = record.replace(/^\.\//, "")
+        if (!path.toLowerCase().includes(query)) return true
+        if (paths.length >= MAX_FIND_FILES) return false
+        paths.push(path)
+        return true
+      },
+    },
+  )
+  if (!result.ok) throw new WorkspaceError(result.message, "conflict")
+  return {
+    paths: paths.sort((left, right) => left.localeCompare(right)),
+    truncated: result.stopReason !== undefined,
   }
 }
 
