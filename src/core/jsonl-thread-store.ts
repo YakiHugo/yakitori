@@ -1,22 +1,3 @@
-import {
-  compareSectionSessions,
-  sectionSessionCursor,
-  startAfterSectionCursor,
-} from "./session-sidebar.ts"
-import {
-  emptySessionSidebar,
-  changeSessionSidebar,
-  presentSession,
-  sessionInView,
-  type SessionPresentation,
-  type SessionSidebar,
-  type SidebarChange,
-} from "./session-sidebar.ts"
-import {
-  advanceSessionHead,
-  sessionEntries,
-  type SessionHeads,
-} from "./session-navigation.ts"
 import { constants } from "node:fs"
 import {
   type FileHandle,
@@ -54,6 +35,23 @@ import type {
   ThreadMetadata,
   ThreadSummary,
 } from "./rollout.ts"
+import {
+  advanceSessionHead,
+  type SessionHeads,
+  sessionEntries,
+} from "./session-navigation.ts"
+import {
+  changeSessionSidebar,
+  compareSectionSessions,
+  emptySessionSidebar,
+  presentSession,
+  type SessionPresentation,
+  type SessionSidebar,
+  type SidebarChange,
+  sectionSessionCursor,
+  sessionInView,
+  startAfterSectionCursor,
+} from "./session-sidebar.ts"
 import {
   SqliteThreadSearchProjection,
   type ThreadSearchProjectionStamp,
@@ -163,8 +161,9 @@ export class JsonlThreadStore implements ThreadStore {
     await this.#ready
   }
 
-  // Ephemeral Sessions own files without a durable thread index. A live host
-  // lease protects those files from GC; restart deliberately drops the lease.
+  // Ephemeral owners (side chats and unsent composer drafts) keep files
+  // without a durable thread index. A live host lease protects those files
+  // from GC; restart deliberately drops the lease.
   retainEphemeralRolloutAssets(rolloutId: string): () => void {
     requireThreadId(rolloutId)
     if (this.#ephemeralAssetOwners.has(rolloutId))
@@ -1739,6 +1738,7 @@ function isThreadMetadata(value: unknown): value is ThreadMetadata {
       "updatedAt",
       "title",
       "workingDirectory",
+      "gitInfo",
       "projectId",
       "mateId",
       "mateRevisionId",
@@ -1756,6 +1756,7 @@ function isThreadMetadata(value: unknown): value is ThreadMetadata {
     typeof value.updatedAt === "string" &&
     optionalString(value.title) &&
     optionalString(value.workingDirectory) &&
+    (value.gitInfo === undefined || isGitInfo(value.gitInfo)) &&
     optionalString(value.projectId) &&
     optionalString(value.mateId) &&
     optionalString(value.mateRevisionId) &&
@@ -1767,6 +1768,19 @@ function isThreadMetadata(value: unknown): value is ThreadMetadata {
       value.forkReason === "edit") &&
     (value.historyBase === undefined || isHistoryPosition(value.historyBase)) &&
     (value.metadata === undefined || isJsonObject(value.metadata))
+  )
+}
+
+function isGitInfo(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ["sha", "branch", "originUrl"]) &&
+    optionalString(value.sha) &&
+    optionalString(value.branch) &&
+    optionalString(value.originUrl) &&
+    (value.sha !== undefined ||
+      value.branch !== undefined ||
+      value.originUrl !== undefined)
   )
 }
 

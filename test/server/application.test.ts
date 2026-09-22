@@ -1130,8 +1130,9 @@ describe("application composition", () => {
         expectOk(created)
         const sessionId = created.body.session.id
         const imageBytes = pngBuffer(128)
+        const draftRolloutId = "draft_application_test"
         const attachments = await application.rolloutAssets.importImageBytes(
-          sessionId,
+          draftRolloutId,
           "draft_application_test",
           [{ name: "screen.png", data: imageBytes }],
         )
@@ -1179,6 +1180,17 @@ describe("application composition", () => {
             ),
           ),
         ).toEqual(imageBytes)
+        await expect(
+          readFile(
+            join(
+              application.sessionStoreRoot,
+              "rollouts",
+              draftRolloutId,
+              "files",
+              attachments[0]?.file.path ?? "",
+            ),
+          ),
+        ).rejects.toMatchObject({ code: "ENOENT" })
         expect(captured?.messages).toContainEqual({
           role: "user",
           content: [{ type: "text", text: "inspect" }],

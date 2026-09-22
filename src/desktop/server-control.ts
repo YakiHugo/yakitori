@@ -3,7 +3,8 @@ import type { ImageAttachment } from "../kernel/events.ts"
 export type ServerControlCommand =
   | {
       readonly type: "import_image_paths"
-      readonly sessionId: string
+      readonly sessionId?: string
+      readonly rolloutId?: string
       readonly ownerId: string
       readonly paths: readonly string[]
     }
@@ -66,8 +67,8 @@ export function isServerControlRequest(
   }
   if (value.type === "import_image_paths") {
     return (
-      "sessionId" in value &&
-      typeof value.sessionId === "string" &&
+      (("sessionId" in value && typeof value.sessionId === "string") ||
+        ("rolloutId" in value && typeof value.rolloutId === "string")) &&
       "ownerId" in value &&
       typeof value.ownerId === "string" &&
       "paths" in value &&

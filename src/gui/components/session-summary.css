@@ -18,6 +18,7 @@
 
 .session-summary-trigger:focus-visible,
 .session-summary-popover button:focus-visible,
+.session-summary-popover a:focus-visible,
 .session-summary-popover summary:focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: 2px;
@@ -68,6 +69,12 @@
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.session-summary-workspace-branch {
+  margin: 6px 0 0 21px;
+  color: var(--muted-foreground);
+  font-size: 10px;
 }
 
 .session-summary-environment {
@@ -127,6 +134,53 @@
   margin-left: auto;
   color: var(--muted-foreground);
   font-size: 11px;
+}
+
+.session-summary-pull-requests {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.session-summary-pull-requests a {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 -6px;
+  padding: 7px 6px;
+  border-radius: 7px;
+}
+
+.session-summary-pull-requests a:hover {
+  background: var(--accent);
+}
+
+.session-summary-pull-requests svg {
+  margin-top: 1px;
+  flex: none;
+  color: var(--muted-foreground);
+}
+
+.session-summary-pull-requests a > span {
+  min-width: 0;
+}
+
+.session-summary-pull-requests strong,
+.session-summary-pull-requests small {
+  display: block;
+}
+
+.session-summary-pull-requests strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.session-summary-pull-requests small {
+  margin-top: 3px;
+  color: var(--muted-foreground);
+  font-size: 10px;
 }
 
 .session-summary-empty {

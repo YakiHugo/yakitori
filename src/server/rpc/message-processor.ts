@@ -1,7 +1,7 @@
 import { ConfigurationError } from "../config-errors.ts"
 import { createSessionEventHub, type SessionEventHub } from "../event-hub.ts"
 import type { ServerHandlers } from "../handlers.ts"
-import type { SideChatService } from "../side-chat.ts"
+import type { McpService } from "../mcp-service.ts"
 import {
   consoleOperationalFailureReporter,
   type OperationalFailureReporter,
@@ -13,18 +13,20 @@ import {
   type ApiReadSubscriptionResponse,
   type ApiSubscriptionProvider,
 } from "../protocol.ts"
+import type { SideChatService } from "../side-chat.ts"
 import type { ProjectStore } from "../sqlite-project-store.ts"
 import {
   ConfigVersionConflictError,
   type UserConfigStore,
 } from "../user-config.ts"
+import type { SessionInteractions } from "../user-interactions.ts"
 import { RpcConnectionState } from "./connection.ts"
 import { ConnectionRpcGate } from "./connection-gate.ts"
 import {
   errorResponse,
   INTERNAL_ERROR,
-  INVALID_REQUEST,
   INVALID_PARAMS,
+  INVALID_REQUEST,
   type JsonRpcMessage,
   JsonRpcParseError,
   type JsonRpcRequest,
@@ -58,6 +60,8 @@ import {
 // Injection mirrors createYakitoriHttpServer so the production wiring stage
 // stays mechanical.
 export type MessageProcessorOptions = Readonly<{
+  mcp?: McpService
+  interactions?: SessionInteractions
   sideChats?: SideChatService
   handlers: ServerHandlers
   eventHub?: SessionEventHub
@@ -102,6 +106,8 @@ export class MessageProcessor {
 
   private readonly handlers: ServerHandlers
   private readonly sideChats: SideChatService | undefined
+  private readonly interactions: SessionInteractions | undefined
+  private readonly mcp: McpService | undefined
   private readonly projectStore: ProjectStore | undefined
   private readonly providers:
     | (() => Promise<ApiListProvidersResponse>)
@@ -127,6 +133,8 @@ export class MessageProcessor {
   constructor(options: MessageProcessorOptions) {
     this.handlers = options.handlers
     this.sideChats = options.sideChats
+    this.interactions = options.interactions
+    this.mcp = options.mcp
     this.projectStore = options.projectStore
     this.providers = options.providers
     this.subscriptionUsage = options.subscriptionUsage
@@ -290,6 +298,10 @@ export class MessageProcessor {
     }
     const context: RpcMethodContext = {
       ...(this.sideChats === undefined ? {} : { sideChats: this.sideChats }),
+      ...(this.interactions === undefined
+        ? {}
+        : { interactions: this.interactions }),
+      ...(this.mcp === undefined ? {} : { mcp: this.mcp }),
       connectionId,
       handlers: this.handlers,
       subscriptions: this.subscriptions,

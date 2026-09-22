@@ -4,12 +4,11 @@ import { describe, expect, it } from "vitest"
 
 // Value imports from these paths pull node builtins (node:crypto and friends)
 // into the browser bundle and blank the GUI at runtime. Type-only imports are
-// erased at build time and stay legal. kernel/events.ts and kernel/ids.ts are
-// the allowed value-import surfaces: both are dependency-free and ids.ts uses
-// the browser-safe globalThis.crypto.
+// erased at build time and stay legal. The allowed kernel surfaces are
+// dependency-free contracts; ids.ts uses browser-safe globalThis.crypto.
 const forbiddenValueImportFrom = [
   /kernel\/index\.ts/,
-  /kernel\/(?!(events|ids)\.ts)[^"']+/,
+  /kernel\/(?!(events|ids|user-interaction)\.ts)[^"']+/,
   /runtime\//,
   /server\//,
 ]

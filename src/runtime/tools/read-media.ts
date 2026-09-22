@@ -1,13 +1,17 @@
-import { imageDecodeError } from "../prepare-model-image.ts"
 import { constants } from "node:fs"
 import { open } from "node:fs/promises"
 import { basename } from "node:path"
 import { inspectImageBytes } from "../../kernel/image-metadata.ts"
+import { imageDecodeError } from "../prepare-model-image.ts"
 import { noToolApprovalRequired } from "./approval-requirements.ts"
 import { resolveReadPath } from "./path-policy.ts"
 import { mediaPresentation } from "./result-output.ts"
 import { plainToolName } from "./tool-name.ts"
-import type { RuntimeTool } from "./types.ts"
+import type {
+  RuntimeTool,
+  ToolExecutionContext,
+  ToolExecutionResult,
+} from "./types.ts"
 
 // Bound snapshot memory before decoding or storing untrusted local media.
 const MEDIA_SNAPSHOT_SAFETY_BYTES = 50_000_000
@@ -26,7 +30,7 @@ function createMediaTool(kind: "image" | "document"): RuntimeTool {
     description:
       kind === "image"
         ? "View a local image visually. Accepts workspace-relative or absolute paths. The image is snapshotted for this conversation. detail can be high or original."
-        : "Read a local PDF as a document. Accepts workspace-relative or absolute paths. The document is snapshotted and sent through the provider's native document input when supported.",
+        : 'Read a local PDF. Accepts workspace-relative or absolute paths. Sends a whole PDF natively when supported; otherwise renders pages for image-capable models or extracts text. Set format to "text" or "image" to select extraction, and pages to a 1-based range such as "1-5,8" or "3-". Extraction reads up to 10 pages automatically or 20 explicitly selected pages (processing safety boundaries).',
     effect: "observe",
     supportsParallelToolCalls: true,
     approvalRequirement: noToolApprovalRequired,
@@ -49,7 +53,19 @@ function createMediaTool(kind: "image" | "document"): RuntimeTool {
                   "high resizes large images; original preserves their dimensions when supported.",
               },
             }
-          : {}),
+          : {
+              pages: {
+                type: "string",
+                description:
+                  'PDF pages, 1-based: "1-5,8", "3-", or "2". Sorted and deduplicated.',
+              },
+              format: {
+                type: "string",
+                enum: ["text", "image"],
+                description:
+                  "Extract page text or render page images. Omit for provider-appropriate reading.",
+              },
+            }),
       },
     },
     async execute(input, context) {
@@ -59,7 +75,11 @@ function createMediaTool(kind: "image" | "document"): RuntimeTool {
         !("path" in input) ||
         typeof input.path !== "string" ||
         Object.keys(input).some(
-          (key) => key !== "path" && !(kind === "image" && key === "detail"),
+          (key) =>
+            key !== "path" &&
+            !(kind === "image"
+              ? key === "detail"
+              : key === "pages" || key === "format"),
         )
       ) {
         return failure("invalid_tool_input", `${name} requires a path.`)
@@ -67,6 +87,20 @@ function createMediaTool(kind: "image" | "document"): RuntimeTool {
       const detail = "detail" in input ? input.detail : "high"
       if (detail !== "high" && detail !== "original")
         return failure("invalid_tool_input", "detail must be high or original.")
+      const pages = "pages" in input ? input.pages : undefined
+      const format = "format" in input ? input.format : undefined
+      if (pages !== undefined && typeof pages !== "string")
+        return failure(
+          "invalid_tool_input",
+          "pages must be a page range string.",
+        )
+      if (format !== undefined && format !== "text" && format !== "image")
+        return failure("invalid_tool_input", "format must be text or image.")
+      if (format === "image" && context.documentReading?.images !== true)
+        return failure(
+          "unsupported_document_format",
+          'This model cannot view page images; use format: "text".',
+        )
       if (
         context.rolloutAssets === undefined ||
         context.rolloutId === undefined ||
@@ -137,14 +171,13 @@ function createMediaTool(kind: "image" | "document"): RuntimeTool {
         if (error !== undefined)
           return failure("invalid_image", `Unable to decode image: ${error}`)
       }
-      const mediaType =
-        kind === "image"
-          ? inspectImageBytes(bytes).mediaType
-          : "application/pdf"
+      if (kind === "document")
+        return readDocument(bytes, path, { pages, format }, context)
+      const mediaType = inspectImageBytes(bytes).mediaType
       const saved = await context.rolloutAssets.saveToolFile(
         context.rolloutId,
         context.toolCallId,
-        kind === "image" ? `image.${mediaType.split("/")[1]}` : "document.pdf",
+        `image.${mediaType.split("/")[1]}`,
         bytes,
       )
       const content = `Read ${kind}: ${path.displayPath}`
@@ -157,35 +190,114 @@ function createMediaTool(kind: "image" | "document"): RuntimeTool {
           sizeBytes: bytes.length,
           file: saved.reference,
         },
-        presentation: mediaPresentation(
-          kind === "image" && mediaType !== "application/pdf"
-            ? {
-                content,
-                images: [
-                  {
-                    type: "image",
-                    mediaType,
-                    detail,
-                    file: saved.reference,
-                    sizeBytes: bytes.length,
-                  },
-                ],
-              }
-            : {
-                content,
-                documents: [
-                  {
-                    type: "document",
-                    mediaType: "application/pdf",
-                    name: basename(path.absolutePath),
-                    file: saved.reference,
-                    sizeBytes: bytes.length,
-                  },
-                ],
-              },
-        ),
+        presentation: mediaPresentation({
+          content,
+          images: [
+            {
+              type: "image",
+              mediaType,
+              detail,
+              file: saved.reference,
+              sizeBytes: bytes.length,
+            },
+          ],
+        }),
       }
     },
+  }
+}
+
+async function readDocument(
+  bytes: Buffer,
+  path: { absolutePath: string; displayPath: string },
+  input: { pages: string | undefined; format: "text" | "image" | undefined },
+  context: ToolExecutionContext,
+): Promise<ToolExecutionResult> {
+  const { rolloutAssets, rolloutId, toolCallId } = context
+  if (
+    rolloutAssets === undefined ||
+    rolloutId === undefined ||
+    toolCallId === undefined
+  )
+    throw new Error("Document reads require rollout asset storage.")
+  const format =
+    input.format ??
+    (input.pages === undefined && context.documentReading?.nativePdf === true
+      ? "native"
+      : context.documentReading?.images === true
+        ? "image"
+        : "text")
+  const { readPdf } = await import("./read-pdf.ts")
+  const result = await readPdf(
+    {
+      bytes: Uint8Array.from(bytes),
+      format,
+      ...(input.pages === undefined ? {} : { pages: input.pages }),
+    },
+    context.signal,
+  )
+  if (!result.ok) return failure(result.code, result.message)
+  const saved = await rolloutAssets.saveToolFile(
+    rolloutId,
+    toolCallId,
+    "document.pdf",
+    bytes,
+  )
+  const summary = `Read PDF: ${path.displayPath} (${result.totalPages} pages)${format === "native" ? "" : `; selected pages: ${result.pages.join(", ")}.`}`
+  const output = {
+    path: path.displayPath,
+    mediaType: "application/pdf",
+    sizeBytes: bytes.length,
+    file: saved.reference,
+    totalPages: result.totalPages,
+    format,
+    pages: result.pages,
+  }
+  if (format === "native")
+    return {
+      ok: true,
+      content: summary,
+      output,
+      presentation: mediaPresentation({
+        content: summary,
+        documents: [
+          {
+            type: "document",
+            mediaType: "application/pdf",
+            name: basename(path.absolutePath),
+            file: saved.reference,
+            sizeBytes: bytes.length,
+          },
+        ],
+      }),
+    }
+  if (format === "text")
+    return {
+      ok: true,
+      content: `${summary}\n\n${result.text}`,
+      output,
+    }
+  const images = []
+  for (const image of result.images) {
+    const saved = await rolloutAssets.saveToolFile(
+      rolloutId,
+      toolCallId,
+      `page-${image.page}.jpg`,
+      image.bytes,
+    )
+    images.push({
+      type: "image" as const,
+      mediaType: "image/jpeg" as const,
+      detail: "original" as const,
+      file: saved.reference,
+      sizeBytes: image.bytes.byteLength,
+    })
+  }
+  return {
+    ok: true,
+    content: summary,
+    output: { ...output, images },
+    presentation: mediaPresentation({ content: summary, images }),
   }
 }
 

@@ -1,6 +1,8 @@
+import { execFile } from "node:child_process"
 import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { promisify } from "node:util"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
@@ -8,19 +10,19 @@ import {
   createYakitoriError,
   YakitoriErrorCode,
 } from "../../src/kernel/errors.ts"
-import { createRolloutAssets } from "../../src/kernel/rollout-assets.ts"
 import { isKernelEvent } from "../../src/kernel/events.ts"
-import { createFauxProvider } from "../support/faux-provider.ts"
-import { waitForValue } from "../support/wait-for-value.ts"
-import { createModelProvider } from "../../src/runtime/model-provider.ts"
+import { createRolloutAssets } from "../../src/kernel/rollout-assets.ts"
 import { ModelStopReason, type StreamFn } from "../../src/runtime/model.ts"
+import { createModelProvider } from "../../src/runtime/model-provider.ts"
 import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
+import { createSkillsLoader } from "../../src/runtime/skills.ts"
 import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
 import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
 import { createSessionEventHub } from "../../src/server/event-hub.ts"
 import { createThreadServerHandlers } from "../../src/server/handlers.ts"
-import { createSkillsLoader } from "../../src/runtime/skills.ts"
 import { MemoryThreadStore } from "../core/memory-thread-store.ts"
+import { createFauxProvider } from "../support/faux-provider.ts"
+import { waitForValue } from "../support/wait-for-value.ts"
 
 const testUserHome = vi.hoisted(() => ({ path: "" }))
 vi.mock("node:os", async (importOriginal) => ({
@@ -32,6 +34,7 @@ beforeEach(async () => {
 })
 
 const cleanups: Array<() => Promise<void>> = []
+const executeFile = promisify(execFile)
 
 afterEach(async () => {
   await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()))
@@ -39,6 +42,67 @@ afterEach(async () => {
 })
 
 describe("thread server handlers", () => {
+  it("captures Git identity when the session is created", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "yakitori-handler-git-"))
+    const git = (args: readonly string[]) =>
+      executeFile(
+        "git",
+        [
+          "-C",
+          workspace,
+          "-c",
+          "user.name=Handler Test",
+          "-c",
+          "user.email=handler@example.test",
+          ...args,
+        ],
+        { encoding: "utf8" },
+      )
+    await git(["init", "--quiet"])
+    await writeFile(join(workspace, "tracked.txt"), "tracked\n")
+    await git(["add", "."])
+    await git(["commit", "--quiet", "-m", "initial"])
+    await git(["branch", "-M", "feat/session-context"])
+    await git([
+      "remote",
+      "add",
+      "origin",
+      "https://github.com/example/project.git",
+    ])
+    const sha = (await git(["rev-parse", "HEAD"])).stdout.trim()
+    const store = new MemoryThreadStore()
+    const manager = new ThreadManager({
+      store,
+      createTurnProcessor: () =>
+        createTurnProcessor({
+          stream: createFauxProvider([]).stream,
+          toolRegistry: createToolRegistry([]),
+        }),
+    })
+    const handlers = createThreadServerHandlers({ manager, store })
+    cleanups.push(async () => {
+      await manager.shutdown()
+      await handlers.close()
+      await rm(workspace, { recursive: true, force: true })
+    })
+
+    const created = await handlers.createSession({
+      workingDirectory: workspace,
+      mateId: "mate_test",
+      mateRevisionId: "mate_revision_test",
+    })
+
+    if (!created.ok) throw new Error(created.body.error.message)
+    expect(created.body.session.gitInfo).toEqual({
+      sha,
+      branch: "feat/session-context",
+      originUrl: "https://github.com/example/project.git",
+    })
+    expect(
+      (await store.readThread(created.body.session.id))?.metadata.gitInfo,
+    ).toEqual(created.body.session.gitInfo)
+  })
+
   it("returns healthy search results with an explicit count of unreadable sessions", async () => {
     const root = await mkdtemp(join(tmpdir(), "yakitori-partial-search-"))
     const original = new JsonlThreadStore({ root })
@@ -437,7 +501,7 @@ describe("thread server handlers", () => {
       details: {
         attempt: 1,
         nextAttempt: 2,
-        maxAttempts: 4,
+        maxAttempts: 8,
         kind: "server_error",
         status: 503,
       },

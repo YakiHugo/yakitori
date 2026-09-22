@@ -1,10 +1,10 @@
-import { createRolloutAssets } from "../../src/kernel/rollout-assets.ts"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { SessionEvent } from "../../src/core/session-io.ts"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
+import { createRolloutAssets } from "../../src/kernel/rollout-assets.ts"
 import {
   type AgentControl,
   createAgentControl,
@@ -20,6 +20,7 @@ import {
 } from "../../src/runtime/models-manager.ts"
 import { createPermissionGate } from "../../src/runtime/permission-gate.ts"
 import type { RolloutBudgetConfig } from "../../src/runtime/rollout-budget.ts"
+import { mcpResult } from "../../src/runtime/tools/mcp-result.ts"
 import {
   createToolRegistry,
   plainToolName,
@@ -33,6 +34,7 @@ import {
 import { MemoryThreadStore } from "../core/memory-thread-store.ts"
 import { createFauxProvider } from "../support/faux-provider.ts"
 import { waitForValue } from "../support/wait-for-value.ts"
+import { pdfFixture } from "./tools/pdf-fixture.ts"
 
 const testUserHome = vi.hoisted(() => ({ path: "" }))
 vi.mock("node:os", async (importOriginal) => ({
@@ -2999,6 +3001,127 @@ it.each([
     withMutationLease: async (_id, mutate) => mutate(),
   })
   expect(await reopened.read(image.file)).toEqual(png)
+})
+
+it("reprojects persisted MCP PDFs when switching between image, text, and native-document providers", async () => {
+  const assetsRoot = await mkdtemp(join(tmpdir(), "yakitori-pdf-history-"))
+  cleanups.push(() => rm(assetsRoot, { recursive: true, force: true }))
+  const assets = createRolloutAssets(assetsRoot, {
+    withMutationLease: async (id, mutate) => {
+      await mkdir(join(assetsRoot, "rollouts", id), { recursive: true })
+      return mutate()
+    },
+  })
+  const bytes = pdfFixture(["Retained PDF"])
+  const tool: RuntimeTool = {
+    toolName: plainToolName("pdf_source"),
+    description: "Read the remote PDF",
+    inputSchema: { type: "object" },
+    effect: "observe",
+    approvalRequirement: { kind: "none" },
+    execute: (_input, context) =>
+      mcpResult(
+        {
+          content: [
+            {
+              type: "resource",
+              resource: {
+                uri: "mcp://report",
+                mimeType: "application/pdf",
+                blob: bytes.toString("base64"),
+              },
+            },
+          ],
+        },
+        context,
+      ),
+  }
+  const provider = createFauxProvider([
+    {
+      stopReason: ModelStopReason.ToolUse,
+      content: [
+        { type: "tool_call", id: "call_pdf", name: "pdf_source", input: {} },
+      ],
+    },
+    {
+      assertRequest(request) {
+        expect(
+          request.messages.find((message) => message.role === "tool"),
+        ).toMatchObject({
+          images: [
+            {
+              type: "image",
+              mediaType: "image/jpeg",
+              data: expect.any(String),
+            },
+          ],
+          content: expect.stringContaining("Rendered pages 1"),
+        })
+      },
+      content: [{ type: "text", text: "Image inspected" }],
+    },
+    {
+      assertRequest(request) {
+        const result = request.messages.find(
+          (message) => message.role === "tool",
+        )
+        expect(result).toMatchObject({
+          content: expect.stringContaining("Retained PDF"),
+        })
+        expect(result).not.toHaveProperty("images")
+        expect(result).not.toHaveProperty("documents")
+      },
+      content: [{ type: "text", text: "Text inspected" }],
+    },
+    {
+      assertRequest(request) {
+        expect(
+          request.messages.find((message) => message.role === "tool"),
+        ).toMatchObject({
+          documents: [{ type: "document", data: bytes.toString("base64") }],
+        })
+      },
+      content: [{ type: "text", text: "Native PDF inspected" }],
+    },
+  ])
+  const runtime = await createRuntime(
+    provider.stream,
+    createToolRegistry([tool]),
+    {
+      rolloutAssets: assets,
+      modelContextWindowTokens: 100_000,
+    },
+  )
+  const thread = await runtime.createThread()
+  for (const modelSelection of [
+    { provider: "faux", model: "scripted" },
+    { provider: "future-provider", model: "text-only" },
+    { provider: "openai", model: "native-pdf-test" },
+  ]) {
+    await thread.startIfIdle({
+      content: { kind: "text", text: "Read the report" },
+      modelSelection,
+    })
+    expect((await nextLifecycleEvent(thread))?.type).toBe("turn.started")
+    const completed = await nextLifecycleEvent(thread)
+    expect(completed, JSON.stringify(completed)).toMatchObject({
+      type: "turn.completed",
+    })
+  }
+  expect(provider.callCount).toBe(4)
+  const durable = thread
+    .snapshot()
+    .context.history.find(
+      ({ item }) => item.role === "tool" && item.toolCallId === "call_pdf",
+    )?.item
+  expect(durable).toMatchObject({
+    role: "tool",
+    content: "[Document attached]",
+    documents: [{ file: expect.any(Object) }],
+  })
+  if (durable?.role !== "tool") throw new Error("Missing durable PDF")
+  expect(durable.documents?.[0]?.data).toBeUndefined()
+  expect(durable.images).toBeUndefined()
 })
 
 async function createRuntime(

@@ -14,6 +14,8 @@ asarUnpack:
   - node_modules/detect-libc/**
   - node_modules/semver/**
   - node_modules/@vscode/ripgrep*/**
+  - node_modules/pdfjs-dist/**
+  - node_modules/@napi-rs/canvas*/**
 # Native addons and ripgrep remain external to resolve their runtime files.
 files:
   - dist/desktop/**
@@ -26,6 +28,8 @@ files:
   - node_modules/detect-libc/**
   - node_modules/semver/**
   - node_modules/@vscode/ripgrep*/**
+  - node_modules/pdfjs-dist/**
+  - node_modules/@napi-rs/canvas*/**
 extraResources:
   - from: dist/gui
     to: gui

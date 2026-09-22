@@ -196,6 +196,27 @@ describe("composer", () => {
     const button = screen.getByRole("button", { name: "Sending" })
     expect(button.textContent).toContain("Sending")
     expect(button).toHaveProperty("disabled", true)
+    expect(screen.getByRole("status").textContent).toBe("Sending…")
+    expect(screen.getByRole("status").getAttribute("data-state")).toBe(
+      "sending",
+    )
+  })
+
+  it("distinguishes active work from admission loading", () => {
+    useAppStore.setState((state) => ({
+      selection: { sessionId: "session_1" },
+      execution: {
+        ...state.execution,
+        activeTurnId: "turn_1",
+      },
+    }))
+    render(<Composer />)
+
+    expect(screen.getByRole("button", { name: "Interrupt" })).toBeDefined()
+    expect(screen.getByRole("status").textContent).toBe("Working…")
+    expect(screen.getByRole("status").getAttribute("data-state")).toBe(
+      "working",
+    )
   })
 
   it("blocks send and slash execution while the session is busy", async () => {
@@ -389,7 +410,7 @@ describe("composer", () => {
     ])
   })
 
-  it("creates a session before importing picked images when none exists", async () => {
+  it("stages picked images without creating a session", async () => {
     const user = userEvent.setup()
     respondWithSessionCreate()
     render(<Composer />)
@@ -402,13 +423,12 @@ describe("composer", () => {
     await waitFor(() => {
       expect(useAppStore.getState().promptAttachments).toHaveLength(1)
     })
-    expect(useAppStore.getState().selection.sessionId).toBe("session_1")
-    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(1)
+    expect(useAppStore.getState().selection.sessionId).toBeUndefined()
+    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(0)
     const bridge = window.yakitoriDesktop
     if (bridge === undefined) throw new Error("Expected the desktop bridge")
     expect(bridge.pickImages).toHaveBeenCalledWith()
     expect(bridge.importPickedImages).toHaveBeenCalledWith({
-      sessionId: "session_1",
       selectionId: "selection_1",
     })
     expect(bridge.discardPickedImages).toHaveBeenCalledWith({
@@ -436,7 +456,7 @@ describe("composer", () => {
     expect(useAppStore.getState().selection.sessionId).toBeUndefined()
   })
 
-  it("rolls back a lazily created session when picked-image import fails", async () => {
+  it("keeps a new-session draft when picked-image import fails", async () => {
     const user = userEvent.setup()
     const bridge = window.yakitoriDesktop
     if (bridge === undefined) throw new Error("Expected the desktop bridge")
@@ -444,24 +464,23 @@ describe("composer", () => {
       new Error("Image import failed."),
     )
     respondWithSessionCreate()
-    const respond = fakeRef.current.respond
-    fakeRef.current.respond = (method, params) =>
-      method === "session/delete" ? {} : respond(method, params)
     useAppStore.setState({ promptDraft: "keep this draft" })
     render(<Composer />)
 
     await user.click(screen.getByRole("button", { name: "Add attachment" }))
     await user.click(screen.getByRole("button", { name: "Upload image" }))
 
-    await waitFor(() => {
-      expect(fakeRef.current.requestsFor("session/delete")).toHaveLength(1)
-    })
+    await waitFor(() =>
+      expect(screen.getByRole("alert").textContent).toBe(
+        "Image import failed.",
+      ),
+    )
     expect(useAppStore.getState().selection.sessionId).toBeUndefined()
     expect(useAppStore.getState().promptDraft).toBe("keep this draft")
-    expect(screen.getByRole("alert").textContent).toBe("Image import failed.")
+    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(0)
   })
 
-  it("waits for an in-flight session creation before importing picked images", async () => {
+  it("stages independently while a session creation is in flight", async () => {
     const user = userEvent.setup()
     useAppStore.setState({
       inFlightActions: new Set(["create-session"]),
@@ -473,19 +492,12 @@ describe("composer", () => {
     await user.click(screen.getByRole("button", { name: "Upload image" }))
     const bridge = window.yakitoriDesktop
     if (bridge === undefined) throw new Error("Expected the desktop bridge")
-    expect(bridge.importPickedImages).not.toHaveBeenCalled()
-
-    useAppStore.setState({
-      inFlightActions: new Set(),
-      selection: { sessionId: "session_1" },
-    })
-
     await waitFor(() => {
       expect(bridge.importPickedImages).toHaveBeenCalledWith({
-        sessionId: "session_1",
         selectionId: "selection_1",
       })
     })
+    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(0)
   })
 
   it("reuses a session that finishes creating while the picker is open", async () => {
@@ -521,7 +533,7 @@ describe("composer", () => {
     expect(fakeRef.current.requestsFor("session/create")).toHaveLength(0)
   })
 
-  it("creates a session before importing dropped images when none exists", async () => {
+  it("stages dropped images without creating a session", async () => {
     respondWithSessionCreate()
     render(<Composer />)
 
@@ -535,12 +547,11 @@ describe("composer", () => {
     await waitFor(() => {
       expect(useAppStore.getState().promptAttachments).toHaveLength(1)
     })
-    expect(useAppStore.getState().selection.sessionId).toBe("session_1")
-    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(1)
+    expect(useAppStore.getState().selection.sessionId).toBeUndefined()
+    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(0)
     const bridge = window.yakitoriDesktop
     if (bridge === undefined) throw new Error("Expected the desktop bridge")
     expect(bridge.importImageFiles).toHaveBeenCalledWith({
-      sessionId: "session_1",
       files: [file],
     })
   })

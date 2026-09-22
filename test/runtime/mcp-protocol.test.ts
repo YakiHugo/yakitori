@@ -1,17 +1,17 @@
-import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
-import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js"
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { createServer } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { createServer } from "node:http"
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js"
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js"
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js"
 import { expect, it } from "vitest"
 import { createMcpConnectionManager } from "../../src/runtime/mcp-connection-manager.ts"
+import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
 import { canonicalToolName } from "../../src/runtime/tools/tool-name.ts"
 
 async function withServer(
@@ -188,6 +188,48 @@ if(m.method==='notifications/cancelled')appendFileSync(process.argv[2],'cancel\\
   )
 })
 
+it("routes general elicitation through the user boundary with invocation context", async () => {
+  const requests: string[] = []
+  await withServer(
+    `
+if(m.method==='tools/list')reply({tools:[{name:'configure',inputSchema:{type:'object'}}]});
+if(m.method==='tools/call'){
+  globalThis.callId=m.id;
+  send({id:'input',method:'elicitation/create',params:{
+    mode:'form',message:'Choose label',
+    requestedSchema:{type:'object',properties:{label:{type:'string'}},required:['label']}
+  }});
+}
+if(m.id==='input'&&m.result)send({id:globalThis.callId,result:{content:[{type:'text',text:JSON.stringify(m.result)}]}});`,
+    async ({ root, manager, config }) => {
+      await manager.update(config)
+      const result = await manager.tools()[0]?.execute(
+        {},
+        {
+          workspaceRoot: root,
+          rolloutId: "session_test",
+          turnId: "turn_test",
+          toolCallId: "call_test",
+        },
+      )
+      expect(JSON.parse(result?.content ?? "")).toEqual({
+        action: "accept",
+        content: { label: "chosen" },
+      })
+      expect(requests).toEqual(["demo:call_test:Choose label"])
+    },
+    {
+      onElicitation: async (request, signal) => {
+        signal.throwIfAborted()
+        requests.push(
+          `${request.serverName}:${request.context?.toolCallId}:${request.params.message}`,
+        )
+        return { action: "accept", content: { label: "chosen" } }
+      },
+    },
+  )
+})
+
 it("does not retain a dead catalog when installation fails", async () => {
   await withServer(
     `if(m.method==='tools/list')reply({tools:[{name:'echo',inputSchema:{type:'object'}}]});`,
@@ -201,6 +243,47 @@ it("does not retain a dead catalog when installation fails", async () => {
     {
       installTools: () => {
         throw new Error("installation failed")
+      },
+    },
+  )
+})
+
+it("cancels a pending elicitation when its tool invocation times out", async () => {
+  let cancelled = false
+  await withServer(
+    `
+if(m.method==='tools/list')reply({tools:[{name:'configure',inputSchema:{type:'object'}}]});
+if(m.method==='tools/call')send({id:'input',method:'elicitation/create',params:{
+  mode:'url',message:'Complete authorization',url:'https://example.com/authorize',elicitationId:'login'
+}});`,
+    async ({ root, manager, config }) => {
+      await manager.update({ demo: { ...config.demo, toolTimeoutMs: 100 } })
+      await expect(
+        manager.tools()[0]?.execute(
+          {},
+          {
+            workspaceRoot: root,
+            rolloutId: "session_test",
+            toolCallId: "call_test",
+          },
+        ),
+      ).rejects.toThrow()
+      await expect.poll(() => cancelled).toBe(true)
+    },
+    {
+      onElicitation: async (request, signal) => {
+        expect(request.params.mode).toBe("url")
+        await new Promise<void>((resolve) =>
+          signal.addEventListener(
+            "abort",
+            () => {
+              cancelled = true
+              resolve()
+            },
+            { once: true },
+          ),
+        )
+        return { action: "cancel" }
       },
     },
   )

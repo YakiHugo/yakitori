@@ -14,7 +14,6 @@ import {
 } from "../../kernel/events.ts"
 import type { ContextExcerpt } from "../../kernel/input-context.ts"
 import type { ApiSkillSummary } from "../../server/protocol.ts"
-import { usePreferencesStore } from "../store/preferences-store.ts"
 import {
   appendImageFiles,
   appendPickedImages,
@@ -24,6 +23,7 @@ import {
   pickImages as selectImages,
   validateImageFiles,
 } from "../composer-attachments.ts"
+import { usePreferencesStore } from "../store/preferences-store.ts"
 import {
   type ComposerSuggestion,
   ComposerSuggestions,
@@ -53,7 +53,7 @@ const SLASH_COMMANDS: readonly SlashCommand[] = [
 export type ComposerImageImport = (
   prepare: () => Promise<
     | {
-        collect(sessionId: string): Promise<readonly ImageAttachment[]>
+        collect(sessionId?: string): Promise<readonly ImageAttachment[]>
         cleanup?: (() => Promise<void>) | undefined
       }
     | undefined
@@ -279,7 +279,7 @@ export function ComposerSurface({
       const selection = await selectImages()
       if (selection === undefined) return
       return {
-        collect: (importSessionId: string) =>
+        collect: (importSessionId) =>
           appendPickedImages(
             attachments,
             importSessionId,
@@ -646,6 +646,26 @@ export function ComposerSurface({
 
             <div className="flex min-w-0 items-center gap-1">
               {modelControls}
+              {sending || activeTurnId !== undefined ? (
+                <span
+                  role="status"
+                  aria-live="polite"
+                  data-state={
+                    stopping ? "stopping" : sending ? "sending" : "working"
+                  }
+                  className="composer-run-state"
+                >
+                  {sending || stopping ? (
+                    <LoaderCircle aria-hidden="true" />
+                  ) : (
+                    <span
+                      aria-hidden="true"
+                      className="composer-run-state-dot"
+                    />
+                  )}
+                  {stopping ? "Stopping…" : sending ? "Sending…" : "Working…"}
+                </span>
+              ) : null}
               {activeTurnId === undefined ? (
                 <Button
                   type="submit"

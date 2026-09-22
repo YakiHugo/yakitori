@@ -1,23 +1,25 @@
 import {
   changeWorkspaceGitIndex,
   findWorkspaceFiles,
+  type GitDiffResponse,
+  type GitPullRequestsResponse,
+  type GitStatusResponse,
   listWorkspaceDirectory,
   readWorkspaceFile,
   readWorkspaceFileForEdit,
   readWorkspaceGitDiff,
   readWorkspaceGitStatus,
+  readWorkspacePullRequests,
   WorkspaceError,
-  writeWorkspaceFile,
   type WorkspaceFindFilesResponse,
   type WorkspaceListResponse,
-  type WorkspaceReadResponse,
   type WorkspaceReadForEditResponse,
+  type WorkspaceReadResponse,
   type WorkspaceWriteResponse,
-  type GitDiffResponse,
-  type GitStatusResponse,
+  writeWorkspaceFile,
 } from "../workspace.ts"
 import { INTERNAL_ERROR, INVALID_PARAMS } from "./messages.ts"
-import { RpcMethodError, type RpcMethodDefinition } from "./methods.ts"
+import { type RpcMethodDefinition, RpcMethodError } from "./methods.ts"
 
 export type WorkspaceRpcParams = {
   "workspace/list": { cwd: string; path?: string }
@@ -36,6 +38,7 @@ export type WorkspaceRpcParams = {
   }
   "workspace/findFiles": { cwd: string; query: string; limit?: number }
   "git/status": { cwd: string }
+  "git/pullRequests": { cwd: string; branch: string }
   "git/diff": { cwd: string; path: string; staged: boolean }
   "git/stage": { cwd: string; path: string }
   "git/unstage": { cwd: string; path: string }
@@ -48,6 +51,7 @@ export type WorkspaceRpcResponses = {
   "workspace/write": WorkspaceWriteResponse
   "workspace/findFiles": WorkspaceFindFilesResponse
   "git/status": GitStatusResponse
+  "git/pullRequests": GitPullRequestsResponse
   "git/diff": GitDiffResponse
   "git/stage": Record<string, never>
   "git/unstage": Record<string, never>
@@ -62,8 +66,9 @@ function method(
   return {
     method: name,
     // Keep index reads consistent with user-initiated stage/unstage operations.
+    // PR discovery is a remote lookup and does not touch the workspace index.
     scope: () =>
-      name.startsWith("git/")
+      name.startsWith("git/") && name !== "git/pullRequests"
         ? { kind: "global", name: "workspace-git" }
         : undefined,
     async invoke(params) {
@@ -169,6 +174,14 @@ export const workspaceRpcMethods: readonly RpcMethodDefinition[] = [
     })
   }),
   method("git/status", (params) => readWorkspaceGitStatus({ cwd: params.cwd })),
+  method("git/pullRequests", (params) => {
+    if (typeof params.branch !== "string")
+      throw new WorkspaceError("branch is required.")
+    return readWorkspacePullRequests({
+      cwd: params.cwd,
+      branch: params.branch,
+    })
+  }),
   method("git/diff", (params) => {
     if (typeof params.staged !== "boolean")
       throw new WorkspaceError("staged must be a boolean.")

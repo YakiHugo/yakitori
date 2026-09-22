@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process"
 import {
+  chmod,
   mkdir,
   mkdtemp,
   readFile,
@@ -13,6 +14,7 @@ import { promisify } from "node:util"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type {
   GitDiffResponse,
+  GitPullRequestsResponse,
   GitStatusResponse,
   WorkspaceListResponse,
   WorkspaceReadResponse,
@@ -195,6 +197,62 @@ describe("workspace RPC against the filesystem and Git", () => {
     expect(
       await connection.sendRequest("git/stage", { cwd, path: "anything" }),
     ).toHaveProperty("error")
+  })
+
+  it("returns stable Git identity and all PR states for a session branch", async () => {
+    const { root, cwd, connection } = await setup(true)
+    await writeFile(join(cwd, "tracked.txt"), "tracked\n")
+    await git(cwd, ["add", "."])
+    await git(cwd, ["commit", "--quiet", "-m", "initial"])
+    await git(cwd, ["branch", "-M", "feat/session-context"])
+    await git(cwd, [
+      "remote",
+      "add",
+      "origin",
+      "https://github.com/example/project.git",
+    ])
+
+    const status = await rpc<GitStatusResponse>(connection, "git/status", {
+      cwd,
+    })
+    expect(status.branch).toBe("feat/session-context")
+
+    const bin = join(root, "bin")
+    await mkdir(bin)
+    const gh = join(bin, "gh")
+    await writeFile(
+      gh,
+      `#!/bin/sh
+case "$*" in
+  "pr list --state all --head feat/session-context --limit 50 --json number,title,state,isDraft,url,headRefName,updatedAt") ;;
+  *) exit 2 ;;
+esac
+printf '%s' '[{"number":12,"title":"Current work","state":"OPEN","isDraft":false,"url":"https://github.com/example/project/pull/12","headRefName":"feat/session-context","updatedAt":"2026-09-22T00:00:00Z"},{"number":7,"title":"Earlier approach","state":"MERGED","isDraft":false,"url":"https://github.com/example/project/pull/7","headRefName":"feat/session-context","updatedAt":"2026-09-20T00:00:00Z"}]'
+`,
+    )
+    await chmod(gh, 0o755)
+    vi.stubEnv("PATH", `${bin}:${process.env.PATH}`)
+
+    expect(
+      await rpc<GitPullRequestsResponse>(connection, "git/pullRequests", {
+        cwd,
+        branch: "feat/session-context",
+      }),
+    ).toEqual({
+      available: true,
+      pullRequests: [
+        expect.objectContaining({
+          number: 12,
+          state: "OPEN",
+          title: "Current work",
+        }),
+        expect.objectContaining({
+          number: 7,
+          state: "MERGED",
+          title: "Earlier approach",
+        }),
+      ],
+    })
   })
 
   it("keeps the index and working tree distinct and stages only the selected literal path", async () => {

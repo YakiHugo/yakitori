@@ -22,6 +22,7 @@ export default defineConfig(({ mode }) => {
             // The sidecar server entry runs under plain Node
             // (ELECTRON_RUN_AS_NODE) in the packaged app.
             server: "src/server/desktop-entry.ts",
+            "read-pdf-worker": "src/runtime/tools/read-pdf-worker.ts",
           },
           fileName: (_format, entryName) => `${entryName}.js`,
           formats: ["es"],
@@ -35,6 +36,8 @@ export default defineConfig(({ mode }) => {
             "node-pty",
             "sharp",
             "@vscode/ripgrep",
+            /^pdfjs-dist(?:\/|$)/,
+            /^@napi-rs\/canvas(?:\/|$)/,
             /^node:/,
           ],
         },

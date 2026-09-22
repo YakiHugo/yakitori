@@ -30,41 +30,43 @@ export function GeneralSettingsSection() {
         <h3>General</h3>
         <p>A workspace that works your way.</p>
       </div>
-      <SettingRow
-        title="Appearance"
-        description="Choose a theme, or follow your system."
-      >
-        <select
-          aria-label="Appearance"
-          value={preferences.appearance}
-          onChange={(event) =>
-            update({
-              appearance: event.target.value as Preferences["appearance"],
-            })
-          }
+      <div className="settings-group">
+        <SettingRow
+          title="Appearance"
+          description="Choose a theme, or follow your system."
         >
-          <option value="light">Light</option>
-          <option value="dark">Dark</option>
-          <option value="system">System</option>
-        </select>
-      </SettingRow>
-      <SettingRow
-        title="Send messages with"
-        description="Applies to conversations and side chats."
-      >
-        <select
-          aria-label="Send messages with"
-          value={preferences.sendShortcut}
-          onChange={(event) =>
-            update({
-              sendShortcut: event.target.value as Preferences["sendShortcut"],
-            })
-          }
+          <select
+            aria-label="Appearance"
+            value={preferences.appearance}
+            onChange={(event) =>
+              update({
+                appearance: event.target.value as Preferences["appearance"],
+              })
+            }
+          >
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+            <option value="system">System</option>
+          </select>
+        </SettingRow>
+        <SettingRow
+          title="Send messages with"
+          description="Applies to conversations and side chats."
         >
-          <option value="enter">Enter</option>
-          <option value="mod-enter">⌘ / Ctrl + Enter</option>
-        </select>
-      </SettingRow>
+          <select
+            aria-label="Send messages with"
+            value={preferences.sendShortcut}
+            onChange={(event) =>
+              update({
+                sendShortcut: event.target.value as Preferences["sendShortcut"],
+              })
+            }
+          >
+            <option value="enter">Enter</option>
+            <option value="mod-enter">⌘ / Ctrl + Enter</option>
+          </select>
+        </SettingRow>
+      </div>
       <div className="settings-hint">
         <Keyboard size={16} />
         <span>
@@ -104,42 +106,44 @@ export function NotificationSettingsSection() {
         <h3>Notifications</h3>
         <p>Step away. Know when your work is ready.</p>
       </div>
-      <SettingRow
-        title="When work finishes"
-        description="Notify when a conversation finishes successfully."
-      >
-        <select
-          aria-label="When work finishes"
-          value={preferences.notificationMode}
-          onChange={(event) =>
-            update({
-              notificationMode: event.target
-                .value as Preferences["notificationMode"],
-            })
-          }
+      <div className="settings-group">
+        <SettingRow
+          title="When work finishes"
+          description="Notify when a conversation finishes successfully."
         >
-          <option value="unfocused">When away</option>
-          <option value="always">Always</option>
-          <option value="off">Never</option>
-        </select>
-      </SettingRow>
-      <SettingRow
-        title="Notification sound"
-        description="Play a sound with system notifications."
-      >
-        <input
-          type="checkbox"
-          role="switch"
-          aria-checked={preferences.notificationSound}
-          aria-label="Notification sound"
-          className="settings-switch"
-          checked={preferences.notificationSound}
-          disabled={preferences.notificationMode === "off"}
-          onChange={(event) =>
-            update({ notificationSound: event.target.checked })
-          }
-        />
-      </SettingRow>
+          <select
+            aria-label="When work finishes"
+            value={preferences.notificationMode}
+            onChange={(event) =>
+              update({
+                notificationMode: event.target
+                  .value as Preferences["notificationMode"],
+              })
+            }
+          >
+            <option value="unfocused">When away</option>
+            <option value="always">Always</option>
+            <option value="off">Never</option>
+          </select>
+        </SettingRow>
+        <SettingRow
+          title="Notification sound"
+          description="Play a sound with system notifications."
+        >
+          <input
+            type="checkbox"
+            role="switch"
+            aria-checked={preferences.notificationSound}
+            aria-label="Notification sound"
+            className="settings-switch"
+            checked={preferences.notificationSound}
+            disabled={preferences.notificationMode === "off"}
+            onChange={(event) =>
+              update({ notificationSound: event.target.checked })
+            }
+          />
+        </SettingRow>
+      </div>
       <p className="settings-hint">
         “When away” sends notifications only while the app window is not in
         focus.

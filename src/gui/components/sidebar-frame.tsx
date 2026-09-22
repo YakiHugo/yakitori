@@ -1,5 +1,5 @@
 import { PanelLeft } from "lucide-react"
-import { type CSSProperties, useEffect, useState } from "react"
+import { type CSSProperties, useEffect, useLayoutEffect, useState } from "react"
 import { useAppStore } from "../store/app-store.ts"
 import { useWorkspaceStore } from "../store/workspace-store.ts"
 import { SessionSearch } from "./session-search.tsx"
@@ -37,6 +37,12 @@ export function SidebarFrame() {
     if (!resizing)
       localStorage.setItem("yakitori.sidebarWidth", String(preferredWidth))
   }, [preferredWidth, resizing])
+  useLayoutEffect(() => {
+    document.documentElement.style.setProperty("--sidebar-width", `${width}px`)
+    return () => {
+      document.documentElement.style.removeProperty("--sidebar-width")
+    }
+  }, [width])
   useEffect(() => {
     const resize = () => setWindowWidth(window.innerWidth)
     window.addEventListener("resize", resize)

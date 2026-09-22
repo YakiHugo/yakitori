@@ -46,6 +46,10 @@
   font-size: 17px;
   font-weight: 600;
 }
+.sidebar-scroll {
+  min-width: 0;
+  scrollbar-gutter: stable;
+}
 .sidebar-icon {
   width: 28px;
   height: 28px;
@@ -221,14 +225,16 @@
   display: flex;
   align-items: center;
   position: relative;
+  min-width: 0;
+  width: 100%;
+  gap: 2px;
   border-radius: 7px;
 }
-.sidebar-project:hover,
-.sidebar-session:hover {
-  background: var(--accent);
+.sidebar-session {
+  margin-block: 2px;
 }
 .sidebar-session[data-selected="true"] {
-  background: color-mix(in oklab, var(--foreground) 7%, transparent);
+  background: color-mix(in oklab, var(--foreground) 6%, transparent);
 }
 .session-activity-spinner {
   width: 14px;
@@ -247,12 +253,23 @@
   background: transparent;
 }
 .sidebar-row-action {
+  position: relative;
+  z-index: 1;
   opacity: 0;
+  color: var(--muted-foreground);
 }
 .group:hover .sidebar-row-action,
 .group:focus-within .sidebar-row-action,
 .sidebar-row-action[aria-expanded="true"] {
   opacity: 1;
+}
+.sidebar-project:hover > .sidebar-row-action,
+.sidebar-session:hover > .sidebar-row-action,
+.sidebar-row-action:hover,
+.sidebar-row-action:focus-visible,
+.sidebar-row-action[aria-expanded="true"] {
+  background: transparent;
+  color: var(--foreground);
 }
 .sidebar-folder {
   display: grid;

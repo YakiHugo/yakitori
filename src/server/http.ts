@@ -9,6 +9,7 @@ import { pipeline } from "node:stream/promises"
 import type { RolloutAssets } from "../kernel/index.ts"
 import { createSessionEventHub, type SessionEventHub } from "./event-hub.ts"
 import type { ServerHandlers } from "./handlers.ts"
+import type { McpService } from "./mcp-service.ts"
 import {
   consoleOperationalFailureReporter,
   type OperationalFailureReporter,
@@ -25,15 +26,18 @@ import {
 import { createRequestGate, type RequestGate } from "./request-gate.ts"
 import { MessageProcessor } from "./rpc/message-processor.ts"
 import { attachWebsocketRpcTransport } from "./rpc/websocket-transport.ts"
+import type { SideChatService } from "./side-chat.ts"
 import type { ProjectStore } from "./sqlite-project-store.ts"
 import type { UserConfigStore } from "./user-config.ts"
-import type { SideChatService } from "./side-chat.ts"
+import type { SessionInteractions } from "./user-interactions.ts"
 
 export type YakitoriStaticAssets = {
   readonly directory: string
 }
 
 type YakitoriHttpServerCommonOptions = {
+  readonly mcp?: McpService
+  readonly interactions?: SessionInteractions
   readonly sideChats?: SideChatService
   readonly eventHub?: SessionEventHub
   readonly staticAssets?: YakitoriStaticAssets
@@ -119,6 +123,10 @@ export function createYakitoriHttpServer(options: YakitoriHttpServerOptions) {
   const messageProcessor =
     options.messageProcessor ??
     new MessageProcessor({
+      ...(options.mcp === undefined ? {} : { mcp: options.mcp }),
+      ...(options.interactions === undefined
+        ? {}
+        : { interactions: options.interactions }),
       ...(options.sideChats === undefined
         ? {}
         : { sideChats: options.sideChats }),

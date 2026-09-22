@@ -186,6 +186,37 @@ describe("model request runtime", () => {
     expect(provider.calls()).toBe(2)
   })
 
+  it("uses the expanded default attempt budget for network timeouts", async () => {
+    const provider = scriptedStream([
+      [failure("idle_timeout")],
+      [failure("idle_timeout")],
+      [failure("idle_timeout")],
+      [failure("idle_timeout")],
+      [failure("idle_timeout")],
+      [failure("idle_timeout")],
+      [failure("idle_timeout")],
+      [success],
+    ])
+    const stream = createModelRequestStream(provider.stream, {
+      wireApi: "unknown",
+      sleep: async () => {},
+      random: () => 0,
+    })
+
+    const events = await collect(stream)
+
+    expect(events).toHaveLength(8)
+    expect(events[6]).toMatchObject({
+      type: "retry",
+      attempt: 7,
+      nextAttempt: 8,
+      maxAttempts: 8,
+      failure: { kind: "idle_timeout" },
+    })
+    expect(events[7]).toEqual(success)
+    expect(provider.calls()).toBe(8)
+  })
+
   it("honors a server retry veto on an idle timeout", async () => {
     const event = failure("idle_timeout")
     const provider = scriptedStream([

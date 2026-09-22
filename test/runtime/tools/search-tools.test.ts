@@ -239,6 +239,94 @@ describe("workspace search tools", () => {
     })
   })
 
+  it("paginates individual Unicode matches on the same line", async () => {
+    await withWorkspace(async (workspace) => {
+      await writeFile(join(workspace, "unicode.txt"), "前缀 猫 猫 猫 后缀\n")
+      const tool = createGrepTool()
+      const input = {
+        pattern: "猫",
+        output_mode: "content",
+        "-o": true,
+        head_limit: 2,
+      }
+      const first = await tool.execute(input, { workspaceRoot: workspace })
+      expect(first).toMatchObject({
+        ok: true,
+        output: {
+          count: 2,
+          locations: [
+            { path: "unicode.txt", line: 1, text: "猫" },
+            { path: "unicode.txt", line: 1, text: "猫" },
+          ],
+          page: { has_more: true, next: { offset: 2 } },
+        },
+      })
+      expect(first.content).not.toContain("前缀")
+      const second = await tool.execute(
+        { ...input, offset: 2 },
+        { workspaceRoot: workspace },
+      )
+      expect(second).toMatchObject({
+        ok: true,
+        output: {
+          count: 1,
+          locations: [{ path: "unicode.txt", line: 1, text: "猫" }],
+          page: { has_more: false },
+        },
+      })
+    })
+  })
+
+  it("uses byte offsets for multiline submatch line numbers and keeps context", async () => {
+    await withWorkspace(async (workspace) => {
+      await writeFile(
+        join(workspace, "multi.txt"),
+        "before\n中文a\nb 中文a\nb\nafter\n",
+      )
+      const result = await createGrepTool().execute(
+        {
+          pattern: "a\\nb",
+          output_mode: "content",
+          "-o": true,
+          multiline: true,
+          context: 1,
+        },
+        { workspaceRoot: workspace },
+      )
+      expect(result).toMatchObject({
+        ok: true,
+        output: {
+          locations: [
+            { path: "multi.txt", line: 1, text: "before" },
+            { path: "multi.txt", line: 2, text: "a\nb" },
+            { path: "multi.txt", line: 3, text: "a\nb" },
+            { path: "multi.txt", line: 5, text: "after" },
+          ],
+        },
+      })
+    })
+  })
+
+  it("omits empty only-matching results without changing count mode", async () => {
+    await withWorkspace(async (workspace) => {
+      await writeFile(join(workspace, "empty.txt"), "abc\n")
+      const tool = createGrepTool()
+      const result = await tool.execute(
+        { pattern: "^", output_mode: "content", "-o": true },
+        { workspaceRoot: workspace },
+      )
+      expect(result).toMatchObject({ ok: true, output: { count: 0 } })
+      const count = await tool.execute(
+        { pattern: "a|b", output_mode: "count", "-o": true },
+        { workspaceRoot: workspace },
+      )
+      expect(count).toMatchObject({
+        ok: true,
+        output: { locations: [{ path: "empty.txt", count: 2 }] },
+      })
+    })
+  })
+
   it("keeps ignored grep discovery as construction-time configuration", async () => {
     await withWorkspace(async (workspace) => {
       await mkdir(join(workspace, "ignored"))

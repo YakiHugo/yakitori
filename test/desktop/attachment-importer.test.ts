@@ -130,6 +130,31 @@ describe("desktop attachment importer", () => {
       }),
     ).rejects.toThrow("no longer available")
   })
+
+  it("stages a picked image under a draft rollout without a session", async () => {
+    const directory = await temporaryDirectory()
+    const imagePath = path.join(directory, "shot.png")
+    await writeFile(imagePath, new Uint8Array([1, 2, 3]))
+    electron.showOpenDialog.mockResolvedValue({
+      canceled: false,
+      filePaths: [imagePath],
+    })
+    const { event, request } = register()
+    const selection = (await handler("yakitori:pick-images")(event)) as {
+      readonly selectionId: string
+    }
+
+    await handler("yakitori:import-picked-images")(event, {
+      selectionId: selection.selectionId,
+    })
+
+    expect(request).toHaveBeenCalledWith({
+      type: "import_image_paths",
+      rolloutId: expect.stringMatching(/^draft_[0-9a-f]+$/),
+      ownerId: expect.stringMatching(/^draft_/),
+      paths: [imagePath],
+    })
+  })
 })
 
 const attachment: ImageAttachment = {

@@ -1,8 +1,3 @@
-import { isContextExcerpts } from "../kernel/input-context.ts"
-import {
-  parseSidebarChange,
-  type SessionSidebar,
-} from "../core/session-sidebar.ts"
 import { realpath, stat } from "node:fs/promises"
 import type { AgentThread } from "../core/agent-thread.ts"
 import type {
@@ -11,6 +6,10 @@ import type {
   StoredThread,
   ThreadSummary,
 } from "../core/rollout.ts"
+import {
+  parseSidebarChange,
+  type SessionSidebar,
+} from "../core/session-sidebar.ts"
 import type { ThreadManager } from "../core/thread-manager.ts"
 import type { ThreadStore } from "../core/thread-store.ts"
 import {
@@ -35,14 +34,14 @@ import {
   type TokenUsage,
   YakitoriErrorCode,
 } from "../kernel/index.ts"
-import { createCoalescingDeltaPublisher } from "../runtime/live-events.ts"
-import type { SkillMetadata } from "../runtime/skills.ts"
+import { isContextExcerpts } from "../kernel/input-context.ts"
 import type { AgentSummary } from "../runtime/agent-control.ts"
-import type { SessionTitleGenerator } from "./session-title.ts"
+import { createCoalescingDeltaPublisher } from "../runtime/live-events.ts"
 import type {
   RuntimePermissionReason,
   RuntimePermissionRequest,
 } from "../runtime/permission-gate.ts"
+import type { SkillMetadata } from "../runtime/skills.ts"
 import {
   consoleOperationalFailureReporter,
   type OperationalFailureReporter,
@@ -70,8 +69,10 @@ import {
   type ApiSessionDetail,
   type ApiSessionSummary,
 } from "./protocol.ts"
-import type { ProjectStore } from "./sqlite-project-store.ts"
 import type { SessionCompletedNotification } from "./rpc/methods.ts"
+import type { SessionTitleGenerator } from "./session-title.ts"
+import type { ProjectStore } from "./sqlite-project-store.ts"
+import { readWorkspaceGitInfo } from "./workspace.ts"
 
 // Input payload allocation boundary for local RPC commands, independent of
 // model context capacity. Retains the existing 256 KiB admission bound.
@@ -113,6 +114,7 @@ export type ThreadServerHandlerOptions = {
   // without a model directory.
   readonly sessionTitle?: SessionTitleGenerator
   readonly rolloutAssets?: RolloutAssets
+  readonly releaseDraftRolloutAssets?: (rolloutIds: readonly string[]) => void
   // Lists the skills the runtime would discover for a session's working
   // directory. Absent in tests and embedders without skill discovery.
   readonly listSessionSkills?: (input: {
@@ -484,8 +486,15 @@ export function createThreadServerHandlers(
             })
           }
         }
+        const gitInfo =
+          request.workingDirectory === undefined
+            ? undefined
+            : await readWorkspaceGitInfo({
+                cwd: request.workingDirectory,
+              }).catch(() => undefined)
         const thread = await options.manager.createThread({
           ...request,
+          ...(gitInfo === undefined ? {} : { gitInfo }),
           ...(request.parentSessionId === undefined
             ? {}
             : { parentThreadId: request.parentSessionId }),
@@ -952,12 +961,28 @@ export function createThreadServerHandlers(
                 )
               }
               try {
-                const promotion =
-                  await options.rolloutAssets.promoteImageAttachments(
-                    rolloutId,
-                    request.requestId,
-                    request.content.attachments,
-                  )
+                const belongsToSession = request.content.attachments.every(
+                  (attachment) => attachment.file.rolloutId === rolloutId,
+                )
+                const promotion = belongsToSession
+                  ? await options.rolloutAssets.promoteImageAttachments(
+                      rolloutId,
+                      request.requestId,
+                      request.content.attachments,
+                    )
+                  : {
+                      attachments:
+                        await options.rolloutAssets.copyImageAttachments(
+                          rolloutId,
+                          request.requestId,
+                          request.content.attachments,
+                        ),
+                      rollback: () =>
+                        options.rolloutAssets?.discardRequestImageAttachments(
+                          rolloutId,
+                          request.requestId,
+                        ) ?? Promise.resolve(),
+                    }
                 rollbackPromotion = promotion.rollback
                 content = {
                   ...request.content,
@@ -1002,17 +1027,24 @@ export function createThreadServerHandlers(
             }
             rollbackPromotion = undefined
             if (request.content.attachments !== undefined) {
-              await options.rolloutAssets
-                ?.discardDraftImageAttachments(request.content.attachments)
-                .catch((error: unknown) => {
-                  reportOperationalFailure(reporter, {
-                    component: "thread-handlers",
-                    operation: "discard-admitted-draft-attachments",
-                    cause: error,
-                    sessionId: request.sessionId,
-                    turnId: request.requestId,
-                  })
+              try {
+                await options.rolloutAssets?.discardDraftImageAttachments(
+                  request.content.attachments,
+                )
+                options.releaseDraftRolloutAssets?.(
+                  request.content.attachments.map(
+                    (attachment) => attachment.file.rolloutId,
+                  ),
+                )
+              } catch (error) {
+                reportOperationalFailure(reporter, {
+                  component: "thread-handlers",
+                  operation: "discard-admitted-draft-attachments",
+                  cause: error,
+                  sessionId: request.sessionId,
+                  turnId: request.requestId,
                 })
+              }
             }
             const stored = await requireStoredThread(
               options.store,
@@ -1196,6 +1228,7 @@ function mapThreadSummary(
     ...(thread.workingDirectory === undefined
       ? {}
       : { workingDirectory: thread.workingDirectory }),
+    ...(thread.gitInfo === undefined ? {} : { gitInfo: thread.gitInfo }),
     ...(thread.projectId === undefined ||
     (liveProjects !== undefined && !liveProjects.has(thread.projectId))
       ? {}

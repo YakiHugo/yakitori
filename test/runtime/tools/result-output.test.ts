@@ -1,25 +1,27 @@
-import { createServer } from "node:http"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { createServer } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
-import { createSessionId } from "../../../src/kernel/ids.ts"
 import {
   isModelMessage,
   type ModelToolResultMessage,
 } from "../../../src/kernel/events.ts"
+import { createSessionId } from "../../../src/kernel/ids.ts"
+import type { JsonValue } from "../../../src/kernel/index.ts"
 import { createRolloutAssets } from "../../../src/kernel/rollout-assets.ts"
-import { toOpenAIInput } from "../../../src/runtime/openai-provider.ts"
 import { toAnthropicMessages } from "../../../src/runtime/anthropic-provider.ts"
+import { toOpenAIInput } from "../../../src/runtime/openai-provider.ts"
 import { mcpResult } from "../../../src/runtime/tools/mcp-result.ts"
+import { createReadFileTool } from "../../../src/runtime/tools/read-file.ts"
 import {
-  createViewImageTool,
   createReadDocumentTool,
+  createViewImageTool,
 } from "../../../src/runtime/tools/read-media.ts"
 import { finalizeToolOutput } from "../../../src/runtime/tools/result-output.ts"
 import { createUnifiedExecTools } from "../../../src/runtime/tools/unified-exec.ts"
-import { createReadFileTool } from "../../../src/runtime/tools/read-file.ts"
 import { createWebFetchTool } from "../../../src/runtime/tools/web-fetch.ts"
+import { pdfFixture } from "./pdf-fixture.ts"
 
 const roots: string[] = []
 afterEach(async () => {
@@ -69,6 +71,83 @@ describe("tool result persistence and model projection", () => {
       ctx,
     )
     expect(empty.content).toBe("")
+  })
+
+  it.each([
+    {
+      name: "objects with reordered keys",
+      text: '{"count":1,"items":[{"name":"One","id":1}]}',
+      structured: { items: [{ id: 1, name: "One" }], count: 1 },
+    },
+    {
+      name: "pretty JSON in a fence",
+      text: 'Found one item:\n```json\n{\n  "items": ["item-1"]\n}\n```',
+      structured: { items: ["item-1"] },
+    },
+    {
+      name: "JSON in prose",
+      text: 'Step [1]: result {"items":["item-1"]}. Finished.',
+      structured: { items: ["item-1"] },
+    },
+    {
+      name: "an array",
+      text: 'Items: [{"name":"One","id":1}]',
+      structured: [{ id: 1, name: "One" }],
+    },
+    {
+      name: "a string",
+      text: "Report with {braces} and [brackets]",
+      structured: "Report with {braces} and [brackets]",
+    },
+  ] satisfies {
+    name: string
+    text: string
+    structured: JsonValue
+  }[])("projects $name once while preserving full MCP output", async ({
+    text,
+    structured,
+  }) => {
+    const ctx = await context()
+    const input = {
+      content: [{ type: "text", text }],
+      structuredContent: structured,
+      _meta: { privateState: "host-only" },
+    }
+    const result = await mcpResult(input, ctx)
+    const projected = await finalizeToolOutput(result, budget, ctx)
+    expect(projected.content).toBe(text)
+    expect(JSON.stringify(projected)).not.toContain("host-only")
+    expect(result.output).toEqual(input)
+  })
+
+  it.each([
+    {
+      text: '{"items":[2,1]}',
+      expected: '{"items":[2,1]}\n{"items":[1,2]}',
+    },
+    {
+      text: '{"items":[1,2],"extra":true}',
+      expected: '{"items":[1,2],"extra":true}\n{"items":[1,2]}',
+    },
+    {
+      text: 'Malformed {"items":[1,2]',
+      expected: 'Malformed {"items":[1,2]\n{"items":[1,2]}',
+    },
+  ])("retains structured data when text differs: $text", async ({
+    text,
+    expected,
+  }) => {
+    const ctx = await context()
+    const result = await mcpResult(
+      {
+        content: [{ type: "text", text }],
+        structuredContent: { items: [1, 2] },
+      },
+      ctx,
+    )
+    expect((await finalizeToolOutput(result, budget, ctx)).content).toBe(
+      expected,
+    )
   })
 
   it("retains full text for a second read while bounding the model preview", async () => {
@@ -180,23 +259,38 @@ describe("tool result persistence and model projection", () => {
     expect(JSON.stringify(result.output)).not.toContain(png.toString("base64"))
   })
 
-  it("preserves mixed MCP media when long text is offloaded", async () => {
+  it.each([
+    "image",
+    "resource",
+  ] as const)("preserves MCP %s images when long text is offloaded", async (type) => {
     const ctx = await context()
     const result = await mcpResult(
       {
         content: [
           { type: "text", text: "long text\n".repeat(1000) },
-          {
-            type: "image",
-            mimeType: "image/png",
-            data: png.toString("base64"),
-          },
+          type === "image"
+            ? {
+                type: "image",
+                mimeType: "image/png",
+                data: png.toString("base64"),
+              }
+            : {
+                type: "resource",
+                resource: {
+                  uri: "demo://image",
+                  mimeType: "image/png",
+                  blob: png.toString("base64"),
+                },
+              },
         ],
       },
       ctx,
     )
     const projected = await finalizeToolOutput(result, budget, ctx)
     expect(projected.images).toHaveLength(1)
+    const file = projected.images?.[0]?.file
+    if (!file) throw new Error("Missing MCP image snapshot")
+    expect(await ctx.rolloutAssets.read(file)).toEqual(png)
     expect(projected.content).toContain("Full text saved")
     expect(JSON.stringify(result.output)).not.toContain(png.toString("base64"))
     expect(Buffer.byteLength(projected.content)).toBeLessThanOrEqual(1024)
@@ -205,9 +299,15 @@ describe("tool result persistence and model projection", () => {
   it("keeps PDF snapshots and uses provider-native document inputs", async () => {
     const ctx = await context()
     const path = join(ctx.workspaceRoot, "document.pdf")
-    const pdf = Buffer.from("%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF")
+    const pdf = pdfFixture(["Native PDF"])
     await writeFile(path, pdf)
-    const result = await createReadDocumentTool().execute({ path }, ctx)
+    const result = await createReadDocumentTool().execute(
+      { path },
+      {
+        ...ctx,
+        documentReading: { nativePdf: true, images: true },
+      },
+    )
     const projected = await finalizeToolOutput(result, budget, ctx)
     const document = projected.documents?.[0]
     if (document === undefined) throw new Error("Missing document")

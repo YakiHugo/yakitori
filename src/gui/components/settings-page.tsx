@@ -1,14 +1,16 @@
 import {
+  ArrowLeft,
   Bell,
   ChartColumn,
   CircleUserRound,
   LoaderCircle,
   Monitor,
+  Plug,
   RefreshCw,
-  X,
 } from "lucide-react"
 import { useEffect } from "react"
-import { useAppStore, type SettingsSection } from "../store/app-store.ts"
+import { type SettingsSection, useAppStore } from "../store/app-store.ts"
+import { McpSettings } from "./mcp-settings.tsx"
 import {
   GeneralSettingsSection,
   NotificationSettingsSection,
@@ -19,6 +21,7 @@ const sections = [
   { id: "general", label: "General", icon: Monitor },
   { id: "notifications", label: "Notifications", icon: Bell },
   { id: "subscriptions", label: "Subscriptions", icon: CircleUserRound },
+  { id: "mcp", label: "MCP servers", icon: Plug },
   { id: "usage", label: "Usage", icon: ChartColumn },
 ] as const satisfies readonly Readonly<{
   id: SettingsSection
@@ -30,6 +33,7 @@ const sectionAria: Record<SettingsSection, string> = {
   general: "General settings",
   notifications: "Notification settings",
   subscriptions: "Subscription settings",
+  mcp: "MCP server settings",
   usage: "Usage dashboard",
 }
 
@@ -50,19 +54,19 @@ export function SettingsPage() {
 
   return (
     <div className="settings-page">
-      <header className="settings-page-header">
-        <h2>Settings</h2>
+      <aside className="settings-sidebar" aria-label="Settings navigation">
         <button
           type="button"
-          aria-label="Close settings"
-          title="Close settings (Esc)"
+          className="settings-back"
+          aria-label="Back to app"
+          title="Back to app (Esc)"
           onClick={closeSettings}
         >
-          <X size={17} />
+          <ArrowLeft size={16} />
+          <span>Back to app</span>
         </button>
-      </header>
-      <div className="settings-page-body">
-        <div className="settings-layout">
+        <div className="settings-nav-group">
+          <p>Preferences</p>
           <nav aria-label="Settings sections" className="settings-nav">
             {sections.map(({ id, label, icon: Icon }) => (
               <button
@@ -72,15 +76,15 @@ export function SettingsPage() {
                 onClick={() => setSettingsSection(id)}
               >
                 <Icon size={16} />
-                {label}
+                <span>{label}</span>
               </button>
             ))}
-            <p>Make Yakitori feel at home.</p>
           </nav>
-          <section
-            className="settings-content"
-            aria-label={sectionAria[section]}
-          >
+        </div>
+      </aside>
+      <main className="settings-page-body">
+        <section className="settings-content" aria-label={sectionAria[section]}>
+          <div className="settings-content-inner">
             {section === "general" ? (
               <GeneralSettingsSection />
             ) : section === "notifications" ? (
@@ -94,12 +98,14 @@ export function SettingsPage() {
                 </div>
                 <SubscriptionsSection />
               </>
+            ) : section === "mcp" ? (
+              <McpSettings />
             ) : (
               <UsageSection />
             )}
-          </section>
-        </div>
-      </div>
+          </div>
+        </section>
+      </main>
     </div>
   )
 }

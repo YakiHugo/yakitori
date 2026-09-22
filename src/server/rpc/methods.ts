@@ -10,8 +10,10 @@ import {
   YakitoriErrorCode,
 } from "../../kernel/index.ts"
 import type { LiveSessionEvent } from "../../runtime/live-events.ts"
+import type { ComputerUseStatus } from "../computer-use.ts"
 import type { ServerHandlers } from "../handlers.ts"
 import { requireUserModelPreference } from "../http.ts"
+import type { McpService } from "../mcp-service.ts"
 import {
   type ApiAdmitInputRequest,
   type ApiAdmitInputResponse,
@@ -51,27 +53,37 @@ import {
   type ApiUpdateUserModelPreferenceResponse,
   type ApiUserModelPreference,
 } from "../protocol.ts"
+import type { SideChatService } from "../side-chat.ts"
 import {
   InvalidProjectCursorError,
   ProjectMoveOutcome,
   type ProjectStore,
 } from "../sqlite-project-store.ts"
 import type { ConfigurationSnapshot, UserConfigStore } from "../user-config.ts"
-import type { ComputerUseStatus } from "../computer-use.ts"
-import type { SideChatService } from "../side-chat.ts"
+import type { SessionInteractions } from "../user-interactions.ts"
 import { computerMethods } from "./computer-methods.ts"
 import {
-  sideChatMethods,
-  type SideChatRpcParams,
-  type SideChatRpcResponses,
-} from "./side-chat-methods.ts"
+  type InteractionRpcParams,
+  type InteractionRpcResponses,
+  interactionMethods,
+} from "./interaction-methods.ts"
+import {
+  type McpRpcParams,
+  type McpRpcResponses,
+  mcpMethods,
+} from "./mcp-methods.ts"
 import { INTERNAL_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND } from "./messages.ts"
 import type { RequestSerializationScope } from "./serialization.ts"
+import {
+  type SideChatRpcParams,
+  type SideChatRpcResponses,
+  sideChatMethods,
+} from "./side-chat-methods.ts"
 import type { SessionSubscriptions } from "./subscriptions.ts"
 import {
-  workspaceRpcMethods,
   type WorkspaceRpcParams,
   type WorkspaceRpcResponses,
+  workspaceRpcMethods,
 } from "./workspace-methods.ts"
 
 // The C8-D1 method surface: Codex's <resource>/<method> naming with the
@@ -221,6 +233,8 @@ export type RpcMethodOutcome = Readonly<{
 }>
 
 export type RpcMethodContext = Readonly<{
+  mcp?: McpService
+  interactions?: SessionInteractions
   sideChats?: SideChatService
   connectionId: number
   handlers: ServerHandlers
@@ -613,6 +627,8 @@ function handlerEntry<TResult>(
 
 export const rpcMethods: readonly RpcMethodDefinition[] = [
   ...sideChatMethods,
+  ...interactionMethods,
+  ...mcpMethods,
   ...workspaceRpcMethods,
   ...computerMethods,
   {
@@ -1110,6 +1126,8 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
 // handlers own their validation.
 export type RpcMethodParams = Readonly<
   WorkspaceRpcParams &
+    InteractionRpcParams &
+    McpRpcParams &
     SideChatRpcParams & {
       "computer/status": Readonly<Record<string, never>>
       "computer/connect": Readonly<Record<string, never>>
@@ -1152,6 +1170,8 @@ export type RpcMethodParams = Readonly<
 
 export type RpcMethodResponses = Readonly<
   WorkspaceRpcResponses &
+    InteractionRpcResponses &
+    McpRpcResponses &
     SideChatRpcResponses & {
       "computer/status": ComputerUseStatus
       "computer/connect": ComputerUseStatus

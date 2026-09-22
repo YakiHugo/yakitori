@@ -9,7 +9,6 @@ import {
   sep,
 } from "node:path"
 import { Agent as UndiciAgent } from "undici"
-import type { TurnProcessor } from "../core/session.ts"
 import packageJson from "../../package.json" with { type: "json" }
 import {
   createSqliteAgentGraphStore,
@@ -19,6 +18,7 @@ import {
   ThreadManager,
   type ThreadStore,
 } from "../core/index.ts"
+import type { TurnProcessor } from "../core/session.ts"
 import { createRolloutAssets } from "../kernel/index.ts"
 import {
   createMateKernel,
@@ -66,6 +66,7 @@ import {
   type StreamFn,
   type UserShellEnv,
 } from "../runtime/index.ts"
+import { createMcpOAuth } from "../runtime/mcp-oauth.ts"
 import { createSkillsLoader } from "../runtime/skills.ts"
 import { createSessionEventHub } from "./event-hub.ts"
 import {
@@ -74,12 +75,7 @@ import {
   type SessionCreateDefaults,
 } from "./handlers.ts"
 import { createYakitoriHttpServer } from "./http.ts"
-import { createSessionTitleGenerator } from "./session-title.ts"
-import {
-  createSideChatService,
-  sideChatInstructions,
-  type SideChatService,
-} from "./side-chat.ts"
+import { createMcpService, McpServiceError } from "./mcp-service.ts"
 import { createModelDirectory, type ModelDirectory } from "./model-directory.ts"
 import {
   consoleOperationalFailureReporter,
@@ -94,6 +90,12 @@ import type {
   ApiSubscriptionProvider,
 } from "./protocol.ts"
 import type { RequestGate } from "./request-gate.ts"
+import { createSessionTitleGenerator } from "./session-title.ts"
+import {
+  createSideChatService,
+  type SideChatService,
+  sideChatInstructions,
+} from "./side-chat.ts"
 import {
   createSqliteProjectStore,
   type ProjectStore,
@@ -104,6 +106,10 @@ import {
   createUserConfigStore,
   type UserConfigStore,
 } from "./user-config.ts"
+import {
+  createElicitationBroker,
+  createSessionInteractions,
+} from "./user-interactions.ts"
 
 const defaultMateProfile = {
   instructions:
@@ -155,6 +161,7 @@ export type YakitoriApplication = {
   readonly threadManager: ThreadManager
   readonly threadStore: ThreadStore
   readonly rolloutAssets: ReturnType<typeof createRolloutAssets>
+  releaseDraftRolloutAssets(rolloutIds: readonly string[]): void
   readonly sessionStoreRoot: string
   readonly workspace: string
   readonly activeMate: {
@@ -197,6 +204,12 @@ export async function createYakitoriApplication(
   let mateStore: SqliteMateStore | undefined
   let projectStoreForCleanup: SqliteProjectStore | undefined
   let sideChatsForCleanup: SideChatService | undefined
+  const elicitations = createElicitationBroker()
+  const mcpOAuth = createMcpOAuth({ storePath: join(rootDir, "mcp-auth") })
+  const closeExtensions = async () => {
+    elicitations.close()
+    await mcpOAuth.close()
+  }
   // Attached when an HTTP server binds a message processor; server-initiated
   // notifications (session activity, server-side renames) stay silent until
   // then, which keeps handler-only embedders unaffected.
@@ -283,7 +296,7 @@ export async function createYakitoriApplication(
         includeMultiAgent,
         execCommandLog: (message) => console.log(message),
       })
-    const mcpManagers = new Set<McpConnectionManager>()
+    const mcpManagers = new Map<string, McpConnectionManager>()
     // One physical desktop is shared by every session in this server. Hold
     // ownership across model steps so focus/input from two turns cannot mix.
     let computerOwner: string | undefined
@@ -383,10 +396,30 @@ export async function createYakitoriApplication(
     const threadStore = new JsonlThreadStore({ root: sessionStoreRoot })
     await threadStore.initialize()
     const ephemeralAssetOwners = new Map<string, () => void>()
+    const draftAssetOwners = new Map<string, () => void>()
+    const releaseDraftRolloutAssets = (rolloutIds: readonly string[]) => {
+      for (const rolloutId of new Set(rolloutIds)) {
+        if (!rolloutId.startsWith("draft_")) continue
+        draftAssetOwners.get(rolloutId)?.()
+        draftAssetOwners.delete(rolloutId)
+      }
+    }
     const rolloutAssets = createRolloutAssets(sessionStoreRoot, {
       withMutationLease: async (rolloutId, mutate) => {
+        if (
+          rolloutId.startsWith("draft_") &&
+          !draftAssetOwners.has(rolloutId)
+        ) {
+          draftAssetOwners.set(
+            rolloutId,
+            threadStore.retainEphemeralRolloutAssets(rolloutId),
+          )
+        }
         return threadStore.withRolloutAssetMutation(rolloutId, async () => {
-          if (ephemeralAssetOwners.has(rolloutId))
+          if (
+            ephemeralAssetOwners.has(rolloutId) ||
+            draftAssetOwners.has(rolloutId)
+          )
             await mkdir(join(sessionStoreRoot, "rollouts", rolloutId), {
               recursive: true,
             })
@@ -444,9 +477,22 @@ export async function createYakitoriApplication(
             : { shellEnvironmentPolicy }),
         })
       const toolRegistry = createToolRegistry(
-        createTrustedTools(sessionShellEnv, !sideConversation),
+        createTrustedTools(sessionShellEnv, !sideConversation).filter(
+          (tool) =>
+            tool.toolName.name !== "request_user_input_async" ||
+            (!sideConversation && !isSubagentThread(stored)),
+        ),
       )
       const mcpManager = createMcpConnectionManager({
+        authProvider: (name, config) =>
+          "url" in config ? mcpOAuth.provider(name, config) : undefined,
+        onElicitation: (request, signal) =>
+          elicitations.request(
+            stored.metadata.id,
+            request.serverName,
+            request.params,
+            signal,
+          ),
         // Codex's bundled Computer Use Stop/Interrupt/SubagentStop hook.
         turnEndTools: {
           cua_repl: {
@@ -541,7 +587,23 @@ export async function createYakitoriApplication(
               await mcpManager.update(servers, signal)
               mcpConfiguration = fingerprint
             }
-            return snapshot.configuration
+            const status = new Map(
+              mcpManager.status().map((server) => [server.name, server]),
+            )
+            return {
+              ...snapshot.configuration,
+              skillMcpServers: Object.entries(servers).map(([name, server]) => {
+                const current = status.get(name)
+                return {
+                  name,
+                  ...("url" in server ? { url: server.url } : {}),
+                  available: current?.state === "ready",
+                  ...(current?.error === undefined
+                    ? {}
+                    : { reason: current.error }),
+                }
+              }),
+            }
           },
           loadModelTransport: async () =>
             (
@@ -617,7 +679,7 @@ export async function createYakitoriApplication(
         ])
         throw error
       }
-      mcpManagers.add(mcpManager)
+      mcpManagers.set(stored.metadata.id, mcpManager)
       return {
         prepare: processor.prepare,
         ...(processor.prepareSteering === undefined
@@ -639,7 +701,9 @@ export async function createYakitoriApplication(
           }
         },
         async dispose() {
-          mcpManagers.delete(mcpManager)
+          elicitations.cancelSession(stored.metadata.id)
+          if (mcpManagers.get(stored.metadata.id) === mcpManager)
+            mcpManagers.delete(stored.metadata.id)
           const processorResult = await Promise.allSettled([
             processor.dispose?.(),
           ])
@@ -724,6 +788,7 @@ export async function createYakitoriApplication(
       availableProviders: providerRegistry.providers,
       ...(sessionTitle === undefined ? {} : { sessionTitle }),
       rolloutAssets,
+      releaseDraftRolloutAssets,
       listSessionSkills: async ({ workingDirectory, projectId }) => {
         // Resolve the config root the same way the turn-processor path does:
         // with the session's project, not a roots-only scan.
@@ -748,6 +813,35 @@ export async function createYakitoriApplication(
         return discovered.skills
       },
       reportOperationalFailure: reporter,
+    })
+    const interactions = createSessionInteractions(
+      threadStore,
+      handlers,
+      elicitations,
+    )
+    const mcp = createMcpService({
+      oauth: mcpOAuth,
+      managers: mcpManagers,
+      async activateSession(sessionId) {
+        if ((await threadManager.resumeThread(sessionId)) === undefined)
+          throw new McpServiceError("Session not found.")
+      },
+      async readServers(sessionId) {
+        const stored =
+          sessionId === undefined
+            ? undefined
+            : await threadStore.readThread(sessionId)
+        if (sessionId !== undefined && stored === undefined)
+          throw new McpServiceError("Session not found.")
+        const cwd = stored?.metadata.workingDirectory ?? workspace
+        const root = await resolveProjectConfigRoot(
+          ownedProjectStore,
+          cwd,
+          stored?.metadata.projectId,
+        )
+        const config = await createSessionUserConfig(root).readSnapshot({ cwd })
+        return resolveSessionMcpServers(config, cwd)
+      },
     })
 
     const sideChats = createSideChatService({
@@ -799,6 +893,7 @@ export async function createYakitoriApplication(
       threadManager,
       threadStore,
       rolloutAssets,
+      releaseDraftRolloutAssets,
       sessionStoreRoot,
       workspace,
       activeMate: {
@@ -809,6 +904,8 @@ export async function createYakitoriApplication(
       },
       createHttpServer(httpOptions = {}) {
         return createYakitoriHttpServer({
+          mcp,
+          interactions,
           sideChats,
           eventHub,
           handlers,
@@ -825,7 +922,9 @@ export async function createYakitoriApplication(
               processor.broadcastNotification(method, params)
           },
           diagnostics: () => {
-            const mcp = [...mcpManagers].flatMap((manager) => manager.status())
+            const mcp = [...mcpManagers.values()].flatMap((manager) =>
+              manager.status(),
+            )
             return {
               resident_threads: threadManager.residentThreadCount,
               active_turns: threadManager.runningTurnCount,
@@ -855,6 +954,7 @@ export async function createYakitoriApplication(
           agentGraphStore.close,
           runtimeLock,
           sideChats,
+          closeExtensions,
         )
         await closePromise
       },
@@ -870,6 +970,7 @@ export async function createYakitoriApplication(
         agentGraphStoreForCleanup?.close,
         runtimeLock,
         sideChatsForCleanup,
+        closeExtensions,
       )
     } catch (cleanupError) {
       throw new AggregateError(
@@ -1369,8 +1470,14 @@ async function closeApplicationResources(
   closeAgentGraphStore: (() => void) | undefined,
   runtimeLock: RuntimeLock | undefined,
   sideChats?: SideChatService,
+  closeExtensions?: () => Promise<void>,
 ): Promise<void> {
   const errors: unknown[] = []
+  try {
+    await closeExtensions?.()
+  } catch (error) {
+    errors.push(error)
+  }
   try {
     await sideChats?.close()
   } catch (error) {

@@ -11,13 +11,15 @@ import { useWorkspaceStore } from "../../src/gui/store/workspace-store.ts"
 import type { ApiSessionDetail } from "../../src/server/protocol.ts"
 import type { GitStatusResponse } from "../../src/server/workspace.ts"
 
-const { request, listAgents } = vi.hoisted(() => ({
+const { request, listAgents, openUrlTarget } = vi.hoisted(() => ({
   listAgents: vi.fn(),
+  openUrlTarget: vi.fn(),
   request:
     vi.fn<
       (method: string, params: Record<string, unknown>) => Promise<unknown>
     >(),
 }))
+vi.mock("../../src/gui/lib/open-resource.ts", () => ({ openUrlTarget }))
 vi.mock("../../src/gui/lib/rpc-client.ts", () => ({
   getAppRpcClient: () => ({
     request: (method: string, params: Record<string, unknown>) =>
@@ -52,7 +54,12 @@ function session(id = "session-1", cwd = "/repo"): ApiSessionDetail {
 beforeEach(() => {
   request.mockReset()
   listAgents.mockReset().mockResolvedValue({ agents: [] })
-  request.mockResolvedValue({ repository: true, branch: "main", entries: [] })
+  openUrlTarget.mockReset().mockResolvedValue(undefined)
+  request.mockImplementation(async (method) =>
+    method === "git/pullRequests"
+      ? { available: true, pullRequests: [] }
+      : { repository: true, branch: "main", entries: [] },
+  )
   useAppStore.setState({
     ...createInitialAppState(),
     selectedSession: session(),
@@ -67,15 +74,19 @@ afterEach(() => {
 })
 
 it("loads real status on demand and opens the changes workspace", async () => {
-  request.mockResolvedValue({
-    repository: true,
-    branch: "feat/context",
-    entries: [
-      { path: "both.ts", indexStatus: "M", worktreeStatus: "M" },
-      { path: "new.ts", indexStatus: "?", worktreeStatus: "?" },
-      { path: "removed.ts", indexStatus: "D", worktreeStatus: " " },
-    ],
-  })
+  request.mockImplementation(async (method) =>
+    method === "git/pullRequests"
+      ? { available: true, pullRequests: [] }
+      : {
+          repository: true,
+          branch: "feat/context",
+          entries: [
+            { path: "both.ts", indexStatus: "M", worktreeStatus: "M" },
+            { path: "new.ts", indexStatus: "?", worktreeStatus: "?" },
+            { path: "removed.ts", indexStatus: "D", worktreeStatus: " " },
+          ],
+        },
+  )
   const user = userEvent.setup()
   render(<SessionSummary />)
   expect(request).not.toHaveBeenCalled()
@@ -94,6 +105,69 @@ it("loads real status on demand and opens the changes workspace", async () => {
   expect(useWorkspaceStore.getState().open).toBe(true)
   expect(useWorkspaceStore.getState().tabs[0]?.kind).toBe("changes")
   expect(screen.queryByRole("dialog")).toBeNull()
+})
+
+it("keeps the session branch stable and shows current and historical PRs", async () => {
+  useAppStore.setState({
+    selectedSession: {
+      ...session(),
+      gitInfo: {
+        sha: "0123456789abcdef",
+        branch: "feat/session-context",
+        originUrl: "https://github.com/example/project.git",
+      },
+    },
+  })
+  request.mockImplementation(async (method, params) => {
+    if (method === "git/pullRequests") {
+      expect(params).toEqual({
+        cwd: "/repo",
+        branch: "feat/session-context",
+      })
+      return {
+        available: true,
+        pullRequests: [
+          {
+            number: 12,
+            title: "Current work",
+            state: "OPEN",
+            isDraft: true,
+            url: "https://github.com/example/project/pull/12",
+            headRefName: "feat/session-context",
+            updatedAt: "2026-09-22T00:00:00Z",
+          },
+          {
+            number: 7,
+            title: "Earlier approach",
+            state: "MERGED",
+            isDraft: false,
+            url: "https://github.com/example/project/pull/7",
+            headRefName: "feat/session-context",
+            updatedAt: "2026-09-20T00:00:00Z",
+          },
+        ],
+      }
+    }
+    return { repository: true, branch: "unrelated-checkout", entries: [] }
+  })
+
+  const user = userEvent.setup()
+  render(<SessionSummary />)
+  await user.click(screen.getByRole("button", { name: "Session context" }))
+
+  expect(await screen.findByText("feat/session-context")).toBeDefined()
+  expect(
+    screen.getByText("Workspace is currently on unrelated-checkout"),
+  ).toBeDefined()
+  expect(screen.getByText("#12 Current work")).toBeDefined()
+  expect(screen.getByText("Draft")).toBeDefined()
+  expect(screen.getByText("#7 Earlier approach")).toBeDefined()
+  expect(screen.getByText("Merged")).toBeDefined()
+  await user.click(screen.getByRole("link", { name: /#12 Current work/ }))
+  expect(openUrlTarget).toHaveBeenCalledWith({
+    kind: "url",
+    url: "https://github.com/example/project/pull/12",
+  })
 })
 
 it("shows submitted sources once and expands their original content", async () => {

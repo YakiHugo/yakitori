@@ -1,9 +1,17 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
+import {
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import {
   createSkillsLoader,
+  getSkillDependencyDiagnostics,
   loadExplicitSkillInstructions,
   loadSkillsCatalog,
   renderSkillsCatalog,
@@ -208,3 +216,209 @@ it("discovers and injects shared user skills outside the project and app home", 
     await rm(root, { recursive: true, force: true })
   }
 })
+
+it("keeps explicit-only skills selectable and refreshes policy and dependencies together", async () => {
+  const root = await mkdtemp(join(tmpdir(), "yakitori-skill-policy-"))
+  try {
+    const skill = join(root, ".agents", "skills", "research")
+    const metadataPath = join(skill, "agents", "openai.yaml")
+    await mkdir(join(skill, "agents"), { recursive: true })
+    await writeFile(
+      join(skill, "SKILL.md"),
+      "---\nname: research\ndescription: Research sources\n---\nRESEARCH BODY",
+    )
+    await writeFile(
+      metadataPath,
+      `policy:
+  allow_implicit_invocation: false
+dependencies:
+  tools:
+    - type: mcp
+      value: docs
+      description: Official documentation
+      transport: streamable_http
+      url: https://docs.example/mcp
+      oauth:
+        callbackPort: 8765
+    - type: cli
+      value: node
+      command: node
+`,
+    )
+    const load = createSkillsLoader()
+    const input = {
+      workingDirectory: root,
+      homeDir: join(root, "empty"),
+      userHomeDir: join(root, "empty"),
+    }
+    const snapshot = await load(input)
+    expect(snapshot.diagnostics).toEqual([])
+    expect(snapshot.skills[0]).toMatchObject({
+      policy: { allowImplicitInvocation: false },
+      dependencies: {
+        tools: [
+          {
+            type: "mcp",
+            value: "docs",
+            transport: "streamable_http",
+            url: "https://docs.example/mcp",
+            oauthCallbackPort: 8765,
+          },
+          { type: "cli", value: "node", command: "node" },
+        ],
+      },
+    })
+    expect(renderSkillsCatalog(snapshot)).toBeUndefined()
+    const warnings: string[] = []
+    const instructions = await loadExplicitSkillInstructions(
+      "$research",
+      snapshot,
+      (warning) => warnings.push(warning),
+      { mcpServers: [] },
+    )
+    expect(instructions).toContain("RESEARCH BODY")
+    expect(instructions).toContain("requires MCP server docs")
+    expect(instructions).toContain("Ask the user to configure or enable")
+    expect(warnings).toHaveLength(1)
+    expect(getSkillDependencyDiagnostics(snapshot.skills, [])).toMatchObject([
+      {
+        skillName: "research",
+        status: "missing",
+        dependency: { value: "docs" },
+      },
+    ])
+    expect(
+      getSkillDependencyDiagnostics(snapshot.skills, [
+        { name: "docs", available: false, reason: "disabled" },
+      ]),
+    ).toMatchObject([
+      { status: "unavailable", message: expect.stringContaining("disabled") },
+    ])
+    expect(
+      getSkillDependencyDiagnostics(snapshot.skills, [
+        { name: "renamed", url: "https://docs.example/mcp", available: true },
+      ]),
+    ).toEqual([])
+    await writeFile(
+      metadataPath,
+      "policy:\n  allow_implicit_invocation: true\n",
+    )
+    const refreshed = await load(input)
+    expect(refreshed.skills[0]?.dependencies).toBeUndefined()
+    expect(renderSkillsCatalog(refreshed)?.text).toContain("Research sources")
+    expect(snapshot.skills[0]?.policy?.allowImplicitInvocation).toBe(false)
+    await rm(metadataPath)
+    expect((await load(input)).skills[0]?.policy).toBeUndefined()
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+it("reports invalid optional metadata without hiding the workflow", async () => {
+  const root = await mkdtemp(join(tmpdir(), "yakitori-skill-invalid-policy-"))
+  try {
+    const skill = join(root, "skill")
+    await mkdir(join(skill, "agents"), { recursive: true })
+    await writeFile(
+      join(skill, "SKILL.md"),
+      "---\nname: review\ndescription: Review changes\n---\nREVIEW BODY",
+    )
+    const metadata = join(skill, "agents", "openai.yaml")
+    const input = {
+      workingDirectory: root,
+      homeDir: join(root, "empty"),
+      userHomeDir: join(root, "empty"),
+      configuration: { paths: [skill] },
+    }
+    const load = createSkillsLoader()
+    for (const invalid of [
+      "policy:\n  allow_implicit_invocation: nope\n",
+      "dependencies:\n  tools: broken\n",
+      "dependencies:\n  tools:\n    - type: mcp\n      value: []\n",
+      "[broken",
+      "x".repeat(33_000),
+    ]) {
+      await writeFile(metadata, invalid)
+      const snapshot = await load(input)
+      expect(snapshot.skills).toHaveLength(1)
+      expect(snapshot.diagnostics).toHaveLength(1)
+      expect(snapshot.diagnostics[0]?.path).toBe(await realpath(metadata))
+      expect(renderSkillsCatalog(snapshot)?.text).toContain("Review changes")
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+it("skips hidden descendants while retaining explicit hidden roots and linked visible skills", async () => {
+  const root = await mkdtemp(join(tmpdir(), "yakitori-skill-hidden-"))
+  try {
+    const skillsRoot = join(root, ".agents", "skills")
+    const hidden = join(skillsRoot, ".hidden")
+    const visible = join(skillsRoot, "visible")
+    await mkdir(hidden, { recursive: true })
+    await mkdir(visible)
+    await writeFile(
+      join(hidden, "SKILL.md"),
+      "---\nname: hidden\ndescription: Hidden workflow\n---\n",
+    )
+    await writeFile(
+      join(visible, "SKILL.md"),
+      "---\nname: visible\ndescription: Visible workflow\n---\n",
+    )
+    await symlink(skillsRoot, join(visible, "cycle"))
+    const load = createSkillsLoader()
+    const input = {
+      workingDirectory: root,
+      homeDir: join(root, "empty"),
+      userHomeDir: join(root, "empty"),
+    }
+    expect((await load(input)).skills.map((skill) => skill.name)).toEqual([
+      "visible",
+    ])
+    expect(
+      (await load({ ...input, configuration: { paths: [hidden] } })).skills.map(
+        (skill) => skill.name,
+      ),
+    ).toEqual(["hidden", "visible"])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+it("bounds each root independently so a large repo cannot starve user skills", async () => {
+  const root = await mkdtemp(join(tmpdir(), "yakitori-skill-root-budget-"))
+  try {
+    const repoSkills = join(root, ".agents", "skills")
+    const userHome = join(root, "user")
+    const userSkill = join(userHome, ".agents", "skills", "review")
+    await mkdir(repoSkills, { recursive: true })
+    await mkdir(userSkill, { recursive: true })
+    // Ordinary unrelated files also consume enumeration work. This exercises
+    // the real filesystem boundary without timing or syscall-count assertions.
+    for (let start = 0; start < 20_001; start += 256)
+      await Promise.all(
+        Array.from({ length: Math.min(256, 20_001 - start) }, (_, index) =>
+          writeFile(join(repoSkills, `asset-${start + index}`), ""),
+        ),
+      )
+    await writeFile(
+      join(userSkill, "SKILL.md"),
+      "---\nname: review\ndescription: User review\n---\n",
+    )
+    const snapshot = await createSkillsLoader()({
+      workingDirectory: root,
+      homeDir: join(root, "empty"),
+      userHomeDir: userHome,
+    })
+    expect(snapshot.skills.map((skill) => skill.name)).toEqual(["review"])
+    expect(snapshot.diagnostics).toEqual([
+      {
+        path: await realpath(repoSkills),
+        message: "Skill discovery reached its host traversal safety boundary.",
+      },
+    ])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}, 30_000)

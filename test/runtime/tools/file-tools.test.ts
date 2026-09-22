@@ -828,6 +828,8 @@ describe("bounded file tools", () => {
       "write_stdin",
       "web_fetch",
       "web_search",
+      "request_user_input_async",
+      "update_plan",
       "spawn_agent",
       "send_message",
       "followup_task",
