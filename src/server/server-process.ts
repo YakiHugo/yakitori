@@ -12,6 +12,8 @@ import {
   type OperationalFailureReporter,
   reportOperationalFailure,
 } from "./operational-errors.ts"
+import { createRequestGate } from "./request-gate.ts"
+import { createServerControlMessageHandler } from "./server-control-handler.ts"
 import {
   beginHttpServerShutdown,
   createShutdownController,
@@ -19,8 +21,6 @@ import {
   type HttpServerShutdown,
   shutdownHttpApplication,
 } from "./shutdown.ts"
-import { createRequestGate } from "./request-gate.ts"
-import { createServerControlMessageHandler } from "./server-control-handler.ts"
 import { SideChatError } from "./side-chat.ts"
 
 export type YakitoriServerProcessInput = Readonly<{
@@ -189,11 +189,24 @@ export async function runYakitoriServerProcess(
 
 export async function handleServerControlRequest(
   application: Pick<YakitoriApplication, "rolloutAssets" | "threadStore"> &
-    Partial<Pick<YakitoriApplication, "sideChats">>,
+    Partial<
+      Pick<YakitoriApplication, "releaseDraftRolloutAssets" | "sideChats">
+    >,
   request: ServerControlRequest,
 ): Promise<ServerControlResponse> {
   try {
     if (request.type === "import_image_paths") {
+      if (request.rolloutId !== undefined) {
+        const attachments = await application.rolloutAssets.importImagePaths(
+          request.rolloutId,
+          request.ownerId,
+          request.paths,
+        )
+        return { requestId: request.requestId, ok: true, attachments }
+      }
+      if (request.sessionId === undefined) {
+        throw new Error("Attachment import requires a target.")
+      }
       const thread = await application.threadStore.readThread(request.sessionId)
       if (thread === undefined) {
         if (application.sideChats !== undefined) {
@@ -220,6 +233,9 @@ export async function handleServerControlRequest(
     }
     await application.rolloutAssets.discardDraftImageAttachments(
       request.attachments,
+    )
+    application.releaseDraftRolloutAssets?.(
+      request.attachments.map((attachment) => attachment.file.rolloutId),
     )
     return { requestId: request.requestId, ok: true }
   } catch (error) {

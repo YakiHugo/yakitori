@@ -79,7 +79,8 @@ export const GrepInputSchema: JsonObject = {
     },
     "-o": {
       type: "boolean",
-      description: "Return only the matching portion of each line.",
+      description:
+        "Return each nonempty match separately in content mode. Pagination counts matches; requested context lines are retained.",
     },
     type: {
       type: "string",

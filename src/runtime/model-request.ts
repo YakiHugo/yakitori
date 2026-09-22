@@ -15,6 +15,9 @@ export type { ModelRequestPolicy } from "../kernel/index.ts"
 // provider or product quota.
 export const MAX_TIMER_DELAY_MS = 2_147_483_647
 
+const DEFAULT_MAX_ATTEMPTS = 8
+const DEFAULT_RATE_LIMIT_MAX_ATTEMPTS = 2
+
 export type ModelRequestOptions = ModelRequestPolicy & {
   readonly wireApi: ModelWireApi
   readonly baseDelayMs?: number
@@ -37,8 +40,9 @@ export function createModelRequestStream(
 ): StreamFn {
   const resolved: ResolvedModelRequestOptions = {
     wireApi: options.wireApi,
-    maxAttempts: options.maxAttempts ?? 4,
-    rateLimitMaxAttempts: options.rateLimitMaxAttempts ?? 2,
+    maxAttempts: options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
+    rateLimitMaxAttempts:
+      options.rateLimitMaxAttempts ?? DEFAULT_RATE_LIMIT_MAX_ATTEMPTS,
     baseDelayMs: options.baseDelayMs ?? 500,
     maxDelayMs: options.maxDelayMs ?? 8_000,
     streamIdleTimeoutMs: options.streamIdleTimeoutMs ?? 300_000,

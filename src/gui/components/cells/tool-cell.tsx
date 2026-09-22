@@ -1,5 +1,9 @@
 import { ArrowUpRight, ChevronRight, ExternalLink } from "lucide-react"
 import { useEffect, useState } from "react"
+import {
+  parseSessionPlan,
+  parseUserQuestions,
+} from "../../../kernel/user-interaction.ts"
 import { imageAttachmentUrl } from "../../composer-attachments.ts"
 import type { ExecutionEntry } from "../../execution-view.ts"
 import {
@@ -15,6 +19,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "../ui/collapsible.tsx"
+import { PlanCell, UserQuestionsCell } from "./session-progress-cell.tsx"
 import { ToolDetailView } from "./tool-detail.tsx"
 import "../activity-timeline.css"
 
@@ -49,6 +54,24 @@ export function ToolCell({
       setOpen(true)
     }
   }, [entry.state])
+
+  if (!entry.resultError && entry.output !== undefined) {
+    if (entry.execution.name === "request_user_input_async") {
+      const request = parseUserQuestions(entry.output)
+      if (request)
+        return (
+          <UserQuestionsCell
+            key={entry.toolCallId}
+            request={request}
+            toolCallId={entry.toolCallId}
+          />
+        )
+    }
+    if (entry.execution.name === "update_plan") {
+      const plan = parseSessionPlan(entry.output)
+      if (plan) return <PlanCell plan={plan} />
+    }
+  }
 
   return (
     <Collapsible

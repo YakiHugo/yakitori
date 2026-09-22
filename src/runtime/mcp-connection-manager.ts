@@ -1,12 +1,15 @@
-import { mcpResult } from "./tools/mcp-result.ts"
+import { createHash } from "node:crypto"
+import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js"
+import type { JsonObject, JsonValue } from "../kernel/index.ts"
 import {
   McpClient,
   McpConnectionError,
+  type McpElicitationHandler,
   type McpToolDescription,
 } from "./mcp-client.ts"
-import { createHash } from "node:crypto"
-import type { JsonObject, JsonValue } from "../kernel/index.ts"
 import type { McpServerConfig } from "./mcp-config.ts"
+import { mcpResourceTools } from "./mcp-resources.ts"
+import { mcpResult } from "./tools/mcp-result.ts"
 import type { ToolName } from "./tools/tool-name.ts"
 import type { RuntimeTool, ToolExecutionContext } from "./tools/types.ts"
 
@@ -27,6 +30,7 @@ export type McpConnectionManager = Readonly<{
   ): Promise<void>
   tools(): readonly RuntimeTool[]
   status(): readonly McpServerStatus[]
+  reconnect(name: string): Promise<void>
   subscribe(
     listener: (serverName: string, tools: readonly RuntimeTool[]) => void,
   ): () => void
@@ -41,16 +45,18 @@ type Connection = Readonly<{
 }>
 
 export function createMcpConnectionManager(
-  options: {
-    readonly restartDelayMs?: number
-    readonly maxRestartDelayMs?: number
-    readonly maxRestartAttempts?: number
-    readonly onBackgroundError?: (error: unknown) => void
-    readonly installTools?: (
+  options: Readonly<{
+    restartDelayMs?: number
+    maxRestartDelayMs?: number
+    maxRestartAttempts?: number
+    onBackgroundError?: (error: unknown) => void
+    onElicitation?: McpElicitationHandler
+    authProvider?: (
       name: string,
-      tools: readonly RuntimeTool[],
-    ) => void
-    readonly turnEndTools?: Readonly<
+      config: McpServerConfig,
+    ) => OAuthClientProvider | undefined
+    installTools?: (name: string, tools: readonly RuntimeTool[]) => void
+    turnEndTools?: Readonly<
       Record<
         string,
         Readonly<{
@@ -59,7 +65,7 @@ export function createMcpConnectionManager(
         }>
       >
     >
-  } = {},
+  }> = {},
 ): McpConnectionManager {
   const allocateServerName = createModelNameAllocator()
   const connections = new Map<string, Connection>()
@@ -240,11 +246,13 @@ export function createMcpConnectionManager(
           refreshing.delete(client)
         }
       })().catch((error: unknown) => {
+        client.handleRequestFailure(error)
         if (!closed) reportBackgroundError(error)
       })
       refreshTasks.add(task)
       void task.finally(() => refreshTasks.delete(task))
     }
+    const authProvider = options.authProvider?.(name, config)
     const client = new McpClient(
       name,
       config,
@@ -260,11 +268,17 @@ export function createMcpConnectionManager(
         connections.delete(name)
         failures.set(name, error)
         publish(name, [])
-        scheduleRestart(name, identity, generation)
+        if (error.retryable) scheduleRestart(name, identity, generation)
       },
       refresh,
       () => {
         clients.delete(client)
+      },
+      {
+        ...(options.onElicitation === undefined
+          ? {}
+          : { onElicitation: options.onElicitation }),
+        ...(authProvider === undefined ? {} : { authProvider }),
       },
     )
     clients.add(client)
@@ -382,6 +396,28 @@ export function createMcpConnectionManager(
       updateQueue = pending.catch(() => {})
       return pending
     },
+    reconnect(name) {
+      const pending = updateQueue.then(async () => {
+        if (closed) throw new Error("MCP connection manager is closed.")
+        const config = configuredServers.get(name)
+        if (config === undefined) return
+        const timer = restartTimers.get(name)
+        if (timer) clearTimeout(timer)
+        restartTimers.delete(name)
+        restartAttempts.delete(name)
+        const generation = (generations.get(name) ?? 0) + 1
+        generations.set(name, generation)
+        const current = connections.get(name)
+        if (current) {
+          await current.client.release()
+          connections.delete(name)
+          publish(name, [])
+        }
+        await connect(name, config, fingerprint(config), generation)
+      })
+      updateQueue = pending.catch(() => {})
+      return pending
+    },
     tools() {
       return [...connections.values()].flatMap((connection) => connection.tools)
     },
@@ -447,6 +483,7 @@ function runtimeTool(
     description: tool.description ?? `MCP tool ${serverName}/${tool.name}`,
     inputSchema: asJsonObject(tool.inputSchema),
     effect: tool.annotations?.readOnlyHint === true ? "observe" : "opaque",
+    supportsParallelToolCalls: tool.annotations?.readOnlyHint === true,
     approvalRequirement:
       tool.annotations?.readOnlyHint === true
         ? { kind: "none" }
@@ -458,7 +495,7 @@ function runtimeTool(
           },
     async execute(input, context) {
       markUsed(context)
-      const result = await call(asJsonValue(input), context.signal)
+      const result = await call(asJsonValue(input), context.signal, context)
       return mcpResult(asJsonValue(result), context)
     },
     dispose: () => client.release(),
@@ -490,22 +527,29 @@ function modelName(raw: string): string {
 
 // Allocate against the final names, including legal names that happen to equal
 // a generated hash name. Keep allocations stable while old Steps still use them.
-function createModelNameAllocator(): (raw: string) => string {
+function createModelNameAllocator(): (
+  raw: string,
+  identity?: string,
+) => string {
   const assigned = new Map<string, string>()
   const used = new Set<string>()
-  return (raw) => {
-    const existing = assigned.get(raw)
+  return (raw, identity) => {
+    const key = JSON.stringify([
+      identity === undefined ? "remote" : "host",
+      identity ?? raw,
+    ])
+    const existing = assigned.get(key)
     if (existing !== undefined) return existing
     const base = modelName(raw)
     let name = base
     for (let attempt = 1; used.has(name); attempt++) {
       const hash = createHash("sha256")
-        .update(`${raw}:${attempt}`)
+        .update(`${key}:${attempt}`)
         .digest("hex")
         .slice(0, 10)
       name = `${base.slice(0, 19).replace(/_+$/, "")}_${hash}`
     }
-    assigned.set(raw, name)
+    assigned.set(key, name)
     used.add(name)
     return name
   }
@@ -516,10 +560,14 @@ function makeTools(
   client: McpClient,
   descriptions: readonly McpToolDescription[],
   config: McpServerConfig,
-  names: Readonly<{ namespace: string; tool: (raw: string) => string }>,
+  names: Readonly<{
+    namespace: string
+    tool: (raw: string, identity?: string) => string
+  }>,
   markUsed: (context: ToolExecutionContext) => void,
 ): readonly RuntimeTool[] {
   const seen = new Set<string>()
+  const resourceTools = mcpResourceTools(name, client, names)
   const tools = descriptions.flatMap((tool) => {
     if (
       seen.has(tool.name) ||
@@ -541,6 +589,7 @@ function makeTools(
   })
   // Prepare the complete catalog before taking ownership; schema compilation
   // can fail and must not retain a partially constructed set of tools.
+  tools.push(...resourceTools)
   tools.forEach(() => {
     client.retain()
   })

@@ -6,11 +6,11 @@ import {
   namespacedToolName,
   plainToolName,
 } from "../../../src/runtime/tools/registry.ts"
+import type { ToolName } from "../../../src/runtime/tools/tool-name.ts"
 import type {
   RuntimeTool,
   ToolExposure,
 } from "../../../src/runtime/tools/types.ts"
-import type { ToolName } from "../../../src/runtime/tools/tool-name.ts"
 
 describe("finalized tool router", () => {
   it("advertises and dispatches the same enabled tool set", async () => {
@@ -681,6 +681,8 @@ describe("finalized tool router", () => {
       write_stdin: "none",
       web_fetch: "none",
       web_search: "none",
+      request_user_input_async: "none",
+      update_plan: "none",
       spawn_agent: "none",
       send_message: "none",
       followup_task: "none",

@@ -77,6 +77,32 @@ export type GitStatusResponse = {
   entries: WorkspaceGitEntry[]
 }
 
+export type WorkspaceGitInfo = Readonly<{
+  sha?: string
+  branch?: string
+  originUrl?: string
+}>
+
+export type WorkspacePullRequest = Readonly<{
+  number: number
+  title: string
+  state: "OPEN" | "CLOSED" | "MERGED"
+  isDraft: boolean
+  url: string
+  headRefName: string
+  updatedAt: string
+}>
+
+export type GitPullRequestsResponse =
+  | Readonly<{
+      available: true
+      pullRequests: readonly WorkspacePullRequest[]
+    }>
+  | Readonly<{
+      available: false
+      reason: "not_configured" | "unavailable"
+    }>
+
 export type GitDiffResponse = {
   path: string
   text: string
@@ -456,6 +482,121 @@ export async function readWorkspaceGitStatus(input: {
       branchResult.code === 0 ? branchResult.text.trimEnd() : "Detached HEAD",
     entries,
   }
+}
+
+export async function readWorkspaceGitInfo(input: {
+  cwd: string
+}): Promise<WorkspaceGitInfo | undefined> {
+  const cwd = await workspaceRoot(input.cwd)
+  const repository = await git(cwd, ["rev-parse", "--show-toplevel"], [128])
+  if (repository.code !== 0) return
+  const [sha, branch, origin] = await Promise.all([
+    git(cwd, ["rev-parse", "--verify", "HEAD"], [128]),
+    git(cwd, ["symbolic-ref", "--quiet", "--short", "HEAD"], [1]),
+    git(cwd, ["remote", "get-url", "origin"], [2]),
+  ])
+  const info = {
+    ...(sha.code === 0 ? { sha: sha.text.trimEnd() } : {}),
+    ...(branch.code === 0 ? { branch: branch.text.trimEnd() } : {}),
+    ...(origin.code === 0 ? { originUrl: origin.text.trimEnd() } : {}),
+  }
+  return Object.keys(info).length === 0 ? undefined : info
+}
+
+export async function readWorkspacePullRequests(input: {
+  cwd: string
+  branch: string
+}): Promise<GitPullRequestsResponse> {
+  const cwd = await workspaceRoot(input.cwd)
+  if (input.branch.length === 0 || input.branch.includes("\0")) {
+    throw new WorkspaceError("branch is required.")
+  }
+  const environment = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")),
+  )
+  try {
+    const result = await executeFile(
+      "gh",
+      [
+        "pr",
+        "list",
+        "--state",
+        "all",
+        "--head",
+        input.branch,
+        "--limit",
+        "50",
+        "--json",
+        "number,title,state,isDraft,url,headRefName,updatedAt",
+      ],
+      {
+        cwd,
+        encoding: "utf8",
+        maxBuffer: MAX_GIT_BYTES,
+        timeout: 10_000,
+        env: {
+          ...environment,
+          GH_PROMPT_DISABLED: "1",
+          GIT_TERMINAL_PROMPT: "0",
+        },
+      },
+    )
+    return {
+      available: true,
+      pullRequests: parsePullRequests(result.stdout),
+    }
+  } catch {
+    return { available: false, reason: "unavailable" }
+  }
+}
+
+function parsePullRequests(value: string): readonly WorkspacePullRequest[] {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(value)
+  } catch {
+    throw new WorkspaceError("GitHub CLI returned invalid PR data.", "conflict")
+  }
+  if (!Array.isArray(parsed)) {
+    throw new WorkspaceError("GitHub CLI returned invalid PR data.", "conflict")
+  }
+  return parsed.map((entry) => {
+    if (
+      typeof entry !== "object" ||
+      entry === null ||
+      !("number" in entry) ||
+      typeof entry.number !== "number" ||
+      !Number.isSafeInteger(entry.number) ||
+      !("title" in entry) ||
+      typeof entry.title !== "string" ||
+      !("state" in entry) ||
+      (entry.state !== "OPEN" &&
+        entry.state !== "CLOSED" &&
+        entry.state !== "MERGED") ||
+      !("isDraft" in entry) ||
+      typeof entry.isDraft !== "boolean" ||
+      !("url" in entry) ||
+      typeof entry.url !== "string" ||
+      !("headRefName" in entry) ||
+      typeof entry.headRefName !== "string" ||
+      !("updatedAt" in entry) ||
+      typeof entry.updatedAt !== "string"
+    ) {
+      throw new WorkspaceError(
+        "GitHub CLI returned invalid PR data.",
+        "conflict",
+      )
+    }
+    return {
+      number: entry.number,
+      title: entry.title,
+      state: entry.state,
+      isDraft: entry.isDraft,
+      url: entry.url,
+      headRefName: entry.headRefName,
+      updatedAt: entry.updatedAt,
+    }
+  })
 }
 
 export async function readWorkspaceGitDiff(input: {

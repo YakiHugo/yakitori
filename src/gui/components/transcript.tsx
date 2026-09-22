@@ -28,10 +28,11 @@ import { ReasoningCell } from "./cells/reasoning-cell.tsx"
 import { ToolCell } from "./cells/tool-cell.tsx"
 import { TurnTerminalCell } from "./cells/turn-terminal-cell.tsx"
 import { UserMessageCell } from "./cells/user-message-cell.tsx"
-import { ConversationNavigation } from "./conversation-navigation.tsx"
 import { ConversationFind } from "./conversation-find.tsx"
+import { ConversationNavigation } from "./conversation-navigation.tsx"
 import { MarkdownView } from "./markdown.tsx"
 import { ResponseActions } from "./response-actions.tsx"
+import { SessionElicitation } from "./session-elicitation.tsx"
 import {
   Collapsible,
   CollapsibleContent,
@@ -277,6 +278,9 @@ export function Transcript({ children }: Readonly<{ children?: ReactNode }>) {
         }
         {children === undefined ? null : (
           <div ref={dockRef} className="conversation-dock">
+            <div className="max-h-[45vh] overflow-y-auto">
+              <SessionElicitation />
+            </div>
             {children}
           </div>
         )}
@@ -490,7 +494,9 @@ function groupTurnTimeline(
   for (const entry of entries) {
     if (
       (entry.kind === "tool" &&
-        entry.execution.type !== "collaboration_tool_call") ||
+        entry.execution.type !== "collaboration_tool_call" &&
+        entry.execution.name !== "request_user_input_async" &&
+        entry.execution.name !== "update_plan") ||
       entry.kind === "permission"
     ) {
       actions.push(entry)

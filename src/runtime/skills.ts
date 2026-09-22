@@ -1,9 +1,8 @@
-import { readdir, realpath, stat } from "node:fs/promises"
+import { realpath } from "node:fs/promises"
 import { homedir } from "node:os"
 import { basename, dirname, join } from "node:path"
 import { parseDocument } from "yaml"
 import {
-  fileSignature,
   type InstructionDiagnostic,
   instructionDirectories,
   instructionHome,
@@ -11,14 +10,26 @@ import {
   readInstructionPrefix,
   utf8Prefix,
 } from "./instruction-files.ts"
+import { discoverSkillFiles, mapSkillFiles } from "./skills-discovery.ts"
+import {
+  getSkillDependencyDiagnostics,
+  parseSkillInvocationMetadata,
+  type SkillInvocationMetadata,
+  type SkillMcpServer,
+} from "./skills-metadata.ts"
+
+export {
+  getSkillDependencyDiagnostics,
+  type SkillDependencyDiagnostic,
+  type SkillMcpServer,
+  type SkillToolDependency,
+} from "./skills-metadata.ts"
 
 export const SKILLS_CATALOG_MAX_BYTES = 20 * 1024
 // Host safety boundaries: bound metadata I/O, traversal memory, and injected
 // text independently. Large bodies do not remove a skill from discovery.
 const METADATA_READ_BYTES = 32 * 1024
 const BODY_READ_BYTES = 256 * 1024
-const MAX_SCAN_ENTRIES = 20_000
-const MAX_SCAN_DEPTH = 32
 // Common shell variables are not skill mentions, matching Codex selection.
 const commonEnvironmentVariables = new Set([
   "PATH",
@@ -47,6 +58,7 @@ type SkillDefinition = Readonly<{
   path: string
 }>
 export type SkillMetadata = SkillDefinition &
+  SkillInvocationMetadata &
   Readonly<{
     scope: "user" | "repo"
     enabled?: boolean
@@ -81,13 +93,8 @@ For multiple skills, choose the smallest sufficient set and announce the order. 
 export function createSkillsLoader(): (
   input: SkillLoadInput,
 ) => Promise<SkillsSnapshot> {
-  const cache = new Map<
-    string,
-    {
-      signature: string
-      result: SkillDefinition | InstructionDiagnostic
-    }
-  >()
+  // Each invocation owns its inventory and parsed metadata. Sharing mutable
+  // stat-keyed caches lets concurrent refreshes publish stale mixed snapshots.
   return async (input) => {
     const directories = await instructionDirectories(
       input.workingDirectory,
@@ -114,8 +121,9 @@ export function createSkillsLoader(): (
       })),
     ]
     const diagnostics: InstructionDiagnostic[] = []
-    const rules = await Promise.all(
-      (input.configuration?.config ?? []).map(async (rule) => {
+    const rules = await mapSkillFiles(
+      input.configuration?.config ?? [],
+      async (rule) => {
         if (rule.path === undefined) return rule
         try {
           return { ...rule, path: await realpath(rule.path) }
@@ -123,73 +131,76 @@ export function createSkillsLoader(): (
           if (!isFileSystemError(error)) throw error
           return rule
         }
-      }),
+      },
     )
     const skills = new Map<string, SkillMetadata>()
-    const visited = new Set<string>()
-    const seen = new Set<string>()
-    let entries = 0
-    const visit = async (
-      candidate: string,
-      scope: SkillMetadata["scope"],
-      depth: number,
-    ): Promise<void> => {
-      if (++entries > MAX_SCAN_ENTRIES || depth > MAX_SCAN_DEPTH) {
-        if (entries === MAX_SCAN_ENTRIES + 1 || depth > MAX_SCAN_DEPTH)
-          diagnostics.push({
-            path: candidate,
-            message:
-              "Skill discovery reached its host traversal safety boundary.",
-          })
-        return
-      }
-      try {
-        const path = await realpath(candidate)
-        if (visited.has(path)) return
-        visited.add(path)
-        const info = await stat(path)
-        if (info.isDirectory()) {
-          const children = await readdir(path)
-          children.sort()
-          for (const name of children) {
-            if (entries > MAX_SCAN_ENTRIES) break
-            await visit(join(path, name), scope, depth + 1)
-          }
-          return
-        }
-        if (!info.isFile() || basename(candidate) !== "SKILL.md") return
-        seen.add(path)
-        const signature = await fileSignature(path)
-        if (signature === undefined) return
-        let loaded = cache.get(path)
-        if (loaded?.signature !== signature) {
-          const prefix = await readInstructionPrefix(path, METADATA_READ_BYTES)
-          loaded = { signature, result: parseSkillMetadata(path, prefix.text) }
-          cache.set(path, loaded)
-        }
-        if ("message" in loaded.result) {
-          diagnostics.push(loaded.result)
-          return
-        }
-        const skill = loaded.result
-        let enabled = true
-        for (const rule of rules) {
-          if (
-            rule.path === path ||
-            (rule.path === undefined && rule.name === skill.name)
-          ) {
-            enabled = rule.enabled
-          }
-        }
-        skills.set(path, { ...skill, scope, enabled })
-      } catch (error) {
-        if (!isFileSystemError(error)) throw error
-        if (error.code !== "ENOENT")
-          diagnostics.push({ path: candidate, message: error.message })
-      }
+    const candidates = new Map<string, SkillMetadata["scope"]>()
+    for (const root of roots) {
+      const discovery = await discoverSkillFiles(root.path)
+      diagnostics.push(...discovery.diagnostics)
+      for (const path of discovery.paths)
+        if (!candidates.has(path)) candidates.set(path, root.scope)
     }
-    for (const root of roots) await visit(root.path, root.scope, 0)
-    for (const path of cache.keys()) if (!seen.has(path)) cache.delete(path)
+    const loaded = await mapSkillFiles(
+      [...candidates],
+      async ([candidate, scope]) => {
+        const warnings: InstructionDiagnostic[] = []
+        try {
+          const path = await realpath(candidate)
+          const prefix = await readInstructionPrefix(path, METADATA_READ_BYTES)
+          const skill = parseSkillMetadata(path, prefix.text)
+          if ("message" in skill) {
+            return { warnings: [skill] }
+          }
+          let metadata: SkillInvocationMetadata = {}
+          const metadataPath = join(dirname(path), "agents", "openai.yaml")
+          try {
+            const sidecar = await readInstructionPrefix(
+              metadataPath,
+              METADATA_READ_BYTES,
+            )
+            if (sidecar.truncated)
+              warnings.push({
+                path: metadataPath,
+                message:
+                  "Skill metadata exceeds the host read safety boundary.",
+              })
+            else {
+              const parsed = parseSkillInvocationMetadata(
+                metadataPath,
+                sidecar.text,
+              )
+              metadata = parsed.metadata
+              warnings.push(...parsed.diagnostics)
+            }
+          } catch (error) {
+            if (!isFileSystemError(error)) throw error
+            if (error.code !== "ENOENT")
+              warnings.push({ path: metadataPath, message: error.message })
+          }
+          let enabled = true
+          for (const rule of rules) {
+            if (
+              rule.path === path ||
+              (rule.path === undefined && rule.name === skill.name)
+            ) {
+              enabled = rule.enabled
+            }
+          }
+          return { skill: { ...skill, ...metadata, scope, enabled }, warnings }
+        } catch (error) {
+          if (!isFileSystemError(error)) throw error
+          if (error.code !== "ENOENT")
+            warnings.push({ path: candidate, message: error.message })
+          return { warnings }
+        }
+      },
+    )
+    for (const result of loaded) {
+      diagnostics.push(...result.warnings)
+      if (result.skill && !skills.has(result.skill.path))
+        skills.set(result.skill.path, result.skill)
+    }
     return {
       skills: [...skills.values()].sort(
         (a, b) => a.name.localeCompare(b.name) || a.path.localeCompare(b.path),
@@ -226,7 +237,11 @@ export function renderSkillsCatalog(
   snapshot: SkillsSnapshot,
   maxBytes = SKILLS_CATALOG_MAX_BYTES,
 ): SkillsCatalog | undefined {
-  const skills = snapshot.skills.filter((skill) => skill.enabled !== false)
+  const skills = snapshot.skills.filter(
+    (skill) =>
+      skill.enabled !== false &&
+      skill.policy?.allowImplicitInvocation !== false,
+  )
   if (skills.length === 0 && snapshot.diagnostics.length === 0) return undefined
   const intro =
     usage +
@@ -278,6 +293,7 @@ export async function loadExplicitSkillInstructions(
   text: string,
   snapshot: SkillsSnapshot,
   onWarning?: (message: string) => void,
+  options?: Readonly<{ mcpServers?: readonly SkillMcpServer[] }>,
 ): Promise<string | undefined> {
   const selected = new Map<string, SkillMetadata>()
   const diagnostics: string[] = []
@@ -326,6 +342,13 @@ export async function loadExplicitSkillInstructions(
       )
   }
   const blocks: string[] = []
+  if (options?.mcpServers !== undefined)
+    diagnostics.push(
+      ...getSkillDependencyDiagnostics(
+        [...selected.values()],
+        options.mcpServers,
+      ).map((diagnostic) => diagnostic.message),
+    )
   for (const skill of selected.values()) {
     try {
       const body = await readInstructionPrefix(skill.path, BODY_READ_BYTES)

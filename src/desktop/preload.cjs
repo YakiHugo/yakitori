@@ -61,7 +61,7 @@ contextBridge.exposeInMainWorld("yakitoriDesktop", {
       )
     }
     return ipcRenderer.invoke("yakitori:import-image-files", {
-      sessionId: input.sessionId,
+      ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }),
       items,
     })
   },

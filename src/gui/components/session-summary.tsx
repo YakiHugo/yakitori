@@ -3,6 +3,7 @@ import {
   FileText,
   GitBranch,
   GitCompareArrows,
+  GitPullRequest,
   Image,
   Monitor,
   Users,
@@ -11,12 +12,16 @@ import { useEffect, useId, useMemo, useRef, useState } from "react"
 import { createPortal } from "react-dom"
 import type { ImageAttachment } from "../../kernel/events.ts"
 import type { ContextExcerpt } from "../../kernel/input-context.ts"
-import type { GitStatusResponse } from "../../server/workspace.ts"
+import type {
+  GitPullRequestsResponse,
+  GitStatusResponse,
+} from "../../server/workspace.ts"
 import { imageAttachmentUrl } from "../composer-attachments.ts"
+import { useSessionAgents } from "../hooks/use-session-agents.ts"
+import { openUrlTarget } from "../lib/open-resource.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import { useAppStore } from "../store/app-store.ts"
 import { useWorkspaceStore } from "../store/workspace-store.ts"
-import { useSessionAgents } from "../hooks/use-session-agents.ts"
 import "./session-summary.css"
 
 export function SessionSummary() {
@@ -27,12 +32,14 @@ export function SessionSummary() {
       state.selectedSession?.workingDirectory,
   )
   const apiBase = useAppStore((state) => state.apiBase)
+  const gitInfo = useAppStore((state) => state.selectedSession?.gitInfo)
   if (!sessionId) return null
   return (
     <SummaryPopover
-      key={`${sessionId}:${apiBase}:${cwd}`}
+      key={`${sessionId}:${apiBase}:${cwd}:${gitInfo?.branch}`}
       cwd={cwd}
       apiBase={apiBase}
+      gitInfo={gitInfo}
     />
   )
 }
@@ -40,12 +47,19 @@ export function SessionSummary() {
 function SummaryPopover({
   cwd,
   apiBase,
-}: Readonly<{ cwd: string | undefined; apiBase: string }>) {
+  gitInfo,
+}: Readonly<{
+  cwd: string | undefined
+  apiBase: string
+  gitInfo: import("../../core/rollout.ts").GitInfo | undefined
+}>) {
   const id = useId()
   const trigger = useRef<HTMLButtonElement>(null)
   const panel = useRef<HTMLDivElement>(null)
   const [anchor, setAnchor] = useState<{ top: number; right: number }>()
   const [status, setStatus] = useState<GitStatusResponse>()
+  const [pullRequests, setPullRequests] = useState<GitPullRequestsResponse>()
+  const [pullRequestsLoading, setPullRequestsLoading] = useState(false)
   const [error, setError] = useState<string>()
   const [loading, setLoading] = useState(false)
   const [revision, setRevision] = useState(0)
@@ -115,30 +129,50 @@ function SummaryPopover({
     let current = true
     setLoading(true)
     setStatus(undefined)
+    setPullRequests(undefined)
     setError(undefined)
-    void getAppRpcClient(apiBase)
-      .request("git/status", { cwd })
-      .then(
-        (result) => {
-          if (!current) return
-          setStatus(result)
-          setLoading(false)
-        },
-        (cause: unknown) => {
-          if (!current) return
-          setError(
-            cause instanceof Error ? cause.message : "Could not load changes.",
-          )
-          setLoading(false)
-        },
-      )
+    const client = getAppRpcClient(apiBase)
+    const loadPullRequests = (branch: string) => {
+      setPullRequestsLoading(true)
+      void client
+        .request("git/pullRequests", { cwd, branch })
+        .then(
+          (result) => {
+            if (current) setPullRequests(result)
+          },
+          () => {
+            if (current)
+              setPullRequests({ available: false, reason: "unavailable" })
+          },
+        )
+        .finally(() => {
+          if (current) setPullRequestsLoading(false)
+        })
+    }
+    if (gitInfo?.branch) loadPullRequests(gitInfo.branch)
+    void client.request("git/status", { cwd }).then(
+      (result) => {
+        if (!current) return
+        setStatus(result)
+        setLoading(false)
+        if (gitInfo?.branch === undefined && result.branch)
+          loadPullRequests(result.branch)
+      },
+      (cause: unknown) => {
+        if (!current) return
+        setError(
+          cause instanceof Error ? cause.message : "Could not load changes.",
+        )
+        setLoading(false)
+      },
+    )
     const refresh = () => setRevision((value) => value + 1)
     window.addEventListener("focus", refresh)
     return () => {
       current = false
       window.removeEventListener("focus", refresh)
     }
-  }, [apiBase, cwd, open, activeTurnId, revision])
+  }, [apiBase, cwd, gitInfo?.branch, open, activeTurnId, revision])
 
   const staged = status?.entries.filter(
     (entry) => ![" ", "?", ""].includes(entry.indexStatus),
@@ -207,15 +241,71 @@ function SummaryPopover({
                 <div className="session-summary-branch">
                   <GitBranch size={13} aria-hidden="true" />
                   <span>
-                    {loading
-                      ? "Loading branch…"
-                      : status?.repository
-                        ? (status.branch ?? "Branch unavailable")
-                        : status
-                          ? "Not a Git repository"
-                          : "Branch unavailable"}
+                    {gitInfo?.branch ??
+                      (loading
+                        ? "Loading branch…"
+                        : status?.repository
+                          ? (status.branch ?? "Branch unavailable")
+                          : status
+                            ? "Not a Git repository"
+                            : "Branch unavailable")}
                   </span>
                 </div>
+                {gitInfo?.branch &&
+                status?.branch &&
+                gitInfo.branch !== status.branch ? (
+                  <p className="session-summary-workspace-branch">
+                    Workspace is currently on {status.branch}
+                  </p>
+                ) : null}
+              </section>
+              <section className="session-summary-section">
+                <h3>
+                  Pull requests{" "}
+                  {pullRequests?.available ? (
+                    <span>{pullRequests.pullRequests.length}</span>
+                  ) : null}
+                </h3>
+                {pullRequestsLoading ? (
+                  <p role="status" className="session-summary-empty">
+                    Loading pull requests…
+                  </p>
+                ) : pullRequests?.available ? (
+                  pullRequests.pullRequests.length === 0 ? (
+                    <p className="session-summary-empty">
+                      No current or historical PRs for this session branch.
+                    </p>
+                  ) : (
+                    <div className="session-summary-pull-requests">
+                      {pullRequests.pullRequests.map((pullRequest) => (
+                        <a
+                          key={pullRequest.number}
+                          href={pullRequest.url}
+                          onClick={(event) => {
+                            event.preventDefault()
+                            void openUrlTarget({
+                              kind: "url",
+                              url: pullRequest.url,
+                            })
+                          }}
+                        >
+                          <GitPullRequest size={14} aria-hidden="true" />
+                          <span>
+                            <strong>
+                              #{pullRequest.number} {pullRequest.title}
+                            </strong>
+                            <small>{formatPullRequestState(pullRequest)}</small>
+                          </span>
+                        </a>
+                      ))}
+                    </div>
+                  )
+                ) : (
+                  <p className="session-summary-empty">
+                    PR status is unavailable. Install and sign in to GitHub CLI
+                    to load current and historical PRs.
+                  </p>
+                )}
               </section>
               <section className="session-summary-section">
                 <h3>Changes</h3>
@@ -350,4 +440,14 @@ function SummaryPopover({
         : null}
     </>
   )
+}
+
+function formatPullRequestState(
+  pullRequest: Extract<
+    GitPullRequestsResponse,
+    { available: true }
+  >["pullRequests"][number],
+): string {
+  if (pullRequest.isDraft && pullRequest.state === "OPEN") return "Draft"
+  return pullRequest.state[0] + pullRequest.state.slice(1).toLocaleLowerCase()
 }

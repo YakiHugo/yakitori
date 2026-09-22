@@ -23,6 +23,7 @@ const runtimeDirectory = join(
 )
 await access(executable)
 await access(runtimeDirectory)
+await access(join(runtimeDirectory, "read-pdf-worker.js"))
 
 await new Promise<void>((resolve, reject) => {
   const probe = [
@@ -38,6 +39,24 @@ await new Promise<void>((resolve, reject) => {
     'if (result !== "1:packaged-search-ok\\n") throw new Error("Packaged search failed: " + result);',
     "} finally { await rm(fixture, { recursive: true, force: true }); }",
     'await sharp.default({ create: { width: 16, height: 16, channels: 3, background: "red" } }).resize(8, 8).png().toBuffer();',
+    'const { Worker } = await import("node:worker_threads");',
+    'const { pathToFileURL } = await import("node:url");',
+    'const pdfStream = "BT /F1 18 Tf 30 120 Td (Packaged PDF) Tj ET";',
+    'const pdfObjects = ["<< /Type /Catalog /Pages 2 0 R >>", "<< /Type /Pages /Kids [4 0 R] /Count 1 >>", "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>", "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 240 160] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>", "<< /Length " + pdfStream.length + " >>\\nstream\\n" + pdfStream + "\\nendstream"];',
+    'let pdf = "%PDF-1.4\\n";',
+    'const offsets = pdfObjects.map((body, index) => { const offset = Buffer.byteLength(pdf); pdf += (index + 1) + " 0 obj\\n" + body + "\\nendobj\\n"; return offset; });',
+    "const xref = Buffer.byteLength(pdf);",
+    'pdf += "xref\\n0 6\\n0000000000 65535 f \\n" + offsets.map((offset) => String(offset).padStart(10, "0") + " 00000 n \\n").join("") + "trailer\\n<< /Size 6 /Root 1 0 R >>\\nstartxref\\n" + xref + "\\n%%EOF\\n";',
+    'for (const format of ["text", "image"]) {',
+    'const worker = new Worker(pathToFileURL(join(process.cwd(), "read-pdf-worker.js")), { workerData: { bytes: Uint8Array.from(Buffer.from(pdf)), format }, execArgv: [] });',
+    "let timer;",
+    "try {",
+    'const result = await new Promise((resolve, reject) => { timer = setTimeout(() => reject(new Error("Packaged PDF worker timed out")), 30000); worker.once("message", resolve); worker.once("error", reject); worker.once("exit", (code) => reject(new Error("Packaged PDF worker exited: " + code))); });',
+    'if (!result.ok) throw new Error("Packaged PDF failed: " + result.message);',
+    'if (format === "text" && !result.text.includes("Packaged PDF")) throw new Error("Packaged PDF text missing");',
+    'if (format === "image") { const image = result.images[0]; if (!image) throw new Error("Packaged PDF image missing"); const stats = await sharp.default(Buffer.from(image.bytes)).stats(); if (stats.channels[0].min >= 100) throw new Error("Packaged PDF rendered a blank page"); }',
+    "} finally { clearTimeout(timer); await worker.terminate(); }",
+    "}",
     "const spawnPty = pty.spawn ?? pty.default?.spawn;",
     'if (spawnPty === undefined) throw new Error("node-pty spawn export missing");',
     'const terminal = spawnPty("/bin/sh", ["-c", "test -t 0 && printf native-runtime-ok"], {',

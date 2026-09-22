@@ -32,6 +32,29 @@ afterEach(async () => {
 })
 
 describe("JsonlThreadStore", () => {
+  it("preserves the session-owned Git identity across restart", async () => {
+    const { root, store } = await createStore()
+    const threadId = "thread_git_identity"
+    await store.createThread(
+      metadata(threadId, {
+        gitInfo: {
+          sha: "0123456789abcdef",
+          branch: "feat/session-context",
+          originUrl: "https://github.com/example/project.git",
+        },
+      }),
+    )
+    await store.shutdownThread(threadId)
+
+    const reopened = new JsonlThreadStore({ root })
+    expect((await reopened.resumeThread(threadId))?.metadata.gitInfo).toEqual({
+      sha: "0123456789abcdef",
+      branch: "feat/session-context",
+      originUrl: "https://github.com/example/project.git",
+    })
+    await reopened.shutdownThread(threadId)
+  })
+
   it("reopens structured Turn failures with nested diagnostic details", async () => {
     const { root, store } = await createStore()
     const threadId = "thread_structured_failure"

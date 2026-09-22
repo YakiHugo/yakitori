@@ -1,10 +1,11 @@
-import { imageDecodeError } from "../prepare-model-image.ts"
+import { isDeepStrictEqual } from "node:util"
+import { inspectImageBytes } from "../../kernel/image-metadata.ts"
 import type {
   JsonValue,
   ModelDocumentBlock,
   ModelImageBlock,
 } from "../../kernel/index.ts"
-import { inspectImageBytes } from "../../kernel/image-metadata.ts"
+import { imageDecodeError } from "../prepare-model-image.ts"
 import { finalizeToolOutput } from "./result-output.ts"
 import type { ToolExecutionContext, ToolExecutionResult } from "./types.ts"
 
@@ -39,10 +40,10 @@ export async function mcpResult(
     }
     const data = item.type === "image" ? item.data : resource?.blob
     const mime = item.type === "image" ? item.mimeType : resource?.mimeType
-    if (
-      typeof data !== "string" ||
-      (item.type !== "image" && mime !== "application/pdf")
-    ) {
+    const isImage =
+      item.type === "image" ||
+      (typeof mime === "string" && mime.startsWith("image/"))
+    if (typeof data !== "string" || (!isImage && mime !== "application/pdf")) {
       text.push(`[Unsupported MCP content: ${String(item.type)}]`)
       visible.push({ type: String(item.type), unsupported: true })
       continue
@@ -57,14 +58,13 @@ export async function mcpResult(
     if (data.length > 67_000_000 || !/^[A-Za-z0-9+/]*={0,2}$/.test(data))
       throw new Error("Invalid or oversized MCP media payload.")
     const bytes = Buffer.from(data, "base64")
-    if (item.type === "image") {
+    if (isImage) {
       const error = await imageDecodeError(bytes)
       if (error !== undefined) throw new Error(`Invalid MCP image: ${error}`)
     }
-    const mediaType =
-      item.type === "image"
-        ? inspectImageBytes(bytes).mediaType
-        : "application/pdf"
+    const mediaType = isImage
+      ? inspectImageBytes(bytes).mediaType
+      : "application/pdf"
     if (
       mediaType === "application/pdf" &&
       bytes.subarray(0, 5).toString() !== "%PDF-"
@@ -102,8 +102,12 @@ export async function mcpResult(
       `[${mediaType === "application/pdf" ? "Document" : "Image"} attached]`,
     )
   }
-  if (result?.structuredContent !== undefined)
-    text.push(JSON.stringify(result.structuredContent))
+  const structuredContent = result?.structuredContent
+  if (
+    structuredContent !== undefined &&
+    !text.some((part) => carriesStructuredContent(part, structuredContent))
+  )
+    text.push(JSON.stringify(structuredContent))
   const content = text.join("\n")
   const output = {
     content: visible,
@@ -132,6 +136,27 @@ export async function mcpResult(
     },
   }
 }
+
+function carriesStructuredContent(text: string, value: JsonValue): boolean {
+  if (typeof value === "string" && text === value) return true
+  let candidate = text
+  if (typeof value === "object" && value !== null) {
+    const array = Array.isArray(value)
+    const start = text.indexOf(array ? "[" : "{")
+    const end = text.lastIndexOf(array ? "]" : "}")
+    if (start < 0 || end < start) return false
+    // Cover standalone JSON, prose and fences without parsing a document stream.
+    // Ambiguous text with multiple JSON documents conservatively keeps the payload.
+    candidate = text.slice(start, end + 1)
+  }
+  try {
+    return isDeepStrictEqual(JSON.parse(candidate), value)
+  } catch (error) {
+    if (error instanceof SyntaxError) return false
+    throw error
+  }
+}
+
 function record(
   value: JsonValue | undefined,
 ): { [key: string]: JsonValue } | undefined {

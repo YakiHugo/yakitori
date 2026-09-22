@@ -1,18 +1,18 @@
+import { noToolApprovalRequired } from "./approval-requirements.ts"
+import {
+  completeFileSearchExecution,
+  fileSearchExecution,
+} from "./execution-descriptors.ts"
 import {
   buildGrepArguments,
   type GrepInput,
   GrepInputSchema,
   parseGrepInput,
 } from "./grep-input.ts"
-import { noToolApprovalRequired } from "./approval-requirements.ts"
 import { resolveSearchPath } from "./path-policy.ts"
-import {
-  completeFileSearchExecution,
-  fileSearchExecution,
-} from "./execution-descriptors.ts"
 import { runRipgrepRecords } from "./ripgrep.ts"
-import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
 import { plainToolName } from "./tool-name.ts"
+import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
 
 const DEFAULT_RESULTS = 250
 const DEFAULT_TIMEOUT_MS = 20_000
@@ -131,8 +131,7 @@ export function createGrepTool(
           delimiter:
             parsed.outputMode === "files_with_matches" ? "null" : "newline",
           onRecord(record) {
-            const entry = parseRecord(record, parsed)
-            return entry === undefined || accept(entry)
+            return parseRecord(record, parsed).every(accept)
           },
         },
       )
@@ -175,55 +174,77 @@ export function createGrepTool(
   }
 }
 
-function parseRecord(
-  record: string,
-  input: GrepInput,
-): SearchEntry | undefined {
-  if (record.length === 0) return undefined
+function parseRecord(record: string, input: GrepInput): SearchEntry[] {
+  if (record.length === 0) return []
   if (input.outputMode === "files_with_matches") {
-    return { content: normalizePath(record) }
+    return [{ content: normalizePath(record) }]
   }
   if (input.outputMode === "count") {
     const separator = record.lastIndexOf("\0")
-    if (separator < 0) return undefined
+    if (separator < 0) return []
     const path = normalizePath(record.slice(0, separator))
-    return { content: `${path}:${record.slice(separator + 1)}` }
+    return [{ content: `${path}:${record.slice(separator + 1)}` }]
   }
-  const match = parseRipgrepJson(record)
-  if (match === undefined) return undefined
-  return {
+  return parseRipgrepJson(record, input.onlyMatching).map((match) => ({
     content: input.lineNumbers
       ? `${match.path}:${match.line}:${displayText(match.text)}`
       : `${match.path}:${displayText(match.text)}`,
     match,
-  }
+  }))
 }
 
-function parseRipgrepJson(record: string): Match | undefined {
+function parseRipgrepJson(record: string, onlyMatching: boolean): Match[] {
   let event: unknown
   try {
     event = JSON.parse(record)
   } catch {
-    return undefined
+    return []
   }
   if (
     !isRecord(event) ||
     (event.type !== "match" && event.type !== "context") ||
     !isRecord(event.data)
   )
-    return undefined
+    return []
   const path = textValue(event.data.path)
   const lines = textValue(event.data.lines)
   const line = event.data.line_number
   if (path === undefined || lines === undefined || typeof line !== "number") {
-    return undefined
+    return []
+  }
+  // --json reports complete lines even with --only-matching. Submatch offsets
+  // are UTF-8 byte offsets, not JavaScript string indices.
+  if (onlyMatching && event.type === "match") {
+    if (!Array.isArray(event.data.submatches)) return []
+    const bytes =
+      isRecord(event.data.lines) && typeof event.data.lines.bytes === "string"
+        ? Buffer.from(event.data.lines.bytes, "base64")
+        : Buffer.from(lines)
+    const matches: Match[] = []
+    let scanned = 0
+    let matchLine = line
+    for (const submatch of event.data.submatches) {
+      if (!isRecord(submatch)) continue
+      const text = textValue(submatch.match)
+      const start = submatch.start
+      if (text === undefined || text === "" || typeof start !== "number")
+        continue
+      while (scanned < start && scanned < bytes.length) {
+        if (bytes[scanned] === 10) matchLine += 1
+        scanned += 1
+      }
+      matches.push({ path: normalizePath(path), line: matchLine, text })
+    }
+    return matches
   }
   const text = lines.replace(/\r\n$|\n$|\r$/u, "")
-  return {
-    path: normalizePath(path),
-    line,
-    text,
-  }
+  return [
+    {
+      path: normalizePath(path),
+      line,
+      text,
+    },
+  ]
 }
 
 function buildSuccess(input: {
@@ -411,8 +432,10 @@ function normalizePath(path: string): string {
 }
 
 function textValue(value: unknown): string | undefined {
-  return isRecord(value) && typeof value.text === "string"
-    ? value.text
+  if (!isRecord(value)) return undefined
+  if (typeof value.text === "string") return value.text
+  return typeof value.bytes === "string"
+    ? Buffer.from(value.bytes, "base64").toString("utf8")
     : undefined
 }
 

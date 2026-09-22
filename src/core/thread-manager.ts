@@ -5,7 +5,7 @@ import type {
 } from "../kernel/events.ts"
 import { createItemId, createSessionId, createTurnId } from "../kernel/ids.ts"
 import { AgentThread } from "./agent-thread.ts"
-import type { ModelContextSettings, StoredThread } from "./rollout.ts"
+import type { GitInfo, ModelContextSettings, StoredThread } from "./rollout.ts"
 import { Session, type TurnProcessor } from "./session.ts"
 import { SessionStatus } from "./session-io.ts"
 import type {
@@ -19,6 +19,7 @@ export type CreateThreadInput = {
   readonly threadId?: string
   readonly title?: string
   readonly workingDirectory?: string
+  readonly gitInfo?: GitInfo
   readonly projectId?: string
   readonly mateId?: string
   readonly mateRevisionId?: string
@@ -154,6 +155,7 @@ export class ThreadManager {
         ...(input.workingDirectory === undefined
           ? {}
           : { workingDirectory: input.workingDirectory }),
+        ...(input.gitInfo === undefined ? {} : { gitInfo: input.gitInfo }),
         ...(input.projectId === undefined
           ? {}
           : { projectId: input.projectId }),

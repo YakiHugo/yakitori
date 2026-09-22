@@ -3,11 +3,11 @@ import { apiUrl } from "./lib/api-client.ts"
 
 export async function appendPickedImages(
   current: readonly ImageAttachment[],
-  sessionId: string,
+  sessionId: string | undefined,
   selectionId: string,
 ): Promise<readonly ImageAttachment[]> {
   const added = await requireDesktopBridge().importPickedImages({
-    sessionId,
+    ...(sessionId === undefined ? {} : { sessionId }),
     selectionId,
   })
   return [...current, ...added]
@@ -34,12 +34,12 @@ export function validateImageFiles(files: readonly File[]): void {
 
 export async function appendImageFiles(
   current: readonly ImageAttachment[],
-  sessionId: string,
+  sessionId: string | undefined,
   files: readonly File[],
 ): Promise<readonly ImageAttachment[]> {
   validateImageFiles(files)
   const added = await requireDesktopBridge().importImageFiles({
-    sessionId,
+    ...(sessionId === undefined ? {} : { sessionId }),
     files,
   })
   return [...current, ...added]

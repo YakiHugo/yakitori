@@ -162,6 +162,24 @@ describe("appearance", () => {
 })
 
 describe("settings page", () => {
+  it("uses a dedicated navigation surface and returns to the app", async () => {
+    const closeSettings = vi.fn()
+    useAppStore.setState({ settingsSection: "general", closeSettings })
+    render(<SettingsPage />)
+
+    expect(
+      screen.getByRole("complementary", { name: "Settings navigation" }),
+    ).toBeDefined()
+    expect(
+      screen.getByRole("navigation", { name: "Settings sections" }),
+    ).toBeDefined()
+
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "Back to app" }))
+    expect(closeSettings).toHaveBeenCalledOnce()
+  })
+
   it("saves changes from general and notification controls", async () => {
     const user = userEvent.setup()
     useAppStore.setState({ settingsSection: "general" })

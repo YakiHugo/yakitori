@@ -1,6 +1,3 @@
-import { formatInputContext } from "./input-context.ts"
-import { prepareModelImage } from "./prepare-model-image.ts"
-import { finalizeToolOutput } from "./tools/result-output.ts"
 import type { ResponseItemEnvelope, TurnContextItem } from "../core/rollout.ts"
 import type {
   TurnControl,
@@ -13,10 +10,10 @@ import {
   type ContextCompactionCompletedItem,
   type JsonObject,
   type KernelError,
-  type ModelTransportPolicy,
   MISSING_TOOL_RESULT_TEXT,
   type ModelMessage,
   type ModelSelection,
+  type ModelTransportPolicy,
   type RolloutAssets,
   type SessionConfigurationSnapshot,
   type StartedExecutionItem,
@@ -33,6 +30,7 @@ import {
 import { observeEnvironment } from "./environment-context.ts"
 import { isAbortError, ModelFailureError } from "./errors.ts"
 import { HookEvent, type HookRunner } from "./hooks.ts"
+import { formatInputContext } from "./input-context.ts"
 import type { InstructionDiagnostic } from "./instruction-files.ts"
 import {
   createRunnerTimingPolicy,
@@ -61,6 +59,7 @@ import {
   estimateModelRequestBudget,
 } from "./model-request-budget.ts"
 import { createPermissionGate, type PermissionGate } from "./permission-gate.ts"
+import { prepareModelImage } from "./prepare-model-image.ts"
 import {
   createProjectInstructionsLoader,
   type loadProjectInstructions,
@@ -85,6 +84,7 @@ import {
 import { resolveToolPermissionRequest } from "./tool-permissions.ts"
 import { resolveWorkspaceRoot } from "./tools/path-policy.ts"
 import { createToolRegistry, type ToolRegistry } from "./tools/registry.ts"
+import { finalizeToolOutput } from "./tools/result-output.ts"
 import { captureStepContext, type StepContext } from "./tools/spec-plan.ts"
 import type {
   ToolExecutionResult,
@@ -125,6 +125,7 @@ export type TurnProcessorOptions = {
   readonly prepareStepExtensions?: (signal: AbortSignal) => Promise<
     Readonly<{
       skills?: SkillConfiguration
+      skillMcpServers?: readonly import("./skills.ts").SkillMcpServer[]
       projectRootMarkers?: readonly string[]
       projectInstructionFilenames?: readonly string[]
     }>
@@ -644,6 +645,9 @@ async function executeTurnModelLoop(
           submitted.content.text,
           skillSnapshot,
           (message) => input.runtime.emitWarning(message),
+          instructionConfiguration.skillMcpServers === undefined
+            ? undefined
+            : { mcpServers: instructionConfiguration.skillMcpServers },
         )
         if (text !== undefined)
           await input.runtime.recordConversationItems([
@@ -870,6 +874,13 @@ async function executeTurnModelLoop(
         messages: await resolveRolloutAssetMedia(
           adapted.messages,
           input.options.rolloutAssets,
+          {
+            nativePdf:
+              step.target.provider === "openai" ||
+              step.target.provider === "anthropic",
+            images: step.modelInfo.inputModalities.includes("image"),
+          },
+          input.signal,
         ),
         tools: toolPlan.modelDefinitions,
         toolWireProtocol: step.toolWireProtocol,
@@ -1035,6 +1046,12 @@ async function executeTurnModelLoop(
           turnId: input.input.submissionId,
           workspaceRoot,
           signal: input.signal,
+          documentReading: {
+            nativePdf:
+              step.target.provider === "openai" ||
+              step.target.provider === "anthropic",
+            images: step.modelInfo.inputModalities.includes("image"),
+          },
           toolPlan,
           permissionGate: input.permissionGate,
           emitItemStarted: input.runtime.emitItemStarted,
@@ -1485,6 +1502,13 @@ async function compactLiveHistory(
           compactionStep.modelInfo,
         ).messages,
         input.rolloutAssets,
+        {
+          nativePdf:
+            compactionStep.target.provider === "openai" ||
+            compactionStep.target.provider === "anthropic",
+          images: compactionStep.modelInfo.inputModalities.includes("image"),
+        },
+        input.signal,
       )
       try {
         result = await compact(
@@ -1650,6 +1674,7 @@ async function compactLiveHistory(
 }
 
 type ToolExecutionScope = {
+  readonly documentReading: { nativePdf: boolean; images: boolean }
   readonly threadId: string
   readonly rolloutId: string
   readonly turnId: string
@@ -2013,6 +2038,7 @@ async function executePreparedTool(
           toolCallId: prepared.call.id,
           turnId: input.turnId,
           signal: input.signal,
+          documentReading: input.documentReading,
           ...(input.rolloutAssets === undefined
             ? {}
             : { rolloutAssets: input.rolloutAssets }),
@@ -2230,62 +2256,69 @@ function envelope(
 async function resolveRolloutAssetMedia(
   messages: readonly ModelMessage[],
   rolloutAssets: RolloutAssets | undefined,
+  documentReading: import("./prepare-model-document.ts").DocumentReadingCapabilities,
+  signal?: AbortSignal,
 ): Promise<readonly ModelMessage[]> {
-  return Promise.all(
-    messages.map(async (message): Promise<ModelMessage> => {
-      if (message.role !== "user" && message.role !== "tool") return message
-      const images = await Promise.all(
-        (message.images ?? []).map(async (image) => {
-          if ("data" in image && image.data !== undefined)
-            return prepareModelImage(
-              Buffer.from(image.data, "base64"),
-              image.detail ?? "high",
-            )
-          if (rolloutAssets === undefined) {
-            throw new Error("Rollout image storage is unavailable.")
-          }
-          const bytes = await rolloutAssets.read(image.file)
-          if (bytes.byteLength !== image.sizeBytes) {
-            throw new Error(
-              "Rollout image size does not match its recorded size.",
-            )
-          }
-          return prepareModelImage(bytes, image.detail ?? "high")
-        }),
-      )
-      const documents =
-        message.role === "tool" && message.documents !== undefined
-          ? await Promise.all(
-              message.documents.map(async (document) => {
-                if (rolloutAssets === undefined)
-                  throw new Error("Document asset storage unavailable.")
-                const bytes = await rolloutAssets.read(document.file)
-                if (bytes.length !== document.sizeBytes)
-                  throw new Error("Document asset size mismatch.")
-                return { ...document, data: bytes.toString("base64") }
-              }),
-            )
-          : undefined
-      if (message.role === "user") {
-        const { contextAttachments, ...user } = message
-        return {
-          ...user,
-          content: contextAttachments?.length
-            ? [
-                ...user.content,
-                { type: "text", text: formatInputContext(contextAttachments) },
-              ]
-            : user.content,
-          ...(images.length === 0 ? {} : { images }),
+  const { prepareModelDocuments } = await import("./prepare-model-document.ts")
+  const resolved: ModelMessage[] = []
+  // Project messages in order so a history full of PDFs cannot launch one
+  // rasterization worker per message concurrently.
+  for (const message of messages) {
+    if (message.role !== "user" && message.role !== "tool") {
+      resolved.push(message)
+      continue
+    }
+    const images = await Promise.all(
+      (message.images ?? []).map(async (image) => {
+        if ("data" in image && image.data !== undefined)
+          return prepareModelImage(
+            Buffer.from(image.data, "base64"),
+            image.detail ?? "high",
+          )
+        if (rolloutAssets === undefined) {
+          throw new Error("Rollout image storage is unavailable.")
         }
-      }
-      return {
-        ...message,
+        const bytes = await rolloutAssets.read(image.file)
+        if (bytes.byteLength !== image.sizeBytes) {
+          throw new Error(
+            "Rollout image size does not match its recorded size.",
+          )
+        }
+        return prepareModelImage(bytes, image.detail ?? "high")
+      }),
+    )
+    if (message.role === "user") {
+      const { contextAttachments, ...user } = message
+      resolved.push({
+        ...user,
+        content: contextAttachments?.length
+          ? [
+              ...user.content,
+              { type: "text", text: formatInputContext(contextAttachments) },
+            ]
+          : user.content,
         ...(images.length === 0 ? {} : { images }),
-        ...(documents === undefined ? {} : { documents }),
-      }
-    }),
-  )
+      })
+      continue
+    }
+    const { documents, ...tool } = message
+    const projected = await prepareModelDocuments(
+      documents ?? [],
+      rolloutAssets,
+      documentReading,
+      signal,
+    )
+    const combinedImages = [...images, ...projected.images]
+    resolved.push({
+      ...tool,
+      content: tool.content + projected.content,
+      ...(combinedImages.length === 0 ? {} : { images: combinedImages }),
+      ...(projected.documents.length === 0
+        ? {}
+        : { documents: projected.documents }),
+    })
+  }
+  return resolved
 }
 
 function aggregateTokenUsage(

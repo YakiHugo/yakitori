@@ -42,6 +42,9 @@ function expectWidth(width: number, maximum: number) {
       .getByRole("complementary", { name: "Sidebar" })
       .style.getPropertyValue("--sidebar-width"),
   ).toBe(`${width}px`)
+  expect(
+    document.documentElement.style.getPropertyValue("--sidebar-width"),
+  ).toBe(`${width}px`)
 }
 
 it("starts at 275 pixels with accessible 240–520 pixel resize bounds", () => {

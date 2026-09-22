@@ -1,4 +1,3 @@
-import type { ContextExcerpt } from "../kernel/input-context.ts"
 import {
   type ImageAttachment,
   isKernelEvent,
@@ -9,6 +8,7 @@ import {
   type TurnMetrics,
   type TurnOutcome,
 } from "../kernel/events.ts"
+import type { ContextExcerpt } from "../kernel/input-context.ts"
 import type { LiveSessionEvent } from "../runtime/live-events.ts"
 import type { ModelFailureKind } from "../runtime/model.ts"
 import type {
@@ -22,6 +22,7 @@ export type ExecutionEntry =
       readonly kind: "user_input"
       readonly contextAttachments?: readonly ContextExcerpt[]
       readonly inputId: string
+      readonly questionId?: string
       readonly text: string
       readonly attachments?: readonly ImageAttachment[]
       readonly at: string
@@ -611,6 +612,9 @@ function applyDurable(
                 {
                   kind: "user_input",
                   inputId: event.data.inputId,
+                  ...(typeof event.data.metadata?.userQuestionId === "string"
+                    ? { questionId: event.data.metadata.userQuestionId }
+                    : {}),
                   text: event.data.content.text,
                   attachments: event.data.content.attachments ?? [],
                   ...(event.data.content.contextAttachments === undefined

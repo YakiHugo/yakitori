@@ -1,12 +1,7 @@
-import { AddProjectButton } from "./sidebar-add-project.tsx"
-import { SidebarDragKind } from "./sidebar-drag.tsx"
-import { useSidebarMotion } from "./sidebar-motion.ts"
-import { SidebarGroups, SidebarOptions } from "./sidebar-groups.tsx"
-import { SessionItems } from "./sidebar-sessions.tsx"
 import {
-  ChevronRight,
-  ArrowUp,
   ArrowDown,
+  ArrowUp,
+  ChevronRight,
   Folder,
   FolderOpen,
   FolderPlus,
@@ -20,11 +15,15 @@ import { useContext, useEffect, useState } from "react"
 import type { ApiProject } from "../../server/protocol.ts"
 import { cn } from "../lib/utils.ts"
 import { sessionListKey, useAppStore } from "../store/app-store.ts"
-import { Button } from "./ui/button.tsx"
-import { ScrollArea } from "./ui/scroll-area.tsx"
-import { Collapsible, CollapsibleContent } from "./ui/collapsible.tsx"
+import { AddProjectButton } from "./sidebar-add-project.tsx"
+import { SidebarDragKind } from "./sidebar-drag.tsx"
+import { SidebarGroups, SidebarOptions } from "./sidebar-groups.tsx"
+import { useSidebarMotion } from "./sidebar-motion.ts"
+import { SessionItems } from "./sidebar-sessions.tsx"
 import { SidebarDialog, SidebarMenu } from "./sidebar-surfaces.tsx"
 import { SubscriptionPanelButton } from "./subscription-panel.tsx"
+import { Button } from "./ui/button.tsx"
+import { Collapsible, CollapsibleContent } from "./ui/collapsible.tsx"
 
 export function Sidebar({ onSearch }: Readonly<{ onSearch(): void }>) {
   const navRef = useSidebarMotion()
@@ -87,7 +86,7 @@ export function Sidebar({ onSearch }: Readonly<{ onSearch(): void }>) {
           </div>
         )}
       </div>
-      <ScrollArea className="min-h-0 flex-1">
+      <div className="sidebar-scroll min-h-0 flex-1 overflow-y-auto">
         <nav ref={navRef} aria-label="Sessions" className="px-2 pb-4">
           <SidebarGroups
             pinnedProjects={projects
@@ -122,7 +121,7 @@ export function Sidebar({ onSearch }: Readonly<{ onSearch(): void }>) {
             </div>
           )}
         </nav>
-      </ScrollArea>
+      </div>
       <SubscriptionPanelButton />
     </>
   )

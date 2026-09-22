@@ -80,6 +80,7 @@ describe("MCP connection manager", () => {
         { name: "demo", state: "ready", toolCount: 1 },
       ])
       expect(first?.toolName).toEqual({ namespace: "demo", name: "echo" })
+      expect(first?.supportsParallelToolCalls).toBe(true)
       await expect(
         first?.execute({ text: "hello" }, { workspaceRoot: root }),
       ).resolves.toMatchObject({
@@ -89,6 +90,11 @@ describe("MCP connection manager", () => {
 
       await manager.update(config)
       expect(manager.tools()[0]).toBe(first)
+      await manager.reconnect("demo")
+      expect(manager.tools()[0]).not.toBe(first)
+      await expect(
+        first?.execute({ text: "leased connection" }, { workspaceRoot: root }),
+      ).resolves.toMatchObject({ content: "leased connection" })
     } finally {
       await manager.close()
       await rm(root, { recursive: true, force: true })

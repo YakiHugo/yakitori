@@ -130,9 +130,11 @@ describe("web_fetch contract", () => {
       content: [
         "HTTP 200 OK",
         "",
-        "Tom & Jerry",
-        "See [the docs](https://example.com/docs) and https://example.com/same and relative.",
-        `5 < 6 "quoted" 'apostrophe' AB end`,
+        "# Tom & Jerry",
+        "",
+        `See [the docs](https://example.com/docs) and [https://example.com/same](https://example.com/same) and [relative](${base}/relative).`,
+        "",
+        `5 < 6 "quoted" 'apostrophe' AB\u00a0end`,
       ].join("\n"),
     })
   })
@@ -147,7 +149,7 @@ describe("web_fetch contract", () => {
     const result = await fetchUrl(base)
     expect(result).toMatchObject({
       ok: true,
-      content: "HTTP 200 OK\n\nif (x) {\n    return  1\n}\nafter",
+      content: "HTTP 200 OK\n\n```\nif (x) {\n    return  1\n}\n```\n\nafter",
     })
   })
 
@@ -172,6 +174,24 @@ describe("web_fetch contract", () => {
       content: "HTTP 200 OK\n\narrived",
       output: { url: `${base}/final`, redirects: 2 },
     })
+  })
+
+  it("resolves relative links and images using the final URL and document base", async () => {
+    const base = await serve(({ url, response }) => {
+      if (url.pathname === "/start") {
+        response.writeHead(302, { location: "/docs/page" })
+        response.end()
+        return
+      }
+      response.writeHead(200, { "content-type": "text/html" })
+      response.end(
+        '<base href="../assets/"><p><a href="guide?q=1&amp;x=2">Guide</a> <a href="#section">Section</a><img alt="Diagram" src="diagram.png"></p>',
+      )
+    })
+    const result = await fetchUrl(`${base}/start`)
+    expect(result.content).toContain(`[Guide](${base}/assets/guide?q=1&x=2)`)
+    expect(result.content).toContain(`[Section](${base}/assets/#section)`)
+    expect(result.content).toContain(`![Diagram](${base}/assets/diagram.png)`)
   })
 
   it("refuses cross-origin redirects and points at the new URL", async () => {
@@ -309,9 +329,31 @@ describe("web_fetch contract", () => {
 })
 
 describe("htmlToText", () => {
-  it("collapses blank-line runs and trims non-pre lines", () => {
-    expect(htmlToText("<p>one</p><div><br></div><div><p>two</p></div>")).toBe(
-      "one\ntwo",
+  it("handles raw-text tags, malformed paragraphs, and full HTML entities", async () => {
+    const text = await htmlToText(
+      '<script>const markup = "<script><style>";</script><style>.x::after { content: "<style>" }</style><p>one &copy; &eacute;<p>two < 3<p>end',
     )
+    expect(text).toBe("one © é\n\ntwo < 3\n\nend")
+  })
+
+  it("retains Markdown lists, tables, and code after removing boilerplate", async () => {
+    const text = await htmlToText(
+      '<html class="advert-layout"><body><nav>Navigation</nav><div class="cookie">Consent</div><main><h2>Title</h2><ul><li>First</li><li>Second</li></ul><table><tr><th>Name</th><th>Value</th></tr><tr><td>Alpha</td><td>1</td></tr></table><pre><code>const x = 1 &lt; 2\n  next()</code></pre></main></body></html>',
+    )
+    expect(text).toContain("## Title")
+    expect(text).toMatch(/-\s+First\n-\s+Second/)
+    expect(text).toContain("| Name | Value |")
+    expect(text).toContain("| Alpha | 1 |")
+    expect(text).toContain("```\nconst x = 1 < 2\n  next()\n```")
+    expect(text).not.toMatch(/Navigation|Consent/)
+  })
+
+  it("preserves relative links without a base and omits embedded data URLs", async () => {
+    const text = await htmlToText(
+      '<p><a href="../next">Next</a><img alt="inline" src="data:image/png;base64,AAAA"><a href="javascript:alert(1)">Action</a></p>',
+    )
+    expect(text).toContain("[Next](../next)")
+    expect(text).toContain("Action")
+    expect(text).not.toMatch(/data:|javascript:/)
   })
 })

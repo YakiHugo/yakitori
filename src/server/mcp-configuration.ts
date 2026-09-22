@@ -70,6 +70,7 @@ export function mcpServersFromConfig(
         "http_headers",
         "env_http_headers",
         "bearer_token_env_var",
+        "oauth",
       ]
       const commonFields = [
         "enabled",
@@ -133,11 +134,51 @@ export function mcpServersFromConfig(
           throw new ConfigurationError(
             `mcp_servers.${name}.bearer_token_env_var must name an environment variable.`,
           )
+        let oauth: Extract<McpServerConfig, { url: string }>["oauth"]
+        if (entry.oauth !== undefined) {
+          if (!isTomlTable(entry.oauth))
+            throw new ConfigurationError(
+              `mcp_servers.${name}.oauth must be a table.`,
+            )
+          for (const key of Object.keys(entry.oauth))
+            if (!["client_id", "client_secret_env_var", "scopes"].includes(key))
+              throw new ConfigurationError(`Unknown MCP OAuth field: ${key}`)
+          const clientId = entry.oauth.client_id
+          const clientSecretEnvVar = entry.oauth.client_secret_env_var
+          for (const field of [clientId, clientSecretEnvVar])
+            if (
+              field !== undefined &&
+              (typeof field !== "string" || field.trim() === "")
+            )
+              throw new ConfigurationError(
+                "MCP OAuth client fields must be nonempty strings.",
+              )
+          if (clientSecretEnvVar !== undefined && clientId === undefined)
+            throw new ConfigurationError(
+              "MCP OAuth client_secret_env_var requires client_id.",
+            )
+          const scopes = stringArrayValue(
+            entry.oauth.scopes,
+            `mcp_servers.${name}.oauth.scopes`,
+          )
+          if (scopes?.some((scope) => scope.trim() === "" || /\s/.test(scope)))
+            throw new ConfigurationError(
+              "MCP OAuth scopes must be nonempty scope tokens.",
+            )
+          oauth = {
+            ...(clientId === undefined ? {} : { clientId: clientId as string }),
+            ...(clientSecretEnvVar === undefined
+              ? {}
+              : { clientSecretEnvVar: clientSecretEnvVar as string }),
+            ...(scopes === undefined ? {} : { scopes }),
+          }
+        }
         return [
           name,
           {
             ...common,
             url: entry.url,
+            ...(oauth === undefined ? {} : { oauth }),
             ...(httpHeaders === undefined ? {} : { httpHeaders }),
             ...(envHttpHeaders === undefined ? {} : { envHttpHeaders }),
             ...(entry.bearer_token_env_var === undefined

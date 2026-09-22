@@ -1,3 +1,4 @@
+import type { GitInfo } from "../core/rollout.ts"
 import type {
   EventEnvelope,
   EventMetadata,
@@ -350,6 +351,7 @@ export type ApiSessionSummary = Readonly<{
   // True while a Turn is running in this Session.
   active?: boolean
   workingDirectory?: string
+  gitInfo?: GitInfo
   // Set when the Session belongs to a live Project; omitted for orphaned
   // projectIds (orphan-on-delete, see ThreadMetadata.projectId).
   projectId?: string

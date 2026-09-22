@@ -21,18 +21,19 @@
 }
 
 .settings-nav {
-  border-right: 1px solid var(--border);
-  padding: 6px 16px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .settings-nav button {
   display: flex;
   align-items: center;
   gap: 10px;
+  min-width: 0;
   width: 100%;
-  border-radius: 8px;
-  padding: 9px 10px;
-  margin-bottom: 4px;
+  border-radius: 9px;
+  padding: 8px 10px;
   font-size: 13px;
   text-align: left;
   color: var(--muted-foreground);
@@ -40,35 +41,42 @@
 
 .settings-nav button:hover,
 .settings-nav button[aria-current="page"] {
-  background: var(--accent);
   color: var(--foreground);
 }
 
-.settings-nav > p {
+.settings-nav button:hover {
+  background: color-mix(in oklab, var(--foreground) 4%, transparent);
+}
+
+.settings-nav button[aria-current="page"] {
+  background: color-mix(in oklab, var(--foreground) 7%, transparent);
+}
+
+.settings-nav-group > p {
   color: var(--muted-foreground);
   font-size: 11px;
-  line-height: 1.6;
-  padding: 20px 10px;
+  font-weight: 500;
+  line-height: 1;
+  padding: 0 10px 9px;
 }
 
 .settings-content {
+  width: 100%;
   min-width: 0;
 }
 
 .settings-section-heading {
-  padding: 12px 0 22px;
+  padding: 8px 0 30px;
 }
 
 .settings-section-heading > svg {
-  margin-bottom: 14px;
-  stroke-width: 1.5;
-  color: var(--muted-foreground);
+  display: none;
 }
 
 .settings-section-heading h3 {
-  font-size: 20px;
+  font-size: 24px;
   font-weight: 600;
-  letter-spacing: -0.5px;
+  letter-spacing: -0.6px;
 }
 
 .settings-section-heading p,
@@ -84,8 +92,8 @@
   align-items: center;
   justify-content: space-between;
   gap: 20px;
-  padding: 19px 0;
-  border-top: 1px solid var(--border);
+  padding: 17px 18px;
+  border-bottom: 1px solid var(--border);
 }
 
 .settings-row h4 {
@@ -190,70 +198,79 @@
   cursor: default;
 }
 
-@media (max-width: 620px) {
-  .settings-layout {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 4px;
-  }
-  .settings-nav {
-    display: flex;
-    border-right: 0;
-    padding: 0;
-    gap: 6px;
-  }
-  .settings-nav > p {
-    display: none;
-  }
-  .settings-row {
-    gap: 10px;
-  }
-}
-
 .settings-page {
-  display: flex;
+  display: grid;
+  grid-template-columns:
+    clamp(240px, var(--sidebar-width, 275px), 520px)
+    minmax(0, 1fr);
   min-width: 0;
   flex: 1;
-  flex-direction: column;
   background: var(--background);
   overflow: hidden;
 }
 
-.settings-page-header {
+.app-shell:has(.settings-page) > :is(.sidebar-frame, .workspace-frame),
+.app-shell:has(.settings-page) > .workspace-show {
+  display: none;
+}
+
+.settings-sidebar {
   display: flex;
-  height: 48px;
-  flex: none;
+  min-width: 0;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+  background: color-mix(in oklab, var(--muted) 52%, var(--background));
+  padding: 20px 12px;
+}
+
+.settings-back {
+  display: inline-flex;
+  width: fit-content;
   align-items: center;
-  justify-content: space-between;
-  border-bottom: 1px solid var(--border);
-  padding: 0 20px;
-}
-
-.settings-page-header h2 {
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.settings-page-header button {
+  gap: 8px;
   border-radius: 8px;
-  padding: 6px;
-  color: var(--muted-foreground);
+  padding: 7px 9px;
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 500;
 }
 
-.settings-page-header button:hover {
-  background: var(--accent);
-  color: var(--foreground);
+.settings-back:hover {
+  background: color-mix(in oklab, var(--foreground) 5%, transparent);
+}
+
+.settings-nav-group {
+  margin-top: 35px;
 }
 
 .settings-page-body {
-  flex: 1;
+  min-width: 0;
   overflow-y: auto;
-  padding: 24px;
+  padding: 64px clamp(32px, 7vw, 112px);
 }
 
-.settings-page-body .settings-layout {
-  max-width: 860px;
+.settings-content-inner {
+  max-width: 900px;
   margin: 0 auto;
-  min-height: 0;
+}
+
+.settings-group {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: color-mix(in oklab, var(--background) 96%, var(--foreground));
+}
+
+.settings-group > .settings-row:last-child {
+  border-bottom: 0;
+}
+
+.settings-group + .settings-hint {
+  margin-top: 14px;
+}
+
+html[data-desktop="macos"] .settings-sidebar {
+  padding-top: 48px;
 }
 
 .settings-usage-heading {
@@ -364,4 +381,48 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+@media (max-width: 620px) {
+  .settings-page {
+    grid-template-columns: minmax(0, 1fr);
+    overflow-y: auto;
+  }
+
+  .settings-sidebar {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+    padding: 10px 12px;
+  }
+
+  .settings-nav-group {
+    margin-top: 8px;
+  }
+
+  .settings-nav-group > p {
+    display: none;
+  }
+
+  .settings-nav {
+    flex-direction: row;
+    gap: 4px;
+    overflow-x: auto;
+  }
+
+  .settings-nav button {
+    width: auto;
+    flex: none;
+  }
+
+  .settings-page-body {
+    overflow: visible;
+    padding: 28px 18px 48px;
+  }
+
+  .settings-row {
+    gap: 10px;
+  }
 }

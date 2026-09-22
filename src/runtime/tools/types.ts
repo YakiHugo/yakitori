@@ -1,7 +1,7 @@
 import type {
   JsonObject,
-  ModelToolResultMessage,
   JsonValue,
+  ModelToolResultMessage,
   ToolExecutionDescriptor,
 } from "../../kernel/index.ts"
 import type { RolloutAssets } from "../../kernel/rollout-assets.ts"
@@ -39,6 +39,7 @@ export type ToolExecutionContext = Readonly<{
   signal?: AbortSignal
   visibleFileObservations?: VisibleFileObservations
   agentControl?: BoundAgentControl
+  documentReading?: Readonly<{ nativePdf: boolean; images: boolean }>
 }>
 
 export type ToolReadinessContext = Readonly<{

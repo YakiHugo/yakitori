@@ -4,8 +4,8 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { type BrowserWindow, dialog, ipcMain, nativeImage } from "electron"
 import type { ImageAttachment } from "../kernel/events.ts"
-import type { ServerProcess } from "./server-process.ts"
 import { requireTrustedSender } from "./resource-opener.ts"
+import type { ServerProcess } from "./server-process.ts"
 
 const pickImagesChannel = "yakitori:pick-images"
 const importPickedImagesChannel = "yakitori:import-picked-images"
@@ -49,12 +49,13 @@ export function registerAttachmentImporter(
     }
     // A selection is single-use even when the sidecar import fails.
     selections.delete(request.selectionId)
+    const target = attachmentImportTarget(request.sessionId)
     return validateImportedImages(
       server,
       requireAttachments(
         await server.request({
           type: "import_image_paths",
-          sessionId: request.sessionId,
+          ...target,
           ownerId: createDraftOwnerId(),
           paths,
         }),
@@ -85,7 +86,7 @@ export function registerAttachmentImporter(
         requireAttachments(
           await server.request({
             type: "import_image_paths",
-            sessionId: request.sessionId,
+            ...attachmentImportTarget(request.sessionId),
             ownerId: createDraftOwnerId(),
             paths,
           }),
@@ -169,14 +170,12 @@ function createDraftOwnerId(): string {
   return `draft_${randomUUID().replaceAll("-", "")}`
 }
 
-function requireSessionId(value: unknown): string {
-  if (
-    typeof value !== "object" ||
-    value === null ||
-    !("sessionId" in value) ||
-    typeof value.sessionId !== "string" ||
-    value.sessionId.length === 0
-  ) {
+function optionalSessionId(value: unknown): string | undefined {
+  if (typeof value !== "object" || value === null) {
+    throw new TypeError("Attachment import requires a Session ID.")
+  }
+  if (!("sessionId" in value) || value.sessionId === undefined) return
+  if (typeof value.sessionId !== "string" || value.sessionId.length === 0) {
     throw new TypeError("Attachment import requires a Session ID.")
   }
   return value.sessionId
@@ -196,23 +195,24 @@ function requireSelectionId(value: unknown): string {
 }
 
 function requirePickedImagesRequest(value: unknown): {
-  readonly sessionId: string
+  readonly sessionId?: string
   readonly selectionId: string
 } {
+  const sessionId = optionalSessionId(value)
   return {
-    sessionId: requireSessionId(value),
+    ...(sessionId === undefined ? {} : { sessionId }),
     selectionId: requireSelectionId(value),
   }
 }
 
 function requireImageFilesRequest(value: unknown): {
-  readonly sessionId: string
+  readonly sessionId?: string
   readonly items: readonly (
     | { readonly name: string; readonly filePath: string }
     | { readonly name: string; readonly data: Uint8Array }
   )[]
 } {
-  const sessionId = requireSessionId(value)
+  const sessionId = optionalSessionId(value)
   if (typeof value !== "object" || value === null || !("items" in value)) {
     throw new TypeError("Attachment import requires image files.")
   }
@@ -221,7 +221,7 @@ function requireImageFilesRequest(value: unknown): {
     throw new TypeError("Attachment import requires image files.")
   }
   return {
-    sessionId,
+    ...(sessionId === undefined ? {} : { sessionId }),
     items: items.map((item: unknown) => {
       if (
         typeof item !== "object" ||
@@ -248,6 +248,14 @@ function requireImageFilesRequest(value: unknown): {
       return { name: item.name, data: item.data }
     }),
   }
+}
+
+function attachmentImportTarget(
+  sessionId: string | undefined,
+): { readonly sessionId: string } | { readonly rolloutId: string } {
+  return sessionId === undefined
+    ? { rolloutId: `draft_${randomUUID().replaceAll("-", "")}` }
+    : { sessionId }
 }
 
 function requireAttachments(

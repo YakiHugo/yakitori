@@ -1,7 +1,6 @@
-import { openSync, closeSync, writeSync, fsyncSync } from "node:fs"
-import { fitText, headTailPreview } from "./result-output.ts"
 import { type ChildProcess, spawn } from "node:child_process"
 import { randomInt } from "node:crypto"
+import { closeSync, fsyncSync, openSync, writeSync } from "node:fs"
 import { basename } from "node:path"
 import { type IPty, spawn as spawnPty } from "node-pty"
 import type { JsonValue } from "../../kernel/index.ts"
@@ -18,6 +17,7 @@ import {
   completeCommandExecution,
 } from "./execution-descriptors.ts"
 import { resolveCommandCwd } from "./path-policy.ts"
+import { fitText, headTailPreview } from "./result-output.ts"
 import { plainToolName } from "./tool-name.ts"
 import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
 
@@ -499,14 +499,14 @@ function launchPipe(
           cwd: input.cwd,
           shell: input.shell,
           env: input.env,
-          stdio: ["pipe", "pipe", "pipe"],
+          stdio: ["ignore", "pipe", "pipe"],
           windowsHide: true,
         })
       : spawn(input.shell, shellArguments(input.shell, input.command), {
           cwd: input.cwd,
           detached: true,
           env: input.env,
-          stdio: ["pipe", "pipe", "pipe"],
+          stdio: ["ignore", "pipe", "pipe"],
           windowsHide: true,
         })
   child.stdout?.on("data", (chunk: Buffer | string) => output.append(chunk))
@@ -516,10 +516,10 @@ function launchPipe(
     handle: {
       pid: child.pid ?? -1,
       write(chars) {
-        if (chars === "\u0003" && process.platform !== "win32") {
+        if (chars === "\u0003") {
           signalProcess(child, "SIGINT")
         } else {
-          child.stdin?.write(chars)
+          throw new Error("stdin is closed for plain-pipe sessions.")
         }
       },
       terminate(signal) {

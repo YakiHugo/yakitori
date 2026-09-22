@@ -1,4 +1,3 @@
-import type { SessionSidebar, SidebarChange } from "./session-sidebar.ts"
 import type {
   HistoryPosition,
   RolloutItem,
@@ -6,6 +5,7 @@ import type {
   ThreadMetadata,
   ThreadSummary,
 } from "./rollout.ts"
+import type { SessionSidebar, SidebarChange } from "./session-sidebar.ts"
 import type { ThreadSearchOccurrence } from "./thread-search.ts"
 
 export const PersistContext = {
@@ -93,6 +93,7 @@ export type ThreadStoreOccurrenceSearchResult = Readonly<{
 // Storage-neutral rollout boundary. Implementations own their live single
 // writer, retry buffer, reference-backed fork positions, and projections.
 export type ThreadStore = {
+  retainEphemeralRolloutAssets?(rolloutId: string): () => void
   createThread(metadata: CreateThreadMetadata): Promise<StoredThread>
   resumeThread(threadId: string): Promise<StoredThread | undefined>
   appendItems(threadId: string, items: readonly RolloutItem[]): Promise<number>

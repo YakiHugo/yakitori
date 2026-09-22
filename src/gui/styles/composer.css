@@ -79,6 +79,37 @@
   transform-origin: bottom right;
   animation: composer-control-enter 180ms var(--conversation-ease);
 }
+.composer-run-state {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+  padding-inline: 5px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+}
+.composer-run-state > svg {
+  width: 12px;
+  height: 12px;
+  animation: spin 1s linear infinite;
+}
+.composer-run-state-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow: 0 0 0 0 color-mix(in oklab, currentColor 22%, transparent);
+  animation: composer-working-pulse 1.8s ease-out infinite;
+}
+.composer-run-state[data-state="working"] {
+  color: color-mix(in oklab, var(--foreground) 72%, var(--muted-foreground));
+}
+.composer-run-state[data-state="stopping"] {
+  color: var(--destructive);
+}
 .effort-slider-fill {
   overflow: hidden;
   background: oklch(0.63 0.2 255);
@@ -175,6 +206,17 @@
     transform: translateY(0) scale(1);
   }
 }
+@keyframes composer-working-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, currentColor 24%, transparent);
+    opacity: 0.95;
+  }
+  65%,
+  100% {
+    box-shadow: 0 0 0 5px transparent;
+    opacity: 0.55;
+  }
+}
 @starting-style {
   .composer-suggestion-panel:not([hidden]) {
     opacity: 0;
@@ -183,7 +225,9 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .composer-suggestion-panel,
-  .composer-control-popover {
+  .composer-control-popover,
+  .composer-run-state-dot,
+  .composer-run-state > svg {
     transition: none;
     animation: none;
   }

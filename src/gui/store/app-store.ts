@@ -89,6 +89,7 @@ export type SettingsSection =
   | "general"
   | "notifications"
   | "subscriptions"
+  | "mcp"
   | "usage"
 
 export type UsageState = Readonly<{
@@ -1119,6 +1120,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
               : undefined
           const excerptsAtCreation =
             get().selection.sessionId === undefined ? get().promptExcerpts : []
+          const attachmentsAtCreation =
+            get().selection.sessionId === undefined
+              ? get().promptAttachments
+              : []
           const parkedDrafts = stashSessionDraft(get())
           const selection = activateSession(response.session.id)
           set({
@@ -1132,6 +1137,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
             ...(draftAtCreation === undefined
               ? {}
               : { promptDraft: draftAtCreation }),
+            promptAttachments: attachmentsAtCreation,
             promptExcerpts: excerptsAtCreation,
           })
           connectEvents(selection, response.event.seq)

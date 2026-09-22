@@ -1,17 +1,19 @@
-import { textPreview } from "./result-output.ts"
-import type { ToolExecutionContext } from "./types.ts"
-import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
-import { plainToolName } from "./tool-name.ts"
 import { noToolApprovalRequired } from "./approval-requirements.ts"
 import {
   completeWebFetchExecution,
   webFetchExecution,
 } from "./execution-descriptors.ts"
+import { textPreview } from "./result-output.ts"
+import { plainToolName } from "./tool-name.ts"
+import type {
+  RuntimeTool,
+  ToolExecutionContext,
+  ToolExecutionResult,
+} from "./types.ts"
 
 // web_fetch deliberately performs no SSRF protection: it runs with the host
-// user's full network authority, same as exec_command. This mirrors dsh's
-// explicit decision — a local coding agent fetches whatever URL the user or
-// repository points it at, and private-network targets are legitimate.
+// user's full network authority, same as exec_command. Private-network targets
+// are legitimate in this local coding-agent harness.
 
 const MAX_URL_CHARACTERS = 2_048
 const MAX_REDIRECTS = 5
@@ -20,52 +22,6 @@ const MAX_TEXT_CHARACTERS = 100_000
 const DEFAULT_TIMEOUT_MS = 30_000
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
-const SKIP_ELEMENTS = new Set([
-  "script",
-  "style",
-  "noscript",
-  "template",
-  "head",
-])
-const BLOCK_ELEMENTS = new Set([
-  "address",
-  "article",
-  "aside",
-  "blockquote",
-  "br",
-  "dd",
-  "details",
-  "div",
-  "dl",
-  "dt",
-  "figcaption",
-  "figure",
-  "footer",
-  "form",
-  "h1",
-  "h2",
-  "h3",
-  "h4",
-  "h5",
-  "h6",
-  "header",
-  "hr",
-  "li",
-  "main",
-  "nav",
-  "ol",
-  "p",
-  "pre",
-  "section",
-  "table",
-  "tbody",
-  "td",
-  "tfoot",
-  "th",
-  "thead",
-  "tr",
-  "ul",
-])
 const TEXTUAL_APPLICATION_TYPES = new Set([
   "application/json",
   "application/xml",
@@ -94,7 +50,7 @@ export function createWebFetchTool(
   return {
     toolName: plainToolName("web_fetch"),
     description:
-      "Fetch a specific http(s) URL and return its content as text. Read-only. HTML is converted to plain text with links preserved as markdown. Redirects to a different origin are not followed; call web_fetch again with the redirect URL instead. Binary content types are not supported. Not a search tool — use it only when you already have a URL.",
+      "Fetch a specific http(s) URL and return its content as text. Read-only. HTML is converted to markdown with links resolved against the page URL. Redirects to a different origin are not followed; call web_fetch again with the redirect URL instead. Binary content types are not supported. Not a search tool — use it only when you already have a URL.",
     approvalRequirement: noToolApprovalRequired,
     effect: "observe",
     supportsParallelToolCalls: true,
@@ -140,7 +96,11 @@ export function createWebFetchTool(
           const fetched = await fetch(current, {
             redirect: "manual",
             signal,
-            headers: { "user-agent": "yakitori web_fetch" },
+            headers: {
+              "user-agent": "yakitori web_fetch",
+              accept:
+                "text/markdown,text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            },
           })
 
           const location = redirectLocation(fetched)
@@ -259,7 +219,9 @@ async function buildResult(
   const charset = charsetOf(contentType)
   const decoded = new TextDecoder(charset).decode(body.bytes)
   const rendered =
-    kind === "html" ? htmlToText(decoded) : stripCarriageReturns(decoded)
+    kind === "html"
+      ? await htmlToText(decoded, url)
+      : stripCarriageReturns(decoded)
 
   const truncated = rendered.length > limits.maxTextCharacters
   const text = truncated
@@ -399,152 +361,58 @@ function stripCarriageReturns(text: string): string {
   return text.replace(/\r\n?/g, "\n")
 }
 
-// Minimal HTML-to-text for a model reader: skip non-content elements, turn
-// block-level tags into newlines, keep absolute http(s) links as markdown,
-// and preserve <pre> whitespace. Fidelity is intentionally not a goal.
-export function htmlToText(html: string): string {
-  const token =
-    /<!--[\s\S]*?-->|<!doctype[^>]*>|<(\/?)([a-zA-Z][a-zA-Z0-9]*)((?:"[^"]*"|'[^']*'|[^>"'])*)>?|([^<]+)/g
-  let out = ""
-  let skipDepth = 0
-  let preDepth = 0
-  const preLines = new Set<number>()
-  const anchors: {
-    readonly href: string | undefined
-    readonly start: number
-  }[] = []
-
-  const emitBreak = () => {
-    if (out.length > 0 && !out.endsWith("\n")) out += "\n"
-  }
-
-  for (const match of html.matchAll(token)) {
-    const [, closing, rawName, attributes, text] = match
-    if (text !== undefined) {
-      if (skipDepth > 0) continue
-      const decoded = decodeEntities(text)
-      if (preDepth > 0) {
-        const firstLine = lineCount(out)
-        out += decoded
-        for (let line = firstLine; line <= lineCount(out); line += 1) {
-          preLines.add(line)
-        }
-      } else {
-        out += decoded.replace(/\s+/g, " ")
-      }
-      continue
-    }
-    if (rawName === undefined) continue // comment or doctype
-    const name = rawName.toLowerCase()
-    const isClosing = closing === "/"
-
-    if (skipDepth > 0) {
-      if (SKIP_ELEMENTS.has(name)) {
-        skipDepth += isClosing ? -1 : 1
-      }
-      continue
-    }
-    if (SKIP_ELEMENTS.has(name)) {
-      if (!isClosing) skipDepth = 1
-      continue
-    }
-    if (name === "pre") {
-      preDepth = Math.max(0, preDepth + (isClosing ? -1 : 1))
-      emitBreak()
-      continue
-    }
-    if (name === "a") {
-      if (isClosing) {
-        const anchor = anchors.pop()
-        if (anchor !== undefined) out = closeAnchor(out, anchor)
-      } else {
-        anchors.push({ href: hrefOf(attributes ?? ""), start: out.length })
-      }
-      continue
-    }
-    if (BLOCK_ELEMENTS.has(name)) emitBreak()
-  }
-
-  return cleanupLines(out, preLines)
-}
-
-function closeAnchor(
-  out: string,
-  anchor: { readonly href: string | undefined; readonly start: number },
-): string {
-  if (anchor.href === undefined || !/^https?:\/\//i.test(anchor.href)) {
-    return out
-  }
-  const label = out.slice(anchor.start).trim().replace(/\s+/g, " ")
-  if (label === "" || label === anchor.href) return out
-  return `${out.slice(0, anchor.start)}[${label}](${anchor.href})`
-}
-
-function hrefOf(attributes: string): string | undefined {
-  const value =
-    /href\s*=\s*"([^"]*)"/i.exec(attributes)?.[1] ??
-    /href\s*=\s*'([^']*)'/i.exec(attributes)?.[1] ??
-    /href\s*=\s*([^\s>]+)/i.exec(attributes)?.[1]
-  return value === undefined ? undefined : decodeEntities(value).trim()
-}
-
-function cleanupLines(out: string, preLines: ReadonlySet<number>): string {
-  const lines = out
-    .split("\n")
-    .map((line, index) => (preLines.has(index) ? line : line.trim()))
-  const kept: string[] = []
-  for (const line of lines) {
-    if (line === "" && (kept.length === 0 || kept[kept.length - 1] === "")) {
-      continue
-    }
-    kept.push(line)
-  }
-  while (kept.length > 0 && kept[kept.length - 1] === "") kept.pop()
-  return kept.join("\n")
-}
-
-function lineCount(text: string): number {
-  let count = 0
-  for (let index = 0; index < text.length; index += 1) {
-    if (text.charCodeAt(index) === 10) count += 1
-  }
-  return count
-}
-
-const NAMED_ENTITIES: Record<string, string> = {
-  amp: "&",
-  lt: "<",
-  gt: ">",
-  quot: '"',
-  apos: "'",
-  nbsp: " ",
-}
-
-function decodeEntities(text: string): string {
-  return text.replace(
-    /&(#x[0-9a-fA-F]+|#[0-9]+|[a-zA-Z][a-zA-Z0-9]*);/g,
-    (whole, body: string) => {
-      if (body.startsWith("#x")) {
-        return codePoint(Number.parseInt(body.slice(2), 16), whole)
-      }
-      if (body.startsWith("#")) {
-        return codePoint(Number.parseInt(body.slice(1), 10), whole)
-      }
-      return NAMED_ENTITIES[body] ?? whole
-    },
+// Grok's web_fetch design: parse HTML, detach boilerplate, then use a Markdown
+// converter. Real parsers handle raw-text elements and malformed markup without
+// letting a script's apparent tags consume the remainder of the article.
+export async function htmlToText(html: string, pageUrl?: URL): Promise<string> {
+  const [{ load }, { default: TurndownService }, { gfm }] = await Promise.all([
+    import("cheerio"),
+    import("turndown"),
+    import("turndown-plugin-gfm"),
+  ])
+  const document = load(html)
+  const baseHref = document("base[href]").first().attr("href")
+  const baseUrl =
+    baseHref === undefined ? pageUrl : (URL.parse(baseHref, pageUrl) ?? pageUrl)
+  document(
+    "head, script, style, noscript, template, svg, iframe, object, embed, nav, header, footer, " +
+      "[class*='cookie'], [class*='sidebar'], [class*='ad-'], [class*='advert'], " +
+      "[id*='cookie'], [id*='sidebar'], [id*='ad-'], [id*='advert']",
   )
-}
-
-function codePoint(value: number, fallback: string): string {
-  if (
-    !Number.isInteger(value) ||
-    value < 0 ||
-    value > 0x10_ffff ||
-    (value >= 0xd8_00 && value <= 0xdf_ff)
-  ) {
-    return fallback
+    .not("html")
+    .remove()
+  for (const [selector, attribute] of [
+    ["a[href]", "href"],
+    ["img[src]", "src"],
+  ] as const) {
+    document(selector).each((_index, element) => {
+      const node = document(element)
+      const value = node.attr(attribute) ?? ""
+      const resolved = URL.parse(value, baseUrl)
+      if (
+        resolved !== null &&
+        ["javascript:", "vbscript:", "data:"].includes(resolved.protocol)
+      ) {
+        node.removeAttr(attribute)
+      } else if (resolved !== null) {
+        node.attr(attribute, resolved.href)
+      }
+    })
   }
-  return String.fromCodePoint(value)
+  document("pre").each((_index, element) => {
+    const node = document(element)
+    if (node.children("code").length === 0) {
+      const code = document("<code>").text(node.text())
+      node.empty().append(code)
+    }
+  })
+  const converter = new TurndownService({
+    headingStyle: "atx",
+    codeBlockStyle: "fenced",
+    bulletListMarker: "-",
+  })
+  converter.use(gfm)
+  return converter.turndown(document.html())
 }
 
 function parseWebFetchInput(

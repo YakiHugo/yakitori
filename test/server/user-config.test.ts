@@ -28,6 +28,11 @@ describe("user config", () => {
         disabled_tools: ["delete"],
         startup_timeout_ms: 1000,
         tool_timeout_ms: 2000,
+        oauth: {
+          client_id: "yakitori-client",
+          client_secret_env_var: "MCP_CLIENT_SECRET",
+          scopes: ["read", "write"],
+        },
       }
       const saved = await store.writeValue({
         keyPath: ["mcp_servers", "remote"],
@@ -41,6 +46,11 @@ describe("user config", () => {
         disabledTools: ["delete"],
         startupTimeoutMs: 1000,
         toolTimeoutMs: 2000,
+        oauth: {
+          clientId: "yakitori-client",
+          clientSecretEnvVar: "MCP_CLIENT_SECRET",
+          scopes: ["read", "write"],
+        },
       })
       const content = await readFile(configPath, "utf8")
       for (const invalid of [
@@ -51,6 +61,10 @@ describe("user config", () => {
         { ...value, startup_timeout_ms: 2_147_483_648 },
         { ...value, startup_timeout_ms: 4_294_967_296 },
         { ...value, url: "file:///tmp/server" },
+        { ...value, oauth: { client_secret_env_var: "SECRET" } },
+        { ...value, oauth: { scopes: ["read write"] } },
+        { ...value, oauth: { client_id: "" } },
+        { ...value, oauth: { client_secret: "must not be stored here" } },
       ]) {
         await expect(
           store.writeValue({

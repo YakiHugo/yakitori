@@ -16,6 +16,12 @@ export type HistoryPosition = {
   readonly endByteOffset: number
 }
 
+export type GitInfo = Readonly<{
+  sha?: string
+  branch?: string
+  originUrl?: string
+}>
+
 export type ThreadMetadata = {
   readonly id: string
   readonly rolloutId: string
@@ -24,6 +30,7 @@ export type ThreadMetadata = {
   readonly updatedAt: string
   readonly title?: string
   readonly workingDirectory?: string
+  readonly gitInfo?: GitInfo
   // Optional owning Project (C8-D2). The rollout is append-only, so deleting
   // a project cannot rewrite this field; the server read path treats a
   // projectId that no longer exists as absent (orphan-on-delete).

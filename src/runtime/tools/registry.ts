@@ -1,4 +1,3 @@
-import { createViewImageTool, createReadDocumentTool } from "./read-media.ts"
 import type { JsonValue, ToolExecutionDescriptor } from "../../kernel/index.ts"
 import type { ModelToolDefinition, ToolWireProtocol } from "../model.ts"
 import type { UserShellEnv } from "../user-shell-env.ts"
@@ -9,6 +8,8 @@ import { createGlobTool } from "./glob.ts"
 import { createGrepTool } from "./grep.ts"
 import { createMultiAgentTools } from "./multi-agent.ts"
 import { createReadFileTool } from "./read-file.ts"
+import { createReadDocumentTool, createViewImageTool } from "./read-media.ts"
+import { createSessionProgressTools } from "./session-progress.ts"
 import {
   canonicalToolName,
   namespacedToolName,
@@ -891,6 +892,7 @@ export function createDefaultTools(
     }),
     createWebFetchTool(),
     createWebSearchTool(),
+    ...createSessionProgressTools(),
     ...(input.includeMultiAgent === false ? [] : createMultiAgentTools()),
   ]
 }

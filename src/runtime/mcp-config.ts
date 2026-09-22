@@ -23,5 +23,10 @@ export type McpServerConfig = McpServerOptions &
         httpHeaders?: Readonly<Record<string, string>>
         envHttpHeaders?: Readonly<Record<string, string>>
         bearerTokenEnvVar?: string
+        oauth?: Readonly<{
+          clientId?: string
+          clientSecretEnvVar?: string
+          scopes?: readonly string[]
+        }>
       }>
   )

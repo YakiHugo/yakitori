@@ -83,6 +83,25 @@ describe("unified exec tools", () => {
     await execCommand.dispose?.()
   })
 
+  it("delivers EOF immediately to non-PTY commands that read stdin", async () => {
+    const manager = createUnifiedExecProcessManager()
+    try {
+      const result = await manager.exec({
+        command: "cat; printf stdin-eof",
+        cwd: process.cwd(),
+        shell: "/bin/sh",
+        env: process.env,
+        tty: false,
+        yieldTimeMs: 1_000,
+        maxOutputTokens: 100,
+      })
+      expect(result).toMatchObject({ exit_code: 0, output: "stdin-eof" })
+      expect(result.session_id).toBeUndefined()
+    } finally {
+      await manager.close()
+    }
+  })
+
   it("writes interactive stdin only to a PTY process", async () => {
     const [execCommand, writeStdin] = createUnifiedExecTools()
     if (execCommand === undefined || writeStdin === undefined) {
