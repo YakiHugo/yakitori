@@ -1,0 +1,106 @@
+.data-preview {
+  min-width: 0;
+  padding: 8px 12px 24px;
+  color: var(--foreground);
+  font-size: 12px;
+}
+
+.data-preview-notice {
+  margin: 8px 0;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--muted-foreground);
+  border-radius: 4px;
+  color: var(--muted-foreground);
+  background: color-mix(in srgb, var(--muted) 45%, var(--background));
+  line-height: 1.5;
+}
+
+.data-preview-table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.data-preview-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.data-preview-table th,
+.data-preview-table td {
+  min-width: 120px;
+  max-width: 360px;
+  padding: 7px 12px;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.data-preview-table tr > :last-child {
+  border-right: 0;
+}
+
+.data-preview-table tbody tr:last-child > * {
+  border-bottom: 0;
+}
+
+.data-preview-table thead th {
+  font-weight: 600;
+  background: color-mix(in srgb, var(--muted) 65%, var(--background));
+}
+
+.data-preview-table tbody tr:hover > * {
+  background: color-mix(in srgb, var(--muted) 45%, var(--background));
+}
+
+.data-preview-table .data-preview-index {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  min-width: 44px;
+  width: 44px;
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.data-preview-table tbody .data-preview-index {
+  background: var(--background);
+}
+
+.data-preview-missing {
+  color: var(--muted-foreground);
+}
+
+.data-preview-json,
+.data-preview-remainder pre {
+  margin: 0;
+  padding: 12px 16px;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--muted) 30%, var(--background));
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.7;
+  tab-size: 2;
+  white-space: pre;
+}
+
+.data-preview-remainder {
+  margin-top: 16px;
+}
+
+.data-preview-remainder p {
+  margin: 0 0 6px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}

@@ -2,9 +2,14 @@ import { execFile } from "node:child_process"
 import { createHash } from "node:crypto"
 import { constants, type Stats } from "node:fs"
 import { open, opendir, realpath, stat } from "node:fs/promises"
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path"
+import { dirname, extname, isAbsolute, relative, resolve, sep } from "node:path"
 import { promisify } from "node:util"
 import { ToolLimitDefaults } from "../runtime/limits.ts"
+import {
+  OfficePreviewError,
+  parseOfficePreview,
+  type WorkspaceReadOfficeResponse,
+} from "./office-preview.ts"
 import {
   captureTextFilePage,
   FileChangedDuringReadError,
@@ -17,6 +22,9 @@ import { compareAndWriteTextFile } from "../runtime/tools/text-file-write.ts"
 const MAX_DIRECTORY_ENTRIES = 1_000
 const MAX_FILE_LINES = 1_000
 const MAX_FILE_BYTES = 256 * 1024
+// A 16 MiB file expands to ~21 MiB in base64, with further copies during JSON
+// serialization. Bound each preview to keep a single RPC from exhausting memory.
+const MAX_BINARY_PREVIEW_BYTES = 16 * 1024 * 1024
 const MAX_GIT_BYTES = 1024 * 1024
 // Complete editor documents share the tool writer's memory safety boundary.
 const MAX_EDIT_FILE_BYTES = ToolLimitDefaults.fileWriteBytes
@@ -46,6 +54,14 @@ export type WorkspaceReadResponse = {
   truncated: boolean
   binary: boolean
 }
+
+export type WorkspaceReadMediaResponse = Readonly<{
+  path: string
+  mimeType: string
+  base64: string
+}>
+
+export type { WorkspaceReadOfficeResponse } from "./office-preview.ts"
 
 export type WorkspaceReadForEditResponse = Readonly<{
   path: string
@@ -218,6 +234,172 @@ export async function readWorkspaceFile(input: {
     ...(hasMore ? { nextOffset: offset + lines.length } : {}),
     truncated: hasMore || shortened,
     binary: false,
+  }
+}
+
+export async function readWorkspaceMediaFile(input: {
+  cwd: string
+  path: string
+}): Promise<WorkspaceReadMediaResponse> {
+  const cwd = await workspaceRoot(input.cwd)
+  const target = await workspacePath(cwd, input.path)
+  const mimeType = binaryPreviewMime(extname(target).toLowerCase())
+  if (
+    mimeType === undefined ||
+    binaryPreviewMime(extname(input.path).toLowerCase()) === undefined
+  )
+    throw new WorkspaceError(
+      "Only PNG, JPEG, WebP, GIF, and PDF files can be previewed.",
+    )
+  const flags =
+    constants.O_RDONLY |
+    (process.platform === "win32"
+      ? 0
+      : constants.O_NONBLOCK | (constants.O_NOFOLLOW ?? 0))
+  const handle = await open(target, flags)
+  try {
+    const before = await handle.stat()
+    if (!before.isFile())
+      throw new WorkspaceError("Only regular files can be previewed.")
+    if (before.size > MAX_BINARY_PREVIEW_BYTES)
+      throw new WorkspaceError(
+        `File exceeds the ${MAX_BINARY_PREVIEW_BYTES}-byte binary preview safety limit.`,
+      )
+    // An extra byte detects growth after stat without an unbounded read.
+    const buffer = Buffer.alloc(before.size + 1)
+    let length = 0
+    while (length < buffer.length) {
+      const read = await handle.read(
+        buffer,
+        length,
+        buffer.length - length,
+        null,
+      )
+      if (read.bytesRead === 0) break
+      length += read.bytesRead
+    }
+    const after = await handle.stat()
+    const currentTarget = await workspacePath(cwd, input.path)
+    const current = await stat(currentTarget)
+    if (
+      (await workspaceRoot(input.cwd)) !== cwd ||
+      currentTarget !== target ||
+      before.dev !== current.dev ||
+      before.ino !== current.ino ||
+      before.size !== current.size ||
+      before.mtimeMs !== current.mtimeMs ||
+      before.ctimeMs !== current.ctimeMs ||
+      before.size !== after.size ||
+      before.mtimeMs !== after.mtimeMs ||
+      before.ctimeMs !== after.ctimeMs ||
+      length !== before.size
+    )
+      throw new WorkspaceError(
+        "File changed while reading. Refresh to retry.",
+        "conflict",
+      )
+    return {
+      path: displayPath(cwd, target),
+      mimeType,
+      base64: buffer.subarray(0, length).toString("base64"),
+    }
+  } finally {
+    await handle.close()
+  }
+}
+
+export async function readWorkspaceOfficeFile(input: {
+  cwd: string
+  path: string
+}): Promise<WorkspaceReadOfficeResponse> {
+  const cwd = await workspaceRoot(input.cwd)
+  const target = await workspacePath(cwd, input.path)
+  const extension = extname(target).toLowerCase()
+  if (
+    extension !== extname(input.path).toLowerCase() ||
+    ![".docx", ".xlsx", ".pptx"].includes(extension)
+  )
+    throw new WorkspaceError(
+      "Only DOCX, XLSX, and PPTX files can be previewed.",
+    )
+  const kind = extension.slice(1) as WorkspaceReadOfficeResponse["kind"]
+  const flags =
+    constants.O_RDONLY |
+    (process.platform === "win32"
+      ? 0
+      : constants.O_NONBLOCK | (constants.O_NOFOLLOW ?? 0))
+  const handle = await open(target, flags)
+  try {
+    const before = await handle.stat()
+    if (!before.isFile())
+      throw new WorkspaceError("Only regular files can be previewed.")
+    // Bound compressed input separately from expanded XML and preview output.
+    if (before.size > 16 * 1024 * 1024)
+      throw new WorkspaceError(
+        "Office file exceeds the 16 MiB input safety limit.",
+      )
+    const bytes = Buffer.alloc(before.size + 1)
+    let length = 0
+    while (length < bytes.length) {
+      const read = await handle.read(bytes, length, bytes.length - length, null)
+      if (read.bytesRead === 0) break
+      length += read.bytesRead
+    }
+    if (length !== before.size)
+      throw new WorkspaceError(
+        "File changed while reading. Refresh to retry.",
+        "conflict",
+      )
+    let result: WorkspaceReadOfficeResponse
+    try {
+      result = await parseOfficePreview({
+        bytes: bytes.subarray(0, length),
+        path: displayPath(cwd, target),
+        kind,
+      })
+    } catch (error) {
+      if (error instanceof OfficePreviewError)
+        throw new WorkspaceError(error.message)
+      throw error
+    }
+    const after = await handle.stat()
+    const currentTarget = await workspacePath(cwd, input.path)
+    const current = await stat(currentTarget)
+    if (
+      (await workspaceRoot(input.cwd)) !== cwd ||
+      currentTarget !== target ||
+      before.dev !== current.dev ||
+      before.ino !== current.ino ||
+      before.size !== current.size ||
+      before.mtimeMs !== current.mtimeMs ||
+      before.ctimeMs !== current.ctimeMs ||
+      before.size !== after.size ||
+      before.mtimeMs !== after.mtimeMs ||
+      before.ctimeMs !== after.ctimeMs
+    )
+      throw new WorkspaceError(
+        "File changed while reading. Refresh to retry.",
+        "conflict",
+      )
+    return result
+  } finally {
+    await handle.close()
+  }
+}
+
+function binaryPreviewMime(extension: string): string | undefined {
+  switch (extension) {
+    case ".png":
+      return "image/png"
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg"
+    case ".webp":
+      return "image/webp"
+    case ".gif":
+      return "image/gif"
+    case ".pdf":
+      return "application/pdf"
   }
 }
 

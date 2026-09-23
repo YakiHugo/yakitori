@@ -155,6 +155,148 @@ it("appends file pages with their source line numbers", async () => {
   expect(screen.queryByRole("button", { name: "Load more lines" })).toBeNull()
 })
 
+it("previews a workspace image through the bounded media reader and opens the zoom view", async () => {
+  request.mockResolvedValue({
+    path: "assets/diagram.png",
+    mimeType: "image/png",
+    base64: "iVBORw0KGgo=",
+  })
+  const user = userEvent.setup()
+  render(
+    <WorkspaceFilePreview
+      cwd="/repo"
+      path="assets/diagram.png"
+      apiBase="http://localhost"
+    />,
+  )
+  const image = await screen.findByRole("img", { name: "diagram.png" })
+  expect(image.getAttribute("src")).toBe("data:image/png;base64,iVBORw0KGgo=")
+  expect(request).toHaveBeenCalledWith("workspace/readMedia", {
+    cwd: "/repo",
+    path: "assets/diagram.png",
+  })
+  await user.click(
+    screen.getByRole("button", { name: "Zoom assets/diagram.png" }),
+  )
+  expect(
+    screen.getByRole("dialog", { name: "Preview diagram.png" }),
+  ).toBeDefined()
+})
+
+it("shows rendered HTML in an isolated frame and retains its source view", async () => {
+  request.mockResolvedValue({
+    path: "index.html",
+    content: "<h1>Local page</h1>",
+    offset: 1,
+    truncated: false,
+    binary: false,
+  })
+  const user = userEvent.setup()
+  render(
+    <WorkspaceFilePreview
+      cwd="/repo"
+      path="index.html"
+      apiBase="http://localhost"
+    />,
+  )
+  const frame = await screen.findByTitle("HTML file preview")
+  expect(frame.getAttribute("sandbox")).toBe("")
+  expect(frame.getAttribute("srcdoc")).toContain("<h1>Local page</h1>")
+  await user.click(screen.getByRole("button", { name: "Source" }))
+  expect(
+    screen.getByRole("table", { name: "Source code for index.html" }),
+  ).toBeDefined()
+})
+
+it("opens a Word document preview through the office reader", async () => {
+  request.mockResolvedValue({
+    path: "report.docx",
+    kind: "docx",
+    blocks: [
+      { kind: "paragraph", text: "Quarterly report" },
+      {
+        kind: "table",
+        rows: [
+          ["Team", "Total"],
+          ["Alpha", "42"],
+        ],
+      },
+    ],
+    truncated: false,
+  })
+  render(
+    <WorkspaceFilePreview
+      cwd="/repo"
+      path="report.docx"
+      apiBase="http://localhost"
+    />,
+  )
+  expect(await screen.findByText("Quarterly report")).toBeDefined()
+  expect(screen.getByRole("table", { name: "Document table 2" })).toBeDefined()
+  expect(request).toHaveBeenCalledWith("workspace/readOffice", {
+    cwd: "/repo",
+    path: "report.docx",
+  })
+  expect(screen.queryByRole("button", { name: "Edit file" })).toBeNull()
+})
+
+it("switches workbook sheets and presentation slides within file previews", async () => {
+  request.mockImplementation(async (_method, params) =>
+    params.path === "numbers.xlsx"
+      ? {
+          path: "numbers.xlsx",
+          kind: "xlsx",
+          sheets: [
+            { name: "Summary", rows: [["Total"], ["42"]] },
+            {
+              name: "Details",
+              rows: [
+                ["Name", "Value"],
+                ["Alpha", "9"],
+              ],
+            },
+          ],
+          truncated: false,
+        }
+      : {
+          path: "slides.pptx",
+          kind: "pptx",
+          slides: [
+            { number: 1, paragraphs: ["Overview"], notes: [] },
+            {
+              number: 2,
+              paragraphs: ["Results"],
+              notes: ["Explain the chart"],
+            },
+          ],
+          truncated: false,
+        },
+  )
+  const user = userEvent.setup()
+  const view = render(
+    <WorkspaceFilePreview
+      cwd="/repo"
+      path="numbers.xlsx"
+      apiBase="http://localhost"
+    />,
+  )
+  await user.click(await screen.findByRole("button", { name: "Details" }))
+  expect(screen.getByRole("table", { name: "Details worksheet" })).toBeDefined()
+  expect(screen.getByText("Alpha")).toBeDefined()
+  expect(screen.getByText(/Raw cell values are shown/)).toBeDefined()
+
+  view.rerender(
+    <WorkspaceFilePreview
+      cwd="/repo"
+      path="slides.pptx"
+      apiBase="http://localhost"
+    />,
+  )
+  await user.click(await screen.findByRole("button", { name: "Next slide" }))
+  expect(screen.getByRole("region", { name: "Slide 2" })).toBeDefined()
+  expect(screen.getByText("Explain the chart")).toBeDefined()
+})
+
 it("discards file requests when changing workspaces", async () => {
   const previous = deferred<WorkspaceListResponse>()
   request.mockImplementation(async (_method, params) =>

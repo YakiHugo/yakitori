@@ -1,0 +1,39 @@
+.html-preview {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 320px;
+  height: 100%;
+  background: var(--background);
+}
+
+.html-preview-notice {
+  flex: none;
+  margin: 0;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted-foreground);
+  background: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.html-preview-limits {
+  flex: none;
+  margin: 0;
+  padding: 7px 14px;
+  border-top: 1px solid var(--border);
+  color: var(--muted-foreground);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.html-preview-frame {
+  display: block;
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  border: 0;
+  background: white;
+}

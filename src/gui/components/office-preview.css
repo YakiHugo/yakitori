@@ -1,0 +1,221 @@
+.office-preview {
+  min-width: 0;
+  min-height: 100%;
+  color: var(--foreground);
+  font-size: 12px;
+}
+
+.office-preview-empty,
+.office-preview-limit {
+  margin: 0;
+  padding: 16px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.office-document {
+  padding: 20px 16px 28px;
+  background: color-mix(in srgb, var(--muted) 35%, var(--background));
+}
+
+.office-document-page {
+  width: min(100%, 740px);
+  min-height: 400px;
+  margin: 0 auto;
+  padding: clamp(24px, 7%, 64px);
+  background: var(--background);
+  box-shadow: 0 1px 12px #00000016;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+
+.office-document-page p {
+  margin: 0 0 0.9em;
+  white-space: pre-wrap;
+}
+
+.office-document-table-scroll,
+.office-sheet-scroll {
+  max-width: 100%;
+  overflow: auto;
+}
+
+.office-document-page table,
+.office-sheet-scroll table {
+  border-collapse: separate;
+  border-spacing: 0;
+  width: 100%;
+  font-size: 11px;
+}
+
+.office-document-page td,
+.office-sheet-scroll th,
+.office-sheet-scroll td {
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-right: 0;
+  border-bottom: 0;
+  text-align: left;
+  vertical-align: top;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.office-document-page tr:last-child td,
+.office-sheet-scroll tr:last-child > * {
+  border-bottom: 1px solid var(--border);
+}
+
+.office-document-page tr > :last-child,
+.office-sheet-scroll tr > :last-child {
+  border-right: 1px solid var(--border);
+}
+
+.office-sheet-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 10px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted-foreground);
+}
+
+.office-sheet-tabs svg {
+  flex: none;
+  margin-right: 4px;
+}
+
+.office-sheet-tabs button {
+  flex: none;
+  max-width: 180px;
+  padding: 5px 9px;
+  overflow: hidden;
+  border-radius: 4px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.office-sheet-tabs button[aria-current="page"] {
+  color: var(--foreground);
+  background: var(--muted);
+}
+
+.office-sheet-scroll {
+  padding: 12px;
+}
+
+.office-sheet-scroll table {
+  width: max-content;
+  min-width: 100%;
+  font-variant-numeric: tabular-nums;
+}
+
+.office-sheet-scroll th,
+.office-sheet-scroll td {
+  min-width: 112px;
+  max-width: 300px;
+}
+
+.office-sheet-scroll thead th,
+.office-sheet-scroll tbody th {
+  position: sticky;
+  background: color-mix(in srgb, var(--muted) 65%, var(--background));
+  color: var(--muted-foreground);
+  font-weight: 500;
+}
+
+.office-sheet-scroll thead th {
+  top: 0;
+}
+
+.office-sheet-scroll tbody th {
+  left: 0;
+  min-width: 42px;
+  width: 42px;
+  text-align: right;
+}
+
+.office-sheet-scroll .office-sheet-corner {
+  left: 0;
+  z-index: 1;
+  min-width: 42px;
+  width: 42px;
+}
+
+.office-presentation {
+  padding: 12px 16px 28px;
+}
+
+.office-slide-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.office-slide-controls > div {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.office-slide-controls button {
+  display: grid;
+  place-items: center;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+}
+
+.office-slide-controls button:disabled {
+  opacity: 0.35;
+}
+
+.office-slide {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 12px;
+  width: min(100%, 850px);
+  min-height: 220px;
+  aspect-ratio: 16 / 9;
+  margin: 0 auto;
+  padding: clamp(20px, 6%, 50px);
+  background: var(--background);
+  box-shadow: 0 2px 18px #0000001f;
+  overflow-wrap: anywhere;
+}
+
+.office-slide p {
+  margin: 0;
+  font-size: clamp(13px, 2.4vw, 20px);
+  line-height: 1.4;
+  white-space: pre-wrap;
+}
+
+.office-slide p:first-child {
+  font-size: clamp(17px, 3vw, 28px);
+  font-weight: 600;
+}
+
+.office-slide-notes {
+  width: min(100%, 850px);
+  margin: 14px auto 0;
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  line-height: 1.6;
+}
+
+.office-slide-notes strong {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.office-slide-notes p {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+}
