@@ -185,11 +185,19 @@
   cursor: zoom-in;
 }
 
+.file-preview-image[data-vector] button {
+  width: min(100%, 960px);
+}
+
 .file-preview-image img {
   max-width: 100%;
   max-height: min(72vh, 920px);
   object-fit: contain;
   box-shadow: 0 10px 32px #0002;
+}
+
+.file-preview-image[data-vector] img {
+  width: 100%;
 }
 
 .file-preview-pdf {
