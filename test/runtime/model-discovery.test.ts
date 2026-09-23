@@ -56,6 +56,42 @@ describe("provider model discovery", () => {
     )
   })
 
+  it("omits retired Codex models from the authenticated catalog", async () => {
+    const models = await discoverCodexModels({
+      baseUrl: "https://chatgpt.example/backend-api/codex",
+      accessToken: "test",
+      fetchFn: async () =>
+        new Response(
+          JSON.stringify({
+            models: [
+              {
+                slug: "gpt-reserve",
+                model_messages: { instructions_template: "reserve" },
+              },
+              {
+                slug: "gpt-5.4",
+                model_messages: { instructions_template: "5.4" },
+              },
+              {
+                slug: "gpt-5.4-mini",
+                model_messages: { instructions_template: "mini" },
+              },
+              {
+                slug: "gpt-5.3-codex-spark",
+                model_messages: { instructions_template: "spark" },
+              },
+              {
+                slug: "gpt-5.5",
+                model_messages: { instructions_template: "current" },
+              },
+            ],
+          }),
+        ),
+    })
+
+    expect(models.map((model) => model.id)).toEqual(["gpt-5.5"])
+  })
+
   it.each([
     {
       messages: { instructions_template: "Astra literal {{ personality }}" },
@@ -258,6 +294,7 @@ it("advertises discovered coding models only with a bundled or provider-supplied
   })
   expect((await grok.listModels()).map((model) => model.model)).toEqual([
     "grok-4.6",
+    "grok-4.7",
     "grok-4.5",
   ])
   const codex = createDiscoveringModelsManager({

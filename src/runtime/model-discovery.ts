@@ -1,5 +1,12 @@
 import type { DiscoveredModel } from "./models-manager.ts"
 
+const HIDDEN_CODEX_MODELS = new Set([
+  "gpt-reserve",
+  "gpt-5.4",
+  "gpt-5.4-mini",
+  "gpt-5.3-codex-spark",
+])
+
 export async function discoverOpenAiCompatibleModels(input: {
   provider: "grok" | "kimi"
   baseUrl: string
@@ -85,7 +92,9 @@ export async function discoverCodexModels(input: {
   if (!isRecord(payload) || !Array.isArray(payload.models)) {
     throw new Error("Codex model discovery returned an invalid response.")
   }
-  return payload.models.flatMap((entry) => parseCodexModel(entry))
+  return payload.models
+    .flatMap((entry) => parseCodexModel(entry))
+    .filter((model) => !HIDDEN_CODEX_MODELS.has(model.id.toLowerCase()))
 }
 
 function parseCodexModel(value: unknown): readonly DiscoveredModel[] {

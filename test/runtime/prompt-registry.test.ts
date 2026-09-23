@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest"
 import catalog from "../../src/runtime/model-catalog.json" with { type: "json" }
 import { requireInstructionProfileId } from "../../src/runtime/model-catalog.ts"
+import { getInstructionProfile } from "../../src/runtime/prompt-registry.ts"
 import manifest from "../../src/runtime/prompts/manifest.json" with {
   type: "json",
 }
-import { getInstructionProfile } from "../../src/runtime/prompt-registry.ts"
 
 const officialAgents = {
   openai: "codex",
@@ -49,6 +49,9 @@ describe("prompt registry", () => {
     )
     expect(getInstructionProfile("grok-4.6").text).toContain(
       "You are Grok 4.6 released by xAI.",
+    )
+    expect(getInstructionProfile("grok-4.7").text).toContain(
+      "You are Grok 4.7 released by xAI.",
     )
     expect(() => requireInstructionProfileId("codex")).toThrow(
       "Unknown instruction profile",
