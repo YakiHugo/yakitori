@@ -5,6 +5,8 @@ import {
   type GitPullRequestsResponse,
   type GitStatusResponse,
   listWorkspaceDirectory,
+  readWorkspaceMediaFile,
+  readWorkspaceOfficeFile,
   readWorkspaceFile,
   readWorkspaceFileForEdit,
   readWorkspaceGitDiff,
@@ -14,6 +16,8 @@ import {
   type WorkspaceFindFilesResponse,
   type WorkspaceListResponse,
   type WorkspaceReadForEditResponse,
+  type WorkspaceReadMediaResponse,
+  type WorkspaceReadOfficeResponse,
   type WorkspaceReadResponse,
   type WorkspaceWriteResponse,
   writeWorkspaceFile,
@@ -29,6 +33,8 @@ export type WorkspaceRpcParams = {
     offset?: number
     limit?: number
   }
+  "workspace/readMedia": { cwd: string; path: string }
+  "workspace/readOffice": { cwd: string; path: string }
   "workspace/readForEdit": { cwd: string; path: string }
   "workspace/write": {
     cwd: string
@@ -47,6 +53,8 @@ export type WorkspaceRpcParams = {
 export type WorkspaceRpcResponses = {
   "workspace/list": WorkspaceListResponse
   "workspace/read": WorkspaceReadResponse
+  "workspace/readMedia": WorkspaceReadMediaResponse
+  "workspace/readOffice": WorkspaceReadOfficeResponse
   "workspace/readForEdit": WorkspaceReadForEditResponse
   "workspace/write": WorkspaceWriteResponse
   "workspace/findFiles": WorkspaceFindFilesResponse
@@ -137,6 +145,12 @@ export const workspaceRpcMethods: readonly RpcMethodDefinition[] = [
       ...(params.limit === undefined ? {} : { limit: params.limit }),
     })
   }),
+  method("workspace/readMedia", (params) =>
+    readWorkspaceMediaFile({ cwd: params.cwd, path: path(params) }),
+  ),
+  method("workspace/readOffice", (params) =>
+    readWorkspaceOfficeFile({ cwd: params.cwd, path: path(params) }),
+  ),
   method("workspace/readForEdit", (params) =>
     readWorkspaceFileForEdit({ cwd: params.cwd, path: path(params) }),
   ),

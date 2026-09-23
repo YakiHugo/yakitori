@@ -1,25 +1,49 @@
 import {
   File,
   FileCode2,
+  FileSpreadsheet,
   FileText,
+  Image,
   Pencil,
+  Presentation,
   SquareArrowOutUpRight,
   WrapText,
 } from "lucide-react"
-import { useEffect, useRef, useState } from "react"
-import type { WorkspaceReadResponse } from "../../server/workspace.ts"
+import { lazy, Suspense, useEffect, useRef, useState } from "react"
+import type { WorkspaceReadOfficeResponse } from "../../server/office-preview.ts"
+import type {
+  WorkspaceReadMediaResponse,
+  WorkspaceReadResponse,
+} from "../../server/workspace.ts"
 import { contextSourceAttributes } from "../conversation-context.ts"
 import { fileActionLabel, openFileTarget } from "../lib/open-resource.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import { languageForPath } from "../lib/syntax-highlighter.ts"
 import { useAppStore } from "../store/app-store.ts"
 import { useWorkspaceStore } from "../store/workspace-store.ts"
+import { DiffView } from "./cells/diff-view.tsx"
+import { DataPreview } from "./data-preview.tsx"
+import { FileEditor } from "./file-editor.tsx"
+import { HtmlPreview } from "./html-preview.tsx"
+import { ImageLightbox } from "./image-lightbox.tsx"
 import { MarkdownView } from "./markdown.tsx"
 import { CopyIconButton } from "./response-actions.tsx"
 import { SourceCode } from "./source-code.tsx"
-import { FileEditor } from "./file-editor.tsx"
 import { WorkspaceFileTree } from "./workspace-file-tree.tsx"
 import "./workspace-files.css"
+
+const PdfPreview = lazy(() =>
+  import("./pdf-preview.tsx").then((module) => ({
+    default: module.PdfPreview,
+  })),
+)
+const OfficePreview = lazy(() =>
+  import("./office-preview.tsx").then((module) => ({
+    default: module.OfficePreview,
+  })),
+)
+const mediaExtensions = new Set(["png", "jpg", "jpeg", "webp", "gif", "pdf"])
+const officeExtensions = new Set(["docx", "xlsx", "pptx"])
 
 const iconButton =
   "inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-foreground/5 hover:text-foreground disabled:opacity-40"
@@ -88,21 +112,36 @@ function FilePreview({
   onEdit,
 }: Readonly<{ cwd: string; apiBase: string; path: string; onEdit(): void }>) {
   const [preview, setPreview] = useState<WorkspaceReadResponse>()
+  const [media, setMedia] = useState<WorkspaceReadMediaResponse>()
+  const [office, setOffice] = useState<WorkspaceReadOfficeResponse>()
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string>()
   const [wrap, setWrap] = useState(false)
   const [mode, setMode] = useState<"source" | "preview">("preview")
+  const [lightbox, setLightbox] = useState(false)
   const request = useRef(0)
   const sessionId = useAppStore((state) => state.selection.sessionId)
+  const extension = path.split(/[\\/]/).at(-1)?.split(".").at(-1)?.toLowerCase()
+  const isMedia = extension !== undefined && mediaExtensions.has(extension)
+  const isOffice = extension !== undefined && officeExtensions.has(extension)
 
   useEffect(() => {
     const id = ++request.current
     void getAppRpcClient(apiBase)
-      .request("workspace/read", { cwd, path })
+      .request(
+        isOffice
+          ? "workspace/readOffice"
+          : isMedia
+            ? "workspace/readMedia"
+            : "workspace/read",
+        { cwd, path },
+      )
       .then(
         (result) => {
           if (request.current === id) {
-            setPreview(result)
+            if (isOffice) setOffice(result as WorkspaceReadOfficeResponse)
+            else if (isMedia) setMedia(result as WorkspaceReadMediaResponse)
+            else setPreview(result as WorkspaceReadResponse)
             setLoading(false)
           }
         },
@@ -118,7 +157,7 @@ function FilePreview({
     return () => {
       request.current += 1
     }
-  }, [apiBase, cwd, path])
+  }, [apiBase, cwd, path, isMedia, isOffice])
 
   const loadMore = async () => {
     if (preview?.nextOffset === undefined || loading) return
@@ -165,7 +204,16 @@ function FilePreview({
     : `${cwd.replace(/\/$/, "")}/${path.replace(/^\.\//, "")}`
   const language = languageForPath(path)
   const markdown = language === "markdown"
-  const rendered = markdown && mode === "preview"
+  const html = language === "html"
+  const data =
+    extension === "csv" || extension === "json" ? extension : undefined
+  const diff = extension === "diff" || extension === "patch"
+  const hasRenderedView = markdown || html || data !== undefined || diff
+  const rendered = hasRenderedView && mode === "preview"
+  const image = media?.mimeType.startsWith("image/") === true
+  const mediaUrl = media
+    ? `data:${media.mimeType};base64,${media.base64}`
+    : undefined
   const source = contextSourceAttributes({
     kind: "file",
     label: path,
@@ -177,7 +225,17 @@ function FilePreview({
     <div className="workspace-file-preview flex min-h-0 flex-1 flex-col">
       <div className="file-preview-heading">
         <div className="file-preview-emblem" aria-hidden="true">
-          {markdown ? <FileText size={18} /> : <FileCode2 size={18} />}
+          {image ? (
+            <Image size={18} />
+          ) : office?.kind === "xlsx" ? (
+            <FileSpreadsheet size={18} />
+          ) : office?.kind === "pptx" ? (
+            <Presentation size={18} />
+          ) : markdown ? (
+            <FileText size={18} />
+          ) : (
+            <FileCode2 size={18} />
+          )}
         </div>
         <div className="file-preview-identity">
           <strong title={path}>{path.split("/").at(-1)}</strong>
@@ -209,7 +267,7 @@ function FilePreview({
       </div>
       {preview && !preview.binary && lines.length > 0 ? (
         <div className="file-preview-toolbar">
-          {markdown ? (
+          {hasRenderedView ? (
             <fieldset className="file-preview-modes" aria-label="File view">
               <button
                 type="button"
@@ -261,17 +319,64 @@ function FilePreview({
             <p>Binary file · {fileActionLabel().toLowerCase()} to view.</p>
           </div>
         ) : null}
+        {office ? (
+          <Suspense
+            fallback={
+              <p role="status" className="px-4 py-3 text-muted-foreground">
+                Loading document viewer…
+              </p>
+            }
+          >
+            <OfficePreview document={office} />
+          </Suspense>
+        ) : image && mediaUrl ? (
+          <div className="file-preview-image">
+            <button
+              type="button"
+              aria-label={`Zoom ${path}`}
+              onClick={() => setLightbox(true)}
+            >
+              <img src={mediaUrl} alt={path.split("/").at(-1) ?? path} />
+            </button>
+          </div>
+        ) : media?.mimeType === "application/pdf" ? (
+          <Suspense
+            fallback={
+              <p role="status" className="px-4 py-3 text-muted-foreground">
+                Loading PDF viewer…
+              </p>
+            }
+          >
+            <PdfPreview base64={media.base64} />
+          </Suspense>
+        ) : null}
         {preview && !preview.binary ? (
           lines.length === 0 ? (
             <p className="file-preview-empty">This file is empty.</p>
           ) : (
             <div {...source}>
-              {rendered ? (
+              {rendered && markdown ? (
                 <MarkdownView
                   text={preview.content}
                   workspaceRoot={cwd}
                   documentPath={absolutePath}
                   className="markdown file-preview-markdown"
+                />
+              ) : rendered && html ? (
+                <HtmlPreview
+                  content={preview.content}
+                  truncated={preview.truncated}
+                />
+              ) : rendered && data ? (
+                <DataPreview
+                  kind={data}
+                  content={preview.content}
+                  truncated={preview.truncated}
+                />
+              ) : rendered && diff ? (
+                <DiffView
+                  diff={{ text: preview.content, truncated: preview.truncated }}
+                  path={path}
                 />
               ) : (
                 <SourceCode
@@ -313,6 +418,13 @@ function FilePreview({
           </span>
           <span>Read only</span>
         </div>
+      ) : null}
+      {lightbox && mediaUrl ? (
+        <ImageLightbox
+          src={mediaUrl}
+          name={path.split("/").at(-1) ?? path}
+          onClose={() => setLightbox(false)}
+        />
       ) : null}
     </div>
   )

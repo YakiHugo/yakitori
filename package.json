@@ -39,13 +39,16 @@
     "@types/react-dom": "^19.2.3",
     "@types/turndown": "^5.0.6",
     "@types/ws": "^8.18.1",
+    "@types/yauzl": "^3.4.0",
+    "@types/yazl": "^3.3.1",
     "@vitejs/plugin-react": "^6.0.4",
     "electron": "^43.2.0",
     "electron-builder": "^26.15.3",
     "happy-dom": "^20.11.1",
     "typescript": "^6.0.3",
     "vite": "^8.1.0",
-    "vitest": "^4.1.9"
+    "vitest": "^4.1.9",
+    "yazl": "^3.3.1"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.112.4",
@@ -82,6 +85,7 @@
     "react-dom": "^19.2.8",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
+    "saxes": "^6.0.0",
     "sharp": "^0.35.4",
     "shiki": "^4.4.3",
     "smol-toml": "^1.8.0",
@@ -92,6 +96,7 @@
     "undici": "^8.10.2",
     "ws": "^8.21.3",
     "yaml": "^2.9.0",
+    "yauzl": "^3.4.0",
     "zustand": "^5.0.14"
   }
 }
