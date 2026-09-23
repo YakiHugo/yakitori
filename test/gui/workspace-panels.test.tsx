@@ -183,6 +183,57 @@ it("previews a workspace image through the bounded media reader and opens the zo
   ).toBeDefined()
 })
 
+it("renders an SVG as an image and retains a source view for editing", async () => {
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg"><circle r="8"/></svg>'
+  request.mockImplementation(async (method) =>
+    method === "workspace/readMedia"
+      ? {
+          path: "assets/logo.svg",
+          mimeType: "image/svg+xml",
+          base64: Buffer.from(svg).toString("base64"),
+        }
+      : {
+          path: "assets/logo.svg",
+          content: svg,
+          offset: 1,
+          truncated: false,
+          binary: false,
+        },
+  )
+  const user = userEvent.setup()
+  render(
+    <WorkspaceFilePreview
+      cwd="/repo"
+      path="assets/logo.svg"
+      apiBase="http://localhost"
+    />,
+  )
+  const image = await screen.findByRole("img", { name: "logo.svg" })
+  expect(image.getAttribute("src")).toBe(
+    `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`,
+  )
+  expect(request).toHaveBeenCalledWith("workspace/readMedia", {
+    cwd: "/repo",
+    path: "assets/logo.svg",
+  })
+  expect(request).toHaveBeenCalledTimes(1)
+  await user.click(screen.getByRole("button", { name: "Source" }))
+  expect(
+    await screen.findByRole("table", {
+      name: "Source code for assets/logo.svg",
+    }),
+  ).toBeDefined()
+  expect(request).toHaveBeenCalledWith("workspace/read", {
+    cwd: "/repo",
+    path: "assets/logo.svg",
+  })
+  expect(screen.getByRole("button", { name: "Edit file" })).toBeDefined()
+  await user.click(screen.getByRole("button", { name: "Preview" }))
+  expect(screen.getByRole("img", { name: "logo.svg" })).toBeDefined()
+  await user.click(screen.getByRole("button", { name: "Zoom assets/logo.svg" }))
+  expect(screen.getByRole("dialog", { name: "Preview logo.svg" })).toBeDefined()
+})
+
 it("shows rendered HTML in an isolated frame and retains its source view", async () => {
   request.mockResolvedValue({
     path: "index.html",

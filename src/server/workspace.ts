@@ -6,17 +6,17 @@ import { dirname, extname, isAbsolute, relative, resolve, sep } from "node:path"
 import { promisify } from "node:util"
 import { ToolLimitDefaults } from "../runtime/limits.ts"
 import {
-  OfficePreviewError,
-  parseOfficePreview,
-  type WorkspaceReadOfficeResponse,
-} from "./office-preview.ts"
-import {
   captureTextFilePage,
   FileChangedDuringReadError,
   UnsupportedTextFileTypeError,
 } from "../runtime/tools/read-file-page.ts"
 import { runRipgrepRecords } from "../runtime/tools/ripgrep.ts"
 import { compareAndWriteTextFile } from "../runtime/tools/text-file-write.ts"
+import {
+  OfficePreviewError,
+  parseOfficePreview,
+  type WorkspaceReadOfficeResponse,
+} from "./office-preview.ts"
 
 // These are implementation safety bounds for rendering and subprocess memory.
 const MAX_DIRECTORY_ENTRIES = 1_000
@@ -249,7 +249,7 @@ export async function readWorkspaceMediaFile(input: {
     binaryPreviewMime(extname(input.path).toLowerCase()) === undefined
   )
     throw new WorkspaceError(
-      "Only PNG, JPEG, WebP, GIF, and PDF files can be previewed.",
+      "Only PNG, JPEG, WebP, GIF, SVG, and PDF files can be previewed.",
     )
   const flags =
     constants.O_RDONLY |
@@ -398,6 +398,8 @@ function binaryPreviewMime(extension: string): string | undefined {
       return "image/webp"
     case ".gif":
       return "image/gif"
+    case ".svg":
+      return "image/svg+xml"
     case ".pdf":
       return "application/pdf"
   }

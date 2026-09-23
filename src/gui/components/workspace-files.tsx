@@ -42,7 +42,15 @@ const OfficePreview = lazy(() =>
     default: module.OfficePreview,
   })),
 )
-const mediaExtensions = new Set(["png", "jpg", "jpeg", "webp", "gif", "pdf"])
+const mediaExtensions = new Set([
+  "png",
+  "jpg",
+  "jpeg",
+  "webp",
+  "gif",
+  "svg",
+  "pdf",
+])
 const officeExtensions = new Set(["docx", "xlsx", "pptx"])
 
 const iconButton =
@@ -122,6 +130,7 @@ function FilePreview({
   const request = useRef(0)
   const sessionId = useAppStore((state) => state.selection.sessionId)
   const extension = path.split(/[\\/]/).at(-1)?.split(".").at(-1)?.toLowerCase()
+  const isSvg = extension === "svg"
   const isMedia = extension !== undefined && mediaExtensions.has(extension)
   const isOffice = extension !== undefined && officeExtensions.has(extension)
 
@@ -186,6 +195,28 @@ function FilePreview({
     }
   }
 
+  const showSource = async () => {
+    setMode("source")
+    if (!isSvg || preview || loading) return
+    const id = request.current
+    setLoading(true)
+    setError(undefined)
+    try {
+      const result = await getAppRpcClient(apiBase).request("workspace/read", {
+        cwd,
+        path,
+      })
+      if (request.current === id) setPreview(result)
+    } catch (cause) {
+      if (request.current === id)
+        setError(
+          cause instanceof Error ? cause.message : "Could not read file.",
+        )
+    } finally {
+      if (request.current === id) setLoading(false)
+    }
+  }
+
   const open = async () => {
     const id = request.current
     try {
@@ -208,7 +239,8 @@ function FilePreview({
   const data =
     extension === "csv" || extension === "json" ? extension : undefined
   const diff = extension === "diff" || extension === "patch"
-  const hasRenderedView = markdown || html || data !== undefined || diff
+  const hasRenderedView =
+    markdown || html || data !== undefined || diff || isSvg
   const rendered = hasRenderedView && mode === "preview"
   const image = media?.mimeType.startsWith("image/") === true
   const mediaUrl = media
@@ -265,7 +297,7 @@ function FilePreview({
           </button>
         ) : null}
       </div>
-      {preview && !preview.binary && lines.length > 0 ? (
+      {(preview && !preview.binary && lines.length > 0) || (isSvg && media) ? (
         <div className="file-preview-toolbar">
           {hasRenderedView ? (
             <fieldset className="file-preview-modes" aria-label="File view">
@@ -279,7 +311,7 @@ function FilePreview({
               <button
                 type="button"
                 aria-pressed={!rendered}
-                onClick={() => setMode("source")}
+                onClick={() => void showSource()}
               >
                 Source
               </button>
@@ -302,7 +334,9 @@ function FilePreview({
                 <WrapText size={15} />
               </button>
             ) : null}
-            <CopyIconButton text={preview.content} label="file content" />
+            {preview ? (
+              <CopyIconButton text={preview.content} label="file content" />
+            ) : null}
           </div>
         </div>
       ) : null}
@@ -312,7 +346,7 @@ function FilePreview({
             {error}
           </p>
         ) : null}
-        {preview?.binary ? (
+        {preview?.binary && (!isSvg || !rendered) ? (
           <div className="file-preview-empty">
             <File size={28} aria-hidden="true" />
             <strong>No text preview</strong>
@@ -329,7 +363,7 @@ function FilePreview({
           >
             <OfficePreview document={office} />
           </Suspense>
-        ) : image && mediaUrl ? (
+        ) : image && mediaUrl && (!isSvg || rendered) ? (
           <div className="file-preview-image">
             <button
               type="button"
@@ -350,7 +384,7 @@ function FilePreview({
             <PdfPreview base64={media.base64} />
           </Suspense>
         ) : null}
-        {preview && !preview.binary ? (
+        {preview && !preview.binary && (!isSvg || !rendered) ? (
           lines.length === 0 ? (
             <p className="file-preview-empty">This file is empty.</p>
           ) : (
@@ -394,7 +428,7 @@ function FilePreview({
             Loading file…
           </p>
         ) : null}
-        {preview?.nextOffset !== undefined ? (
+        {preview?.nextOffset !== undefined && (!isSvg || !rendered) ? (
           <button
             type="button"
             disabled={loading}
@@ -403,13 +437,13 @@ function FilePreview({
           >
             Load more lines
           </button>
-        ) : preview?.truncated && !preview.binary ? (
+        ) : preview?.truncated && !preview.binary && (!isSvg || !rendered) ? (
           <p className="px-4 py-3 text-muted-foreground">
             Preview truncated. {fileActionLabel()} to view the full file.
           </p>
         ) : null}
       </div>
-      {preview && !preview.binary ? (
+      {preview && !preview.binary && (!isSvg || !rendered) ? (
         <div className="file-preview-status">
           <span>
             {lines.length.toLocaleString()}{" "}
