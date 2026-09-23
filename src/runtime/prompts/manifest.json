@@ -7,6 +7,22 @@
     "selection": "Exact model entry; default personality, matching Codex ModelInfo rendering.",
     "sha256": "be213cc3a9566255f6d43f61c54cbc33cafbc3461680ad6513afa0850050c7d6"
   },
+  "gpt-6-sol": {
+    "file": "codex-gpt-6-sol.md",
+    "agent": "codex",
+    "source": "https://github.com/openai/codex/blob/24462234b2aeeb27373e17bbe226baf9c0e97d3b/codex-rs/models-manager/models.json",
+    "version": "2026-09-23",
+    "selection": "Exact model entry; default personality, matching Codex ModelInfo rendering.",
+    "sha256": "6e61d417b2c660f88f59b8be32933df8ed5e21240058ded907e8e3ecfbf2ea5a"
+  },
+  "gpt-6-luna": {
+    "file": "codex-gpt-6-luna.md",
+    "agent": "codex",
+    "source": "https://github.com/openai/codex/blob/24462234b2aeeb27373e17bbe226baf9c0e97d3b/codex-rs/models-manager/models.json",
+    "version": "2026-09-23",
+    "selection": "Exact model entry; default personality, matching Codex ModelInfo rendering.",
+    "sha256": "49c4958e931333ee6a703ecb258a44ffb46f07f40e0a167a663de04dfdfa6ef1"
+  },
   "gpt-5.1-codex": {
     "file": "codex-fallback.md",
     "agent": "codex",
@@ -55,29 +71,13 @@
     "selection": "Exact model entry; default personality, matching Codex ModelInfo rendering.",
     "sha256": "ca4db22940fe7dee15df40285ea01b5710b6e7b8079ad6ba746c98a3e8771336"
   },
-  "gpt-5.4": {
-    "file": "codex-gpt-5.4.md",
-    "agent": "codex",
-    "source": "https://github.com/openai/codex/blob/1d74c3ba1ee98be2025ab066dcc3fd654fe8a3b6/codex-rs/models-manager/models.json",
-    "version": "2026-09-10",
-    "selection": "Exact model entry; default personality, matching Codex ModelInfo rendering.",
-    "sha256": "46223554f4c456936ec2294667e368e6c4e592f3271364fa78fed662b8349291"
-  },
-  "gpt-5.4-mini": {
-    "file": "codex-gpt-5.4-mini.md",
-    "agent": "codex",
-    "source": "https://github.com/openai/codex/blob/1d74c3ba1ee98be2025ab066dcc3fd654fe8a3b6/codex-rs/models-manager/models.json",
-    "version": "2026-09-10",
-    "selection": "Exact model entry; default personality, matching Codex ModelInfo rendering.",
-    "sha256": "28bcd936d46210b2b1f0fb4e1aece7ac18133b3a13633bd16234b37670d66c0c"
-  },
-  "gpt-5.3-codex-spark": {
-    "file": "codex-gpt-5.3-codex-spark.md",
-    "agent": "codex",
-    "source": "https://chatgpt.com/backend-api/codex/models",
-    "version": "2026-09-10",
-    "selection": "Exact model entry; default personality, matching Codex ModelInfo rendering.",
-    "sha256": "43f4ec5df67c619bfa01d119f3c1c1d850a4463c056f1fbc6353ab8708d02642"
+  "grok-4.7": {
+    "file": "grok-4.7.md",
+    "agent": "grok-build",
+    "source": "https://github.com/xai-org/grok-build/blob/07e35a3dfeed2f200d319ef6c893b5ea286d9a51/crates/codegen/xai-grok-agent/templates/prompt.md",
+    "version": "07e35a3dfeed2f200d319ef6c893b5ea286d9a51",
+    "selection": "Official shared template rendered with exact model label, interactive mode, Yakitori file/shell/subagent tool names; monitor, automatic completion reminders and browser verification disabled because those integrations are not supplied.",
+    "sha256": "723910fd04cf6284f6ad86d26e4a8f807be31c3b89507db709c56a1440048755"
   },
   "grok-4.5": {
     "file": "grok-4.5.md",

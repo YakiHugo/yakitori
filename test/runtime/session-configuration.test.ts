@@ -66,6 +66,7 @@ describe("session configuration", () => {
       window: 262144,
       limit: 235929,
     },
+    { provider: "grok", model: "grok-4.7", window: 500000, limit: 450000 },
     { provider: "grok", model: "grok-4.5", window: 500000, limit: 450000 },
     { provider: "grok", model: "grok-4.6", window: 500000, limit: 450000 },
   ])("resolves $provider/$model instructions and compaction without discovery", ({
@@ -122,9 +123,13 @@ describe("session configuration", () => {
     ).toThrow("Invalid Session configuration snapshot")
   })
 
-  it("uses the Codex default capacity and its 95% effective window", () => {
+  it.each([
+    "gpt-6-sol",
+    "gpt-6-luna",
+    "gpt-5.6-sol",
+  ])("keeps Codex %s at 272k unless extended context is explicitly configured", (model) => {
     const configuration = resolveSessionConfiguration({
-      selection: { provider: "codex", model: "gpt-5.6-sol" },
+      selection: { provider: "codex", model },
       workspaceRoot: "/workspace",
       enabledTools: ["read_file"],
       approvalPolicy: "auto_file_tools",
@@ -147,7 +152,7 @@ describe("session configuration", () => {
       scope: "total",
     })
     expect(turn.execution).toMatchObject({
-      instructionProfileId: "gpt-5.6-sol",
+      instructionProfileId: model,
       baseInstructionsRevision: configuration.baseInstructions.revision,
       modelInstructionsRevision: configuration.modelInstructions.revision,
       modelContextWindowTokens: 272_000,
@@ -171,9 +176,13 @@ describe("session configuration", () => {
     })
   })
 
-  it("applies a configured window without exceeding the Codex maximum", () => {
+  it.each([
+    "gpt-6-sol",
+    "gpt-6-luna",
+    "gpt-5.6-sol",
+  ])("extends Codex %s only through an explicit override and clamps its maximum", (model) => {
     const configuration = resolveSessionConfiguration({
-      selection: { provider: "codex", model: "gpt-5.6-sol" },
+      selection: { provider: "codex", model },
       workspaceRoot: "/workspace",
       enabledTools: [],
       approvalPolicy: "always_approve",
@@ -188,13 +197,13 @@ describe("session configuration", () => {
     })
     expect(() =>
       resolveSessionConfiguration({
-        selection: { provider: "codex", model: "gpt-5.6-sol" },
+        selection: { provider: "codex", model },
         workspaceRoot: "/workspace",
         enabledTools: [],
         approvalPolicy: "always_approve",
         modelContextWindowTokens: 900_000,
       }),
-    ).toThrow("exceeds codex/gpt-5.6-sol maximum of 872000")
+    ).toThrow(`exceeds codex/${model} maximum of 872000`)
   })
 
   it("restores the exact persisted base instructions instead of re-resolving them", () => {

@@ -20,6 +20,26 @@ describe("model directory", () => {
         imageDetailModes: ["high", "original"],
       },
       {
+        id: "gpt-6-sol",
+        displayName: "GPT-6-Sol",
+        instructionProfileId: "gpt-6-sol",
+        efforts: ["none", "low", "medium", "high", "xhigh", "max"],
+        defaultEffort: "medium",
+        speeds: ["standard", "fast"],
+        inputModalities: ["text", "image"],
+        imageDetailModes: ["high", "original"],
+      },
+      {
+        id: "gpt-6-luna",
+        displayName: "GPT-6-Luna",
+        instructionProfileId: "gpt-6-luna",
+        efforts: ["none", "low", "medium", "high", "xhigh", "max"],
+        defaultEffort: "medium",
+        speeds: ["standard", "fast"],
+        inputModalities: ["text", "image"],
+        imageDetailModes: ["high", "original"],
+      },
+      {
         id: "gpt-5.1-codex",
         displayName: "gpt-5.1-codex",
         instructionProfileId: "gpt-5.1-codex",
@@ -40,6 +60,15 @@ describe("model directory", () => {
     const directory = createModelDirectory()
 
     expect(await directory.listModels("grok")).toEqual([
+      {
+        id: "grok-4.7",
+        displayName: "Grok 4.7",
+        instructionProfileId: "grok-4.7",
+        efforts: ["low", "medium", "high", "xhigh"],
+        defaultEffort: "high",
+        inputModalities: ["text", "image"],
+        imageDetailModes: ["high"],
+      },
       {
         id: "grok-4.6",
         displayName: "Grok 4.6",
@@ -65,13 +94,12 @@ describe("model directory", () => {
 
     expect(models.map((model) => model.id)).toEqual([
       "gpt-6-astra",
+      "gpt-6-sol",
+      "gpt-6-luna",
       "gpt-5.6-sol",
       "gpt-5.6-terra",
       "gpt-5.6-luna",
       "gpt-5.5",
-      "gpt-5.4",
-      "gpt-5.4-mini",
-      "gpt-5.3-codex-spark",
     ])
     expect(models[0]).toEqual({
       id: "gpt-6-astra",
@@ -83,15 +111,7 @@ describe("model directory", () => {
       inputModalities: ["text", "image"],
       imageDetailModes: ["high", "original"],
     })
-    expect(models.at(-1)).toEqual({
-      id: "gpt-5.3-codex-spark",
-      displayName: "GPT-5.3-Codex-Spark",
-      instructionProfileId: "gpt-5.3-codex-spark",
-      efforts: ["low", "medium", "high", "xhigh"],
-      defaultEffort: "high",
-      inputModalities: ["text"],
-      imageDetailModes: [],
-    })
+    expect(models.at(-1)?.id).toBe("gpt-5.5")
   })
 
   it("is case-insensitive and returns no speculative unknown models", async () => {

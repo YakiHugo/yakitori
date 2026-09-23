@@ -131,6 +131,9 @@ describe("model catalog context windows", () => {
 
   it("uses the local coding-agent capacities for Grok and Kimi", () => {
     expect(
+      catalogContextWindowTokens({ provider: "grok", model: "grok-4.7" }),
+    ).toBe(500_000)
+    expect(
       catalogContextWindowTokens({ provider: "grok", model: "grok-4.6" }),
     ).toBe(500_000)
     expect(catalogContextWindowTokens({ provider: "kimi", model: "k3" })).toBe(
@@ -145,6 +148,13 @@ describe("model catalog context windows", () => {
   })
 
   it("validates the explicit Grok effort sets without inference", () => {
+    expect(() =>
+      validateModelSelection({
+        provider: "grok",
+        model: "grok-4.7",
+        effort: "xhigh",
+      }),
+    ).not.toThrow()
     expect(() =>
       validateModelSelection({
         provider: "grok",
@@ -263,14 +273,17 @@ describe("model catalog context windows", () => {
       resolveModelWireEffort({ provider: "codex", model: "gpt-6-astra" }),
     ).toBe("low")
     expect(
+      resolveModelWireEffort({ provider: "codex", model: "gpt-6-sol" }),
+    ).toBe("medium")
+    expect(
       resolveModelWireEffort({ provider: "codex", model: "gpt-5.6-terra" }),
     ).toBe("medium")
     expect(
       resolveModelWireEffort({
         provider: "codex",
-        model: "gpt-5.3-codex-spark",
+        model: "gpt-5.5",
       }),
-    ).toBe("high")
+    ).toBe("medium")
     // Models without a declared default keep the provider default.
     expect(
       resolveModelWireEffort({ provider: "kimi", model: "k3" }),
