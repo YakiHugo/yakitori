@@ -55,6 +55,7 @@ it("returns exact base64 bytes and MIME for supported images and PDF through the
     ["sample.jpeg", "image/jpeg"],
     ["sample.webp", "image/webp"],
     ["sample.gif", "image/gif"],
+    ["sample.SVG", "image/svg+xml"],
     ["sample.pdf", "application/pdf"],
   ] as const
   const bytes = Buffer.from([0, 1, 0xff, 0x80, 27])
@@ -84,7 +85,6 @@ it("allows an internal symlink and rejects escape paths, .git, and unsupported t
   await writeFile(join(cwd, ".git", "config.png"), "secret")
   await writeFile(join(cwd, "inside.png"), "inside")
   await writeFile(join(root, "outside.png"), "outside")
-  await writeFile(join(cwd, "note.svg"), "<svg/>")
   await writeFile(join(cwd, "document.docx"), "office")
   await writeFile(join(cwd, "missing.png.txt"), "text")
   await symlink(join(cwd, "inside.png"), join(cwd, "alias.png"))
@@ -104,7 +104,6 @@ it("allows an internal symlink and rejects escape paths, .git, and unsupported t
     join(root, "outside.png"),
     ".git/config.png",
     "git-alias/config.png",
-    "note.svg",
     "document.docx",
     "missing.png.txt",
   ]) {
