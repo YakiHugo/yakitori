@@ -364,7 +364,7 @@ function FilePreview({
             <OfficePreview document={office} />
           </Suspense>
         ) : image && mediaUrl && (!isSvg || rendered) ? (
-          <div className="file-preview-image">
+          <div className="file-preview-image" data-vector={isSvg || undefined}>
             <button
               type="button"
               aria-label={`Zoom ${path}`}
