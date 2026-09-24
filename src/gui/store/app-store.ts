@@ -961,13 +961,18 @@ export const useAppStore = create<AppStore>()((set, get) => {
           )
           persistCollapsedProjects(collapsedProjects)
           const remembered = window.localStorage.getItem("yakitori.project")
+          // An empty remembered value is an explicit "No project" choice
+          // (written by setNewSessionProject/selectSession); only a missing
+          // key falls back to the first project.
           const currentProject =
             state.currentProject !== undefined &&
             liveIds.has(state.currentProject)
               ? state.currentProject
-              : remembered !== null && liveIds.has(remembered)
-                ? remembered
-                : projects[0]?.id
+              : remembered === ""
+                ? undefined
+                : remembered !== null && liveIds.has(remembered)
+                  ? remembered
+                  : projects[0]?.id
           return {
             projects,
             projectsError: undefined,
@@ -1103,6 +1108,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
         sessionSelectionIntentRevision:
           state.sessionSelectionIntentRevision + 1,
       })
+      window.localStorage.setItem("yakitori.project", projectId ?? "")
       // The dropdown changes the destination of the current draft, including
       // its staged attachments. Supersede the old request and create there.
       if (state.selection.sessionId === undefined && newSessionCreation)
@@ -1690,6 +1696,9 @@ export const useAppStore = create<AppStore>()((set, get) => {
             text,
             ...(attachments.length === 0 ? {} : { attachments }),
             ...(excerpts.length === 0 ? {} : { contextAttachments: excerpts }),
+            ...(admittedModelSelection === undefined
+              ? {}
+              : { modelSelection: admittedModelSelection }),
           })
           if (!isCurrentSelection(selection)) return
           const response = await getAppRpcClient(get().apiBase).request(

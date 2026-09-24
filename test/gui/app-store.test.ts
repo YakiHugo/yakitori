@@ -1084,6 +1084,26 @@ describe("project state", () => {
     expect(useAppStore.getState().currentProject).toBe("project_b")
   })
 
+  it("keeps an explicit no-project selection across list refreshes", async () => {
+    window.localStorage.clear()
+    fakeRef.current.respond = (method) => {
+      if (method === "project/list") {
+        return { projects: [projectA, projectB] }
+      }
+      return notFound()
+    }
+
+    await useAppStore.getState().loadProjects()
+    expect(useAppStore.getState().currentProject).toBe("project_a")
+
+    useAppStore.getState().setNewSessionProject(undefined)
+    expect(window.localStorage.getItem("yakitori.project")).toBe("")
+
+    await useAppStore.getState().loadProjects()
+
+    expect(useAppStore.getState().currentProject).toBeUndefined()
+  })
+
   it("ignores an older project-list failure after a newer read succeeds", async () => {
     const older = deferredResponse()
     const newer = deferredResponse()
