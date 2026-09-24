@@ -17,6 +17,8 @@ import type { McpService } from "../mcp-service.ts"
 import {
   type ApiAdmitInputRequest,
   type ApiAdmitInputResponse,
+  type ApiSteerInputRequest,
+  type ApiSteerInputResponse,
   type ApiCancelInputRequest,
   type ApiCancelInputResponse,
   type ApiCancelTurnRequest,
@@ -755,6 +757,11 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
     sessionScope,
     (handlers, params) => handlers.admitInput(params),
   ),
+  handlerEntry<ApiSteerInputResponse>(
+    "session/input/steer",
+    sessionScope,
+    (handlers, params) => handlers.steerInput(params),
+  ),
   handlerEntry<ApiCancelInputResponse>(
     "session/input/cancel",
     sessionScope,
@@ -1157,6 +1164,7 @@ export type RpcMethodParams = Readonly<
       "session/fork": ApiForkSessionRequest & Readonly<{ sessionId: string }>
       "session/compact": Readonly<{ sessionId: string; requestId?: string }>
       "session/input": ApiAdmitInputRequest
+      "session/input/steer": ApiSteerInputRequest
       "session/input/cancel": ApiCancelInputRequest
       "session/turn/cancel": ApiCancelTurnRequest
       "session/subscribe": SessionSubscribeParams
@@ -1201,6 +1209,7 @@ export type RpcMethodResponses = Readonly<
       "session/fork": ApiForkSessionResponse
       "session/compact": ApiCompactSessionResponse
       "session/input": ApiAdmitInputResponse
+      "session/input/steer": ApiSteerInputResponse
       "session/input/cancel": ApiCancelInputResponse
       "session/turn/cancel": ApiCancelTurnResponse
       "session/subscribe": SessionSubscribeResponse

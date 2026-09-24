@@ -49,6 +49,7 @@ import {
 } from "./operational-errors.ts"
 import {
   type ApiAdmitInputResponse,
+  type ApiSteerInputResponse,
   type ApiCancelInputResponse,
   type ApiCancelTurnResponse,
   type ApiCompactSessionResponse,
@@ -155,6 +156,7 @@ export type ServerHandlers = {
   ): Promise<ApiHandlerResult<ApiDeleteSessionResponse>>
   forkSession(input: unknown): Promise<ApiHandlerResult<ApiForkSessionResponse>>
   admitInput(input: unknown): Promise<ApiHandlerResult<ApiAdmitInputResponse>>
+  steerInput(input: unknown): Promise<ApiHandlerResult<ApiSteerInputResponse>>
   compactSession(
     input: unknown,
   ): Promise<ApiHandlerResult<ApiCompactSessionResponse>>
@@ -455,6 +457,82 @@ export function createThreadServerHandlers(
     } finally {
       release()
       if (admissionTails.get(key) === tail) admissionTails.delete(key)
+    }
+  }
+
+  type PromotedContent = {
+    readonly content: TextContent
+    readonly rollback: (() => Promise<void>) | undefined
+  }
+
+  const promoteRequestAttachments = async (
+    rolloutId: string,
+    requestId: string,
+    content: TextContent,
+  ): Promise<PromotedContent> => {
+    if (content.attachments === undefined) {
+      return { content, rollback: undefined }
+    }
+    if (options.rolloutAssets === undefined) {
+      throw invalidInput("Image attachments require rollout asset storage.")
+    }
+    try {
+      const belongsToSession = content.attachments.every(
+        (attachment) => attachment.file.rolloutId === rolloutId,
+      )
+      const promotion = belongsToSession
+        ? await options.rolloutAssets.promoteImageAttachments(
+            rolloutId,
+            requestId,
+            content.attachments,
+          )
+        : {
+            attachments: await options.rolloutAssets.copyImageAttachments(
+              rolloutId,
+              requestId,
+              content.attachments,
+            ),
+            rollback: () =>
+              options.rolloutAssets?.discardRequestImageAttachments(
+                rolloutId,
+                requestId,
+              ) ?? Promise.resolve(),
+          }
+      return {
+        content: { ...content, attachments: promotion.attachments },
+        rollback: promotion.rollback,
+      }
+    } catch (error) {
+      if (error instanceof ImageAttachmentConflictError) {
+        throw conflict("Input was not submitted: request_conflict.", {
+          reason: "request_conflict",
+        })
+      }
+      throw error
+    }
+  }
+
+  const discardAdmittedDraftAttachments = async (
+    sessionId: string,
+    requestId: string,
+    content: TextContent,
+  ) => {
+    if (content.attachments === undefined) return
+    try {
+      await options.rolloutAssets?.discardDraftImageAttachments(
+        content.attachments,
+      )
+      options.releaseDraftRolloutAssets?.(
+        content.attachments.map((attachment) => attachment.file.rolloutId),
+      )
+    } catch (error) {
+      reportOperationalFailure(reporter, {
+        component: "thread-handlers",
+        operation: "discard-admitted-draft-attachments",
+        cause: error,
+        sessionId,
+        turnId: requestId,
+      })
     }
   }
 
@@ -953,55 +1031,13 @@ export function createThreadServerHandlers(
           async () => {
             const thread = await resumeRequired(request.sessionId)
             const rolloutId = thread.snapshot().metadata.rolloutId
-            let content: TextContent = request.content
-            let rollbackPromotion: (() => Promise<void>) | undefined
-            if (request.content.attachments !== undefined) {
-              if (options.rolloutAssets === undefined) {
-                throw invalidInput(
-                  "Image attachments require rollout asset storage.",
-                )
-              }
-              try {
-                const belongsToSession = request.content.attachments.every(
-                  (attachment) => attachment.file.rolloutId === rolloutId,
-                )
-                const promotion = belongsToSession
-                  ? await options.rolloutAssets.promoteImageAttachments(
-                      rolloutId,
-                      request.requestId,
-                      request.content.attachments,
-                    )
-                  : {
-                      attachments:
-                        await options.rolloutAssets.copyImageAttachments(
-                          rolloutId,
-                          request.requestId,
-                          request.content.attachments,
-                        ),
-                      rollback: () =>
-                        options.rolloutAssets?.discardRequestImageAttachments(
-                          rolloutId,
-                          request.requestId,
-                        ) ?? Promise.resolve(),
-                    }
-                rollbackPromotion = promotion.rollback
-                content = {
-                  ...request.content,
-                  attachments: promotion.attachments,
-                }
-              } catch (error) {
-                if (error instanceof ImageAttachmentConflictError) {
-                  throw conflict("Input was not submitted: request_conflict.", {
-                    reason: "request_conflict",
-                  })
-                }
-                throw error
-              }
-            }
-            // The existing /inputs route has a durable input-event response
-            // shape, so it maps to Codex's start-if-idle operation. Steering
-            // remains a distinct live Session command and needs its own host
-            // protocol.
+            const promoted = await promoteRequestAttachments(
+              rolloutId,
+              request.requestId,
+              request.content,
+            )
+            const content = promoted.content
+            let rollbackPromotion = promoted.rollback
             const submitted = await thread
               .startIfIdle({
                 submissionId: request.requestId,
@@ -1027,26 +1063,11 @@ export function createThreadServerHandlers(
               })
             }
             rollbackPromotion = undefined
-            if (request.content.attachments !== undefined) {
-              try {
-                await options.rolloutAssets?.discardDraftImageAttachments(
-                  request.content.attachments,
-                )
-                options.releaseDraftRolloutAssets?.(
-                  request.content.attachments.map(
-                    (attachment) => attachment.file.rolloutId,
-                  ),
-                )
-              } catch (error) {
-                reportOperationalFailure(reporter, {
-                  component: "thread-handlers",
-                  operation: "discard-admitted-draft-attachments",
-                  cause: error,
-                  sessionId: request.sessionId,
-                  turnId: request.requestId,
-                })
-              }
-            }
+            await discardAdmittedDraftAttachments(
+              request.sessionId,
+              request.requestId,
+              request.content,
+            )
             const stored = await requireStoredThread(
               options.store,
               request.sessionId,
@@ -1102,6 +1123,69 @@ export function createThreadServerHandlers(
         )
       } catch (error) {
         return fail(error, reporter, "admit-input")
+      }
+    },
+
+    // Steering injects input into an already-running Turn (Codex turn/steer).
+    // Unlike session/input, acceptance is ephemeral: the input becomes durable
+    // when the Turn records it at its next sampling point, so the response
+    // carries the steered Turn id rather than a durable input event.
+    async steerInput(input) {
+      try {
+        const request = requireSteerInputRequest(
+          input,
+          options.maxInputBytes ?? DEFAULT_MAX_INPUT_BYTES,
+        )
+        if (
+          (await options.store.sessionPresentation(request.sessionId)).archived
+        )
+          throw conflict("Restore this conversation before sending a message.")
+        requireAvailableProvider(
+          request.modelSelection?.provider,
+          options.availableProviders,
+        )
+        const thread = await resumeRequired(request.sessionId)
+        const rolloutId = thread.snapshot().metadata.rolloutId
+        const promoted = await promoteRequestAttachments(
+          rolloutId,
+          request.requestId,
+          request.content,
+        )
+        const submitted = await thread
+          .steer(
+            {
+              submissionId: request.requestId,
+              content: promoted.content,
+              ...(request.modelSelection === undefined
+                ? {}
+                : { modelSelection: request.modelSelection }),
+              ...(request.metadata === undefined
+                ? {}
+                : { metadata: request.metadata }),
+            },
+            request.expectedTurnId,
+          )
+          .catch(async (error: unknown) => {
+            await promoted.rollback?.()
+            throw error
+          })
+        if (submitted.type === "not_submitted") {
+          await promoted.rollback?.()
+          throw conflict(`Input was not submitted: ${submitted.reason}.`, {
+            reason: submitted.reason,
+          })
+        }
+        await discardAdmittedDraftAttachments(
+          request.sessionId,
+          request.requestId,
+          request.content,
+        )
+        return ok(200, {
+          requestId: request.requestId,
+          turnId: submitted.turnId,
+        })
+      } catch (error) {
+        return fail(error, reporter, "steer-input")
       }
     },
 
@@ -1391,9 +1475,12 @@ function mapRolloutEvent(
   if (
     item.type === "response_item" &&
     item.item.item.role === "user" &&
-    item.item.id.startsWith("input_") &&
+    (item.item.id.startsWith("input_") || item.item.id.startsWith("message_")) &&
     item.item.item.context === undefined
   ) {
+    // message_-prefixed user items are steered inputs, recorded when the
+    // active Turn sampled them; input_-prefixed items start Turns.
+    const steered = item.item.id.startsWith("message_")
     const text = item.item.item.content
       .filter((block) => block.type === "text")
       .map((block) => block.text)
@@ -1406,6 +1493,7 @@ function mapRolloutEvent(
           requestId: item.item.turnId,
           inputId: item.item.id,
           role: InputRole.User,
+          ...(steered ? { steered: true } : {}),
           content: {
             kind: "text",
             text,
@@ -1826,6 +1914,18 @@ function requireAdmitInputRequest(input: unknown, maxInputBytes: number) {
     ...optionalModelSelectionField(record, "modelSelection"),
     ...optionalInputRoleField(record, "role"),
     ...(parentInputId === undefined ? {} : { parentInputId }),
+    ...optionalMetadataField(record, "metadata"),
+  }
+}
+
+function requireSteerInputRequest(input: unknown, maxInputBytes: number) {
+  const record = requireRecord(input, "Steer request must be an object.")
+  return {
+    sessionId: requireSessionId(record.sessionId, "sessionId"),
+    requestId: requireRequestId(record.requestId),
+    expectedTurnId: requireString(record.expectedTurnId, "expectedTurnId"),
+    content: requireAdmissionTextContent(record.content, maxInputBytes),
+    ...optionalModelSelectionField(record, "modelSelection"),
     ...optionalMetadataField(record, "metadata"),
   }
 }

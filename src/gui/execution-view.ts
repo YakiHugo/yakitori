@@ -594,14 +594,17 @@ function applyDurable(
     case "session.created":
       return next
     case "input.admitted": {
-      const queuedInputs = {
-        ...next.queuedInputs,
-        [event.data.inputId]: {
-          id: event.data.inputId,
-          text: event.data.content.text,
-          admittedAt: event.createdAt,
-        },
-      }
+      const queuedInputs =
+        event.data.steered === true
+          ? next.queuedInputs
+          : {
+              ...next.queuedInputs,
+              [event.data.inputId]: {
+                id: event.data.inputId,
+                text: event.data.content.text,
+                admittedAt: event.createdAt,
+              },
+            }
       return {
         ...next,
         queuedInputs,

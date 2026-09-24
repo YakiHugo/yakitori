@@ -104,6 +104,111 @@ describe("thread server handlers", () => {
     ).toEqual(created.body.session.gitInfo)
   })
 
+  it("steers input into an active turn and rejects steering an idle session", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "yakitori-handler-steer-"))
+    const store = new MemoryThreadStore()
+    const requests: string[] = []
+    let releaseFirst!: () => void
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve
+    })
+    const stream: StreamFn = async function* (request) {
+      const text = request.messages
+        .flatMap((message) => (message.role === "user" ? message.content : []))
+        .flatMap((block) => (block.type === "text" ? [block.text] : []))
+        .join("\n")
+      requests.push(text)
+      if (requests.length === 1) await firstGate
+      yield {
+        type: "response",
+        response: {
+          stopReason: ModelStopReason.EndTurn,
+          content: [{ type: "text", text: "ok" }],
+        },
+      }
+    }
+    const manager = new ThreadManager({
+      store,
+      createTurnProcessor: () =>
+        createTurnProcessor({
+          stream,
+          toolRegistry: createToolRegistry([]),
+          loadProjectInstructions: async () => undefined,
+        }),
+    })
+    const handlers = createThreadServerHandlers({ manager, store })
+    cleanups.push(async () => {
+      await manager.shutdown()
+      await handlers.close()
+      await rm(workspace, { recursive: true, force: true })
+    })
+
+    const created = await handlers.createSession({
+      workingDirectory: workspace,
+      mateId: "mate_test",
+      mateRevisionId: "mate_revision_test",
+    })
+    if (!created.ok) throw new Error(created.body.error.message)
+    const sessionId = created.body.session.id
+
+    const idle = await handlers.steerInput({
+      sessionId,
+      requestId: "request_idle_steer",
+      expectedTurnId: "turn_missing",
+      content: { kind: "text", text: "nothing to steer" },
+    })
+    expect(idle.ok).toBe(false)
+    if (!idle.ok) expect(idle.body.error.message).toContain("no_active_turn")
+
+    const admitted = await handlers.admitInput({
+      sessionId,
+      requestId: "request_first",
+      content: { kind: "text", text: "start the work" },
+    })
+    if (!admitted.ok) throw new Error(admitted.body.error.message)
+    await waitForValue(() => (requests.length === 1 ? true : undefined))
+
+    const wrongTurn = await handlers.steerInput({
+      sessionId,
+      requestId: "request_wrong_turn",
+      expectedTurnId: "turn_other",
+      content: { kind: "text", text: "wrong target" },
+    })
+    expect(wrongTurn.ok).toBe(false)
+    if (!wrongTurn.ok)
+      expect(wrongTurn.body.error.message).toContain("turn_mismatch")
+
+    const steered = await handlers.steerInput({
+      sessionId,
+      requestId: "request_steer",
+      expectedTurnId: "request_first",
+      content: { kind: "text", text: "also handle this" },
+    })
+    if (!steered.ok) throw new Error(steered.body.error.message)
+    expect(steered.body.turnId).toBe("request_first")
+
+    releaseFirst()
+    await waitForValue(() =>
+      manager.getThread(sessionId)?.status === "idle" ? true : undefined,
+    )
+
+    // The steered input joined the same Turn: the next sampling saw it and
+    // the rollout records it durably.
+    expect(requests).toHaveLength(2)
+    expect(requests[1]).toContain("also handle this")
+    const events = await handlers.readSessionEvents({ sessionId })
+    if (!events.ok) throw new Error(events.body.error.message)
+    expect(
+      events.body.events.some(
+        (event) =>
+          event.type === "input.admitted" &&
+          "steered" in event.data &&
+          event.data.steered === true &&
+          event.data.content.text === "also handle this",
+      ),
+    ).toBe(true)
+  })
+
   it("returns healthy search results with an explicit count of unreadable sessions", async () => {
     const root = await mkdtemp(join(tmpdir(), "yakitori-partial-search-"))
     const original = new JsonlThreadStore({ root })

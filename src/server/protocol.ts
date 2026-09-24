@@ -277,6 +277,23 @@ export type ApiAdmitInputResponse = {
   readonly event: EventEnvelope
 }
 
+export type ApiSteerInputRequest = {
+  readonly sessionId: string
+  readonly requestId: string
+  readonly expectedTurnId: string
+  readonly content: TextContent
+  readonly modelSelection?: ModelSelection
+  readonly metadata?: EventMetadata
+}
+
+// Steering acceptance is ephemeral: the input becomes durable when the active
+// Turn records it at its next sampling point, so the response carries the
+// steered Turn id instead of a durable input event.
+export type ApiSteerInputResponse = {
+  readonly requestId: string
+  readonly turnId: string
+}
+
 export type ApiCompactSessionResponse = {
   readonly requestId: string
   readonly inputId: string
