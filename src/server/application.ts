@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import { mkdir, realpath, stat } from "node:fs/promises"
 import {
   basename,
@@ -60,7 +61,9 @@ import {
   readGrokUsage,
   readKimiUsage,
   resolveCodexAccessToken,
+  resolveCodexAccountIdentity,
   resolveGrokAccessToken,
+  resolveGrokAccountIdentity,
   resolveModel,
   type ShellEnvironmentPolicy,
   type StreamFn,
@@ -1393,6 +1396,10 @@ function createApiKeyProvider(
       ? {
           models: createDiscoveringModelsManager({
             provider,
+            identity: () =>
+              Promise.resolve(
+                createHash("sha256").update(apiKey).digest("hex"),
+              ),
             discover: () =>
               discoverOpenAiCompatibleModels({
                 provider: "kimi",
@@ -1430,6 +1437,7 @@ async function registerCodexLogin(
       createTurnStream: () => createCodexProvider(),
       models: createDiscoveringModelsManager({
         provider: "codex",
+        identity: () => resolveCodexAccountIdentity(),
         async discover() {
           const token = await resolveCodexAccessToken()
           return discoverCodexModels({
@@ -1678,6 +1686,7 @@ function createGrokProvider(): ModelProvider {
     },
     models: createDiscoveringModelsManager({
       provider: "grok",
+      identity: () => resolveGrokAccountIdentity(),
       async discover() {
         const accessToken =
           process.env.XAI_API_KEY ?? (await resolveGrokAccessToken())

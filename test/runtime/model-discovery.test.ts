@@ -157,6 +157,7 @@ describe("provider model discovery", () => {
   it("uses Kimi's returned capacities, modalities and effort levels throughout the model manager", async () => {
     const manager = createDiscoveringModelsManager({
       provider: "kimi",
+      identity: async () => "account",
       discover: () =>
         discoverOpenAiCompatibleModels({
           provider: "kimi",
@@ -233,7 +234,7 @@ describe("provider model discovery", () => {
     ])
   })
 
-  it("uses remote metadata while retaining the bundled catalog after discovery fails", async () => {
+  it("serves an expired cache while revalidating, and retains it after discovery fails", async () => {
     let now = 0
     const discover = vi
       .fn<
@@ -242,9 +243,10 @@ describe("provider model discovery", () => {
       .mockResolvedValueOnce([
         { id: "gpt-5.6-sol", contextWindowTokens: 333_000 },
       ])
-      .mockRejectedValueOnce(new Error("offline"))
+      .mockRejectedValue(new Error("offline"))
     const manager = createDiscoveringModelsManager({
       provider: "codex",
+      identity: async () => "account",
       discover,
       now: () => now,
       ttlMs: 100,
@@ -256,9 +258,10 @@ describe("provider model discovery", () => {
     ).toMatchObject({ contextWindowTokens: 333_000 })
 
     now = 101
+    // The expired cache is served immediately; revalidation runs behind it.
     const models = await manager.listModels()
-    expect(discover).toHaveBeenCalledTimes(2)
     expect(models.some((model) => model.model === "gpt-5.6-sol")).toBe(true)
+    await vi.waitFor(() => expect(discover).toHaveBeenCalledTimes(2))
     expect(
       manager.capacity({ provider: "codex", model: "gpt-5.6-sol" }),
     ).toMatchObject({ contextWindowTokens: 333_000 })
@@ -267,6 +270,7 @@ describe("provider model discovery", () => {
   it("keeps conservative capabilities for a discovered model without a bundled profile", async () => {
     const manager = createDiscoveringModelsManager({
       provider: "codex",
+      identity: async () => "account",
       discover: async () => [
         { id: "future-model", contextWindowTokens: 42_000 },
       ],
@@ -286,6 +290,7 @@ describe("provider model discovery", () => {
 it("advertises discovered coding models only with a bundled or provider-supplied instruction source", async () => {
   const grok = createDiscoveringModelsManager({
     provider: "grok",
+    identity: async () => "account",
     discover: async () => [
       { id: "grok-4.6" },
       { id: "grok-imagine-image" },
@@ -299,6 +304,7 @@ it("advertises discovered coding models only with a bundled or provider-supplied
   ])
   const codex = createDiscoveringModelsManager({
     provider: "codex",
+    identity: async () => "account",
     discover: async () => [
       {
         id: "gpt-new-coder",
