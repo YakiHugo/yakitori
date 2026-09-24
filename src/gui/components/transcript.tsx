@@ -422,7 +422,7 @@ const TurnBlock = memo(
                   {reasoningExpanded ? (
                     <MarkdownView
                       text={reasoningText}
-                      className="markdown max-w-2xl pt-4 text-sm leading-6 text-muted-foreground"
+                      className="markdown max-w-2xl pt-4 text-sm text-muted-foreground"
                       workspaceRoot={workspaceRoot}
                     />
                   ) : null}

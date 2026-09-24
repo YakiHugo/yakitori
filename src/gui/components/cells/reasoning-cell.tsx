@@ -31,7 +31,7 @@ export function ReasoningCell({
       <CollapsibleContent className="pt-1 pb-2">
         <MarkdownView
           text={entry.text}
-          className="markdown max-w-2xl text-sm leading-6 text-muted-foreground"
+          className="markdown max-w-2xl text-sm text-muted-foreground"
           workspaceRoot={workspaceRoot}
         />
       </CollapsibleContent>

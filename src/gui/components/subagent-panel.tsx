@@ -412,7 +412,7 @@ function TraceEntry({
           <MarkdownView
             text={entry.text}
             workspaceRoot={workspaceRoot}
-            className="markdown text-sm leading-7"
+            className="markdown text-sm"
           />
         </div>
       )

@@ -83,10 +83,17 @@
   }
 }
 
-/* Assistant markdown rendering. No typography plugin; keep it small. */
+/* Assistant markdown rendering. Proportions follow Codex's markdown module:
+   line-height 1.625, a spacing unit of 0.25em (--md-space), 1em between
+   paragraphs, heading scale 1.5/1.25/1.125em at semibold, plain monospace
+   inline code without a chip, blockquote as a rounded bar, tables with row
+   separators instead of a grid. Everything is em-based so a text-sm root
+   (reasoning, subagent answers) scales the whole system down. */
 .markdown {
+  --md-space: 0.25em;
   min-width: 0;
   overflow-wrap: anywhere;
+  line-height: 1.625;
 }
 .markdown > :first-child {
   margin-top: 0;
@@ -94,35 +101,115 @@
 .markdown > :last-child {
   margin-bottom: 0;
 }
-.markdown p,
-.markdown ul,
-.markdown ol,
-.markdown pre {
-  margin-top: 0.5rem;
-  margin-bottom: 0.5rem;
+.markdown :where(p, ul, ol, blockquote, pre, table, hr) {
+  margin-top: var(--md-space);
+  margin-bottom: var(--md-space);
 }
-.markdown ul {
-  list-style: disc;
-  padding-left: 1.25rem;
+.markdown :where(p + p) {
+  margin-block: calc(var(--md-space) * 4);
 }
-.markdown ol {
-  list-style: decimal;
-  padding-left: 1.25rem;
+.markdown :where(p + ul, p + ol) {
+  margin-top: 0;
 }
-.markdown code {
+.markdown :where(h1, h2, h3, h4, h5, h6) {
+  font-weight: 600;
+}
+.markdown :where(h1) {
+  margin: 0 0 calc(var(--md-space) * 2);
+  font-size: 1.5em;
+  line-height: calc(var(--md-space) * 8);
+}
+.markdown :where(h2) {
+  margin: calc(var(--md-space) * 4) 0 var(--md-space);
+  font-size: 1.25em;
+  line-height: calc(var(--md-space) * 7);
+}
+.markdown :where(h3) {
+  margin: calc(var(--md-space) * 4) 0 var(--md-space);
+  font-size: 1.125em;
+  line-height: calc(var(--md-space) * 7);
+}
+.markdown :where(h4) {
+  margin: calc(var(--md-space) * 4) 0 0;
+  font-size: 1em;
+  line-height: calc(var(--md-space) * 6);
+}
+.markdown :where(h5, h6) {
+  margin: 0;
+  font-size: 1em;
+}
+.markdown :where(ul, ol) {
+  padding-inline-start: calc(var(--md-space) * 6.5);
+  list-style-position: outside;
+}
+.markdown :where(ul) {
+  list-style-type: disc;
+}
+.markdown :where(ol) {
+  list-style-type: decimal;
+}
+.markdown :where(ul ul) {
+  list-style-type: circle;
+}
+.markdown :where(ul ul ul) {
+  list-style-type: square;
+}
+.markdown :where(li) {
+  padding-inline-start: calc(var(--md-space) * 1.5);
+}
+.markdown :where(li + li) {
+  margin-top: 0;
+}
+.markdown :where(li > p) {
+  margin: 0;
+}
+.markdown :where(li > p + p) {
+  margin-top: calc(var(--md-space) * 4);
+}
+.markdown :where(li > ul, li > ol) {
+  margin: 0;
+}
+.markdown :where(ul > li)::marker,
+.markdown :where(ol > li)::marker {
+  color: var(--foreground);
+  font-weight: 600;
+}
+.markdown :where(blockquote) {
+  position: relative;
+  padding: calc(var(--md-space) * 2) 0 calc(var(--md-space) * 2)
+    calc(var(--md-space) * 6);
+  border: 0;
+  color: inherit;
+  font-style: normal;
+}
+.markdown :where(blockquote)::after {
+  content: "";
+  position: absolute;
+  inset-inline-start: 0;
+  top: calc(var(--md-space) * 2);
+  bottom: calc(var(--md-space) * 2);
+  width: var(--md-space);
+  border-radius: calc(var(--md-space) / 2);
+  background: var(--border);
+}
+.markdown :where(hr) {
+  margin: calc(var(--md-space) * 7) 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+.markdown :where(code) {
   font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: 0.8125em;
-  background: var(--muted);
-  border-radius: var(--radius-sm);
-  padding: 0.1em 0.3em;
+  font-size: 0.875em;
 }
-.markdown pre {
+.markdown :where(pre) {
+  margin-block: calc(var(--md-space) * 5);
   background: var(--muted);
-  border-radius: var(--radius-md);
-  padding: 0.75rem;
+  border-radius: 12px;
+  padding: calc(var(--md-space) * 4);
   overflow-x: auto;
+  line-height: 1.45;
 }
-.markdown pre code {
+.markdown :where(pre code) {
   background: transparent;
   padding: 0;
 }
@@ -141,31 +228,26 @@
   text-decoration: underline;
   text-underline-offset: 2px;
 }
-.markdown h1,
-.markdown h2,
-.markdown h3,
-.markdown h4 {
-  font-weight: 600;
-  margin-top: 0.75rem;
-  margin-bottom: 0.5rem;
-}
-.markdown blockquote {
-  border-left: 2px solid var(--border);
-  padding-left: 0.75rem;
-  color: var(--muted-foreground);
-}
 .markdown table {
   display: block;
   max-width: 100%;
   overflow-x: auto;
-  border-collapse: collapse;
-  font-size: 0.8125rem;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 0.875em;
 }
-.markdown th,
-.markdown td {
-  border: 1px solid var(--border);
-  padding: 0.25rem 0.5rem;
-  text-align: left;
+.markdown :where(th, td) {
+  padding: calc(var(--md-space) * 2) calc(var(--md-space) * 6)
+    calc(var(--md-space) * 2) 0;
+  text-align: start;
+  vertical-align: top;
+}
+.markdown :where(thead th) {
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+}
+.markdown :where(tbody tr:not(:last-child) td) {
+  border-bottom: 1px solid color-mix(in oklab, var(--border) 55%, transparent);
 }
 
 @keyframes tool-running-shimmer {
