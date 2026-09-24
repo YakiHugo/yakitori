@@ -9,6 +9,11 @@ if (!root) throw new Error("Missing app root.")
 if (window.yakitoriDesktop?.platform === "darwin")
   document.documentElement.dataset.desktop = "macos"
 
-void useAppStore.getState().boot()
+if (new URLSearchParams(window.location.search).get("mock") === "transcript") {
+  const { seedMockTranscript } = await import("./mock-transcript.ts")
+  seedMockTranscript()
+} else {
+  void useAppStore.getState().boot()
+}
 
 createRoot(root).render(<App />)
