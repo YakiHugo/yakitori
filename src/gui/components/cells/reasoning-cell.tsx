@@ -17,7 +17,7 @@ export function ReasoningCell({
   return (
     <Collapsible
       defaultOpen={entry.status === "streaming"}
-      className="group/reasoning border-l border-foreground/15 pl-3"
+      className="group/reasoning pl-3"
     >
       <CollapsibleTrigger className="flex items-center gap-2 py-1 text-muted-foreground transition-colors hover:text-foreground">
         <span

@@ -570,7 +570,7 @@ function ActionGroup({
         <ChevronRight className="size-3.5 shrink-0 transition-transform group-data-[state=open]/actions:rotate-90" />
       </CollapsibleTrigger>
       <CollapsibleContent className="pt-2">
-        <div className="flex flex-col gap-1 border-l border-foreground/10 pl-3">
+        <div className="flex flex-col gap-1 pl-3">
           {entries.map((entry) => (
             <EntryCell key={entryKey(entry)} entry={entry} />
           ))}
