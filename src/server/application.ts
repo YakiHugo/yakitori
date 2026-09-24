@@ -39,6 +39,7 @@ import {
   createCodexProvider,
   createDefaultTools,
   createDiscoveringModelsManager,
+  createFileModelsCacheStore,
   createHookRunner,
   createMcpConnectionManager,
   createModelProvider,
@@ -128,6 +129,9 @@ const defaultMateProfile = {
 const KIMI_CODE_API_BASE_URL = "https://api.kimi.com/coding"
 const OPENAI_API_BASE_URL = "https://api.openai.com/v1"
 const ANTHROPIC_API_BASE_URL = "https://api.anthropic.com"
+// codex-rs refreshes the model catalog every 4.5 min, just under the 5 min
+// manager TTL, so OnlineIfUncached effectively never waits on the network.
+const MODELS_REFRESH_INTERVAL_MS = 270_000
 
 // The C8-D1 initialize handshake identifies the host as name/version, read
 // from the package manifest (bundled into the desktop build at build time).
@@ -219,6 +223,7 @@ export async function createYakitoriApplication(
   let broadcastNotification:
     | ((method: string, params: unknown) => void)
     | undefined
+  let modelsRefreshTimer: ReturnType<typeof setInterval> | undefined
 
   try {
     await mkdir(configuredSessionStoreRoot, { recursive: true })
@@ -317,9 +322,33 @@ export async function createYakitoriApplication(
       fauxScenario: options.fauxScenario ?? process.env.YAKITORI_FAUX_SCENARIO,
       primaryStream: options.stream,
       injected: options.providerStreams,
+      modelsCacheDir: join(rootDir, "models-cache"),
       reportOperationalFailure: reporter,
     })
     const providerRegistry = createProviderRegistry(provider.providers)
+    // Mirror the codex-rs models refresh worker: keep discovered catalogs warm
+    // so turn admission rarely meets a cold cache. The interval stays just
+    // below the manager TTL (5 min).
+    const refreshModelsCatalogs = () => {
+      for (const name of providerRegistry.providers) {
+        void providerRegistry
+          .models(name)
+          .refresh()
+          .catch((cause: unknown) =>
+            reportOperationalFailure(reporter, {
+              component: "models-manager",
+              operation: "background-refresh",
+              cause,
+            }),
+          )
+      }
+    }
+    refreshModelsCatalogs()
+    modelsRefreshTimer = setInterval(
+      refreshModelsCatalogs,
+      MODELS_REFRESH_INTERVAL_MS,
+    )
+    modelsRefreshTimer.unref()
     const injectedProviderNames = new Set([
       ...Object.keys(options.providerStreams ?? {}),
       ...(options.stream === undefined ? [] : [provider.provider]),
@@ -948,6 +977,7 @@ export async function createYakitoriApplication(
         return defaultUserShellEnv.probe()
       },
       async close() {
+        clearInterval(modelsRefreshTimer)
         closePromise ??= closeApplicationResources(
           threadManager,
           handlers.close,
@@ -963,6 +993,7 @@ export async function createYakitoriApplication(
       },
     }
   } catch (error) {
+    clearInterval(modelsRefreshTimer)
     try {
       await closeApplicationResources(
         threadManagerForCleanup,
@@ -1242,6 +1273,7 @@ async function configureProviders(input: {
   readonly fauxScenario: string | undefined
   readonly primaryStream: StreamFn | undefined
   readonly injected: Readonly<Record<string, StreamFn>> | undefined
+  readonly modelsCacheDir: string
   readonly reportOperationalFailure: OperationalFailureReporter
 }): Promise<{
   readonly provider: string
@@ -1258,6 +1290,7 @@ async function configureProviders(input: {
         provider,
         apiKey,
         "selected-at-request-time",
+        input.modelsCacheDir,
       )
     }
   }
@@ -1266,8 +1299,13 @@ async function configureProviders(input: {
     (await resolveGrokAccessToken()
       .then(() => true)
       .catch(() => false))
-  if (grokAvailable) providers.grok ??= createGrokProvider()
-  await registerCodexLogin(providers, input.reportOperationalFailure)
+  if (grokAvailable)
+    providers.grok ??= createGrokProvider(input.modelsCacheDir)
+  await registerCodexLogin(
+    providers,
+    input.reportOperationalFailure,
+    input.modelsCacheDir,
+  )
 
   const model =
     input.model ??
@@ -1325,6 +1363,7 @@ async function configureProviders(input: {
       input.provider,
       apiKey,
       model,
+      input.modelsCacheDir,
     )
     return { provider: input.provider, model, providers }
   }
@@ -1341,7 +1380,7 @@ async function configureProviders(input: {
   if (!grokAvailable) {
     await resolveGrokAccessToken()
   }
-  providers.grok = createGrokProvider()
+  providers.grok = createGrokProvider(input.modelsCacheDir)
   return { provider: input.provider, model, providers }
 }
 
@@ -1365,6 +1404,7 @@ function createApiKeyProvider(
   provider: keyof typeof apiKeyEnvironment,
   apiKey: string,
   model: string,
+  modelsCacheDir: string,
 ): ModelProvider {
   if (provider === "openai") {
     return createModelProvider({
@@ -1406,6 +1446,10 @@ function createApiKeyProvider(
                 baseUrl: `${KIMI_CODE_API_BASE_URL}/v1`,
                 accessToken: apiKey,
               }),
+            cacheStore: createFileModelsCacheStore({
+              provider,
+              directory: modelsCacheDir,
+            }),
           }),
         }
       : {}),
@@ -1418,6 +1462,7 @@ function createApiKeyProvider(
 async function registerCodexLogin(
   providers: Record<string, ModelProvider | StreamFn>,
   reporter: OperationalFailureReporter,
+  modelsCacheDir: string,
 ): Promise<void> {
   let login: CodexLogin | undefined
   try {
@@ -1448,6 +1493,10 @@ async function registerCodexLogin(
               : { accountId: token.accountId }),
           })
         },
+        cacheStore: createFileModelsCacheStore({
+          provider: "codex",
+          directory: modelsCacheDir,
+        }),
       }),
     })
     return
@@ -1628,7 +1677,7 @@ async function listAllActiveMateIds(mateKernel: MateKernel): Promise<string[]> {
   }
 }
 
-function createGrokProvider(): ModelProvider {
+function createGrokProvider(modelsCacheDir: string): ModelProvider {
   // XAI_API_KEY wins; otherwise reuse the Grok CLI's OIDC login. OAuth
   // tokens expire, so resolve per model call rather than freezing one token at
   // application startup. The same lazy stream supports primary and switched
@@ -1696,6 +1745,10 @@ function createGrokProvider(): ModelProvider {
           accessToken,
         })
       },
+      cacheStore: createFileModelsCacheStore({
+        provider: "grok",
+        directory: modelsCacheDir,
+      }),
     }),
   })
 }

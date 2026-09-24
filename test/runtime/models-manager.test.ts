@@ -1,4 +1,8 @@
-import { describe, expect, it, vi } from "vitest"
+import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { afterEach, describe, expect, it, vi } from "vitest"
+import { createFileModelsCacheStore } from "../../src/runtime/models-cache-store.ts"
 import {
   createDiscoveringModelsManager,
   type DiscoveredModel,
@@ -142,7 +146,9 @@ describe("discovering models manager", () => {
     const discover = vi
       .fn<() => Promise<readonly DiscoveredModel[]>>()
       .mockRejectedValueOnce(new Error("offline"))
-      .mockResolvedValueOnce([{ id: "gpt-retry-test", contextWindowTokens: 100_000 }])
+      .mockResolvedValueOnce([
+        { id: "gpt-retry-test", contextWindowTokens: 100_000 },
+      ])
     const manager = createDiscoveringModelsManager({
       provider: "codex",
       identity: async () => "account",
@@ -161,6 +167,119 @@ describe("discovering models manager", () => {
     expect(
       manager.capacity({ provider: "codex", model: "gpt-retry-test" }),
     ).toMatchObject({ contextWindowTokens: 100_000 })
+  })
+})
+
+describe("persisted models cache", () => {
+  let root: string | undefined
+  afterEach(async () => {
+    if (root !== undefined) await rm(root, { recursive: true, force: true })
+    root = undefined
+  })
+
+  it("starts a cold process with the last good catalog", async () => {
+    root = await mkdtemp(join(tmpdir(), "yakitori-models-cache-"))
+    const store = createFileModelsCacheStore({
+      provider: "codex",
+      directory: root,
+    })
+    const first = createDiscoveringModelsManager({
+      provider: "codex",
+      identity: async () => "account",
+      discover: async () => [
+        { id: "gpt-persisted", contextWindowTokens: 321_000 },
+      ],
+      cacheStore: store,
+    })
+    await first.refresh()
+
+    // A new manager over the same store serves the persisted catalog without
+    // touching the network.
+    const discover = vi.fn<() => Promise<readonly DiscoveredModel[]>>()
+    const second = createDiscoveringModelsManager({
+      provider: "codex",
+      identity: async () => "account",
+      discover,
+      cacheStore: store,
+    })
+    await second.refresh()
+    expect(
+      second.capacity({ provider: "codex", model: "gpt-persisted" }),
+    ).toMatchObject({ contextWindowTokens: 321_000 })
+    expect(discover).not.toHaveBeenCalled()
+  })
+
+  it("ignores a persisted catalog from another account", async () => {
+    root = await mkdtemp(join(tmpdir(), "yakitori-models-cache-"))
+    const store = createFileModelsCacheStore({
+      provider: "codex",
+      directory: root,
+    })
+    await store.save({
+      identity: "account_a",
+      fetchedAt: Date.now(),
+      models: [{ id: "gpt-persisted", contextWindowTokens: 321_000 }],
+    })
+
+    const discover = vi
+      .fn<() => Promise<readonly DiscoveredModel[]>>()
+      .mockResolvedValue([{ id: "gpt-b-model", contextWindowTokens: 222_000 }])
+    const manager = createDiscoveringModelsManager({
+      provider: "codex",
+      identity: async () => "account_b",
+      discover,
+      cacheStore: store,
+    })
+    await manager.refresh()
+
+    expect(
+      manager.capacity({ provider: "codex", model: "gpt-persisted" }),
+    ).toBeUndefined()
+    expect(discover).toHaveBeenCalledTimes(1)
+    expect(
+      manager.capacity({ provider: "codex", model: "gpt-b-model" }),
+    ).toMatchObject({ contextWindowTokens: 222_000 })
+  })
+
+  it("ignores a persisted catalog older than the TTL", async () => {
+    root = await mkdtemp(join(tmpdir(), "yakitori-models-cache-"))
+    const store = createFileModelsCacheStore({
+      provider: "codex",
+      directory: root,
+    })
+    await store.save({
+      identity: "account",
+      fetchedAt: 1_000,
+      models: [{ id: "gpt-persisted", contextWindowTokens: 321_000 }],
+    })
+
+    const discover = vi
+      .fn<() => Promise<readonly DiscoveredModel[]>>()
+      .mockResolvedValue([])
+    const manager = createDiscoveringModelsManager({
+      provider: "codex",
+      identity: async () => "account",
+      discover,
+      cacheStore: store,
+      now: () => 1_000 + 5 * 60 * 1_000,
+      ttlMs: 5 * 60 * 1_000,
+    })
+    await manager.refresh()
+
+    expect(
+      manager.capacity({ provider: "codex", model: "gpt-persisted" }),
+    ).toBeUndefined()
+    expect(discover).toHaveBeenCalledTimes(1)
+  })
+
+  it("treats a malformed cache file as absent", async () => {
+    root = await mkdtemp(join(tmpdir(), "yakitori-models-cache-"))
+    await writeFile(join(root, "codex.json"), "not json")
+    const store = createFileModelsCacheStore({
+      provider: "codex",
+      directory: root,
+    })
+    await expect(store.load()).resolves.toBeUndefined()
   })
 })
 
