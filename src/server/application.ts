@@ -132,6 +132,9 @@ const ANTHROPIC_API_BASE_URL = "https://api.anthropic.com"
 // codex-rs refreshes the model catalog every 4.5 min, just under the 5 min
 // manager TTL, so OnlineIfUncached effectively never waits on the network.
 const MODELS_REFRESH_INTERVAL_MS = 270_000
+// Shared per-Step grace for MCP servers that are still connecting (codex-rs
+// optional_mcp_startup_grace, 1 s).
+const MCP_STEP_GRACE_MS = 1_000
 
 // The C8-D1 initialize handshake identifies the host as name/version, read
 // from the package manifest (bundled into the desktop build at build time).
@@ -581,6 +584,11 @@ export async function createYakitoriApplication(
             sessionId: stored.metadata.id,
           }),
       })
+      mcpManager.subscribeStatus(() =>
+        broadcastNotification?.("mcp/statusChanged", {
+          sessionId: stored.metadata.id,
+        }),
+      )
       try {
         await mcpManager.update(
           resolveSessionMcpServers(config, workingDirectory),
@@ -619,6 +627,10 @@ export async function createYakitoriApplication(
               await mcpManager.update(servers, signal)
               mcpConfiguration = fingerprint
             }
+            // Give servers that are nearly ready a short shared grace so a
+            // Step snapshot usually includes them (codex-rs optional
+            // startup_grace); slower servers join the next Step.
+            await mcpManager.settleConnecting(MCP_STEP_GRACE_MS)
             const status = new Map(
               mcpManager.status().map((server) => [server.name, server]),
             )

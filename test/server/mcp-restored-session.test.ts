@@ -50,6 +50,10 @@ createInterface({input:process.stdin}).on("line", line => {
       "[mcp_servers.fixture]",
       `command = ${JSON.stringify(process.execPath)}`,
       `args = [${JSON.stringify(script)}, ${JSON.stringify(requestsPath)}]`,
+      // The test asserts connection effects synchronously after create and
+      // resume; required keeps those boundaries deterministic now that
+      // optional servers connect in the background.
+      "required = true",
     ].join("\n"),
   )
   const provider = createFauxProvider([])

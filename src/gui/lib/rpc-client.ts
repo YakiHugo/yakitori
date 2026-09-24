@@ -4,6 +4,7 @@ import type { LiveSessionEvent } from "../../runtime/live-events.ts"
 import type { ApiErrorCode } from "../../server/protocol.ts"
 import type { SideChatSnapshot } from "../../server/side-chat.ts"
 import type {
+  McpStatusChangedNotification,
   ProjectChangedNotification,
   RpcMethodParams,
   RpcMethodResponses,
@@ -86,6 +87,11 @@ export type AppRpcClient = {
   subscribeToProjectChanges(
     listener: (notification: ProjectChangedNotification) => void,
   ): () => void
+  // Server-broadcast MCP connection-state changes for a session; refetch
+  // mcp/status to read the new state.
+  subscribeToMcpStatusChanges(
+    listener: (notification: McpStatusChangedNotification) => void,
+  ): () => void
   // Server-broadcast session activity. `undefined` means the connection
   // re-initialized and the current active set is unknown: refetch lists.
   subscribeToSessionActivity(
@@ -150,6 +156,9 @@ export function createAppRpcClient(options: {
   >()
   const projectChangeListeners = new Set<
     (notification: ProjectChangedNotification) => void
+  >()
+  const mcpStatusChangedListeners = new Set<
+    (notification: McpStatusChangedNotification) => void
   >()
   const sessionActivityListeners = new Set<
     (activeSessionIds: readonly string[] | undefined) => void
@@ -396,6 +405,10 @@ export function createAppRpcClient(options: {
       const params = message.params as ProjectChangedNotification
       for (const listener of projectChangeListeners) listener(params)
     }
+    if (message.method === "mcp/statusChanged") {
+      const params = message.params as McpStatusChangedNotification
+      for (const listener of mcpStatusChangedListeners) listener(params)
+    }
   }
 
   function dispatchTransient(event: LiveSessionEvent): void {
@@ -464,6 +477,12 @@ export function createAppRpcClient(options: {
       projectChangeListeners.add(listener)
       return () => {
         projectChangeListeners.delete(listener)
+      }
+    },
+    subscribeToMcpStatusChanges(listener) {
+      mcpStatusChangedListeners.add(listener)
+      return () => {
+        mcpStatusChangedListeners.delete(listener)
       }
     },
     subscribeToSessionActivity(listener) {

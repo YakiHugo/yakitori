@@ -179,6 +179,11 @@ async function withMcpService(
         manager.update(configs.get(sessionId) ?? {}),
       ),
     )
+    // Optional servers connect in the background now; tests that assert the
+    // outcome of the initial connect settle it explicitly.
+    await Promise.all(
+      [...managers.values()].map((manager) => manager.settleConnecting(5_000)),
+    )
     await run({
       async invoke(method, params) {
         const definition = rpcMethods.find(

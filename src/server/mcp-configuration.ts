@@ -24,6 +24,10 @@ export function mcpServersFromConfig(
         throw new ConfigurationError(
           `mcp_servers.${name}.enabled must be a boolean.`,
         )
+      if (entry.required !== undefined && typeof entry.required !== "boolean")
+        throw new ConfigurationError(
+          `mcp_servers.${name}.required must be a boolean.`,
+        )
       for (const field of ["startup_timeout_ms", "tool_timeout_ms"]) {
         const value = entry[field]
         if (
@@ -39,6 +43,9 @@ export function mcpServersFromConfig(
       }
       const common = {
         ...(entry.enabled === undefined ? {} : { enabled: entry.enabled }),
+        ...(entry.required === undefined
+          ? {}
+          : { required: entry.required as boolean }),
         ...(entry.startup_timeout_ms === undefined
           ? {}
           : { startupTimeoutMs: entry.startup_timeout_ms as number }),
@@ -74,6 +81,7 @@ export function mcpServersFromConfig(
       ]
       const commonFields = [
         "enabled",
+        "required",
         "startup_timeout_ms",
         "tool_timeout_ms",
         "enabled_tools",

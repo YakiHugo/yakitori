@@ -19,7 +19,9 @@ async function withServer(
   run: (fixture: {
     root: string
     manager: ReturnType<typeof createMcpConnectionManager>
-    config: { demo: { command: string; args: string[] } }
+    config: {
+      demo: { command: string; args: string[]; required: boolean }
+    }
   }) => Promise<void>,
   options: Parameters<typeof createMcpConnectionManager>[0] = {},
 ) {
@@ -50,6 +52,10 @@ ${body}
         demo: {
           command: process.execPath,
           args: [script, join(root, "effects")],
+          // Tests assert on the connected catalog right after update();
+          // required keeps that deterministic now that optional servers
+          // connect in the background.
+          required: true,
         },
       },
     })
@@ -87,7 +93,8 @@ it("rejects cyclic pagination instead of publishing a partial catalog", async ()
   await withServer(
     `if(m.method==='tools/list')reply({tools:[],nextCursor:'again'});`,
     async ({ manager, config }) => {
-      await manager.update(config)
+      await manager.update({ demo: { ...config.demo, required: false } })
+      await manager.settleConnecting(5_000)
       expect(manager.tools()).toEqual([])
       expect(manager.status()).toMatchObject([
         { name: "demo", state: "failed" },
@@ -321,6 +328,7 @@ it("connects to Streamable HTTP with configured headers and executes tools", asy
       remote: {
         url: `http://127.0.0.1:${address.port}/mcp`,
         httpHeaders: { Authorization: "Bearer test-token" },
+        required: true,
       },
     })
     expect(manager.status()).toMatchObject([{ state: "ready" }])
@@ -409,7 +417,7 @@ it("serializes overlapping configuration updates and applies raw-name filters", 
         }),
       ])
       expect(manager.status()).toEqual([
-        { name: "demo", state: "ready", toolCount: 1 },
+        { name: "demo", state: "ready", toolCount: 1, required: true },
       ])
       expect(manager.tools()[0]?.search?.searchText).toBe("demo read.raw")
       await manager.update({})
@@ -431,7 +439,7 @@ if(m.method==='tools/call')reply({content:[{type:'text',text:'still connected'}]
       })
       await manager.update(config)
       expect(manager.status()).toEqual([
-        { name: "demo", state: "ready", toolCount: 1 },
+        { name: "demo", state: "ready", toolCount: 1, required: true },
       ])
       expect(
         await manager.tools()[0]?.execute({}, { workspaceRoot: root }),
@@ -592,6 +600,7 @@ it("classifies HTTP 401 as authentication required without exposing the response
     await manager.update({
       remote: { url: `http://127.0.0.1:${address.port}/mcp` },
     })
+    await manager.settleConnecting(5_000)
     expect(manager.status()).toMatchObject([
       { state: "failed", errorCode: "authentication_required" },
     ])

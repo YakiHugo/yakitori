@@ -208,6 +208,14 @@ export type SidebarChangedNotification = Readonly<{
   sessionId?: string
 }>
 
+// Broadcast when a session's MCP server connections change state (connecting,
+// ready, failed); clients refetch mcp/status instead of relying on polling.
+export const mcpStatusChangedMethod = "mcp/statusChanged"
+
+export type McpStatusChangedNotification = Readonly<{
+  sessionId: string
+}>
+
 // The session/permission/request server→client method (Codex parity:
 // approvals are correlated RPCs, not POST + notification). Params carry the
 // same tool detail as the permission.requested transient; the response result

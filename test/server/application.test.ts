@@ -2054,6 +2054,10 @@ describe("application composition", () => {
           `command = ${JSON.stringify(process.execPath)}`,
           `args = [${JSON.stringify(script)}, ${JSON.stringify(observedCwd)}]`,
           'cwd = "tools"',
+          // The probe must have run by the time createSession returns and by
+          // the first step after a config reload; required keeps that
+          // deterministic now that optional servers connect in the background.
+          "required = true",
         ].join("\n"),
       )
 

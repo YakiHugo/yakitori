@@ -8,6 +8,7 @@ import type { StoredEventEnvelope } from "../../src/kernel/index.ts"
 import type { LiveSessionEvent } from "../../src/runtime/live-events.ts"
 import type { ApiReadSessionResponse } from "../../src/server/protocol.ts"
 import type {
+  McpStatusChangedNotification,
   ProjectChangedNotification,
   SessionCompletedNotification,
   SessionPermissionRequestResult,
@@ -134,6 +135,24 @@ export class FakeRpcClient {
     return () => {
       const index = this.projectChangeListeners.indexOf(listener)
       if (index >= 0) this.projectChangeListeners.splice(index, 1)
+    }
+  }
+
+  readonly mcpStatusChangedListeners = new Set<
+    (notification: McpStatusChangedNotification) => void
+  >()
+  subscribeToMcpStatusChanges(
+    listener: (notification: McpStatusChangedNotification) => void,
+  ): () => void {
+    this.mcpStatusChangedListeners.add(listener)
+    return () => {
+      this.mcpStatusChangedListeners.delete(listener)
+    }
+  }
+
+  emitMcpStatusChanged(notification: McpStatusChangedNotification): void {
+    for (const listener of [...this.mcpStatusChangedListeners]) {
+      listener(notification)
     }
   }
 

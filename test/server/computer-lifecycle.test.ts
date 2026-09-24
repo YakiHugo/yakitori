@@ -60,6 +60,9 @@ async function fixture(waitForFirstAbort = false) {
       `command = ${JSON.stringify(process.execPath)}`,
       `args = [${JSON.stringify(script)}]`,
       'enabled_tools = ["js"]',
+      // The first Turn calls js immediately; required keeps the fixture
+      // connected before Session creation returns.
+      "required = true",
     ].join("\n"),
   )
   const toolResults: string[] = []
