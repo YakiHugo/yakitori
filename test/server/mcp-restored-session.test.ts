@@ -11,6 +11,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { expect, it } from "vitest"
 import { WebSocket } from "ws"
+import { PersistContext } from "../../src/core/thread-store.ts"
 import { createYakitoriApplication } from "../../src/server/application.ts"
 import type { McpRpcResponses } from "../../src/server/rpc/mcp-methods.ts"
 import { createFauxProvider } from "../support/faux-provider.ts"
@@ -74,6 +75,14 @@ createInterface({input:process.stdin}).on("line", line => {
     if (!other.ok) throw new Error(other.body.error.message)
     const selectedId = selected.body.session.id
     const otherId = other.body.session.id
+    await application.threadStore.persistThread(
+      selectedId,
+      PersistContext.TurnStart,
+    )
+    await application.threadStore.persistThread(
+      otherId,
+      PersistContext.TurnStart,
+    )
     await application.close()
     await writeFile(requestsPath, "")
 

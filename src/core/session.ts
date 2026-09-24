@@ -1,3 +1,4 @@
+import { kernelErrorFromUnknown } from "../kernel/errors.ts"
 import type {
   CompletedExecutionItem,
   JsonObject,
@@ -7,7 +8,6 @@ import type {
   TokenUsage,
   TurnMetrics,
 } from "../kernel/events.ts"
-import { kernelErrorFromUnknown } from "../kernel/errors.ts"
 import { InputRole } from "../kernel/events.ts"
 import { createTurnId } from "../kernel/ids.ts"
 import { fingerprintInputAdmission } from "../kernel/operation.ts"
@@ -149,6 +149,15 @@ type AcceptedAgentMessage = {
   throughSeq?: number
 }
 
+type PendingTurnStart = {
+  readonly input: TurnInput
+  readonly context: TurnContextItem
+  readonly inputItem: ResponseItemEnvelope
+  readonly items: readonly RolloutItem[]
+  readonly requestFingerprint: string
+  throughSeq?: number
+}
+
 export class Session {
   readonly id: string
   readonly io: SessionIo
@@ -159,6 +168,7 @@ export class Session {
     string,
     { readonly fingerprint: string; readonly inputItemId: string }
   >()
+  #pendingTurnStart: PendingTurnStart | undefined
   readonly #store: SessionRolloutStore
   readonly #processor: TurnProcessor
   readonly #submissions = new BoundedQueue<SessionCommand>(submissionCapacity)
@@ -304,6 +314,8 @@ export class Session {
     }
     if (operation.type === "fail_agent") {
       try {
+        if (this.#pendingTurnStart !== undefined)
+          throw new Error("The previous Turn must be persisted first.")
         if (this.#activeTurn === undefined) {
           await this.#recordAgentFailure(operation.message)
         }
@@ -315,6 +327,8 @@ export class Session {
     }
     if (operation.type === "agent_message") {
       try {
+        if (this.#pendingTurnStart !== undefined)
+          throw new Error("The previous Turn must be persisted first.")
         await this.#recordAgentMessage(operation.messageId, operation.text)
         operation.reply.resolve()
       } catch (error) {
@@ -336,6 +350,18 @@ export class Session {
     mode: Extract<SessionOp, { readonly type: "turn_input" }>["mode"],
   ): Promise<TurnInputSubmission> {
     const fingerprint = turnInputFingerprint(input)
+    const pending = this.#pendingTurnStart
+    if (pending !== undefined) {
+      if (
+        pending.input.submissionId !== input.submissionId ||
+        pending.requestFingerprint !== fingerprint
+      ) {
+        throw new Error(
+          "The previous Turn must be persisted before another input.",
+        )
+      }
+      return this.#startTurn(input)
+    }
     const submitted = this.#submittedTurns.get(input.submissionId)
     if (submitted !== undefined) {
       if (submitted.fingerprint !== fingerprint) {
@@ -397,55 +423,51 @@ export class Session {
   }
 
   async #startTurn(input: TurnInput): Promise<TurnInputSubmission> {
-    let context: TurnContextItem
-    try {
-      context = await this.#processor.prepare(this.snapshot(), input)
-    } catch (error) {
-      await this.#recordAgentFailure(
-        error instanceof Error ? error.message : "Turn preparation failed.",
-      )
-      throw error
-    }
-    if (context.turnId !== input.submissionId) {
-      throw new Error("Turn processor prepared a mismatched Turn id.")
-    }
-    this.#configuration = structuredClone(context.configuration)
-    const inputItem: ResponseItemEnvelope = {
-      id: `input_${globalThis.crypto.randomUUID()}`,
-      turnId: input.submissionId,
-      createdAt: new Date().toISOString(),
-      item: {
-        role: "user",
-        content:
-          input.content.text.length === 0
-            ? []
-            : [{ type: "text", text: input.content.text }],
-        ...(input.content.contextAttachments === undefined
-          ? {}
-          : { contextAttachments: input.content.contextAttachments }),
-        ...(input.content.attachments === undefined ||
-        input.content.attachments.length === 0
-          ? {}
-          : {
-              images: input.content.attachments.map((attachment) => ({
-                type: "image" as const,
-                mediaType: attachment.mediaType,
-                detail: attachment.detail ?? "high",
-                file: attachment.file,
-                sizeBytes: attachment.sizeBytes,
-              })),
-            }),
-      },
-      ...turnInputSubmissionMetadata(input),
-    }
-    const requestFingerprint = turnInputFingerprint(input)
-    this.#submittedTurns.set(input.submissionId, {
-      fingerprint: requestFingerprint,
-      inputItemId: inputItem.id,
-    })
-    this.#contextManager.record([inputItem])
-    try {
-      await this.#appendRollout([
+    let pending = this.#pendingTurnStart
+    if (pending === undefined) {
+      let context: TurnContextItem
+      try {
+        context = await this.#processor.prepare(this.snapshot(), input)
+      } catch (error) {
+        await this.#recordAgentFailure(
+          error instanceof Error ? error.message : "Turn preparation failed.",
+        )
+        throw error
+      }
+      if (context.turnId !== input.submissionId) {
+        throw new Error("Turn processor prepared a mismatched Turn id.")
+      }
+      this.#configuration = structuredClone(context.configuration)
+      const inputItem: ResponseItemEnvelope = {
+        id: `input_${globalThis.crypto.randomUUID()}`,
+        turnId: input.submissionId,
+        createdAt: new Date().toISOString(),
+        item: {
+          role: "user",
+          content:
+            input.content.text.length === 0
+              ? []
+              : [{ type: "text", text: input.content.text }],
+          ...(input.content.contextAttachments === undefined
+            ? {}
+            : { contextAttachments: input.content.contextAttachments }),
+          ...(input.content.attachments === undefined ||
+          input.content.attachments.length === 0
+            ? {}
+            : {
+                images: input.content.attachments.map((attachment) => ({
+                  type: "image" as const,
+                  mediaType: attachment.mediaType,
+                  detail: attachment.detail ?? "high",
+                  file: attachment.file,
+                  sizeBytes: attachment.sizeBytes,
+                })),
+              }),
+        },
+        ...turnInputSubmissionMetadata(input),
+      }
+      const requestFingerprint = turnInputFingerprint(input)
+      const items: readonly RolloutItem[] = [
         { type: "response_item", item: inputItem },
         { type: "turn_context", context },
         {
@@ -454,15 +476,93 @@ export class Session {
           inputItemId: inputItem.id,
           requestFingerprint,
         },
-      ])
-      await this.#persist(PersistContext.TurnStart)
+      ]
+      pending = {
+        input,
+        context,
+        inputItem,
+        items,
+        requestFingerprint,
+      }
+      this.#pendingTurnStart = pending
+      try {
+        pending.throughSeq = await this.#store.appendItems(this.id, items)
+      } catch (error) {
+        this.#reportPersistenceError(error)
+        throw error
+      }
+    } else if (pending.throughSeq === undefined) {
+      try {
+        const retry = pending
+        // A rejected append may already have queued or written the entire
+        // batch. Drain and inspect it before deciding whether to append again.
+        await this.#store.flushThread(this.id)
+        const rollout = (await this.#store.readThread(this.id))?.rollout ?? []
+        const start = rollout.find(
+          (entry) =>
+            entry.item.type === "turn_started" &&
+            entry.item.turnId === input.submissionId &&
+            entry.item.inputItemId === retry.inputItem.id,
+        )
+        if (start !== undefined) {
+          const inputRecord = rollout.find(
+            (entry) =>
+              entry.item.type === "response_item" &&
+              entry.item.item.id === retry.inputItem.id,
+          )
+          const contextRecord = rollout.find(
+            (entry) =>
+              entry.item.type === "turn_context" &&
+              entry.item.context.turnId === input.submissionId,
+          )
+          if (
+            inputRecord?.seq !== start.seq - 2 ||
+            contextRecord?.seq !== start.seq - 1
+          )
+            throw new Error("The pending Turn has incomplete stored input.")
+          pending.throughSeq = start.seq + 1
+        } else {
+          if (
+            rollout.some(
+              (entry) =>
+                (entry.item.type === "response_item" &&
+                  entry.item.item.id === retry.inputItem.id) ||
+                (entry.item.type === "turn_context" &&
+                  entry.item.context.turnId === input.submissionId),
+            )
+          )
+            throw new Error("The pending Turn has incomplete stored input.")
+          pending.throughSeq = await this.#store.appendItems(
+            this.id,
+            pending.items,
+          )
+        }
+      } catch (error) {
+        this.#reportPersistenceError(error)
+        throw error
+      }
+    }
+    try {
+      await this.#store.persistThread(this.id, PersistContext.TurnStart)
     } catch (error) {
-      this.#submittedTurns.delete(input.submissionId)
-      await this.#recordAgentFailure(
-        error instanceof Error ? error.message : "Turn persistence failed.",
-      )
+      this.#reportPersistenceError(error)
       throw error
     }
+    this.#pendingTurnStart = undefined
+    this.#submittedTurns.set(input.submissionId, {
+      fingerprint: pending.requestFingerprint,
+      inputItemId: pending.inputItem.id,
+    })
+    this.#contextManager.record([pending.inputItem])
+    if (pending.throughSeq === undefined)
+      throw new Error("A persisted Turn has no rollout sequence.")
+    this.#events.send({
+      type: "rollout.appended",
+      threadId: this.id,
+      throughSeq: pending.throughSeq,
+      items: structuredClone(pending.items),
+    })
+    const context = pending.context
 
     const abort = new AbortController()
     const aborted = deferred<void>()
@@ -844,6 +944,8 @@ export class Session {
 
   async #runForkBarrier(operation: ForkBarrierCommand): Promise<void> {
     try {
+      if (this.#pendingTurnStart !== undefined)
+        throw new Error("The previous Turn must be persisted before forking.")
       this.#interruptActiveTurn("conversation_fork")
       await this.#activeTurn?.task.catch(() => undefined)
       await this.#store.flushThread(this.id)
@@ -862,14 +964,6 @@ export class Session {
         throughSeq,
         items: structuredClone(items),
       })
-    } catch (error) {
-      this.#reportPersistenceError(error)
-    }
-  }
-
-  async #persist(context: PersistContext): Promise<void> {
-    try {
-      await this.#store.persistThread(this.id, context)
     } catch (error) {
       this.#reportPersistenceError(error)
     }
@@ -1003,11 +1097,29 @@ export class Session {
           try {
             accepted.throughSeq = await append
           } catch {
-            // Returning a Promise transfers the batch to ThreadStore's retry
-            // buffer. The flush below is the durable acknowledgement barrier.
+            // The batch may already be in the writer's retry buffer. Persist
+            // it before acknowledging an out-of-band agent message.
+            await this.#store.persistThread(this.id, PersistContext.TurnStart)
           }
         }
         await this.#store.flushThread(this.id)
+        if (accepted.throughSeq === undefined) {
+          await this.#store.persistThread(this.id, PersistContext.TurnStart)
+          const stored = await this.#store.readThread(this.id)
+          const record = stored?.rollout.find(
+            (entry) =>
+              entry.item.type === "agent_message" &&
+              entry.item.messageId === messageId,
+          )
+          if (record !== undefined) accepted.throughSeq = record.seq + 1
+          else {
+            accepted.throughSeq = await this.#store.appendItems(
+              this.id,
+              accepted.items,
+            )
+            await this.#store.flushThread(this.id)
+          }
+        }
       } catch (error) {
         this.#reportPersistenceError(error)
         throw error

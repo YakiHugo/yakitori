@@ -22,6 +22,7 @@ import type {
 import type { CreateThreadMetadata } from "../../src/core/thread-store.ts"
 import { YakitoriErrorCode } from "../../src/kernel/errors.ts"
 import { createRolloutAssets } from "../../src/kernel/rollout-assets.ts"
+import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
 
 const roots: string[] = []
 
@@ -32,10 +33,414 @@ afterEach(async () => {
 })
 
 describe("JsonlThreadStore", () => {
+  it("creates child agents with their existing durable rollout lifecycle", async () => {
+    const { root, store } = await createStore()
+    const id = "thread_child_agent"
+    await store.createThread(metadata(id, { parentThreadId: "thread_parent" }))
+    expect(await store.listThreadIds()).toEqual([id])
+    await expect(
+      access(join(root, "rollouts", id, "rollout.jsonl")),
+    ).resolves.toBeUndefined()
+    await store.shutdownThread(id)
+    expect((await store.readThread(id))?.rollout).toHaveLength(1)
+  })
+
+  it("keeps an ordinary root live without publishing idle history", async () => {
+    const { root, store } = await createStore()
+    const id = "thread_staged"
+    const created = await store.createThread(metadata(id))
+    expect(created.rollout.map((entry) => entry.item.type)).toEqual([
+      "session_meta",
+    ])
+    await store.appendItems(id, [response("turn_seed", "seed")])
+    await store.persistThread(id, "standard")
+    await store.flushThread(id)
+    expect((await store.readThread(id))?.rollout).toHaveLength(1)
+    expect(await store.listThreadIds()).toEqual([])
+    expect((await store.listThreads()).threads).toEqual([])
+    expect(
+      (await store.searchThreads({ searchTerm: "seed", limit: 10 })).matches,
+    ).toEqual([])
+    const otherStore = new JsonlThreadStore({ root })
+    expect(await otherStore.readThread(id)).toBeUndefined()
+    await expect(
+      access(join(root, "threads", `${id}.json`)),
+    ).rejects.toMatchObject({ code: "ENOENT" })
+    await expect(access(join(root, "rollouts", id))).rejects.toMatchObject({
+      code: "ENOENT",
+    })
+    await store.shutdownThread(id)
+    expect(await store.readThread(id)).toBeUndefined()
+    expect(await store.listThreadIds()).toEqual([])
+  })
+
+  it("publishes complete staged history at the first turn barrier", async () => {
+    const { root, store } = await createStore()
+    const id = "thread_first_turn"
+    await store.createThread(metadata(id))
+    await store.appendItems(id, [response("turn_seed", "seed")])
+    await store.appendItems(id, [
+      {
+        type: "response_item",
+        item: {
+          id: "item_user",
+          turnId: "turn_first",
+          createdAt: new Date().toISOString(),
+          item: { role: "user", content: [{ type: "text", text: "hello" }] },
+        },
+      },
+      {
+        type: "turn_started",
+        turnId: "turn_first",
+        inputItemId: "item_user",
+        requestFingerprint: "fingerprint",
+      },
+    ])
+    await store.persistThread(id, "turn_start")
+    expect((await store.readThread(id))?.rollout.map(({ seq }) => seq)).toEqual(
+      [0, 1, 2, 3],
+    )
+    expect(await store.listThreadIds()).toEqual([id])
+    const reopened = new JsonlThreadStore({ root })
+    expect(
+      (await reopened.readThread(id))?.rollout.map(({ item }) => item.type),
+    ).toEqual([
+      "session_meta",
+      "response_item",
+      "response_item",
+      "turn_started",
+    ])
+    await store.shutdownThread(id)
+  })
+
+  it("retains staged image assets through materialization and removes them on idle discard", async () => {
+    const { root, store } = await createStore()
+    const assets = createStoreAssets(root, store)
+    const bytes = pngBytes()
+    const imagePath = join(root, "source-image.png")
+    await writeFile(imagePath, bytes)
+    const id = "thread_images"
+    await store.createThread(metadata(id))
+    const [fromBytes] = await assets.importImageBytes(id, "bytes", [
+      { name: "image.png", data: bytes },
+    ])
+    const [fromPath] = await assets.importImagePaths(id, "path", [imagePath])
+    if (fromBytes === undefined || fromPath === undefined)
+      throw new Error("Missing staged image attachment.")
+    expect(await assets.read(fromBytes.file)).toEqual(bytes)
+    expect(await assets.read(fromPath.file)).toEqual(bytes)
+    expect(await store.listThreadIds()).toEqual([])
+    const otherStore = new JsonlThreadStore({ root })
+    await otherStore.initialize()
+    expect(await assets.read(fromPath.file)).toEqual(bytes)
+    await expect(
+      otherStore.createThread(metadata(id, { parentThreadId: "parent" })),
+    ).rejects.toThrow("active writer")
+    expect(await assets.read(fromBytes.file)).toEqual(bytes)
+    await store.persistThread(id, "turn_start")
+    expect(await assets.read(fromBytes.file)).toEqual(bytes)
+    expect(await assets.read(fromPath.file)).toEqual(bytes)
+    await store.shutdownThread(id)
+    const idle = "thread_idle_image"
+    await store.createThread(metadata(idle))
+    const [discarded] = await assets.importImageBytes(idle, "draft", [
+      { name: "image.png", data: bytes },
+    ])
+    if (discarded === undefined)
+      throw new Error("Missing idle image attachment.")
+    await store.discardThread(idle)
+    await expect(assets.read(discarded.file)).rejects.toMatchObject({
+      code: "ENOENT",
+    })
+    await expect(access(join(root, "rollouts", idle))).rejects.toMatchObject({
+      code: "ENOENT",
+    })
+  })
+
+  it("retries failed first turn materialization with its staged history and assets", async () => {
+    const { root, store } = await createStore()
+    const assets = createStoreAssets(root, store)
+    const id = "thread_retry_first_turn"
+    await store.createThread(metadata(id))
+    await store.appendItems(id, [response("turn_one", "original")])
+    const bytes = pngBytes()
+    const [attachment] = await assets.importImageBytes(id, "draft", [
+      { name: "image.png", data: bytes },
+    ])
+    if (attachment === undefined)
+      throw new Error("Missing staged image attachment.")
+    const probe = await open(join(root, "probe-first-turn"), "w+")
+    const prototype = Object.getPrototypeOf(probe) as {
+      sync(): Promise<void>
+    }
+    const originalSync = prototype.sync
+    let syncCount = 0
+    prototype.sync = async function sync() {
+      syncCount += 1
+      if (syncCount === 4) {
+        throw new Error("first turn sync failed")
+      }
+      await originalSync.call(this)
+    }
+    try {
+      await expect(store.persistThread(id, "turn_start")).rejects.toThrow(
+        "first turn sync failed",
+      )
+    } finally {
+      prototype.sync = originalSync
+      await probe.close()
+    }
+    expect(await store.listThreadIds()).toEqual([])
+    expect((await store.readThread(id))?.rollout).toHaveLength(1)
+    expect(await assets.read(attachment.file)).toEqual(bytes)
+    await store.persistThread(id, "turn_start")
+    expect((await store.readThread(id))?.rollout.map(({ seq }) => seq)).toEqual(
+      [0, 1],
+    )
+    expect(await assets.read(attachment.file)).toEqual(bytes)
+    await store.shutdownThread(id)
+  })
+
+  it("keeps a failed first turn private while preserving its original event sequence on retry", async () => {
+    const { root, store } = await createStore()
+    const id = "thread_private_first_turn"
+    await store.createThread(metadata(id))
+    // A first turn can have earlier staged records unrelated to its submission.
+    await store.appendItems(id, [response("turn_earlier", "earlier")])
+    await store.appendItems(id, [
+      response("turn_first", "first input"),
+      {
+        type: "turn_context",
+        context: {
+          turnId: "turn_first",
+          configuration: SessionConfiguration.create({
+            selection: { provider: "faux", model: "scripted" },
+            workspaceRoot: "/workspace",
+            enabledTools: [],
+            approvalPolicy: "always_approve",
+            promptCacheKey: "turn_first",
+          }).snapshot,
+          selection: { provider: "faux", model: "scripted" },
+        },
+      },
+      {
+        type: "turn_started",
+        turnId: "turn_first",
+        inputItemId: "input_first",
+      },
+    ])
+    const probe = await open(join(root, "probe-private-first-turn"), "w+")
+    const prototype = Object.getPrototypeOf(probe) as { sync(): Promise<void> }
+    const originalSync = prototype.sync
+    let count = 0
+    prototype.sync = async function sync() {
+      if (++count === 4) throw new Error("materialization failed")
+      await originalSync.call(this)
+    }
+    try {
+      await expect(store.persistThread(id, "turn_start")).rejects.toThrow(
+        "materialization failed",
+      )
+    } finally {
+      prototype.sync = originalSync
+      await probe.close()
+    }
+    expect((await store.readThread(id))?.rollout.map(({ seq }) => seq)).toEqual(
+      [0],
+    )
+    await store.persistThread(id, "turn_start")
+    expect((await store.readThread(id))?.rollout.map(({ seq }) => seq)).toEqual(
+      [0, 1, 2, 3, 4],
+    )
+    await store.shutdownThread(id)
+    const reopened = new JsonlThreadStore({ root })
+    expect((await reopened.readThread(id))?.rollout).toHaveLength(5)
+  })
+
+  it("shares staged shutdown cleanup across concurrent calls", async () => {
+    const { root, store } = await createStore()
+    const id = "thread_staged_shutdown"
+    await store.createThread(metadata(id))
+    const first = store.shutdownThread(id)
+    const second = store.shutdownThread(id)
+    expect(second).toBe(first)
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      undefined,
+      undefined,
+    ])
+    expect(await store.readThread(id)).toBeUndefined()
+    await expect(
+      access(join(root, "threads", `${id}.json`)),
+    ).rejects.toMatchObject({
+      code: "ENOENT",
+    })
+  })
+
+  it("keeps staged presentation in memory until the first turn and persists it across restart", async () => {
+    const { root, store } = await createStore()
+    const id = "thread_staged_sidebar"
+    await store.createThread(metadata(id))
+    await store.updateSessionSidebar({
+      type: "session",
+      sessionId: id,
+      title: "Renamed draft",
+      goal: "Finish task",
+      archived: true,
+      sectionId: "pinned",
+    })
+    expect(await store.sessionPresentation(id)).toMatchObject({
+      navigationId: id,
+      title: "Renamed draft",
+      goal: "Finish task",
+      archived: true,
+      sectionId: "pinned",
+    })
+    expect((await store.readSessionSidebar()).entries[id]).toMatchObject({
+      title: "Renamed draft",
+      sectionId: "pinned",
+    })
+    await expect(
+      access(join(root, "session-sidebar.json")),
+    ).rejects.toMatchObject({
+      code: "ENOENT",
+    })
+    expect(
+      (await store.listThreads({ view: "sessions", archived: true })).threads,
+    ).toEqual([])
+    expect(
+      (
+        await store.searchThreads({
+          view: "sessions",
+          archived: true,
+          searchTerm: "Renamed draft",
+          limit: 10,
+        })
+      ).matches,
+    ).toEqual([])
+    await store.persistThread(id, "turn_start")
+    await store.shutdownThread(id)
+    const reopened = new JsonlThreadStore({ root })
+    expect(await reopened.sessionPresentation(id)).toMatchObject({
+      navigationId: id,
+      title: "Renamed draft",
+      goal: "Finish task",
+      archived: true,
+      sectionId: "pinned",
+    })
+    expect(
+      (await reopened.listThreads({ view: "sessions", archived: true }))
+        .threads[0],
+    ).toMatchObject({ id, title: "Renamed draft", sectionId: "pinned" })
+  })
+
+  it("retries staged presentation after a failed first turn without publishing an orphan sidebar entry", async () => {
+    const { root, store } = await createStore()
+    const id = "thread_sidebar_retry"
+    await store.createThread(metadata(id))
+    await store.updateSessionSidebar({
+      type: "session",
+      sessionId: id,
+      title: "Keep this title",
+    })
+    const probe = await open(join(root, "probe-sidebar-retry"), "w+")
+    const prototype = Object.getPrototypeOf(probe) as { sync(): Promise<void> }
+    const originalSync = prototype.sync
+    let count = 0
+    prototype.sync = async function sync() {
+      // Journal and metadata publish before the sidebar write.
+      if (++count === 5) throw new Error("sidebar sync failed")
+      await originalSync.call(this)
+    }
+    try {
+      await expect(store.persistThread(id, "turn_start")).rejects.toThrow(
+        "sidebar sync failed",
+      )
+    } finally {
+      prototype.sync = originalSync
+      await probe.close()
+    }
+    expect(await store.listThreadIds()).toEqual([])
+    expect((await store.readSessionSidebar()).entries[id]?.title).toBe(
+      "Keep this title",
+    )
+    const restartedBeforeRetry = new JsonlThreadStore({ root })
+    expect(
+      (await restartedBeforeRetry.readSessionSidebar()).entries[id],
+    ).toBeUndefined()
+    await store.persistThread(id, "turn_start")
+    await store.shutdownThread(id)
+    const restartedAfterRetry = new JsonlThreadStore({ root })
+    expect((await restartedAfterRetry.sessionPresentation(id)).title).toBe(
+      "Keep this title",
+    )
+  })
+
+  it("durably acknowledges an idle agent message before its append resolves", async () => {
+    const { root, store } = await createStore()
+    const id = "thread_idle_agent_message"
+    await store.createThread(metadata(id))
+    const item: RolloutItem = {
+      type: "agent_message",
+      messageId: "agent_input",
+      item: {
+        id: "agent_input",
+        turnId: "turn_agent",
+        createdAt: new Date().toISOString(),
+        item: { role: "user", content: [{ type: "text", text: "go" }] },
+      },
+    }
+    expect(await store.appendItems(id, [item])).toBe(2)
+    const reopened = new JsonlThreadStore({ root })
+    expect((await reopened.readThread(id))?.rollout[1]?.item).toEqual(item)
+    await store.shutdownThread(id)
+  })
+
+  it("retries a failed staged agent message without duplicating its record", async () => {
+    const { root, store } = await createStore()
+    const id = "thread_retry_agent_message"
+    await store.createThread(metadata(id))
+    const item: RolloutItem = {
+      type: "agent_message",
+      messageId: "agent_retry",
+      item: {
+        id: "agent_retry",
+        turnId: "turn_agent_retry",
+        createdAt: new Date().toISOString(),
+        item: { role: "user", content: [{ type: "text", text: "retry" }] },
+      },
+    }
+    const probe = await open(join(root, "probe-agent-materialization"), "w+")
+    const prototype = Object.getPrototypeOf(probe) as { sync(): Promise<void> }
+    const originalSync = prototype.sync
+    let count = 0
+    prototype.sync = async function sync() {
+      if (++count === 4) throw new Error("agent sync failed")
+      await originalSync.call(this)
+    }
+    try {
+      await expect(store.appendItems(id, [item])).rejects.toThrow(
+        "agent sync failed",
+      )
+    } finally {
+      prototype.sync = originalSync
+      await probe.close()
+    }
+    expect((await store.readThread(id))?.rollout.map(({ seq }) => seq)).toEqual(
+      [0],
+    )
+    expect(await store.appendItems(id, [item])).toBe(2)
+    await store.shutdownThread(id)
+    const reopened = new JsonlThreadStore({ root })
+    expect(
+      (await reopened.readThread(id))?.rollout.map(({ item }) => item.type),
+    ).toEqual(["session_meta", "agent_message"])
+  })
+
   it("preserves the session-owned Git identity across restart", async () => {
     const { root, store } = await createStore()
     const threadId = "thread_git_identity"
-    await store.createThread(
+    await createPersistentThread(
+      store,
       metadata(threadId, {
         gitInfo: {
           sha: "0123456789abcdef",
@@ -72,7 +477,7 @@ describe("JsonlThreadStore", () => {
         },
       },
     }
-    await store.createThread(metadata(threadId))
+    await createPersistentThread(store, metadata(threadId))
     await store.appendItems(threadId, [completed])
     await store.shutdownThread(threadId)
 
@@ -88,7 +493,7 @@ describe("JsonlThreadStore", () => {
   ])("recovers a coherent context after %i checkpoint records reach disk", async (persistedCheckpointRecords) => {
     const { root, store } = await createStore()
     const threadId = "thread_checkpoint"
-    await store.createThread(metadata(threadId))
+    await createPersistentThread(store, metadata(threadId))
     const original = response("turn_old", "old history")
     const replacement = response("turn_compact", "checkpoint")
     await store.appendItems(threadId, [
@@ -169,7 +574,7 @@ describe("JsonlThreadStore", () => {
   })
   it("restores latest context usage and invalidates it when history is replaced", async () => {
     const { store } = await createStore()
-    await store.createThread(metadata("thread_tokens"))
+    await createPersistentThread(store, metadata("thread_tokens"))
     await store.appendItems("thread_tokens", [
       { type: "token_count", turnId: "turn_one", activeContextTokens: 500 },
       { type: "token_count", turnId: "turn_one", activeContextTokens: 900 },
@@ -207,7 +612,7 @@ describe("JsonlThreadStore", () => {
 
   it("restores and replaces the auto-compaction prefill estimate", async () => {
     const { store } = await createStore()
-    await store.createThread(metadata("thread_prefill"))
+    await createPersistentThread(store, metadata("thread_prefill"))
     await store.appendItems("thread_prefill", [
       {
         type: "token_count",
@@ -239,7 +644,7 @@ describe("JsonlThreadStore", () => {
 
   it("persists ordered rollout items and resumes a single live writer", async () => {
     const { store } = await createStore()
-    await store.createThread(metadata("thread_root"))
+    await createPersistentThread(store, metadata("thread_root"))
     await Promise.all([
       store.appendItems("thread_root", [response("turn_one", "one")]),
       store.appendItems("thread_root", [terminal("turn_one")]),
@@ -270,7 +675,7 @@ describe("JsonlThreadStore", () => {
 
   it("round-trips full world-state markers and completed host items", async () => {
     const { store } = await createStore()
-    await store.createThread(metadata("thread_current_rollout"))
+    await createPersistentThread(store, metadata("thread_current_rollout"))
     await store.appendItems("thread_current_rollout", [
       {
         type: "world_state",
@@ -313,7 +718,7 @@ describe("JsonlThreadStore", () => {
 
   it("rejects a second writer opened by another store instance", async () => {
     const { root, store } = await createStore()
-    await store.createThread(metadata("thread_shared"))
+    await createPersistentThread(store, metadata("thread_shared"))
     const second = new JsonlThreadStore({ root })
 
     await expect(second.resumeThread("thread_shared")).rejects.toThrow(
@@ -326,7 +731,7 @@ describe("JsonlThreadStore", () => {
 
   it("stores a fork as a history reference instead of copying source lines", async () => {
     const { root, store } = await createStore()
-    await store.createThread(metadata("thread_source"))
+    await createPersistentThread(store, metadata("thread_source"))
     await store.appendItems("thread_source", [
       response("turn_one", "one"),
       terminal("turn_one"),
@@ -372,7 +777,7 @@ describe("JsonlThreadStore", () => {
 
   it("rejects forged lineage fields on an empty-history fork target", async () => {
     const { store } = await createStore()
-    await store.createThread(metadata("thread_empty_source"))
+    await createPersistentThread(store, metadata("thread_empty_source"))
     const prepared = await store.prepareFork({
       sourceThreadId: "thread_empty_source",
       boundary: { type: "latest" },
@@ -406,7 +811,7 @@ describe("JsonlThreadStore", () => {
         endByteOffset: 100,
       },
     }
-    await expect(store.createThread(forged)).rejects.toThrow(
+    await expect(createPersistentThread(store, forged)).rejects.toThrow(
       "cannot provide physical rollout or inherited history",
     )
     await expect(
@@ -416,7 +821,7 @@ describe("JsonlThreadStore", () => {
 
   it("keeps referenced rollout history after deleting the visible source thread", async () => {
     const { root, store } = await createStore()
-    await store.createThread(metadata("thread_source"))
+    await createPersistentThread(store, metadata("thread_source"))
     await store.appendItems("thread_source", [
       response("turn_one", "one"),
       terminal("turn_one"),
@@ -454,7 +859,7 @@ describe("JsonlThreadStore", () => {
   it("serializes asset creation with deletion and cannot revive a bundle", async () => {
     const { root, store } = await createStore()
     const rolloutId = "thread_asset_race"
-    await store.createThread(metadata(rolloutId))
+    await createPersistentThread(store, metadata(rolloutId))
     await store.shutdownThread(rolloutId)
     const entered = deferred<void>()
     const release = deferred<void>()
@@ -497,7 +902,7 @@ describe("JsonlThreadStore", () => {
 
   it("holds and releases a source deletion reservation around fork preparation", async () => {
     const { store } = await createStore()
-    await store.createThread(metadata("thread_source"))
+    await createPersistentThread(store, metadata("thread_source"))
     await store.shutdownThread("thread_source")
     const prepared = await store.prepareFork({
       sourceThreadId: "thread_source",
@@ -514,7 +919,7 @@ describe("JsonlThreadStore", () => {
 
   it("prepares bounded model context after compaction replacement", async () => {
     const { store } = await createStore()
-    await store.createThread(metadata("thread_source"))
+    await createPersistentThread(store, metadata("thread_source"))
     const replacement = response("turn_summary", "summary")
     const later = response("turn_later", "later")
     await store.appendItems("thread_source", [
@@ -542,7 +947,7 @@ describe("JsonlThreadStore", () => {
 
   it("repairs an incomplete trailing JSON line before resuming appends", async () => {
     const { root, store } = await createStore()
-    await store.createThread(metadata("thread_recover"))
+    await createPersistentThread(store, metadata("thread_recover"))
     await store.appendItems("thread_recover", [response("turn_one", "one")])
     await store.shutdownThread("thread_recover")
     const rolloutPath = join(
@@ -567,7 +972,7 @@ describe("JsonlThreadStore", () => {
 
   it("resolves multi-generation lineage using physical history positions", async () => {
     const { store } = await createStore()
-    await store.createThread(metadata("thread_root"))
+    await createPersistentThread(store, metadata("thread_root"))
     await store.appendItems("thread_root", [
       response("turn_root", "root"),
       terminal("turn_root"),
@@ -620,7 +1025,7 @@ describe("JsonlThreadStore", () => {
 
   it("shares shutdown completion and closes writer admission immediately", async () => {
     const { store } = await createStore()
-    await store.createThread(metadata("thread_shutdown"))
+    await createPersistentThread(store, metadata("thread_shutdown"))
 
     const first = store.shutdownThread("thread_shutdown")
     const second = store.shutdownThread("thread_shutdown")
@@ -648,7 +1053,7 @@ describe("JsonlThreadStore", () => {
 
   it("truncates an unknown partial write before replaying the semantic item", async () => {
     const { root, store } = await createStore()
-    await store.createThread(metadata("thread_partial_retry"))
+    await createPersistentThread(store, metadata("thread_partial_retry"))
     const probe = await open(join(root, "probe-write"), "w+")
     const prototype = Object.getPrototypeOf(probe) as {
       write(
@@ -688,7 +1093,7 @@ describe("JsonlThreadStore", () => {
 
   it("does not duplicate a record when write completion is reported as failure", async () => {
     const { root, store } = await createStore()
-    await store.createThread(metadata("thread_ack_lost"))
+    await createPersistentThread(store, metadata("thread_ack_lost"))
     const probe = await open(join(root, "probe-ack-lost"), "w+")
     const prototype = Object.getPrototypeOf(probe) as {
       write(
@@ -739,14 +1144,14 @@ describe("JsonlThreadStore", () => {
 
     const store = new JsonlThreadStore({ root })
     await expect(
-      store.createThread(metadata("thread_create_retry")),
+      createPersistentThread(store, metadata("thread_create_retry")),
     ).resolves.toBeDefined()
     await store.shutdownThread("thread_create_retry")
   })
 
   it("enforces writer and reservation ownership across processes", async () => {
     const { root, store } = await createStore()
-    await store.createThread(metadata("thread_process"))
+    await createPersistentThread(store, metadata("thread_process"))
 
     expect(await runStoreProbe(root, "thread_process")).toEqual({
       resume: "Thread thread_process already has an active writer.",
@@ -765,7 +1170,7 @@ describe("JsonlThreadStore", () => {
 
   it("preserves a valid trailing record that only lacks its newline", async () => {
     const { root, store } = await createStore()
-    await store.createThread(metadata("thread_valid_tail"))
+    await createPersistentThread(store, metadata("thread_valid_tail"))
     await store.appendItems("thread_valid_tail", [response("turn_one", "one")])
     await store.shutdownThread("thread_valid_tail")
     const rolloutPath = join(
@@ -787,7 +1192,7 @@ describe("JsonlThreadStore", () => {
 
   it("rejects complete local journal gaps instead of appending past corruption", async () => {
     const { root, store } = await createStore()
-    await store.createThread(metadata("thread_corrupt"))
+    await createPersistentThread(store, metadata("thread_corrupt"))
     await store.appendItems("thread_corrupt", [response("turn_one", "one")])
     await store.shutdownThread("thread_corrupt")
     const rolloutPath = join(
@@ -808,7 +1213,7 @@ describe("JsonlThreadStore", () => {
 
   it("rejects malformed model messages at the journal read boundary", async () => {
     const { root, store } = await createStore()
-    await store.createThread(metadata("thread_malformed_message"))
+    await createPersistentThread(store, metadata("thread_malformed_message"))
     await store.shutdownThread("thread_malformed_message")
     await appendFile(
       join(root, "rollouts", "thread_malformed_message", "rollout.jsonl"),
@@ -836,7 +1241,7 @@ describe("JsonlThreadStore", () => {
 
   it("uses original BeforeTurn and newest ThroughTurn occurrences", async () => {
     const { store } = await createStore()
-    await store.createThread(metadata("thread_boundary"))
+    await createPersistentThread(store, metadata("thread_boundary"))
     await store.appendItems("thread_boundary", [
       response("turn_repeat", "first"),
       terminal("turn_repeat"),
@@ -861,7 +1266,7 @@ describe("JsonlThreadStore", () => {
 
   it("keeps healthy Threads listable when an index points to no rollout", async () => {
     const { root, store } = await createStore()
-    await store.createThread(metadata("thread_healthy"))
+    await createPersistentThread(store, metadata("thread_healthy"))
     await writeFile(
       join(root, "threads", "thread_phantom.json"),
       `${JSON.stringify({
@@ -878,7 +1283,7 @@ describe("JsonlThreadStore", () => {
 
   it("starts with a damaged index without deleting healthy rollout state", async () => {
     const { root, store } = await createStore()
-    await store.createThread(metadata("thread_healthy_restart"))
+    await createPersistentThread(store, metadata("thread_healthy_restart"))
     await store.appendItems("thread_healthy_restart", [
       response("turn_healthy", "healthy"),
     ])
@@ -899,7 +1304,7 @@ describe("JsonlThreadStore", () => {
 
   it("rejects path traversal identities from persisted metadata", async () => {
     const { root, store } = await createStore()
-    await store.createThread(metadata("thread_traversal"))
+    await createPersistentThread(store, metadata("thread_traversal"))
     await store.shutdownThread("thread_traversal")
     const metadataPath = join(root, "threads", "thread_traversal.json")
     const persisted = JSON.parse(
@@ -919,8 +1324,8 @@ describe("JsonlThreadStore", () => {
 
   it("keeps healthy Threads searchable and reports unavailable histories until repaired", async () => {
     const { root, store } = await createStore()
-    await store.createThread(metadata("thread_healthy_rollout"))
-    await store.createThread(metadata("thread_broken_rollout"))
+    await createPersistentThread(store, metadata("thread_healthy_rollout"))
+    await createPersistentThread(store, metadata("thread_broken_rollout"))
     await store.appendItems("thread_healthy_rollout", [
       response("turn_healthy", "healthy searchable message"),
       terminal("turn_healthy"),
@@ -993,7 +1398,7 @@ describe("JsonlThreadStore", () => {
 
   it("persists and incrementally pages the visible-history search projection", async () => {
     const { root, store } = await createStore()
-    await store.createThread(metadata("thread_search_projection"))
+    await createPersistentThread(store, metadata("thread_search_projection"))
     await store.appendItems("thread_search_projection", [
       response("turn_search_one", "needle needle needle"),
       terminal("turn_search_one"),
@@ -1065,7 +1470,7 @@ describe("JsonlThreadStore", () => {
 
   it("waits for storage coordination during startup instead of rejecting readiness", async () => {
     const { root, store } = await createStore()
-    await store.createThread(metadata("thread_coordinated"))
+    await createPersistentThread(store, metadata("thread_coordinated"))
     await store.shutdownThread("thread_coordinated")
     const heldLock = await holdStorageLock(root)
     const competing = new JsonlThreadStore({ root })
@@ -1085,8 +1490,8 @@ describe("JsonlThreadStore", () => {
 
   it("does not delete an existing target when fork creation collides", async () => {
     const { store } = await createStore()
-    await store.createThread(metadata("thread_source"))
-    await store.createThread(metadata("thread_target"))
+    await createPersistentThread(store, metadata("thread_source"))
+    await createPersistentThread(store, metadata("thread_target"))
     const prepared = await store.prepareFork({
       sourceThreadId: "thread_source",
       boundary: { type: "latest" },
@@ -1103,7 +1508,7 @@ describe("JsonlThreadStore", () => {
 
   it("rejects a forged byte cutoff instead of silently widening history", async () => {
     const { root, store } = await createStore()
-    await store.createThread(metadata("thread_source"))
+    await createPersistentThread(store, metadata("thread_source"))
     await store.appendItems("thread_source", [response("turn_one", "one")])
     const prepared = await store.prepareFork({
       sourceThreadId: "thread_source",
@@ -1133,6 +1538,30 @@ describe("JsonlThreadStore", () => {
 async function createStore() {
   const root = await createRoot()
   return { root, store: new JsonlThreadStore({ root }) }
+}
+
+function createStoreAssets(root: string, store: JsonlThreadStore) {
+  return createRolloutAssets(root, {
+    withMutationLease: (rolloutId, mutate) =>
+      store.withRolloutAssetMutation(rolloutId, mutate),
+  })
+}
+
+function pngBytes(): Buffer {
+  const bytes = Buffer.alloc(24)
+  Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(bytes)
+  bytes.writeUInt32BE(1, 16)
+  bytes.writeUInt32BE(1, 20)
+  return bytes
+}
+
+async function createPersistentThread(
+  store: JsonlThreadStore,
+  input: CreateThreadMetadata,
+) {
+  const created = await store.createThread(input)
+  await store.persistThread(created.metadata.id, "turn_start")
+  return created
 }
 
 async function createRoot() {
@@ -1205,6 +1634,7 @@ async function runShutdownSyncFailureProbe(root: string): Promise<string> {
     const store = new JsonlThreadStore({ root: ${JSON.stringify(root)} });
     const now = new Date().toISOString();
     await store.createThread({ id: "thread_retry_shutdown", conversationId: "thread_retry_shutdown", createdAt: now, updatedAt: now });
+    await store.persistThread("thread_retry_shutdown", "turn_start");
     await store.appendItems("thread_retry_shutdown", [${JSON.stringify(response("turn_retry", "retry"))}]);
     const probe = await open(${JSON.stringify(join(root, "probe-shutdown-sync"))}, "w+");
     const prototype = Object.getPrototypeOf(probe);
@@ -1248,10 +1678,11 @@ async function runCreateSyncFailureProbe(
     };
     const now = new Date().toISOString();
     let message = "no failure";
-    try { await store.createThread({ id: "thread_create_retry", conversationId: "thread_create_retry", createdAt: now, updatedAt: now }); }
+    try { await store.createThread({ id: "thread_create_retry", conversationId: "thread_create_retry", createdAt: now, updatedAt: now }); await store.persistThread("thread_create_retry", "turn_start"); }
     catch (error) { message = error instanceof Error ? error.message : "unknown failure"; }
     prototype.sync = originalSync;
     await probe.close();
+    await store.shutdownThread("thread_create_retry");
     process.stdout.write(message);
   `
   return runScriptProbe(script)

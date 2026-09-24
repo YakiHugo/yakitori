@@ -787,7 +787,8 @@ export function createThreadServerHandlers(
         }
         if (
           (await options.store.sessionPresentation(sessionId)).navigationId !==
-          undefined
+            undefined &&
+          (await options.store.listThreadIds()).includes(sessionId)
         ) {
           // Keep an explicit head while deleting, so retained edit history can
           // never reappear as an unrelated conversation after the head is gone.

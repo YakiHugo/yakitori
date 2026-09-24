@@ -130,5 +130,9 @@ export type ThreadStore = {
 // this writer in memory without exposing durable navigation or fork APIs.
 export type SessionRolloutStore = Pick<
   ThreadStore,
-  "appendItems" | "persistThread" | "flushThread" | "shutdownThread"
+  | "appendItems"
+  | "persistThread"
+  | "flushThread"
+  | "readThread"
+  | "shutdownThread"
 >

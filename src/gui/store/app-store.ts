@@ -171,6 +171,7 @@ export type AppStoreActions = {
   loadProviders(): Promise<void>
   loadSubscriptions(): Promise<void>
   startNewSession(projectId?: string): void
+  setNewSessionProject(projectId?: string): void
   createSession(title?: string): Promise<string | undefined>
   deleteSession(sessionId: string): Promise<void>
   forkSession(
@@ -303,6 +304,21 @@ export const useAppStore = create<AppStore>()((set, get) => {
   let sidebarQueue: Promise<boolean> = Promise.resolve(true)
   let sidebarQueueDepth = 0
   let sidebarQueueError: string | undefined
+  let newSessionCreation:
+    | { revision: number; promise: Promise<string | undefined> }
+    | undefined
+  const pendingCreateIntents = new Set<number>()
+  const createNewSessionForCurrentIntent = (): void => {
+    const creation = get().createSession()
+    const pending = {
+      revision: get().sessionSelectionIntentRevision,
+      promise: creation,
+    }
+    newSessionCreation = pending
+    void creation.then(() => {
+      if (newSessionCreation === pending) newSessionCreation = undefined
+    })
+  }
   const pendingSidebarSessionIds = new Set<string>()
   const pendingSidebarPins = new Map<
     string,
@@ -323,9 +339,12 @@ export const useAppStore = create<AppStore>()((set, get) => {
     task: () => Promise<void>,
     isCurrent: () => boolean = () => true,
     clearMessage = true,
+    tracksBusy = true,
   ): Promise<boolean> => {
-    activeTaskCount += 1
-    set({ busy: true })
+    if (tracksBusy) {
+      activeTaskCount += 1
+      set({ busy: true })
+    }
     if (clearMessage && isCurrent()) set({ message: undefined })
     try {
       await task()
@@ -334,8 +353,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
       if (isCurrent()) set({ message: errorMessage(error, "Request failed.") })
       return false
     } finally {
-      activeTaskCount -= 1
-      set({ busy: activeTaskCount > 0 })
+      if (tracksBusy) {
+        activeTaskCount -= 1
+        set({ busy: activeTaskCount > 0 })
+      }
     }
   }
   const invalidateSessionListReads = (): void => {
@@ -1041,6 +1062,12 @@ export const useAppStore = create<AppStore>()((set, get) => {
     },
 
     startNewSession: (projectId = get().currentProject) => {
+      if (
+        get().selection.sessionId === undefined &&
+        get().currentProject === projectId &&
+        newSessionCreation?.revision === get().sessionSelectionIntentRevision
+      )
+        return
       const state = get()
       closeStream()
       set({
@@ -1065,15 +1092,28 @@ export const useAppStore = create<AppStore>()((set, get) => {
           state.sessionSelectionIntentRevision + 1,
         composerFocusRevision: state.composerFocusRevision + 1,
       })
+      createNewSessionForCurrentIntent()
+    },
+
+    setNewSessionProject: (projectId) => {
+      const state = get()
+      if (state.currentProject === projectId) return
+      set({
+        currentProject: projectId,
+        sessionSelectionIntentRevision:
+          state.sessionSelectionIntentRevision + 1,
+      })
+      // The dropdown changes the destination of the current draft, including
+      // its staged attachments. Supersede the old request and create there.
+      if (state.selection.sessionId === undefined && newSessionCreation)
+        createNewSessionForCurrentIntent()
     },
 
     createSession: async (title) => {
-      if (get().inFlightActions.has("create-session")) return
-      set((state) => ({
-        inFlightActions: new Set(state.inFlightActions).add("create-session"),
-      }))
+      if (pendingCreateIntents.has(get().sessionSelectionIntentRevision)) return
       let createdId: string | undefined
       const intentRevision = get().sessionSelectionIntentRevision + 1
+      pendingCreateIntents.add(intentRevision)
       set({ sessionSelectionIntentRevision: intentRevision })
       await runTask(
         async () => {
@@ -1092,6 +1132,22 @@ export const useAppStore = create<AppStore>()((set, get) => {
             },
           )
 
+          if (get().sessionSelectionIntentRevision !== intentRevision) {
+            // Creation succeeded after its draft was abandoned. The session
+            // has no owner; discard it through the same API as explicit delete.
+            if (get().selection.sessionId !== response.session.id) {
+              try {
+                await getAppRpcClient(get().apiBase).request("session/delete", {
+                  sessionId: response.session.id,
+                })
+              } catch (error) {
+                set({
+                  message: `Could not remove abandoned conversation ${response.session.id}: ${errorMessage(error, "Request failed.")}`,
+                })
+              }
+            }
+            return
+          }
           if (
             project !== undefined &&
             get().collapsedProjects[project.id] === true
@@ -1101,8 +1157,6 @@ export const useAppStore = create<AppStore>()((set, get) => {
             set({ collapsedProjects })
             persistCollapsedProjects(collapsedProjects)
           }
-          await get().loadSessions(project?.id)
-          if (get().sessionSelectionIntentRevision !== intentRevision) return
           createdId = response.session.id
           const draftModel = get().draftModelSelection
           if (draftModel !== undefined) {
@@ -1144,12 +1198,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
           loadSessionSkills(response.session.id)
         },
         () => get().sessionSelectionIntentRevision === intentRevision,
+        true,
+        false,
       )
-      set((state) => {
-        const inFlightActions = new Set(state.inFlightActions)
-        inFlightActions.delete("create-session")
-        return { inFlightActions }
-      })
+      pendingCreateIntents.delete(intentRevision)
       return createdId
     },
 
@@ -1530,13 +1582,47 @@ export const useAppStore = create<AppStore>()((set, get) => {
     admitInput: async (text, attachments = []) => {
       const excerpts = get().promptExcerpts
       if (text === COMPACT_DIRECTIVE && excerpts.length > 0) return
+      let queuedModelSelection: ModelSelection | undefined
+      let queuedForCreation = false
       if (get().selection.sessionId === undefined) {
         if (text === COMPACT_DIRECTIVE) return
-        // Conversations start untitled; the server names the first input.
-        const sessionId = await get().createSession()
+        const revision = get().sessionSelectionIntentRevision
+        const queuedKey = `queue-first-input:${revision}`
+        if (get().inFlightActions.has(queuedKey)) return
+        queuedForCreation = true
+        const state = get()
+        queuedModelSelection = normalizeKimiModelSelection(
+          resolveEffectiveModel({
+            sessionCurrent: state.draftModelSelection,
+            userPreference: state.userPreference,
+            defaultProvider: state.defaultProvider,
+            defaultModel: state.defaultModel,
+            providers: state.providers,
+          }),
+          state.providers,
+        )
+        set((current) => ({
+          inFlightActions: new Set(current.inFlightActions).add(queuedKey),
+        }))
+        if (state.promptDraft === undefined) set({ promptDraft: text })
+        // A newly opened draft already has a create request in flight. Direct
+        // first sends still use the explicit create action when needed.
+        let sessionId: string | undefined
+        try {
+          const creation =
+            newSessionCreation?.revision === revision
+              ? newSessionCreation.promise
+              : get().createSession()
+          sessionId = await creation
+        } finally {
+          set((current) => {
+            const inFlightActions = new Set(current.inFlightActions)
+            inFlightActions.delete(queuedKey)
+            return { inFlightActions }
+          })
+        }
         if (sessionId === undefined || get().selection.sessionId !== sessionId)
           return
-        if (get().promptDraft === undefined) set({ promptDraft: text })
       }
       const selection = currentSelection()
       if (
@@ -1595,10 +1681,9 @@ export const useAppStore = create<AppStore>()((set, get) => {
             defaultModel: state.defaultModel,
             providers: state.providers,
           })
-          const admittedModelSelection = normalizeKimiModelSelection(
-            modelSelection,
-            state.providers,
-          )
+          const admittedModelSelection = queuedForCreation
+            ? queuedModelSelection
+            : normalizeKimiModelSelection(modelSelection, state.providers)
           const pendingAdmission = await reserveAdmission(window.localStorage, {
             apiBase: get().apiBase,
             sessionId: selection.sessionId,

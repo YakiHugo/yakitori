@@ -2,10 +2,10 @@ import { GitFork, Info, LoaderCircle, Search, Square } from "lucide-react"
 import { ApprovalBar } from "./components/approval-bar.tsx"
 import { Composer } from "./components/composer.tsx"
 import { openConversationFind } from "./components/conversation-find.tsx"
-import { QueuedInputs } from "./components/queued-inputs.tsx"
 import { PreferencesEffects } from "./components/preferences-effects.tsx"
-import { SessionSummary } from "./components/session-summary.tsx"
+import { QueuedInputs } from "./components/queued-inputs.tsx"
 import { SessionGoal } from "./components/session-goal.tsx"
+import { SessionSummary } from "./components/session-summary.tsx"
 import { SettingsPage } from "./components/settings-page.tsx"
 import { TelemetryRail } from "./components/telemetry-rail.tsx"
 import { Transcript } from "./components/transcript.tsx"
@@ -207,9 +207,9 @@ function EmptyState() {
             value={currentProject ?? ""}
             className="max-w-full rounded-md border bg-background px-3 py-1.5 text-xs"
             onChange={(event) =>
-              useAppStore.setState({
-                currentProject: event.target.value || undefined,
-              })
+              useAppStore
+                .getState()
+                .setNewSessionProject(event.target.value || undefined)
             }
           >
             <option value="">No project</option>

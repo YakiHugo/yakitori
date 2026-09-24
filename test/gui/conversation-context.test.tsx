@@ -225,8 +225,6 @@ it("keeps new-conversation excerpts separate and carries them through the first 
   useAppStore.getState().addPromptExcerpt(newExcerpt)
   await useAppStore.getState().selectSession("session_1")
   expect(useAppStore.getState().promptExcerpts).toEqual([excerpt])
-  useAppStore.getState().startNewSession()
-  expect(useAppStore.getState().promptExcerpts).toEqual([newExcerpt])
 
   const fallback = fakeRef.current.respond
   fakeRef.current.respond = (method, params) =>
@@ -257,6 +255,8 @@ it("keeps new-conversation excerpts separate and carries them through the first 
         }
       : fallback(method, params)
   const held = holdAdmission()
+  useAppStore.getState().startNewSession()
+  expect(useAppStore.getState().promptExcerpts).toEqual([newExcerpt])
   const sending = useAppStore.getState().admitInput("")
   await waitFor(() =>
     expect(fakeRef.current.requestsFor("session/input")).toHaveLength(1),

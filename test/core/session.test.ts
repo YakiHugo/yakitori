@@ -586,6 +586,106 @@ describe("live Session actor", () => {
     await manager.shutdown()
   })
 
+  it("retries a failed TurnStart fence without duplicating the input or starting the processor early", async () => {
+    const store = new MemoryThreadStore()
+    let preparations = 0
+    let starts = 0
+    const manager = new ThreadManager({
+      store,
+      createTurnProcessor: () => {
+        const processor = withPreparation({
+          run: async () => {
+            starts += 1
+          },
+        })
+        return {
+          ...processor,
+          prepare(snapshot, input) {
+            preparations += 1
+            return processor.prepare(snapshot, input)
+          },
+        }
+      },
+    })
+    const thread = await manager.createThread()
+    const input = {
+      submissionId: "turn_retry_fence",
+      content: { kind: "text" as const, text: "send once" },
+    }
+    store.failNextFlush = true
+
+    await expect(thread.startIfIdle(input)).rejects.toThrow("flush failed")
+    expect(starts).toBe(0)
+    expect(thread.status).toBe(SessionStatus.Idle)
+    await expect(
+      thread.startIfIdle({
+        submissionId: "turn_other",
+        content: { kind: "text", text: "different" },
+      }),
+    ).rejects.toThrow("previous Turn must be persisted")
+    expect(await thread.startIfIdle(input)).toEqual({
+      type: "started",
+      turnId: input.submissionId,
+    })
+    await nextEventOfType(thread, "turn.completed")
+    expect(preparations).toBe(1)
+    expect(starts).toBe(1)
+    expect(
+      (await store.readThread(thread.id))?.rollout.filter(
+        (entry) => entry.item.type === "response_item",
+      ),
+    ).toHaveLength(1)
+    await manager.shutdown()
+  })
+
+  it("recovers an uncertain first append without duplicating the admitted Turn", async () => {
+    const store = new MemoryThreadStore()
+    let starts = 0
+    let preparations = 0
+    const manager = new ThreadManager({
+      store,
+      createTurnProcessor: () => {
+        const processor = withPreparation({
+          run: async () => {
+            starts += 1
+          },
+        })
+        return {
+          ...processor,
+          prepare(snapshot, input) {
+            preparations += 1
+            return processor.prepare(snapshot, input)
+          },
+        }
+      },
+    })
+    const thread = await manager.createThread()
+    const input = {
+      submissionId: "turn_uncertain_append",
+      content: { kind: "text" as const, text: "only once" },
+    }
+    store.failNextAppend = true
+    await expect(thread.startIfIdle(input)).rejects.toThrow("append failed")
+    expect(starts).toBe(0)
+    await expect(
+      thread.deliverAgentMessage("agent_later", "wait"),
+    ).rejects.toThrow("previous Turn must be persisted")
+
+    expect(await thread.startIfIdle(input)).toEqual({
+      type: "started",
+      turnId: input.submissionId,
+    })
+    await nextEventOfType(thread, "turn.completed")
+    expect(preparations).toBe(1)
+    expect(starts).toBe(1)
+    const items = (await store.readThread(thread.id))?.rollout.map(
+      (record) => record.item.type,
+    )
+    expect(items?.filter((type) => type === "response_item")).toHaveLength(1)
+    expect(items?.filter((type) => type === "turn_started")).toHaveLength(1)
+    await manager.shutdown()
+  })
+
   it("preserves image attachments in the durable initial user item", async () => {
     const store = new MemoryThreadStore()
     const manager = createManager({ run: async () => undefined }, store)
@@ -689,48 +789,6 @@ describe("live Session actor", () => {
     await nextEventOfType(thread, "turn.completed")
     expect(thread.status).toBe(SessionStatus.Idle)
     await manager.shutdown()
-  })
-
-  it("retries the unwritten rollout suffix after an append failure", async () => {
-    const store = new MemoryThreadStore()
-    store.failNextAppend = true
-    const persistenceErrors: unknown[] = []
-    const manager = new ThreadManager({
-      store,
-      onPersistenceError: (error) => persistenceErrors.push(error),
-      createTurnProcessor: () =>
-        withPreparation({
-          run: async () => undefined,
-        }),
-    })
-    const thread = await manager.createThread()
-
-    await thread.startIfIdle({
-      submissionId: "item_first",
-      content: { kind: "text", text: "first" },
-    })
-    await nextEventOfType(thread, "turn.completed")
-    expect(
-      thread.snapshot().context.history.map((item) => item.turnId),
-    ).toContain("item_first")
-
-    await thread.startIfIdle({
-      submissionId: "item_second",
-      content: { kind: "text", text: "second" },
-    })
-    await nextEventOfType(thread, "turn.completed")
-    await manager.shutdown()
-
-    const stored = await store.readThread(thread.id)
-    expect(
-      stored?.rollout.flatMap((entry) =>
-        entry.item.type === "response_item" &&
-        entry.item.item.item.role === "user"
-          ? [entry.item.item.turnId]
-          : [],
-      ),
-    ).toEqual(["item_first", "item_second"])
-    expect(persistenceErrors).toEqual([expect.any(Error)])
   })
 
   it("holds a stable fork barrier while later input waits in the mailbox", async () => {

@@ -3,7 +3,10 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
-import type { CreateThreadMetadata } from "../../src/core/thread-store.ts"
+import {
+  type CreateThreadMetadata,
+  PersistContext,
+} from "../../src/core/thread-store.ts"
 
 const roots: string[] = []
 afterEach(async () => {
@@ -32,6 +35,7 @@ async function save(
     updatedAt: "2026-09-13T00:00:00Z",
     ...extra,
   })
+  await store.persistThread(id, PersistContext.TurnStart)
   await store.shutdownThread(id)
 }
 

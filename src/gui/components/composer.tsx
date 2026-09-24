@@ -39,6 +39,9 @@ export function Composer() {
   const userPreference = useAppStore((state) => state.userPreference)
   const inFlightActions = useAppStore((state) => state.inFlightActions)
   const sessionId = useAppStore((state) => state.selection.sessionId)
+  const selectionRevision = useAppStore(
+    (state) => state.sessionSelectionIntentRevision,
+  )
   const sessionCurrent = useAppStore((state) =>
     state.selection.sessionId === undefined
       ? state.draftModelSelection
@@ -131,8 +134,13 @@ export function Composer() {
       const next = await prepared.collect(importSessionId)
       const current = useAppStore.getState()
       if (
-        current.selection.sessionId !== currentSessionId ||
-        current.sessionSelectionIntentRevision !== importIntentRevision
+        current.sessionSelectionIntentRevision !== importIntentRevision ||
+        (current.selection.sessionId !== currentSessionId &&
+          !(
+            sessionId === undefined &&
+            currentSessionId === undefined &&
+            current.selection.sessionId !== undefined
+          ))
       ) {
         await discardDraftImages(next.slice(attachments.length))
         return
@@ -182,7 +190,9 @@ export function Composer() {
         (sessionId !== undefined && restoringModelSelectionFor === sessionId)
       }
       sending={
-        sessionId !== undefined && inFlightActions.has(`admit:${sessionId}`)
+        sessionId === undefined
+          ? inFlightActions.has(`queue-first-input:${selectionRevision}`)
+          : inFlightActions.has(`admit:${sessionId}`)
       }
       stopping={
         activeTurnId !== undefined &&

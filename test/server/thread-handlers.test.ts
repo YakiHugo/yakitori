@@ -6,6 +6,7 @@ import { promisify } from "node:util"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
+import { PersistContext } from "../../src/core/thread-store.ts"
 import {
   createYakitoriError,
   YakitoriErrorCode,
@@ -114,6 +115,7 @@ describe("thread server handlers", () => {
         createdAt: "2026-09-20T00:00:00.000Z",
         updatedAt: "2026-09-20T00:00:00.000Z",
       })
+      await original.persistThread(id, PersistContext.TurnStart)
       await original.shutdownThread(id)
     }
     await appendFile(

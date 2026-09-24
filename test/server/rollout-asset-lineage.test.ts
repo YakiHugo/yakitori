@@ -1,6 +1,6 @@
 import {
-  mkdtemp,
   mkdir,
+  mkdtemp,
   readFile,
   rename,
   rm,
@@ -12,13 +12,14 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
+import { PersistContext } from "../../src/core/thread-store.ts"
 import { createRolloutAssets } from "../../src/kernel/rollout-assets.ts"
-import { createFauxProvider } from "../support/faux-provider.ts"
 import {
   createYakitoriApplication,
   type YakitoriApplication,
 } from "../../src/server/application.ts"
 import type { ApiHandlerResult } from "../../src/server/protocol.ts"
+import { createFauxProvider } from "../support/faux-provider.ts"
 
 const cleanups: Array<() => Promise<void>> = []
 
@@ -49,6 +50,7 @@ describe("rollout asset lineage", () => {
     expectOk(created)
     const threadId = created.body.session.id
     const sessionStoreRoot = initial.sessionStoreRoot
+    await initial.threadStore.persistThread(threadId, PersistContext.TurnStart)
     await initial.close()
 
     const rolloutId = "rollout_physical_integration"
@@ -185,6 +187,10 @@ describe("rollout asset lineage", () => {
     const created = await application.handlers.createSession()
     expectOk(created)
     const sourceId = created.body.session.id
+    await application.threadStore.persistThread(
+      sourceId,
+      PersistContext.TurnStart,
+    )
     const attachments = await application.rolloutAssets.importImageBytes(
       sourceId,
       "lineage_draft",

@@ -32,6 +32,43 @@ afterEach(() => {
 })
 
 describe("app shell", () => {
+  it("routes a new-session project choice through the store intent", async () => {
+    const user = userEvent.setup()
+    const setNewSessionProject = vi.fn()
+    useAppStore.setState({
+      currentProject: "project_a",
+      projects: [
+        {
+          id: "project_a",
+          name: "A",
+          roots: ["/p/a"],
+          metadata: {},
+          position: 0,
+          pinned: false,
+          createdAt: 0,
+          updatedAt: 0,
+        },
+        {
+          id: "project_b",
+          name: "B",
+          roots: ["/p/b"],
+          metadata: {},
+          position: 1,
+          pinned: false,
+          createdAt: 0,
+          updatedAt: 0,
+        },
+      ],
+      setNewSessionProject,
+    })
+    render(<App />)
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "New session project" }),
+      "project_b",
+    )
+    expect(setNewSessionProject).toHaveBeenCalledExactlyOnceWith("project_b")
+  })
+
   it("makes session telemetry available from the conversation header", async () => {
     const user = userEvent.setup()
     render(<App />)
