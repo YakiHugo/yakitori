@@ -1,6 +1,9 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { projectExecutionView } from "../../src/gui/execution-view.ts"
+import {
+  createExecutionViewState,
+  projectExecutionView,
+} from "../../src/gui/execution-view.ts"
 import { ApiRequestError } from "../../src/gui/lib/rpc-client.ts"
 import {
   createInitialAppState,
@@ -1806,6 +1809,87 @@ describe("model selection", () => {
         effort: "low",
       },
     })
+    expect(useAppStore.getState().message).toBeUndefined()
+  })
+
+  it("steers follow-up input into the active turn", async () => {
+    window.localStorage.clear()
+    fakeRef.current.respond = (method, params) => {
+      if (method === "session/input/steer") {
+        const body = params as { requestId: string; expectedTurnId: string }
+        return { requestId: body.requestId, turnId: body.expectedTurnId }
+      }
+      if (method === "session/list") return { sessions: [] }
+      return notFound()
+    }
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      promptDraft: "follow up",
+      execution: { ...createExecutionViewState(), activeTurnId: "turn_1" },
+    })
+
+    await useAppStore.getState().admitInput("follow up")
+
+    const steers = fakeRef.current.requestsFor("session/input/steer")
+    expect(steers).toHaveLength(1)
+    expect(steers[0]?.params).toMatchObject({
+      sessionId: "session_1",
+      expectedTurnId: "turn_1",
+      content: { kind: "text", text: "follow up" },
+    })
+    expect(fakeRef.current.requestsFor("session/input")).toHaveLength(0)
+    expect(useAppStore.getState().promptDraft).toBeUndefined()
+    // Steering is ephemeral acceptance: no admission outbox entry.
+    expect(
+      Object.keys(window.localStorage).filter((key) =>
+        key.startsWith("yakitori.admission"),
+      ),
+    ).toEqual([])
+  })
+
+  it("falls back to a fresh admission when the active turn ended before steering", async () => {
+    window.localStorage.clear()
+    fakeRef.current.respond = (method, params) => {
+      if (method === "session/input/steer") {
+        throw new ApiRequestError(
+          "Input was not submitted: no_active_turn.",
+          "conflict",
+        )
+      }
+      if (method === "session/input") {
+        const body = params as { requestId: string }
+        return {
+          requestId: body.requestId,
+          inputId: "input_2",
+          event: createEventEnvelope({
+            sessionId: "session_1",
+            seq: 2,
+            event: {
+              type: EventType.InputAdmitted,
+              data: {
+                requestId: body.requestId,
+                inputId: "input_2",
+                role: InputRole.User,
+                content: { kind: "text", text: "follow up" },
+              },
+            },
+          }),
+        }
+      }
+      if (method === "session/list") return { sessions: [] }
+      return notFound()
+    }
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      promptDraft: "follow up",
+      execution: { ...createExecutionViewState(), activeTurnId: "turn_1" },
+    })
+
+    await useAppStore.getState().admitInput("follow up")
+
+    expect(fakeRef.current.requestsFor("session/input/steer")).toHaveLength(1)
+    expect(fakeRef.current.requestsFor("session/input")).toHaveLength(1)
+    expect(useAppStore.getState().promptDraft).toBeUndefined()
     expect(useAppStore.getState().message).toBeUndefined()
   })
 

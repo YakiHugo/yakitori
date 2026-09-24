@@ -1642,6 +1642,70 @@ export const useAppStore = create<AppStore>()((set, get) => {
         inFlightActions: new Set(state.inFlightActions).add(key),
       }))
 
+      // An active Turn takes follow-up input as steering (Codex turn/steer);
+      // the input is recorded when the Turn next samples. If the Turn ended
+      // between our view and the server, fall through and admit a new Turn
+      // instead — the message must not be lost to a race.
+      const activeTurnId = get().execution.activeTurnId
+      if (activeTurnId !== undefined && text !== COMPACT_DIRECTIVE) {
+        let rejected = false
+        await runTask(
+          async () => {
+            try {
+              const response = await getAppRpcClient(get().apiBase).request(
+                "session/input/steer",
+                {
+                  sessionId: selection.sessionId,
+                  requestId: createRequestId(),
+                  expectedTurnId: activeTurnId,
+                  content: {
+                    kind: "text",
+                    text,
+                    ...(attachments.length === 0 ? {} : { attachments }),
+                    ...(excerpts.length === 0
+                      ? {}
+                      : { contextAttachments: excerpts }),
+                  },
+                },
+              )
+              if (response.turnId !== activeTurnId) {
+                throw new Error("Steer response did not match the request.")
+              }
+            } catch (error) {
+              if (
+                error instanceof ApiRequestError &&
+                error.code === "conflict"
+              ) {
+                rejected = true
+                return
+              }
+              throw error
+            }
+            if (!isCurrentSelection(selection)) return
+            set((state) => ({
+              promptExcerpts: state.promptExcerpts.filter(
+                (excerpt) => !excerpts.includes(excerpt),
+              ),
+            }))
+            if (
+              (get().promptDraft ?? "").trim() === text &&
+              sameAttachments(get().promptAttachments, attachments)
+            ) {
+              set({ promptDraft: undefined, promptAttachments: [] })
+            }
+          },
+          () => isCurrentSelection(selection),
+        )
+        if (!rejected) {
+          set((state) => {
+            const inFlightActions = new Set(state.inFlightActions)
+            inFlightActions.delete(key)
+            return { inFlightActions }
+          })
+          return
+        }
+      }
+
       // The compact directive takes a dedicated lane: no admission outbox,
       // no model selection — the server admits it as a runtime-role Input.
       // A per-invocation requestId keeps a retried call from admitting a

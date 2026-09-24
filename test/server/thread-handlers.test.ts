@@ -199,14 +199,19 @@ describe("thread server handlers", () => {
     const events = await handlers.readSessionEvents({ sessionId })
     if (!events.ok) throw new Error(events.body.error.message)
     expect(
-      events.body.events.some(
+      events.body.events.find(
         (event) =>
+          isKernelEvent(event) &&
           event.type === "input.admitted" &&
-          "steered" in event.data &&
-          event.data.steered === true &&
-          event.data.content.text === "also handle this",
+          event.data.steered === true,
       ),
-    ).toBe(true)
+    ).toMatchObject({
+      type: "input.admitted",
+      data: {
+        steered: true,
+        content: { kind: "text", text: "also handle this" },
+      },
+    })
   })
 
   it("returns healthy search results with an explicit count of unreadable sessions", async () => {
