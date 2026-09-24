@@ -22,7 +22,7 @@ export function AssistantMessageCell({
     >
       <MarkdownView
         text={entry.text}
-        className="markdown text-[15px] leading-7"
+        className="markdown text-base"
         workspaceRoot={workspaceRoot}
       />
     </div>

@@ -17,7 +17,7 @@ export function ReasoningCell({
   return (
     <Collapsible
       defaultOpen={entry.status === "streaming"}
-      className="group/reasoning border-l border-foreground/15 pl-3"
+      className="group/reasoning pl-3"
     >
       <CollapsibleTrigger className="flex items-center gap-2 py-1 text-muted-foreground transition-colors hover:text-foreground">
         <span
@@ -31,7 +31,7 @@ export function ReasoningCell({
       <CollapsibleContent className="pt-1 pb-2">
         <MarkdownView
           text={entry.text}
-          className="markdown max-w-2xl text-sm leading-6 text-muted-foreground"
+          className="markdown max-w-2xl text-sm text-muted-foreground"
           workspaceRoot={workspaceRoot}
         />
       </CollapsibleContent>
