@@ -18,6 +18,7 @@ it("persists discovered model instructions before sampling and updates them acro
   const models = createDiscoveringModelsManager({
     provider: "codex",
     ttlMs: 0,
+    identity: async () => "account",
     discover: async () => [
       {
         id: "gpt-6-astra",
@@ -28,12 +29,15 @@ it("persists discovered model instructions before sampling and updates them acro
   })
   const stream: StreamFn = async function* (request) {
     const stored = await store.readThread(threadId)
-    // The request must have a durable explanation for the prompt it sends.
-    expect(JSON.stringify(stored?.rollout)).toContain(
+    // The request must have a durable explanation for the prompt it sends:
+    // whatever instruction revision this Turn sampled with is in the rollout.
+    const requestText = JSON.stringify(request.messages)
+    const marker =
       request.target.model === "gpt-6-astra"
-        ? `Astra instructions revision ${revision}`
-        : "Sol specific instructions",
-    )
+        ? requestText.match(/Astra instructions revision \d+/)?.[0]
+        : "Sol specific instructions"
+    expect(marker).toBeDefined()
+    expect(JSON.stringify(stored?.rollout)).toContain(marker)
     requests.push(request)
     yield {
       type: "response",
@@ -103,7 +107,19 @@ it("persists discovered model instructions before sampling and updates them acro
     })
     await expect.poll(() => thread.agentStatus).toEqual({ completed: "done" })
     expect(requests[2]?.system).toEqual(pinnedBase)
+    // An expired catalog never blocks the Turn: the stale instructions are
+    // served while the background revalidation runs.
     expect(JSON.stringify(requests[2]?.messages)).toContain(
+      "Astra instructions revision 1",
+    )
+
+    // The background revalidation kicked off by the resumed Turn has landed,
+    // so the next Turn samples with the refreshed instructions.
+    await thread.startIfIdle({
+      content: { kind: "text", text: "continue after resume" },
+    })
+    await expect.poll(() => thread.agentStatus).toEqual({ completed: "done" })
+    expect(JSON.stringify(requests[3]?.messages)).toContain(
       "Astra instructions revision 2",
     )
 
@@ -112,8 +128,8 @@ it("persists discovered model instructions before sampling and updates them acro
       modelSelection: { provider: "codex", model: "gpt-5.6-sol" },
     })
     await expect.poll(() => thread.agentStatus).toEqual({ completed: "done" })
-    expect(requests[3]?.target.model).toBe("gpt-5.6-sol")
-    expect(JSON.stringify(requests[3]?.messages)).toContain(
+    expect(requests[4]?.target.model).toBe("gpt-5.6-sol")
+    expect(JSON.stringify(requests[4]?.messages)).toContain(
       "Sol specific instructions",
     )
   } finally {

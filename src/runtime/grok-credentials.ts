@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import { readFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
@@ -49,6 +50,26 @@ export async function resolveGrokCredentials(
     userId: credentials.userId,
     expiresAt: credentials.expiresAt,
   }
+}
+
+// Account identity for scoping cached per-account data (the model catalog),
+// following the same credential source as discovery: the XAI_API_KEY
+// environment key when set, otherwise the CLI login. Old logins without a
+// user id fall back to a token digest and simply rescope when tokens rotate.
+export async function resolveGrokAccountIdentity(
+  options: GrokCredentialsOptions = {},
+): Promise<string | undefined> {
+  const envKey = process.env.XAI_API_KEY
+  if (envKey !== undefined) {
+    return createHash("sha256").update(envKey).digest("hex")
+  }
+  const credentials = await readGrokCredentials(
+    options.path ?? defaultGrokCredentialsPath(),
+  )
+  return (
+    credentials.userId ??
+    createHash("sha256").update(credentials.accessToken).digest("hex")
+  )
 }
 
 async function resolveStoredGrokCredentials(

@@ -25,7 +25,11 @@ import type {
   ApiSubscriptionSummary,
   ApiUserModelPreference,
 } from "../../server/protocol.ts"
-import { acknowledgeAdmission, reserveAdmission } from "../admission-outbox.ts"
+import {
+  acknowledgeAdmission,
+  type PendingAdmission,
+  reserveAdmission,
+} from "../admission-outbox.ts"
 import type { ContextExcerpt } from "../conversation-context.ts"
 import {
   createExecutionViewState,
@@ -171,6 +175,7 @@ export type AppStoreActions = {
   loadProviders(): Promise<void>
   loadSubscriptions(): Promise<void>
   startNewSession(projectId?: string): void
+  setNewSessionProject(projectId?: string): void
   createSession(title?: string): Promise<string | undefined>
   deleteSession(sessionId: string): Promise<void>
   forkSession(
@@ -195,6 +200,9 @@ export type AppStoreActions = {
   admitInput(
     text: string,
     attachments?: readonly ImageAttachment[],
+    // "queue" skips steering: the input joins the durable pending queue and
+    // dispatches as the next Turn when the Session goes idle.
+    mode?: "auto" | "queue",
   ): Promise<void>
   cancelTurn(turnId: string): Promise<void>
   cancelQueuedInput(inputId: string): Promise<void>
@@ -303,6 +311,21 @@ export const useAppStore = create<AppStore>()((set, get) => {
   let sidebarQueue: Promise<boolean> = Promise.resolve(true)
   let sidebarQueueDepth = 0
   let sidebarQueueError: string | undefined
+  let newSessionCreation:
+    | { revision: number; promise: Promise<string | undefined> }
+    | undefined
+  const pendingCreateIntents = new Set<number>()
+  const createNewSessionForCurrentIntent = (): void => {
+    const creation = get().createSession()
+    const pending = {
+      revision: get().sessionSelectionIntentRevision,
+      promise: creation,
+    }
+    newSessionCreation = pending
+    void creation.then(() => {
+      if (newSessionCreation === pending) newSessionCreation = undefined
+    })
+  }
   const pendingSidebarSessionIds = new Set<string>()
   const pendingSidebarPins = new Map<
     string,
@@ -313,6 +336,9 @@ export const useAppStore = create<AppStore>()((set, get) => {
   const projectPinRevisions: Record<string, number> = {}
   const confirmedProjectPins: Record<string, boolean> = {}
   const pendingProjectPins: Record<string, number> = {}
+  // Admissions whose server acknowledgment arrived but whose durable event is
+  // still pending; the outbox entry clears when the stream confirms it.
+  const pendingAdmissions = new Map<string, PendingAdmission>()
   const subscriptionReadRevisions: Record<ApiSubscriptionProvider, number> = {
     codex: 0,
     grok: 0,
@@ -323,9 +349,12 @@ export const useAppStore = create<AppStore>()((set, get) => {
     task: () => Promise<void>,
     isCurrent: () => boolean = () => true,
     clearMessage = true,
+    tracksBusy = true,
   ): Promise<boolean> => {
-    activeTaskCount += 1
-    set({ busy: true })
+    if (tracksBusy) {
+      activeTaskCount += 1
+      set({ busy: true })
+    }
     if (clearMessage && isCurrent()) set({ message: undefined })
     try {
       await task()
@@ -334,8 +363,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
       if (isCurrent()) set({ message: errorMessage(error, "Request failed.") })
       return false
     } finally {
-      activeTaskCount -= 1
-      set({ busy: activeTaskCount > 0 })
+      if (tracksBusy) {
+        activeTaskCount -= 1
+        set({ busy: activeTaskCount > 0 })
+      }
     }
   }
   const invalidateSessionListReads = (): void => {
@@ -603,6 +634,13 @@ export const useAppStore = create<AppStore>()((set, get) => {
               return
             }
             if (event.sessionId !== selection.sessionId) return
+            if (isKernelEvent(event) && event.type === "input.admitted") {
+              const admission = pendingAdmissions.get(event.data.requestId)
+              if (admission !== undefined) {
+                pendingAdmissions.delete(event.data.requestId)
+                void acknowledgeAdmission(window.localStorage, admission)
+              }
+            }
             set((state) => {
               const selectedSession = applyDurableSessionDetail(
                 state.selectedSession,
@@ -940,13 +978,18 @@ export const useAppStore = create<AppStore>()((set, get) => {
           )
           persistCollapsedProjects(collapsedProjects)
           const remembered = window.localStorage.getItem("yakitori.project")
+          // An empty remembered value is an explicit "No project" choice
+          // (written by setNewSessionProject/selectSession); only a missing
+          // key falls back to the first project.
           const currentProject =
             state.currentProject !== undefined &&
             liveIds.has(state.currentProject)
               ? state.currentProject
-              : remembered !== null && liveIds.has(remembered)
-                ? remembered
-                : projects[0]?.id
+              : remembered === ""
+                ? undefined
+                : remembered !== null && liveIds.has(remembered)
+                  ? remembered
+                  : projects[0]?.id
           return {
             projects,
             projectsError: undefined,
@@ -1041,6 +1084,12 @@ export const useAppStore = create<AppStore>()((set, get) => {
     },
 
     startNewSession: (projectId = get().currentProject) => {
+      if (
+        get().selection.sessionId === undefined &&
+        get().currentProject === projectId &&
+        newSessionCreation?.revision === get().sessionSelectionIntentRevision
+      )
+        return
       const state = get()
       closeStream()
       set({
@@ -1065,15 +1114,29 @@ export const useAppStore = create<AppStore>()((set, get) => {
           state.sessionSelectionIntentRevision + 1,
         composerFocusRevision: state.composerFocusRevision + 1,
       })
+      createNewSessionForCurrentIntent()
+    },
+
+    setNewSessionProject: (projectId) => {
+      const state = get()
+      if (state.currentProject === projectId) return
+      set({
+        currentProject: projectId,
+        sessionSelectionIntentRevision:
+          state.sessionSelectionIntentRevision + 1,
+      })
+      window.localStorage.setItem("yakitori.project", projectId ?? "")
+      // The dropdown changes the destination of the current draft, including
+      // its staged attachments. Supersede the old request and create there.
+      if (state.selection.sessionId === undefined && newSessionCreation)
+        createNewSessionForCurrentIntent()
     },
 
     createSession: async (title) => {
-      if (get().inFlightActions.has("create-session")) return
-      set((state) => ({
-        inFlightActions: new Set(state.inFlightActions).add("create-session"),
-      }))
+      if (pendingCreateIntents.has(get().sessionSelectionIntentRevision)) return
       let createdId: string | undefined
       const intentRevision = get().sessionSelectionIntentRevision + 1
+      pendingCreateIntents.add(intentRevision)
       set({ sessionSelectionIntentRevision: intentRevision })
       await runTask(
         async () => {
@@ -1092,6 +1155,22 @@ export const useAppStore = create<AppStore>()((set, get) => {
             },
           )
 
+          if (get().sessionSelectionIntentRevision !== intentRevision) {
+            // Creation succeeded after its draft was abandoned. The session
+            // has no owner; discard it through the same API as explicit delete.
+            if (get().selection.sessionId !== response.session.id) {
+              try {
+                await getAppRpcClient(get().apiBase).request("session/delete", {
+                  sessionId: response.session.id,
+                })
+              } catch (error) {
+                set({
+                  message: `Could not remove abandoned conversation ${response.session.id}: ${errorMessage(error, "Request failed.")}`,
+                })
+              }
+            }
+            return
+          }
           if (
             project !== undefined &&
             get().collapsedProjects[project.id] === true
@@ -1101,8 +1180,6 @@ export const useAppStore = create<AppStore>()((set, get) => {
             set({ collapsedProjects })
             persistCollapsedProjects(collapsedProjects)
           }
-          await get().loadSessions(project?.id)
-          if (get().sessionSelectionIntentRevision !== intentRevision) return
           createdId = response.session.id
           const draftModel = get().draftModelSelection
           if (draftModel !== undefined) {
@@ -1144,12 +1221,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
           loadSessionSkills(response.session.id)
         },
         () => get().sessionSelectionIntentRevision === intentRevision,
+        true,
+        false,
       )
-      set((state) => {
-        const inFlightActions = new Set(state.inFlightActions)
-        inFlightActions.delete("create-session")
-        return { inFlightActions }
-      })
+      pendingCreateIntents.delete(intentRevision)
       return createdId
     },
 
@@ -1527,16 +1602,50 @@ export const useAppStore = create<AppStore>()((set, get) => {
       loadSessionSkills(sessionId)
     },
 
-    admitInput: async (text, attachments = []) => {
+    admitInput: async (text, attachments = [], mode = "auto") => {
       const excerpts = get().promptExcerpts
       if (text === COMPACT_DIRECTIVE && excerpts.length > 0) return
+      let queuedModelSelection: ModelSelection | undefined
+      let queuedForCreation = false
       if (get().selection.sessionId === undefined) {
         if (text === COMPACT_DIRECTIVE) return
-        // Conversations start untitled; the server names the first input.
-        const sessionId = await get().createSession()
+        const revision = get().sessionSelectionIntentRevision
+        const queuedKey = `queue-first-input:${revision}`
+        if (get().inFlightActions.has(queuedKey)) return
+        queuedForCreation = true
+        const state = get()
+        queuedModelSelection = normalizeKimiModelSelection(
+          resolveEffectiveModel({
+            sessionCurrent: state.draftModelSelection,
+            userPreference: state.userPreference,
+            defaultProvider: state.defaultProvider,
+            defaultModel: state.defaultModel,
+            providers: state.providers,
+          }),
+          state.providers,
+        )
+        set((current) => ({
+          inFlightActions: new Set(current.inFlightActions).add(queuedKey),
+        }))
+        if (state.promptDraft === undefined) set({ promptDraft: text })
+        // A newly opened draft already has a create request in flight. Direct
+        // first sends still use the explicit create action when needed.
+        let sessionId: string | undefined
+        try {
+          const creation =
+            newSessionCreation?.revision === revision
+              ? newSessionCreation.promise
+              : get().createSession()
+          sessionId = await creation
+        } finally {
+          set((current) => {
+            const inFlightActions = new Set(current.inFlightActions)
+            inFlightActions.delete(queuedKey)
+            return { inFlightActions }
+          })
+        }
         if (sessionId === undefined || get().selection.sessionId !== sessionId)
           return
-        if (get().promptDraft === undefined) set({ promptDraft: text })
       }
       const selection = currentSelection()
       if (
@@ -1549,6 +1658,73 @@ export const useAppStore = create<AppStore>()((set, get) => {
       set((state) => ({
         inFlightActions: new Set(state.inFlightActions).add(key),
       }))
+
+      // An active Turn takes follow-up input as steering (Codex turn/steer);
+      // the input is recorded when the Turn next samples. If the Turn ended
+      // or stopped accepting between our view and the server, fall through to
+      // a queued admission — it dispatches as the next Turn (or starts at
+      // once when the Session is already idle), so the message is never lost.
+      const activeTurnId = get().execution.activeTurnId
+      let queueAdmission = mode === "queue"
+      if (activeTurnId !== undefined && text !== COMPACT_DIRECTIVE && !queueAdmission) {
+        let rejected = false
+        await runTask(
+          async () => {
+            try {
+              const response = await getAppRpcClient(get().apiBase).request(
+                "session/input/steer",
+                {
+                  sessionId: selection.sessionId,
+                  requestId: createRequestId(),
+                  expectedTurnId: activeTurnId,
+                  content: {
+                    kind: "text",
+                    text,
+                    ...(attachments.length === 0 ? {} : { attachments }),
+                    ...(excerpts.length === 0
+                      ? {}
+                      : { contextAttachments: excerpts }),
+                  },
+                },
+              )
+              if (response.turnId !== activeTurnId) {
+                throw new Error("Steer response did not match the request.")
+              }
+            } catch (error) {
+              if (
+                error instanceof ApiRequestError &&
+                error.code === "conflict"
+              ) {
+                rejected = true
+                queueAdmission = true
+                return
+              }
+              throw error
+            }
+            if (!isCurrentSelection(selection)) return
+            set((state) => ({
+              promptExcerpts: state.promptExcerpts.filter(
+                (excerpt) => !excerpts.includes(excerpt),
+              ),
+            }))
+            if (
+              (get().promptDraft ?? "").trim() === text &&
+              sameAttachments(get().promptAttachments, attachments)
+            ) {
+              set({ promptDraft: undefined, promptAttachments: [] })
+            }
+          },
+          () => isCurrentSelection(selection),
+        )
+        if (!rejected) {
+          set((state) => {
+            const inFlightActions = new Set(state.inFlightActions)
+            inFlightActions.delete(key)
+            return { inFlightActions }
+          })
+          return
+        }
+      }
 
       // The compact directive takes a dedicated lane: no admission outbox,
       // no model selection — the server admits it as a runtime-role Input.
@@ -1595,20 +1771,22 @@ export const useAppStore = create<AppStore>()((set, get) => {
             defaultModel: state.defaultModel,
             providers: state.providers,
           })
-          const admittedModelSelection = normalizeKimiModelSelection(
-            modelSelection,
-            state.providers,
-          )
+          const admittedModelSelection = queuedForCreation
+            ? queuedModelSelection
+            : normalizeKimiModelSelection(modelSelection, state.providers)
           const pendingAdmission = await reserveAdmission(window.localStorage, {
             apiBase: get().apiBase,
             sessionId: selection.sessionId,
             text,
             ...(attachments.length === 0 ? {} : { attachments }),
             ...(excerpts.length === 0 ? {} : { contextAttachments: excerpts }),
+            ...(admittedModelSelection === undefined
+              ? {}
+              : { modelSelection: admittedModelSelection }),
           })
           if (!isCurrentSelection(selection)) return
           const response = await getAppRpcClient(get().apiBase).request(
-            "session/input",
+            queueAdmission ? "session/input/queue" : "session/input",
             {
               sessionId: selection.sessionId,
               requestId: pendingAdmission.requestId,
@@ -1625,13 +1803,20 @@ export const useAppStore = create<AppStore>()((set, get) => {
                 : { modelSelection: admittedModelSelection }),
             },
           )
-          if (
-            response.requestId !== pendingAdmission.requestId ||
-            response.event.sessionId !== selection.sessionId
-          ) {
+          if (response.requestId !== pendingAdmission.requestId) {
             throw new Error("Admission response did not match the request.")
           }
-          await acknowledgeAdmission(window.localStorage, pendingAdmission)
+          // The response acknowledges the routing decision only; the outbox
+          // entry clears once the durable input.admitted event confirms the
+          // write (it may already have been replayed to this view).
+          if (get().execution.admittedRequestIds[pendingAdmission.requestId]) {
+            await acknowledgeAdmission(window.localStorage, pendingAdmission)
+          } else {
+            pendingAdmissions.set(
+              pendingAdmission.requestId,
+              pendingAdmission,
+            )
+          }
           if (!isCurrentSelection(selection)) return
           set((state) => ({
             // A new or edited excerpt queued during admission belongs to the

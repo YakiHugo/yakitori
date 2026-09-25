@@ -10,16 +10,36 @@ import {
 } from "../../src/gui/store/app-store.ts"
 import type { ApiSessionDetail } from "../../src/server/protocol.ts"
 
-const { request, openUrlTarget } = vi.hoisted(() => ({
-  request:
-    vi.fn<
-      (method: string, params: Record<string, unknown>) => Promise<unknown>
-    >(),
-  openUrlTarget:
-    vi.fn<(target: { kind: "url"; url: string }) => Promise<void>>(),
-}))
+const { request, openUrlTarget, mcpStatusChanged } = vi.hoisted(() => {
+  const listeners = new Set<(notification: { sessionId: string }) => void>()
+  return {
+    request:
+      vi.fn<
+        (method: string, params: Record<string, unknown>) => Promise<unknown>
+      >(),
+    openUrlTarget:
+      vi.fn<(target: { kind: "url"; url: string }) => Promise<void>>(),
+    mcpStatusChanged: {
+      subscribe(listener: (notification: { sessionId: string }) => void) {
+        listeners.add(listener)
+        return () => {
+          listeners.delete(listener)
+        }
+      },
+      emit(notification: { sessionId: string }) {
+        for (const listener of [...listeners]) listener(notification)
+      },
+      clear() {
+        listeners.clear()
+      },
+    },
+  }
+})
 vi.mock("../../src/gui/lib/rpc-client.ts", () => ({
-  getAppRpcClient: () => ({ request }),
+  getAppRpcClient: () => ({
+    request,
+    subscribeToMcpStatusChanges: mcpStatusChanged.subscribe,
+  }),
 }))
 vi.mock("../../src/gui/lib/open-resource.ts", () => ({ openUrlTarget }))
 
@@ -57,6 +77,7 @@ function session(id: string): ApiSessionDetail {
 beforeEach(() => {
   request.mockReset().mockResolvedValue({ servers: [docsServer] })
   openUrlTarget.mockReset().mockResolvedValue()
+  mcpStatusChanged.clear()
   useAppStore.setState(createInitialAppState())
 })
 
@@ -79,8 +100,35 @@ it("opens MCP settings with global status when no conversation is selected", asy
   expect(request).toHaveBeenCalledWith("mcp/status", {})
 })
 
-it("refreshes server states while mounted and stops polling when closed", async () => {
-  vi.useFakeTimers()
+it("refreshes immediately on a status-changed push for the visible session", async () => {
+  request.mockResolvedValueOnce({ servers: [docsServer] }).mockResolvedValue({
+    servers: [{ ...docsServer, state: "ready", toolCount: 3 }],
+  })
+  render(<McpSettings />)
+  expect(await screen.findByText("Not connected")).toBeDefined()
+
+  act(() => mcpStatusChanged.emit({ sessionId: "other-session" }))
+
+  expect(await screen.findByText("Connected")).toBeDefined()
+  expect(screen.getByText(/3 tools/)).toBeDefined()
+})
+
+it("ignores status pushes for other sessions when one is selected", async () => {
+  useAppStore.setState({ selectedSession: session("work") })
+  render(<McpSettings />)
+  expect(await screen.findByText("docs")).toBeDefined()
+  const before = request.mock.calls.length
+
+  act(() => mcpStatusChanged.emit({ sessionId: "other" }))
+  await act(async () => {})
+  expect(request.mock.calls).toHaveLength(before)
+
+  act(() => mcpStatusChanged.emit({ sessionId: "work" }))
+  await act(async () => {})
+  expect(request.mock.calls.length).toBeGreaterThan(before)
+})
+
+it("refreshes server states while mounted and stops polling when closed", async () => {vi.useFakeTimers()
   request.mockResolvedValueOnce({ servers: [docsServer] }).mockResolvedValue({
     servers: [{ ...docsServer, state: "ready", toolCount: 3 }],
   })

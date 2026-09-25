@@ -3,15 +3,15 @@ import { act, cleanup, render, screen, within } from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { App } from "../../src/gui/app.tsx"
+import {
+  createInitialAppState,
+  useAppStore,
+} from "../../src/gui/store/app-store.ts"
 import type {
   ApiProject,
   ApiSessionSummary,
   ApiSubscriptionSummary,
 } from "../../src/server/protocol.ts"
-import {
-  createInitialAppState,
-  useAppStore,
-} from "../../src/gui/store/app-store.ts"
 
 function project(
   id: string,
@@ -101,15 +101,15 @@ describe("sidebar", () => {
     expect(toggleProject).toHaveBeenCalledWith("project_2")
   })
 
-  it("opens a draft without creating an empty persistent session", async () => {
-    const createSession = vi.fn()
+  it("opens a local draft and starts session creation immediately", async () => {
+    const createSession = vi.fn(async () => undefined)
     useAppStore.setState({ createSession })
     const user = userEvent.setup()
     render(<App />)
 
     await user.click(screen.getByLabelText("New session"))
 
-    expect(createSession).not.toHaveBeenCalled()
+    expect(createSession).toHaveBeenCalledOnce()
     expect(
       screen.getByRole("combobox", { name: "New session project" }),
     ).toBeDefined()

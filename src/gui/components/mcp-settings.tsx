@@ -15,6 +15,7 @@ const stateLabels = {
   stopped: "Stopped",
   failed: "Connection failed",
   unconnected: "Not connected",
+  connecting: "Connecting…",
 }
 
 export function McpSettings() {
@@ -66,7 +67,12 @@ function McpServerList({
         if (!current) return
         setServers(response.servers)
         setStatusError(undefined)
-        if (response.servers.some((server) => server.loginState === "pending"))
+        if (
+          response.servers.some(
+            (server) =>
+              server.loginState === "pending" || server.state === "connecting",
+          )
+        )
           delay = 2_000
       } catch (error) {
         if (!current) return
@@ -89,6 +95,18 @@ function McpServerList({
       clearTimeout(timer)
     }
   }, [apiBase, sessionId, refreshRevision])
+
+  // The server pushes connection-state changes; polling above stays as a
+  // backstop for missed notifications.
+  useEffect(() => {
+    return getAppRpcClient(apiBase).subscribeToMcpStatusChanges(
+      (notification) => {
+        if (sessionId === undefined || notification.sessionId === sessionId) {
+          setRefreshRevision((revision) => revision + 1)
+        }
+      },
+    )
+  }, [apiBase, sessionId])
 
   const perform = async (name: string, action: McpAction) => {
     setPendingAction({ name, action })
@@ -179,6 +197,9 @@ function McpServerList({
                   >
                     {server.enabled ? stateLabels[server.state] : "Disabled"}
                   </Badge>
+                  {server.required ? (
+                    <Badge variant="outline">Required</Badge>
+                  ) : null}
                 </div>
                 <p>
                   {server.transport === "http" ? "HTTP" : "Local process"} ·{" "}

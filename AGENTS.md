@@ -31,11 +31,14 @@ Reference priority:
 - Ignore legacy compatibility paths in reference projects unless Yakitori has
   the same explicit historical compatibility obligation. Prefer the current
   clean architecture and product behavior when no such obligation exists.
-- Secondary references: `.references/public/opencode-v2`,
-  `.references/public/claude-code-sourcemap`, and public Claude Code
-  documentation and observable product behavior. Use these only when the
-  primary references leave a concrete gap or a comparison would materially
-  clarify a decision.
+- Secondary references: `.references/public/opencode-v2` and current
+  first-party Claude Code documentation and observable product behavior. Use
+  these only when the primary references leave a concrete gap or a comparison
+  would materially clarify a decision.
+- Historical reference: `.references/public/claude-code-sourcemap` is an
+  unofficial reconstruction of an older release. Consult it only for a
+  specific historical question when the primary and secondary references are
+  insufficient; do not use it to infer current behavior or architecture.
 - Do not consult DSH, Gemini CLI, Kimi Code, Manus, Raft, or another reference
   by default. Before using one, propose it and explain why the primary and
   secondary references are insufficient. Raft is relevant only to the later

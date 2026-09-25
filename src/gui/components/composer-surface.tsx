@@ -117,7 +117,11 @@ export function ComposerSurface({
   setPromptAttachments(attachments: readonly ImageAttachment[]): void
   removePromptExcerpt(id: string): void
   updatePromptExcerpt(excerpt: ContextExcerpt): void
-  onSubmit(text: string, attachments: readonly ImageAttachment[]): void
+  onSubmit(
+    text: string,
+    attachments: readonly ImageAttachment[],
+    mode?: "auto" | "queue",
+  ): void
   onCancel(): void
   modelControls: ReactNode
   importImages: ComposerImageImport
@@ -290,7 +294,7 @@ export function ComposerSurface({
     })
   }
 
-  const submit = () => {
+  const submit = (mode?: "auto" | "queue") => {
     if (!canSend) return
     setHistoryNavigation(undefined)
     onSubmit(
@@ -301,6 +305,7 @@ export function ComposerSurface({
             ...attachment,
             detail: "high" as const,
           })),
+      mode,
     )
   }
 
@@ -413,15 +418,26 @@ export function ComposerSurface({
       setPromptDraft(entry)
       return true
     }
-    if (
-      event.key === "Enter" &&
-      !event.shiftKey &&
-      !event.altKey &&
-      (sendShortcut === "enter" || event.metaKey || event.ctrlKey)
-    ) {
-      event.preventDefault()
-      submit()
-      return true
+    if (event.key === "Enter" && !event.altKey) {
+      const mod = event.metaKey || event.ctrlKey
+      // Queue-for-next-turn gestures: Mod+Enter in enter mode (plain Enter
+      // already sends); Shift+Mod+Enter in mod-enter mode (the plain chord
+      // is already "send"). Sending steers an active Turn; queueing runs the
+      // input as the next Turn.
+      const queue = mod && (sendShortcut === "enter" ? !event.shiftKey : event.shiftKey)
+      if (queue) {
+        event.preventDefault()
+        submit("queue")
+        return true
+      }
+      if (
+        !event.shiftKey &&
+        (sendShortcut === "enter" || mod)
+      ) {
+        event.preventDefault()
+        submit()
+        return true
+      }
     }
     return false
   }
@@ -646,41 +662,24 @@ export function ComposerSurface({
 
             <div className="flex min-w-0 items-center gap-1">
               {modelControls}
-              {sending || activeTurnId !== undefined ? (
-                <span
-                  role="status"
-                  aria-live="polite"
-                  data-state={
-                    stopping ? "stopping" : sending ? "sending" : "working"
-                  }
-                  className="composer-run-state"
-                >
-                  {sending || stopping ? (
-                    <LoaderCircle aria-hidden="true" />
-                  ) : (
-                    <span
-                      aria-hidden="true"
-                      className="composer-run-state-dot"
-                    />
-                  )}
-                  {stopping ? "Stopping…" : sending ? "Sending…" : "Working…"}
-                </span>
-              ) : null}
               {activeTurnId === undefined ? (
                 <Button
                   type="submit"
                   size="icon-sm"
                   disabled={!canSend}
+                  aria-busy={sending}
                   aria-label={sending ? "Sending" : sendLabel}
                   title={
-                    compactBlocked
-                      ? "Remove attachments and excerpts before compacting"
-                      : "Send message"
+                    sending
+                      ? "Sending…"
+                      : compactBlocked
+                        ? "Remove attachments and excerpts before compacting"
+                        : "Send message"
                   }
                   className="rounded-full"
                 >
                   {sending ? (
-                    <LoaderCircle className="animate-spin" />
+                    <LoaderCircle className="animate-spin motion-reduce:animate-none" />
                   ) : (
                     <ArrowUp />
                   )}
@@ -689,19 +688,20 @@ export function ComposerSurface({
                   </span>
                 </Button>
               ) : (
-                // A stop action, not a submit: Enter in the editor still
-                // queues a follow-up through the unchanged submit path.
+                // A stop action, not a submit: Enter still follows the
+                // unchanged input path while the turn is active.
                 <Button
                   type="button"
                   size="icon-sm"
                   disabled={stopping}
+                  aria-busy={stopping}
                   aria-label={stopping ? "Stopping" : stopLabel}
                   title={stopping ? "Stopping" : "Interrupt"}
                   className="rounded-full"
                   onClick={onCancel}
                 >
                   {stopping ? (
-                    <LoaderCircle className="animate-spin" />
+                    <LoaderCircle className="animate-spin motion-reduce:animate-none" />
                   ) : (
                     <Square />
                   )}

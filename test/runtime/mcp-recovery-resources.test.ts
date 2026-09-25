@@ -163,6 +163,7 @@ it("exposes paged resources and templates from a resource-only server and reads 
     await manager.update({
       remote: { url: `http://127.0.0.1:${address.port}/mcp` },
     })
+    await manager.settleConnecting(5_000)
     expect(manager.tools()).toHaveLength(3)
     expect(requests).toEqual(["initialize"])
     const tools = Object.fromEntries(

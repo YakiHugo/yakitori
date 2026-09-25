@@ -147,6 +147,7 @@ it("logs in with SDK discovery and PKCE, persists credentials, refreshes once, a
     })
     try {
       await manager.update({ remote: config })
+      await manager.settleConnecting(5_000)
       expect(manager.status()).toMatchObject([
         { state: "failed", errorCode: "authentication_required" },
       ])
@@ -211,6 +212,7 @@ it("logs in with SDK discovery and PKCE, persists credentials, refreshes once, a
     })
     try {
       await authenticated.update({ remote: config })
+      await authenticated.settleConnecting(5_000)
       const original = authenticated.tools()[0]
       await expect(
         original?.execute({}, { workspaceRoot: directory }),

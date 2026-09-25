@@ -12,6 +12,7 @@ import {
   useAppStore,
   useExecutionView,
 } from "../store/app-store.ts"
+import { usePreferencesStore } from "../store/preferences-store.ts"
 import {
   type ComposerImageImport,
   ComposerSurface,
@@ -38,7 +39,11 @@ export function Composer() {
   const defaultModel = useAppStore((state) => state.defaultModel)
   const userPreference = useAppStore((state) => state.userPreference)
   const inFlightActions = useAppStore((state) => state.inFlightActions)
+  const sendShortcut = usePreferencesStore((state) => state.sendShortcut)
   const sessionId = useAppStore((state) => state.selection.sessionId)
+  const selectionRevision = useAppStore(
+    (state) => state.sessionSelectionIntentRevision,
+  )
   const sessionCurrent = useAppStore((state) =>
     state.selection.sessionId === undefined
       ? state.draftModelSelection
@@ -131,8 +136,13 @@ export function Composer() {
       const next = await prepared.collect(importSessionId)
       const current = useAppStore.getState()
       if (
-        current.selection.sessionId !== currentSessionId ||
-        current.sessionSelectionIntentRevision !== importIntentRevision
+        current.sessionSelectionIntentRevision !== importIntentRevision ||
+        (current.selection.sessionId !== currentSessionId &&
+          !(
+            sessionId === undefined &&
+            currentSessionId === undefined &&
+            current.selection.sessionId !== undefined
+          ))
       ) {
         await discardDraftImages(next.slice(attachments.length))
         return
@@ -182,7 +192,9 @@ export function Composer() {
         (sessionId !== undefined && restoringModelSelectionFor === sessionId)
       }
       sending={
-        sessionId !== undefined && inFlightActions.has(`admit:${sessionId}`)
+        sessionId === undefined
+          ? inFlightActions.has(`queue-first-input:${selectionRevision}`)
+          : inFlightActions.has(`admit:${sessionId}`)
       }
       stopping={
         activeTurnId !== undefined &&
@@ -198,7 +210,7 @@ export function Composer() {
       setPromptAttachments={setPromptAttachments}
       removePromptExcerpt={removePromptExcerpt}
       updatePromptExcerpt={updatePromptExcerpt}
-      onSubmit={(text, images) => {
+      onSubmit={(text, images, mode) => {
         conversationScroll?.jumpToBottom()
         const goalCommand =
           text === GOAL_DIRECTIVE
@@ -224,8 +236,13 @@ export function Composer() {
             })
           return
         }
-        if (images.length === 0) void admitInput(text)
-        else void admitInput(text, images)
+        if (mode === "queue") {
+          void admitInput(text, images, "queue")
+        } else if (images.length === 0) {
+          void admitInput(text)
+        } else {
+          void admitInput(text, images)
+        }
       }}
       onCancel={() => {
         if (activeTurnId) void cancelTurn(activeTurnId)
@@ -239,7 +256,11 @@ export function Composer() {
       placeholder={
         sessionId === undefined
           ? "Describe what you want to work on"
-          : "Ask anything"
+          : activeTurnId !== undefined
+            ? sendShortcut === "enter"
+              ? "Steer this turn · ⌘ / Ctrl + Enter queues for the next"
+              : "⌘ / Ctrl + Enter steers · Shift + ⌘ / Ctrl + Enter queues"
+            : "Ask anything"
       }
     />
   )

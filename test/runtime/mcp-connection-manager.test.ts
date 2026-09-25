@@ -39,6 +39,7 @@ describe("MCP connection manager", () => {
           command: process.execPath,
           args: [script],
           enabledTools: ["js"],
+          required: true,
         },
       })
       expect(manager.tools().map((tool) => tool.toolName.name)).toEqual(["js"])
@@ -73,11 +74,13 @@ describe("MCP connection manager", () => {
     )
     const manager = createMcpConnectionManager()
     try {
-      const config = { demo: { command: process.execPath, args: [script] } }
+      const config = {
+        demo: { command: process.execPath, args: [script], required: true },
+      }
       await manager.update(config)
       const first = manager.tools()[0]
       expect(manager.status()).toEqual([
-        { name: "demo", state: "ready", toolCount: 1 },
+        { name: "demo", state: "ready", toolCount: 1, required: true },
       ])
       expect(first?.toolName).toEqual({ namespace: "demo", name: "echo" })
       expect(first?.supportsParallelToolCalls).toBe(true)
@@ -122,7 +125,7 @@ describe("MCP connection manager", () => {
     })
     try {
       await manager.update({
-        demo: { command: process.execPath, args: [script] },
+        demo: { command: process.execPath, args: [script], required: true },
       })
       const first = manager.tools()[0]
       await first?.execute({}, { workspaceRoot: root })
@@ -136,7 +139,7 @@ describe("MCP connection manager", () => {
         .toBe(true)
       expect(catalogs.at(-1)).toBe(1)
       expect(manager.status()).toEqual([
-        { name: "demo", state: "ready", toolCount: 1 },
+        { name: "demo", state: "ready", toolCount: 1, required: true },
       ])
     } finally {
       unsubscribe()
@@ -162,7 +165,9 @@ describe("MCP connection manager", () => {
     )
     const manager = createMcpConnectionManager({ restartDelayMs: 200 })
     try {
-      const config = { demo: { command: process.execPath, args: [script] } }
+      const config = {
+        demo: { command: process.execPath, args: [script], required: true },
+      }
       await manager.update(config)
       await expect.poll(() => manager.status()[0]?.state).toBe("failed")
       await manager.update(config)
@@ -194,7 +199,7 @@ describe("MCP connection manager", () => {
     })
     try {
       await manager.update({
-        demo: { command: process.execPath, args: [script] },
+        demo: { command: process.execPath, args: [script], required: true },
       })
       await expect
         .poll(
@@ -206,6 +211,140 @@ describe("MCP connection manager", () => {
       expect((await readFile(starts, "utf8")).trim().split("\n")).toHaveLength(
         3,
       )
+    } finally {
+      await manager.close()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it("connects optional servers in the background and reports status transitions", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yakitori-mcp-optional-"))
+    const script = join(root, "slow.mjs")
+    await writeFile(
+      script,
+      [
+        "import readline from 'node:readline';",
+        "const rl=readline.createInterface({input:process.stdin});",
+        "rl.on('line',(line)=>{const m=JSON.parse(line);if(m.id===undefined)return;",
+        "const respond=()=>{const result=m.method==='tools/list'?{tools:[{name:'echo',inputSchema:{type:'object'}}]}:{protocolVersion:m.params?.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'fixture',version:'1'}};process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result})+'\\n');};",
+        "if(m.method==='initialize'){setTimeout(respond,200);return;}respond();});",
+      ].join("\n"),
+    )
+    const manager = createMcpConnectionManager()
+    const transitions: string[] = []
+    const unsubscribe = manager.subscribeStatus(() => {
+      transitions.push(
+        manager
+          .status()
+          .map((server) => `${server.name}:${server.state}`)
+          .join(","),
+      )
+    })
+    try {
+      await manager.update({
+        demo: { command: process.execPath, args: [script] },
+      })
+      expect(manager.status()).toEqual([
+        { name: "demo", state: "connecting", toolCount: 0, required: false },
+      ])
+      expect(manager.tools()).toEqual([])
+      await manager.settleConnecting(5_000)
+      expect(manager.status()).toEqual([
+        { name: "demo", state: "ready", toolCount: 1, required: false },
+      ])
+      expect(transitions).toContain("demo:connecting")
+      expect(transitions).toContain("demo:ready")
+    } finally {
+      unsubscribe()
+      await manager.close()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it("bounds the step grace for servers that are still connecting", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yakitori-mcp-grace-"))
+    const script = join(root, "slower.mjs")
+    await writeFile(
+      script,
+      [
+        "import readline from 'node:readline';",
+        "const rl=readline.createInterface({input:process.stdin});",
+        "rl.on('line',(line)=>{const m=JSON.parse(line);if(m.id===undefined)return;",
+        "const respond=()=>{const result=m.method==='tools/list'?{tools:[]}:{protocolVersion:m.params?.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'fixture',version:'1'}};process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result})+'\\n');};",
+        "if(m.method==='initialize'){setTimeout(respond,500);return;}respond();});",
+      ].join("\n"),
+    )
+    const manager = createMcpConnectionManager()
+    try {
+      await manager.update({
+        demo: { command: process.execPath, args: [script] },
+      })
+      await manager.settleConnecting(50)
+      expect(manager.status()).toMatchObject([{ state: "connecting" }])
+      await manager.settleConnecting(5_000)
+      expect(manager.status()).toMatchObject([{ state: "ready" }])
+    } finally {
+      await manager.close()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it("fails update only when a required server cannot connect", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yakitori-mcp-required-"))
+    const missing = join(root, "missing-executable")
+    const manager = createMcpConnectionManager({ maxRestartAttempts: 0 })
+    try {
+      await manager.update({ optional: { command: missing } })
+      await manager.settleConnecting(5_000)
+      expect(manager.status()).toMatchObject([
+        { name: "optional", state: "failed", required: false },
+      ])
+
+      await expect(
+        manager.update({
+          required_server: { command: missing, required: true },
+        }),
+      ).rejects.toThrow(
+        "Required MCP servers failed to connect: required_server",
+      )
+      expect(manager.status()).toMatchObject([
+        { name: "required_server", state: "failed", required: true },
+      ])
+    } finally {
+      await manager.close()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it("reports an optional server's installation failure in the background", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yakitori-mcp-install-"))
+    const script = join(root, "server.mjs")
+    await writeFile(
+      script,
+      [
+        "import readline from 'node:readline';",
+        "const rl=readline.createInterface({input:process.stdin});",
+        "rl.on('line',(line)=>{const m=JSON.parse(line);if(m.id===undefined)return;",
+        "const result=m.method==='tools/list'?{tools:[{name:'echo',inputSchema:{type:'object'}}]}:{protocolVersion:m.params?.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'fixture',version:'1'}};process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result})+'\\n');});",
+      ].join("\n"),
+    )
+    const failures: unknown[] = []
+    const manager = createMcpConnectionManager({
+      maxRestartAttempts: 0,
+      onBackgroundError: (error) => failures.push(error),
+      installTools: () => {
+        throw new Error("installation failed")
+      },
+    })
+    try {
+      await manager.update({
+        demo: { command: process.execPath, args: [script] },
+      })
+      await expect.poll(() => manager.status()[0]?.state).toBe("failed")
+      expect(manager.status()).toMatchObject([
+        { name: "demo", state: "failed", error: "installation failed" },
+      ])
+      expect(failures).toHaveLength(1)
     } finally {
       await manager.close()
       await rm(root, { recursive: true, force: true })

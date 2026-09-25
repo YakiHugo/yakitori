@@ -17,8 +17,9 @@ export type { McpServerConfig } from "./mcp-config.ts"
 
 export type McpServerStatus = Readonly<{
   name: string
-  state: "ready" | "failed" | "stopped"
+  state: "ready" | "failed" | "stopped" | "connecting"
   toolCount: number
+  required: boolean
   error?: string
   errorCode?: McpConnectionError["code"]
 }>
@@ -30,10 +31,16 @@ export type McpConnectionManager = Readonly<{
   ): Promise<void>
   tools(): readonly RuntimeTool[]
   status(): readonly McpServerStatus[]
+  // Waits for in-flight optional connections up to a shared deadline so a
+  // Step snapshot usually includes servers that are nearly ready (codex-rs
+  // optional_mcp_startup_grace). Required servers are already awaited by
+  // update(); a required server reconnecting mid-session is awaited here.
+  settleConnecting(timeoutMs: number): Promise<void>
   reconnect(name: string): Promise<void>
   subscribe(
     listener: (serverName: string, tools: readonly RuntimeTool[]) => void,
   ): () => void
+  subscribeStatus(listener: () => void): () => void
   finishTurn(): Promise<void>
   close(): Promise<void>
 }>
@@ -90,6 +97,7 @@ export function createMcpConnectionManager(
   const listeners = new Set<
     (serverName: string, tools: readonly RuntimeTool[]) => void
   >()
+  const statusListeners = new Set<() => void>()
   const restartDelayMs = options.restartDelayMs ?? 250
   const maxRestartDelayMs = options.maxRestartDelayMs ?? 30_000
   const maxRestartAttempts = options.maxRestartAttempts ?? 5
@@ -112,6 +120,15 @@ export function createMcpConnectionManager(
     if (options.onBackgroundError) options.onBackgroundError(error)
     else console.error("MCP background operation failed", error)
   }
+  const notifyStatus = () => {
+    for (const listener of statusListeners) {
+      try {
+        listener()
+      } catch (error) {
+        reportBackgroundError(error)
+      }
+    }
+  }
   const publish = (
     name: string,
     tools: readonly RuntimeTool[],
@@ -126,6 +143,7 @@ export function createMcpConnectionManager(
         reportBackgroundError(error)
       }
     }
+    notifyStatus()
   }
 
   const scheduleRestart = (
@@ -172,6 +190,7 @@ export function createMcpConnectionManager(
     if (active?.generation === generation) return active.promise
     const promise = connectOnce(name, config, identity, generation, signal)
     connecting.set(name, { fingerprint: identity, generation, promise })
+    notifyStatus()
     await promise.finally(() => {
       if (connecting.get(name)?.promise === promise) connecting.delete(name)
     })
@@ -322,6 +341,7 @@ export function createMcpConnectionManager(
       signal?.throwIfAborted()
       if (!(error instanceof McpConnectionError)) throw error
       failures.set(name, error)
+      notifyStatus()
       if (error.retryable) scheduleRestart(name, identity, generation)
     }
   }
@@ -362,30 +382,70 @@ export function createMcpConnectionManager(
       }
     }
 
-    await Promise.all(
-      enabled.map(async ([name, config]) => {
-        const identity = fingerprint(config)
-        configuredServers.set(name, config)
-        const current = connections.get(name)
-        if (current?.fingerprint === identity && current.client.isRunning()) {
-          return
-        }
-        const pending = connecting.get(name)
-        if (pending?.fingerprint === identity) {
-          await pending.promise
-          return
-        }
-        restartAttempts.delete(name)
-        const generation = (generations.get(name) ?? 0) + 1
-        generations.set(name, generation)
-        if (current !== undefined) {
-          await current.client.release()
-          connections.delete(name)
-          publish(name, [])
-        }
-        await connect(name, config, identity, generation, signal)
-      }),
-    )
+    // Required servers are awaited and fail the caller when they cannot
+    // connect; optional servers connect in the background so a slow or
+    // broken integration never stalls Session creation or a config reload.
+    // Background connects deliberately do not inherit the caller's signal: a
+    // Turn-scoped abort must not cancel a connection other Steps still need.
+    const requiredTasks: Promise<void>[] = []
+    for (const [name, config] of enabled) {
+      const identity = fingerprint(config)
+      configuredServers.set(name, config)
+      const current = connections.get(name)
+      if (current?.fingerprint === identity && current.client.isRunning()) {
+        continue
+      }
+      const pending = connecting.get(name)
+      if (pending?.fingerprint === identity) {
+        if (config.required === true) requiredTasks.push(pending.promise)
+        continue
+      }
+      restartAttempts.delete(name)
+      const generation = (generations.get(name) ?? 0) + 1
+      generations.set(name, generation)
+      if (current !== undefined) {
+        await current.client.release()
+        connections.delete(name)
+        publish(name, [])
+      }
+      const task = connect(
+        name,
+        config,
+        identity,
+        generation,
+        config.required === true ? signal : undefined,
+      )
+      if (config.required === true) {
+        requiredTasks.push(task)
+      } else {
+        void task.catch((error: unknown) => {
+          if (closed) return
+          if (generations.get(name) === generation) {
+            failures.set(
+              name,
+              error instanceof McpConnectionError
+                ? error
+                : new McpConnectionError(
+                    error instanceof Error ? error.message : String(error),
+                  ),
+            )
+            notifyStatus()
+          }
+          reportBackgroundError(error)
+        })
+      }
+    }
+    await Promise.all(requiredTasks)
+    const requiredFailures = enabled.flatMap(([name, config]) => {
+      if (config.required !== true) return []
+      const failure = failures.get(name)
+      return failure === undefined ? [] : [`${name}: ${failure.message}`]
+    })
+    if (requiredFailures.length > 0) {
+      throw new Error(
+        `Required MCP servers failed to connect: ${requiredFailures.join("; ")}`,
+      )
+    }
   }
 
   return {
@@ -422,6 +482,8 @@ export function createMcpConnectionManager(
       return [...connections.values()].flatMap((connection) => connection.tools)
     },
     status() {
+      const required = (name: string) =>
+        configuredServers.get(name)?.required === true
       return [
         ...[...connections.entries()].map(
           ([name, connection]) =>
@@ -429,20 +491,66 @@ export function createMcpConnectionManager(
               name,
               state: connection.client.isRunning() ? "ready" : "stopped",
               toolCount: connection.tools.length,
+              required: required(name),
             }) satisfies McpServerStatus,
         ),
         ...[...failures.entries()].map(([name, error]) => ({
           name,
           state: "failed" as const,
           toolCount: 0,
+          required: required(name),
           error: error.message,
           errorCode: error.code,
         })),
+        ...[...connecting.keys()].flatMap((name) =>
+          connections.has(name) || failures.has(name)
+            ? []
+            : [
+                {
+                  name,
+                  state: "connecting" as const,
+                  toolCount: 0,
+                  required: required(name),
+                },
+              ],
+        ),
       ].sort((left, right) => left.name.localeCompare(right.name))
+    },
+    async settleConnecting(timeoutMs) {
+      const pending = [...connecting.entries()]
+      if (pending.length === 0) return
+      // Failures surface through status(); settling is only a wait.
+      const settled = (promise: Promise<void>) => promise.catch(() => {})
+      const requiredWaits = pending
+        .filter(([name]) => configuredServers.get(name)?.required === true)
+        .map(([, entry]) => settled(entry.promise))
+      const optionalWaits = pending
+        .filter(([name]) => configuredServers.get(name)?.required !== true)
+        .map(([, entry]) => settled(entry.promise))
+      const waits: Promise<unknown>[] = [...requiredWaits]
+      if (optionalWaits.length > 0) {
+        let timer: ReturnType<typeof setTimeout> | undefined
+        waits.push(
+          Promise.race([
+            Promise.allSettled(optionalWaits),
+            new Promise<void>((resolve) => {
+              timer = setTimeout(resolve, timeoutMs)
+              timer.unref()
+            }),
+          ]).finally(() => {
+            if (timer !== undefined) clearTimeout(timer)
+          }),
+        )
+      }
+      await Promise.all(waits)
     },
     subscribe(listener) {
       listeners.add(listener)
       return () => listeners.delete(listener)
+    },
+    subscribeStatus(listener) {
+      statusListeners.add(listener)
+      return () => statusListeners.delete(listener)
     },
     finishTurn,
     async close() {

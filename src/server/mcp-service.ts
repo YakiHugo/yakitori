@@ -8,8 +8,9 @@ export type McpServerSummary = Readonly<{
   name: string
   transport: "stdio" | "http"
   enabled: boolean
-  state: "ready" | "stopped" | "failed" | "unconnected"
+  state: "ready" | "stopped" | "failed" | "unconnected" | "connecting"
   toolCount: number
+  required: boolean
   authenticated: boolean
   loginState?: "pending" | "failed"
   error?: string
@@ -70,6 +71,7 @@ export function createMcpService(options: {
                   ? ("stopped" as const)
                   : (current?.state ?? ("unconnected" as const)),
               toolCount: current?.toolCount ?? 0,
+              required: config.required === true,
               authenticated:
                 "url" in config &&
                 (await options.oauth.hasCredentials(name, config)),

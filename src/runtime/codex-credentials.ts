@@ -180,6 +180,27 @@ export async function resolveCodexAccessToken(input?: {
   }).resolve()
 }
 
+// Account identity for scoping cached per-account data (the model catalog).
+// Read-only: never refreshes tokens. Mirrors codex-rs models_identity, which
+// excludes access tokens so weekly rotation does not invalidate the cache;
+// logins without an account id fall back to a token digest and simply rescope
+// whenever tokens rotate.
+export async function resolveCodexAccountIdentity(input?: {
+  readonly path?: string
+}): Promise<string | undefined> {
+  const login = await readCodexLogin(input)
+  if (login === undefined) return undefined
+  if (login.kind === "chatgpt") {
+    if (login.accountId !== undefined) return login.accountId
+    return createHash("sha256")
+      .update(login.accessToken)
+      .update("\0")
+      .update(login.refreshToken)
+      .digest("hex")
+  }
+  return createHash("sha256").update(login.apiKey).digest("hex")
+}
+
 async function requireChatGptLogin(path: string) {
   const login = await readCodexLogin({ path })
   if (login === undefined) {

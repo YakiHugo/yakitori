@@ -1,6 +1,9 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { projectExecutionView } from "../../src/gui/execution-view.ts"
+import {
+  createExecutionViewState,
+  projectExecutionView,
+} from "../../src/gui/execution-view.ts"
 import { ApiRequestError } from "../../src/gui/lib/rpc-client.ts"
 import {
   createInitialAppState,
@@ -1084,6 +1087,26 @@ describe("project state", () => {
     expect(useAppStore.getState().currentProject).toBe("project_b")
   })
 
+  it("keeps an explicit no-project selection across list refreshes", async () => {
+    window.localStorage.clear()
+    fakeRef.current.respond = (method) => {
+      if (method === "project/list") {
+        return { projects: [projectA, projectB] }
+      }
+      return notFound()
+    }
+
+    await useAppStore.getState().loadProjects()
+    expect(useAppStore.getState().currentProject).toBe("project_a")
+
+    useAppStore.getState().setNewSessionProject(undefined)
+    expect(window.localStorage.getItem("yakitori.project")).toBe("")
+
+    await useAppStore.getState().loadProjects()
+
+    expect(useAppStore.getState().currentProject).toBeUndefined()
+  })
+
   it("ignores an older project-list failure after a newer read succeeds", async () => {
     const older = deferredResponse()
     const newer = deferredResponse()
@@ -1241,7 +1264,12 @@ describe("project state", () => {
       "unfinished message",
     )
     expect(useAppStore.getState().collapsedProjects.project_b).toBeUndefined()
-    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(0)
+    expect(fakeRef.current.requestsFor("session/create")).toEqual([
+      {
+        method: "session/create",
+        params: { projectId: "project_b", workingDirectory: "/p/b" },
+      },
+    ])
   })
 
   it("toggleProjectPinned reorders immediately and absorbs the update response", async () => {
@@ -1404,6 +1432,25 @@ describe("project state", () => {
       },
     ])
     expect(useAppStore.getState().selectedSession?.id).toBe("session_1")
+  })
+
+  it("keeps explicit createSession calls deduplicated while awaiting creation", async () => {
+    const create = deferredResponse()
+    fakeRef.current.respond = (method) =>
+      method === "session/create" ? create.promise : notFound()
+    const first = useAppStore.getState().createSession("First")
+    const duplicate = useAppStore.getState().createSession("Second")
+    expect(await duplicate).toBeUndefined()
+    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(1)
+    create.resolve({
+      session: sessionDetail,
+      event: createEventEnvelope({
+        sessionId: "session_1",
+        seq: 1,
+        event: { type: EventType.SessionCreated, data: {} },
+      }),
+    })
+    expect(await first).toBe("session_1")
   })
 })
 
@@ -1765,6 +1812,136 @@ describe("model selection", () => {
     expect(useAppStore.getState().message).toBeUndefined()
   })
 
+  it("steers follow-up input into the active turn", async () => {
+    window.localStorage.clear()
+    fakeRef.current.respond = (method, params) => {
+      if (method === "session/input/steer") {
+        const body = params as { requestId: string; expectedTurnId: string }
+        return { requestId: body.requestId, turnId: body.expectedTurnId }
+      }
+      if (method === "session/list") return { sessions: [] }
+      return notFound()
+    }
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      promptDraft: "follow up",
+      execution: { ...createExecutionViewState(), activeTurnId: "turn_1" },
+    })
+
+    await useAppStore.getState().admitInput("follow up")
+
+    const steers = fakeRef.current.requestsFor("session/input/steer")
+    expect(steers).toHaveLength(1)
+    expect(steers[0]?.params).toMatchObject({
+      sessionId: "session_1",
+      expectedTurnId: "turn_1",
+      content: { kind: "text", text: "follow up" },
+    })
+    expect(fakeRef.current.requestsFor("session/input")).toHaveLength(0)
+    expect(useAppStore.getState().promptDraft).toBeUndefined()
+    // Steering is ephemeral acceptance: no admission outbox entry.
+    expect(
+      Array.from({ length: window.localStorage.length }, (_, index) =>
+        window.localStorage.key(index),
+      ).filter((key) => key?.startsWith("yakitori.admission")),
+    ).toEqual([])
+  })
+
+  it("falls back to a queued admission when the active turn ended before steering", async () => {
+    window.localStorage.clear()
+    fakeRef.current.respond = (method, params) => {
+      if (method === "session/input/steer") {
+        throw new ApiRequestError(
+          "Input was not submitted: no_active_turn.",
+          "conflict",
+        )
+      }
+      if (method === "session/input/queue") {
+        const body = params as { requestId: string }
+        return {
+          requestId: body.requestId,
+          inputId: "input_2",
+          event: createEventEnvelope({
+            sessionId: "session_1",
+            seq: 2,
+            event: {
+              type: EventType.InputAdmitted,
+              data: {
+                requestId: body.requestId,
+                inputId: "input_2",
+                role: InputRole.User,
+                content: { kind: "text", text: "follow up" },
+              },
+            },
+          }),
+        }
+      }
+      if (method === "session/list") return { sessions: [] }
+      return notFound()
+    }
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      promptDraft: "follow up",
+      execution: { ...createExecutionViewState(), activeTurnId: "turn_1" },
+    })
+
+    await useAppStore.getState().admitInput("follow up")
+
+    expect(fakeRef.current.requestsFor("session/input/steer")).toHaveLength(1)
+    expect(fakeRef.current.requestsFor("session/input/queue")).toHaveLength(1)
+    expect(fakeRef.current.requestsFor("session/input")).toHaveLength(0)
+    expect(useAppStore.getState().promptDraft).toBeUndefined()
+    expect(useAppStore.getState().message).toBeUndefined()
+  })
+
+  it("clears the admission outbox only when the durable event confirms the write", async () => {
+    window.localStorage.clear()
+    fakeRef.current.respond = admissionResponder()
+    useAppStore.setState({
+      modelSelections: {
+        session_1: { provider: "openai", model: "gpt-5.1-codex" },
+      },
+    })
+    await useAppStore.getState().selectSession("session_1")
+    emitSnapshot(fakeRef.current.streams[0])
+    useAppStore.setState({ promptDraft: "hello" })
+
+    await useAppStore.getState().admitInput("hello")
+
+    const admissionKeys = () =>
+      Array.from({ length: window.localStorage.length }, (_, index) =>
+        window.localStorage.key(index),
+      ).filter((key) => key?.startsWith("yakitori.admission"))
+    expect(useAppStore.getState().message).toBeUndefined()
+    expect(fakeRef.current.requestsFor("session/input")).toHaveLength(1)
+    // The response acknowledges the routing decision only; the outbox entry
+    // is still held.
+    expect(admissionKeys()).toHaveLength(1)
+
+    const requestId = (
+      fakeRef.current.requestsFor("session/input")[0]?.params as {
+        requestId: string
+      }
+    ).requestId
+    fakeRef.current.streams[0]?.emitEvent(
+      createEventEnvelope({
+        sessionId: "session_1",
+        seq: 2,
+        event: {
+          type: EventType.InputAdmitted,
+          data: {
+            requestId,
+            inputId: "input_1",
+            role: InputRole.User,
+            content: { kind: "text", text: "hello" },
+          },
+        },
+      }),
+    )
+
+    await vi.waitFor(() => expect(admissionKeys()).toHaveLength(0))
+  })
+
   it("clears an attachment-only draft after admission", async () => {
     window.localStorage.clear()
     fakeRef.current.respond = admissionResponder()
@@ -2119,10 +2296,10 @@ describe("new session drafts", () => {
     expect(useAppStore.getState().promptDraft).toBe("new task")
     await useAppStore.getState().selectSession("session_1")
     expect(useAppStore.getState().promptDraft).toBe("existing task")
-    expect(fakeRef.current.requestsFor("session/create")).toEqual([])
+    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(2)
   })
 
-  it("creates once on first send and carries the draft model into admission", async () => {
+  it("creates on opening and carries the draft model into first admission", async () => {
     window.localStorage.clear()
     const respond = admissionResponder()
     fakeRef.current.respond = (method, params) => {
@@ -2138,6 +2315,7 @@ describe("new session drafts", () => {
       return respond(method, params)
     }
     useAppStore.getState().startNewSession()
+    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(1)
     useAppStore
       .getState()
       .setModelSelection(undefined, { provider: "faux", model: "scripted" })
@@ -2156,6 +2334,431 @@ describe("new session drafts", () => {
       modelSelection: { provider: "faux", model: "scripted" },
     })
     expect(useAppStore.getState().promptDraft).toBeUndefined()
+  })
+
+  it("keeps creation out of busy while tracking concurrent work", async () => {
+    const create = deferredResponse()
+    const update = deferredResponse()
+    fakeRef.current.respond = (method) => {
+      if (method === "session/create") return create.promise
+      if (method === "project/update") return update.promise
+      if (method === "project/list") return { projects: [] }
+      return notFound()
+    }
+    useAppStore.getState().startNewSession()
+    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(1)
+    expect(useAppStore.getState().busy).toBe(false)
+    const updating = useAppStore
+      .getState()
+      .updateProject("project_a", { name: "Renamed" })
+    expect(useAppStore.getState().busy).toBe(true)
+    update.resolve(undefined)
+    await updating
+    expect(useAppStore.getState().busy).toBe(false)
+    expect(useAppStore.getState().selection.sessionId).toBeUndefined()
+    create.resolve({
+      session: sessionDetail,
+      event: createEventEnvelope({
+        sessionId: "session_1",
+        seq: 1,
+        event: { type: EventType.SessionCreated, data: {} },
+      }),
+    })
+    await vi.waitFor(() =>
+      expect(useAppStore.getState().selection.sessionId).toBe("session_1"),
+    )
+    expect(useAppStore.getState().busy).toBe(false)
+  })
+
+  it("queues one captured first prompt with images, excerpts, and model during creation", async () => {
+    window.localStorage.clear()
+    const create = deferredResponse()
+    const respond = admissionResponder()
+    fakeRef.current.respond = (method, params) =>
+      method === "session/create" ? create.promise : respond(method, params)
+    useAppStore.getState().startNewSession()
+    expect(useAppStore.getState().selection.sessionId).toBeUndefined()
+    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(1)
+    useAppStore
+      .getState()
+      .setModelSelection(undefined, { provider: "faux", model: "first" })
+    const image = {
+      name: "screen.png",
+      mediaType: "image/png" as const,
+      detail: "high" as const,
+      sizeBytes: 9,
+      file: { rolloutId: "draft_1", path: "attachments/staging/1.png" },
+    }
+    const excerpt = {
+      id: "excerpt_1",
+      kind: "selection" as const,
+      text: "selected context",
+      source: { kind: "file" as const, label: "README", path: "/p/README" },
+    }
+    useAppStore.getState().setPromptDraft("first")
+    useAppStore.getState().setPromptAttachments([image])
+    useAppStore.getState().addPromptExcerpt(excerpt)
+    const first = useAppStore.getState().admitInput("first", [image])
+    const duplicate = useAppStore.getState().admitInput("first", [image])
+    useAppStore.getState().setPromptDraft("next")
+    useAppStore.getState().setPromptAttachments([])
+    useAppStore.getState().removePromptExcerpt(excerpt.id)
+    useAppStore
+      .getState()
+      .setModelSelection(undefined, { provider: "faux", model: "later" })
+    expect(fakeRef.current.requestsFor("session/input")).toHaveLength(0)
+    create.resolve({
+      session: sessionDetail,
+      event: createEventEnvelope({
+        sessionId: "session_1",
+        seq: 1,
+        event: { type: EventType.SessionCreated, data: {} },
+      }),
+    })
+    await Promise.all([first, duplicate])
+    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(1)
+    expect(fakeRef.current.requestsFor("session/input")).toHaveLength(1)
+    expect(
+      fakeRef.current.requestsFor("session/input")[0]?.params,
+    ).toMatchObject({
+      content: {
+        text: "first",
+        attachments: [image],
+        contextAttachments: [excerpt],
+      },
+      modelSelection: { provider: "faux", model: "first" },
+    })
+    expect(useAppStore.getState().promptDraft).toBe("next")
+    expect(useAppStore.getState().promptAttachments).toEqual([])
+    expect(useAppStore.getState().promptExcerpts).toEqual([])
+  })
+
+  it("keeps an existing selection when a pending creation responds late", async () => {
+    const create = deferredResponse()
+    fakeRef.current.respond = (method) =>
+      method === "session/create"
+        ? create.promise
+        : method === "session/delete"
+          ? { sessionId: "session_1" }
+          : notFound()
+    useAppStore.getState().startNewSession()
+    useAppStore.getState().setPromptDraft("new conversation")
+    const first = useAppStore.getState().admitInput("new conversation")
+    await useAppStore.getState().selectSession("session_existing")
+    create.resolve({
+      session: sessionDetail,
+      event: createEventEnvelope({
+        sessionId: "session_1",
+        seq: 1,
+        event: { type: EventType.SessionCreated, data: {} },
+      }),
+    })
+    await first
+    expect(useAppStore.getState().selection.sessionId).toBe("session_existing")
+    expect(fakeRef.current.requestsFor("session/input")).toHaveLength(0)
+    expect(useAppStore.getState().newSessionPrompt).toBe("new conversation")
+    expect(fakeRef.current.requestsFor("session/delete")).toEqual([
+      { method: "session/delete", params: { sessionId: "session_1" } },
+    ])
+  })
+
+  it("starts a new draft after navigation while an earlier create is pending", async () => {
+    const first = deferredResponse()
+    const second = deferredResponse()
+    let requests = 0
+    fakeRef.current.respond = (method) => {
+      if (method === "session/create") {
+        requests += 1
+        return requests === 1 ? first.promise : second.promise
+      }
+      if (method === "session/delete") return { sessionId: "session_1" }
+      return notFound()
+    }
+    useAppStore.getState().startNewSession()
+    useAppStore.getState().startNewSession()
+    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(1)
+    await useAppStore.getState().selectSession("session_existing")
+    useAppStore.getState().startNewSession()
+    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(2)
+    first.resolve({
+      session: sessionDetail,
+      event: createEventEnvelope({
+        sessionId: "session_1",
+        seq: 1,
+        event: { type: EventType.SessionCreated, data: {} },
+      }),
+    })
+    // Let the older request settle while the second one remains unresolved.
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(fakeRef.current.requestsFor("session/delete")).toEqual([
+      { method: "session/delete", params: { sessionId: "session_1" } },
+    ])
+    expect(useAppStore.getState().selection.sessionId).toBeUndefined()
+    second.resolve({
+      session: { ...sessionDetail, id: "session_2" },
+      event: createEventEnvelope({
+        sessionId: "session_2",
+        seq: 1,
+        event: { type: EventType.SessionCreated, data: {} },
+      }),
+    })
+    await vi.waitFor(() =>
+      expect(useAppStore.getState().selection.sessionId).toBe("session_2"),
+    )
+  })
+
+  it("starts a different project's draft while the old project's create is pending", async () => {
+    const first = deferredResponse()
+    const second = deferredResponse()
+    let requests = 0
+    fakeRef.current.respond = (method) => {
+      if (method === "session/create")
+        return ++requests === 1 ? first.promise : second.promise
+      if (method === "session/delete") return { sessionId: "session_a" }
+      return notFound()
+    }
+    useAppStore.setState({
+      projects: [
+        makeProject("project_a", "/p/a"),
+        makeProject("project_b", "/p/b"),
+      ],
+    })
+    useAppStore.getState().startNewSession("project_a")
+    useAppStore.getState().startNewSession("project_a")
+    useAppStore.getState().startNewSession("project_b")
+    expect(fakeRef.current.requestsFor("session/create")).toEqual([
+      {
+        method: "session/create",
+        params: { projectId: "project_a", workingDirectory: "/p/a" },
+      },
+      {
+        method: "session/create",
+        params: { projectId: "project_b", workingDirectory: "/p/b" },
+      },
+    ])
+    first.resolve({
+      session: { ...sessionDetail, id: "session_a", projectId: "project_a" },
+      event: createEventEnvelope({
+        sessionId: "session_a",
+        seq: 1,
+        event: { type: EventType.SessionCreated, data: {} },
+      }),
+    })
+    await vi.waitFor(() =>
+      expect(fakeRef.current.requestsFor("session/delete")).toEqual([
+        { method: "session/delete", params: { sessionId: "session_a" } },
+      ]),
+    )
+    expect(useAppStore.getState().selection.sessionId).toBeUndefined()
+    second.resolve({
+      session: { ...sessionDetail, id: "session_b", projectId: "project_b" },
+      event: createEventEnvelope({
+        sessionId: "session_b",
+        seq: 1,
+        event: { type: EventType.SessionCreated, data: {} },
+      }),
+    })
+    await vi.waitFor(() =>
+      expect(useAppStore.getState().selectedSession).toMatchObject({
+        id: "session_b",
+        projectId: "project_b",
+      }),
+    )
+  })
+
+  it("does not delete the active project when an older create responds last", async () => {
+    const first = deferredResponse()
+    const second = deferredResponse()
+    let requests = 0
+    fakeRef.current.respond = (method) => {
+      if (method === "session/create")
+        return ++requests === 1 ? first.promise : second.promise
+      if (method === "session/delete") return { sessionId: "session_a" }
+      return notFound()
+    }
+    useAppStore.setState({
+      projects: [
+        makeProject("project_a", "/p/a"),
+        makeProject("project_b", "/p/b"),
+      ],
+    })
+    useAppStore.getState().startNewSession("project_a")
+    useAppStore.getState().setNewSessionProject("project_b")
+    second.resolve({
+      session: { ...sessionDetail, id: "session_b", projectId: "project_b" },
+      event: createEventEnvelope({
+        sessionId: "session_b",
+        seq: 1,
+        event: { type: EventType.SessionCreated, data: {} },
+      }),
+    })
+    await vi.waitFor(() =>
+      expect(useAppStore.getState().selection.sessionId).toBe("session_b"),
+    )
+    first.resolve({
+      session: { ...sessionDetail, id: "session_a", projectId: "project_a" },
+      event: createEventEnvelope({
+        sessionId: "session_a",
+        seq: 1,
+        event: { type: EventType.SessionCreated, data: {} },
+      }),
+    })
+    await vi.waitFor(() =>
+      expect(fakeRef.current.requestsFor("session/delete")).toEqual([
+        { method: "session/delete", params: { sessionId: "session_a" } },
+      ]),
+    )
+    expect(useAppStore.getState().selection.sessionId).toBe("session_b")
+    expect(useAppStore.getState().selectedSession?.projectId).toBe("project_b")
+  })
+
+  it("reports a failed cleanup for an abandoned successful create", async () => {
+    const create = deferredResponse()
+    fakeRef.current.respond = (method) => {
+      if (method === "session/create") return create.promise
+      if (method === "session/delete")
+        throw new ApiRequestError("Deletion failed", "not_found")
+      return notFound()
+    }
+    useAppStore.getState().startNewSession()
+    await useAppStore.getState().selectSession("session_existing")
+    create.resolve({
+      session: sessionDetail,
+      event: createEventEnvelope({
+        sessionId: "session_1",
+        seq: 1,
+        event: { type: EventType.SessionCreated, data: {} },
+      }),
+    })
+    await vi.waitFor(() =>
+      expect(useAppStore.getState().message).toBe(
+        "Could not remove abandoned conversation session_1: Deletion failed",
+      ),
+    )
+    expect(useAppStore.getState().selection.sessionId).toBe("session_existing")
+  })
+
+  it("recreates a pending draft when its project dropdown changes and preserves its draft", async () => {
+    const first = deferredResponse()
+    const second = deferredResponse()
+    let requests = 0
+    fakeRef.current.respond = (method) => {
+      if (method === "session/create")
+        return ++requests === 1 ? first.promise : second.promise
+      if (method === "session/delete") return { sessionId: "session_a" }
+      return notFound()
+    }
+    useAppStore.setState({
+      projects: [
+        makeProject("project_a", "/p/a"),
+        makeProject("project_b", "/p/b"),
+      ],
+    })
+    useAppStore.getState().startNewSession("project_a")
+    useAppStore.getState().setPromptDraft("work in B")
+    const attachment = {
+      name: "screen.png",
+      mediaType: "image/png" as const,
+      detail: "high" as const,
+      sizeBytes: 9,
+      file: { rolloutId: "draft_1", path: "attachments/staging/1.png" },
+    }
+    useAppStore.getState().setPromptAttachments([attachment])
+    const revision = useAppStore.getState().sessionSelectionIntentRevision
+    useAppStore.getState().setNewSessionProject("project_b")
+    expect(
+      useAppStore.getState().sessionSelectionIntentRevision,
+    ).toBeGreaterThan(revision)
+    expect(fakeRef.current.requestsFor("session/create")[1]?.params).toEqual({
+      projectId: "project_b",
+      workingDirectory: "/p/b",
+    })
+    first.resolve({
+      session: { ...sessionDetail, id: "session_a", projectId: "project_a" },
+      event: createEventEnvelope({
+        sessionId: "session_a",
+        seq: 1,
+        event: { type: EventType.SessionCreated, data: {} },
+      }),
+    })
+    await vi.waitFor(() =>
+      expect(fakeRef.current.requestsFor("session/delete")).toHaveLength(1),
+    )
+    second.resolve({
+      session: { ...sessionDetail, id: "session_b", projectId: "project_b" },
+      event: createEventEnvelope({
+        sessionId: "session_b",
+        seq: 1,
+        event: { type: EventType.SessionCreated, data: {} },
+      }),
+    })
+    await vi.waitFor(() =>
+      expect(useAppStore.getState().selection.sessionId).toBe("session_b"),
+    )
+    expect(useAppStore.getState().currentProject).toBe("project_b")
+    expect(useAppStore.getState().selectedSession?.projectId).toBe("project_b")
+    expect(useAppStore.getState().promptDraft).toBe("work in B")
+    expect(useAppStore.getState().promptAttachments).toEqual([attachment])
+  })
+
+  it("retains the queued draft on creation failure and permits retry", async () => {
+    const create = deferredResponse()
+    const respond = admissionResponder()
+    fakeRef.current.respond = (method, params) =>
+      method === "session/create" ? create.promise : respond(method, params)
+    useAppStore.getState().startNewSession()
+    const first = useAppStore.getState().admitInput("try again")
+    const duplicate = useAppStore.getState().admitInput("try again")
+    create.reject(new ApiRequestError("Creation failed", "not_found"))
+    await Promise.all([first, duplicate])
+    expect(useAppStore.getState().promptDraft).toBe("try again")
+    expect(useAppStore.getState().message).toBe("Creation failed")
+    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(1)
+    fakeRef.current.respond = (method, params) =>
+      method === "session/create"
+        ? {
+            session: sessionDetail,
+            event: createEventEnvelope({
+              sessionId: "session_1",
+              seq: 1,
+              event: { type: EventType.SessionCreated, data: {} },
+            }),
+          }
+        : respond(method, params)
+    await useAppStore.getState().admitInput("try again")
+    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(2)
+    expect(fakeRef.current.requestsFor("session/input")).toHaveLength(1)
+  })
+
+  it("admits the first input before the session list refresh finishes", async () => {
+    window.localStorage.clear()
+    const list = deferredResponse()
+    const respond = admissionResponder()
+    fakeRef.current.respond = (method, params) => {
+      if (method === "session/create")
+        return {
+          session: sessionDetail,
+          event: createEventEnvelope({
+            sessionId: "session_1",
+            seq: 1,
+            event: { type: EventType.SessionCreated, data: {} },
+          }),
+        }
+      if (method === "session/list") return list.promise
+      return respond(method, params)
+    }
+    useAppStore.getState().startNewSession()
+
+    const sending = useAppStore.getState().admitInput("hello")
+    try {
+      await vi.waitFor(() =>
+        expect(fakeRef.current.requestsFor("session/input")).toHaveLength(1),
+      )
+      expect(useAppStore.getState().selection.sessionId).toBe("session_1")
+    } finally {
+      list.resolve({ sessions: [] })
+      await sending
+    }
   })
 
   it("reveals a search result in its collapsed project without duplicating later pagination", async () => {

@@ -416,6 +416,9 @@ export type InputAdmittedEvent = {
     readonly modelSelection?: ModelSelection
     readonly parentInputId?: string
     readonly metadata?: EventMetadata
+    // Steered inputs join an active Turn instead of starting one: they are
+    // recorded when the Turn next samples and never occupy the input queue.
+    readonly steered?: boolean
   }
 }
 
@@ -819,13 +822,15 @@ function requireKernelEvent(value: unknown): asserts value is KernelEvent {
             "modelSelection",
             "parentInputId",
             "metadata",
+            "steered",
           ]) &&
           isString(data.requestId) &&
           isString(data.inputId) &&
           isInputRole(data.role) &&
           isTextContent(data.content) &&
           (data.modelSelection === undefined ||
-            isModelSelection(data.modelSelection))
+            isModelSelection(data.modelSelection)) &&
+          (data.steered === undefined || data.steered === true)
         )
       case EventType.InputCancelled:
         return onlyKeys(data, ["inputId", "reason"]) && isString(data.inputId)

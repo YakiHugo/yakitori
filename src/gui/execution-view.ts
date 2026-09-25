@@ -170,6 +170,10 @@ export type ExecutionViewState = Readonly<{
   permissionEntryIndexes: Readonly<Record<string, number>>
   openCompactionItems: Readonly<Record<string, string>>
   queuedInputs: Readonly<Record<string, ApiPendingInput>>
+  // requestIds whose durable input.admitted event this view has seen; the
+  // admission outbox acknowledges against this set (including events that
+  // arrived while the client was offline).
+  admittedRequestIds: Readonly<Record<string, true>>
   timeToFirstTokenWeightedMs: number
   timeToFirstTokenSamples: number
 }>
@@ -223,6 +227,7 @@ export function createExecutionViewState(
     permissionEntryIndexes: {},
     openCompactionItems: {},
     queuedInputs: {},
+    admittedRequestIds: {},
     timeToFirstTokenWeightedMs: 0,
     timeToFirstTokenSamples: 0,
   }
@@ -594,17 +599,24 @@ function applyDurable(
     case "session.created":
       return next
     case "input.admitted": {
-      const queuedInputs = {
-        ...next.queuedInputs,
-        [event.data.inputId]: {
-          id: event.data.inputId,
-          text: event.data.content.text,
-          admittedAt: event.createdAt,
-        },
-      }
+      const queuedInputs =
+        event.data.steered === true
+          ? next.queuedInputs
+          : {
+              ...next.queuedInputs,
+              [event.data.inputId]: {
+                id: event.data.inputId,
+                text: event.data.content.text,
+                admittedAt: event.createdAt,
+              },
+            }
       return {
         ...next,
         queuedInputs,
+        admittedRequestIds: {
+          ...next.admittedRequestIds,
+          [event.data.requestId]: true,
+        },
         entries:
           event.data.role === "user"
             ? [
@@ -630,7 +642,15 @@ function applyDurable(
       }
     }
     case "input.cancelled":
-      return removeQueuedInput(next, event.data.inputId)
+      next = removeQueuedInput(next, event.data.inputId)
+      // A cancelled queued input never ran; it leaves the transcript too.
+      return {
+        ...next,
+        entries: next.entries.filter(
+          (entry) =>
+            entry.kind !== "user_input" || entry.inputId !== event.data.inputId,
+        ),
+      }
     case "turn.started":
       next = removeQueuedInput(next, event.data.inputId)
       return {

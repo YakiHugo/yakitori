@@ -123,6 +123,53 @@ describe("admission outbox", () => {
     ])
   })
 
+  it("reserves a new request id when the model selection changes", async () => {
+    const storage = createMemoryStorage()
+    const draft = {
+      apiBase: "http://127.0.0.1:4141/",
+      sessionId: "session_one",
+      text: "Retry with another model",
+    }
+
+    const first = await reserveAdmission(
+      storage,
+      { ...draft, modelSelection: { provider: "codex", model: "gpt-5" } },
+      () => "request_first",
+    )
+    const retried = await reserveAdmission(
+      storage,
+      { ...draft, modelSelection: { provider: "codex", model: "gpt-5" } },
+      () => "request_unused",
+    )
+    const changed = await reserveAdmission(
+      storage,
+      { ...draft, modelSelection: { provider: "grok", model: "grok-4" } },
+      () => "request_changed",
+    )
+
+    expect(retried.requestId).toBe(first.requestId)
+    expect(changed.requestId).toBe("request_changed")
+  })
+
+  it("stores the full submission content for replay", async () => {
+    const storage = createMemoryStorage()
+    const draft = {
+      apiBase: "http://127.0.0.1:4141/",
+      sessionId: "session_one",
+      text: "Keep me whole",
+      modelSelection: { provider: "codex", model: "gpt-5" },
+    }
+
+    await reserveAdmission(storage, draft, () => "request_first")
+
+    const key = storage.keys()[0]
+    expect(key).toBeDefined()
+    expect(JSON.parse(storage.getItem(key ?? "") ?? "")).toEqual({
+      requestId: "request_first",
+      draft,
+    })
+  })
+
   it("removes a request id only after its matching acknowledgement", async () => {
     const storage = createMemoryStorage()
     const draft = {

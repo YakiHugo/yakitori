@@ -55,6 +55,10 @@ export type ResponseItemEnvelope = {
     readonly modelSelection?: ModelSelection
     readonly parentInputId?: string
     readonly metadata?: EventMetadata
+    // Queued admissions write the input item as a standalone batch; the
+    // marker distinguishes a real queue entry from a torn turn-start batch
+    // (uncovered input_ with no marker) when rebuilding the queue on resume.
+    readonly queued?: boolean
   }
 }
 
@@ -88,6 +92,12 @@ export type RolloutItem =
       readonly usage?: TokenUsage
       readonly metrics?: TurnMetrics
       readonly error?: KernelError
+    }
+  | {
+      // Cancels a queued input: the queue entry is the earlier uncovered
+      // input_ response_item; this marker keeps it cancelled across restarts.
+      readonly type: "input_cancelled"
+      readonly inputId: string
     }
   | {
       readonly type: "agent_status"

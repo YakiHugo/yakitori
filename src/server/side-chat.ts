@@ -7,22 +7,22 @@ import { Session, type TurnProcessor } from "../core/session.ts"
 import type { SessionEvent, TurnInputSubmission } from "../core/session-io.ts"
 import type { SessionRolloutStore } from "../core/thread-store.ts"
 import {
-  isImageAttachment,
   type ImageAttachment,
+  isImageAttachment,
   type ModelMessage,
   type ModelSelection,
   type TextContent,
 } from "../kernel/events.ts"
+import { createSessionId } from "../kernel/ids.ts"
 import {
-  isContextExcerpts,
   type ContextExcerpt,
+  isContextExcerpts,
 } from "../kernel/input-context.ts"
 import type { RolloutAssets } from "../kernel/rollout-assets.ts"
 import type {
   PermissionGate,
   RuntimePermissionRequest,
 } from "../runtime/permission-gate.ts"
-import { createSessionId } from "../kernel/ids.ts"
 
 export type SideChatMessage = {
   id: string
@@ -343,6 +343,9 @@ export function createSideChatService(options: {
           },
           async persistThread() {},
           async flushThread() {},
+          async readThread() {
+            return structuredClone(stored)
+          },
           async shutdownThread() {},
         }
         const thread = new AgentThread(

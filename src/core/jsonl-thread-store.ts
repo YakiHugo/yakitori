@@ -65,17 +65,17 @@ import {
   startAfterThreadCursor,
   threadCursor,
 } from "./thread-search.ts"
-import type {
-  CreateForkInput,
-  CreateThreadMetadata,
+import {
+  type CreateForkInput,
+  type CreateThreadMetadata,
   PersistContext,
-  PreparedFork,
-  PrepareForkInput,
-  ThreadStore,
-  ThreadStoreForkResult,
-  ThreadStoreListInput,
-  ThreadStoreListResult,
-  ThreadStoreSearchInput,
+  type PreparedFork,
+  type PrepareForkInput,
+  type ThreadStore,
+  type ThreadStoreForkResult,
+  type ThreadStoreListInput,
+  type ThreadStoreListResult,
+  type ThreadStoreSearchInput,
 } from "./thread-store.ts"
 
 type PendingWrite = {
@@ -92,6 +92,19 @@ type LiveWriter = {
   tail: Promise<void>
   shutdownPromise: Promise<void> | undefined
   nextSeq: number
+  accepting: boolean
+}
+
+type StagedThread = {
+  readonly metadata: ThreadMetadata
+  readonly lock: OwnedFileLock
+  readonly rollout: StoredRolloutItem[]
+  materializing: Promise<void> | undefined
+  shutdownPromise: Promise<void> | undefined
+  sidebar: SessionPresentation | undefined
+  pendingDurableAppend:
+    | { readonly items: readonly RolloutItem[]; readonly throughSeq: number }
+    | undefined
   accepting: boolean
 }
 
@@ -123,6 +136,7 @@ export class JsonlThreadStore implements ThreadStore {
   readonly #reservationLocksDirectory: string
   readonly #coordinationLockPath: string
   readonly #writers = new Map<string, LiveWriter>()
+  readonly #staged = new Map<string, StagedThread>()
   readonly #reservations = new Map<string, ForkReservation>()
   readonly #ephemeralAssetOwners = new Set<string>()
   readonly #ready: Promise<void>
@@ -188,6 +202,14 @@ export class JsonlThreadStore implements ThreadStore {
     )
     try {
       if (this.#ephemeralAssetOwners.has(rolloutId)) return await mutate()
+      if (this.#staged.has(rolloutId)) {
+        const directory = this.#rolloutDirectory(rolloutId)
+        if (!(await pathExists(directory))) {
+          await mkdir(directory)
+          await syncDirectory(this.#rolloutsDirectory)
+        }
+        return await mutate()
+      }
       const metadataFiles = (await readdir(this.#threadsDirectory)).filter(
         (file) => file.endsWith(".json"),
       )
@@ -237,25 +259,57 @@ export class JsonlThreadStore implements ThreadStore {
         "New Threads cannot provide physical rollout or inherited history.",
       )
     }
-    if (await pathExists(this.#metadataPath(metadata.id))) {
-      throw new Error(`Thread ${metadata.id} already exists.`)
-    }
     const normalized = normalizeMetadata({
       ...metadata,
       rolloutId: metadata.id,
     })
-    await this.#createPhysicalThread(normalized)
+    if (normalized.parentThreadId !== undefined) {
+      await this.#createPhysicalThread(normalized)
+      try {
+        const stored = await this.#readRequiredThread(normalized.id)
+        await this.#withSearchProjection(async () =>
+          this.#searchProjection.rebuild(
+            stored,
+            await this.#searchProjectionStamp(normalized),
+          ),
+        )
+        return stored
+      } catch (error) {
+        await this.#rollbackCreatedThread(normalized.id)
+        throw error
+      }
+    }
+    const lock = await acquireOwnedLock(
+      this.#writerLockPath(normalized.id),
+      `Thread ${normalized.id} already has an active writer.`,
+    )
     try {
-      const stored = await this.#readRequiredThread(normalized.id)
-      await this.#withSearchProjection(async () =>
-        this.#searchProjection.rebuild(
-          stored,
-          await this.#searchProjectionStamp(normalized),
-        ),
-      )
-      return stored
+      if (
+        (await pathExists(this.#metadataPath(normalized.id))) ||
+        (await pathExists(this.#rolloutDirectory(normalized.id)))
+      ) {
+        throw new Error(`Thread ${normalized.id} already exists.`)
+      }
+      const sessionMeta: StoredRolloutItem = {
+        threadId: normalized.id,
+        rolloutId: normalized.rolloutId,
+        seq: 0,
+        createdAt: normalized.createdAt,
+        item: { type: "session_meta", metadata: normalized },
+      }
+      this.#staged.set(normalized.id, {
+        metadata: normalized,
+        lock,
+        rollout: [sessionMeta],
+        materializing: undefined,
+        shutdownPromise: undefined,
+        sidebar: undefined,
+        pendingDurableAppend: undefined,
+        accepting: true,
+      })
+      return structuredClone({ metadata: normalized, rollout: [sessionMeta] })
     } catch (error) {
-      await this.#rollbackCreatedThread(normalized.id)
+      await releaseOwnedLock(lock)
       throw error
     }
   }
@@ -280,6 +334,45 @@ export class JsonlThreadStore implements ThreadStore {
     threadId: string,
     items: readonly RolloutItem[],
   ): Promise<number> {
+    const staged = this.#staged.get(threadId)
+    if (staged !== undefined) {
+      if (!staged.accepting) throw new Error(`Thread ${threadId} is closing.`)
+      if (staged.materializing !== undefined) {
+        return staged.materializing.then(() =>
+          this.appendItems(threadId, items),
+        )
+      }
+      const copied = structuredClone([...items])
+      const pending = staged.pendingDurableAppend
+      if (pending !== undefined) {
+        const sameBatch =
+          JSON.stringify(copied) === JSON.stringify(pending.items)
+        staged.materializing = this.#materializeStagedThread(threadId, staged)
+        return staged.materializing.then(() =>
+          sameBatch ? pending.throughSeq : this.appendItems(threadId, items),
+        )
+      }
+      for (const item of copied) {
+        staged.rollout.push({
+          threadId,
+          rolloutId: staged.metadata.rolloutId,
+          seq: staged.rollout.length,
+          createdAt: new Date().toISOString(),
+          item,
+        })
+      }
+      const throughSeq = staged.rollout.length
+      if (
+        copied.some(
+          ({ type }) => type === "agent_message" || type === "agent_status",
+        )
+      ) {
+        staged.pendingDurableAppend = { items: copied, throughSeq }
+        staged.materializing = this.#materializeStagedThread(threadId, staged)
+        return staged.materializing.then(() => throughSeq)
+      }
+      return Promise.resolve(throughSeq)
+    }
     const writer = this.#requireWriter(threadId)
     for (const item of structuredClone([...items])) {
       const entry: StoredRolloutItem = {
@@ -303,11 +396,18 @@ export class JsonlThreadStore implements ThreadStore {
     })
   }
 
-  persistThread(threadId: string, _context: PersistContext): Promise<void> {
+  persistThread(threadId: string, context: PersistContext): Promise<void> {
+    const staged = this.#staged.get(threadId)
+    if (staged !== undefined && context === PersistContext.TurnStart) {
+      staged.materializing ??= this.#materializeStagedThread(threadId, staged)
+      return staged.materializing
+    }
     return this.flushThread(threadId)
   }
 
   flushThread(threadId: string): Promise<void> {
+    const staged = this.#staged.get(threadId)
+    if (staged !== undefined) return staged.materializing ?? Promise.resolve()
     const writer = this.#requireWriter(threadId)
     const endSeqExclusive = writer.nextSeq
     return this.#enqueue(writer, async () => {
@@ -317,6 +417,32 @@ export class JsonlThreadStore implements ThreadStore {
   }
 
   shutdownThread(threadId: string): Promise<void> {
+    const staged = this.#staged.get(threadId)
+    if (staged !== undefined) {
+      if (staged.shutdownPromise !== undefined) return staged.shutdownPromise
+      staged.accepting = false
+      staged.shutdownPromise =
+        staged.materializing !== undefined
+          ? staged.materializing.then(
+              () => this.shutdownThread(threadId),
+              (error: unknown) => {
+                staged.shutdownPromise = undefined
+                staged.accepting = true
+                throw error
+              },
+            )
+          : this.#discardStagedThread(staged).then(
+              () => {
+                this.#staged.delete(threadId)
+              },
+              (error: unknown) => {
+                staged.shutdownPromise = undefined
+                staged.accepting = true
+                throw error
+              },
+            )
+      return staged.shutdownPromise
+    }
     const writer = this.#writers.get(threadId)
     if (writer === undefined) {
       return Promise.reject(
@@ -358,6 +484,17 @@ export class JsonlThreadStore implements ThreadStore {
   }
 
   async discardThread(threadId: string): Promise<void> {
+    const staged = this.#staged.get(threadId)
+    if (staged !== undefined) {
+      if (staged.materializing !== undefined) {
+        await staged.materializing
+        return this.discardThread(threadId)
+      }
+      staged.accepting = false
+      this.#staged.delete(threadId)
+      await this.#discardStagedThread(staged)
+      return
+    }
     const writer = this.#writers.get(threadId)
     if (writer === undefined) return
     if (writer.shutdownPromise !== undefined) {
@@ -377,6 +514,11 @@ export class JsonlThreadStore implements ThreadStore {
   async prepareFork(input: PrepareForkInput): Promise<PreparedFork> {
     await this.#ready
     requireThreadId(input.sourceThreadId)
+    const staged = this.#staged.get(input.sourceThreadId)
+    if (staged !== undefined) {
+      // Explicit forks need a physical byte cutoff for inherited history.
+      await this.persistThread(input.sourceThreadId, PersistContext.TurnStart)
+    }
     const reservationId = `fork_${globalThis.crypto.randomUUID()}`
     const localWriter = this.#writers.get(input.sourceThreadId)
     const coordinationLock =
@@ -504,6 +646,29 @@ export class JsonlThreadStore implements ThreadStore {
   async readThread(threadId: string): Promise<StoredThread | undefined> {
     await this.#ready
     requireThreadId(threadId)
+    const staged = this.#staged.get(threadId)
+    if (staged !== undefined) {
+      if (staged.materializing !== undefined) await staged.materializing
+      else {
+        // A rejected durable append remains in the retry buffer, but its
+        // entire batch is an unpublished suffix of the staged rollout.
+        const pending = staged.pendingDurableAppend
+        const visibleThrough =
+          pending === undefined
+            ? staged.rollout.length
+            : pending.throughSeq - pending.items.length
+        return structuredClone({
+          metadata: staged.metadata,
+          rollout: staged.rollout.filter(
+            ({ item, seq }) =>
+              seq < visibleThrough &&
+              item.type !== "response_item" &&
+              item.type !== "turn_context" &&
+              item.type !== "turn_started",
+          ),
+        })
+      }
+    }
     if (!(await pathExists(this.#metadataPath(threadId)))) return undefined
     return this.#readRequiredThread(threadId)
   }
@@ -633,6 +798,21 @@ export class JsonlThreadStore implements ThreadStore {
 
   async readSessionSidebar(): Promise<SessionSidebar> {
     await this.#ready
+    const state = await this.#readDurableSessionSidebar()
+    return {
+      ...state,
+      entries: {
+        ...state.entries,
+        ...Object.fromEntries(
+          [...this.#staged].flatMap(([id, staged]) =>
+            staged.sidebar === undefined ? [] : [[id, staged.sidebar]],
+          ),
+        ),
+      },
+    }
+  }
+
+  async #readDurableSessionSidebar(): Promise<SessionSidebar> {
     try {
       // Canonical UI state is separate from the disposable search projection.
       const value: unknown = JSON.parse(
@@ -675,8 +855,12 @@ export class JsonlThreadStore implements ThreadStore {
   async sessionPresentation(
     threadId: string,
   ): Promise<SessionPresentation & { navigationId?: string }> {
+    await this.#ready
     const entries = sessionEntries(
-      await this.#navigationMetadata(),
+      [
+        ...(await this.#navigationMetadata()),
+        ...[...this.#staged.values()].map(({ metadata }) => metadata),
+      ],
       await this.#readSessionHeads(),
     )
     const session = entries.find((entry) => entry.id === threadId)
@@ -690,6 +874,9 @@ export class JsonlThreadStore implements ThreadStore {
 
   async updateSessionSidebar(change: SidebarChange): Promise<SessionSidebar> {
     await this.#ready
+    if ("sessionId" in change) {
+      await this.#staged.get(change.sessionId)?.materializing
+    }
     const lock = await acquireOwnedLock(
       this.#coordinationLockPath,
       "Sidebar is being updated.",
@@ -697,16 +884,38 @@ export class JsonlThreadStore implements ThreadStore {
       true,
     )
     try {
+      const metadata = await this.#navigationMetadata()
       const sessions = sessionEntries(
-        await this.#navigationMetadata(),
+        [
+          ...metadata,
+          ...[...this.#staged.values()]
+            .filter(
+              ({ metadata: staged }) =>
+                !metadata.some(({ id }) => id === staged.id),
+            )
+            .map(({ metadata }) => metadata),
+        ],
         await this.#readSessionHeads(),
       )
+      const durable = await this.#readDurableSessionSidebar()
       const state = changeSessionSidebar(
         await this.readSessionSidebar(),
         change,
         sessions,
       )
-      await atomicWrite(this.#sessionSidebarPath, JSON.stringify(state))
+      const stagedIds = new Set(this.#staged.keys())
+      const persisted: SessionSidebar = {
+        sections: state.sections,
+        entries: Object.fromEntries(
+          Object.entries(state.entries).filter(([id]) => !stagedIds.has(id)),
+        ),
+      }
+      if (JSON.stringify(persisted) !== JSON.stringify(durable)) {
+        await atomicWrite(this.#sessionSidebarPath, JSON.stringify(persisted))
+      }
+      for (const [id, staged] of this.#staged) {
+        staged.sidebar = state.entries[id]
+      }
       return state
     } finally {
       await releaseOwnedLock(lock)
@@ -817,6 +1026,14 @@ export class JsonlThreadStore implements ThreadStore {
   async deleteThread(threadId: string): Promise<void> {
     await this.#ready
     requireThreadId(threadId)
+    const staged = this.#staged.get(threadId)
+    if (staged !== undefined) {
+      if (staged.materializing !== undefined) await staged.materializing
+      else {
+        await this.discardThread(threadId)
+        return
+      }
+    }
     if (this.#writers.has(threadId)) {
       throw new Error(`Thread ${threadId} still has a live writer.`)
     }
@@ -863,16 +1080,72 @@ export class JsonlThreadStore implements ThreadStore {
     await this.#collectUnreferencedRollouts()
   }
 
-  async #createPhysicalThread(metadata: ThreadMetadata): Promise<void> {
+  async #materializeStagedThread(
+    threadId: string,
+    staged: StagedThread,
+  ): Promise<void> {
+    try {
+      await this.#createPhysicalThread(
+        staged.metadata,
+        staged.rollout,
+        staged.lock,
+      )
+      this.#staged.delete(threadId)
+      await this.#withSearchProjection(async () => {
+        try {
+          this.#searchProjection.rebuild(
+            await this.#readRequiredThread(threadId),
+            await this.#searchProjectionStamp(staged.metadata),
+          )
+        } catch {
+          this.#searchProjectionDirty = true
+        }
+      })
+    } catch (error) {
+      staged.materializing = undefined
+      throw error
+    }
+  }
+
+  async #discardStagedThread(staged: StagedThread): Promise<void> {
+    try {
+      const lock = await acquireOwnedLock(
+        this.#coordinationLockPath,
+        "Thread storage is being updated.",
+        false,
+        true,
+      )
+      try {
+        await durableRemoveTree(
+          this.#rolloutDirectory(staged.metadata.rolloutId),
+        )
+      } finally {
+        await releaseOwnedLock(lock)
+      }
+    } finally {
+      await releaseOwnedLock(staged.lock)
+    }
+  }
+
+  async #createPhysicalThread(
+    metadata: ThreadMetadata,
+    initialRollout?: readonly StoredRolloutItem[],
+    stagedLock?: OwnedFileLock,
+  ): Promise<void> {
     const normalized = normalizeMetadata(metadata)
     requireThreadId(normalized.id)
-    if (this.#writers.has(normalized.id)) {
+    if (
+      this.#writers.has(normalized.id) ||
+      (stagedLock === undefined && this.#staged.has(normalized.id))
+    ) {
       throw new Error(`Thread ${normalized.id} already has a live writer.`)
     }
-    const writerLock = await acquireOwnedLock(
-      this.#writerLockPath(normalized.id),
-      `Thread ${normalized.id} already has an active writer.`,
-    )
+    const writerLock =
+      stagedLock ??
+      (await acquireOwnedLock(
+        this.#writerLockPath(normalized.id),
+        `Thread ${normalized.id} already has an active writer.`,
+      ))
     const rolloutId = normalized.rolloutId
     const rolloutDirectory = this.#rolloutDirectory(rolloutId)
     const rolloutPath = this.#rolloutPath(rolloutId)
@@ -886,7 +1159,11 @@ export class JsonlThreadStore implements ThreadStore {
     }
     let lockTransferred = false
     let ownsCreationPaths = false
+    let hadAssetDirectory = false
     let coordinationLock: OwnedFileLock | undefined
+    let priorSidebar: SessionSidebar | undefined
+    let hadSidebarFile = false
+    let sidebarWriteAttempted = false
     try {
       coordinationLock = await acquireOwnedLock(
         this.#coordinationLockPath,
@@ -895,32 +1172,65 @@ export class JsonlThreadStore implements ThreadStore {
         true,
       )
       if (
-        (await pathExists(rolloutDirectory)) ||
-        (await pathExists(metadataPath))
+        (await pathExists(metadataPath)) ||
+        (await pathExists(rolloutPath)) ||
+        (stagedLock === undefined && (await pathExists(rolloutDirectory)))
       ) {
         throw new Error(`Thread ${normalized.id} already exists.`)
       }
+      hadAssetDirectory = await pathExists(rolloutDirectory)
       ownsCreationPaths = true
-      await mkdir(rolloutDirectory)
-      await syncDirectory(this.#rolloutsDirectory)
-      await atomicWrite(rolloutPath, `${JSON.stringify(sessionMeta)}\n`)
+      if (!hadAssetDirectory) {
+        await mkdir(rolloutDirectory)
+        await syncDirectory(this.#rolloutsDirectory)
+      }
+      await atomicWrite(
+        rolloutPath,
+        `${(initialRollout ?? [sessionMeta]).map((entry) => JSON.stringify(entry)).join("\n")}\n`,
+      )
       await atomicWrite(metadataPath, `${JSON.stringify(normalized)}\n`)
+      const sidebar =
+        stagedLock === undefined
+          ? undefined
+          : this.#staged.get(normalized.id)?.sidebar
+      if (sidebar !== undefined) {
+        hadSidebarFile = await pathExists(this.#sessionSidebarPath)
+        priorSidebar = await this.#readDurableSessionSidebar()
+        sidebarWriteAttempted = true
+        await atomicWrite(
+          this.#sessionSidebarPath,
+          JSON.stringify({
+            ...priorSidebar,
+            entries: { ...priorSidebar.entries, [normalized.id]: sidebar },
+          }),
+        )
+      }
       await this.#openClaimedWriter(normalized, false, writerLock)
       lockTransferred = true
     } catch (error) {
+      if (sidebarWriteAttempted && priorSidebar !== undefined) {
+        if (hadSidebarFile)
+          await atomicWrite(
+            this.#sessionSidebarPath,
+            JSON.stringify(priorSidebar),
+          )
+        else await durableRemove(this.#sessionSidebarPath)
+      }
       // atomicWrite can publish its final path before a directory fsync fails.
       // Both names were absent under the storage lock, so unconditional rollback
       // cannot remove another creator's state.
       if (ownsCreationPaths) {
         await durableRemove(metadataPath)
-        await durableRemoveTree(rolloutDirectory)
+        if (!hadAssetDirectory) await durableRemoveTree(rolloutDirectory)
+        else await durableRemove(rolloutPath)
       }
       throw error
     } finally {
       if (coordinationLock !== undefined) {
         await releaseOwnedLock(coordinationLock)
       }
-      if (!lockTransferred) await releaseOwnedLock(writerLock)
+      if (!lockTransferred && stagedLock === undefined)
+        await releaseOwnedLock(writerLock)
     }
   }
 
@@ -1865,6 +2175,12 @@ function isRolloutItem(value: unknown): value is RolloutItem {
       (value.error === undefined || isRolloutError(value.error))
     )
   }
+  if (value.type === "input_cancelled") {
+    return (
+      hasOnlyKeys(value, ["type", "inputId"]) &&
+      typeof value.inputId === "string"
+    )
+  }
   if (value.type === "agent_status") {
     return (
       hasOnlyKeys(value, ["type", "status", "error"]) &&
@@ -1962,11 +2278,17 @@ function isResponseItem(value: unknown): value is ResponseItemEnvelope {
 function isSubmissionMetadata(value: unknown): boolean {
   return (
     isRecord(value) &&
-    hasOnlyKeys(value, ["modelSelection", "parentInputId", "metadata"]) &&
+    hasOnlyKeys(value, [
+      "modelSelection",
+      "parentInputId",
+      "metadata",
+      "queued",
+    ]) &&
     (value.modelSelection === undefined ||
       isModelSelection(value.modelSelection)) &&
     optionalString(value.parentInputId) &&
-    (value.metadata === undefined || isJsonObject(value.metadata))
+    (value.metadata === undefined || isJsonObject(value.metadata)) &&
+    (value.queued === undefined || value.queued === true)
   )
 }
 

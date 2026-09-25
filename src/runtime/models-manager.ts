@@ -18,7 +18,9 @@ export type ModelSelectionInput = Readonly<{
 
 // Mirrors Codex's ModelsManager boundary: callers read one provider-scoped
 // catalog owner instead of consulting the bundled catalog independently.
-// Static managers are the fallback for providers without a discovery API.
+// refresh() revalidates an expired cache in the background and never blocks a
+// Turn on the network for it. Static managers are the fallback for providers
+// without a discovery API.
 export type ModelsManager = {
   readonly provider: string
   refresh(): Promise<void>
@@ -41,38 +43,113 @@ export type DiscoveredModel = Readonly<{
   effectiveContextWindowPercent?: number
 }>
 
+// The persisted form of a discovery result, written after each successful
+// refresh so a cold process starts with the last good catalog (codex-rs keeps
+// the same models_cache.json per identity). Entries older than the manager
+// TTL are treated as absent, and identity mismatches are evicted on load.
+export type PersistedModelsCache = Readonly<{
+  identity: string | undefined
+  fetchedAt: number
+  models: readonly DiscoveredModel[]
+}>
+
+export type ModelsCacheStore = {
+  load(): Promise<PersistedModelsCache | undefined>
+  save(entry: PersistedModelsCache): Promise<void>
+}
+
+// Discovery results are scoped to the account that produced them: every cache
+// entry carries the credential identity observed when it was fetched, entries
+// from another account are evicted on sight, and a fetch whose account changed
+// mid-flight is discarded (codex-rs models-manager does the same identity
+// double-check around refresh). Callers never wait for an expired cache: a
+// stale entry is served while a background fetch revalidates it. Only a cold
+// cache (first use, or just evicted) blocks on the in-flight fetch — Codex's
+// OnlineIfUncached — because discovered instruction profiles must be present
+// in the first sampled prompt.
 export function createDiscoveringModelsManager(input: {
   provider: string
   discover(): Promise<readonly DiscoveredModel[]>
+  identity(): Promise<string | undefined>
+  cacheStore?: ModelsCacheStore
   now?: () => number
   ttlMs?: number
 }): ModelsManager {
   const fallback = createStaticModelsManager(input.provider)
   const now = input.now ?? Date.now
   const ttlMs = input.ttlMs ?? 5 * 60 * 1_000
-  let remote = new Map<string, DiscoveredModel>()
-  let refreshedAt: number | undefined
-  let refresh: Promise<void> | undefined
+  let cache:
+    | {
+        readonly identity: string | undefined
+        readonly fetchedAt: number
+        readonly models: Map<string, DiscoveredModel>
+      }
+    | undefined
+  let refreshTask: Promise<void> | undefined
+  let diskLoaded = false
 
-  const ensureFresh = async () => {
-    if (refreshedAt !== undefined && now() - refreshedAt < ttlMs) return
-    refresh ??= input
-      .discover()
-      .then((models) => {
-        remote = new Map(models.map((model) => [model.id.toLowerCase(), model]))
-        refreshedAt = now()
-      })
-      .finally(() => {
-        refresh = undefined
-      })
-    try {
-      await refresh
-    } catch {
-      // The bundled catalog remains usable offline and after credential expiry.
-      refreshedAt = now()
+  // Identity probes only read local credential state; a failure means the
+  // login is mid-rotation or gone, so the safe reading is "unknown".
+  const currentIdentity = () => input.identity().catch(() => undefined)
+
+  const indexModels = (
+    models: readonly DiscoveredModel[],
+  ): Map<string, DiscoveredModel> =>
+    new Map(models.map((model) => [model.id.toLowerCase(), model]))
+
+  const loadDiskCache = async () => {
+    if (diskLoaded) return
+    diskLoaded = true
+    if (input.cacheStore === undefined) return
+    // A cache that cannot be read degrades to a cold fetch.
+    const persisted = await input.cacheStore.load().catch(() => undefined)
+    if (persisted === undefined) return
+    if (now() - persisted.fetchedAt >= ttlMs) return
+    cache = {
+      identity: persisted.identity,
+      fetchedAt: persisted.fetchedAt,
+      models: indexModels(persisted.models),
     }
   }
-  const discovered = (model: string) => remote.get(model.toLowerCase())
+
+  const refreshRemotely = async () => {
+    const before = await currentIdentity()
+    let models: readonly DiscoveredModel[]
+    try {
+      models = await input.discover()
+    } catch {
+      // The last good cache and the bundled catalog keep serving offline.
+      return
+    }
+    const after = await currentIdentity()
+    if (before !== after) {
+      // The account changed mid-flight; the result belongs to the old account.
+      if (cache !== undefined && cache.identity !== after) cache = undefined
+      return
+    }
+    cache = {
+      identity: before,
+      fetchedAt: now(),
+      models: indexModels(models),
+    }
+    // Persisting the cache is best-effort; a failed write only means the next
+    // process starts cold.
+    await input.cacheStore
+      ?.save({ identity: before, fetchedAt: now(), models })
+      .catch(() => undefined)
+  }
+
+  const ensureFresh = async () => {
+    await loadDiskCache()
+    const identity = await currentIdentity()
+    if (cache !== undefined && cache.identity !== identity) cache = undefined
+    if (cache !== undefined && now() - cache.fetchedAt < ttlMs) return
+    refreshTask ??= refreshRemotely().finally(() => {
+      refreshTask = undefined
+    })
+    if (cache === undefined) await refreshTask
+  }
+  const discovered = (model: string) => cache?.models.get(model.toLowerCase())
 
   return {
     provider: input.provider,
@@ -84,7 +161,7 @@ export function createDiscoveringModelsManager(input: {
         staticModels.map((model) => [model.model.toLowerCase(), model]),
       )
       return [
-        ...[...remote.values()]
+        ...[...(cache?.models.values() ?? [])]
           .filter(
             (model) =>
               staticById.has(model.id.toLowerCase()) ||
@@ -117,7 +194,7 @@ export function createDiscoveringModelsManager(input: {
             }
           }),
         ...staticModels.filter(
-          (model) => !remote.has(model.model.toLowerCase()),
+          (model) => !(cache?.models.has(model.model.toLowerCase()) ?? false),
         ),
       ]
     },

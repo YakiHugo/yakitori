@@ -273,8 +273,28 @@ export type ApiAdmitInputRequest = {
 
 export type ApiAdmitInputResponse = {
   readonly requestId: string
+  // Acknowledged at the routing decision (Codex turn/start): the input is
+  // recorded by the run task, so durability is signaled by the durable
+  // input.admitted event on the session stream, not by this response.
+  readonly turnId: string
   readonly inputId: string
-  readonly event: EventEnvelope
+}
+
+export type ApiSteerInputRequest = {
+  readonly sessionId: string
+  readonly requestId: string
+  readonly expectedTurnId: string
+  readonly content: TextContent
+  readonly modelSelection?: ModelSelection
+  readonly metadata?: EventMetadata
+}
+
+// Steering acceptance is ephemeral: the input becomes durable when the active
+// Turn records it at its next sampling point, so the response carries the
+// steered Turn id instead of a durable input event.
+export type ApiSteerInputResponse = {
+  readonly requestId: string
+  readonly turnId: string
 }
 
 export type ApiCompactSessionResponse = {

@@ -1,5 +1,6 @@
 // @vitest-environment happy-dom
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -185,7 +186,7 @@ describe("composer", () => {
     )
   })
 
-  it("shows an explicit sending state while admission is in flight", () => {
+  it("shows admission loading on the send button", () => {
     useAppStore.setState({
       selection: { sessionId: "session_1" },
       promptDraft: "hello",
@@ -196,13 +197,80 @@ describe("composer", () => {
     const button = screen.getByRole("button", { name: "Sending" })
     expect(button.textContent).toContain("Sending")
     expect(button).toHaveProperty("disabled", true)
-    expect(screen.getByRole("status").textContent).toBe("Sending…")
-    expect(screen.getByRole("status").getAttribute("data-state")).toBe(
-      "sending",
-    )
+    expect(button.getAttribute("aria-busy")).toBe("true")
+    expect(screen.queryByRole("status")).toBeNull()
   })
 
-  it("distinguishes active work from admission loading", () => {
+  it("keeps a queued first prompt's image until creation settles", async () => {
+    const user = userEvent.setup()
+    const bridge = window.yakitoriDesktop
+    if (bridge === undefined) throw new Error("Expected the desktop bridge")
+    let rejectCreate!: (error: Error) => void
+    fakeRef.current.respond = (method) => {
+      if (method === "session/create")
+        return new Promise((_resolve, reject) => {
+          rejectCreate = reject
+        })
+      throw new ApiRequestError("not found", "not_found")
+    }
+    useAppStore.getState().startNewSession()
+    useAppStore.getState().setPromptAttachments([draftImage("high")])
+    render(<Composer />)
+
+    await user.click(screen.getByRole("button", { name: "Send" }))
+    const remove = screen.getByRole("button", {
+      name: "Remove screenshot.png",
+    })
+    expect(remove).toHaveProperty("disabled", true)
+    await user.click(remove)
+    expect(bridge.discardDraftImages).not.toHaveBeenCalled()
+    expect(useAppStore.getState().promptAttachments).toEqual([
+      draftImage("high"),
+    ])
+
+    rejectCreate(new Error("creation failed"))
+    await waitFor(() => expect(remove).toHaveProperty("disabled", false))
+    expect(useAppStore.getState().promptAttachments).toEqual([
+      draftImage("high"),
+    ])
+  })
+
+  it("keeps session prewarming quiet while the first input remains available", async () => {
+    const user = userEvent.setup()
+    let rejectCreate!: (error: Error) => void
+    fakeRef.current.respond = (method) => {
+      if (method === "session/create")
+        return new Promise((_resolve, reject) => {
+          rejectCreate = reject
+        })
+      throw new ApiRequestError("not found", "not_found")
+    }
+    useAppStore.getState().startNewSession()
+    useAppStore.getState().setPromptDraft("hello")
+    render(<Composer />)
+
+    expect(screen.queryByRole("status")).toBeNull()
+    expect(screen.getByRole("button", { name: "Send" })).toHaveProperty(
+      "disabled",
+      false,
+    )
+    expect(screen.getByRole("textbox").getAttribute("contenteditable")).toBe(
+      "true",
+    )
+    expect(
+      screen.getByRole("button", { name: "Add attachment" }),
+    ).toHaveProperty("disabled", false)
+    await user.click(screen.getByRole("button", { name: "Send" }))
+    const sending = screen.getByRole("button", { name: "Sending" })
+    expect(sending).toHaveProperty("disabled", true)
+    expect(sending.getAttribute("aria-busy")).toBe("true")
+    expect(screen.queryByRole("status")).toBeNull()
+    await act(async () => rejectCreate(new Error("creation failed")))
+    expect(screen.queryByRole("status")).toBeNull()
+    expect(useAppStore.getState().promptDraft).toBe("hello")
+  })
+
+  it("uses the interrupt button for an active turn without duplicating its status", () => {
     useAppStore.setState((state) => ({
       selection: { sessionId: "session_1" },
       execution: {
@@ -213,10 +281,7 @@ describe("composer", () => {
     render(<Composer />)
 
     expect(screen.getByRole("button", { name: "Interrupt" })).toBeDefined()
-    expect(screen.getByRole("status").textContent).toBe("Working…")
-    expect(screen.getByRole("status").getAttribute("data-state")).toBe(
-      "working",
-    )
+    expect(screen.queryByRole("status")).toBeNull()
   })
 
   it("blocks send and slash execution while the session is busy", async () => {
@@ -480,57 +545,126 @@ describe("composer", () => {
     expect(fakeRef.current.requestsFor("session/create")).toHaveLength(0)
   })
 
-  it("stages independently while a session creation is in flight", async () => {
-    const user = userEvent.setup()
-    useAppStore.setState({
-      inFlightActions: new Set(["create-session"]),
-      sessionSelectionIntentRevision: 1,
-    })
-    render(<Composer />)
-
-    await user.click(screen.getByRole("button", { name: "Add attachment" }))
-    await user.click(screen.getByRole("button", { name: "Upload image" }))
-    const bridge = window.yakitoriDesktop
-    if (bridge === undefined) throw new Error("Expected the desktop bridge")
-    await waitFor(() => {
-      expect(bridge.importPickedImages).toHaveBeenCalledWith({
-        selectionId: "selection_1",
-      })
-    })
-    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(0)
-  })
-
   it("reuses a session that finishes creating while the picker is open", async () => {
     const user = userEvent.setup()
     const bridge = window.yakitoriDesktop
     if (bridge === undefined) throw new Error("Expected the desktop bridge")
     let resolvePick!: (selection: { readonly selectionId: string }) => void
+    let resolveCreate!: (value: unknown) => void
+    fakeRef.current.respond = (method) => {
+      if (method === "session/create")
+        return new Promise((resolve) => {
+          resolveCreate = resolve
+        })
+      if (method === "session/skills") return { skills: [] }
+      throw new ApiRequestError("not found", "not_found")
+    }
     vi.mocked(bridge.pickImages).mockReturnValueOnce(
       new Promise((resolve) => {
         resolvePick = resolve
       }),
     )
-    useAppStore.setState({
-      inFlightActions: new Set(["create-session"]),
-      sessionSelectionIntentRevision: 1,
-    })
+    useAppStore.getState().startNewSession()
     render(<Composer />)
 
     await user.click(screen.getByRole("button", { name: "Add attachment" }))
     await user.click(screen.getByRole("button", { name: "Upload image" }))
-    useAppStore.setState({
-      inFlightActions: new Set(),
-      selection: { sessionId: "session_1" },
+    await act(async () => {
+      resolveCreate({
+        session: createdSession,
+        event: createEventEnvelope({
+          sessionId: createdSession.id,
+          seq: 1,
+          event: { type: EventType.SessionCreated, data: {} },
+        }),
+      })
     })
     resolvePick({ selectionId: "selection_during_create" })
 
     await waitFor(() => {
       expect(bridge.importPickedImages).toHaveBeenCalledWith({
-        sessionId: "session_1",
+        sessionId: createdSession.id,
         selectionId: "selection_during_create",
       })
     })
-    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(0)
+    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(1)
+  })
+
+  it("keeps an image imported before its draft activates after creation", async () => {
+    const user = userEvent.setup()
+    const bridge = window.yakitoriDesktop
+    if (bridge === undefined) throw new Error("Expected the desktop bridge")
+    let resolveCreate!: (value: unknown) => void
+    let resolveImport!: (value: ReturnType<typeof draftImage>[]) => void
+    fakeRef.current.respond = (method) => {
+      if (method === "session/create")
+        return new Promise((resolve) => {
+          resolveCreate = resolve
+        })
+      if (method === "session/skills") return { skills: [] }
+      throw new ApiRequestError("not found", "not_found")
+    }
+    vi.mocked(bridge.importPickedImages).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveImport = resolve
+      }),
+    )
+    useAppStore.getState().startNewSession()
+    const intent = useAppStore.getState().sessionSelectionIntentRevision
+    render(<Composer />)
+    await user.click(screen.getByRole("button", { name: "Add attachment" }))
+    await user.click(screen.getByRole("button", { name: "Upload image" }))
+    await waitFor(() =>
+      expect(bridge.importPickedImages).toHaveBeenCalledOnce(),
+    )
+    await act(async () => {
+      resolveCreate({
+        session: createdSession,
+        event: createEventEnvelope({
+          sessionId: createdSession.id,
+          seq: 1,
+          event: { type: EventType.SessionCreated, data: {} },
+        }),
+      })
+    })
+    expect(useAppStore.getState().sessionSelectionIntentRevision).toBe(intent)
+    expect(useAppStore.getState().selection.sessionId).toBe(createdSession.id)
+    await act(async () => resolveImport([draftImage("high")]))
+    await waitFor(() =>
+      expect(useAppStore.getState().promptAttachments).toEqual([
+        draftImage("high"),
+      ]),
+    )
+    expect(bridge.discardDraftImages).not.toHaveBeenCalled()
+  })
+
+  it("discards an image import when navigation supersedes the draft", async () => {
+    const user = userEvent.setup()
+    const bridge = window.yakitoriDesktop
+    if (bridge === undefined) throw new Error("Expected the desktop bridge")
+    let resolveImport!: (value: ReturnType<typeof draftImage>[]) => void
+    vi.mocked(bridge.importPickedImages).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveImport = resolve
+      }),
+    )
+    useAppStore.getState().startNewSession()
+    render(<Composer />)
+    await user.click(screen.getByRole("button", { name: "Add attachment" }))
+    await user.click(screen.getByRole("button", { name: "Upload image" }))
+    await waitFor(() =>
+      expect(bridge.importPickedImages).toHaveBeenCalledOnce(),
+    )
+    await act(async () => {
+      await useAppStore.getState().selectSession("session_existing")
+      resolveImport([draftImage("high")])
+    })
+    await waitFor(() =>
+      expect(bridge.discardDraftImages).toHaveBeenCalledWith([
+        draftImage("high"),
+      ]),
+    )
+    expect(useAppStore.getState().promptAttachments).toEqual([])
   })
 
   it("stages dropped images without creating a session", async () => {
@@ -617,7 +751,7 @@ describe("composer", () => {
     )
   })
 
-  it("still admits a follow-up on Enter while a turn runs", async () => {
+  it("still dispatches a follow-up on Enter while a turn runs", async () => {
     const user = userEvent.setup()
     const admitInput = vi.fn((_text: string) => Promise.resolve())
     useAppStore.setState({

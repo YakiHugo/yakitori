@@ -1,13 +1,17 @@
-import type { ImageAttachment } from "../kernel/events.ts"
+import type { ImageAttachment, ModelSelection } from "../kernel/events.ts"
 import { createRequestId, isRequestId } from "../kernel/ids.ts"
 import type { ContextExcerpt } from "../kernel/input-context.ts"
 
+// An admission draft is the complete immutable submission: the model selection
+// is part of the identity, so retrying after a model change reserves a fresh
+// request id instead of conflicting with the server's recorded fingerprint.
 export type AdmissionDraft = {
   readonly apiBase: string
   readonly sessionId: string
   readonly text: string
   readonly attachments?: readonly ImageAttachment[]
   readonly contextAttachments?: readonly ContextExcerpt[]
+  readonly modelSelection?: ModelSelection
 }
 
 export type PendingAdmission = AdmissionDraft & {
@@ -19,6 +23,11 @@ export type AdmissionStorage = Pick<
   "getItem" | "removeItem" | "setItem"
 >
 
+type StoredAdmission = {
+  readonly requestId: string
+  readonly draft: AdmissionDraft
+}
+
 export async function reserveAdmission(
   storage: AdmissionStorage,
   draft: AdmissionDraft,
@@ -29,16 +38,20 @@ export async function reserveAdmission(
     apiBase: normalizeApiBase(draft.apiBase),
   }
   const key = await storageKey(normalizedDraft)
-  const storedRequestId = storage.getItem(key)
-  if (storedRequestId !== null && isRequestId(storedRequestId)) {
+  const stored = readStoredAdmission(storage.getItem(key))
+  if (stored !== undefined) {
     return {
       ...normalizedDraft,
-      requestId: storedRequestId,
+      requestId: stored.requestId,
     }
   }
 
   const requestId = generateRequestId()
-  storage.setItem(key, requestId)
+  const storedAdmission: StoredAdmission = {
+    requestId,
+    draft: normalizedDraft,
+  }
+  storage.setItem(key, JSON.stringify(storedAdmission))
   return {
     ...normalizedDraft,
     requestId,
@@ -50,7 +63,8 @@ export async function acknowledgeAdmission(
   admission: PendingAdmission,
 ): Promise<void> {
   const key = await storageKey(admission)
-  if (storage.getItem(key) !== admission.requestId) return
+  const stored = readStoredAdmission(storage.getItem(key))
+  if (stored?.requestId !== admission.requestId) return
   storage.removeItem(key)
 }
 
@@ -60,6 +74,28 @@ export function normalizeApiBase(value: string): string {
   url.search = ""
   if (!url.pathname.endsWith("/")) url.pathname = `${url.pathname}/`
   return url.toString()
+}
+
+// Entries written by older versions held a bare request id; those predate
+// model-keyed identity and are discarded so a stale id cannot wedge a retry
+// against a changed submission.
+function readStoredAdmission(value: string | null): StoredAdmission | undefined {
+  if (value === null) return undefined
+  try {
+    const parsed: unknown = JSON.parse(value)
+    if (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      "requestId" in parsed &&
+      typeof parsed.requestId === "string" &&
+      isRequestId(parsed.requestId)
+    ) {
+      return parsed as StoredAdmission
+    }
+  } catch {
+    // Corrupt storage is an expected localStorage outcome; re-reserve below.
+  }
+  return undefined
 }
 
 async function storageKey(draft: AdmissionDraft): Promise<string> {
@@ -72,6 +108,7 @@ async function storageKey(draft: AdmissionDraft): Promise<string> {
         draft.text,
         draft.attachments ?? [],
         draft.contextAttachments ?? [],
+        draft.modelSelection ?? null,
       ]),
     ),
   )

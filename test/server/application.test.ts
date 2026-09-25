@@ -12,10 +12,10 @@ import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { WebSocket } from "ws"
 import packageJson from "../../package.json" with { type: "json" }
+import { PersistContext } from "../../src/core/thread-store.ts"
 import { MateEventType, MateLifecycle } from "../../src/mates/events.ts"
 import { createMateKernel } from "../../src/mates/mate-kernel.ts"
 import { createSqliteMateStore } from "../../src/mates/sqlite-mate-store.ts"
-import { createFauxProvider } from "../support/faux-provider.ts"
 import { type ModelRequest, ModelStopReason } from "../../src/runtime/model.ts"
 import { listCatalogModels } from "../../src/runtime/model-catalog.ts"
 import {
@@ -27,10 +27,11 @@ import {
   ApiErrorCode,
   type ApiHandlerResult,
   type ApiListAgentsResponse,
-  type ApiListSessionsResponse,
   type ApiListProvidersResponse,
+  type ApiListSessionsResponse,
 } from "../../src/server/protocol.ts"
 import type { ConfigurationSnapshot } from "../../src/server/user-config.ts"
+import { createFauxProvider } from "../support/faux-provider.ts"
 import { deferred } from "./rpc/testkit.ts"
 
 async function listen(server: HttpServer): Promise<string> {
@@ -278,6 +279,79 @@ describe("application composition", () => {
     })
   })
 
+  it("keeps an empty Session live until the first input commits its replayable history", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const options = testApplicationOptions({ rootDir, workspace })
+      const application = await createYakitoriApplication(options)
+      let emptyId = ""
+      let committedId = ""
+      try {
+        const empty = await application.handlers.createSession()
+        expectOk(empty)
+        emptyId = empty.body.session.id
+        const readEmpty = await application.handlers.readSession({
+          sessionId: emptyId,
+        })
+        expectOk(readEmpty)
+        const emptyEvents = await application.handlers.readSessionEvents({
+          sessionId: emptyId,
+        })
+        expectOk(emptyEvents)
+        expect(emptyEvents.body.events.map((event) => event.type)).toEqual([
+          "session.created",
+        ])
+        expect((await application.threadStore.listThreads()).threads).toEqual(
+          [],
+        )
+
+        const created = await application.handlers.createSession()
+        expectOk(created)
+        committedId = created.body.session.id
+        const admitted = await application.handlers.admitInput({
+          sessionId: committedId,
+          requestId: "request_first_commit",
+          content: { kind: "text", text: "persist this prompt" },
+        })
+        expectOk(admitted)
+        // The admission is acknowledged at routing; the staged Session
+        // materializes when the background recording lands.
+        await vi.waitFor(async () => {
+          expect(
+            (await application.threadStore.listThreads()).threads.map(
+              (thread) => thread.id,
+            ),
+          ).toEqual([committedId])
+        })
+        const replay = await application.handlers.readSessionEvents({
+          sessionId: committedId,
+        })
+        expectOk(replay)
+        expect(
+          replay.body.events
+            .map((event) => event.type)
+            .filter((type) =>
+              ["session.created", "input.admitted", "turn.started"].includes(
+                type,
+              ),
+            ),
+        ).toEqual(["session.created", "input.admitted", "turn.started"])
+      } finally {
+        await application.close()
+      }
+
+      const reopened = await createYakitoriApplication(options)
+      try {
+        expect(await reopened.threadStore.readThread(emptyId)).toBeUndefined()
+        const saved = await reopened.threadStore.readThread(committedId)
+        expect(
+          saved?.rollout.some((entry) => entry.item.type === "turn_started"),
+        ).toBe(true)
+      } finally {
+        await reopened.close()
+      }
+    })
+  })
+
   it("lists only the current root's agents over RPC with live and stored status", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const childMayFinish = deferred<void>()
@@ -364,9 +438,12 @@ describe("application composition", () => {
           "session/list",
           {},
         )
-        expect(listRoots.sessions.map((session) => session.id).sort()).toEqual(
-          [rootThreadId, other.body.session.id].sort(),
-        )
+        expect(listRoots.sessions.map((session) => session.id)).toEqual([
+          rootThreadId,
+        ])
+        expect(
+          application.threadManager.getThread(other.body.session.id)?.status,
+        ).toBe("idle")
         expect(
           await rpcRequest(baseUrl, "agent/list", {
             sessionId: other.body.session.id,
@@ -1129,6 +1206,10 @@ describe("application composition", () => {
         const created = await application.handlers.createSession({})
         expectOk(created)
         const sessionId = created.body.session.id
+        await application.threadStore.persistThread(
+          sessionId,
+          PersistContext.TurnStart,
+        )
         const imageBytes = pngBuffer(128)
         const draftRolloutId = "draft_application_test"
         const attachments = await application.rolloutAssets.importImageBytes(
@@ -1148,7 +1229,14 @@ describe("application composition", () => {
         expectOk(admitted)
         await waitForThreadIdle(application, sessionId)
 
-        expect(admitted.body.event).toMatchObject({
+        const events = await application.handlers.readSessionEvents({
+          sessionId,
+        })
+        expectOk(events)
+        const admittedEvent = events.body.events.find(
+          (event) => event.type === "input.admitted",
+        )
+        expect(admittedEvent).toMatchObject({
           data: {
             content: {
               attachments: [
@@ -1163,7 +1251,7 @@ describe("application composition", () => {
             },
           },
         })
-        expect(JSON.stringify(admitted.body.event)).not.toContain(
+        expect(JSON.stringify(admittedEvent)).not.toContain(
           imageBytes.toString("base64"),
         )
         expect(
@@ -1336,6 +1424,10 @@ describe("application composition", () => {
 
         const concurrentSession = await application.handlers.createSession()
         expectOk(concurrentSession)
+        await application.threadStore.persistThread(
+          concurrentSession.body.session.id,
+          PersistContext.TurnStart,
+        )
         const [draftA, draftB] = await Promise.all([
           application.rolloutAssets.importImageBytes(
             concurrentSession.body.session.id,
@@ -1429,6 +1521,10 @@ describe("application composition", () => {
         const created = await application.handlers.createSession({})
         expectOk(created)
         const sessionId = created.body.session.id
+        await application.threadStore.persistThread(
+          sessionId,
+          PersistContext.TurnStart,
+        )
         const attachments = await application.rolloutAssets.importImageBytes(
           sessionId,
           "text_only_draft",
@@ -1475,6 +1571,10 @@ describe("application composition", () => {
         const baseUrl = await listen(server)
         const created = await application.handlers.createSession({})
         expectOk(created)
+        await application.threadStore.persistThread(
+          created.body.session.id,
+          PersistContext.TurnStart,
+        )
         const imageBytes = pngBuffer(128 * 1024 + 17)
         const sourcePath = join(rootDir, "large.png")
         await writeFile(sourcePath, imageBytes)
@@ -1965,6 +2065,10 @@ describe("application composition", () => {
           `command = ${JSON.stringify(process.execPath)}`,
           `args = [${JSON.stringify(script)}, ${JSON.stringify(observedCwd)}]`,
           'cwd = "tools"',
+          // The probe must have run by the time createSession returns and by
+          // the first step after a config reload; required keeps that
+          // deterministic now that optional servers connect in the background.
+          "required = true",
         ].join("\n"),
       )
 
@@ -2252,7 +2356,9 @@ describe("application composition", () => {
         expect(
           events.body.events.filter((event) => event.type === "input.admitted"),
         ).toHaveLength(1)
-        expect(admitted.body.event).toMatchObject({
+        expect(
+          events.body.events.find((event) => event.type === "input.admitted"),
+        ).toMatchObject({
           data: {
             modelSelection: input.modelSelection,
             parentInputId: input.parentInputId,

@@ -102,6 +102,211 @@ describe("live Session actor", () => {
     await manager.shutdown()
   })
 
+  it("queues input durably during a turn and dispatches it as the next turn", async () => {
+    const store = new MemoryThreadStore()
+    const ran: string[] = []
+    let releaseFirst!: () => void
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve
+    })
+    const manager = createManager(
+      {
+        run: async (_runtime, input) => {
+          ran.push(input.submissionId)
+          if (ran.length === 1) await firstGate
+        },
+      },
+      store,
+    )
+    const thread = await manager.createThread()
+    try {
+      const first = thread.startIfIdle({
+        submissionId: "turn_first",
+        content: { kind: "text", text: "first" },
+      })
+      await nextEventOfType(thread, "turn.started")
+      await first
+
+      const queued = await thread.queueInput({
+        submissionId: "turn_queued",
+        content: { kind: "text", text: "queued" },
+      })
+      expect(queued.type).toBe("queued")
+      if (queued.type !== "queued") throw new Error("Expected queued input.")
+      expect(queued.inputItemId).toMatch(/^input_/)
+      // Durable at admission time, but not running and not in context yet.
+      expect(ran).toEqual(["turn_first"])
+      expect(
+        JSON.stringify((await store.readThread(thread.id))?.rollout),
+      ).toContain("queued")
+
+      const replay = await thread.queueInput({
+        submissionId: "turn_queued",
+        content: { kind: "text", text: "queued" },
+      })
+      expect(replay).toEqual({
+        type: "replayed",
+        turnId: "turn_queued",
+        inputItemId: queued.inputItemId,
+      })
+
+      releaseFirst()
+      await nextEventOfType(thread, "turn.completed")
+      await waitForValue(() => (ran.length === 2 ? true : undefined))
+      expect(ran).toEqual(["turn_first", "turn_queued"])
+      // Dispatch reuses the queued input item: one transcript entry.
+      const stored = await store.readThread(thread.id)
+      const starts = stored?.rollout.flatMap((record) =>
+        record.item.type === "turn_started" ? [record.item] : [],
+      )
+      expect(starts?.at(-1)).toMatchObject({
+        turnId: "turn_queued",
+        inputItemId: queued.inputItemId,
+      })
+      await nextEventOfType(thread, "turn.completed")
+    } finally {
+      releaseFirst()
+      await manager.shutdown()
+    }
+  })
+
+  it("cancels a queued input before dispatch and records the cancellation durably", async () => {
+    const store = new MemoryThreadStore()
+    const ran: string[] = []
+    let releaseFirst!: () => void
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve
+    })
+    const manager = createManager(
+      {
+        run: async (_runtime, input) => {
+          ran.push(input.submissionId)
+          if (ran.length === 1) await firstGate
+        },
+      },
+      store,
+    )
+    const thread = await manager.createThread()
+    try {
+      const first = thread.startIfIdle({
+        submissionId: "turn_first",
+        content: { kind: "text", text: "first" },
+      })
+      await nextEventOfType(thread, "turn.started")
+      await first
+      const queued = await thread.queueInput({
+        submissionId: "turn_queued",
+        content: { kind: "text", text: "queued" },
+      })
+      if (queued.type !== "queued") throw new Error("Expected queued input.")
+
+      expect(await thread.cancelQueuedInput(queued.inputItemId)).toBe(true)
+      expect(await thread.cancelQueuedInput(queued.inputItemId)).toBe(false)
+
+      releaseFirst()
+      await nextEventOfType(thread, "turn.completed")
+      await waitForValue(() => (ran.length === 1 ? true : undefined))
+      // Let a potential dispatch settle before asserting it never happens.
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(ran).toEqual(["turn_first"])
+      const stored = await store.readThread(thread.id)
+      expect(
+        stored?.rollout.some(
+          (record) =>
+            record.item.type === "input_cancelled" &&
+            record.item.inputId === queued.inputItemId,
+        ),
+      ).toBe(true)
+    } finally {
+      releaseFirst()
+      await manager.shutdown()
+    }
+  })
+
+  it("rebuilds the pending queue on resume and dispatches it after the next turn", async () => {
+    const store = new MemoryThreadStore()
+    let ran: string[] = []
+    let releaseFirst!: () => void
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve
+    })
+    const processor = {
+      run: async (_runtime: unknown, input: TurnInput) => {
+        ran.push(input.submissionId)
+        if (ran.length === 1) await firstGate
+      },
+    }
+    let manager = createManager(processor, store)
+    const thread = await manager.createThread()
+    const first = thread.startIfIdle({
+      submissionId: "turn_first",
+      content: { kind: "text", text: "first" },
+    })
+    await nextEventOfType(thread, "turn.started")
+    await first
+    const queued = await thread.queueInput({
+      submissionId: "turn_queued",
+      content: { kind: "text", text: "queued" },
+    })
+    if (queued.type !== "queued") throw new Error("Expected queued input.")
+    const threadId = thread.id
+    // Simulate a restart without letting the first turn finish.
+    await manager.shutdown()
+    releaseFirst()
+
+    ran = []
+    manager = createManager(
+      {
+        run: async (_runtime, input) => {
+          ran.push(input.submissionId)
+        },
+      },
+      store,
+    )
+    try {
+      const resumed = await manager.resumeThread(threadId)
+      if (resumed === undefined) throw new Error("Stored thread was not resumed")
+      // The rebuilt queue waits for the next turn instead of auto-running.
+      await resumed.startIfIdle({
+        submissionId: "turn_next",
+        content: { kind: "text", text: "next" },
+      })
+      await waitForValue(() => (ran.length === 2 ? true : undefined))
+      expect(ran).toEqual(["turn_next", "turn_queued"])
+    } finally {
+      await manager.shutdown()
+    }
+  })
+
+  it("starts queued input immediately when the session is idle", async () => {
+    const store = new MemoryThreadStore()
+    const ran: string[] = []
+    const manager = createManager(
+      {
+        run: async (_runtime, input) => {
+          ran.push(input.submissionId)
+        },
+      },
+      store,
+    )
+    const thread = await manager.createThread()
+    try {
+      const submission = await thread.queueInput({
+        submissionId: "turn_now",
+        content: { kind: "text", text: "now" },
+      })
+      expect(submission).toEqual({
+        type: "started",
+        turnId: "turn_now",
+        inputItemId: expect.any(String),
+      })
+      await nextEventOfType(thread, "turn.completed")
+      expect(ran).toEqual(["turn_now"])
+    } finally {
+      await manager.shutdown()
+    }
+  })
+
   it("removes a newly created Thread when async processor setup fails", async () => {
     const store = new MemoryThreadStore()
     const manager = new ThreadManager({
@@ -307,7 +512,11 @@ describe("live Session actor", () => {
       submissionId: "turn_first",
       content: { kind: "text", text: "first" },
     })
-    expect(started).toEqual({ type: "started", turnId: "turn_first" })
+    expect(started).toEqual({
+      type: "started",
+      turnId: "turn_first",
+      inputItemId: expect.any(String),
+    })
     expect(thread.agentStatus).toBe("running")
     expect(
       await thread.startIfIdle({
@@ -391,8 +600,13 @@ describe("live Session actor", () => {
     expect(await thread.startIfIdle(input)).toEqual({
       type: "started",
       turnId: "turn_idempotent",
+      inputItemId: expect.any(String),
     })
-    const inputItemId = thread.snapshot().context.history[0]?.id
+    // The dedupe entry is registered at acceptance; the context record lands
+    // with the background recording.
+    const inputItemId = await waitForValue(
+      () => thread.snapshot().context.history[0]?.id,
+    )
     expect(await thread.startIfIdle(input)).toEqual({
       type: "replayed",
       turnId: "turn_idempotent",
@@ -558,10 +772,21 @@ describe("live Session actor", () => {
     await manager.shutdown()
   })
 
-  it("persists the input and TurnStart fence before returning Started", async () => {
+  it("acknowledges at routing, then records the input and TurnStart fence before sampling", async () => {
     const store = new MemoryThreadStore()
     const mayFinish = deferred<void>()
-    const manager = createManager({ run: async () => mayFinish.promise }, store)
+    let rolloutAtSampling: readonly string[] | undefined
+    const manager = createManager(
+      {
+        run: async () => {
+          rolloutAtSampling = (await store.readThread(thread.id))?.rollout.map(
+            (entry) => entry.item.type,
+          )
+          await mayFinish.promise
+        },
+      },
+      store,
+    )
     const thread = await manager.createThread()
 
     expect(
@@ -569,9 +794,18 @@ describe("live Session actor", () => {
         submissionId: "turn_durable",
         content: { kind: "text", text: "durable" },
       }),
-    ).toEqual({ type: "started", turnId: "turn_durable" })
-    const storedAtStart = await store.readThread(thread.id)
-    expect(storedAtStart?.rollout.map((entry) => entry.item.type)).toEqual([
+    ).toEqual({
+      type: "started",
+      turnId: "turn_durable",
+      inputItemId: expect.any(String),
+    })
+
+    // The acknowledgment comes at routing; the durable fence still lands
+    // before the first sampling request.
+    await waitForValue(() =>
+      rolloutAtSampling === undefined ? undefined : true,
+    )
+    expect(rolloutAtSampling).toEqual([
       "session_meta",
       "response_item",
       "turn_context",
@@ -583,6 +817,123 @@ describe("live Session actor", () => {
     expect(
       (await store.readThread(thread.id))?.rollout.at(-1)?.item,
     ).toMatchObject({ type: "turn_completed", outcome: "completed" })
+    await manager.shutdown()
+  })
+
+  it("fails a Turn whose TurnStart fence fails and replays it without duplicating", async () => {
+    const store = new MemoryThreadStore()
+    let preparations = 0
+    let starts = 0
+    const manager = new ThreadManager({
+      store,
+      createTurnProcessor: () => {
+        const processor = withPreparation({
+          run: async () => {
+            starts += 1
+          },
+        })
+        return {
+          ...processor,
+          prepare(snapshot, input) {
+            preparations += 1
+            return processor.prepare(snapshot, input)
+          },
+        }
+      },
+    })
+    const thread = await manager.createThread()
+    const input = {
+      submissionId: "turn_retry_fence",
+      content: { kind: "text" as const, text: "send once" },
+    }
+    store.failNextFlush = true
+
+    // Acknowledged at routing; the fence failure fails the Turn instead of
+    // rejecting the admission.
+    expect(await thread.startIfIdle(input)).toEqual({
+      type: "started",
+      turnId: input.submissionId,
+      inputItemId: expect.any(String),
+    })
+    await waitForValue(() =>
+      typeof thread.agentStatus === "object" &&
+      "errored" in thread.agentStatus
+        ? true
+        : undefined,
+    )
+    expect(starts).toBe(0)
+    expect(thread.status).toBe(SessionStatus.Idle)
+
+    // The dedupe entry survives: the same submission replays instead of
+    // duplicating, while a different input starts a fresh Turn.
+    expect(await thread.startIfIdle(input)).toEqual({
+      type: "replayed",
+      turnId: input.submissionId,
+      inputItemId: expect.any(String),
+    })
+    expect(
+      await thread.startIfIdle({
+        submissionId: "turn_other",
+        content: { kind: "text", text: "different" },
+      }),
+    ).toEqual({
+      type: "started",
+      turnId: "turn_other",
+      inputItemId: expect.any(String),
+    })
+    await nextEventOfType(thread, "turn.completed")
+    expect(preparations).toBe(2)
+    expect(starts).toBe(1)
+    expect(
+      (await store.readThread(thread.id))?.rollout.filter(
+        (entry) => entry.item.type === "response_item",
+      ),
+    ).toHaveLength(2)
+    await manager.shutdown()
+  })
+
+  it("recovers an uncertain first append inline without duplicating the admitted Turn", async () => {
+    const store = new MemoryThreadStore()
+    let starts = 0
+    let preparations = 0
+    const manager = new ThreadManager({
+      store,
+      createTurnProcessor: () => {
+        const processor = withPreparation({
+          run: async () => {
+            starts += 1
+          },
+        })
+        return {
+          ...processor,
+          prepare(snapshot, input) {
+            preparations += 1
+            return processor.prepare(snapshot, input)
+          },
+        }
+      },
+    })
+    const thread = await manager.createThread()
+    const input = {
+      submissionId: "turn_uncertain_append",
+      content: { kind: "text" as const, text: "only once" },
+    }
+    store.failNextAppend = true
+    // The recording drains, detects the uncertain append, and lands the batch
+    // inline instead of rejecting the admission.
+    expect(await thread.startIfIdle(input)).toEqual({
+      type: "started",
+      turnId: input.submissionId,
+      inputItemId: expect.any(String),
+    })
+    await nextEventOfType(thread, "turn.completed")
+    expect(preparations).toBe(1)
+    expect(starts).toBe(1)
+    const items = (await store.readThread(thread.id))?.rollout.map(
+      (record) => record.item.type,
+    )
+    expect(items?.filter((type) => type === "response_item")).toHaveLength(1)
+    expect(items?.filter((type) => type === "turn_started")).toHaveLength(1)
     await manager.shutdown()
   })
 
@@ -691,48 +1042,6 @@ describe("live Session actor", () => {
     await manager.shutdown()
   })
 
-  it("retries the unwritten rollout suffix after an append failure", async () => {
-    const store = new MemoryThreadStore()
-    store.failNextAppend = true
-    const persistenceErrors: unknown[] = []
-    const manager = new ThreadManager({
-      store,
-      onPersistenceError: (error) => persistenceErrors.push(error),
-      createTurnProcessor: () =>
-        withPreparation({
-          run: async () => undefined,
-        }),
-    })
-    const thread = await manager.createThread()
-
-    await thread.startIfIdle({
-      submissionId: "item_first",
-      content: { kind: "text", text: "first" },
-    })
-    await nextEventOfType(thread, "turn.completed")
-    expect(
-      thread.snapshot().context.history.map((item) => item.turnId),
-    ).toContain("item_first")
-
-    await thread.startIfIdle({
-      submissionId: "item_second",
-      content: { kind: "text", text: "second" },
-    })
-    await nextEventOfType(thread, "turn.completed")
-    await manager.shutdown()
-
-    const stored = await store.readThread(thread.id)
-    expect(
-      stored?.rollout.flatMap((entry) =>
-        entry.item.type === "response_item" &&
-        entry.item.item.item.role === "user"
-          ? [entry.item.item.turnId]
-          : [],
-      ),
-    ).toEqual(["item_first", "item_second"])
-    expect(persistenceErrors).toEqual([expect.any(Error)])
-  })
-
   it("holds a stable fork barrier while later input waits in the mailbox", async () => {
     const firstMayAbort = deferred<void>()
     const forkStarted = deferred<void>()
@@ -787,7 +1096,11 @@ describe("live Session actor", () => {
     expect(fork.snapshot().context.history.map((item) => item.turnId)).toEqual([
       "item_before",
     ])
-    expect(await laterInput).toEqual({ type: "started", turnId: "item_later" })
+    expect(await laterInput).toEqual({
+      type: "started",
+      turnId: "item_later",
+      inputItemId: expect.any(String),
+    })
     await nextEventOfType(source, "turn.completed")
     expect(source.status).toBe(SessionStatus.Idle)
     await manager.shutdown()
