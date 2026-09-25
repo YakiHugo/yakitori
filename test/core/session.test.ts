@@ -295,7 +295,11 @@ describe("live Session actor", () => {
         submissionId: "turn_now",
         content: { kind: "text", text: "now" },
       })
-      expect(submission).toEqual({ type: "started", turnId: "turn_now" })
+      expect(submission).toEqual({
+        type: "started",
+        turnId: "turn_now",
+        inputItemId: expect.any(String),
+      })
       await nextEventOfType(thread, "turn.completed")
       expect(ran).toEqual(["turn_now"])
     } finally {
@@ -508,7 +512,11 @@ describe("live Session actor", () => {
       submissionId: "turn_first",
       content: { kind: "text", text: "first" },
     })
-    expect(started).toEqual({ type: "started", turnId: "turn_first" })
+    expect(started).toEqual({
+      type: "started",
+      turnId: "turn_first",
+      inputItemId: expect.any(String),
+    })
     expect(thread.agentStatus).toBe("running")
     expect(
       await thread.startIfIdle({
@@ -592,8 +600,13 @@ describe("live Session actor", () => {
     expect(await thread.startIfIdle(input)).toEqual({
       type: "started",
       turnId: "turn_idempotent",
+      inputItemId: expect.any(String),
     })
-    const inputItemId = thread.snapshot().context.history[0]?.id
+    // The dedupe entry is registered at acceptance; the context record lands
+    // with the background recording.
+    const inputItemId = await waitForValue(
+      () => thread.snapshot().context.history[0]?.id,
+    )
     expect(await thread.startIfIdle(input)).toEqual({
       type: "replayed",
       turnId: "turn_idempotent",
@@ -759,10 +772,21 @@ describe("live Session actor", () => {
     await manager.shutdown()
   })
 
-  it("persists the input and TurnStart fence before returning Started", async () => {
+  it("acknowledges at routing, then records the input and TurnStart fence before sampling", async () => {
     const store = new MemoryThreadStore()
     const mayFinish = deferred<void>()
-    const manager = createManager({ run: async () => mayFinish.promise }, store)
+    let rolloutAtSampling: readonly string[] | undefined
+    const manager = createManager(
+      {
+        run: async () => {
+          rolloutAtSampling = (await store.readThread(thread.id))?.rollout.map(
+            (entry) => entry.item.type,
+          )
+          await mayFinish.promise
+        },
+      },
+      store,
+    )
     const thread = await manager.createThread()
 
     expect(
@@ -770,9 +794,18 @@ describe("live Session actor", () => {
         submissionId: "turn_durable",
         content: { kind: "text", text: "durable" },
       }),
-    ).toEqual({ type: "started", turnId: "turn_durable" })
-    const storedAtStart = await store.readThread(thread.id)
-    expect(storedAtStart?.rollout.map((entry) => entry.item.type)).toEqual([
+    ).toEqual({
+      type: "started",
+      turnId: "turn_durable",
+      inputItemId: expect.any(String),
+    })
+
+    // The acknowledgment comes at routing; the durable fence still lands
+    // before the first sampling request.
+    await waitForValue(() =>
+      rolloutAtSampling === undefined ? undefined : true,
+    )
+    expect(rolloutAtSampling).toEqual([
       "session_meta",
       "response_item",
       "turn_context",
@@ -787,7 +820,7 @@ describe("live Session actor", () => {
     await manager.shutdown()
   })
 
-  it("retries a failed TurnStart fence without duplicating the input or starting the processor early", async () => {
+  it("fails a Turn whose TurnStart fence fails and replays it without duplicating", async () => {
     const store = new MemoryThreadStore()
     let preparations = 0
     let starts = 0
@@ -815,31 +848,51 @@ describe("live Session actor", () => {
     }
     store.failNextFlush = true
 
-    await expect(thread.startIfIdle(input)).rejects.toThrow("flush failed")
-    expect(starts).toBe(0)
-    expect(thread.status).toBe(SessionStatus.Idle)
-    await expect(
-      thread.startIfIdle({
-        submissionId: "turn_other",
-        content: { kind: "text", text: "different" },
-      }),
-    ).rejects.toThrow("previous Turn must be persisted")
+    // Acknowledged at routing; the fence failure fails the Turn instead of
+    // rejecting the admission.
     expect(await thread.startIfIdle(input)).toEqual({
       type: "started",
       turnId: input.submissionId,
+      inputItemId: expect.any(String),
+    })
+    await waitForValue(() =>
+      typeof thread.agentStatus === "object" &&
+      "errored" in thread.agentStatus
+        ? true
+        : undefined,
+    )
+    expect(starts).toBe(0)
+    expect(thread.status).toBe(SessionStatus.Idle)
+
+    // The dedupe entry survives: the same submission replays instead of
+    // duplicating, while a different input starts a fresh Turn.
+    expect(await thread.startIfIdle(input)).toEqual({
+      type: "replayed",
+      turnId: input.submissionId,
+      inputItemId: expect.any(String),
+    })
+    expect(
+      await thread.startIfIdle({
+        submissionId: "turn_other",
+        content: { kind: "text", text: "different" },
+      }),
+    ).toEqual({
+      type: "started",
+      turnId: "turn_other",
+      inputItemId: expect.any(String),
     })
     await nextEventOfType(thread, "turn.completed")
-    expect(preparations).toBe(1)
+    expect(preparations).toBe(2)
     expect(starts).toBe(1)
     expect(
       (await store.readThread(thread.id))?.rollout.filter(
         (entry) => entry.item.type === "response_item",
       ),
-    ).toHaveLength(1)
+    ).toHaveLength(2)
     await manager.shutdown()
   })
 
-  it("recovers an uncertain first append without duplicating the admitted Turn", async () => {
+  it("recovers an uncertain first append inline without duplicating the admitted Turn", async () => {
     const store = new MemoryThreadStore()
     let starts = 0
     let preparations = 0
@@ -866,15 +919,12 @@ describe("live Session actor", () => {
       content: { kind: "text" as const, text: "only once" },
     }
     store.failNextAppend = true
-    await expect(thread.startIfIdle(input)).rejects.toThrow("append failed")
-    expect(starts).toBe(0)
-    await expect(
-      thread.deliverAgentMessage("agent_later", "wait"),
-    ).rejects.toThrow("previous Turn must be persisted")
-
+    // The recording drains, detects the uncertain append, and lands the batch
+    // inline instead of rejecting the admission.
     expect(await thread.startIfIdle(input)).toEqual({
       type: "started",
       turnId: input.submissionId,
+      inputItemId: expect.any(String),
     })
     await nextEventOfType(thread, "turn.completed")
     expect(preparations).toBe(1)
@@ -1046,7 +1096,11 @@ describe("live Session actor", () => {
     expect(fork.snapshot().context.history.map((item) => item.turnId)).toEqual([
       "item_before",
     ])
-    expect(await laterInput).toEqual({ type: "started", turnId: "item_later" })
+    expect(await laterInput).toEqual({
+      type: "started",
+      turnId: "item_later",
+      inputItemId: expect.any(String),
+    })
     await nextEventOfType(source, "turn.completed")
     expect(source.status).toBe(SessionStatus.Idle)
     await manager.shutdown()

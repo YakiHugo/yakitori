@@ -177,6 +177,10 @@ export class Session {
   // the rollout and rebuilt on resume by queuedInputsFromRollout.
   readonly #queuedInputs = new Map<string, QueuedInputEntry>()
   #pendingTurnStart: PendingTurnStart | undefined
+  // Resolves when the pending Turn's recording has either launched or failed,
+  // so barrier operations (fork) can wait out the recording instead of
+  // racing it.
+  #pendingTurnReady: Promise<void> | undefined
   readonly #store: SessionRolloutStore
   readonly #processor: TurnProcessor
   readonly #submissions = new BoundedQueue<SessionCommand>(submissionCapacity)
@@ -375,18 +379,6 @@ export class Session {
     mode: Extract<SessionOp, { readonly type: "turn_input" }>["mode"],
   ): Promise<TurnInputSubmission> {
     const fingerprint = turnInputFingerprint(input)
-    const pending = this.#pendingTurnStart
-    if (pending !== undefined) {
-      if (
-        pending.input.submissionId !== input.submissionId ||
-        pending.requestFingerprint !== fingerprint
-      ) {
-        throw new Error(
-          "The previous Turn must be persisted before another input.",
-        )
-      }
-      return this.#startTurn(input)
-    }
     const submitted = this.#submittedTurns.get(input.submissionId)
     if (submitted !== undefined) {
       if (submitted.fingerprint !== fingerprint) {
@@ -470,7 +462,7 @@ export class Session {
   // active Turn releases the Session. The item enters the model context only
   // at dispatch, so a queued message never leaks into the running Turn.
   async #queueInput(input: TurnInput): Promise<TurnInputSubmission> {
-    const inputItem = buildInputItem(input)
+    const inputItem = buildInputItem(input, { queued: true })
     const items: readonly RolloutItem[] = [
       { type: "response_item", item: inputItem },
     ]
@@ -530,7 +522,13 @@ export class Session {
   // if a Turn started in between, the head simply dispatches when that Turn
   // finishes instead.
   async #dispatchQueuedInput(): Promise<void> {
-    if (this.#closing || this.#activeTurn !== undefined) return
+    if (
+      this.#closing ||
+      this.#activeTurn !== undefined ||
+      this.#pendingTurnStart !== undefined
+    ) {
+      return
+    }
     const head = this.#queuedInputs.entries().next().value
     if (head === undefined) return
     const [submissionId, entry] = head
@@ -546,147 +544,65 @@ export class Session {
     }
   }
 
+  // The admission decision happens here, on the actor: prepare the batch,
+  // register the dedupe entry, and establish the active Turn so follow-up
+  // commands (steer, interrupt, shutdown) see it synchronously. Durability
+  // continues in the background (Codex: ack at the routing decision, record
+  // in the run task), fenced before the first sampling request.
   async #startTurn(
     input: TurnInput,
     queued?: QueuedInputEntry,
   ): Promise<TurnInputSubmission> {
-    let pending = this.#pendingTurnStart
-    if (pending === undefined) {
-      let context: TurnContextItem
-      try {
-        context = await this.#processor.prepare(this.snapshot(), input)
-      } catch (error) {
-        await this.#recordAgentFailure(
-          error instanceof Error ? error.message : "Turn preparation failed.",
-        )
-        throw error
-      }
-      if (context.turnId !== input.submissionId) {
-        throw new Error("Turn processor prepared a mismatched Turn id.")
-      }
-      this.#configuration = structuredClone(context.configuration)
-      const inputItem = queued?.inputItem ?? buildInputItem(input)
-      const requestFingerprint =
-        queued?.fingerprint ?? turnInputFingerprint(input)
-      const items: readonly RolloutItem[] =
-        queued === undefined
-          ? [
-              { type: "response_item", item: inputItem },
-              { type: "turn_context", context },
-              {
-                type: "turn_started",
-                turnId: input.submissionId,
-                inputItemId: inputItem.id,
-                requestFingerprint,
-              },
-            ]
-          : [
-              { type: "turn_context", context },
-              {
-                type: "turn_started",
-                turnId: input.submissionId,
-                inputItemId: inputItem.id,
-                requestFingerprint,
-              },
-            ]
-      pending = {
-        input,
-        context,
-        inputItem,
-        items,
-        requestFingerprint,
-        ...(queued === undefined ? {} : { queuedLayout: true }),
-      }
-      this.#pendingTurnStart = pending
-      try {
-        pending.throughSeq = await this.#store.appendItems(this.id, items)
-      } catch (error) {
-        this.#reportPersistenceError(error)
-        throw error
-      }
-    } else if (pending.throughSeq === undefined) {
-      try {
-        const retry = pending
-        // A rejected append may already have queued or written the entire
-        // batch. Drain and inspect it before deciding whether to append again.
-        await this.#store.flushThread(this.id)
-        const rollout = (await this.#store.readThread(this.id))?.rollout ?? []
-        const start = rollout.find(
-          (entry) =>
-            entry.item.type === "turn_started" &&
-            entry.item.turnId === input.submissionId &&
-            entry.item.inputItemId === retry.inputItem.id,
-        )
-        if (start !== undefined) {
-          const inputRecord = rollout.find(
-            (entry) =>
-              entry.item.type === "response_item" &&
-              entry.item.item.id === retry.inputItem.id,
-          )
-          const contextRecord = rollout.find(
-            (entry) =>
-              entry.item.type === "turn_context" &&
-              entry.item.context.turnId === input.submissionId,
-          )
-          if (retry.queuedLayout === true) {
-            if (contextRecord?.seq !== start.seq - 1 || inputRecord === undefined)
-              throw new Error("The pending Turn has incomplete stored input.")
-          } else if (
-            inputRecord?.seq !== start.seq - 2 ||
-            contextRecord?.seq !== start.seq - 1
-          ) {
-            throw new Error("The pending Turn has incomplete stored input.")
-          }
-          pending.throughSeq = start.seq + 1
-        } else {
-          const inputPresent = rollout.some(
-            (entry) =>
-              entry.item.type === "response_item" &&
-              entry.item.item.id === retry.inputItem.id,
-          )
-          const contextPresent = rollout.some(
-            (entry) =>
-              entry.item.type === "turn_context" &&
-              entry.item.context.turnId === input.submissionId,
-          )
-          // A queued input item legitimately predates the batch.
-          const partial = retry.queuedLayout === true
-            ? contextPresent
-            : inputPresent || contextPresent
-          if (partial)
-            throw new Error("The pending Turn has incomplete stored input.")
-          pending.throughSeq = await this.#store.appendItems(
-            this.id,
-            pending.items,
-          )
-        }
-      } catch (error) {
-        this.#reportPersistenceError(error)
-        throw error
-      }
-    }
+    let context: TurnContextItem
     try {
-      await this.#store.persistThread(this.id, PersistContext.TurnStart)
+      context = await this.#processor.prepare(this.snapshot(), input)
     } catch (error) {
-      this.#reportPersistenceError(error)
+      await this.#recordAgentFailure(
+        error instanceof Error ? error.message : "Turn preparation failed.",
+      )
       throw error
     }
-    this.#pendingTurnStart = undefined
+    if (context.turnId !== input.submissionId) {
+      throw new Error("Turn processor prepared a mismatched Turn id.")
+    }
+    this.#configuration = structuredClone(context.configuration)
+    const inputItem = queued?.inputItem ?? buildInputItem(input)
+    const requestFingerprint =
+      queued?.fingerprint ?? turnInputFingerprint(input)
+    const items: readonly RolloutItem[] =
+      queued === undefined
+        ? [
+            { type: "response_item", item: inputItem },
+            { type: "turn_context", context },
+            {
+              type: "turn_started",
+              turnId: input.submissionId,
+              inputItemId: inputItem.id,
+              requestFingerprint,
+            },
+          ]
+        : [
+            { type: "turn_context", context },
+            {
+              type: "turn_started",
+              turnId: input.submissionId,
+              inputItemId: inputItem.id,
+              requestFingerprint,
+            },
+          ]
+    const pending: PendingTurnStart = {
+      input,
+      context,
+      inputItem,
+      items,
+      requestFingerprint,
+      ...(queued === undefined ? {} : { queuedLayout: true }),
+    }
+    this.#pendingTurnStart = pending
     this.#submittedTurns.set(input.submissionId, {
-      fingerprint: pending.requestFingerprint,
-      inputItemId: pending.inputItem.id,
+      fingerprint: requestFingerprint,
+      inputItemId: inputItem.id,
     })
-    this.#contextManager.record([pending.inputItem])
-    if (pending.throughSeq === undefined)
-      throw new Error("A persisted Turn has no rollout sequence.")
-    this.#events.send({
-      type: "rollout.appended",
-      threadId: this.id,
-      throughSeq: pending.throughSeq,
-      items: structuredClone(pending.items),
-    })
-    const context = pending.context
-
     const abort = new AbortController()
     const aborted = deferred<void>()
     const active: ActiveTurn = {
@@ -706,15 +622,125 @@ export class Session {
     this.#setStatus(SessionStatus.Active)
     this.#setAgentStatus("running")
     this.#events.send({ type: "turn.started", threadId: this.id, input })
+    const launch = (async () => {
+      try {
+        await this.#persistAndLaunchTurn(pending, active, aborted.promise)
+      } catch (error) {
+        await this.#failPendingTurn(pending, active, error)
+      }
+    })().catch((error: unknown) => {
+      this.#reportPersistenceError(error)
+    })
+    this.#pendingTurnReady = launch.finally(() => {
+      if (this.#pendingTurnReady === launch) this.#pendingTurnReady = undefined
+    })
+    return {
+      type: "started",
+      turnId: input.submissionId,
+      inputItemId: inputItem.id,
+    }
+  }
+
+  async #persistAndLaunchTurn(
+    pending: PendingTurnStart,
+    active: ActiveTurn,
+    aborted: Promise<void>,
+  ): Promise<void> {
+    const input = pending.input
+    try {
+      pending.throughSeq = await this.#store.appendItems(
+        this.id,
+        pending.items,
+      )
+    } catch {
+      // A rejected append may already have queued or written the batch. Drain
+      // and inspect it before deciding whether to append again.
+      try {
+        await this.#store.flushThread(this.id)
+        const rollout = (await this.#store.readThread(this.id))?.rollout ?? []
+        const start = rollout.find(
+          (entry) =>
+            entry.item.type === "turn_started" &&
+            entry.item.turnId === input.submissionId &&
+            entry.item.inputItemId === pending.inputItem.id,
+        )
+        if (start !== undefined) {
+          const inputRecord = rollout.find(
+            (entry) =>
+              entry.item.type === "response_item" &&
+              entry.item.item.id === pending.inputItem.id,
+          )
+          const contextRecord = rollout.find(
+            (entry) =>
+              entry.item.type === "turn_context" &&
+              entry.item.context.turnId === input.submissionId,
+          )
+          if (pending.queuedLayout === true) {
+            if (
+              contextRecord?.seq !== start.seq - 1 ||
+              inputRecord === undefined
+            )
+              throw new Error("The pending Turn has incomplete stored input.")
+          } else if (
+            inputRecord?.seq !== start.seq - 2 ||
+            contextRecord?.seq !== start.seq - 1
+          ) {
+            throw new Error("The pending Turn has incomplete stored input.")
+          }
+          pending.throughSeq = start.seq + 1
+        } else {
+          const inputPresent = rollout.some(
+            (entry) =>
+              entry.item.type === "response_item" &&
+              entry.item.item.id === pending.inputItem.id,
+          )
+          const contextPresent = rollout.some(
+            (entry) =>
+              entry.item.type === "turn_context" &&
+              entry.item.context.turnId === input.submissionId,
+          )
+          // A queued input item legitimately predates the batch.
+          const partial =
+            pending.queuedLayout === true
+              ? contextPresent
+              : inputPresent || contextPresent
+          if (partial)
+            throw new Error("The pending Turn has incomplete stored input.")
+          pending.throughSeq = await this.#store.appendItems(
+            this.id,
+            pending.items,
+          )
+        }
+      } catch (error) {
+        this.#reportPersistenceError(error)
+        throw error
+      }
+    }
+    try {
+      await this.#store.persistThread(this.id, PersistContext.TurnStart)
+    } catch (error) {
+      this.#reportPersistenceError(error)
+      throw error
+    }
+    if (this.#pendingTurnStart === pending) this.#pendingTurnStart = undefined
+    this.#contextManager.record([pending.inputItem])
+    if (pending.throughSeq === undefined)
+      throw new Error("A persisted Turn has no rollout sequence.")
+    this.#events.send({
+      type: "rollout.appended",
+      threadId: this.id,
+      throughSeq: pending.throughSeq,
+      items: structuredClone(pending.items),
+    })
 
     let taskHandle: TurnTask
     try {
       taskHandle = this.#processor.start(
         this.#turnRuntime(active),
         input,
-        context,
+        active.context,
         {
-          signal: abort.signal,
+          signal: active.abort.signal,
           takeSteering: () => active.steering.splice(0),
           takeSteeringOrComplete: () => {
             const inputs = active.steering.splice(0)
@@ -736,11 +762,11 @@ export class Session {
     const settled = processorTask
       .then(
         () =>
-          abort.signal.aborted
+          active.abort.signal.aborted
             ? { type: "interrupted" as const }
             : { type: "completed" as const },
         (error: unknown) =>
-          abort.signal.aborted
+          active.abort.signal.aborted
             ? { type: "interrupted" as const }
             : { type: "failed" as const, error },
       )
@@ -749,7 +775,7 @@ export class Session {
       })
     const outcome = Promise.race([
       settled,
-      aborted.promise.then(async () => {
+      aborted.then(async () => {
         await Promise.race([
           processorTask.catch(() => undefined),
           delay(gracefulInterruptionTimeoutMs),
@@ -774,7 +800,29 @@ export class Session {
     ])
     void processorTask.catch(() => undefined)
     active.task = outcome.then((result) => this.#finishTurn(active, result))
-    return { type: "started", turnId: input.submissionId }
+  }
+
+  // A Turn that never became durable: clear the starting marker, unwind the
+  // active shell, and surface the failure. The dedupe entry stays: the batch
+  // may already be durable, and a retry must replay rather than risk a
+  // duplicate — the Turn's failure is visible through the agent status.
+  async #failPendingTurn(
+    pending: PendingTurnStart,
+    active: ActiveTurn,
+    error: unknown,
+  ): Promise<void> {
+    if (this.#pendingTurnStart === pending) this.#pendingTurnStart = undefined
+    if (this.#activeTurn === active) {
+      this.#activeTurn = undefined
+      if (!this.#closing) this.#setStatus(SessionStatus.Idle)
+    }
+    try {
+      await this.#recordAgentFailure(
+        error instanceof Error ? error.message : "Turn persistence failed.",
+      )
+    } catch (failureError) {
+      this.#reportPersistenceError(failureError)
+    }
   }
 
   async #finishTurn(
@@ -1077,8 +1125,9 @@ export class Session {
 
   async #runForkBarrier(operation: ForkBarrierCommand): Promise<void> {
     try {
-      if (this.#pendingTurnStart !== undefined)
-        throw new Error("The previous Turn must be persisted before forking.")
+      // A Turn being recorded must land before the barrier snapshots: wait
+      // out the recording instead of racing it.
+      await this.#pendingTurnReady
       this.#interruptActiveTurn("conversation_fork")
       await this.#activeTurn?.task.catch(() => undefined)
       await this.#store.flushThread(this.id)
@@ -1357,6 +1406,8 @@ export function queuedInputsFromRollout(
       !record.item.item.id.startsWith("input_") ||
       record.item.item.item.role !== "user" ||
       record.item.item.item.context !== undefined ||
+      // The marker separates a real queue entry from a torn turn-start batch.
+      record.item.item.submissionMetadata?.queued !== true ||
       startedInputIds.has(record.item.item.id) ||
       cancelledInputIds.has(record.item.item.id)
     ) {
@@ -1427,7 +1478,11 @@ function turnInputFingerprint(input: TurnInput): string {
   })
 }
 
-function buildInputItem(input: TurnInput): ResponseItemEnvelope {
+function buildInputItem(
+  input: TurnInput,
+  options?: { readonly queued?: boolean },
+): ResponseItemEnvelope {
+  const submissionMetadata = turnInputSubmissionMetadata(input)
   return {
     id: `input_${globalThis.crypto.randomUUID()}`,
     turnId: input.submissionId,
@@ -1454,7 +1509,14 @@ function buildInputItem(input: TurnInput): ResponseItemEnvelope {
             })),
           }),
     },
-    ...turnInputSubmissionMetadata(input),
+    ...(options?.queued === true
+      ? {
+          submissionMetadata: {
+            ...submissionMetadata?.submissionMetadata,
+            queued: true,
+          },
+        }
+      : submissionMetadata),
   }
 }
 

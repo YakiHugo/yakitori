@@ -25,7 +25,11 @@ import type {
   ApiSubscriptionSummary,
   ApiUserModelPreference,
 } from "../../server/protocol.ts"
-import { acknowledgeAdmission, reserveAdmission } from "../admission-outbox.ts"
+import {
+  acknowledgeAdmission,
+  type PendingAdmission,
+  reserveAdmission,
+} from "../admission-outbox.ts"
 import type { ContextExcerpt } from "../conversation-context.ts"
 import {
   createExecutionViewState,
@@ -332,6 +336,9 @@ export const useAppStore = create<AppStore>()((set, get) => {
   const projectPinRevisions: Record<string, number> = {}
   const confirmedProjectPins: Record<string, boolean> = {}
   const pendingProjectPins: Record<string, number> = {}
+  // Admissions whose server acknowledgment arrived but whose durable event is
+  // still pending; the outbox entry clears when the stream confirms it.
+  const pendingAdmissions = new Map<string, PendingAdmission>()
   const subscriptionReadRevisions: Record<ApiSubscriptionProvider, number> = {
     codex: 0,
     grok: 0,
@@ -627,6 +634,13 @@ export const useAppStore = create<AppStore>()((set, get) => {
               return
             }
             if (event.sessionId !== selection.sessionId) return
+            if (isKernelEvent(event) && event.type === "input.admitted") {
+              const admission = pendingAdmissions.get(event.data.requestId)
+              if (admission !== undefined) {
+                pendingAdmissions.delete(event.data.requestId)
+                void acknowledgeAdmission(window.localStorage, admission)
+              }
+            }
             set((state) => {
               const selectedSession = applyDurableSessionDetail(
                 state.selectedSession,
@@ -1789,13 +1803,20 @@ export const useAppStore = create<AppStore>()((set, get) => {
                 : { modelSelection: admittedModelSelection }),
             },
           )
-          if (
-            response.requestId !== pendingAdmission.requestId ||
-            response.event.sessionId !== selection.sessionId
-          ) {
+          if (response.requestId !== pendingAdmission.requestId) {
             throw new Error("Admission response did not match the request.")
           }
-          await acknowledgeAdmission(window.localStorage, pendingAdmission)
+          // The response acknowledges the routing decision only; the outbox
+          // entry clears once the durable input.admitted event confirms the
+          // write (it may already have been replayed to this view).
+          if (get().execution.admittedRequestIds[pendingAdmission.requestId]) {
+            await acknowledgeAdmission(window.localStorage, pendingAdmission)
+          } else {
+            pendingAdmissions.set(
+              pendingAdmission.requestId,
+              pendingAdmission,
+            )
+          }
           if (!isCurrentSelection(selection)) return
           set((state) => ({
             // A new or edited excerpt queued during admission belongs to the

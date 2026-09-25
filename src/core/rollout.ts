@@ -55,6 +55,10 @@ export type ResponseItemEnvelope = {
     readonly modelSelection?: ModelSelection
     readonly parentInputId?: string
     readonly metadata?: EventMetadata
+    // Queued admissions write the input item as a standalone batch; the
+    // marker distinguishes a real queue entry from a torn turn-start batch
+    // (uncovered input_ with no marker) when rebuilding the queue on resume.
+    readonly queued?: boolean
   }
 }
 

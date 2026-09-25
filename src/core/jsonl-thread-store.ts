@@ -2278,11 +2278,17 @@ function isResponseItem(value: unknown): value is ResponseItemEnvelope {
 function isSubmissionMetadata(value: unknown): boolean {
   return (
     isRecord(value) &&
-    hasOnlyKeys(value, ["modelSelection", "parentInputId", "metadata"]) &&
+    hasOnlyKeys(value, [
+      "modelSelection",
+      "parentInputId",
+      "metadata",
+      "queued",
+    ]) &&
     (value.modelSelection === undefined ||
       isModelSelection(value.modelSelection)) &&
     optionalString(value.parentInputId) &&
-    (value.metadata === undefined || isJsonObject(value.metadata))
+    (value.metadata === undefined || isJsonObject(value.metadata)) &&
+    (value.queued === undefined || value.queued === true)
   )
 }
 

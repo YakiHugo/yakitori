@@ -1841,9 +1841,9 @@ describe("model selection", () => {
     expect(useAppStore.getState().promptDraft).toBeUndefined()
     // Steering is ephemeral acceptance: no admission outbox entry.
     expect(
-      Object.keys(window.localStorage).filter((key) =>
-        key.startsWith("yakitori.admission"),
-      ),
+      Array.from({ length: window.localStorage.length }, (_, index) =>
+        window.localStorage.key(index),
+      ).filter((key) => key?.startsWith("yakitori.admission")),
     ).toEqual([])
   })
 
@@ -1892,6 +1892,54 @@ describe("model selection", () => {
     expect(fakeRef.current.requestsFor("session/input")).toHaveLength(0)
     expect(useAppStore.getState().promptDraft).toBeUndefined()
     expect(useAppStore.getState().message).toBeUndefined()
+  })
+
+  it("clears the admission outbox only when the durable event confirms the write", async () => {
+    window.localStorage.clear()
+    fakeRef.current.respond = admissionResponder()
+    useAppStore.setState({
+      modelSelections: {
+        session_1: { provider: "openai", model: "gpt-5.1-codex" },
+      },
+    })
+    await useAppStore.getState().selectSession("session_1")
+    emitSnapshot(fakeRef.current.streams[0])
+    useAppStore.setState({ promptDraft: "hello" })
+
+    await useAppStore.getState().admitInput("hello")
+
+    const admissionKeys = () =>
+      Array.from({ length: window.localStorage.length }, (_, index) =>
+        window.localStorage.key(index),
+      ).filter((key) => key?.startsWith("yakitori.admission"))
+    expect(useAppStore.getState().message).toBeUndefined()
+    expect(fakeRef.current.requestsFor("session/input")).toHaveLength(1)
+    // The response acknowledges the routing decision only; the outbox entry
+    // is still held.
+    expect(admissionKeys()).toHaveLength(1)
+
+    const requestId = (
+      fakeRef.current.requestsFor("session/input")[0]?.params as {
+        requestId: string
+      }
+    ).requestId
+    fakeRef.current.streams[0]?.emitEvent(
+      createEventEnvelope({
+        sessionId: "session_1",
+        seq: 2,
+        event: {
+          type: EventType.InputAdmitted,
+          data: {
+            requestId,
+            inputId: "input_1",
+            role: InputRole.User,
+            content: { kind: "text", text: "hello" },
+          },
+        },
+      }),
+    )
+
+    await vi.waitFor(() => expect(admissionKeys()).toHaveLength(0))
   })
 
   it("clears an attachment-only draft after admission", async () => {

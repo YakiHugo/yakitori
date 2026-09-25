@@ -216,6 +216,50 @@ export function createThreadServerHandlers(
     )
     const last = records.at(-1)
     if (last !== undefined) publishedThrough.set(threadId, hostSeq(last))
+    maybeGenerateSessionTitle(threadId, stored, records)
+  }
+
+  // Name an untitled conversation once, from its first user input, when the
+  // durable event publishes. The generator re-checks title ownership and
+  // never blocks the pump.
+  function maybeGenerateSessionTitle(
+    threadId: string,
+    stored: StoredThread,
+    records: readonly StoredRolloutItem[],
+  ) {
+    if (options.sessionTitle === undefined) return
+    const isUserInput = (record: StoredRolloutItem) =>
+      record.item.type === "response_item" &&
+      record.item.item.id.startsWith("input_") &&
+      record.item.item.item.role === "user" &&
+      record.item.item.item.context === undefined
+    const admitted = records.find(isUserInput)
+    if (admitted === undefined) return
+    const first = stored.rollout.find(isUserInput)
+    if (
+      first === undefined ||
+      first.item.type !== "response_item" ||
+      admitted.item.type !== "response_item" ||
+      first.item.item.id !== admitted.item.item.id
+    ) {
+      return
+    }
+    const message = admitted.item.item.item
+    if (message.role !== "user") return
+    const text = message.content
+      .filter((block) => block.type === "text")
+      .map((block) => block.text)
+      .join("")
+    if (text.trim() === "") return
+    void options.sessionTitle.generate({
+      sessionId: threadId,
+      text,
+      ...(admitted.item.item.submissionMetadata?.modelSelection === undefined
+        ? {}
+        : {
+            modelSelection: admitted.item.item.submissionMetadata.modelSelection,
+          }),
+    })
   }
 
   async function ensureEventPump(thread: AgentThread): Promise<void> {
@@ -582,58 +626,19 @@ export function createThreadServerHandlers(
             reason: submitted.reason,
           })
         }
+        if (submitted.type === "steered") {
+          throw internalError("Admission unexpectedly returned steering.")
+        }
         rollbackPromotion = undefined
         await discardAdmittedDraftAttachments(
           request.sessionId,
           request.requestId,
           request.content,
         )
-        const stored = await requireStoredThread(
-          options.store,
-          request.sessionId,
-        )
-        const record = [...stored.rollout]
-          .reverse()
-          .find(
-            (entry) =>
-              entry.item.type === "response_item" &&
-              entry.item.item.turnId === request.requestId &&
-              entry.item.item.id.startsWith("input_"),
-          )
-        if (record === undefined) {
-          throw internalError("Submitted input was not present in the rollout.")
-        }
-        const event = mapRolloutEvent(record, request.sessionId)
-        if (!isKernelEvent(event)) {
-          throw internalError("Submitted input did not map to a host event.")
-        }
-        // Name an untitled conversation once, from its first user input.
-        // The generator re-checks title ownership and never blocks this
-        // admission path.
-        if (options.sessionTitle !== undefined) {
-          const userInputs = stored.rollout.filter(
-            (entry) =>
-              entry.item.type === "response_item" &&
-              entry.item.item.item.role === "user" &&
-              entry.item.item.id.startsWith("input_"),
-          )
-          if (userInputs.length <= 1 && content.text.trim() !== "") {
-            void options.sessionTitle.generate({
-              sessionId: request.sessionId,
-              text: content.text,
-              ...(request.modelSelection === undefined
-                ? {}
-                : { modelSelection: request.modelSelection }),
-            })
-          }
-        }
         return ok(submitted.type === "replayed" ? 200 : 201, {
           requestId: request.requestId,
-          inputId:
-            record.item.type === "response_item"
-              ? record.item.item.id
-              : request.requestId,
-          event,
+          turnId: submitted.turnId,
+          inputId: submitted.inputItemId,
         })
       },
     )

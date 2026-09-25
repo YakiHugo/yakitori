@@ -313,11 +313,15 @@ describe("application composition", () => {
           content: { kind: "text", text: "persist this prompt" },
         })
         expectOk(admitted)
-        expect(
-          (await application.threadStore.listThreads()).threads.map(
-            (thread) => thread.id,
-          ),
-        ).toEqual([committedId])
+        // The admission is acknowledged at routing; the staged Session
+        // materializes when the background recording lands.
+        await vi.waitFor(async () => {
+          expect(
+            (await application.threadStore.listThreads()).threads.map(
+              (thread) => thread.id,
+            ),
+          ).toEqual([committedId])
+        })
         const replay = await application.handlers.readSessionEvents({
           sessionId: committedId,
         })
@@ -1225,7 +1229,14 @@ describe("application composition", () => {
         expectOk(admitted)
         await waitForThreadIdle(application, sessionId)
 
-        expect(admitted.body.event).toMatchObject({
+        const events = await application.handlers.readSessionEvents({
+          sessionId,
+        })
+        expectOk(events)
+        const admittedEvent = events.body.events.find(
+          (event) => event.type === "input.admitted",
+        )
+        expect(admittedEvent).toMatchObject({
           data: {
             content: {
               attachments: [
@@ -1240,7 +1251,7 @@ describe("application composition", () => {
             },
           },
         })
-        expect(JSON.stringify(admitted.body.event)).not.toContain(
+        expect(JSON.stringify(admittedEvent)).not.toContain(
           imageBytes.toString("base64"),
         )
         expect(
@@ -2345,7 +2356,9 @@ describe("application composition", () => {
         expect(
           events.body.events.filter((event) => event.type === "input.admitted"),
         ).toHaveLength(1)
-        expect(admitted.body.event).toMatchObject({
+        expect(
+          events.body.events.find((event) => event.type === "input.admitted"),
+        ).toMatchObject({
           data: {
             modelSelection: input.modelSelection,
             parentInputId: input.parentInputId,

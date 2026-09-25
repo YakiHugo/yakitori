@@ -48,7 +48,11 @@ export type NotSubmittedReason =
   (typeof NotSubmittedReason)[keyof typeof NotSubmittedReason]
 
 export type TurnInputSubmission =
-  | { readonly type: "started"; readonly turnId: string }
+  | {
+      readonly type: "started"
+      readonly turnId: string
+      readonly inputItemId: string
+    }
   | { readonly type: "steered"; readonly turnId: string }
   | {
       readonly type: "queued"

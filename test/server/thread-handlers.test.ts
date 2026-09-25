@@ -276,17 +276,18 @@ describe("thread server handlers", () => {
     })
     if (!queued.ok) throw new Error(queued.body.error.message)
     expect(queued.status).toBe(201)
-    expect(queued.body.event.type).toBe("input.admitted")
 
     const detail = await handlers.readSession({ sessionId })
     if (!detail.ok) throw new Error(detail.body.error.message)
     expect(detail.body.session.pendingInputs).toEqual([
       expect.objectContaining({ text: "run after" }),
     ])
+    const queuedInputId = detail.body.session.pendingInputs[0]?.id
+    if (queuedInputId === undefined) throw new Error("Missing queued input.")
 
     const cancelled = await handlers.cancelInput({
       sessionId,
-      inputId: queued.body.inputId,
+      inputId: queuedInputId,
       reason: "user_cancel",
     })
     if (!cancelled.ok) throw new Error(cancelled.body.error.message)
@@ -299,7 +300,7 @@ describe("thread server handlers", () => {
     // Cancelling an already-started or unknown input conflicts.
     const missing = await handlers.cancelInput({
       sessionId,
-      inputId: queued.body.inputId,
+      inputId: queuedInputId,
     })
     expect(missing.ok).toBe(false)
     if (!missing.ok) expect(missing.status).toBe(409)

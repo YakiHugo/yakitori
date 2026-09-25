@@ -273,8 +273,11 @@ export type ApiAdmitInputRequest = {
 
 export type ApiAdmitInputResponse = {
   readonly requestId: string
+  // Acknowledged at the routing decision (Codex turn/start): the input is
+  // recorded by the run task, so durability is signaled by the durable
+  // input.admitted event on the session stream, not by this response.
+  readonly turnId: string
   readonly inputId: string
-  readonly event: EventEnvelope
 }
 
 export type ApiSteerInputRequest = {

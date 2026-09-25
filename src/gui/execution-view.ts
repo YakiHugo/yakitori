@@ -170,6 +170,10 @@ export type ExecutionViewState = Readonly<{
   permissionEntryIndexes: Readonly<Record<string, number>>
   openCompactionItems: Readonly<Record<string, string>>
   queuedInputs: Readonly<Record<string, ApiPendingInput>>
+  // requestIds whose durable input.admitted event this view has seen; the
+  // admission outbox acknowledges against this set (including events that
+  // arrived while the client was offline).
+  admittedRequestIds: Readonly<Record<string, true>>
   timeToFirstTokenWeightedMs: number
   timeToFirstTokenSamples: number
 }>
@@ -223,6 +227,7 @@ export function createExecutionViewState(
     permissionEntryIndexes: {},
     openCompactionItems: {},
     queuedInputs: {},
+    admittedRequestIds: {},
     timeToFirstTokenWeightedMs: 0,
     timeToFirstTokenSamples: 0,
   }
@@ -608,6 +613,10 @@ function applyDurable(
       return {
         ...next,
         queuedInputs,
+        admittedRequestIds: {
+          ...next.admittedRequestIds,
+          [event.data.requestId]: true,
+        },
         entries:
           event.data.role === "user"
             ? [
