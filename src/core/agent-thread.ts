@@ -38,6 +38,14 @@ export class AgentThread {
     return this.#session.io.startIfIdle(input)
   }
 
+  queueInput(input: SubmitTurnInput): Promise<TurnInputSubmission> {
+    return this.#session.io.queueInput(input)
+  }
+
+  cancelQueuedInput(inputId: string): Promise<boolean> {
+    return this.#session.io.cancelQueuedInput(inputId)
+  }
+
   steer(
     input: SubmitTurnInput,
     expectedTurnId: string,

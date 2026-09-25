@@ -6,6 +6,8 @@ import type {
   StoredThread,
   ThreadSummary,
 } from "../core/rollout.ts"
+import { queuedInputsFromRollout } from "../core/session.ts"
+import type { TurnInputSubmission } from "../core/session-io.ts"
 import {
   parseSidebarChange,
   type SessionSidebar,
@@ -156,6 +158,7 @@ export type ServerHandlers = {
   ): Promise<ApiHandlerResult<ApiDeleteSessionResponse>>
   forkSession(input: unknown): Promise<ApiHandlerResult<ApiForkSessionResponse>>
   admitInput(input: unknown): Promise<ApiHandlerResult<ApiAdmitInputResponse>>
+  queueInput(input: unknown): Promise<ApiHandlerResult<ApiAdmitInputResponse>>
   steerInput(input: unknown): Promise<ApiHandlerResult<ApiSteerInputResponse>>
   compactSession(
     input: unknown,
@@ -534,6 +537,106 @@ export function createThreadServerHandlers(
         turnId: requestId,
       })
     }
+  }
+
+  // Shared admission pipeline for session/input (start-if-idle) and
+  // session/input/queue (queue-or-start): validate, promote attachments,
+  // submit through the Session, and answer with the durable input event.
+  const admitTurnInput = async (
+    request: ReturnType<typeof requireAdmitInputRequest>,
+    submit: (
+      thread: AgentThread,
+      content: TextContent,
+    ) => Promise<TurnInputSubmission>,
+  ) => {
+    if (
+      (await options.store.sessionPresentation(request.sessionId)).archived
+    )
+      throw conflict("Restore this conversation before sending a message.")
+    requireAvailableProvider(
+      request.modelSelection?.provider,
+      options.availableProviders,
+    )
+    return await withAdmissionLock(
+      request.sessionId,
+      request.requestId,
+      async () => {
+        const thread = await resumeRequired(request.sessionId)
+        const rolloutId = thread.snapshot().metadata.rolloutId
+        const promoted = await promoteRequestAttachments(
+          rolloutId,
+          request.requestId,
+          request.content,
+        )
+        const content = promoted.content
+        let rollbackPromotion = promoted.rollback
+        const submitted = await submit(thread, content).catch(
+          async (error: unknown) => {
+            await rollbackPromotion?.()
+            throw error
+          },
+        )
+        if (submitted.type === "not_submitted") {
+          await rollbackPromotion?.()
+          throw conflict(`Input was not submitted: ${submitted.reason}.`, {
+            reason: submitted.reason,
+          })
+        }
+        rollbackPromotion = undefined
+        await discardAdmittedDraftAttachments(
+          request.sessionId,
+          request.requestId,
+          request.content,
+        )
+        const stored = await requireStoredThread(
+          options.store,
+          request.sessionId,
+        )
+        const record = [...stored.rollout]
+          .reverse()
+          .find(
+            (entry) =>
+              entry.item.type === "response_item" &&
+              entry.item.item.turnId === request.requestId &&
+              entry.item.item.id.startsWith("input_"),
+          )
+        if (record === undefined) {
+          throw internalError("Submitted input was not present in the rollout.")
+        }
+        const event = mapRolloutEvent(record, request.sessionId)
+        if (!isKernelEvent(event)) {
+          throw internalError("Submitted input did not map to a host event.")
+        }
+        // Name an untitled conversation once, from its first user input.
+        // The generator re-checks title ownership and never blocks this
+        // admission path.
+        if (options.sessionTitle !== undefined) {
+          const userInputs = stored.rollout.filter(
+            (entry) =>
+              entry.item.type === "response_item" &&
+              entry.item.item.item.role === "user" &&
+              entry.item.item.id.startsWith("input_"),
+          )
+          if (userInputs.length <= 1 && content.text.trim() !== "") {
+            void options.sessionTitle.generate({
+              sessionId: request.sessionId,
+              text: content.text,
+              ...(request.modelSelection === undefined
+                ? {}
+                : { modelSelection: request.modelSelection }),
+            })
+          }
+        }
+        return ok(submitted.type === "replayed" ? 200 : 201, {
+          requestId: request.requestId,
+          inputId:
+            record.item.type === "response_item"
+              ? record.item.item.id
+              : request.requestId,
+          event,
+        })
+      },
+    )
   }
 
   const unsubscribeThreadInstalled =
@@ -1009,13 +1112,42 @@ export function createThreadServerHandlers(
           input,
           options.maxInputBytes ?? DEFAULT_MAX_INPUT_BYTES,
         )
-        if (
-          (await options.store.sessionPresentation(request.sessionId)).archived
+        if (request.role !== undefined && request.role !== InputRole.User) {
+          throw invalidInput(
+            "Only user input can be submitted to a live Session.",
+            {
+              field: "role",
+            },
+          )
+        }
+        return await admitTurnInput(request, (thread, content) =>
+          thread.startIfIdle({
+            submissionId: request.requestId,
+            content,
+            ...(request.modelSelection === undefined
+              ? {}
+              : { modelSelection: request.modelSelection }),
+            ...(request.metadata === undefined
+              ? {}
+              : { metadata: request.metadata }),
+            ...(request.parentInputId === undefined
+              ? {}
+              : { parentInputId: request.parentInputId }),
+          }),
         )
-          throw conflict("Restore this conversation before sending a message.")
-        requireAvailableProvider(
-          request.modelSelection?.provider,
-          options.availableProviders,
+      } catch (error) {
+        return fail(error, reporter, "admit-input")
+      }
+    },
+
+    // Queue-or-start (Codex thread/queue): admitted durably at once; while a
+    // Turn is running the input joins the pending queue and dispatches when
+    // the Session goes idle, otherwise it starts immediately.
+    async queueInput(input) {
+      try {
+        const request = requireAdmitInputRequest(
+          input,
+          options.maxInputBytes ?? DEFAULT_MAX_INPUT_BYTES,
         )
         if (request.role !== undefined && request.role !== InputRole.User) {
           throw invalidInput(
@@ -1025,104 +1157,23 @@ export function createThreadServerHandlers(
             },
           )
         }
-        return await withAdmissionLock(
-          request.sessionId,
-          request.requestId,
-          async () => {
-            const thread = await resumeRequired(request.sessionId)
-            const rolloutId = thread.snapshot().metadata.rolloutId
-            const promoted = await promoteRequestAttachments(
-              rolloutId,
-              request.requestId,
-              request.content,
-            )
-            const content = promoted.content
-            let rollbackPromotion = promoted.rollback
-            const submitted = await thread
-              .startIfIdle({
-                submissionId: request.requestId,
-                content,
-                ...(request.modelSelection === undefined
-                  ? {}
-                  : { modelSelection: request.modelSelection }),
-                ...(request.metadata === undefined
-                  ? {}
-                  : { metadata: request.metadata }),
-                ...(request.parentInputId === undefined
-                  ? {}
-                  : { parentInputId: request.parentInputId }),
-              })
-              .catch(async (error: unknown) => {
-                await rollbackPromotion?.()
-                throw error
-              })
-            if (submitted.type === "not_submitted") {
-              await rollbackPromotion?.()
-              throw conflict(`Input was not submitted: ${submitted.reason}.`, {
-                reason: submitted.reason,
-              })
-            }
-            rollbackPromotion = undefined
-            await discardAdmittedDraftAttachments(
-              request.sessionId,
-              request.requestId,
-              request.content,
-            )
-            const stored = await requireStoredThread(
-              options.store,
-              request.sessionId,
-            )
-            const record = [...stored.rollout]
-              .reverse()
-              .find(
-                (entry) =>
-                  entry.item.type === "response_item" &&
-                  entry.item.item.turnId === request.requestId &&
-                  entry.item.item.id.startsWith("input_"),
-              )
-            if (record === undefined) {
-              throw internalError(
-                "Submitted input was not present in the rollout.",
-              )
-            }
-            const event = mapRolloutEvent(record, request.sessionId)
-            if (!isKernelEvent(event)) {
-              throw internalError(
-                "Submitted input did not map to a host event.",
-              )
-            }
-            // Name an untitled conversation once, from its first user input.
-            // The generator re-checks title ownership and never blocks this
-            // admission path.
-            if (options.sessionTitle !== undefined) {
-              const userInputs = stored.rollout.filter(
-                (entry) =>
-                  entry.item.type === "response_item" &&
-                  entry.item.item.item.role === "user" &&
-                  entry.item.item.id.startsWith("input_"),
-              )
-              if (userInputs.length <= 1 && content.text.trim() !== "") {
-                void options.sessionTitle.generate({
-                  sessionId: request.sessionId,
-                  text: content.text,
-                  ...(request.modelSelection === undefined
-                    ? {}
-                    : { modelSelection: request.modelSelection }),
-                })
-              }
-            }
-            return ok(submitted.type === "replayed" ? 200 : 201, {
-              requestId: request.requestId,
-              inputId:
-                record.item.type === "response_item"
-                  ? record.item.item.id
-                  : request.requestId,
-              event,
-            })
-          },
+        return await admitTurnInput(request, (thread, content) =>
+          thread.queueInput({
+            submissionId: request.requestId,
+            content,
+            ...(request.modelSelection === undefined
+              ? {}
+              : { modelSelection: request.modelSelection }),
+            ...(request.metadata === undefined
+              ? {}
+              : { metadata: request.metadata }),
+            ...(request.parentInputId === undefined
+              ? {}
+              : { parentInputId: request.parentInputId }),
+          }),
         )
       } catch (error) {
-        return fail(error, reporter, "admit-input")
+        return fail(error, reporter, "queue-input")
       }
     },
 
@@ -1205,14 +1256,40 @@ export function createThreadServerHandlers(
     async cancelInput(input) {
       try {
         const request = requireCancelInputRequest(input)
-        await resumeRequired(request.sessionId)
-        throw conflict(
-          "Live Sessions do not keep a durable pending-input queue.",
-          {
-            sessionId: request.sessionId,
-            inputId: request.inputId,
-          },
+        const thread = await resumeRequired(request.sessionId)
+        const cancelled = await thread.cancelQueuedInput(request.inputId)
+        if (!cancelled) {
+          throw conflict(
+            `Input ${request.inputId} is already started or unknown.`,
+            {
+              sessionId: request.sessionId,
+              inputId: request.inputId,
+            },
+          )
+        }
+        const stored = await requireStoredThread(
+          options.store,
+          request.sessionId,
         )
+        const record = [...stored.rollout]
+          .reverse()
+          .find(
+            (entry) =>
+              entry.item.type === "input_cancelled" &&
+              entry.item.inputId === request.inputId,
+          )
+        if (record === undefined) {
+          throw internalError("Cancelled input was not present in the rollout.")
+        }
+        const event = mapRolloutEvent(record, request.sessionId)
+        if (!isKernelEvent(event)) {
+          throw internalError("Cancelled input did not map to a host event.")
+        }
+        return ok(200, {
+          sessionId: request.sessionId,
+          inputId: request.inputId,
+          event,
+        })
       } catch (error) {
         return fail(error, reporter, "cancel-input")
       }
@@ -1377,6 +1454,7 @@ async function mapStoredThread(
     seq: Math.max(0, threadSeq(stored) - 1),
   }
   const liveProjects = await liveProjectIds(options, [stored.metadata])
+  const pendingQueue = queuedInputsFromRollout(stored.rollout)
   return {
     ...mapThreadSummary(summary, liveProjects),
     ...(live?.snapshot().activeTurnId === undefined
@@ -1386,13 +1464,17 @@ async function mapStoredThread(
       ? {}
       : { currentModel: currentContext.context.selection }),
     ...(usage === undefined ? {} : { usage }),
-    pendingInputs: [],
+    pendingInputs: pendingQueue.map((entry) => ({
+      id: entry.inputItem.id,
+      text: entry.input.content.text,
+      admittedAt: entry.inputItem.createdAt,
+    })),
     pendingPermissions: pendingPermissions.map(
       ({ sessionId: _, ...entry }) => entry,
     ),
     counts: {
       inputs,
-      pendingInputs: 0,
+      pendingInputs: pendingQueue.length,
       turns,
       items,
       permissions: pendingPermissions.length,
@@ -1530,6 +1612,15 @@ function mapRolloutEvent(
             ? {}
             : { metadata: item.item.submissionMetadata.metadata }),
         },
+      },
+    })
+  }
+  if (item.type === "input_cancelled") {
+    return createEventEnvelope({
+      ...base,
+      event: {
+        type: "input.cancelled",
+        data: { inputId: item.inputId },
       },
     })
   }

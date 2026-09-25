@@ -2175,6 +2175,12 @@ function isRolloutItem(value: unknown): value is RolloutItem {
       (value.error === undefined || isRolloutError(value.error))
     )
   }
+  if (value.type === "input_cancelled") {
+    return (
+      hasOnlyKeys(value, ["type", "inputId"]) &&
+      typeof value.inputId === "string"
+    )
+  }
   if (value.type === "agent_status") {
     return (
       hasOnlyKeys(value, ["type", "status", "error"]) &&

@@ -633,7 +633,15 @@ function applyDurable(
       }
     }
     case "input.cancelled":
-      return removeQueuedInput(next, event.data.inputId)
+      next = removeQueuedInput(next, event.data.inputId)
+      // A cancelled queued input never ran; it leaves the transcript too.
+      return {
+        ...next,
+        entries: next.entries.filter(
+          (entry) =>
+            entry.kind !== "user_input" || entry.inputId !== event.data.inputId,
+        ),
+      }
     case "turn.started":
       next = removeQueuedInput(next, event.data.inputId)
       return {

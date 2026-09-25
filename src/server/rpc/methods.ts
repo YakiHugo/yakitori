@@ -757,6 +757,11 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
     sessionScope,
     (handlers, params) => handlers.admitInput(params),
   ),
+  handlerEntry<ApiAdmitInputResponse>(
+    "session/input/queue",
+    sessionScope,
+    (handlers, params) => handlers.queueInput(params),
+  ),
   handlerEntry<ApiSteerInputResponse>(
     "session/input/steer",
     sessionScope,
@@ -1164,6 +1169,7 @@ export type RpcMethodParams = Readonly<
       "session/fork": ApiForkSessionRequest & Readonly<{ sessionId: string }>
       "session/compact": Readonly<{ sessionId: string; requestId?: string }>
       "session/input": ApiAdmitInputRequest
+      "session/input/queue": ApiAdmitInputRequest
       "session/input/steer": ApiSteerInputRequest
       "session/input/cancel": ApiCancelInputRequest
       "session/turn/cancel": ApiCancelTurnRequest
@@ -1209,6 +1215,7 @@ export type RpcMethodResponses = Readonly<
       "session/fork": ApiForkSessionResponse
       "session/compact": ApiCompactSessionResponse
       "session/input": ApiAdmitInputResponse
+      "session/input/queue": ApiAdmitInputResponse
       "session/input/steer": ApiSteerInputResponse
       "session/input/cancel": ApiCancelInputResponse
       "session/turn/cancel": ApiCancelTurnResponse

@@ -196,6 +196,9 @@ export type AppStoreActions = {
   admitInput(
     text: string,
     attachments?: readonly ImageAttachment[],
+    // "queue" skips steering: the input joins the durable pending queue and
+    // dispatches as the next Turn when the Session goes idle.
+    mode?: "auto" | "queue",
   ): Promise<void>
   cancelTurn(turnId: string): Promise<void>
   cancelQueuedInput(inputId: string): Promise<void>
@@ -1585,7 +1588,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
       loadSessionSkills(sessionId)
     },
 
-    admitInput: async (text, attachments = []) => {
+    admitInput: async (text, attachments = [], mode = "auto") => {
       const excerpts = get().promptExcerpts
       if (text === COMPACT_DIRECTIVE && excerpts.length > 0) return
       let queuedModelSelection: ModelSelection | undefined
@@ -1644,10 +1647,12 @@ export const useAppStore = create<AppStore>()((set, get) => {
 
       // An active Turn takes follow-up input as steering (Codex turn/steer);
       // the input is recorded when the Turn next samples. If the Turn ended
-      // between our view and the server, fall through and admit a new Turn
-      // instead — the message must not be lost to a race.
+      // or stopped accepting between our view and the server, fall through to
+      // a queued admission — it dispatches as the next Turn (or starts at
+      // once when the Session is already idle), so the message is never lost.
       const activeTurnId = get().execution.activeTurnId
-      if (activeTurnId !== undefined && text !== COMPACT_DIRECTIVE) {
+      let queueAdmission = mode === "queue"
+      if (activeTurnId !== undefined && text !== COMPACT_DIRECTIVE && !queueAdmission) {
         let rejected = false
         await runTask(
           async () => {
@@ -1677,6 +1682,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
                 error.code === "conflict"
               ) {
                 rejected = true
+                queueAdmission = true
                 return
               }
               throw error
@@ -1766,7 +1772,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
           })
           if (!isCurrentSelection(selection)) return
           const response = await getAppRpcClient(get().apiBase).request(
-            "session/input",
+            queueAdmission ? "session/input/queue" : "session/input",
             {
               sessionId: selection.sessionId,
               requestId: pendingAdmission.requestId,

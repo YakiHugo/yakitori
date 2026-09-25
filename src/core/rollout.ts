@@ -90,6 +90,12 @@ export type RolloutItem =
       readonly error?: KernelError
     }
   | {
+      // Cancels a queued input: the queue entry is the earlier uncovered
+      // input_ response_item; this marker keeps it cancelled across restarts.
+      readonly type: "input_cancelled"
+      readonly inputId: string
+    }
+  | {
       readonly type: "agent_status"
       readonly status: "errored"
       readonly error: string

@@ -185,6 +185,12 @@ export function createFakeHandlers(
         inputId: "input_1",
         event: makeTurnStarted("session_1", 2, "turn_1"),
       }),
+    queueInput: async () =>
+      okResult({
+        requestId: "request_1",
+        inputId: "input_1",
+        event: makeTurnStarted("session_1", 2, "turn_1"),
+      }),
     steerInput: async () =>
       okResult({ requestId: "request_1", turnId: "turn_1" }),
     compactSession: async () =>

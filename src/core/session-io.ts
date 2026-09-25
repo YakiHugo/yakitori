@@ -51,6 +51,11 @@ export type TurnInputSubmission =
   | { readonly type: "started"; readonly turnId: string }
   | { readonly type: "steered"; readonly turnId: string }
   | {
+      readonly type: "queued"
+      readonly turnId: string
+      readonly inputItemId: string
+    }
+  | {
       readonly type: "replayed"
       readonly turnId: string
       readonly inputItemId: string
@@ -91,6 +96,7 @@ export type TurnInputMode =
   | { readonly type: "start_or_steer" }
   | { readonly type: "start_if_idle" }
   | { readonly type: "steer"; readonly expectedTurnId: string }
+  | { readonly type: "queue" }
 
 type TurnInputReply = {
   readonly resolve: (submission: TurnInputSubmission) => void
@@ -104,6 +110,15 @@ export type SessionOp =
       readonly mode: TurnInputMode
       readonly reply: TurnInputReply
     }
+  | {
+      readonly type: "cancel_queued_input"
+      readonly inputId: string
+      readonly reply: {
+        readonly resolve: (cancelled: boolean) => void
+        readonly reject: (error: unknown) => void
+      }
+    }
+  | { readonly type: "dispatch_queued" }
   | {
       readonly type: "interrupt"
       readonly reason?: string
@@ -254,6 +269,21 @@ export class SessionIo {
 
   startIfIdle(input: SubmitTurnInput): Promise<TurnInputSubmission> {
     return this.#submitTurnInput(input, { type: "start_if_idle" })
+  }
+
+  queueInput(input: SubmitTurnInput): Promise<TurnInputSubmission> {
+    return this.#submitTurnInput(input, { type: "queue" })
+  }
+
+  cancelQueuedInput(inputId: string): Promise<boolean> {
+    this.#requireOpen()
+    return new Promise((resolve, reject) => {
+      void this.#send({
+        type: "cancel_queued_input",
+        inputId,
+        reply: { resolve, reject },
+      }).catch(reject)
+    })
   }
 
   steer(

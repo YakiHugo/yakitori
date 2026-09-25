@@ -1847,7 +1847,7 @@ describe("model selection", () => {
     ).toEqual([])
   })
 
-  it("falls back to a fresh admission when the active turn ended before steering", async () => {
+  it("falls back to a queued admission when the active turn ended before steering", async () => {
     window.localStorage.clear()
     fakeRef.current.respond = (method, params) => {
       if (method === "session/input/steer") {
@@ -1856,7 +1856,7 @@ describe("model selection", () => {
           "conflict",
         )
       }
-      if (method === "session/input") {
+      if (method === "session/input/queue") {
         const body = params as { requestId: string }
         return {
           requestId: body.requestId,
@@ -1888,7 +1888,8 @@ describe("model selection", () => {
     await useAppStore.getState().admitInput("follow up")
 
     expect(fakeRef.current.requestsFor("session/input/steer")).toHaveLength(1)
-    expect(fakeRef.current.requestsFor("session/input")).toHaveLength(1)
+    expect(fakeRef.current.requestsFor("session/input/queue")).toHaveLength(1)
+    expect(fakeRef.current.requestsFor("session/input")).toHaveLength(0)
     expect(useAppStore.getState().promptDraft).toBeUndefined()
     expect(useAppStore.getState().message).toBeUndefined()
   })

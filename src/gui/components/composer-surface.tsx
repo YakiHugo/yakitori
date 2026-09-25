@@ -117,7 +117,11 @@ export function ComposerSurface({
   setPromptAttachments(attachments: readonly ImageAttachment[]): void
   removePromptExcerpt(id: string): void
   updatePromptExcerpt(excerpt: ContextExcerpt): void
-  onSubmit(text: string, attachments: readonly ImageAttachment[]): void
+  onSubmit(
+    text: string,
+    attachments: readonly ImageAttachment[],
+    mode?: "auto" | "queue",
+  ): void
   onCancel(): void
   modelControls: ReactNode
   importImages: ComposerImageImport
@@ -290,7 +294,7 @@ export function ComposerSurface({
     })
   }
 
-  const submit = () => {
+  const submit = (mode?: "auto" | "queue") => {
     if (!canSend) return
     setHistoryNavigation(undefined)
     onSubmit(
@@ -301,6 +305,7 @@ export function ComposerSurface({
             ...attachment,
             detail: "high" as const,
           })),
+      mode,
     )
   }
 
@@ -413,15 +418,26 @@ export function ComposerSurface({
       setPromptDraft(entry)
       return true
     }
-    if (
-      event.key === "Enter" &&
-      !event.shiftKey &&
-      !event.altKey &&
-      (sendShortcut === "enter" || event.metaKey || event.ctrlKey)
-    ) {
-      event.preventDefault()
-      submit()
-      return true
+    if (event.key === "Enter" && !event.altKey) {
+      const mod = event.metaKey || event.ctrlKey
+      // Queue-for-next-turn gestures: Mod+Enter in enter mode (plain Enter
+      // already sends); Shift+Mod+Enter in mod-enter mode (the plain chord
+      // is already "send"). Sending steers an active Turn; queueing runs the
+      // input as the next Turn.
+      const queue = mod && (sendShortcut === "enter" ? !event.shiftKey : event.shiftKey)
+      if (queue) {
+        event.preventDefault()
+        submit("queue")
+        return true
+      }
+      if (
+        !event.shiftKey &&
+        (sendShortcut === "enter" || mod)
+      ) {
+        event.preventDefault()
+        submit()
+        return true
+      }
     }
     return false
   }

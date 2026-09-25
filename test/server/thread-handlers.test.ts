@@ -214,6 +214,104 @@ describe("thread server handlers", () => {
     })
   })
 
+  it("queues input durably while a turn runs and cancels it through the RPC", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "yakitori-handler-queue-"))
+    const store = new MemoryThreadStore()
+    const requests: string[] = []
+    let releaseFirst!: () => void
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve
+    })
+    const stream: StreamFn = async function* (request) {
+      const text = request.messages
+        .flatMap((message) => (message.role === "user" ? message.content : []))
+        .flatMap((block) => (block.type === "text" ? [block.text] : []))
+        .join("\n")
+      requests.push(text)
+      if (requests.length === 1) await firstGate
+      yield {
+        type: "response",
+        response: {
+          stopReason: ModelStopReason.EndTurn,
+          content: [{ type: "text", text: "ok" }],
+        },
+      }
+    }
+    const manager = new ThreadManager({
+      store,
+      createTurnProcessor: () =>
+        createTurnProcessor({
+          stream,
+          toolRegistry: createToolRegistry([]),
+          loadProjectInstructions: async () => undefined,
+        }),
+    })
+    const handlers = createThreadServerHandlers({ manager, store })
+    cleanups.push(async () => {
+      await manager.shutdown()
+      await handlers.close()
+      await rm(workspace, { recursive: true, force: true })
+    })
+
+    const created = await handlers.createSession({
+      workingDirectory: workspace,
+      mateId: "mate_test",
+      mateRevisionId: "mate_revision_test",
+    })
+    if (!created.ok) throw new Error(created.body.error.message)
+    const sessionId = created.body.session.id
+
+    const admitted = await handlers.admitInput({
+      sessionId,
+      requestId: "request_first",
+      content: { kind: "text", text: "start the work" },
+    })
+    if (!admitted.ok) throw new Error(admitted.body.error.message)
+    await waitForValue(() => (requests.length === 1 ? true : undefined))
+
+    const queued = await handlers.queueInput({
+      sessionId,
+      requestId: "request_queued",
+      content: { kind: "text", text: "run after" },
+    })
+    if (!queued.ok) throw new Error(queued.body.error.message)
+    expect(queued.status).toBe(201)
+    expect(queued.body.event.type).toBe("input.admitted")
+
+    const detail = await handlers.readSession({ sessionId })
+    if (!detail.ok) throw new Error(detail.body.error.message)
+    expect(detail.body.session.pendingInputs).toEqual([
+      expect.objectContaining({ text: "run after" }),
+    ])
+
+    const cancelled = await handlers.cancelInput({
+      sessionId,
+      inputId: queued.body.inputId,
+      reason: "user_cancel",
+    })
+    if (!cancelled.ok) throw new Error(cancelled.body.error.message)
+    expect(cancelled.body.event.type).toBe("input.cancelled")
+
+    const after = await handlers.readSession({ sessionId })
+    if (!after.ok) throw new Error(after.body.error.message)
+    expect(after.body.session.pendingInputs).toEqual([])
+
+    // Cancelling an already-started or unknown input conflicts.
+    const missing = await handlers.cancelInput({
+      sessionId,
+      inputId: queued.body.inputId,
+    })
+    expect(missing.ok).toBe(false)
+    if (!missing.ok) expect(missing.status).toBe(409)
+
+    releaseFirst()
+    await waitForValue(() =>
+      manager.getThread(sessionId)?.status === "idle" ? true : undefined,
+    )
+    expect(requests).toHaveLength(1)
+    expect(requests[0]).toContain("start the work")
+  })
+
   it("returns healthy search results with an explicit count of unreadable sessions", async () => {
     const root = await mkdtemp(join(tmpdir(), "yakitori-partial-search-"))
     const original = new JsonlThreadStore({ root })
