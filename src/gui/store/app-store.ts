@@ -44,6 +44,12 @@ import {
   getAppRpcClient,
   type SessionStream,
 } from "../lib/rpc-client.ts"
+import {
+  readSteers,
+  reserveSteer,
+  type StoredSteer,
+  updateSteers,
+} from "../steer-outbox.ts"
 
 type SessionSelection = {
   readonly revision: number
@@ -125,6 +131,8 @@ export type AppStoreData = {
   promptAttachments: readonly ImageAttachment[]
   promptExcerpts: readonly ContextExcerpt[]
   sessionDrafts: Record<string, SessionDraft>
+  pendingSteers: Record<string, readonly StoredSteer[]>
+  restoredSteerRequestIds: Readonly<Record<string, true>>
   // Skills discoverable in the selected session's working directory.
   sessionSkills: readonly ApiSkillSummary[]
   sessionSkillsError: string | undefined
@@ -277,6 +285,8 @@ export function createInitialAppState(): AppStoreData {
     promptAttachments: [],
     promptExcerpts: [],
     sessionDrafts: {},
+    pendingSteers: {},
+    restoredSteerRequestIds: {},
     sessionSkills: [],
     sessionSkillsError: undefined,
     hydratingSessionId: undefined,
@@ -339,6 +349,11 @@ export const useAppStore = create<AppStore>()((set, get) => {
   // Admissions whose server acknowledgment arrived but whose durable event is
   // still pending; the outbox entry clears when the stream confirms it.
   const pendingAdmissions = new Map<string, PendingAdmission>()
+  const inFlightSteerRequests = new Set<string>()
+  const committedSteerRequests = new Set<string>()
+  // Set only after a complete replay or a durable terminal event. A live
+  // snapshot alone may still have subsequent history to deliver.
+  const authoritativeTurns = new Map<string, string | undefined>()
   const subscriptionReadRevisions: Record<ApiSubscriptionProvider, number> = {
     codex: 0,
     grok: 0,
@@ -538,6 +553,112 @@ export const useAppStore = create<AppStore>()((set, get) => {
     get().sessionSelectionIntentRevision === selection.revision &&
     get().selection.sessionId === selection.sessionId
 
+  const restoreUncommittedSteers = (
+    sessionId: string,
+    turnId?: string,
+  ): void => {
+    set((state) => {
+      const pending = state.pendingSteers[sessionId] ?? []
+      const restoring = pending.filter(
+        (steer) => turnId === undefined || steer.turnId === turnId,
+      )
+      if (restoring.length === 0) return state
+      const pendingSteers = {
+        ...state.pendingSteers,
+        [sessionId]: pending.filter((steer) => !restoring.includes(steer)),
+      }
+      updateSteers(window.localStorage, state.apiBase, sessionId, (steers) =>
+        steers.map((steer) =>
+          restoring.some((item) => item.requestId === steer.requestId)
+            ? { ...steer, restored: true }
+            : steer,
+        ),
+      )
+      const restoredSteerRequestIds = {
+        ...state.restoredSteerRequestIds,
+        ...Object.fromEntries(
+          restoring.map((steer) => [steer.requestId, true] as const),
+        ),
+      }
+      const selected = state.selection.sessionId === sessionId
+      const draft: SessionDraft = selected
+        ? {
+            text: state.promptDraft,
+            attachments: state.promptAttachments,
+            excerpts: state.promptExcerpts,
+          }
+        : (state.sessionDrafts[sessionId] ?? {
+            text: undefined,
+            attachments: [],
+            excerpts: [],
+          })
+      // A reply can arrive after replay has already restored its pending
+      // submission; the original composer may still contain that same text.
+      const last = restoring.at(-1)
+      const alreadyInDraft =
+        last !== undefined &&
+        (draft.text ?? "").trim() === last.text &&
+        sameAttachments(draft.attachments, last.attachments)
+      const toPrepend = alreadyInDraft ? restoring.slice(0, -1) : restoring
+      const restored: SessionDraft = {
+        text: [...toPrepend.map((steer) => steer.text), draft.text]
+          .filter(
+            (text): text is string => text !== undefined && text.length > 0,
+          )
+          .join("\n"),
+        attachments: [
+          ...toPrepend.flatMap((steer) => steer.attachments),
+          ...draft.attachments,
+        ],
+        excerpts: [
+          ...restoring.flatMap((steer) =>
+            steer.excerpts.filter(
+              (excerpt) =>
+                !draft.excerpts.some((current) => current.id === excerpt.id),
+            ),
+          ),
+          ...draft.excerpts,
+        ],
+      }
+      return selected
+        ? {
+            pendingSteers,
+            restoredSteerRequestIds,
+            promptDraft: restored.text,
+            promptAttachments: restored.attachments,
+            promptExcerpts: restored.excerpts,
+          }
+        : {
+            pendingSteers,
+            restoredSteerRequestIds,
+            sessionDrafts: { ...state.sessionDrafts, [sessionId]: restored },
+          }
+    })
+  }
+
+  const retireRestoredSteers = (sessionId: string): void => {
+    const ids = readSteers(
+      window.localStorage,
+      get().apiBase,
+      sessionId,
+    ).flatMap((steer) =>
+      steer.restored && get().restoredSteerRequestIds[steer.requestId]
+        ? [steer.requestId]
+        : [],
+    )
+    if (ids.length === 0) return
+    updateSteers(window.localStorage, get().apiBase, sessionId, (steers) =>
+      steers.filter((steer) => !ids.includes(steer.requestId)),
+    )
+    set((state) => ({
+      restoredSteerRequestIds: Object.fromEntries(
+        Object.entries(state.restoredSteerRequestIds).filter(
+          ([requestId]) => !ids.includes(requestId),
+        ),
+      ),
+    }))
+  }
+
   const closeStream = (): void => {
     get().stream?.close()
     set({ stream: undefined })
@@ -572,6 +693,17 @@ export const useAppStore = create<AppStore>()((set, get) => {
   const connectEvents = (selection: SessionSelection, after: number): void => {
     if (!isCurrentSelection(selection)) return
     closeStream()
+    authoritativeTurns.delete(selection.sessionId)
+    set((state) => ({
+      pendingSteers: {
+        ...state.pendingSteers,
+        [selection.sessionId]: readSteers(
+          window.localStorage,
+          state.apiBase,
+          selection.sessionId,
+        ).filter((steer) => !state.restoredSteerRequestIds[steer.requestId]),
+      },
+    }))
     if (after === 0) set({ hydratingSessionId: selection.sessionId })
 
     let replaySnapshot: ApiSessionDetail | undefined
@@ -629,6 +761,22 @@ export const useAppStore = create<AppStore>()((set, get) => {
                       session: snapshot,
                     }),
             }))
+            authoritativeTurns.set(
+              selection.sessionId,
+              get().execution.activeTurnId,
+            )
+            if (get().execution.activeTurnId !== undefined) {
+              for (const steer of get().pendingSteers[selection.sessionId] ??
+                []) {
+                if (
+                  steer.restored ||
+                  steer.turnId !== get().execution.activeTurnId
+                )
+                  restoreUncommittedSteers(selection.sessionId, steer.turnId)
+              }
+            } else {
+              restoreUncommittedSteers(selection.sessionId)
+            }
             if (get().restoringModelSelectionFor === selection.sessionId) {
               set({ restoringModelSelectionFor: undefined })
             }
@@ -639,11 +787,35 @@ export const useAppStore = create<AppStore>()((set, get) => {
             }
             if (event.sessionId !== selection.sessionId) return
             if (isKernelEvent(event) && event.type === "input.admitted") {
+              if (inFlightSteerRequests.has(event.data.requestId))
+                committedSteerRequests.add(event.data.requestId)
               const admission = pendingAdmissions.get(event.data.requestId)
               if (admission !== undefined) {
                 pendingAdmissions.delete(event.data.requestId)
                 void acknowledgeAdmission(window.localStorage, admission)
               }
+              updateSteers(
+                window.localStorage,
+                get().apiBase,
+                selection.sessionId,
+                (steers) =>
+                  steers.filter(
+                    (steer) => steer.requestId !== event.data.requestId,
+                  ),
+              )
+              set((state) => ({
+                pendingSteers: {
+                  ...state.pendingSteers,
+                  [selection.sessionId]: (
+                    state.pendingSteers[selection.sessionId] ?? []
+                  ).filter((steer) => steer.requestId !== event.data.requestId),
+                },
+                restoredSteerRequestIds: Object.fromEntries(
+                  Object.entries(state.restoredSteerRequestIds).filter(
+                    ([requestId]) => requestId !== event.data.requestId,
+                  ),
+                ),
+              }))
             }
             set((state) => {
               const selectedSession = applyDurableSessionDetail(
@@ -662,6 +834,13 @@ export const useAppStore = create<AppStore>()((set, get) => {
                 }),
               }
             })
+            if (isKernelEvent(event) && event.type === "turn.completed") {
+              authoritativeTurns.set(
+                selection.sessionId,
+                get().execution.activeTurnId,
+              )
+              restoreUncommittedSteers(selection.sessionId, event.data.turnId)
+            }
           },
           onTransient: (event) => {
             if (get().stream !== source || !isCurrentSelection(selection)) {
@@ -1685,16 +1864,38 @@ export const useAppStore = create<AppStore>()((set, get) => {
       // once when the Session is already idle), so the message is never lost.
       const activeTurnId = get().execution.activeTurnId
       let queueAdmission = mode === "queue"
-      if (activeTurnId !== undefined && text !== COMPACT_DIRECTIVE && !queueAdmission) {
+      if (
+        activeTurnId !== undefined &&
+        text !== COMPACT_DIRECTIVE &&
+        !queueAdmission
+      ) {
         let rejected = false
+        const requestId = createRequestId()
+        inFlightSteerRequests.add(requestId)
         await runTask(
           async () => {
+            let reserved = false
+            let promotedAttachments: readonly ImageAttachment[] | undefined
             try {
+              reserveSteer(
+                window.localStorage,
+                get().apiBase,
+                selection.sessionId,
+                {
+                  requestId,
+                  turnId: activeTurnId,
+                  text,
+                  attachments,
+                  excerpts,
+                  restored: false,
+                },
+              )
+              reserved = true
               const response = await getAppRpcClient(get().apiBase).request(
                 "session/input/steer",
                 {
                   sessionId: selection.sessionId,
-                  requestId: createRequestId(),
+                  requestId,
                   expectedTurnId: activeTurnId,
                   content: {
                     kind: "text",
@@ -1706,10 +1907,24 @@ export const useAppStore = create<AppStore>()((set, get) => {
                   },
                 },
               )
-              if (response.turnId !== activeTurnId) {
+              if (
+                response.turnId !== activeTurnId ||
+                response.requestId !== requestId
+              ) {
                 throw new Error("Steer response did not match the request.")
               }
+              promotedAttachments = response.attachments
             } catch (error) {
+              inFlightSteerRequests.delete(requestId)
+              committedSteerRequests.delete(requestId)
+              if (reserved)
+                updateSteers(
+                  window.localStorage,
+                  get().apiBase,
+                  selection.sessionId,
+                  (steers) =>
+                    steers.filter((steer) => steer.requestId !== requestId),
+                )
               if (
                 error instanceof ApiRequestError &&
                 error.code === "conflict"
@@ -1720,17 +1935,164 @@ export const useAppStore = create<AppStore>()((set, get) => {
               }
               throw error
             }
-            if (!isCurrentSelection(selection)) return
+            // Acceptance is ephemeral until input.admitted commits. Keep ownership
+            // across navigation and reconnect so an interrupted Turn can restore it.
+            const committed =
+              committedSteerRequests.has(requestId) ||
+              (isCurrentSelection(selection) &&
+                get().execution.admittedRequestIds[requestId] === true)
+            inFlightSteerRequests.delete(requestId)
+            committedSteerRequests.delete(requestId)
+            const acceptedAttachments = promotedAttachments
+            if (acceptedAttachments !== undefined) {
+              updateSteers(
+                window.localStorage,
+                get().apiBase,
+                selection.sessionId,
+                (steers) =>
+                  steers.map((steer) =>
+                    steer.requestId === requestId
+                      ? { ...steer, attachments: acceptedAttachments }
+                      : steer,
+                  ),
+              )
+              set((state) => ({
+                pendingSteers: {
+                  ...state.pendingSteers,
+                  [selection.sessionId]: (
+                    state.pendingSteers[selection.sessionId] ?? []
+                  ).map((steer) =>
+                    steer.requestId === requestId
+                      ? { ...steer, attachments: acceptedAttachments }
+                      : steer,
+                  ),
+                },
+              }))
+            }
+            const alreadyRestored =
+              get().restoredSteerRequestIds[requestId] === true
+            if (
+              !committed &&
+              !alreadyRestored &&
+              !(get().pendingSteers[selection.sessionId] ?? []).some(
+                (steer) => steer.requestId === requestId,
+              )
+            ) {
+              set((state) => ({
+                pendingSteers: {
+                  ...state.pendingSteers,
+                  [selection.sessionId]: [
+                    ...(state.pendingSteers[selection.sessionId] ?? []),
+                    {
+                      requestId,
+                      turnId: activeTurnId,
+                      text,
+                      attachments: acceptedAttachments ?? attachments,
+                      excerpts,
+                      restored: false,
+                    },
+                  ],
+                },
+              }))
+            }
+            if (alreadyRestored && acceptedAttachments !== undefined) {
+              const replaceAttachments = (
+                current: readonly ImageAttachment[],
+              ): readonly ImageAttachment[] =>
+                current.map((attachment) => {
+                  const index = attachments.findIndex((original) =>
+                    sameAttachments([original], [attachment]),
+                  )
+                  return index < 0
+                    ? attachment
+                    : (acceptedAttachments[index] ?? attachment)
+                })
+              set((state) =>
+                state.selection.sessionId === selection.sessionId
+                  ? {
+                      promptAttachments: replaceAttachments(
+                        state.promptAttachments,
+                      ),
+                    }
+                  : {
+                      sessionDrafts: {
+                        ...state.sessionDrafts,
+                        [selection.sessionId]: {
+                          ...(state.sessionDrafts[selection.sessionId] ?? {
+                            text: undefined,
+                            attachments: [],
+                            excerpts: [],
+                          }),
+                          attachments: replaceAttachments(
+                            state.sessionDrafts[selection.sessionId]
+                              ?.attachments ?? [],
+                          ),
+                        },
+                      },
+                    },
+              )
+            }
+            if (!alreadyRestored) retireRestoredSteers(selection.sessionId)
+            if (!isCurrentSelection(selection)) {
+              if (alreadyRestored) return
+              set((state) => {
+                if (state.selection.sessionId === selection.sessionId) {
+                  const clear =
+                    (state.promptDraft ?? "").trim() === text &&
+                    sameAttachments(state.promptAttachments, attachments)
+                  return {
+                    promptDraft: clear ? undefined : state.promptDraft,
+                    promptAttachments: clear ? [] : state.promptAttachments,
+                    promptExcerpts: state.promptExcerpts.filter(
+                      (excerpt) => !excerpts.includes(excerpt),
+                    ),
+                  }
+                }
+                const draft = state.sessionDrafts[selection.sessionId]
+                if (draft === undefined) return state
+                const clear =
+                  (draft.text ?? "").trim() === text &&
+                  sameAttachments(draft.attachments, attachments)
+                return {
+                  sessionDrafts: {
+                    ...state.sessionDrafts,
+                    [selection.sessionId]: {
+                      ...draft,
+                      text: clear ? undefined : draft.text,
+                      attachments: clear ? [] : draft.attachments,
+                      excerpts: draft.excerpts.filter(
+                        (excerpt) => !excerpts.includes(excerpt),
+                      ),
+                    },
+                  },
+                }
+              })
+              if (
+                authoritativeTurns.has(selection.sessionId) &&
+                authoritativeTurns.get(selection.sessionId) !== activeTurnId
+              )
+                restoreUncommittedSteers(selection.sessionId, activeTurnId)
+              return
+            }
             set((state) => ({
               promptExcerpts: state.promptExcerpts.filter(
                 (excerpt) => !excerpts.includes(excerpt),
               ),
             }))
             if (
+              !alreadyRestored &&
               (get().promptDraft ?? "").trim() === text &&
               sameAttachments(get().promptAttachments, attachments)
             ) {
               set({ promptDraft: undefined, promptAttachments: [] })
+            }
+            if (
+              get().execution.turnTimings[activeTurnId]?.completedAt !==
+                undefined ||
+              (authoritativeTurns.has(selection.sessionId) &&
+                authoritativeTurns.get(selection.sessionId) !== activeTurnId)
+            ) {
+              restoreUncommittedSteers(selection.sessionId, activeTurnId)
             }
           },
           () => isCurrentSelection(selection),
@@ -1825,16 +2187,14 @@ export const useAppStore = create<AppStore>()((set, get) => {
           if (response.requestId !== pendingAdmission.requestId) {
             throw new Error("Admission response did not match the request.")
           }
+          retireRestoredSteers(selection.sessionId)
           // The response acknowledges the routing decision only; the outbox
           // entry clears once the durable input.admitted event confirms the
           // write (it may already have been replayed to this view).
           if (get().execution.admittedRequestIds[pendingAdmission.requestId]) {
             await acknowledgeAdmission(window.localStorage, pendingAdmission)
           } else {
-            pendingAdmissions.set(
-              pendingAdmission.requestId,
-              pendingAdmission,
-            )
+            pendingAdmissions.set(pendingAdmission.requestId, pendingAdmission)
           }
           if (!isCurrentSelection(selection)) return
           set((state) => ({
@@ -2384,11 +2744,13 @@ function applyDurableSessionDetail(
   }
   switch (event.type) {
     case "input.admitted":
-      pendingInputs.push({
-        id: event.data.inputId,
-        text: event.data.content.text,
-        admittedAt: event.createdAt,
-      })
+      if (!event.data.steered) {
+        pendingInputs.push({
+          id: event.data.inputId,
+          text: event.data.content.text,
+          admittedAt: event.createdAt,
+        })
+      }
       return {
         ...next,
         pendingInputs,
