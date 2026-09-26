@@ -67,7 +67,7 @@ export type RolloutAssets = {
     rolloutId: string,
     ownerId: string,
     attachments: readonly ImageAttachment[],
-  ): Promise<readonly ImageAttachment[]>
+  ): Promise<PreparedImageAttachments>
   discardRequestImageAttachments(
     rolloutId: string,
     ownerId: string,
@@ -281,6 +281,10 @@ export function createRolloutAssets(
         const ownerDirectory = fileNameForId(ownerId)
         const copied: ImageAttachment[] = []
         const createdPaths: string[] = []
+        const rollback = () =>
+          Promise.all(
+            createdPaths.map((path) => rm(path, { force: true })),
+          ).then(() => undefined)
         try {
           for (const [index, attachment] of attachments.entries()) {
             const sourcePath = resolveReference(attachment.file)
@@ -311,11 +315,9 @@ export function createRolloutAssets(
             }
             copied.push({ ...attachment, file })
           }
-          return copied
+          return { attachments: copied, rollback }
         } catch (error) {
-          await Promise.all(
-            createdPaths.map((path) => rm(path, { force: true })),
-          )
+          await rollback()
           throw error
         }
       })

@@ -276,12 +276,36 @@ describe("thread server handlers", () => {
     })
     if (!queued.ok) throw new Error(queued.body.error.message)
     expect(queued.status).toBe(201)
+    const admittedEvents = await handlers.readSessionEvents({ sessionId })
+    if (!admittedEvents.ok) throw new Error(admittedEvents.body.error.message)
+    expect(
+      admittedEvents.body.events.filter(
+        (event) =>
+          event.type === "input.admitted" &&
+          isKernelEvent(event) &&
+          event.data.requestId === "request_queued",
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        data: expect.objectContaining({
+          inputId: queued.body.inputId,
+          content: { kind: "text", text: "run after" },
+        }),
+      }),
+    ])
+    expect(
+      (await store.readThread(sessionId))?.rollout.some(
+        ({ item }) =>
+          item.type === "response_item" && item.item.id === queued.body.inputId,
+      ),
+    ).toBe(false)
 
     const detail = await handlers.readSession({ sessionId })
     if (!detail.ok) throw new Error(detail.body.error.message)
     expect(detail.body.session.pendingInputs).toEqual([
       expect.objectContaining({ text: "run after" }),
     ])
+    expect(detail.body.session.counts.inputs).toBe(2)
     const queuedInputId = detail.body.session.pendingInputs[0]?.id
     if (queuedInputId === undefined) throw new Error("Missing queued input.")
 
@@ -305,12 +329,34 @@ describe("thread server handlers", () => {
     expect(missing.ok).toBe(false)
     if (!missing.ok) expect(missing.status).toBe(409)
 
+    const next = await handlers.queueInput({
+      sessionId,
+      requestId: "request_dispatched",
+      content: { kind: "text", text: "run second" },
+    })
+    if (!next.ok) throw new Error(next.body.error.message)
     releaseFirst()
     await waitForValue(() =>
-      manager.getThread(sessionId)?.status === "idle" ? true : undefined,
+      requests.length === 2 && manager.getThread(sessionId)?.status === "idle"
+        ? true
+        : undefined,
     )
-    expect(requests).toHaveLength(1)
+    expect(requests).toHaveLength(2)
     expect(requests[0]).toContain("start the work")
+    expect(requests[1]).toContain("run second")
+    expect(requests[1]).not.toContain("run after")
+    const replay = await handlers.readSessionEvents({ sessionId })
+    if (!replay.ok) throw new Error(replay.body.error.message)
+    const admittedNext = replay.body.events.filter(
+      (event) =>
+        event.type === "input.admitted" &&
+        isKernelEvent(event) &&
+        event.data.requestId === "request_dispatched",
+    )
+    expect(admittedNext).toHaveLength(1)
+    expect(admittedNext[0]).toMatchObject({
+      data: { inputId: next.body.inputId },
+    })
   })
 
   it("returns healthy search results with an explicit count of unreadable sessions", async () => {
@@ -815,6 +861,114 @@ describe("thread server handlers", () => {
     )[0]
 
     expect(image).toMatchObject({ file: { rolloutId } })
+  })
+
+  it("returns reusable image references for steering interrupted before sampling", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "yakitori-steer-assets-"))
+    const store = new MemoryThreadStore()
+    const started = deferred<void>()
+    const release = deferred<void>()
+    let calls = 0
+    const stream: StreamFn = async function* () {
+      calls += 1
+      if (calls === 1) {
+        started.resolve()
+        await release.promise
+      }
+      yield {
+        type: "response",
+        response: {
+          stopReason: ModelStopReason.EndTurn,
+          content: [{ type: "text", text: "done" }],
+        },
+      }
+    }
+    const manager = new ThreadManager({
+      store,
+      createTurnProcessor: () =>
+        createTurnProcessor({
+          stream,
+          toolRegistry: createToolRegistry([]),
+          loadProjectInstructions: async () => undefined,
+        }),
+    })
+    const rolloutAssets = createRolloutAssets(workspace, {
+      async withMutationLease(_rolloutId, mutate) {
+        return mutate()
+      },
+    })
+    const handlers = createThreadServerHandlers({
+      manager,
+      store,
+      rolloutAssets,
+    })
+    cleanups.push(async () => {
+      release.resolve()
+      await manager.shutdown()
+      await handlers.close()
+      await rm(workspace, { recursive: true, force: true })
+    })
+    const created = await handlers.createSession({
+      workingDirectory: workspace,
+      mateId: "mate_test",
+      mateRevisionId: "mate_revision_test",
+    })
+    if (!created.ok) throw new Error(created.body.error.message)
+    const sessionId = created.body.session.id
+    await mkdir(join(workspace, "rollouts", sessionId), { recursive: true })
+    await writeFile(
+      join(workspace, "rollouts", sessionId, "rollout.jsonl"),
+      "fixture\n",
+    )
+    const draft = await rolloutAssets.importImageBytes(
+      sessionId,
+      "draft_steer",
+      [{ name: "original.png", data: pngBytes() }],
+    )
+    const first = await handlers.admitInput({
+      sessionId,
+      requestId: "request_active",
+      content: { kind: "text", text: "first" },
+    })
+    if (!first.ok) throw new Error(first.body.error.message)
+    await started.promise
+
+    const steered = await handlers.steerInput({
+      sessionId,
+      requestId: "request_image_steer",
+      expectedTurnId: "request_active",
+      content: { kind: "text", text: "inspect image", attachments: draft },
+    })
+    if (!steered.ok) throw new Error(steered.body.error.message)
+    expect(steered.body.attachments?.[0]?.name).toBe("original.png")
+    expect(steered.body.attachments?.[0]?.file.path).toContain(
+      "attachments/requests/",
+    )
+    const promoted = steered.body.attachments?.[0]
+    if (promoted === undefined) throw new Error("Image was not promoted.")
+    expect(await rolloutAssets.read(promoted.file)).toEqual(pngBytes())
+
+    const interrupted = await handlers.cancelTurn({
+      sessionId,
+      turnId: "request_active",
+    })
+    if (!interrupted.ok) throw new Error(interrupted.body.error.message)
+    release.resolve()
+    await waitForValue(() =>
+      manager.getThread(sessionId)?.status === "idle" ? true : undefined,
+    )
+    expect(await rolloutAssets.read(promoted.file)).toEqual(pngBytes())
+    const retried = await handlers.queueInput({
+      sessionId,
+      requestId: "request_recovered_image",
+      content: {
+        kind: "text",
+        text: "inspect image",
+        attachments: [promoted],
+      },
+    })
+    if (!retried.ok) throw new Error(retried.body.error.message)
+    expect(retried.body.inputId).toMatch(/^input_/)
   })
 
   it("maps attachment ownership lost to concurrent deletion as not found", async () => {

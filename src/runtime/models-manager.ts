@@ -85,8 +85,9 @@ export function createDiscoveringModelsManager(input: {
         readonly models: Map<string, DiscoveredModel>
       }
     | undefined
-  let refreshTask: Promise<void> | undefined
-  let diskLoaded = false
+  const refreshTasks = new Map<string | undefined, Promise<void>>()
+  let diskLoadTask: Promise<void> | undefined
+  let saveTask = Promise.resolve()
 
   // Identity probes only read local credential state; a failure means the
   // login is mid-rotation or gone, so the safe reading is "unknown".
@@ -97,23 +98,22 @@ export function createDiscoveringModelsManager(input: {
   ): Map<string, DiscoveredModel> =>
     new Map(models.map((model) => [model.id.toLowerCase(), model]))
 
-  const loadDiskCache = async () => {
-    if (diskLoaded) return
-    diskLoaded = true
-    if (input.cacheStore === undefined) return
-    // A cache that cannot be read degrades to a cold fetch.
-    const persisted = await input.cacheStore.load().catch(() => undefined)
-    if (persisted === undefined) return
-    if (now() - persisted.fetchedAt >= ttlMs) return
-    cache = {
-      identity: persisted.identity,
-      fetchedAt: persisted.fetchedAt,
-      models: indexModels(persisted.models),
-    }
-  }
+  const loadDiskCache = () =>
+    (diskLoadTask ??= (async () => {
+      if (input.cacheStore === undefined) return
+      // A cache that cannot be read degrades to a cold fetch. All first
+      // readers await the same load before any of them can refresh.
+      const persisted = await input.cacheStore.load().catch(() => undefined)
+      if (persisted === undefined || now() - persisted.fetchedAt >= ttlMs)
+        return
+      cache = {
+        identity: persisted.identity,
+        fetchedAt: persisted.fetchedAt,
+        models: indexModels(persisted.models),
+      }
+    })())
 
-  const refreshRemotely = async () => {
-    const before = await currentIdentity()
+  const refreshRemotely = async (before: string | undefined) => {
     let models: readonly DiscoveredModel[]
     try {
       models = await input.discover()
@@ -127,16 +127,24 @@ export function createDiscoveringModelsManager(input: {
       if (cache !== undefined && cache.identity !== after) cache = undefined
       return
     }
+    const fetchedAt = now()
     cache = {
       identity: before,
-      fetchedAt: now(),
+      fetchedAt,
       models: indexModels(models),
     }
-    // Persisting the cache is best-effort; a failed write only means the next
-    // process starts cold.
-    await input.cacheStore
-      ?.save({ identity: before, fetchedAt: now(), models })
+    // Account-specific fetches may overlap. Serialize writes to their shared
+    // cache file so the later result cannot be overwritten by an older save.
+    saveTask = saveTask
+      .then(() =>
+        input.cacheStore?.save({
+          identity: before,
+          fetchedAt,
+          models,
+        }),
+      )
       .catch(() => undefined)
+    await saveTask
   }
 
   const ensureFresh = async () => {
@@ -144,10 +152,14 @@ export function createDiscoveringModelsManager(input: {
     const identity = await currentIdentity()
     if (cache !== undefined && cache.identity !== identity) cache = undefined
     if (cache !== undefined && now() - cache.fetchedAt < ttlMs) return
-    refreshTask ??= refreshRemotely().finally(() => {
-      refreshTask = undefined
-    })
-    if (cache === undefined) await refreshTask
+    let task = refreshTasks.get(identity)
+    if (task === undefined) {
+      task = refreshRemotely(identity).finally(() => {
+        refreshTasks.delete(identity)
+      })
+      refreshTasks.set(identity, task)
+    }
+    if (cache === undefined) await task
   }
   const discovered = (model: string) => cache?.models.get(model.toLowerCase())
 

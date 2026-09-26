@@ -6,6 +6,7 @@ import { createFileModelsCacheStore } from "../../src/runtime/models-cache-store
 import {
   createDiscoveringModelsManager,
   type DiscoveredModel,
+  type PersistedModelsCache,
 } from "../../src/runtime/models-manager.ts"
 
 describe("discovering models manager", () => {
@@ -142,6 +143,76 @@ describe("discovering models manager", () => {
     ).toMatchObject({ contextWindowTokens: 222_000 })
   })
 
+  it("fetches a new account while the previous account's discovery is still in flight", async () => {
+    let identity = "account_a"
+    const first = deferred<readonly DiscoveredModel[]>()
+    const second = deferred<readonly DiscoveredModel[]>()
+    const discover = vi
+      .fn<() => Promise<readonly DiscoveredModel[]>>()
+      .mockImplementationOnce(() => first.promise)
+      .mockImplementationOnce(() => second.promise)
+    const manager = createDiscoveringModelsManager({
+      provider: "codex",
+      identity: async () => identity,
+      discover,
+    })
+
+    const oldRefresh = manager.refresh()
+    await vi.waitFor(() => expect(discover).toHaveBeenCalledTimes(1))
+    identity = "account_b"
+    const newRefresh = manager.refresh()
+    await vi.waitFor(() => expect(discover).toHaveBeenCalledTimes(2))
+
+    second.resolve([{ id: "gpt-b-model", contextWindowTokens: 222_000 }])
+    await newRefresh
+    expect(
+      manager.capacity({ provider: "codex", model: "gpt-b-model" }),
+    ).toMatchObject({ contextWindowTokens: 222_000 })
+    first.resolve([{ id: "gpt-a-model", contextWindowTokens: 111_000 }])
+    await oldRefresh
+    expect(
+      manager.capacity({ provider: "codex", model: "gpt-b-model" }),
+    ).toMatchObject({ contextWindowTokens: 222_000 })
+    expect(
+      manager.capacity({ provider: "codex", model: "gpt-a-model" }),
+    ).toBeUndefined()
+  })
+
+  it("persists the newer account after an older account's slow cache write", async () => {
+    let identity = "account_a"
+    let persistedIdentity: string | undefined
+    const firstSave = deferred<void>()
+    const save = vi.fn(async (entry: PersistedModelsCache) => {
+      if (entry.identity === "account_a") await firstSave.promise
+      persistedIdentity = entry.identity
+    })
+    const manager = createDiscoveringModelsManager({
+      provider: "codex",
+      identity: async () => identity,
+      discover: async () => [
+        { id: `model-${identity}`, instructions: identity },
+      ],
+      cacheStore: { load: async () => undefined, save },
+    })
+
+    const oldRefresh = manager.refresh()
+    await vi.waitFor(() => expect(save).toHaveBeenCalledTimes(1))
+    identity = "account_b"
+    const newRefresh = manager.refresh()
+    await vi.waitFor(() =>
+      expect(
+        manager.resolve({ provider: "codex", model: "model-account_b" })
+          .instructions,
+      ).toBe("account_b"),
+    )
+    expect(save).toHaveBeenCalledTimes(1)
+
+    firstSave.resolve(undefined)
+    await Promise.all([oldRefresh, newRefresh])
+    expect(persistedIdentity).toBe("account_b")
+    expect(save).toHaveBeenCalledTimes(2)
+  })
+
   it("retries discovery after a failure instead of suppressing retries", async () => {
     const discover = vi
       .fn<() => Promise<readonly DiscoveredModel[]>>()
@@ -175,6 +246,38 @@ describe("persisted models cache", () => {
   afterEach(async () => {
     if (root !== undefined) await rm(root, { recursive: true, force: true })
     root = undefined
+  })
+
+  it("shares an in-flight disk load across concurrent first refreshes", async () => {
+    const disk = deferred<{
+      identity: string
+      fetchedAt: number
+      models: readonly DiscoveredModel[]
+    }>()
+    const load = vi.fn(() => disk.promise)
+    const discover = vi.fn<() => Promise<readonly DiscoveredModel[]>>()
+    const manager = createDiscoveringModelsManager({
+      provider: "codex",
+      identity: async () => "account",
+      discover,
+      cacheStore: { load, save: async () => {} },
+    })
+
+    const first = manager.refresh()
+    const second = manager.refresh()
+    expect(load).toHaveBeenCalledTimes(1)
+    disk.resolve({
+      identity: "account",
+      fetchedAt: Date.now(),
+      models: [{ id: "gpt-disk", contextWindowTokens: 321_000 }],
+    })
+    await Promise.all([first, second])
+    expect(discover).not.toHaveBeenCalled()
+    expect(
+      manager.capacity({ provider: "codex", model: "gpt-disk" }),
+    ).toMatchObject({
+      contextWindowTokens: 321_000,
+    })
   })
 
   it("starts a cold process with the last good catalog", async () => {

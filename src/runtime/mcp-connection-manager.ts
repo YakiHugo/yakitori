@@ -35,7 +35,7 @@ export type McpConnectionManager = Readonly<{
   // Step snapshot usually includes servers that are nearly ready (codex-rs
   // optional_mcp_startup_grace). Required servers are already awaited by
   // update(); a required server reconnecting mid-session is awaited here.
-  settleConnecting(timeoutMs: number): Promise<void>
+  settleConnecting(timeoutMs: number, signal?: AbortSignal): Promise<void>
   reconnect(name: string): Promise<void>
   subscribe(
     listener: (serverName: string, tools: readonly RuntimeTool[]) => void,
@@ -516,7 +516,8 @@ export function createMcpConnectionManager(
         ),
       ].sort((left, right) => left.name.localeCompare(right.name))
     },
-    async settleConnecting(timeoutMs) {
+    async settleConnecting(timeoutMs, signal) {
+      signal?.throwIfAborted()
       const pending = [...connecting.entries()]
       if (pending.length === 0) return
       // Failures surface through status(); settling is only a wait.
@@ -528,8 +529,8 @@ export function createMcpConnectionManager(
         .filter(([name]) => configuredServers.get(name)?.required !== true)
         .map(([, entry]) => settled(entry.promise))
       const waits: Promise<unknown>[] = [...requiredWaits]
+      let timer: ReturnType<typeof setTimeout> | undefined
       if (optionalWaits.length > 0) {
-        let timer: ReturnType<typeof setTimeout> | undefined
         waits.push(
           Promise.race([
             Promise.allSettled(optionalWaits),
@@ -537,12 +538,33 @@ export function createMcpConnectionManager(
               timer = setTimeout(resolve, timeoutMs)
               timer.unref()
             }),
-          ]).finally(() => {
-            if (timer !== undefined) clearTimeout(timer)
-          }),
+          ]),
         )
       }
-      await Promise.all(waits)
+      let onAbort: (() => void) | undefined
+      try {
+        if (signal === undefined) {
+          await Promise.all(waits)
+        } else {
+          await Promise.race([
+            Promise.all(waits),
+            new Promise<never>((_, reject) => {
+              onAbort = () => {
+                try {
+                  signal.throwIfAborted()
+                } catch (error) {
+                  reject(error)
+                }
+              }
+              signal.addEventListener("abort", onAbort, { once: true })
+              if (signal.aborted) onAbort()
+            }),
+          ])
+        }
+      } finally {
+        if (onAbort !== undefined) signal?.removeEventListener("abort", onAbort)
+        if (timer !== undefined) clearTimeout(timer)
+      }
     },
     subscribe(listener) {
       listeners.add(listener)

@@ -289,6 +289,45 @@ describe("MCP connection manager", () => {
     }
   })
 
+  it("stops waiting for a required reconnect when the Turn aborts", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yakitori-mcp-reconnect-abort-"))
+    const script = join(root, "server.mjs")
+    const starts = join(root, "starts.txt")
+    await writeFile(
+      script,
+      [
+        "import {appendFileSync,existsSync} from 'node:fs';",
+        "import readline from 'node:readline';",
+        `const delayed=existsSync(${JSON.stringify(starts)});`,
+        `appendFileSync(${JSON.stringify(starts)},'start\\n');`,
+        "readline.createInterface({input:process.stdin}).on('line',line=>{const m=JSON.parse(line);if(m.id===undefined)return;",
+        "const respond=()=>{const result=m.method==='tools/list'?{tools:[{name:'echo',inputSchema:{type:'object'}}]}:{protocolVersion:m.params?.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'fixture',version:'1'}};process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result})+'\\n');};",
+        "if(delayed&&m.method==='initialize'){setTimeout(respond,700);return;}respond();});",
+      ].join("\n"),
+    )
+    const manager = createMcpConnectionManager()
+    try {
+      await manager.update({
+        demo: { command: process.execPath, args: [script], required: true },
+      })
+      const reconnect = manager.reconnect("demo")
+      await expect.poll(() => manager.status()[0]?.state).toBe("connecting")
+      const controller = new AbortController()
+      const waiting = manager.settleConnecting(5_000, controller.signal)
+      controller.abort(new Error("Turn interrupted"))
+      await expect(waiting).rejects.toThrow("Turn interrupted")
+
+      // Cancelling a Step's wait does not cancel the shared server reconnect.
+      await reconnect
+      expect(manager.status()).toMatchObject([
+        { name: "demo", state: "ready", required: true, toolCount: 1 },
+      ])
+    } finally {
+      await manager.close()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it("fails update only when a required server cannot connect", async () => {
     const root = await mkdtemp(join(tmpdir(), "yakitori-mcp-required-"))
     const missing = join(root, "missing-executable")

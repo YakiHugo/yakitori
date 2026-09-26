@@ -20,6 +20,85 @@ import type { ApiSessionDetail } from "../../src/server/protocol.ts"
 const sessionId = "session_00000000-0000-4000-8000-000000000000"
 
 describe("execution view", () => {
+  it("reindexes item and permission entries after removing a cancelled input", () => {
+    let state = createExecutionViewState()
+    const durable = (seq: number, event: KernelFact) => {
+      state = reduceExecutionView(state, {
+        type: "durable",
+        event: createExecutionEnvelope({ sessionId, seq, event }),
+      })
+    }
+    durable(1, {
+      type: EventType.InputAdmitted,
+      data: {
+        requestId: "request:1",
+        inputId: "input_1",
+        role: InputRole.User,
+        content: { kind: "text", text: "running input" },
+      },
+    })
+    durable(2, {
+      type: EventType.TurnStarted,
+      data: { turnId: "turn_1", inputId: "input_1" },
+    })
+    durable(3, {
+      type: EventType.InputAdmitted,
+      data: {
+        requestId: "request:2",
+        inputId: "input_2",
+        role: InputRole.User,
+        content: { kind: "text", text: "cancel me" },
+      },
+    })
+    durable(
+      4,
+      toolStarted({
+        turnId: "turn_1",
+        itemId: "item_1",
+        toolCallId: "call_1",
+        name: "read_file",
+        input: { path: "README.md" },
+        requiresPermission: false,
+      }),
+    )
+    state = reduceExecutionView(state, {
+      type: "transient",
+      event: {
+        type: "permission.requested",
+        sessionId,
+        turnId: "turn_1",
+        permissionRequestId: "permission_1",
+        toolCallId: "call_1",
+        action: "read",
+        createdAt: "2026-07-24T00:00:00.000Z",
+      },
+    })
+    durable(5, {
+      type: EventType.InputCancelled,
+      data: { inputId: "input_2" },
+    })
+    state = reduceExecutionView(state, {
+      type: "permission_resolving",
+      permissionRequestId: "permission_1",
+      behavior: "allow",
+    })
+    durable(
+      6,
+      toolCompleted({
+        itemId: "item_1",
+        resultItemId: "result_1",
+        toolCallId: "call_1",
+        turnId: "turn_1",
+        content: { kind: "text", text: "done" },
+      }),
+    )
+    expect(projectExecutionView(state).entries).toEqual([
+      expect.objectContaining({ kind: "user_input", text: "running input" }),
+      expect.objectContaining({ kind: "tool", resultText: "done" }),
+      expect.objectContaining({ kind: "permission", state: "resolving" }),
+    ])
+  })
+
   it("appends transient deltas until an agent item completion is authoritative", () => {
     let state = createExecutionViewState()
     state = reduceExecutionView(state, {
