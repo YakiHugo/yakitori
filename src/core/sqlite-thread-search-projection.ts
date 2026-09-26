@@ -116,6 +116,15 @@ export class SqliteThreadSearchProjection {
     )
   }
 
+  readSummary(threadId: string): ThreadSummary | undefined {
+    const row = this.#database
+      .prepare(
+        "SELECT thread_id, metadata_json, seq, title FROM search_threads WHERE thread_id = ?",
+      )
+      .get(threadId) as ThreadRow | undefined
+    return row === undefined ? undefined : summaryFromRow(row)
+  }
+
   rebuild(stored: StoredThread, stamp: ThreadSearchProjectionStamp): void {
     this.#transaction(() => {
       this.#database

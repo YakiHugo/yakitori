@@ -728,31 +728,32 @@ export class JsonlThreadStore implements ThreadStore {
 
   async #threadSummaries(): Promise<ThreadSummary[]> {
     const files = await readdir(this.#threadsDirectory)
-    const summaries = (
-      await Promise.all(
+    return this.#withSearchProjection(async () => {
+      const summaries = await Promise.all(
         files
           .filter((file) => file.endsWith(".json"))
           .map(async (file): Promise<ThreadSummary | undefined> => {
+            const threadId = basename(file, ".json")
             try {
-              const metadata = await this.#readMetadata(basename(file, ".json"))
-              const history = await this.#materialize(
-                metadata.rolloutId,
-                new Set(),
-              )
-              return {
-                ...metadata,
-                seq: history.filter(
-                  (entry) => entry.item.type !== "session_meta",
-                ).length,
+              const metadata = await this.#readMetadata(threadId)
+              const stamp = await this.#searchProjectionStamp(metadata)
+              if (!this.#searchProjection.isCurrent(threadId, stamp)) {
+                this.#searchProjection.rebuild(
+                  await this.#readRequiredThread(threadId),
+                  stamp,
+                )
               }
+              return this.#searchProjection.readSummary(threadId)
             } catch {
               // One damaged index entry cannot make every healthy Thread unlistable.
               return undefined
             }
           }),
       )
-    ).filter((summary): summary is ThreadSummary => summary !== undefined)
-    return summaries
+      return summaries.filter(
+        (summary): summary is ThreadSummary => summary !== undefined,
+      )
+    })
   }
 
   async #navigationMetadata(): Promise<ThreadMetadata[]> {

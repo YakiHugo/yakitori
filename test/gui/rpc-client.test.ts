@@ -413,6 +413,45 @@ describe("app RPC client", () => {
     client.close()
   })
 
+  it("reports a dropped session stream while keeping it available for reconnect", async () => {
+    vi.useFakeTimers()
+    const onDisconnected = vi.fn()
+    const onReplayComplete = vi.fn()
+    const client = createAppRpcClient({ apiBase: "http://api.test" })
+    client.openSessionStream("session_1", 0, {
+      onSnapshot: () => {},
+      onEvent: () => {},
+      onTransient: () => {},
+      onReplayComplete,
+      onDisconnected,
+    })
+    const first = completeHandshake(FakeWebSocket.instances[0])
+    await flushMicrotasks()
+    first.emitClose()
+    expect(onDisconnected).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        message: "The connection to the server was lost.",
+      }),
+    )
+
+    await vi.advanceTimersByTimeAsync(250)
+    const second = completeHandshake(FakeWebSocket.instances[1])
+    await flushMicrotasks()
+    expect(
+      second
+        .sentFrames()
+        .filter((frame) => frame.method === "session/subscribe"),
+    ).toHaveLength(1)
+    second.emitMessage({ id: 2, result: { session: { id: "session_1" } } })
+    await flushMicrotasks()
+    second.emitMessage({
+      method: "session/replayComplete",
+      params: { sessionId: "session_1", seq: 0 },
+    })
+    expect(onReplayComplete).toHaveBeenCalledOnce()
+    client.close()
+  })
+
   it("reports a terminal subscribe failure through onError", async () => {
     const failures: unknown[] = []
     const client = createAppRpcClient({ apiBase: "http://api.test" })
