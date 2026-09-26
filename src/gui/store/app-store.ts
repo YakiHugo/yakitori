@@ -600,6 +600,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
             }
             set({
               selectedSession: response.session,
+              hydratingSessionId: selection.sessionId,
               currentProject: response.session.projectId,
               modelSelections,
               restoringModelSelectionFor,
@@ -617,6 +618,9 @@ export const useAppStore = create<AppStore>()((set, get) => {
             replaySnapshot = undefined
             set((state) => ({
               hydratingSessionId: undefined,
+              ...(state.message === "The connection to the server was lost."
+                ? { message: undefined }
+                : {}),
               execution:
                 snapshot === undefined
                   ? state.execution
@@ -692,6 +696,21 @@ export const useAppStore = create<AppStore>()((set, get) => {
                 type: "stream_unavailable",
               }),
               message: errorMessage(error, "Could not open event stream."),
+            })
+          },
+          onDisconnected: (error) => {
+            if (get().stream !== source || !isCurrentSelection(selection)) {
+              return
+            }
+            set({
+              hydratingSessionId: undefined,
+              execution: reduceExecutionView(get().execution, {
+                type: "stream_unavailable",
+              }),
+              message: errorMessage(
+                error,
+                "The connection to the server was lost.",
+              ),
             })
           },
         },

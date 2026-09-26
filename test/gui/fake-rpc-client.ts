@@ -48,6 +48,10 @@ export class FakeSessionStream implements SessionStream {
     this.handlers.onReplayComplete()
   }
 
+  disconnect(error: unknown): void {
+    this.handlers.onDisconnected?.(error)
+  }
+
   failSubscription(error: unknown): void {
     this.handlers.onError?.(error)
   }

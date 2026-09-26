@@ -329,6 +329,30 @@ describe("app store event stream", () => {
     expect(useAppStore.getState().message).toBe("Session event replay failed.")
   })
 
+  it("leaves hydration on disconnect and resumes after replay on reconnect", async () => {
+    await useAppStore.getState().selectSession("session_1")
+    const stream = fakeRef.current.streams[0]
+    emitSnapshot(stream, { ...sessionDetail, activeTurnId: "turn_1" })
+    expect(useAppStore.getState().hydratingSessionId).toBe("session_1")
+
+    stream?.disconnect(new Error("The connection to the server was lost."))
+    expect(useAppStore.getState().hydratingSessionId).toBeUndefined()
+    expect(useAppStore.getState().message).toBe(
+      "The connection to the server was lost.",
+    )
+    expect(useAppStore.getState().stream).toBe(stream)
+    expect(
+      projectExecutionView(useAppStore.getState().execution).activeTurnId,
+    ).toBeUndefined()
+
+    emitSnapshot(stream, sessionDetail)
+    expect(useAppStore.getState().hydratingSessionId).toBe("session_1")
+    stream?.emitReplayComplete()
+    expect(useAppStore.getState().hydratingSessionId).toBeUndefined()
+    expect(useAppStore.getState().message).toBeUndefined()
+    expect(useAppStore.getState().selectedSession?.id).toBe("session_1")
+  })
+
   it("resubscribes after a stale interrupt without cancelling a newer turn", async () => {
     await useAppStore.getState().selectSession("session_1")
     const initialStream = fakeRef.current.streams[0]

@@ -48,6 +48,8 @@ export type SessionStreamHandlers = {
   readonly onEvent: (event: StoredEventEnvelope) => void
   readonly onTransient: (event: LiveSessionEvent) => void
   readonly onReplayComplete: () => void
+  // The stream stays registered and will be re-subscribed after reconnect.
+  readonly onDisconnected?: (error: unknown) => void
   // Terminal subscription failure (e.g. the Session is gone after a
   // reconnect); the stream is closed before this fires.
   readonly onError?: (error: unknown) => void
@@ -264,6 +266,9 @@ export function createAppRpcClient(options: {
       pending.reject(lost)
     }
     if (closed) return
+    for (const record of streams.values()) {
+      if (!record.closed) record.handlers.onDisconnected?.(lost)
+    }
     // Bounded backoff: the delay growth is capped, attempts are not.
     const delay = Math.min(
       reconnectBaseDelayMs * 2 ** reconnectAttempt,
