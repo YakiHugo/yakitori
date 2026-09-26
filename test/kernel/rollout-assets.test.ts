@@ -193,6 +193,34 @@ describe("rollout assets", () => {
     ).rejects.toMatchObject({ code: "ENOENT" })
   })
 
+  it("keeps existing request images when a retried copy is rolled back", async () => {
+    const root = await makeRoot()
+    const sourceSessionId = createSessionId()
+    const targetSessionId = createSessionId()
+    const files = await createTestRolloutAssets(
+      root,
+      sourceSessionId,
+      targetSessionId,
+    )
+    const [source] = await files.importImageBytes(sourceSessionId, "draft", [
+      { name: "screen.png", data: pngBytes() },
+    ])
+    if (source === undefined) throw new Error("missing source attachment")
+
+    const first = await files.copyImageAttachments(targetSessionId, "retry", [
+      source,
+    ])
+    const retry = await files.copyImageAttachments(targetSessionId, "retry", [
+      source,
+    ])
+    await retry.rollback()
+    if (first.attachments[0] === undefined)
+      throw new Error("missing copied attachment")
+    await expect(files.read(first.attachments[0].file)).resolves.toEqual(
+      pngBytes(),
+    )
+  })
+
   it("imports a native path as a snapshot and cleans abandoned staging", async () => {
     const root = await makeRoot()
     const sessionId = createSessionId()

@@ -3,6 +3,7 @@ import type {
   EventEnvelope,
   EventMetadata,
   ForkReason,
+  ImageAttachment,
   InputRole,
   ModelSelection,
   StoredEventEnvelope,
@@ -295,6 +296,9 @@ export type ApiSteerInputRequest = {
 export type ApiSteerInputResponse = {
   readonly requestId: string
   readonly turnId: string
+  // A promoted image belongs to the Session, so an uncommitted steer can be
+  // restored even after its original draft attachment has been released.
+  readonly attachments?: readonly ImageAttachment[]
 }
 
 export type ApiCompactSessionResponse = {

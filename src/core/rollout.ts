@@ -8,6 +8,7 @@ import type {
   SessionConfigurationSnapshot,
   TokenUsage,
   TurnMetrics,
+  TextContent,
 } from "../kernel/events.ts"
 
 export type HistoryPosition = {
@@ -55,10 +56,8 @@ export type ResponseItemEnvelope = {
     readonly modelSelection?: ModelSelection
     readonly parentInputId?: string
     readonly metadata?: EventMetadata
-    // Queued admissions write the input item as a standalone batch; the
-    // marker distinguishes a real queue entry from a torn turn-start batch
-    // (uncovered input_ with no marker) when rebuilding the queue on resume.
-    readonly queued?: boolean
+    // Admission was already published from input_admitted.
+    readonly queuedDispatch?: true
   }
 }
 
@@ -77,6 +76,18 @@ export type ModelContextSettings = Readonly<{
 export type RolloutItem =
   | { readonly type: "model_context"; readonly settings: ModelContextSettings }
   | { readonly type: "session_meta"; readonly metadata: ThreadMetadata }
+  | {
+      readonly type: "input_admitted"
+      readonly input: Readonly<{
+        submissionId: string
+        content: TextContent
+        modelSelection?: ModelSelection
+        parentInputId?: string
+        metadata?: EventMetadata
+      }>
+      readonly inputItemId: string
+      readonly requestFingerprint: string
+    }
   | { readonly type: "response_item"; readonly item: ResponseItemEnvelope }
   | { readonly type: "turn_context"; readonly context: TurnContextItem }
   | {
@@ -94,8 +105,7 @@ export type RolloutItem =
       readonly error?: KernelError
     }
   | {
-      // Cancels a queued input: the queue entry is the earlier uncovered
-      // input_ response_item; this marker keeps it cancelled across restarts.
+      // Cancels an admitted input that has not started.
       readonly type: "input_cancelled"
       readonly inputId: string
     }

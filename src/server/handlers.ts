@@ -193,6 +193,7 @@ export function createThreadServerHandlers(
   const pumpReady = new Map<AgentThread, Promise<void>>()
   const publishedThrough = new Map<string, number>()
   const admissionTails = new Map<string, Promise<void>>()
+  const pendingSteerDrafts = new Map<string, TextContent>()
   let closing = false
   let stopPumps: (() => void) | undefined
   const pumpsStopped = new Promise<void>((resolve) => {
@@ -217,6 +218,20 @@ export function createThreadServerHandlers(
     const last = records.at(-1)
     if (last !== undefined) publishedThrough.set(threadId, hostSeq(last))
     maybeGenerateSessionTitle(threadId, stored, records)
+    for (const record of records) {
+      if (
+        record.item.type !== "response_item" ||
+        !record.item.item.id.startsWith("message_") ||
+        record.item.item.item.role !== "user"
+      )
+        continue
+      const requestId = record.item.item.turnId
+      const key = `${threadId}\0${requestId}`
+      const draft = pendingSteerDrafts.get(key)
+      if (draft === undefined) continue
+      pendingSteerDrafts.delete(key)
+      void discardAdmittedDraftAttachments(threadId, requestId, draft)
+    }
   }
 
   // Name an untitled conversation once, from its first user input, when the
@@ -228,37 +243,56 @@ export function createThreadServerHandlers(
     records: readonly StoredRolloutItem[],
   ) {
     if (options.sessionTitle === undefined) return
-    const isUserInput = (record: StoredRolloutItem) =>
-      record.item.type === "response_item" &&
-      record.item.item.id.startsWith("input_") &&
-      record.item.item.item.role === "user" &&
-      record.item.item.item.context === undefined
+    const inheritedPending = inheritedPendingInputIds(stored)
+    const isUserInput = (
+      record: StoredRolloutItem,
+    ): record is StoredRolloutItem & {
+      item: Extract<
+        RolloutItem,
+        { readonly type: "input_admitted" | "response_item" }
+      >
+    } =>
+      (record.item.type === "input_admitted" &&
+        !inheritedPending.has(record.item.inputItemId)) ||
+      (record.item.type === "response_item" &&
+        record.item.item.id.startsWith("input_") &&
+        record.item.item.item.role === "user" &&
+        record.item.item.item.context === undefined &&
+        record.item.item.submissionMetadata?.queuedDispatch !== true)
     const admitted = records.find(isUserInput)
     if (admitted === undefined) return
     const first = stored.rollout.find(isUserInput)
     if (
       first === undefined ||
-      first.item.type !== "response_item" ||
-      admitted.item.type !== "response_item" ||
-      first.item.item.id !== admitted.item.item.id
+      (first.item.type === "input_admitted"
+        ? first.item.inputItemId
+        : first.item.item.id) !==
+        (admitted.item.type === "input_admitted"
+          ? admitted.item.inputItemId
+          : admitted.item.item.id)
     ) {
       return
     }
-    const message = admitted.item.item.item
-    if (message.role !== "user") return
-    const text = message.content
-      .filter((block) => block.type === "text")
-      .map((block) => block.text)
-      .join("")
+    let text: string
+    if (admitted.item.type === "input_admitted") {
+      text = admitted.item.input.content.text
+    } else {
+      const message = admitted.item.item.item
+      if (message.role !== "user") return
+      text = message.content
+        .filter((block) => block.type === "text")
+        .map((block) => block.text)
+        .join("")
+    }
     if (text.trim() === "") return
+    const modelSelection =
+      admitted.item.type === "input_admitted"
+        ? admitted.item.input.modelSelection
+        : admitted.item.item.submissionMetadata?.modelSelection
     void options.sessionTitle.generate({
       sessionId: threadId,
       text,
-      ...(admitted.item.item.submissionMetadata?.modelSelection === undefined
-        ? {}
-        : {
-            modelSelection: admitted.item.item.submissionMetadata.modelSelection,
-          }),
+      ...(modelSelection === undefined ? {} : { modelSelection }),
     })
   }
 
@@ -524,27 +558,22 @@ export function createThreadServerHandlers(
       throw invalidInput("Image attachments require rollout asset storage.")
     }
     try {
-      const belongsToSession = content.attachments.every(
-        (attachment) => attachment.file.rolloutId === rolloutId,
+      const allStagedInSession = content.attachments.every(
+        (attachment) =>
+          attachment.file.rolloutId === rolloutId &&
+          attachment.file.path.startsWith("attachments/staging/"),
       )
-      const promotion = belongsToSession
+      const promotion = allStagedInSession
         ? await options.rolloutAssets.promoteImageAttachments(
             rolloutId,
             requestId,
             content.attachments,
           )
-        : {
-            attachments: await options.rolloutAssets.copyImageAttachments(
-              rolloutId,
-              requestId,
-              content.attachments,
-            ),
-            rollback: () =>
-              options.rolloutAssets?.discardRequestImageAttachments(
-                rolloutId,
-                requestId,
-              ) ?? Promise.resolve(),
-          }
+        : await options.rolloutAssets.copyImageAttachments(
+            rolloutId,
+            requestId,
+            content.attachments,
+          )
       return {
         content: { ...content, attachments: promotion.attachments },
         rollback: promotion.rollback,
@@ -565,12 +594,14 @@ export function createThreadServerHandlers(
     content: TextContent,
   ) => {
     if (content.attachments === undefined) return
+    const drafts = content.attachments.filter((attachment) =>
+      attachment.file.path.startsWith("attachments/staging/"),
+    )
+    if (drafts.length === 0) return
     try {
-      await options.rolloutAssets?.discardDraftImageAttachments(
-        content.attachments,
-      )
+      await options.rolloutAssets?.discardDraftImageAttachments(drafts)
       options.releaseDraftRolloutAssets?.(
-        content.attachments.map((attachment) => attachment.file.rolloutId),
+        drafts.map((attachment) => attachment.file.rolloutId),
       )
     } catch (error) {
       reportOperationalFailure(reporter, {
@@ -593,9 +624,7 @@ export function createThreadServerHandlers(
       content: TextContent,
     ) => Promise<TurnInputSubmission>,
   ) => {
-    if (
-      (await options.store.sessionPresentation(request.sessionId)).archived
-    )
+    if ((await options.store.sessionPresentation(request.sessionId)).archived)
       throw conflict("Restore this conversation before sending a message.")
     requireAvailableProvider(
       request.modelSelection?.provider,
@@ -614,12 +643,10 @@ export function createThreadServerHandlers(
         )
         const content = promoted.content
         let rollbackPromotion = promoted.rollback
-        const submitted = await submit(thread, content).catch(
-          async (error: unknown) => {
-            await rollbackPromotion?.()
-            throw error
-          },
-        )
+        // Session may have appended an admission even when its durability
+        // fence failed. Keep promoted files for a retry with the same request
+        // ID; deleting them would leave a durable queued image dangling.
+        const submitted = await submit(thread, content)
         if (submitted.type === "not_submitted") {
           await rollbackPromotion?.()
           throw conflict(`Input was not submitted: ${submitted.reason}.`, {
@@ -1046,11 +1073,13 @@ export function createThreadServerHandlers(
             const attachments =
               sourceAttachments.length === 0
                 ? undefined
-                : await requireRolloutAssets(options).copyImageAttachments(
-                    forkRolloutId,
-                    submissionId,
-                    sourceAttachments,
-                  )
+                : (
+                    await requireRolloutAssets(options).copyImageAttachments(
+                      forkRolloutId,
+                      submissionId,
+                      sourceAttachments,
+                    )
+                  ).attachments
             const submitted = await forked.thread.startIfIdle({
               submissionId,
               content: {
@@ -1095,9 +1124,20 @@ export function createThreadServerHandlers(
           options.store,
           forked.thread.id,
         )
-        const events = stored.rollout.map((record) =>
-          mapRolloutEvent(record, forked.thread.id),
-        )
+        const inheritedPending = inheritedPendingInputIds(stored)
+        const events = stored.rollout
+          .filter(
+            ({ item }) =>
+              !(
+                item.type === "input_admitted" &&
+                inheritedPending.has(item.inputItemId)
+              ) &&
+              !(
+                item.type === "input_cancelled" &&
+                inheritedPending.has(item.inputId)
+              ),
+          )
+          .map((record) => mapRolloutEvent(record, forked.thread.id))
         publishedThrough.set(forked.thread.id, threadSeq(stored))
         options.eventHub?.publishDurable(events)
         return ok(201, {
@@ -1207,6 +1247,11 @@ export function createThreadServerHandlers(
           request.requestId,
           request.content,
         )
+        const steerKey = `${request.sessionId}\0${request.requestId}`
+        // The model may record a steer before this RPC returns; register the
+        // draft before handing ownership to the active Turn.
+        if (request.content.attachments !== undefined)
+          pendingSteerDrafts.set(steerKey, request.content)
         const submitted = await thread
           .steer(
             {
@@ -1222,23 +1267,26 @@ export function createThreadServerHandlers(
             request.expectedTurnId,
           )
           .catch(async (error: unknown) => {
+            pendingSteerDrafts.delete(steerKey)
             await promoted.rollback?.()
             throw error
           })
         if (submitted.type === "not_submitted") {
+          pendingSteerDrafts.delete(steerKey)
           await promoted.rollback?.()
           throw conflict(`Input was not submitted: ${submitted.reason}.`, {
             reason: submitted.reason,
           })
         }
-        await discardAdmittedDraftAttachments(
-          request.sessionId,
-          request.requestId,
-          request.content,
-        )
+        // Steering acceptance is ephemeral. Preserve draft assets until the
+        // model records this input, so a lost response or an interrupted Turn
+        // leaves the client's draft retryable.
         return ok(200, {
           requestId: request.requestId,
           turnId: submitted.turnId,
+          ...(promoted.content.attachments === undefined
+            ? {}
+            : { attachments: promoted.content.attachments }),
         })
       } catch (error) {
         return fail(error, reporter, "steer-input")
@@ -1423,16 +1471,20 @@ async function mapStoredThread(
   options: ThreadServerHandlerOptions,
 ): Promise<ApiSessionDetail> {
   const rollout = stored.rollout.map((record) => record.item)
+  const inheritedPending = inheritedPendingInputIds(stored)
   const contexts = rollout.filter(
     (item): item is Extract<RolloutItem, { readonly type: "turn_context" }> =>
       item.type === "turn_context",
   )
-  const inputs = rollout.filter(
-    (item) =>
-      item.type === "response_item" &&
-      item.item.item.role === "user" &&
-      item.item.id.startsWith("input_") &&
-      item.item.item.context === undefined,
+  const inputs = stored.rollout.filter(
+    ({ item }) =>
+      (item.type === "input_admitted" &&
+        !inheritedPending.has(item.inputItemId)) ||
+      (item.type === "response_item" &&
+        item.item.item.role === "user" &&
+        item.item.id.startsWith("input_") &&
+        item.item.item.context === undefined &&
+        item.item.submissionMetadata?.queuedDispatch !== true),
   ).length
   const turns = rollout.filter((item) => item.type === "turn_started").length
   const completedItems = rollout.filter(
@@ -1459,7 +1511,10 @@ async function mapStoredThread(
     seq: Math.max(0, threadSeq(stored) - 1),
   }
   const liveProjects = await liveProjectIds(options, [stored.metadata])
-  const pendingQueue = queuedInputsFromRollout(stored.rollout)
+  const pendingQueue = queuedInputsFromRollout(
+    stored.rollout,
+    stored.metadata.rolloutId,
+  )
   return {
     ...mapThreadSummary(summary, liveProjects),
     ...(live?.snapshot().activeTurnId === undefined
@@ -1470,9 +1525,9 @@ async function mapStoredThread(
       : { currentModel: currentContext.context.selection }),
     ...(usage === undefined ? {} : { usage }),
     pendingInputs: pendingQueue.map((entry) => ({
-      id: entry.inputItem.id,
+      id: entry.inputItemId,
       text: entry.input.content.text,
-      admittedAt: entry.inputItem.createdAt,
+      admittedAt: entry.admittedAt,
     })),
     pendingPermissions: pendingPermissions.map(
       ({ sessionId: _, ...entry }) => entry,
@@ -1486,6 +1541,23 @@ async function mapStoredThread(
       tools,
     },
   }
+}
+
+function inheritedPendingInputIds(stored: StoredThread): Set<string> {
+  const started = new Set(
+    stored.rollout.flatMap(({ item }) =>
+      item.type === "turn_started" ? [item.inputItemId] : [],
+    ),
+  )
+  return new Set(
+    stored.rollout.flatMap(({ item, rolloutId }) =>
+      item.type === "input_admitted" &&
+      rolloutId !== stored.metadata.rolloutId &&
+      !started.has(item.inputItemId)
+        ? [item.inputItemId]
+        : [],
+    ),
+  )
 }
 
 // Resolves which of the referenced projectIds still exist. Returns undefined
@@ -1559,11 +1631,36 @@ function mapRolloutEvent(
       },
     })
   }
+  if (item.type === "input_admitted") {
+    return createEventEnvelope({
+      ...base,
+      event: {
+        type: "input.admitted",
+        data: {
+          requestId: item.input.submissionId,
+          inputId: item.inputItemId,
+          role: InputRole.User,
+          content: item.input.content,
+          ...(item.input.modelSelection === undefined
+            ? {}
+            : { modelSelection: item.input.modelSelection }),
+          ...(item.input.parentInputId === undefined
+            ? {}
+            : { parentInputId: item.input.parentInputId }),
+          ...(item.input.metadata === undefined
+            ? {}
+            : { metadata: item.input.metadata }),
+        },
+      },
+    })
+  }
   if (
     item.type === "response_item" &&
     item.item.item.role === "user" &&
-    (item.item.id.startsWith("input_") || item.item.id.startsWith("message_")) &&
-    item.item.item.context === undefined
+    (item.item.id.startsWith("input_") ||
+      item.item.id.startsWith("message_")) &&
+    item.item.item.context === undefined &&
+    item.item.submissionMetadata?.queuedDispatch !== true
   ) {
     // message_-prefixed user items are steered inputs, recorded when the
     // active Turn sampled them; input_-prefixed items start Turns.

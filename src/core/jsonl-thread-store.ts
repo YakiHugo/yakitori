@@ -26,6 +26,7 @@ import {
   isTurnMetrics,
 } from "../kernel/events.ts"
 import { isStorageKey } from "../kernel/ids.ts"
+import { ContextManager } from "./context-manager.ts"
 import type {
   HistoryPosition,
   ResponseItemEnvelope,
@@ -1437,10 +1438,34 @@ export class JsonlThreadStore implements ThreadStore {
   ): Promise<readonly StoredRolloutItem[]> {
     await this.#validateHistoryPosition(position)
     const history = await this.#materialize(position.rolloutId, seen)
-    return history.filter(
+    const prefix = history.filter(
       (entry) =>
         entry.item.type !== "session_meta" &&
         entry.seq < position.endSeqExclusive,
+    )
+    const started = new Set(
+      prefix.flatMap(({ item }) =>
+        item.type === "turn_started" ? [item.inputItemId] : [],
+      ),
+    )
+    const inheritedPending = new Set(
+      prefix.flatMap(({ item }) =>
+        item.type === "input_admitted" && !started.has(item.inputItemId)
+          ? [item.inputItemId]
+          : [],
+      ),
+    )
+    // A fork inherits the conversation prefix, not its parent's outstanding
+    // queue or its cancellation receipts. Keep physical seq values intact.
+    return prefix.filter(
+      ({ item }) =>
+        !(
+          item.type === "input_admitted" &&
+          inheritedPending.has(item.inputItemId)
+        ) &&
+        !(
+          item.type === "input_cancelled" && inheritedPending.has(item.inputId)
+        ),
     )
   }
 
@@ -1809,18 +1834,9 @@ function forkBoundaryIndex(
 function modelContextAt(
   rollout: readonly StoredRolloutItem[],
 ): readonly ResponseItemEnvelope[] {
-  let context: readonly ResponseItemEnvelope[] = []
-  for (const entry of rollout) {
-    if (
-      entry.item.type === "response_item" ||
-      entry.item.type === "agent_message"
-    ) {
-      context = [...context, entry.item.item]
-    } else if (entry.item.type === "compacted") {
-      context = entry.item.replacement
-    }
-  }
-  return structuredClone(context)
+  // A fork sees exactly the model history of its selected rollout prefix.
+  // Pending queue receipts must not become conversation items in that prefix.
+  return ContextManager.fromStoredThread({ rollout }).snapshot().history
 }
 
 async function readPhysicalRollout(
@@ -2120,6 +2136,39 @@ function isRolloutItem(value: unknown): value is RolloutItem {
   if (value.type === "response_item") {
     return hasOnlyKeys(value, ["type", "item"]) && isResponseItem(value.item)
   }
+  if (value.type === "input_admitted") {
+    return (
+      hasOnlyKeys(value, [
+        "type",
+        "input",
+        "inputItemId",
+        "requestFingerprint",
+      ]) &&
+      isRecord(value.input) &&
+      hasOnlyKeys(value.input, [
+        "submissionId",
+        "content",
+        "modelSelection",
+        "parentInputId",
+        "metadata",
+      ]) &&
+      typeof value.inputItemId === "string" &&
+      value.inputItemId.startsWith("input_") &&
+      typeof value.requestFingerprint === "string" &&
+      isKernelEvent({
+        type: EventType.InputAdmitted,
+        data: {
+          requestId: value.input.submissionId,
+          inputId: value.inputItemId,
+          role: "user",
+          content: value.input.content,
+          modelSelection: value.input.modelSelection,
+          parentInputId: value.input.parentInputId,
+          metadata: value.input.metadata,
+        },
+      })
+    )
+  }
   if (value.type === "turn_context") {
     return (
       hasOnlyKeys(value, ["type", "context"]) &&
@@ -2283,13 +2332,13 @@ function isSubmissionMetadata(value: unknown): boolean {
       "modelSelection",
       "parentInputId",
       "metadata",
-      "queued",
+      "queuedDispatch",
     ]) &&
     (value.modelSelection === undefined ||
       isModelSelection(value.modelSelection)) &&
     optionalString(value.parentInputId) &&
     (value.metadata === undefined || isJsonObject(value.metadata)) &&
-    (value.queued === undefined || value.queued === true)
+    (value.queuedDispatch === undefined || value.queuedDispatch === true)
   )
 }
 

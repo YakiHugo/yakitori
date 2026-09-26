@@ -945,6 +945,78 @@ describe("JsonlThreadStore", () => {
     await store.shutdownThread("thread_source")
   })
 
+  it("keeps pending and cancelled queue receipts out of fork model context", async () => {
+    const { store } = await createStore()
+    await createPersistentThread(store, metadata("thread_source"))
+    const queued = {
+      type: "input_admitted",
+      input: {
+        submissionId: "turn_queued",
+        content: { kind: "text", text: "queued" },
+      },
+      inputItemId: "input_queued",
+      requestFingerprint: "queued-fingerprint",
+    } as const
+    const cancelled = {
+      type: "input_admitted",
+      input: {
+        submissionId: "turn_cancelled",
+        content: { kind: "text", text: "cancelled" },
+      },
+      inputItemId: "input_cancelled",
+      requestFingerprint: "cancelled-fingerprint",
+    } as const
+    await store.appendItems("thread_source", [
+      response("turn_first", "first"),
+      queued,
+      cancelled,
+      { type: "input_cancelled", inputId: "input_cancelled" },
+    ])
+
+    const beforeDispatch = await store.prepareFork({
+      sourceThreadId: "thread_source",
+      boundary: { type: "latest" },
+    })
+    expect(beforeDispatch.modelContext.map((item) => item.turnId)).toEqual([
+      "turn_first",
+    ])
+    const child = await store.createFork({
+      prepared: beforeDispatch,
+      target: metadata("thread_child", { parentThreadId: "thread_source" }),
+    })
+    expect(
+      child.thread.rollout.flatMap(({ item }) =>
+        item.type === "input_admitted" ? [item.inputItemId] : [],
+      ),
+    ).toEqual([])
+    expect(
+      child.thread.rollout.some(({ item }) => item.type === "input_cancelled"),
+    ).toBe(false)
+
+    await store.appendItems("thread_source", [
+      {
+        ...response("turn_queued", "queued"),
+        item: { ...response("turn_queued", "queued").item, id: "input_queued" },
+      },
+      {
+        type: "turn_started",
+        turnId: "turn_queued",
+        inputItemId: "input_queued",
+      },
+    ])
+    const afterDispatch = await store.prepareFork({
+      sourceThreadId: "thread_source",
+      boundary: { type: "latest" },
+    })
+    expect(afterDispatch.modelContext.map((item) => item.turnId)).toEqual([
+      "turn_first",
+      "turn_queued",
+    ])
+    await store.releasePreparedFork(afterDispatch)
+    await store.shutdownThread("thread_child")
+    await store.shutdownThread("thread_source")
+  })
+
   it("repairs an incomplete trailing JSON line before resuming appends", async () => {
     const { root, store } = await createStore()
     await createPersistentThread(store, metadata("thread_recover"))

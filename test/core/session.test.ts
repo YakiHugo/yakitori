@@ -4,6 +4,7 @@ import type {
   TurnProcessor,
   TurnRuntime,
 } from "../../src/core/session.ts"
+import type { RolloutItem } from "../../src/core/rollout.ts"
 import { SessionStatus, type TurnInput } from "../../src/core/session-io.ts"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
 import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
@@ -134,11 +135,23 @@ describe("live Session actor", () => {
       expect(queued.type).toBe("queued")
       if (queued.type !== "queued") throw new Error("Expected queued input.")
       expect(queued.inputItemId).toMatch(/^input_/)
-      // Durable at admission time, but not running and not in context yet.
+      // Durable at admission time, but not running or model-visible yet.
       expect(ran).toEqual(["turn_first"])
+      const admitted = (await store.readThread(thread.id))?.rollout
       expect(
-        JSON.stringify((await store.readThread(thread.id))?.rollout),
-      ).toContain("queued")
+        admitted?.filter(
+          ({ item }) =>
+            item.type === "input_admitted" &&
+            item.inputItemId === queued.inputItemId,
+        ),
+      ).toHaveLength(1)
+      expect(
+        admitted?.some(
+          ({ item }) =>
+            item.type === "response_item" &&
+            item.item.id === queued.inputItemId,
+        ),
+      ).toBe(false)
 
       const replay = await thread.queueInput({
         submissionId: "turn_queued",
@@ -154,8 +167,23 @@ describe("live Session actor", () => {
       await nextEventOfType(thread, "turn.completed")
       await waitForValue(() => (ran.length === 2 ? true : undefined))
       expect(ran).toEqual(["turn_first", "turn_queued"])
-      // Dispatch reuses the queued input item: one transcript entry.
+      // Dispatch writes the model item alongside context and start.
       const stored = await store.readThread(thread.id)
+      const startedIndex = stored?.rollout.findIndex(
+        ({ item }) =>
+          item.type === "turn_started" && item.turnId === "turn_queued",
+      )
+      if (
+        startedIndex === undefined ||
+        startedIndex < 2 ||
+        stored === undefined
+      )
+        throw new Error("Queued Turn did not start with a complete batch.")
+      expect(
+        stored.rollout
+          .slice(startedIndex - 2, startedIndex + 1)
+          .map(({ item }) => item.type),
+      ).toEqual(["response_item", "turn_context", "turn_started"])
       const starts = stored?.rollout.flatMap((record) =>
         record.item.type === "turn_started" ? [record.item] : [],
       )
@@ -166,6 +194,77 @@ describe("live Session actor", () => {
       await nextEventOfType(thread, "turn.completed")
     } finally {
       releaseFirst()
+      await manager.shutdown()
+    }
+  })
+
+  it.each([
+    "append",
+    "fence",
+  ] as const)("reconciles an uncertain queue %s without duplicating its admission", async (failure) => {
+    class UncertainAdmissionStore extends MemoryThreadStore {
+      failAdmission = true
+      override async appendItems(
+        threadId: string,
+        items: readonly RolloutItem[],
+      ): Promise<number> {
+        const seq = await super.appendItems(threadId, items)
+        if (
+          failure === "append" &&
+          this.failAdmission &&
+          items[0]?.type === "input_admitted"
+        ) {
+          this.failAdmission = false
+          throw new Error("uncertain admission append")
+        }
+        return seq
+      }
+      override async persistThread(
+        threadId: string,
+        context: Parameters<MemoryThreadStore["persistThread"]>[1],
+      ): Promise<void> {
+        await super.persistThread(threadId, context)
+        if (failure === "fence" && this.failAdmission) {
+          const stored = await this.readThread(threadId)
+          if (
+            !stored?.rollout.some(({ item }) => item.type === "input_admitted")
+          )
+            return
+          this.failAdmission = false
+          throw new Error("uncertain admission fence")
+        }
+      }
+    }
+    const store = new UncertainAdmissionStore()
+    const gate = deferred<void>()
+    const manager = createManager(
+      {
+        run: async (_runtime, input) => {
+          if (input.submissionId === "turn_first") await gate.promise
+        },
+      },
+      store,
+    )
+    const thread = await manager.createThread()
+    try {
+      await thread.startIfIdle({
+        submissionId: "turn_first",
+        content: { kind: "text", text: "first" },
+      })
+      const queued = await thread.queueInput({
+        submissionId: "turn_ambiguous",
+        content: { kind: "text", text: "once" },
+      })
+      expect(queued.type).toBe("queued")
+      expect(
+        (await store.readThread(thread.id))?.rollout.filter(
+          ({ item }) =>
+            item.type === "input_admitted" &&
+            item.input.submissionId === "turn_ambiguous",
+        ),
+      ).toHaveLength(1)
+    } finally {
+      gate.resolve()
       await manager.shutdown()
     }
   })
@@ -226,6 +325,7 @@ describe("live Session actor", () => {
   it("rebuilds the pending queue on resume and dispatches it after the next turn", async () => {
     const store = new MemoryThreadStore()
     let ran: string[] = []
+    const sampledHistories: string[][] = []
     let releaseFirst!: () => void
     const firstGate = new Promise<void>((resolve) => {
       releaseFirst = resolve
@@ -257,15 +357,30 @@ describe("live Session actor", () => {
     ran = []
     manager = createManager(
       {
-        run: async (_runtime, input) => {
+        run: async (runtime, input) => {
           ran.push(input.submissionId)
+          sampledHistories.push(
+            runtime
+              .snapshot()
+              .context.history.flatMap((entry) =>
+                entry.item.role === "user"
+                  ? entry.item.content.flatMap((block) =>
+                      block.type === "text" ? [block.text] : [],
+                    )
+                  : [],
+              ),
+          )
         },
       },
       store,
     )
     try {
       const resumed = await manager.resumeThread(threadId)
-      if (resumed === undefined) throw new Error("Stored thread was not resumed")
+      if (resumed === undefined)
+        throw new Error("Stored thread was not resumed")
+      expect(
+        resumed.snapshot().context.history.map((entry) => entry.turnId),
+      ).toEqual(["turn_first"])
       // The rebuilt queue waits for the next turn instead of auto-running.
       await resumed.startIfIdle({
         submissionId: "turn_next",
@@ -273,6 +388,90 @@ describe("live Session actor", () => {
       })
       await waitForValue(() => (ran.length === 2 ? true : undefined))
       expect(ran).toEqual(["turn_next", "turn_queued"])
+      expect(sampledHistories).toEqual([
+        ["first", "next"],
+        ["first", "next", "queued"],
+      ])
+    } finally {
+      await manager.shutdown()
+    }
+  })
+
+  it("keeps a cancelled queued input out of model history after resume", async () => {
+    const store = new MemoryThreadStore()
+    const mayFinish = deferred<void>()
+    let manager = createManager({ run: async () => mayFinish.promise }, store)
+    const thread = await manager.createThread()
+    await thread.startIfIdle({
+      submissionId: "turn_first",
+      content: { kind: "text", text: "first" },
+    })
+    await nextEventOfType(thread, "turn.started")
+    const queued = await thread.queueInput({
+      submissionId: "turn_cancelled",
+      content: { kind: "text", text: "private cancelled message" },
+    })
+    if (queued.type !== "queued") throw new Error("Expected queued input.")
+    expect(await thread.cancelQueuedInput(queued.inputItemId)).toBe(true)
+    const threadId = thread.id
+    await manager.shutdown()
+    mayFinish.resolve()
+
+    manager = createManager({ run: async () => undefined }, store)
+    try {
+      const resumed = await manager.resumeThread(threadId)
+      if (resumed === undefined)
+        throw new Error("Stored thread was not resumed")
+      expect(JSON.stringify(resumed.snapshot().context.history)).not.toContain(
+        "private cancelled message",
+      )
+    } finally {
+      await manager.shutdown()
+    }
+  })
+
+  it("replays a queued image with its original attachment name after resume", async () => {
+    const store = new MemoryThreadStore()
+    const mayFinish = deferred<void>()
+    let manager = createManager({ run: async () => mayFinish.promise }, store)
+    const thread = await manager.createThread()
+    await thread.startIfIdle({
+      submissionId: "turn_first",
+      content: { kind: "text", text: "first" },
+    })
+    await nextEventOfType(thread, "turn.started")
+    const queuedInput: TurnInput = {
+      submissionId: "turn_image_queued",
+      content: {
+        kind: "text",
+        text: "inspect image",
+        attachments: [
+          {
+            name: "original.png",
+            mediaType: "image/png",
+            sizeBytes: 123,
+            file: {
+              rolloutId: thread.id,
+              path: "attachments/generated-asset.png",
+            },
+          },
+        ],
+      },
+    }
+    const queued = await thread.queueInput(queuedInput)
+    if (queued.type !== "queued") throw new Error("Expected queued input.")
+    await manager.shutdown()
+    mayFinish.resolve()
+
+    manager = createManager({ run: async () => undefined }, store)
+    try {
+      const resumed = await manager.resumeThread(thread.id)
+      if (resumed === undefined)
+        throw new Error("Stored thread was not resumed")
+      expect(await resumed.queueInput(queuedInput)).toMatchObject({
+        type: "replayed",
+        inputItemId: queued.inputItemId,
+      })
     } finally {
       await manager.shutdown()
     }
@@ -820,6 +1019,47 @@ describe("live Session actor", () => {
     await manager.shutdown()
   })
 
+  it("waits for an acknowledged Turn's persistence fence before disposing its processor", async () => {
+    const store = new MemoryThreadStore()
+    const flushStarted = deferred<void>()
+    const releaseFlush = deferred<void>()
+    store.flushStarted = () => flushStarted.resolve()
+    store.flushBarrier = releaseFlush.promise
+    let disposed = false
+    let startedAfterDisposal = false
+    const manager = createManager(
+      {
+        run: async () => {
+          startedAfterDisposal = disposed
+        },
+        dispose() {
+          disposed = true
+        },
+      },
+      store,
+    )
+    const thread = await manager.createThread()
+    await thread.startIfIdle({
+      submissionId: "turn_shutdown_fence",
+      content: { kind: "text", text: "acknowledged" },
+    })
+    await flushStarted.promise
+    const shutdown = manager.shutdown()
+    await Promise.resolve()
+    expect(disposed).toBe(false)
+    releaseFlush.resolve()
+    await shutdown
+    expect(disposed).toBe(true)
+    expect(startedAfterDisposal).toBe(false)
+    expect(
+      (await store.readThread(thread.id))?.rollout.some(
+        (entry) =>
+          entry.item.type === "turn_started" &&
+          entry.item.turnId === "turn_shutdown_fence",
+      ),
+    ).toBe(true)
+  })
+
   it("fails a Turn whose TurnStart fence fails and replays it without duplicating", async () => {
     const store = new MemoryThreadStore()
     let preparations = 0
@@ -856,8 +1096,7 @@ describe("live Session actor", () => {
       inputItemId: expect.any(String),
     })
     await waitForValue(() =>
-      typeof thread.agentStatus === "object" &&
-      "errored" in thread.agentStatus
+      typeof thread.agentStatus === "object" && "errored" in thread.agentStatus
         ? true
         : undefined,
     )

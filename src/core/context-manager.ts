@@ -51,7 +51,9 @@ export class ContextManager {
         : structuredClone(snapshot.worldStateBaseline)
   }
 
-  static fromStoredThread(thread: StoredThread): ContextManager {
+  static fromStoredThread(
+    thread: Pick<StoredThread, "rollout">,
+  ): ContextManager {
     let history: ResponseItemEnvelope[] = []
     let worldStateBaseline: JsonObject | undefined
     let activeContextTokens: number | undefined
