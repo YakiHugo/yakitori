@@ -630,7 +630,7 @@ export async function createYakitoriApplication(
             // Give servers that are nearly ready a short shared grace so a
             // Step snapshot usually includes them (codex-rs optional
             // startup_grace); slower servers join the next Step.
-            await mcpManager.settleConnecting(MCP_STEP_GRACE_MS)
+            await mcpManager.settleConnecting(MCP_STEP_GRACE_MS, signal)
             const status = new Map(
               mcpManager.status().map((server) => [server.name, server]),
             )
