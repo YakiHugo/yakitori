@@ -1281,6 +1281,42 @@ describe("JsonlThreadStore", () => {
     await store.shutdownThread("thread_healthy")
   })
 
+  it("lists the current durable summary after metadata and rollout changes from another store", async () => {
+    const { root, store } = await createStore()
+    const threadId = "thread_list_current"
+    await createPersistentThread(store, metadata(threadId))
+    await store.shutdownThread(threadId)
+
+    const reader = new JsonlThreadStore({ root })
+    expect((await reader.listThreads()).threads).toMatchObject([
+      { id: threadId, seq: 0 },
+    ])
+
+    const writer = new JsonlThreadStore({ root })
+    await writer.resumeThread(threadId)
+    await writer.appendItems(threadId, [
+      response("turn_external", "persisted elsewhere"),
+    ])
+    expect((await writer.listThreads()).threads).toMatchObject([
+      { id: threadId, seq: 1 },
+    ])
+    await writer.shutdownThread(threadId)
+
+    const metadataPath = join(root, "threads", `${threadId}.json`)
+    const saved = JSON.parse(await readFile(metadataPath, "utf8")) as Record<
+      string,
+      unknown
+    >
+    await writeFile(
+      metadataPath,
+      `${JSON.stringify({ ...saved, title: "Changed outside this store" })}\n`,
+    )
+
+    expect((await reader.listThreads()).threads).toMatchObject([
+      { id: threadId, title: "Changed outside this store", seq: 1 },
+    ])
+  })
+
   it("starts with a damaged index without deleting healthy rollout state", async () => {
     const { root, store } = await createStore()
     await createPersistentThread(store, metadata("thread_healthy_restart"))
