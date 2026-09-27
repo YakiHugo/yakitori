@@ -494,26 +494,37 @@ it("shows navigation only while the centered body leaves 48 layout pixels of mar
   }
 })
 
-it("offers an anchor for every input including inputs received during a turn", () => {
+it("anchors requests while keeping steering messages inside their request", () => {
   centeredConversationGeometry()
   useAppStore.setState({
     execution: {
       ...useAppStore.getState().execution,
       entries: [
         ...entries.slice(0, 2),
-        { kind: "user_input", inputId: "input_2", text: "Follow-up", at },
+        {
+          kind: "user_input",
+          inputId: "input_2",
+          text: "Steering message",
+          steered: true,
+          at,
+        },
         ...entries.slice(2),
+        { kind: "user_input", inputId: "input_3", text: "Second request", at },
       ],
     },
   })
   render(<Transcript />)
   const first = screen.getByRole("button", {
-    name: "Jump to message 1: First request",
+    name: "Jump to request 1: First request",
   })
   expect(first).toBeDefined()
   expect(
-    screen.getByRole("button", { name: "Jump to message 2: Follow-up" }),
+    screen.getByRole("button", { name: "Jump to request 2: Second request" }),
   ).toBeDefined()
+  expect(
+    screen.queryByRole("button", { name: /Jump to request.*Steering message/ }),
+  ).toBeNull()
+  expect(screen.getByText("Steering message")).toBeDefined()
 
   const viewport = document.querySelector(
     "[data-slot=scroll-area-viewport]",
@@ -568,6 +579,13 @@ it("marks only the rail markers whose turns intersect the viewport", () => {
         },
         {
           kind: "user_input",
+          inputId: "input_steered",
+          text: "Extra context",
+          steered: true,
+          at,
+        },
+        {
+          kind: "user_input",
           inputId: "input_2",
           text: "Second request",
           at,
@@ -607,10 +625,10 @@ it("marks only the rail markers whose turns intersect the viewport", () => {
     return node
   }
   const first = screen.getByRole("button", {
-    name: "Jump to message 1: First request",
+    name: "Jump to request 1: First request",
   })
   const second = screen.getByRole("button", {
-    name: "Jump to message 2: Second request",
+    name: "Jump to request 2: Second request",
   })
 
   viewport.getBoundingClientRect = () => rect(100, 500)
@@ -621,7 +639,8 @@ it("marks only the rail markers whose turns intersect the viewport", () => {
   expect(second.getAttribute("aria-current")).toBe("location")
 
   // A tall first turn stays marked while its content fills the viewport, even
-  // though its own bubble has scrolled out.
+  // though its own bubble has scrolled out. Steering stays in that segment.
+  anchorFor("Extra context").getBoundingClientRect = () => rect(150, 190)
   anchorFor("Second request").getBoundingClientRect = () => rect(600, 650)
   fireEvent.scroll(viewport)
   expect(first.getAttribute("aria-current")).toBe("location")

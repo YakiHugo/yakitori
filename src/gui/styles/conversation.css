@@ -230,65 +230,69 @@
   font-size: 10px;
   line-height: 14px;
 }
-.message-source {
-  max-width: 100%;
-  min-width: 0;
-}
-.message-source summary {
-  display: flex;
+.message-sources-trigger {
+  display: inline-flex;
   align-items: center;
   gap: 7px;
-  max-width: 100%;
-  padding: 5px 12px;
+  padding: 5px 11px;
   border: 1px solid var(--border);
   border-radius: 999px;
   background: var(--background);
   font-size: 13px;
   line-height: 20px;
-  cursor: pointer;
-  list-style: none;
 }
-.message-source summary::-webkit-details-marker {
-  display: none;
-}
-.message-source summary svg {
+.message-sources-trigger svg {
   flex: none;
   color: var(--muted-foreground);
 }
-.message-source summary span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.message-source summary:hover,
+.message-sources-trigger:hover,
+.message-sources-trigger[aria-expanded="true"],
 .message-image:hover {
   border-color: var(--ring);
 }
-.message-source summary:focus-visible,
+.message-sources-trigger:focus-visible,
 .message-image:focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: 3px;
 }
-.message-source-content {
-  max-width: 360px;
-  max-height: 240px;
+.message-sources-popover {
+  position: fixed;
+  z-index: 65;
+  width: min(360px, calc(100vw - 16px));
+  max-height: min(360px, 60vh);
   overflow: auto;
   overflow-wrap: anywhere;
-  margin-top: 8px;
-  padding: 12px;
   border: 1px solid var(--border);
-  border-radius: 12px;
-  font-size: 12px;
-  line-height: 1.6;
-  background: var(--muted);
+  border-radius: 14px;
+  background: var(--popover);
+  color: var(--popover-foreground);
+  box-shadow: 0 8px 24px #00000018;
 }
-.message-source-content p {
+.message-sources-row {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: 6px;
+  padding: 12px 16px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.message-sources-row + .message-sources-row {
+  border-top: 1px solid var(--border);
+}
+.message-sources-index,
+.message-sources-label,
+.message-sources-location {
   color: var(--muted-foreground);
+}
+.message-sources-location {
   font-size: 11px;
 }
-.message-source-content blockquote {
-  margin: 8px 0;
+.message-sources-row blockquote {
+  margin-top: 4px;
   white-space: pre-wrap;
+}
+.message-sources-comment {
+  margin-top: 8px;
 }
 @media (prefers-reduced-motion: reduce) {
   .conversation-disclosure {

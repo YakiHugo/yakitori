@@ -23,6 +23,7 @@ export type ExecutionEntry =
       readonly contextAttachments?: readonly ContextExcerpt[]
       readonly inputId: string
       readonly questionId?: string
+      readonly steered?: boolean
       readonly text: string
       readonly attachments?: readonly ImageAttachment[]
       readonly at: string
@@ -624,6 +625,7 @@ function applyDurable(
                 {
                   kind: "user_input",
                   inputId: event.data.inputId,
+                  ...(event.data.steered === true ? { steered: true } : {}),
                   ...(typeof event.data.metadata?.userQuestionId === "string"
                     ? { questionId: event.data.metadata.userQuestionId }
                     : {}),

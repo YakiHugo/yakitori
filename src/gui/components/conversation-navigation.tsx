@@ -51,8 +51,16 @@ export function ConversationNavigation({
   }, [viewportRef, contentRef])
   const messages: { id: string; text: string; response: string }[] = []
   for (const entry of entries) {
-    if (entry.kind === "user_input")
-      messages.push({ id: entry.inputId, text: entry.text, response: "" })
+    if (entry.kind === "user_input" && !entry.steered)
+      messages.push({
+        id: entry.inputId,
+        text:
+          entry.text ||
+          (entry.contextAttachments?.length
+            ? "Referenced context"
+            : "Attached images"),
+        response: "",
+      })
     else if (entry.kind === "assistant") {
       const message = messages.at(-1)
       if (message) message.response = entry.text
@@ -84,7 +92,7 @@ export function ConversationNavigation({
           <button
             key={message.id}
             type="button"
-            aria-label={`Jump to message ${index + 1}: ${message.text.slice(0, 80)}`}
+            aria-label={`Jump to request ${index + 1}: ${message.text.slice(0, 80)}`}
             aria-current={active ? "location" : undefined}
             className="conversation-marker"
             onMouseEnter={() => setHovered(index)}
@@ -122,7 +130,7 @@ export function ConversationNavigation({
               aria-hidden="true"
             >
               <span className="line-clamp-2 font-medium text-foreground">
-                {previewText(message.text) || "Attached images"}
+                {previewText(message.text)}
               </span>
               {message.response ? (
                 <span className="mt-1.5 line-clamp-3 text-muted-foreground">
