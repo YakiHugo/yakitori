@@ -2,7 +2,6 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { pastePrompt } from "./prompt-editor-helpers.ts"
 import { UserMessageCell } from "../../src/gui/components/cells/user-message-cell.tsx"
 import {
   createInitialAppState,
@@ -12,6 +11,7 @@ import {
   defaultPreferences,
   usePreferencesStore,
 } from "../../src/gui/store/preferences-store.ts"
+import { pastePrompt } from "./prompt-editor-helpers.ts"
 
 beforeEach(() => {
   useAppStore.setState(createInitialAppState())
@@ -81,7 +81,7 @@ describe("attachments", () => {
     ).toBeDefined()
   })
 
-  it("shows the full submitted source text when a source pill is expanded", async () => {
+  it("groups submitted references behind one entry while preserving their full text", async () => {
     const user = userEvent.setup()
     render(
       <UserMessageCell
@@ -98,16 +98,27 @@ describe("attachments", () => {
                 path: "/workspace/notes.md",
               },
             },
+            {
+              id: "excerpt_2",
+              kind: "annotation",
+              text: "A previous response.",
+              comment: "Please check this.",
+              source: { kind: "message", label: "Assistant message" },
+              anchor: { startOffset: 0, endOffset: 20 },
+            },
           ],
         }}
         queued={false}
       />,
     )
-    await user.click(screen.getByText("notes.md"))
-    expect(
-      screen.getByText("The original source excerpt.").closest("details")?.open,
-    ).toBe(true)
-    expect(screen.getByText("/workspace/notes.md")).toBeDefined()
+    expect(screen.getByRole("button", { name: "2 references" })).toBeDefined()
+    expect(screen.queryByText("The original source excerpt.")).toBeNull()
+    await user.click(screen.getByRole("button", { name: "2 references" }))
+    const popover = screen.getByRole("dialog", { name: "2 references" })
+    expect(popover.textContent).toContain("The original source excerpt.")
+    expect(popover.textContent).toContain("/workspace/notes.md")
+    expect(popover.textContent).toContain("A previous response.")
+    expect(popover.textContent).toContain("Please check this.")
   })
 })
 

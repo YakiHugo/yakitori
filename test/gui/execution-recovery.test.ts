@@ -44,6 +44,38 @@ function runningState() {
 }
 
 describe("execution recovery", () => {
+  it("retains the steering distinction when rebuilding request navigation from history", () => {
+    let state = createExecutionViewState()
+    for (const [index, steered] of [false, true, false].entries()) {
+      state = reduceExecutionView(state, {
+        type: "durable",
+        event: createEventEnvelope({
+          sessionId: session.id,
+          seq: index + 1,
+          event: {
+            type: "input.admitted",
+            data: {
+              requestId: `request_${index}`,
+              inputId: `input_${index}`,
+              role: "user",
+              content: { kind: "text", text: `Message ${index}` },
+              ...(steered ? { steered: true } : {}),
+            },
+          },
+        }),
+      })
+    }
+    state = reduceExecutionView(state, {
+      type: "replay_completed",
+      session: { ...session, seq: 3 },
+    })
+    expect(
+      projectExecutionView(state).entries.map((entry) =>
+        entry.kind === "user_input" ? entry.steered === true : undefined,
+      ),
+    ).toEqual([false, true, false])
+  })
+
   it("settles cached output, tools, permissions and compaction after an idle reconnect", () => {
     let state = runningState()
     for (const item of [

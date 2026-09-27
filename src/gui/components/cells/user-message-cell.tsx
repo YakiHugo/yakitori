@@ -2,10 +2,19 @@ import {
   FileText,
   ImageOff,
   LoaderCircle,
+  MessageSquare,
   PencilLine,
   RotateCcw,
 } from "lucide-react"
-import { type ReactNode, useLayoutEffect, useRef, useState } from "react"
+import {
+  type ReactNode,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react"
+import { createPortal } from "react-dom"
+import type { ContextExcerpt } from "../../../kernel/input-context.ts"
 import { imageAttachmentUrl } from "../../composer-attachments.ts"
 import { contextSourceAttributes } from "../../conversation-context.ts"
 import type { ExecutionEntry } from "../../execution-view.ts"
@@ -95,31 +104,9 @@ export function UserMessageCell({
                   ))}
                 </div>
               ) : null}
-              {contextAttachments.map((excerpt) => (
-                <details className="message-source" key={excerpt.id}>
-                  <summary
-                    title={
-                      excerpt.source.path ??
-                      excerpt.source.url ??
-                      excerpt.source.label
-                    }
-                  >
-                    <FileText size={14} aria-hidden="true" />
-                    <span>{excerpt.source.label}</span>
-                  </summary>
-                  <div className="message-source-content">
-                    <p>
-                      {excerpt.source.path ??
-                        excerpt.source.url ??
-                        excerpt.source.label}
-                    </p>
-                    <blockquote>{excerpt.text}</blockquote>
-                    {excerpt.kind === "annotation" && excerpt.comment && (
-                      <p>{excerpt.comment}</p>
-                    )}
-                  </div>
-                </details>
-              ))}
+              {contextAttachments.length > 0 ? (
+                <MessageSources excerpts={contextAttachments} />
+              ) : null}
             </section>
           )}
           {entry.text ? (
@@ -274,6 +261,125 @@ export function UserMessageCell({
         />
       )}
     </div>
+  )
+}
+
+function MessageSources({
+  excerpts,
+}: Readonly<{ excerpts: readonly ContextExcerpt[] }>) {
+  const [open, setOpen] = useState(false)
+  const [position, setPosition] = useState({ top: 0, left: 0 })
+  const trigger = useRef<HTMLButtonElement>(null)
+  const popover = useRef<HTMLDivElement>(null)
+  const allAnnotations = excerpts.every(
+    (excerpt) => excerpt.kind === "annotation",
+  )
+  const Icon = allAnnotations ? MessageSquare : FileText
+  const label = allAnnotations
+    ? excerpts.length === 1
+      ? "1 annotation"
+      : `${excerpts.length} annotations`
+    : excerpts.length === 1
+      ? "1 reference"
+      : `${excerpts.length} references`
+
+  useLayoutEffect(() => {
+    if (!open) return
+    const place = () => {
+      if (!trigger.current || !popover.current) return
+      const rect = trigger.current.getBoundingClientRect()
+      const { width, height } = popover.current.getBoundingClientRect()
+      setPosition({
+        top:
+          rect.top >= height + 16
+            ? rect.top - height - 8
+            : Math.min(window.innerHeight - height - 8, rect.bottom + 8),
+        left: Math.max(
+          8,
+          Math.min(window.innerWidth - width - 8, rect.right - width),
+        ),
+      })
+    }
+    place()
+    window.addEventListener("resize", place)
+    document.addEventListener("scroll", place, { capture: true, passive: true })
+    return () => {
+      window.removeEventListener("resize", place)
+      document.removeEventListener("scroll", place, true)
+    }
+  }, [open])
+
+  useEffect(() => {
+    if (!open) return
+    const dismiss = (event: PointerEvent) => {
+      if (
+        event.target instanceof Node &&
+        !trigger.current?.contains(event.target) &&
+        !popover.current?.contains(event.target)
+      )
+        setOpen(false)
+    }
+    const keydown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpen(false)
+        trigger.current?.focus()
+      }
+    }
+    document.addEventListener("pointerdown", dismiss)
+    document.addEventListener("keydown", keydown)
+    return () => {
+      document.removeEventListener("pointerdown", dismiss)
+      document.removeEventListener("keydown", keydown)
+    }
+  }, [open])
+
+  return (
+    <>
+      <button
+        ref={trigger}
+        type="button"
+        className="message-sources-trigger"
+        aria-expanded={open}
+        onClick={() => setOpen(!open)}
+      >
+        <Icon size={14} aria-hidden="true" />
+        {label}
+      </button>
+      {open
+        ? createPortal(
+            <div
+              ref={popover}
+              className="message-sources-popover"
+              style={position}
+              role="dialog"
+              aria-label={label}
+            >
+              {excerpts.map((excerpt, index) => (
+                <div key={excerpt.id} className="message-sources-row">
+                  <span className="message-sources-index">{index + 1}.</span>
+                  <div>
+                    <p className="message-sources-label">
+                      {excerpt.source.label}
+                    </p>
+                    {excerpt.source.path || excerpt.source.url ? (
+                      <p className="message-sources-location">
+                        {excerpt.source.path ?? excerpt.source.url}
+                      </p>
+                    ) : null}
+                    <blockquote>{excerpt.text}</blockquote>
+                    {excerpt.kind === "annotation" && excerpt.comment ? (
+                      <p className="message-sources-comment">
+                        {excerpt.comment}
+                      </p>
+                    ) : null}
+                  </div>
+                </div>
+              ))}
+            </div>,
+            document.body,
+          )
+        : null}
+    </>
   )
 }
 

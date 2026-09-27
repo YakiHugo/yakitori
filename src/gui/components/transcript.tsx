@@ -125,7 +125,9 @@ export function Transcript({ children }: Readonly<{ children?: ReactNode }>) {
     }
     return answers
   }, [view.entries, view.turnTimings, view.activeTurnId])
-  const inputs = view.entries.filter((entry) => entry.kind === "user_input")
+  const inputs = view.entries
+    .filter((entry) => entry.kind === "user_input")
+    .filter((entry) => !entry.steered)
   const queued = new Set(view.queuedInputIds)
   // A message counts as in view while its turn segment — from its own bubble
   // to the next bubble — intersects the viewport, like codex's rail. Only
