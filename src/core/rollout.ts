@@ -100,6 +100,8 @@ export type RolloutItem =
       readonly type: "turn_completed"
       readonly turnId: string
       readonly outcome: "completed" | "failed" | "interrupted"
+      /** Start of the last model stream invoked during this Turn, when known. */
+      readonly lastRequestStartedAt?: string
       readonly usage?: TokenUsage
       readonly metrics?: TurnMetrics
       readonly error?: KernelError

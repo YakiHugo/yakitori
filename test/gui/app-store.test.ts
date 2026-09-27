@@ -11,6 +11,7 @@ import {
   resolveEffectiveModel,
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
+import { useWorkspaceStore } from "../../src/gui/store/workspace-store.ts"
 import {
   createEventEnvelope,
   EventType,
@@ -816,6 +817,14 @@ describe("delete session", () => {
     emitSnapshot(fakeRef.current.streams[0])
     expect(useAppStore.getState().selectedSession?.id).toBe("session_1")
     const stream = fakeRef.current.streams[0]
+    useWorkspaceStore.setState({
+      tabs: [{ id: "changes", kind: "changes" }],
+      activeId: "changes",
+      sessionId: undefined,
+      presentationBySession: {},
+    })
+    useWorkspaceStore.getState().setSession("session_1")
+    useWorkspaceStore.getState().addTab("chat", "session_1")
 
     await useAppStore.getState().deleteSession("session_1")
 
@@ -826,6 +835,12 @@ describe("delete session", () => {
     ).toEqual([])
     expect(useAppStore.getState().sessionsByProject[""]?.sessions).toEqual([])
     expect(stream?.closed).toBe(true)
+    expect(useWorkspaceStore.getState().sessionId).toBeUndefined()
+    expect(
+      useWorkspaceStore
+        .getState()
+        .tabs.filter((tab) => tab.workspaceSessionId === "session_1"),
+    ).toEqual([])
   })
 
   it("keeps the selection when another session is deleted", async () => {
@@ -837,6 +852,28 @@ describe("delete session", () => {
 
     expect(useAppStore.getState().selectedSession?.id).toBe("session_1")
     expect(useAppStore.getState().selection.sessionId).toBe("session_1")
+  })
+
+  it("keeps a session's side chat when deleting its parent fails", async () => {
+    fakeRef.current.respond = (method) => {
+      if (method === "session/delete")
+        throw new ApiRequestError("Could not delete", "conflict")
+      return notFound()
+    }
+    useWorkspaceStore.setState({
+      tabs: [{ id: "changes", kind: "changes" }],
+      activeId: "changes",
+      sessionId: undefined,
+      presentationBySession: {},
+    })
+    useWorkspaceStore.getState().setSession("session_1")
+    const sideChatId = useWorkspaceStore.getState().addTab("chat", "session_1")
+
+    await useAppStore.getState().deleteSession("session_1")
+
+    expect(
+      useWorkspaceStore.getState().tabs.some((tab) => tab.id === sideChatId),
+    ).toBe(true)
   })
 })
 

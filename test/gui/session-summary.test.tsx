@@ -62,6 +62,7 @@ beforeEach(() => {
   )
   useAppStore.setState({
     ...createInitialAppState(),
+    selection: { sessionId: "session-1" },
     selectedSession: session(),
     apiBase: "http://localhost",
   })
@@ -223,6 +224,91 @@ it("shows submitted sources once and expands their original content", async () =
   ).toBe("http://localhost/rollouts/rollout-1/assets/images/reference.png")
 })
 
+it("shows the previous provider's cache policy and keeps minimum retention distinct from estimated expiry", async () => {
+  const user = userEvent.setup()
+  const completedAt = new Date(Date.now() - 60_000).toISOString()
+  useAppStore.setState({
+    selectedSession: {
+      ...session(),
+      cacheExpiry: {
+        provider: "anthropic",
+        lastTurnCompletedAt: completedAt,
+        lastRequestStartedAt: new Date(Date.now() - 90_000).toISOString(),
+        ttlDescription: "5-minute ephemeral cache",
+        expiresAt: new Date(Date.now() + 240_000).toISOString(),
+        status: "estimated",
+      },
+    },
+  })
+  render(<SessionSummary />)
+  await user.click(screen.getByRole("button", { name: "Session context" }))
+  expect(screen.getByText("Possibly cached")).toBeDefined()
+  expect(screen.getByText(/Last turn: anthropic/)).toBeDefined()
+  expect(screen.getByText(/Last model request started:/)).toBeDefined()
+  expect(screen.getByText(/Estimated expiry/)).toBeDefined()
+  act(() =>
+    useAppStore.setState({
+      selectedSession: {
+        ...session(),
+        cacheExpiry: {
+          provider: "openai",
+          lastTurnCompletedAt: completedAt,
+          ttlDescription: "Minimum 30-minute retention",
+          expiresAt: new Date(Date.now() - 1_000).toISOString(),
+          status: "minimum",
+        },
+      },
+    }),
+  )
+  expect(screen.getByText("Retention uncertain")).toBeDefined()
+  expect(screen.getByText(/Estimated earliest expiry/)).toBeDefined()
+  expect(screen.queryByText("Likely expired")).toBeNull()
+})
+
+it("refreshes the cache summary after a live turn completes", async () => {
+  let completed = false
+  request.mockImplementation(async (method) => {
+    if (method === "session/read")
+      return {
+        session: {
+          ...session(),
+          ...(completed
+            ? {
+                cacheExpiry: {
+                  provider: "anthropic",
+                  lastTurnCompletedAt: "2026-09-20T00:00:00Z",
+                  lastRequestStartedAt: "2026-09-19T23:59:00Z",
+                  ttlDescription: "5 minutes after last use",
+                  expiresAt: "2026-09-20T00:04:00Z",
+                  status: "estimated",
+                },
+              }
+            : {}),
+        },
+      }
+    if (method === "git/pullRequests")
+      return { available: true, pullRequests: [] }
+    return { repository: true, branch: "main", entries: [] }
+  })
+  const user = userEvent.setup()
+  render(<SessionSummary />)
+  await user.click(screen.getByRole("button", { name: "Session context" }))
+  expect(
+    screen.getByText("No completed provider turn in this session yet."),
+  ).toBeDefined()
+  completed = true
+  act(() =>
+    useAppStore.setState((state) => ({
+      execution: {
+        ...state.execution,
+        telemetry: { ...state.execution.telemetry, turns: 1 },
+      },
+    })),
+  )
+  expect(await screen.findByText("Likely expired")).toBeDefined()
+  expect(screen.getByText(/Last turn: anthropic/)).toBeDefined()
+})
+
 it("dismisses on Escape and outside clicks, restoring keyboard focus on Escape", async () => {
   const user = userEvent.setup()
   render(
@@ -256,7 +342,10 @@ it("discards previous session requests and closes the popover on selection", asy
   await user.click(screen.getByRole("button", { name: "Session context" }))
   await screen.findByText("Loading changes…")
   act(() =>
-    useAppStore.setState({ selectedSession: session("session-2", "/next") }),
+    useAppStore.setState({
+      selection: { sessionId: "session-2" },
+      selectedSession: session("session-2", "/next"),
+    }),
   )
   expect(screen.queryByRole("dialog")).toBeNull()
   await user.click(screen.getByRole("button", { name: "Session context" }))
@@ -266,6 +355,20 @@ it("discards previous session requests and closes the popover on selection", asy
   )
   expect(screen.queryByText("stale")).toBeNull()
   expect(screen.getByText("/next")).toBeDefined()
+})
+
+it("hides the old session's context until the newly selected session loads", () => {
+  const { rerender } = render(<SessionSummary />)
+  expect(screen.getByRole("button", { name: "Session context" })).toBeDefined()
+  act(() => useAppStore.setState({ selection: { sessionId: "session-2" } }))
+  expect(screen.queryByRole("button", { name: "Session context" })).toBeNull()
+  act(() =>
+    useAppStore.setState({
+      selectedSession: session("session-2", "/next"),
+    }),
+  )
+  rerender(<SessionSummary />)
+  expect(screen.getByRole("button", { name: "Session context" })).toBeDefined()
 })
 
 it("refreshes at turn completion and retries failures without claiming a clean tree", async () => {

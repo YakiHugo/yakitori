@@ -6,10 +6,12 @@ import {
   GitPullRequest,
   Image,
   Monitor,
+  Timer,
   Users,
 } from "lucide-react"
 import { useEffect, useId, useMemo, useRef, useState } from "react"
 import { createPortal } from "react-dom"
+import type { SessionCacheExpiry } from "../../core/session-cache-expiry.ts"
 import type { ImageAttachment } from "../../kernel/events.ts"
 import type { ContextExcerpt } from "../../kernel/input-context.ts"
 import type {
@@ -22,24 +24,28 @@ import { openUrlTarget } from "../lib/open-resource.ts"
 import { getAppRpcClient } from "../lib/rpc-client.ts"
 import { useAppStore } from "../store/app-store.ts"
 import { useWorkspaceStore } from "../store/workspace-store.ts"
+import { TelemetryRail } from "./telemetry-rail.tsx"
 import "./session-summary.css"
 
 export function SessionSummary() {
-  const sessionId = useAppStore((state) => state.selectedSession?.id)
-  const cwd = useAppStore(
-    (state) =>
-      state.execution.workingDirectory ??
-      state.selectedSession?.workingDirectory,
+  const sessionId = useAppStore((state) => state.selection.sessionId)
+  const cwd = useAppStore((state) =>
+    state.selection.sessionId &&
+    state.selectedSession?.id === state.selection.sessionId
+      ? (state.execution.workingDirectory ??
+        state.selectedSession.workingDirectory)
+      : undefined,
   )
   const apiBase = useAppStore((state) => state.apiBase)
-  const gitInfo = useAppStore((state) => state.selectedSession?.gitInfo)
-  if (!sessionId) return null
+  const selectedSession = useAppStore((state) => state.selectedSession)
+  if (!sessionId || selectedSession?.id !== sessionId) return null
   return (
     <SummaryPopover
-      key={`${sessionId}:${apiBase}:${cwd}:${gitInfo?.branch}`}
+      key={`${sessionId}:${apiBase}:${cwd}:${selectedSession.gitInfo?.branch}`}
       cwd={cwd}
       apiBase={apiBase}
-      gitInfo={gitInfo}
+      gitInfo={selectedSession.gitInfo}
+      cacheExpiry={selectedSession.cacheExpiry}
     />
   )
 }
@@ -48,10 +54,12 @@ function SummaryPopover({
   cwd,
   apiBase,
   gitInfo,
+  cacheExpiry,
 }: Readonly<{
   cwd: string | undefined
   apiBase: string
   gitInfo: import("../../core/rollout.ts").GitInfo | undefined
+  cacheExpiry: SessionCacheExpiry | undefined
 }>) {
   const id = useId()
   const trigger = useRef<HTMLButtonElement>(null)
@@ -63,7 +71,11 @@ function SummaryPopover({
   const [error, setError] = useState<string>()
   const [loading, setLoading] = useState(false)
   const [revision, setRevision] = useState(0)
+  const [now, setNow] = useState(() => Date.now())
+  const [latestCacheExpiry, setLatestCacheExpiry] = useState(cacheExpiry)
+  const [cacheReadFailed, setCacheReadFailed] = useState(false)
   const activeTurnId = useAppStore((state) => state.execution.activeTurnId)
+  const completedTurns = useAppStore((state) => state.execution.telemetry.turns)
   const entries = useAppStore((state) => state.execution.entries)
   const open = anchor !== undefined
   const sessionId = useAppStore((state) => state.selectedSession?.id)
@@ -93,6 +105,45 @@ function SummaryPopover({
     return { images: [...images.values()], excerpts: [...excerpts.values()] }
   }, [entries])
   const sourceCount = sources.images.length + sources.excerpts.length
+  const expiresAt = latestCacheExpiry?.expiresAt
+    ? Date.parse(latestCacheExpiry.expiresAt)
+    : undefined
+  const expired = expiresAt !== undefined && now >= expiresAt
+
+  useEffect(() => setLatestCacheExpiry(cacheExpiry), [cacheExpiry])
+
+  // The selected detail is projected from live events without the provider
+  // selection recorded in the rollout. Refresh its server-owned cache summary
+  // when a turn completes or the user opens Context after a completed turn.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: completedTurns invalidates the server-owned cache projection.
+  useEffect(() => {
+    if (!open || !sessionId) return
+    let current = true
+    setCacheReadFailed(false)
+    void getAppRpcClient(apiBase)
+      .request("session/read", { sessionId })
+      .then(
+        (response) => {
+          if (current && response.session?.id === sessionId)
+            setLatestCacheExpiry(response.session.cacheExpiry)
+        },
+        () => {
+          if (current) setCacheReadFailed(true)
+        },
+      )
+    return () => {
+      current = false
+    }
+  }, [apiBase, completedTurns, open, sessionId])
+
+  useEffect(() => {
+    if (!open || expiresAt === undefined || expiresAt <= now) return
+    const timer = window.setTimeout(
+      () => setNow(Date.now()),
+      Math.min(expiresAt - now + 100, 2_147_483_647),
+    )
+    return () => window.clearTimeout(timer)
+  }, [open, expiresAt, now])
 
   useEffect(() => {
     if (!open) return
@@ -196,6 +247,7 @@ function SummaryPopover({
         aria-controls={open ? id : undefined}
         onClick={() => {
           if (open) return setAnchor(undefined)
+          setNow(Date.now())
           const rect = trigger.current?.getBoundingClientRect()
           if (rect)
             setAnchor({
@@ -226,6 +278,59 @@ function SummaryPopover({
                 maxHeight: `calc(100dvh - ${anchor.top + 12}px)`,
               }}
             >
+              <section className="session-summary-section">
+                <h3>Report</h3>
+                <TelemetryRail />
+              </section>
+              <section className="session-summary-section">
+                <h3>KV cache</h3>
+                {cacheReadFailed ? (
+                  <p className="session-summary-empty">
+                    Could not refresh cache status.
+                  </p>
+                ) : latestCacheExpiry ? (
+                  <div className="session-summary-cache">
+                    <Timer size={16} aria-hidden="true" />
+                    <div>
+                      <strong>
+                        {expiresAt === undefined
+                          ? "Expiry unknown"
+                          : latestCacheExpiry.status === "minimum"
+                            ? expired
+                              ? "Retention uncertain"
+                              : "Within estimated retention window"
+                            : expired
+                              ? "Likely expired"
+                              : "Possibly cached"}
+                      </strong>
+                      <span>
+                        Last turn: {latestCacheExpiry.provider} ·{" "}
+                        {new Date(
+                          latestCacheExpiry.lastTurnCompletedAt,
+                        ).toLocaleString()}
+                      </span>
+                      {latestCacheExpiry.lastRequestStartedAt ? (
+                        <span>
+                          Last model request started:{" "}
+                          {new Date(
+                            latestCacheExpiry.lastRequestStartedAt,
+                          ).toLocaleString()}
+                        </span>
+                      ) : null}
+                      <span>
+                        {latestCacheExpiry.ttlDescription}
+                        {expiresAt === undefined
+                          ? ""
+                          : ` · ${latestCacheExpiry.status === "minimum" ? "Estimated earliest expiry" : "Estimated expiry"} ${new Date(expiresAt).toLocaleString()}`}
+                      </span>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="session-summary-empty">
+                    No completed provider turn in this session yet.
+                  </p>
+                )}
+              </section>
               <section className="session-summary-section">
                 <h3>Environment</h3>
                 <div className="session-summary-environment">

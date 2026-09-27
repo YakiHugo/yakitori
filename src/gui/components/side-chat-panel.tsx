@@ -43,6 +43,8 @@ export function SideChatPanel({
   const [chat, setChat] = useState<SideChatSnapshot>()
   const [error, setError] = useState<string>()
   const [pending, setPending] = useState(false)
+  const [expiredByServer, setExpiredByServer] = useState(false)
+  const [, setExpiryTick] = useState(0)
   const [readingImages, setReadingImages] = useState(false)
   const [attachmentError, setAttachmentError] = useState<string>()
   const [previewImage, setPreviewImage] = useState<ImageAttachment>()
@@ -92,6 +94,11 @@ export function SideChatPanel({
   const client = getAppRpcClient(apiBase)
   const updateDraft = useWorkspaceStore((state) => state.updateChatDraft)
   const updateStatus = useWorkspaceStore((state) => state.updateChatStatus)
+  const expired =
+    expiredByServer ||
+    (chat !== undefined && Date.now() >= Date.parse(chat.expiresAt))
+  const isExpired = (snapshot: SideChatSnapshot) =>
+    Date.now() >= Date.parse(snapshot.expiresAt)
   const latestTab = () => {
     const state = useWorkspaceStore.getState()
     const current = state.tabs.find((entry) => entry.id === tab.id)
@@ -102,6 +109,7 @@ export function SideChatPanel({
     if (disposed.current) return
     if (chatRef.current && next.revision < chatRef.current.revision) return
     chatRef.current = next
+    if (Date.now() < Date.parse(next.expiresAt)) setExpiredByServer(false)
     setChat(next)
   }, [])
   useEffect(() => {
@@ -140,16 +148,37 @@ export function SideChatPanel({
   }, [active, chat?.revision])
 
   useEffect(() => {
+    if (!chat?.expiresAt) return
+    let timeout: number
+    const schedule = () => {
+      const remaining = Date.parse(chat.expiresAt) - Date.now()
+      if (remaining <= 0) {
+        setExpiryTick((tick) => tick + 1)
+        return
+      }
+      // setTimeout clamps long delays; schedule again when necessary.
+      timeout = window.setTimeout(
+        schedule,
+        Math.min(remaining + 1, 2_147_483_647),
+      )
+    }
+    schedule()
+    return () => window.clearTimeout(timeout)
+  }, [chat?.expiresAt])
+
+  useEffect(() => {
     const currentError = error ?? chat?.error
     updateStatus(tab.id, {
       hasMessages: (chat?.messages.length ?? 0) > 0,
       ...(chat?.activeTurnId ? { activeTurnId: chat.activeTurnId } : {}),
+      ...(chat?.expiresAt ? { expiresAt: chat.expiresAt } : {}),
       ...(currentError === undefined ? {} : { error: currentError }),
     })
   }, [
     tab.id,
     chat?.messages.length,
     chat?.activeTurnId,
+    chat?.expiresAt,
     chat?.error,
     error,
     updateStatus,
@@ -196,7 +225,7 @@ export function SideChatPanel({
   }, [ensureChat])
 
   const importImages: ComposerImageImport = async (prepare, validate) => {
-    if (readingImages || sending.current) return
+    if (readingImages || sending.current || expired) return
     setReadingImages(true)
     setAttachmentError(undefined)
     let release: (() => Promise<void>) | undefined
@@ -207,11 +236,16 @@ export function SideChatPanel({
       if (!prepared) return
       release = prepared.cleanup
       const current = await ensureChat()
-      if (!current) return
+      if (!current || isExpired(current)) return
       const images = await prepared.collect(current.id)
       const latest = latestTab()
       const added = images.slice(tab.attachments.length)
-      if (disposed.current || !latest) {
+      if (
+        disposed.current ||
+        !latest ||
+        expiredByServer ||
+        isExpired(chatRef.current ?? current)
+      ) {
         await discardDraftImages(added)
         return
       }
@@ -241,6 +275,8 @@ export function SideChatPanel({
     if (
       sending.current ||
       chatRef.current?.activeTurnId ||
+      expiredByServer ||
+      (chatRef.current !== undefined && isExpired(chatRef.current)) ||
       (!text && tab.excerpts.length === 0 && images.length === 0)
     )
       return
@@ -272,6 +308,10 @@ export function SideChatPanel({
     try {
       const current = await ensureChat(request.modelSelection)
       if (!current) return
+      if (isExpired(current)) {
+        setExpiryTick((tick) => tick + 1)
+        return
+      }
       request.modelSelection ??= current.modelSelection
       setSelection(
         (currentSelection) => currentSelection ?? request.modelSelection,
@@ -294,8 +334,21 @@ export function SideChatPanel({
         updateDraft(tab.id, "", [], [])
       attempt.current = undefined
     } catch (cause) {
-      if (!disposed.current)
+      if (!disposed.current) {
         setError(cause instanceof Error ? cause.message : String(cause))
+        if (
+          cause instanceof Error &&
+          (/expired/i.test(cause.message) ||
+            cause.message.includes("read-only after 24 hours of inactivity"))
+        ) {
+          setExpiredByServer(true)
+          const id = chatRef.current?.id
+          if (id)
+            void client
+              .request("sideChat/read", { sideChatId: id })
+              .then(applySnapshot, () => {})
+        }
+      }
     } finally {
       sending.current = false
       if (!disposed.current) setPending(false)
@@ -403,7 +456,15 @@ export function SideChatPanel({
                   ))}
                 </div>
               ) : null}
-              <MarkdownView text={message.text} workspaceRoot={chat.cwd} />
+              <MarkdownView
+                text={message.text}
+                className={
+                  message.role === "user"
+                    ? "markdown side-chat-user-bubble"
+                    : "markdown"
+                }
+                workspaceRoot={chat.cwd}
+              />
             </article>
           ))
         ) : (
@@ -437,85 +498,129 @@ export function SideChatPanel({
           void resolvePermission(turnId, id, behavior)
         }
       />
-      <ComposerSurface
-        sessionId={tab.id}
-        draft={tab.draft}
-        excerpts={tab.excerpts}
-        attachments={tab.attachments}
-        sessionSkills={sessionSkills}
-        apiBase={apiBase}
-        focusRevision={active ? tab.excerpts.length + 1 : 0}
-        sending={pending}
-        busy={chat?.activeTurnId !== undefined}
-        activeTurnId={chat?.activeTurnId}
-        stopping={stopping}
-        supportsImages={
-          modelEntry === undefined ||
-          (modelEntry.inputModalities?.includes("image") ?? false)
-        }
-        supportsOriginal={
-          modelEntry === undefined ||
-          (modelEntry.imageDetailModes?.includes("original") ?? false)
-        }
-        historyTexts={
-          chat?.messages.flatMap((message) =>
-            message.role === "user" ? [message.text] : [],
-          ) ?? []
-        }
-        setPromptDraft={(draft) => updateDraft(tab.id, draft, tab.excerpts)}
-        setPromptAttachments={(images) =>
-          updateDraft(tab.id, tab.draft, tab.excerpts, images)
-        }
-        removePromptExcerpt={(id) =>
-          updateDraft(
-            tab.id,
-            tab.draft,
-            tab.excerpts.filter((entry) => entry.id !== id),
-          )
-        }
-        updatePromptExcerpt={(excerpt) =>
-          updateDraft(
-            tab.id,
-            tab.draft,
-            tab.excerpts.map((entry) =>
-              entry.id === excerpt.id ? excerpt : entry,
-            ),
-          )
-        }
-        onSubmit={(text, images) => void send(text, images)}
-        onCancel={() => void cancel()}
-        importImages={importImages}
-        readingImages={readingImages}
-        attachmentError={attachmentError}
-        onAttachmentError={setAttachmentError}
-        label="Message side chat"
-        sendLabel="Send side chat message"
-        stopLabel="Stop side chat"
-        className="side-chat-composer"
-        allowCommands={false}
-        modelControls={
-          <ModelSelector
-            selection={selection}
-            onChange={(next) => {
-              const state = useAppStore.getState()
-              setSelection(
-                next ??
-                  normalizeKimiModelSelection(
-                    resolveEffectiveModel({
-                      sessionCurrent: undefined,
-                      userPreference: state.userPreference,
-                      defaultProvider: state.defaultProvider,
-                      defaultModel: state.defaultModel,
-                      providers: state.providers,
-                    }),
-                    state.providers,
-                  ) ??
-                  chatRef.current?.modelSelection,
-              )
-            }}
-          />
-        }
-      />
+      {expired ? (
+        <div className="side-chat-expired" role="status">
+          <p>Side chat expired. Start a new side chat to continue.</p>
+          {tab.draft ? (
+            <textarea
+              aria-label="Unsent side chat draft"
+              value={tab.draft}
+              readOnly
+              rows={Math.min(tab.draft.split("\n").length + 1, 5)}
+            />
+          ) : null}
+          {tab.excerpts.length > 0 || tab.attachments.length > 0 ? (
+            <p>
+              {tab.excerpts.length} context excerpt
+              {tab.excerpts.length === 1 ? "" : "s"} and{" "}
+              {tab.attachments.length} image attachment
+              {tab.attachments.length === 1 ? "" : "s"} remain in this side
+              chat.
+            </p>
+          ) : null}
+          <div className="side-chat-expired-actions">
+            {chat?.activeTurnId ? (
+              <button
+                type="button"
+                disabled={stopping}
+                onClick={() => void cancel()}
+              >
+                {stopping ? "Stopping…" : "Stop response"}
+              </button>
+            ) : null}
+            <button
+              type="button"
+              onClick={() =>
+                useWorkspaceStore
+                  .getState()
+                  .addTab("chat", sourceSessionId.current)
+              }
+            >
+              Start new side chat
+            </button>
+          </div>
+        </div>
+      ) : (
+        <ComposerSurface
+          sessionId={tab.id}
+          draft={tab.draft}
+          excerpts={tab.excerpts}
+          attachments={tab.attachments}
+          sessionSkills={sessionSkills}
+          apiBase={apiBase}
+          focusRevision={active ? tab.excerpts.length + 1 : 0}
+          sending={pending}
+          busy={chat?.activeTurnId !== undefined}
+          activeTurnId={chat?.activeTurnId}
+          stopping={stopping}
+          supportsImages={
+            modelEntry === undefined ||
+            (modelEntry.inputModalities?.includes("image") ?? false)
+          }
+          supportsOriginal={
+            modelEntry === undefined ||
+            (modelEntry.imageDetailModes?.includes("original") ?? false)
+          }
+          historyTexts={
+            chat?.messages.flatMap((message) =>
+              message.role === "user" ? [message.text] : [],
+            ) ?? []
+          }
+          setPromptDraft={(draft) => updateDraft(tab.id, draft, tab.excerpts)}
+          setPromptAttachments={(images) =>
+            updateDraft(tab.id, tab.draft, tab.excerpts, images)
+          }
+          removePromptExcerpt={(id) =>
+            updateDraft(
+              tab.id,
+              tab.draft,
+              tab.excerpts.filter((entry) => entry.id !== id),
+            )
+          }
+          updatePromptExcerpt={(excerpt) =>
+            updateDraft(
+              tab.id,
+              tab.draft,
+              tab.excerpts.map((entry) =>
+                entry.id === excerpt.id ? excerpt : entry,
+              ),
+            )
+          }
+          onSubmit={(text, images) => void send(text, images)}
+          onCancel={() => void cancel()}
+          importImages={importImages}
+          readingImages={readingImages}
+          attachmentError={attachmentError}
+          onAttachmentError={setAttachmentError}
+          label="Message side chat"
+          sendLabel="Send side chat message"
+          stopLabel="Stop side chat"
+          className="side-chat-composer"
+          allowCommands={false}
+          modelControls={
+            <ModelSelector
+              selection={selection}
+              onChange={(next) => {
+                const state = useAppStore.getState()
+                setSelection(
+                  next ??
+                    normalizeKimiModelSelection(
+                      resolveEffectiveModel({
+                        sessionCurrent: undefined,
+                        userPreference: state.userPreference,
+                        defaultProvider: state.defaultProvider,
+                        defaultModel: state.defaultModel,
+                        providers: state.providers,
+                      }),
+                      state.providers,
+                    ) ??
+                    chatRef.current?.modelSelection,
+                )
+              }}
+            />
+          }
+        />
+      )}
       {previewImage ? (
         <ImageLightbox
           src={imageAttachmentUrl(previewImage, apiBase)}

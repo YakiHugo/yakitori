@@ -140,8 +140,10 @@ beforeEach(() => {
   useWorkspaceStore.setState({
     tabs: [{ id: "changes", kind: "changes" }],
     activeId: "changes",
+    sessionId: undefined,
     open: true,
     expanded: false,
+    presentationBySession: {},
   })
   useAppStore.setState({
     ...createInitialAppState(),
@@ -301,7 +303,7 @@ it("moves tab selection and focus with arrow, Home, and End keys", async () => {
   }
 })
 
-it("keeps file and change content rooted in the selected session when project selection changes", async () => {
+it("restores each session's workspace tabs and roots across selection changes", async () => {
   useAppStore.setState({
     projects: [
       project("project-one", "/project/one"),
@@ -330,11 +332,138 @@ it("keeps file and change content rooted in the selected session when project se
       selectedSession: session("session-two", "/session/two"),
     }),
   )
-  expect(screen.getByText("Files at /session/two")).toBeDefined()
+  expect(screen.getByText("Changes at /session/two")).toBeDefined()
+  expect(screen.queryByRole("tab", { name: "Files" })).toBeNull()
   expect(screen.queryByText("Files at /session/one")).toBeNull()
+  await addView(user, "Browser")
+  expect(screen.getByRole("tab", { name: "Browser" })).toBeDefined()
+
+  act(() =>
+    useAppStore.setState({
+      selection: { sessionId: "session-one" },
+      selectedSession: session("session-one", "/session/one"),
+    }),
+  )
+  expect(
+    screen.getByRole("tab", { name: "Files", selected: true }),
+  ).toBeDefined()
+  expect(screen.queryByRole("tab", { name: "Browser" })).toBeNull()
+  expect(screen.getByText("Files at /session/one")).toBeDefined()
 
   act(() => useAppStore.setState({ selection: {}, selectedSession: undefined }))
-  expect(screen.getByText("Files at /project/two")).toBeDefined()
+  expect(screen.getByText("Changes at /project/two")).toBeDefined()
+  expect(screen.queryByRole("tab", { name: "Files" })).toBeNull()
+})
+
+it("does not show the previous session's root while the next session hydrates", () => {
+  useAppStore.setState({
+    selection: { sessionId: "session-one" },
+    selectedSession: session("session-one", "/session/one"),
+  })
+  render(
+    <WorkspaceFrame>
+      <main>Conversation</main>
+    </WorkspaceFrame>,
+  )
+  expect(screen.getByText("Changes at /session/one")).toBeDefined()
+  act(() =>
+    useAppStore.setState({
+      selection: { sessionId: "session-two" },
+    }),
+  )
+  expect(screen.queryByText("Changes at /session/one")).toBeNull()
+  expect(screen.queryByText("Changes at /project/one")).toBeNull()
+  expect(
+    screen.getByText(/Select a project or open a conversation/),
+  ).toBeDefined()
+})
+
+it("restores each session's workspace visibility and expansion", async () => {
+  useAppStore.setState({
+    selection: { sessionId: "session-one" },
+    selectedSession: session("session-one", "/session/one"),
+  })
+  const user = userEvent.setup()
+  render(
+    <WorkspaceFrame>
+      <main>Conversation</main>
+    </WorkspaceFrame>,
+  )
+  await user.click(screen.getByRole("button", { name: "Expand workspace" }))
+  act(() =>
+    useAppStore.setState({
+      selection: { sessionId: "session-two" },
+      selectedSession: session("session-two", "/session/two"),
+    }),
+  )
+  await user.click(
+    screen.getByRole("button", { name: "Restore workspace size" }),
+  )
+  await user.click(screen.getByRole("button", { name: "Hide workspace" }))
+  act(() =>
+    useAppStore.setState({
+      selection: { sessionId: "session-one" },
+      selectedSession: session("session-one", "/session/one"),
+    }),
+  )
+  expect(
+    screen.getByRole("button", { name: "Restore workspace size" }),
+  ).toBeDefined()
+  expect(
+    screen.getByRole("tab", { name: "Changes", selected: true }),
+  ).toBeDefined()
+  act(() =>
+    useAppStore.setState({
+      selection: { sessionId: "session-two" },
+      selectedSession: session("session-two", "/session/two"),
+    }),
+  )
+  expect(screen.getByRole("button", { name: "Show workspace" })).toBeDefined()
+  expect(useWorkspaceStore.getState().expanded).toBe(false)
+})
+
+it("hides file and side chat tabs from other sessions and restores their drafts", async () => {
+  useAppStore.setState({
+    selection: { sessionId: "session-one" },
+    selectedSession: session("session-one", "/session/one"),
+  })
+  const user = userEvent.setup()
+  render(
+    <WorkspaceFrame>
+      <main>Conversation</main>
+    </WorkspaceFrame>,
+  )
+  act(() => useWorkspaceStore.getState().openFile("work.ts", "/session/one"))
+  expect(screen.getByText("File work.ts")).toBeDefined()
+  await addView(user, "Side chat")
+  await user.type(
+    screen.getByRole("textbox", { name: "Message side chat" }),
+    "Session one draft",
+  )
+  act(() =>
+    useAppStore.setState({
+      selection: { sessionId: "session-two" },
+      selectedSession: session("session-two", "/session/two"),
+    }),
+  )
+  expect(screen.queryByRole("tab", { name: "work.ts" })).toBeNull()
+  expect(screen.queryByRole("tab", { name: "Side chat" })).toBeNull()
+  expect(
+    screen.queryByRole("textbox", { name: "Message side chat" }),
+  ).toBeNull()
+  act(() =>
+    useAppStore.setState({
+      selection: { sessionId: "session-one" },
+      selectedSession: session("session-one", "/session/one"),
+    }),
+  )
+  expect(
+    screen.getByRole("tab", { name: "Side chat", selected: true }),
+  ).toBeDefined()
+  expect(
+    screen.getByRole("textbox", { name: "Message side chat" }).textContent,
+  ).toBe("Session one draft")
+  expect(screen.getByRole("tab", { name: "work.ts" })).toBeDefined()
 })
 
 it("opens views from the add menu and closes only the chosen tab", async () => {

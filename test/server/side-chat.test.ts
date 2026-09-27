@@ -3,8 +3,8 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import {
-  ModelStopReason,
   type ModelRequest,
+  ModelStopReason,
   type StreamFn,
 } from "../../src/runtime/model.ts"
 import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
@@ -41,7 +41,7 @@ async function rpc<T>(
   return response.result as T
 }
 
-async function fixture(stream: StreamFn) {
+async function fixture(stream: StreamFn, now?: () => number) {
   const root = await mkdtemp(join(tmpdir(), "yakitori-side-chat-"))
   const changes: SideChatSnapshot[] = []
   const errors: unknown[] = []
@@ -50,6 +50,7 @@ async function fixture(stream: StreamFn) {
     defaultModel: { provider: "faux", model: "first-model" },
     mateId: "test-mate",
     mateRevisionId: "test-revision",
+    ...(now === undefined ? {} : { now }),
     createProcessor: () =>
       createTurnProcessor({
         stream,
@@ -83,6 +84,220 @@ async function fixture(stream: StreamFn) {
 }
 
 describe("temporary side conversations", () => {
+  it("renews the deadline on successful admissions and keeps expired history readable", async () => {
+    const day = 24 * 60 * 60 * 1_000
+    const createdAt = Date.parse("2026-01-01T00:00:00.000Z")
+    let time = createdAt
+    let requests = 0
+    const context = await fixture(
+      async function* () {
+        requests++
+        yield {
+          type: "response",
+          response: {
+            stopReason: ModelStopReason.EndTurn,
+            content: [{ type: "text", text: `reply ${requests}` }],
+          },
+        }
+      },
+      () => time,
+    )
+    try {
+      const unused = await rpc<SideChatSnapshot>(
+        context.connection,
+        "sideChat/create",
+        {},
+      )
+      expect(unused.expiresAt).toBe("2026-01-02T00:00:00.000Z")
+      time += day - 1
+      const created = await rpc<SideChatSnapshot>(
+        context.connection,
+        "sideChat/create",
+        {},
+      )
+      const first = await rpc<SideChatSnapshot>(
+        context.connection,
+        "sideChat/send",
+        { sideChatId: created.id, requestId: "first", text: "hello" },
+      )
+      expect(first.expiresAt).toBe("2026-01-02T23:59:59.999Z")
+      await until(
+        () => context.service.read(created.id).activeTurnId === undefined,
+      )
+      time += day - 1
+      expect(
+        await context.connection.sendRequest("sideChat/send", {
+          sideChatId: unused.id,
+          requestId: "too-late",
+          text: "hello",
+        }),
+      ).toMatchObject({
+        error: {
+          data: { code: "conflict" },
+          message: expect.stringContaining("read-only"),
+        },
+      })
+      const second = await rpc<SideChatSnapshot>(
+        context.connection,
+        "sideChat/send",
+        { sideChatId: created.id, requestId: "second", text: "follow-up" },
+      )
+      expect(second.expiresAt).toBe("2026-01-03T23:59:59.998Z")
+      await until(
+        () => context.service.read(created.id).activeTurnId === undefined,
+      )
+      time += day
+      const expired = await rpc<SideChatSnapshot>(
+        context.connection,
+        "sideChat/read",
+        { sideChatId: created.id },
+      )
+      expect(expired.expiresAt).toBe(second.expiresAt)
+      expect(expired.messages.map(({ text }) => text)).toEqual([
+        "hello",
+        "reply 1",
+        "follow-up",
+        "reply 2",
+      ])
+      await expect(
+        context.service.importImagePaths(created.id, "owner", []),
+      ).rejects.toMatchObject({
+        code: "conflict",
+        message: expect.stringContaining("read-only"),
+      })
+      const replay = await rpc<SideChatSnapshot>(
+        context.connection,
+        "sideChat/send",
+        { sideChatId: created.id, requestId: "first", text: "hello" },
+      )
+      expect(replay).toEqual(expired)
+      expect(
+        await context.connection.sendRequest("sideChat/send", {
+          sideChatId: created.id,
+          requestId: "first",
+          text: "changed",
+        }),
+      ).toMatchObject({ error: { data: { code: "conflict" } } })
+      expect(
+        await context.connection.sendRequest("sideChat/send", {
+          sideChatId: created.id,
+          requestId: "third",
+          text: "new message",
+        }),
+      ).toMatchObject({
+        error: {
+          data: { code: "conflict" },
+          message: expect.stringContaining("read-only"),
+        },
+      })
+      expect(requests).toBe(2)
+    } finally {
+      await context.close()
+    }
+  })
+
+  it("lets an active turn finish after its deadline without extending the deadline", async () => {
+    const createdAt = Date.parse("2026-01-01T00:00:00.000Z")
+    let time = createdAt
+    let finish: (() => void) | undefined
+    const context = await fixture(
+      async function* () {
+        yield { type: "snapshot", text: "working" }
+        await new Promise<void>((resolve) => {
+          finish = resolve
+        })
+        yield {
+          type: "response",
+          response: {
+            stopReason: ModelStopReason.EndTurn,
+            content: [{ type: "text", text: "finished" }],
+          },
+        }
+      },
+      () => time,
+    )
+    try {
+      const created = await context.service.create({})
+      await context.service.send({
+        sideChatId: created.id,
+        requestId: "active",
+        text: "question",
+      })
+      await until(() => finish !== undefined)
+      const deadline = context.service.read(created.id).expiresAt
+      time = Date.parse(deadline)
+      expect(
+        await context.connection.sendRequest("sideChat/send", {
+          sideChatId: created.id,
+          requestId: "later",
+          text: "follow-up",
+        }),
+      ).toMatchObject({
+        error: {
+          data: { code: "conflict" },
+          message: expect.stringContaining("read-only"),
+        },
+      })
+      finish?.()
+      await until(
+        () =>
+          context.service.read(created.id).activeTurnId === undefined &&
+          context.service.read(created.id).messages.at(-1)?.text === "finished",
+      )
+      expect(context.service.read(created.id)).toMatchObject({
+        expiresAt: deadline,
+        messages: [
+          { role: "user", text: "question" },
+          { role: "assistant", text: "finished", streaming: false },
+        ],
+      })
+    } finally {
+      finish?.()
+      await context.close()
+    }
+  })
+
+  it("allows cancellation of an active turn after expiry", async () => {
+    let time = Date.parse("2026-01-01T00:00:00.000Z")
+    const context = await fixture(
+      async function* (request) {
+        yield { type: "snapshot", text: "unfinished answer" }
+        const signal = request.signal
+        if (!signal) throw new Error("Expected cancellation signal")
+        if (!signal.aborted)
+          await new Promise<void>((resolve) =>
+            signal.addEventListener("abort", () => resolve(), { once: true }),
+          )
+        yield { type: "cancelled" }
+      },
+      () => time,
+    )
+    try {
+      const created = await context.service.create({})
+      await context.service.send({
+        sideChatId: created.id,
+        requestId: "cancel-after-expiry",
+        text: "question",
+      })
+      await until(() =>
+        context.service
+          .read(created.id)
+          .messages.some((message) => message.text === "unfinished answer"),
+      )
+      time = Date.parse(context.service.read(created.id).expiresAt)
+      await context.service.cancel(created.id, "cancel-after-expiry")
+      await until(
+        () => context.service.read(created.id).activeTurnId === undefined,
+      )
+      expect(context.service.read(created.id).messages.at(-1)).toMatchObject({
+        text: "unfinished answer",
+        streaming: false,
+      })
+    } finally {
+      await context.close()
+    }
+  })
+
   it("admits structured context without visible text and rejects malformed annotation anchors", async () => {
     const requests: ModelRequest[] = []
     const context = await fixture(async function* (request) {

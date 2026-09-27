@@ -1,24 +1,24 @@
 import {
-  ArrowUp,
-  ArrowDown,
   Archive,
   ArchiveRestore,
+  ArrowDown,
+  ArrowUp,
+  FolderInput,
   GitFork,
   Pencil,
   Pin,
-  FolderInput,
   Trash2,
 } from "lucide-react"
 import { useState } from "react"
 import type { ApiSessionSummary } from "../../server/protocol.ts"
 import {
+  type SidebarListFilter,
   sessionListKey,
   useAppStore,
-  type SidebarListFilter,
 } from "../store/app-store.ts"
-import { SidebarDialog, SidebarMenu } from "./sidebar-surfaces.tsx"
-import { SidebarNameDialog } from "./sidebar-name-dialog.tsx"
 import { ActivitySpinner } from "./activity-spinner.tsx"
+import { SidebarNameDialog } from "./sidebar-name-dialog.tsx"
+import { SidebarDialog, SidebarMenu } from "./sidebar-surfaces.tsx"
 import { Button } from "./ui/button.tsx"
 
 export function SessionItems({
@@ -251,7 +251,8 @@ export function SessionItems({
           onClose={() => setPendingDeleteId(undefined)}
         >
           <p className="text-sm text-muted-foreground">
-            This cannot be undone.
+            This cannot be undone. Side chats and unsaved file drafts belonging
+            to this conversation will also close.
           </p>
           <div className="mt-5 flex justify-end gap-2">
             <Button

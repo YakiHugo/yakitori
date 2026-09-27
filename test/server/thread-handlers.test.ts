@@ -43,6 +43,78 @@ afterEach(async () => {
 })
 
 describe("thread server handlers", () => {
+  it("reads prior turn cache policy from the durable rollout after the selected model changes", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "yakitori-handler-cache-"))
+    const store = new MemoryThreadStore()
+    const manager = new ThreadManager({
+      store,
+      createTurnProcessor: () =>
+        createTurnProcessor({
+          stream: createFauxProvider([]).stream,
+          toolRegistry: createToolRegistry([]),
+        }),
+    })
+    const handlers = createThreadServerHandlers({ manager, store })
+    cleanups.push(async () => {
+      await manager.shutdown()
+      await handlers.close()
+      await rm(workspace, { recursive: true, force: true })
+    })
+    const created = await handlers.createSession({
+      workingDirectory: workspace,
+      mateId: "mate_test",
+      mateRevisionId: "mate_revision_test",
+    })
+    if (!created.ok) throw new Error(created.body.error.message)
+    const sessionId = created.body.session.id
+    const empty = await handlers.readSession({ sessionId })
+    if (!empty.ok) throw new Error(empty.body.error.message)
+    expect(empty.body.session.cacheExpiry).toBeUndefined()
+
+    await store.appendItems(sessionId, [
+      {
+        type: "turn_context",
+        context: {
+          turnId: "turn_anthropic",
+          selection: { provider: "anthropic", model: "claude-sonnet-4-6" },
+          configuration: {} as never,
+        },
+      },
+      {
+        type: "turn_completed",
+        turnId: "turn_anthropic",
+        outcome: "completed",
+        lastRequestStartedAt: "2026-09-20T10:00:00.000Z",
+      },
+      {
+        type: "turn_context",
+        context: {
+          turnId: "turn_openai",
+          selection: { provider: "openai", model: "gpt-6-sol" },
+          configuration: {} as never,
+        },
+      },
+    ])
+    const stored = await store.readThread(sessionId)
+    const completedAt = stored?.rollout.find(
+      ({ item }) =>
+        item.type === "turn_completed" && item.turnId === "turn_anthropic",
+    )?.createdAt
+    if (completedAt === undefined)
+      throw new Error("Missing durable completion.")
+    const read = await handlers.readSession({ sessionId })
+    if (!read.ok) throw new Error(read.body.error.message)
+    expect(read.body.session.currentModel?.provider).toBe("openai")
+    expect(read.body.session.cacheExpiry).toEqual({
+      provider: "anthropic",
+      lastTurnCompletedAt: completedAt,
+      lastRequestStartedAt: "2026-09-20T10:00:00.000Z",
+      ttlDescription: "5 minutes after last use",
+      expiresAt: "2026-09-20T10:05:00.000Z",
+      status: "estimated",
+    })
+  })
+
   it("captures Git identity when the session is created", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "yakitori-handler-git-"))
     const git = (args: readonly string[]) =>

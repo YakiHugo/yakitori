@@ -1311,6 +1311,39 @@ describe("JsonlThreadStore", () => {
     )
   })
 
+  it("preserves request start on reload and rejects malformed request timestamps", async () => {
+    const { root, store } = await createStore()
+    const id = "thread_request_clock"
+    await createPersistentThread(store, metadata(id))
+    await store.appendItems(id, [
+      {
+        type: "turn_completed",
+        turnId: "turn_request",
+        outcome: "completed",
+        lastRequestStartedAt: "2026-09-20T10:00:00.000Z",
+      },
+    ])
+    await store.shutdownThread(id)
+    const rolloutPath = join(root, "rollouts", id, "rollout.jsonl")
+    const restarted = new JsonlThreadStore({ root })
+    expect(
+      (await restarted.readThread(id))?.rollout.at(-1)?.item,
+    ).toMatchObject({
+      lastRequestStartedAt: "2026-09-20T10:00:00.000Z",
+    })
+
+    const lines = (await readFile(rolloutPath, "utf8")).trim().split("\n")
+    const last = JSON.parse(lines.at(-1) ?? "null") as {
+      item: { lastRequestStartedAt: unknown }
+    }
+    last.item.lastRequestStartedAt = "2026-09-20T10:00:00Z"
+    lines[lines.length - 1] = JSON.stringify(last)
+    await writeFile(rolloutPath, `${lines.join("\n")}\n`)
+    await expect(new JsonlThreadStore({ root }).readThread(id)).rejects.toThrow(
+      "contains an invalid item",
+    )
+  })
+
   it("uses original BeforeTurn and newest ThroughTurn occurrences", async () => {
     const { store } = await createStore()
     await createPersistentThread(store, metadata("thread_boundary"))

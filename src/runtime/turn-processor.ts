@@ -935,6 +935,7 @@ async function executeTurnModelLoop(
           }>
         | undefined
       const modelStartedAt = Date.now()
+      input.runtime.recordRequestStartedAt(modelStartedAt)
       let firstTokenAt: number | undefined
       const response = await consumeModelStream({
         request,
@@ -947,6 +948,7 @@ async function executeTurnModelLoop(
           input.runtime.emitWarning(message, diagnostic),
         assistantResponseBytes: step.executionPolicy.assistantResponseBytes,
         onOperationalFailure: input.options.onOperationalFailure,
+        onRetry: input.runtime.invalidateRequestStartedAt,
         onFirstToken: () => {
           firstTokenAt ??= Date.now()
         },
@@ -1206,6 +1208,7 @@ async function consumeModelStream(input: {
     | TurnProcessorOperationalFailureReporter
     | undefined
   readonly onFirstToken?: () => void
+  readonly onRetry?: () => void
   readonly onUsage: (usage: ModelUsage) => void | Promise<void>
   readonly setActiveStream: (
     stream: AsyncIterator<ModelStreamEvent> | undefined,
@@ -1225,6 +1228,7 @@ async function consumeModelStream(input: {
       }
       const event = next.value
       if (event.type === "retry") {
+        input.onRetry?.()
         if (event.usage !== undefined) await input.onUsage(event.usage)
         input.emitWarning?.(
           `Model request failed (${event.failure.kind}); retrying attempt ${String(event.nextAttempt)} of ${String(event.maxAttempts)} in ${String(Math.round(event.delayMs))} ms.`,
@@ -1434,6 +1438,7 @@ async function compactLiveHistory(
   try {
     const compact = async (request: ModelRequest) => {
       const modelStartedAt = Date.now()
+      input.runtime.recordRequestStartedAt(modelStartedAt)
       let firstTokenAt: number | undefined
       const response = await consumeModelStream({
         request,
@@ -1445,6 +1450,7 @@ async function compactLiveHistory(
         emitWarning: (message, diagnostic) =>
           input.runtime.emitWarning(message, diagnostic),
         onOperationalFailure: input.onOperationalFailure,
+        onRetry: input.runtime.invalidateRequestStartedAt,
         onFirstToken() {
           firstTokenAt ??= Date.now()
         },
