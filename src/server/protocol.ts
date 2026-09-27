@@ -391,6 +391,7 @@ export type ApiSessionDetail = ApiSessionSummary & {
   readonly activeTurnId?: string
   readonly currentModel?: ModelSelection
   readonly usage?: TokenUsage
+  readonly cacheExpiry?: import("../core/session-cache-expiry.ts").SessionCacheExpiry
   readonly pendingInputs: readonly ApiPendingInput[]
   readonly pendingPermissions: readonly ApiPendingPermission[]
   readonly counts: {

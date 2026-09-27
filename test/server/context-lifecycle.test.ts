@@ -328,7 +328,7 @@ describe("structured context and ephemeral forks", () => {
     expect(await context.app.threadStore.listThreadIds()).toEqual([id])
   })
 
-  it("keeps inherited images model-visible after deleting the parent and closing an intermediate side chat", async () => {
+  it("keeps inherited images model-visible after closing an intermediate side chat", async () => {
     const requests: ModelRequest[] = []
     const context = await fixture(async function* (request) {
       requests.push(request)
@@ -372,13 +372,6 @@ describe("structured context and ephemeral forks", () => {
       sourceSessionId: parentId,
     })
     expect(side.messages).toEqual([])
-    const deleted = await context.app.handlers.deleteSession({
-      sessionId: parentId,
-    })
-    if (!deleted.ok) throw new Error(deleted.body.error.message)
-    await expect(
-      context.app.rolloutAssets.read(parentImage.file),
-    ).rejects.toMatchObject({ code: "ENOENT" })
     await context.app.sideChats.send({
       sideChatId: side.id,
       requestId: "side_image_question",
@@ -428,11 +421,74 @@ describe("structured context and ephemeral forks", () => {
     ).toMatchObject({
       content: [{ type: "text", text: "Explain the same image again" }],
     })
+    const deleted = await context.app.handlers.deleteSession({
+      sessionId: parentId,
+    })
+    if (!deleted.ok) throw new Error(deleted.body.error.message)
+    await expect(
+      context.app.rolloutAssets.read(parentImage.file),
+    ).rejects.toMatchObject({ code: "ENOENT" })
     expect(await context.app.threadStore.listThreadIds()).toEqual([])
-    await context.app.sideChats.remove(nested.id)
+    expect(() => context.app.sideChats.read(side.id)).toThrow(
+      "no longer available",
+    )
     expect(() => context.app.sideChats.read(nested.id)).toThrow(
       "no longer available",
     )
+  })
+
+  it("deleting a session closes active side chats and their nested descendants without closing independent chats", async () => {
+    const cancelled: string[] = []
+    const context = await fixture(async function* (request) {
+      if (request.messages.some((message) => message.role === "user")) {
+        yield { type: "snapshot", text: "working" }
+        if (!request.signal) throw new Error("Expected cancellation signal")
+        if (!request.signal.aborted)
+          await new Promise<void>((resolve) =>
+            request.signal?.addEventListener("abort", () => resolve(), {
+              once: true,
+            }),
+          )
+        cancelled.push("active side chat")
+        yield { type: "cancelled" }
+      }
+    })
+    const parentId = await createMain(context.app)
+    const side = await context.app.sideChats.create({
+      sourceSessionId: parentId,
+    })
+    const nested = await context.app.sideChats.create({
+      sourceSessionId: side.id,
+    })
+    const sibling = await context.app.sideChats.create({
+      sourceSessionId: parentId,
+    })
+    const independent = await context.app.sideChats.create({})
+    await context.app.sideChats.send({
+      sideChatId: nested.id,
+      requestId: "nested_active",
+      text: "Keep working",
+    })
+    await until(() =>
+      context.app.sideChats
+        .read(nested.id)
+        .messages.some((message) => message.text === "working"),
+    )
+    const deleted = await context.app.handlers.deleteSession({
+      sessionId: parentId,
+    })
+    if (!deleted.ok) throw new Error(deleted.body.error.message)
+    expect(cancelled).toEqual(["active side chat"])
+    for (const id of [side.id, nested.id, sibling.id]) {
+      expect(() => context.app.sideChats.read(id)).toThrow(
+        "no longer available",
+      )
+      await expect(
+        context.app.sideChats.create({ sourceSessionId: id }),
+      ).rejects.toMatchObject({ code: "not_found" })
+    }
+    expect(context.app.sideChats.read(independent.id).id).toBe(independent.id)
+    expect(await context.app.threadStore.listThreadIds()).toEqual([])
   })
 
   it("uses workspace tools and project instructions, materializes side images, and removes assets on close", async () => {

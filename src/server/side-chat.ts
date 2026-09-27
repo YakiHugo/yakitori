@@ -42,6 +42,7 @@ export type SideChatSnapshot = {
   revision: number
   cwd: string
   modelSelection: ModelSelection
+  expiresAt: string
   messages: SideChatMessage[]
   activeTurnId?: string
   error?: string
@@ -69,6 +70,10 @@ export type SideChatService = {
   send(input: SideChatSend): Promise<SideChatSnapshot>
   cancel(sideChatId: string, turnId: string): Promise<SideChatSnapshot>
   remove(sideChatId: string): Promise<void>
+  removeForSessionDeletion(
+    sessionId: string,
+    discardSession: () => Promise<void>,
+  ): Promise<void>
   close(): Promise<void>
   importImagePaths(
     sideChatId: string,
@@ -93,6 +98,7 @@ export class SideChatError extends Error {
 }
 
 type LiveChat = {
+  parentSessionId?: string
   thread: AgentThread
   stored: StoredThread
   inheritedHistory: readonly ModelMessage[]
@@ -116,11 +122,20 @@ export function createSideChatService(options: {
   rolloutAssets?: RolloutAssets
   releaseAssets?(id: string): Promise<void>
   resolvePermission?: PermissionGate["resolve"]
+  now?: () => number
   changed(snapshot: SideChatSnapshot): void
   reportError(error: unknown): void
 }): SideChatService {
   const chats = new Map<string, LiveChat>()
   const creating = new Set<Promise<SideChatSnapshot>>()
+  const deletingParents = new Set<string>()
+  const now = options.now ?? Date.now
+  const inactivityMs = 24 * 60 * 60 * 1_000
+  const expiredChatError = () =>
+    new SideChatError(
+      "This side conversation is read-only after 24 hours of inactivity.",
+      "conflict",
+    )
   let closed = false
   const requireChat = (id: string): LiveChat => {
     const chat = chats.get(id)
@@ -161,6 +176,10 @@ export function createSideChatService(options: {
             "The source conversation is no longer available.",
             "not_found",
           )
+        const parentSessionId =
+          sourceChat === undefined
+            ? input.sourceSessionId
+            : sourceChat.parentSessionId
         const completedTurns = new Set(
           source?.rollout.flatMap(({ item }) =>
             item.type === "turn_completed" && item.outcome === "completed"
@@ -252,13 +271,14 @@ export function createSideChatService(options: {
         if (closed)
           throw new SideChatError("Side conversations are closed.", "conflict")
         const id = createSessionId()
-        const now = new Date().toISOString()
+        const createdAt = now()
+        const createdAtIso = new Date(createdAt).toISOString()
         const metadata = {
           id,
           rolloutId: id,
           conversationId: id,
-          createdAt: now,
-          updatedAt: now,
+          createdAt: createdAtIso,
+          updatedAt: createdAtIso,
           workingDirectory: cwd,
           mateId: options.mateId,
           mateRevisionId: options.mateRevisionId,
@@ -271,13 +291,13 @@ export function createSideChatService(options: {
             threadId: id,
             rolloutId: id,
             seq: 0,
-            createdAt: now,
+            createdAt: createdAtIso,
             item: {
               type: "response_item",
               item: {
                 id: `side_context_${id}`,
                 turnId: `side_context_${id}`,
-                createdAt: now,
+                createdAt: createdAtIso,
                 item: {
                   role: "developer",
                   content: [
@@ -304,13 +324,13 @@ export function createSideChatService(options: {
             threadId: id,
             rolloutId: id,
             seq: rollout.length,
-            createdAt: now,
+            createdAt: createdAtIso,
             item: {
               type: "response_item",
               item: {
                 id: `side_images_${id}`,
                 turnId: `side_context_${id}`,
-                createdAt: now,
+                createdAt: createdAtIso,
                 item: {
                   role: "user",
                   content: [
@@ -355,7 +375,18 @@ export function createSideChatService(options: {
             processor: await options.createProcessor(stored),
           }),
         )
+        if (
+          parentSessionId !== undefined &&
+          deletingParents.has(parentSessionId)
+        ) {
+          await options.releaseAssets?.(id)
+          throw new SideChatError(
+            "The source conversation is no longer available.",
+            "not_found",
+          )
+        }
         const chat: LiveChat = {
+          ...(parentSessionId === undefined ? {} : { parentSessionId }),
           thread,
           stored,
           inheritedHistory,
@@ -365,6 +396,7 @@ export function createSideChatService(options: {
             revision: 0,
             cwd,
             modelSelection: structuredClone(modelSelection),
+            expiresAt: new Date(createdAt + inactivityMs).toISOString(),
             messages: [],
           },
           pump: Promise.resolve(),
@@ -446,6 +478,7 @@ export function createSideChatService(options: {
           )
         return snapshot(chat)
       }
+      if (now() >= Date.parse(chat.snapshot.expiresAt)) throw expiredChatError()
       if (chat.thread.status !== "idle")
         throw new SideChatError(
           "Wait for the current response or stop it first.",
@@ -467,6 +500,11 @@ export function createSideChatService(options: {
             ? {}
             : { attachments: promotion.attachments }),
         }
+        // Promotion may outlive the deadline; admission must still happen before it.
+        if (now() >= Date.parse(chat.snapshot.expiresAt)) {
+          await promotion?.rollback()
+          throw expiredChatError()
+        }
         let result: TurnInputSubmission
         try {
           result = await chat.thread.startIfIdle({
@@ -485,14 +523,15 @@ export function createSideChatService(options: {
             "conflict",
           )
         }
-        if (promotion !== undefined)
-          await options.rolloutAssets?.discardDraftImageAttachments(
-            input.attachments ?? [],
-          )
+        chat.snapshot.expiresAt = new Date(now() + inactivityMs).toISOString()
         chat.requests.set(input.requestId, {
           content: originalContent,
           modelSelection: structuredClone(selection),
         })
+        if (promotion !== undefined)
+          await options.rolloutAssets?.discardDraftImageAttachments(
+            input.attachments ?? [],
+          )
         chat.snapshot.modelSelection = structuredClone(selection)
         if (
           !chat.snapshot.messages.some(
@@ -530,6 +569,7 @@ export function createSideChatService(options: {
     },
     async importImagePaths(id, ownerId, paths) {
       const chat = requireChat(id)
+      if (now() >= Date.parse(chat.snapshot.expiresAt)) throw expiredChatError()
       if (options.rolloutAssets === undefined)
         throw new SideChatError("Image attachment storage is unavailable.")
       const operation = options.rolloutAssets.importImagePaths(
@@ -573,6 +613,31 @@ export function createSideChatService(options: {
         } finally {
           chats.delete(id)
         }
+      }
+    },
+    async removeForSessionDeletion(sessionId, discardSession) {
+      deletingParents.add(sessionId)
+      try {
+        await Promise.allSettled([...creating])
+        const results = await Promise.allSettled(
+          [...chats]
+            .filter(([, chat]) => chat.parentSessionId === sessionId)
+            .map(([id]) => service.remove(id)),
+        )
+        const errors = results.flatMap((result) =>
+          result.status === "rejected" ? [result.reason] : [],
+        )
+        if (errors.length > 0)
+          throw new AggregateError(
+            errors,
+            "Failed to close side conversations.",
+          )
+        await discardSession()
+        // A fork started while the durable session was being discarded must
+        // finish (and observe the deletion gate) before it is released.
+        await Promise.allSettled([...creating])
+      } finally {
+        deletingParents.delete(sessionId)
       }
     },
     async close() {

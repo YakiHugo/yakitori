@@ -8,8 +8,8 @@ import {
   Monitor,
   PanelRight,
   Plus,
-  X,
   Users,
+  X,
 } from "lucide-react"
 import {
   type CSSProperties,
@@ -28,13 +28,13 @@ import {
 import { BrowserPanel } from "./browser-panel.tsx"
 import { CloseSideChatDialog } from "./close-side-chat-dialog.tsx"
 import { ComputerPanel } from "./computer-panel.tsx"
+import { DiscardFileDialog } from "./file-editor.tsx"
 import { SelectionActions } from "./selection-actions.tsx"
 import { SideChatPanel } from "./side-chat-panel.tsx"
 import { SidebarFrame } from "./sidebar-frame.tsx"
-import { WorkspaceChanges } from "./workspace-changes.tsx"
 import { SubagentsWorkspace } from "./subagents-workspace.tsx"
+import { WorkspaceChanges } from "./workspace-changes.tsx"
 import { WorkspaceFilePreview, WorkspaceFiles } from "./workspace-files.tsx"
-import { DiscardFileDialog } from "./file-editor.tsx"
 
 const views = [
   { id: "changes", label: "Changes", icon: GitCompareArrows },
@@ -58,7 +58,9 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
   const expanded = useWorkspaceStore((state) => state.expanded)
   const tabs = useWorkspaceStore((state) => state.tabs)
   const activeId = useWorkspaceStore((state) => state.activeId)
-  const activeFile = tabs.find(
+  const sessionId = useAppStore((state) => state.selection.sessionId)
+  const visibleTabs = tabs.filter((tab) => tab.workspaceSessionId === sessionId)
+  const activeFile = visibleTabs.find(
     (tab): tab is Extract<WorkspaceTab, { kind: "file" }> =>
       tab.id === activeId && tab.kind === "file",
   )
@@ -102,12 +104,13 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
   const [adding, setAdding] = useState(false)
   const [resizing, setResizing] = useState(false)
   const apiBase = useAppStore((state) => state.apiBase)
-  const sessionId = useAppStore((state) => state.selection.sessionId)
-  const cwd = useAppStore(
-    (state) =>
-      state.selectedSession?.workingDirectory ??
-      state.projects.find((project) => project.id === state.currentProject)
-        ?.roots[0],
+  const cwd = useAppStore((state) =>
+    state.selection.sessionId === undefined
+      ? state.projects.find((project) => project.id === state.currentProject)
+          ?.roots[0]
+      : state.selectedSession?.id === state.selection.sessionId
+        ? state.selectedSession.workingDirectory
+        : undefined,
   )
   const addToMain = (excerpt: ContextExcerpt) => {
     if (excerpt.kind === "selection") {
@@ -131,6 +134,10 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
       setClosing(tab)
     else closeTab(tab.id)
   }
+
+  useLayoutEffect(() => {
+    useWorkspaceStore.getState().setSession(sessionId)
+  }, [sessionId])
 
   useLayoutEffect(() => {
     const element = shell.current
@@ -300,7 +307,7 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
             role="tablist"
             aria-label="Workspace views"
           >
-            {tabs.map((tab, index) => {
+            {visibleTabs.map((tab, index) => {
               const { id } = tab
               const label = tabLabel(tab)
               const Icon =
@@ -325,17 +332,18 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
                     onKeyDown={(event) => {
                       const next =
                         event.key === "ArrowRight"
-                          ? (index + 1) % tabs.length
+                          ? (index + 1) % visibleTabs.length
                           : event.key === "ArrowLeft"
-                            ? (index + tabs.length - 1) % tabs.length
+                            ? (index + visibleTabs.length - 1) %
+                              visibleTabs.length
                             : event.key === "Home"
                               ? 0
                               : event.key === "End"
-                                ? tabs.length - 1
+                                ? visibleTabs.length - 1
                                 : undefined
                       if (next === undefined) return
                       event.preventDefault()
-                      const entry = tabs[next]
+                      const entry = visibleTabs[next]
                       if (!entry) return
                       activate(entry.id)
                       document
@@ -440,9 +448,16 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
               role="tabpanel"
               aria-labelledby={`workspace-tab-${tab.id}`}
               className="workspace-content"
-              hidden={!open || activeId !== tab.id}
+              hidden={
+                !open ||
+                tab.workspaceSessionId !== sessionId ||
+                activeId !== tab.id
+              }
             >
-              {tab.kind === "agents" ? (
+              {tab.workspaceSessionId !== sessionId &&
+              (tab.kind === "changes" ||
+                tab.kind === "files" ||
+                tab.kind === "computer") ? null : tab.kind === "agents" ? (
                 <SubagentsWorkspace
                   apiBase={apiBase}
                   sourceSessionId={tab.sourceSessionId ?? sessionId}
@@ -503,12 +518,17 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
                   </div>
                   {tab.kind === "files" ? (
                     <WorkspaceFiles
+                      key={sessionId ?? "draft"}
                       cwd={cwd}
                       apiBase={apiBase}
                       onOpenFile={(path) => openFile(path, cwd)}
                     />
                   ) : (
-                    <WorkspaceChanges cwd={cwd} apiBase={apiBase} />
+                    <WorkspaceChanges
+                      key={sessionId ?? "draft"}
+                      cwd={cwd}
+                      apiBase={apiBase}
+                    />
                   )}
                 </>
               ) : (
@@ -523,7 +543,7 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
               )}
             </div>
           ))}
-          {tabs.length === 0 && (
+          {visibleTabs.length === 0 && (
             <div className="workspace-empty">
               <MessageCirclePlus size={30} strokeWidth={1.25} />
               <strong>Open something alongside your conversation</strong>

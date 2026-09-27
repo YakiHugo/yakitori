@@ -50,6 +50,7 @@ import {
   type StoredSteer,
   updateSteers,
 } from "../steer-outbox.ts"
+import { useWorkspaceStore } from "./workspace-store.ts"
 
 type SessionSelection = {
   readonly revision: number
@@ -1530,6 +1531,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
         await getAppRpcClient(get().apiBase).request("session/delete", {
           sessionId,
         })
+        useWorkspaceStore.getState().removeSession(sessionId)
         if (get().selection.sessionId === sessionId) {
           closeStream()
           set((state) => {

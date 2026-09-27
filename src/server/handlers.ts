@@ -1,5 +1,6 @@
 import { realpath, stat } from "node:fs/promises"
 import type { AgentThread } from "../core/agent-thread.ts"
+import { sessionCacheExpiry } from "../core/session-cache-expiry.ts"
 import type {
   RolloutItem,
   StoredRolloutItem,
@@ -1502,6 +1503,7 @@ async function mapStoredThread(
     if (item.type !== "turn_completed" || item.usage === undefined) return total
     return addUsage(total, item.usage)
   }, undefined)
+  const cacheExpiry = sessionCacheExpiry(stored.rollout)
   const pendingPermissions =
     options.listPendingPermissions?.(stored.metadata.id) ?? []
   const currentContext = contexts.at(-1)
@@ -1524,6 +1526,7 @@ async function mapStoredThread(
       ? {}
       : { currentModel: currentContext.context.selection }),
     ...(usage === undefined ? {} : { usage }),
+    ...(cacheExpiry === undefined ? {} : { cacheExpiry }),
     pendingInputs: pendingQueue.map((entry) => ({
       id: entry.inputItemId,
       text: entry.input.content.text,

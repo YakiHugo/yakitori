@@ -79,6 +79,8 @@ describe("app shell", () => {
         selectedSession: sessionDetail(),
       }),
     )
+    expect(screen.queryByLabelText("Session telemetry")).toBeNull()
+    await user.click(screen.getByRole("button", { name: "Session context" }))
     const summary = screen.getByLabelText("Session telemetry")
     expect(summary.textContent).toContain("Avg TTFT")
     expect(summary.textContent).toContain("Tokens")

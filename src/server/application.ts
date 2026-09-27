@@ -820,7 +820,10 @@ export async function createYakitoriApplication(
     const handlers = createThreadServerHandlers({
       manager: threadManager,
       listAgents: (stored) => agentRuntime.listAgents(stored),
-      discardThread: (threadId) => agentRuntime.discardThread(threadId),
+      discardThread: (threadId) =>
+        sideChatsForCleanup?.removeForSessionDeletion(threadId, () =>
+          agentRuntime.discardThread(threadId),
+        ) ?? agentRuntime.discardThread(threadId),
       store: threadStore,
       eventHub,
       sessionDefaults,

@@ -7,7 +7,6 @@ import { QueuedInputs } from "./components/queued-inputs.tsx"
 import { SessionGoal } from "./components/session-goal.tsx"
 import { SessionSummary } from "./components/session-summary.tsx"
 import { SettingsPage } from "./components/settings-page.tsx"
-import { TelemetryRail } from "./components/telemetry-rail.tsx"
 import { Transcript } from "./components/transcript.tsx"
 import {
   Tooltip,
@@ -55,7 +54,6 @@ export function App() {
           ) : hasSession ? (
             <>
               <SessionHeader />
-              <TelemetryRail />
               <Transcript>
                 <ApprovalBar />
                 <QueuedInputs />

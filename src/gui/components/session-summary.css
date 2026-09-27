@@ -189,6 +189,34 @@
   line-height: 1.6;
 }
 
+.session-summary-cache {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+}
+
+.session-summary-cache > svg {
+  flex: none;
+  margin-top: 1px;
+  color: var(--muted-foreground);
+}
+
+.session-summary-cache > div {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  line-height: 1.5;
+}
+
+.session-summary-cache strong {
+  font-weight: 500;
+}
+
+.session-summary-cache > div > span {
+  color: var(--muted-foreground);
+  overflow-wrap: anywhere;
+}
+
 .session-summary-error {
   color: var(--destructive);
   overflow-wrap: anywhere;

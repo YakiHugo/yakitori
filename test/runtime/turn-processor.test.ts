@@ -398,6 +398,7 @@ describe("Turn processor", () => {
         .filter(({ item }) => item.type === "turn_completed")
         .at(-1)?.item
       expect(completed).toMatchObject({
+        lastRequestStartedAt: new Date(4_600).toISOString(),
         usage: { inputTokens: 100, outputTokens: 50 },
         metrics: {
           modelCalls: 2,
@@ -853,6 +854,103 @@ describe("Turn processor", () => {
         activeContextTokens: 3,
       },
     })
+  })
+
+  it("persists the last of multiple request starts even when its stream finishes much later", async () => {
+    const firstStart = Date.parse("2026-09-20T10:00:00.000Z")
+    const secondStart = Date.parse("2026-09-20T10:03:00.000Z")
+    let clock = firstStart
+    let calls = 0
+    const dateNow = vi.spyOn(Date, "now").mockImplementation(() => clock)
+    try {
+      const stream: StreamFn = async function* () {
+        calls += 1
+        if (calls === 1) {
+          clock = secondStart
+          yield {
+            type: "response",
+            response: {
+              stopReason: ModelStopReason.ToolUse,
+              content: [
+                {
+                  type: "tool_call",
+                  id: "tool_clock",
+                  name: "clock",
+                  input: {},
+                },
+              ],
+            },
+          }
+        } else {
+          clock += 7 * 60_000
+          yield responseEvent("done")
+        }
+      }
+      const runtime = await createRuntime(
+        stream,
+        createToolRegistry([
+          {
+            toolName: plainToolName("clock"),
+            description: "Clock",
+            inputSchema: { type: "object" },
+            effect: "observe",
+            approvalRequirement: { kind: "none" },
+            async execute() {
+              return { ok: true, output: {}, content: "tick" }
+            },
+          },
+        ]),
+      )
+      const thread = await runtime.createThread()
+      await thread.startIfIdle({ content: { kind: "text", text: "tick" } })
+      await expect.poll(() => thread.agentStatus).toEqual({ completed: "done" })
+
+      expect(calls).toBe(2)
+      expect(
+        (await runtime.store.readThread(thread.id))?.rollout.find(
+          ({ item }) => item.type === "turn_completed",
+        )?.item,
+      ).toMatchObject({
+        lastRequestStartedAt: "2026-09-20T10:03:00.000Z",
+        metrics: { modelCalls: 2 },
+      })
+      expect(clock).toBe(Date.parse("2026-09-20T10:10:00.000Z"))
+    } finally {
+      dateNow.mockRestore()
+    }
+  })
+
+  it("leaves the request start unknown when the final stream retries internally", async () => {
+    const stream: StreamFn = async function* () {
+      yield {
+        type: "retry",
+        attempt: 1,
+        nextAttempt: 2,
+        maxAttempts: 2,
+        delayMs: 100,
+        failure: {
+          kind: "connection_failed",
+          stage: "connect",
+          provider: "faux",
+          wireApi: "unknown",
+          message: "First request failed.",
+        },
+      }
+      yield responseEvent("done")
+    }
+    const runtime = await createRuntime(stream)
+    const thread = await runtime.createThread()
+    await thread.startIfIdle({ content: { kind: "text", text: "retry" } })
+    await expect.poll(() => thread.agentStatus).toEqual({ completed: "done" })
+
+    const completed = (await runtime.store.readThread(thread.id))?.rollout.find(
+      ({ item }) => item.type === "turn_completed",
+    )?.item
+    expect(completed).toMatchObject({
+      type: "turn_completed",
+      outcome: "completed",
+    })
+    expect(completed).not.toHaveProperty("lastRequestStartedAt")
   })
 
   it("reports an unexpected tool throw with its owning operation", async () => {

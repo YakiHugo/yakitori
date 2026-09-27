@@ -2212,6 +2212,7 @@ function isRolloutItem(value: unknown): value is RolloutItem {
         "type",
         "turnId",
         "outcome",
+        "lastRequestStartedAt",
         "usage",
         "metrics",
         "error",
@@ -2220,6 +2221,11 @@ function isRolloutItem(value: unknown): value is RolloutItem {
       (value.outcome === "completed" ||
         value.outcome === "failed" ||
         value.outcome === "interrupted") &&
+      (value.lastRequestStartedAt === undefined ||
+        (typeof value.lastRequestStartedAt === "string" &&
+          !Number.isNaN(Date.parse(value.lastRequestStartedAt)) &&
+          new Date(value.lastRequestStartedAt).toISOString() ===
+            value.lastRequestStartedAt)) &&
       (value.usage === undefined || isTokenUsage(value.usage)) &&
       (value.metrics === undefined || isTurnMetrics(value.metrics)) &&
       (value.error === undefined || isRolloutError(value.error))

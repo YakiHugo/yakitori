@@ -59,6 +59,8 @@ export type TurnRuntime = {
   recordModelContext(settings: ModelContextSettings): Promise<void>
   snapshot(): SessionSnapshot
   recordUsage(usage: TokenUsage): void
+  recordRequestStartedAt(startedAt: number): void
+  invalidateRequestStartedAt(): void
   recordTurnMetrics(metrics: TurnMetrics): void
   recordContextTokens(
     input: Readonly<{
@@ -128,6 +130,7 @@ type ActiveTurn = {
   readonly steering: TurnInput[]
   acceptingSteering: boolean
   usage: TokenUsage | undefined
+  lastRequestStartedAt: string | undefined
   metrics: TurnMetrics | undefined
   readonly resolveAbort: () => void
   taskHandle: TurnTask | undefined
@@ -684,6 +687,7 @@ export class Session {
       steering: [],
       acceptingSteering: true,
       usage: undefined,
+      lastRequestStartedAt: undefined,
       metrics: undefined,
       resolveAbort: () => aborted.resolve(),
       taskHandle: undefined,
@@ -972,6 +976,9 @@ export class Session {
         type: "turn_completed",
         turnId: active.input.submissionId,
         outcome: "completed",
+        ...(active.lastRequestStartedAt === undefined
+          ? {}
+          : { lastRequestStartedAt: active.lastRequestStartedAt }),
         ...(active.usage === undefined ? {} : { usage: active.usage }),
         ...(active.metrics === undefined ? {} : { metrics: active.metrics }),
       },
@@ -1037,6 +1044,14 @@ export class Session {
       recordUsage: (usage) => {
         requireActive()
         active.usage = structuredClone(usage)
+      },
+      recordRequestStartedAt: (startedAt) => {
+        requireLease()
+        active.lastRequestStartedAt = new Date(startedAt).toISOString()
+      },
+      invalidateRequestStartedAt: () => {
+        requireLease()
+        active.lastRequestStartedAt = undefined
       },
       recordTurnMetrics: (metrics) => {
         requireActive()

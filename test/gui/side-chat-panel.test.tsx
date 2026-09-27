@@ -46,6 +46,7 @@ function snapshot(
     revision,
     cwd: "/repo",
     modelSelection: modelA,
+    expiresAt: "2099-01-01T00:00:00.000Z",
     messages: [],
     ...extra,
   }
@@ -122,11 +123,271 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  vi.useRealTimers()
   useWorkspaceStore.setState({ tabs: [], activeId: undefined })
   useAppStore.setState(createInitialAppState())
 })
 
 describe("side chat panel", () => {
+  it("keeps expired history readable and opens a new chat in the original parent session", async () => {
+    const history = snapshot(1, {
+      expiresAt: "2020-01-01T00:00:00.000Z",
+      messages: [
+        {
+          id: "answer",
+          turnId: "turn",
+          role: "assistant",
+          text: "An earlier answer",
+          streaming: false,
+        },
+      ],
+    })
+    client.request.mockImplementation(async (method) =>
+      method === "sideChat/create" ? history : {},
+    )
+    render(<Panel />)
+    expect(await screen.findByText("An earlier answer")).toBeDefined()
+    expect(
+      screen.getByText("Side chat expired. Start a new side chat to continue."),
+    ).toBeDefined()
+    expect(
+      screen.queryByRole("textbox", { name: "Message side chat" }),
+    ).toBeNull()
+    expect(
+      (
+        screen.getByRole("textbox", {
+          name: "Unsent side chat draft",
+        }) as HTMLTextAreaElement
+      ).value,
+    ).toBe("Explain")
+    expect(requests("sideChat/send")).toEqual([])
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "Start new side chat" }))
+    const tabs = useWorkspaceStore.getState().tabs
+    expect(tabs).toHaveLength(2)
+    expect(tabs[1]).toMatchObject({
+      kind: "chat",
+      sourceSessionId: "main-session",
+      draft: "",
+    })
+    expect(useWorkspaceStore.getState().activeId).toBe(tabs[1]?.id)
+    expect(screen.getByText("An earlier answer")).toBeDefined()
+  })
+
+  it("expires on its timer while a response is active without canceling it", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] })
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"))
+    client.request.mockImplementation(async (method) =>
+      method === "sideChat/create"
+        ? snapshot(1, {
+            expiresAt: "2026-01-01T00:00:01.000Z",
+            activeTurnId: "turn",
+            messages: [
+              {
+                id: "partial",
+                turnId: "turn",
+                role: "assistant",
+                text: "Partial answer",
+                streaming: true,
+              },
+            ],
+          })
+        : {},
+    )
+    await act(async () => {
+      render(<Panel />)
+    })
+    expect(
+      screen.getByRole("textbox", { name: "Message side chat" }),
+    ).toBeDefined()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_001)
+    })
+    expect(
+      screen.queryByRole("textbox", { name: "Message side chat" }),
+    ).toBeNull()
+    expect(screen.getByText("Partial answer")).toBeDefined()
+    expect(screen.getByText("Responding…")).toBeDefined()
+    expect(requests("sideChat/cancel")).toEqual([])
+    expect(screen.getByRole("button", { name: "Stop response" })).toBeDefined()
+    await act(async () => {
+      for (const listener of listeners)
+        listener(
+          snapshot(2, {
+            expiresAt: "2026-01-01T00:00:01.000Z",
+            messages: [
+              {
+                id: "partial",
+                turnId: "turn",
+                role: "assistant",
+                text: "Completed answer",
+                streaming: false,
+              },
+            ],
+          }),
+        )
+    })
+    expect(screen.getByText("Completed answer")).toBeDefined()
+    expect(requests("sideChat/cancel")).toEqual([])
+  })
+
+  it("still permits an explicit stop after expiry", async () => {
+    client.request.mockImplementation(async (method) => {
+      if (method === "sideChat/create")
+        return snapshot(1, {
+          expiresAt: "2020-01-01T00:00:00.000Z",
+          activeTurnId: "turn",
+        })
+      if (method === "sideChat/cancel")
+        return snapshot(2, { expiresAt: "2020-01-01T00:00:00.000Z" })
+      return {}
+    })
+    render(<Panel />)
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Stop response" }),
+    )
+    expect(requests("sideChat/cancel")).toEqual([
+      { sideChatId: "side-chat", turnId: "turn" },
+    ])
+    expect(requests("sideChat/send")).toEqual([])
+  })
+
+  it("guards a send when creation returns an already expired snapshot", async () => {
+    const creating = deferred<SideChatSnapshot>()
+    client.request.mockImplementation(async (method) =>
+      method === "sideChat/create" ? creating.promise : {},
+    )
+    render(<Panel />)
+    fireEvent.click(
+      screen.getByRole("button", { name: "Send side chat message" }),
+    )
+    await act(async () =>
+      creating.resolve(snapshot(1, { expiresAt: "2020-01-01T00:00:00.000Z" })),
+    )
+    expect(requests("sideChat/send")).toEqual([])
+    expect(
+      screen.getByText("Side chat expired. Start a new side chat to continue."),
+    ).toBeDefined()
+  })
+
+  it("keeps a server expiry rejection authoritative when the client clock lags", async () => {
+    client.request.mockImplementation(async (method) => {
+      if (method === "sideChat/create") return snapshot()
+      if (method === "sideChat/send")
+        throw new Error(
+          "This side conversation is read-only after 24 hours of inactivity.",
+        )
+      if (method === "sideChat/read")
+        return snapshot(2, {
+          messages: [
+            {
+              id: "previous",
+              turnId: "earlier",
+              role: "assistant",
+              text: "Previous answer",
+              streaming: false,
+            },
+          ],
+        })
+      return {}
+    })
+    render(<Panel />)
+    fireEvent.click(
+      screen.getByRole("button", { name: "Send side chat message" }),
+    )
+    expect(
+      await screen.findByText(
+        "This side conversation is read-only after 24 hours of inactivity.",
+      ),
+    ).toBeDefined()
+    expect(await screen.findByText("Previous answer")).toBeDefined()
+    expect(requests("sideChat/read")).toEqual([{ sideChatId: "side-chat" }])
+    expect(
+      screen.queryByRole("textbox", { name: "Message side chat" }),
+    ).toBeNull()
+    expect(useWorkspaceStore.getState().tabs[0]).toMatchObject({
+      draft: "Explain",
+    })
+  })
+
+  it("resumes the composer when a newer snapshot extends the expiry", async () => {
+    client.request.mockImplementation(async (method) => {
+      if (method === "sideChat/create") return snapshot()
+      if (method === "sideChat/send")
+        throw new Error(
+          "This side conversation is read-only after 24 hours of inactivity.",
+        )
+      if (method === "sideChat/read")
+        return snapshot(2, {
+          expiresAt: "2099-02-01T00:00:00.000Z",
+        })
+      return {}
+    })
+    render(<Panel />)
+    fireEvent.click(
+      screen.getByRole("button", { name: "Send side chat message" }),
+    )
+    await waitFor(() => expect(requests("sideChat/read")).toHaveLength(1))
+    expect(
+      screen.getByRole("textbox", { name: "Message side chat" }),
+    ).toBeDefined()
+    expect(
+      screen.queryByRole("button", { name: "Start new side chat" }),
+    ).toBeNull()
+  })
+
+  it("renders consecutive turns with markdown spacing and bounded user bubbles", async () => {
+    client.request.mockImplementation(async (method) =>
+      method === "sideChat/create"
+        ? snapshot(1, {
+            messages: [
+              {
+                id: "input",
+                turnId: "turn",
+                role: "user",
+                text: "First question",
+                streaming: false,
+              },
+              {
+                id: "answer",
+                turnId: "turn",
+                role: "assistant",
+                text: "First paragraph\n\nSecond paragraph",
+                streaming: false,
+              },
+              {
+                id: "followup",
+                turnId: "next-turn",
+                role: "user",
+                text: "Follow up",
+                streaming: false,
+              },
+            ],
+          })
+        : {},
+    )
+    render(<Panel />)
+    const log = await screen.findByRole("log", { name: "Side chat messages" })
+    await waitFor(() =>
+      expect(log.querySelectorAll(".side-chat-message")).toHaveLength(3),
+    )
+    const messages = [...log.querySelectorAll(".side-chat-message")]
+    expect(messages[0]?.textContent).toBe("First question")
+    expect(messages[2]?.textContent).toBe("Follow up")
+    expect(
+      messages[0]?.querySelector(".markdown.side-chat-user-bubble"),
+    ).not.toBeNull()
+    expect(
+      [...(messages[1]?.querySelectorAll(".markdown p") ?? [])].map(
+        (paragraph) => paragraph.textContent?.trim(),
+      ),
+    ).toEqual(["First paragraph", "Second paragraph"])
+    expect(
+      messages[2]?.querySelector(".markdown.side-chat-user-bubble"),
+    ).not.toBeNull()
+  })
+
   it("creates its fork on mount without sending and reuses pending creation for the first send", async () => {
     const creating = deferred<SideChatSnapshot>()
     client.request.mockImplementation(async (method) => {
