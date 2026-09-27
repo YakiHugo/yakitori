@@ -271,7 +271,7 @@ describe("side chat panel", () => {
     ).toBeDefined()
   })
 
-  it("shows a server expiry rejection and refreshes the transcript", async () => {
+  it("keeps a server expiry rejection authoritative when the client clock lags", async () => {
     client.request.mockImplementation(async (method) => {
       if (method === "sideChat/create") return snapshot()
       if (method === "sideChat/send")
@@ -280,7 +280,6 @@ describe("side chat panel", () => {
         )
       if (method === "sideChat/read")
         return snapshot(2, {
-          expiresAt: "2020-01-01T00:00:00.000Z",
           messages: [
             {
               id: "previous",

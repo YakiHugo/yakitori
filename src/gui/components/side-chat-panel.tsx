@@ -108,8 +108,16 @@ export function SideChatPanel({
   const applySnapshot = useCallback((next: SideChatSnapshot) => {
     if (disposed.current) return
     if (chatRef.current && next.revision < chatRef.current.revision) return
+    const previousExpiry = chatRef.current?.expiresAt
     chatRef.current = next
-    if (Date.now() < Date.parse(next.expiresAt)) setExpiredByServer(false)
+    // A server rejection remains authoritative when the local clock lags.
+    // Only another admitted message extending the lease can reopen this chat.
+    if (
+      previousExpiry !== undefined &&
+      Date.parse(next.expiresAt) > Date.parse(previousExpiry) &&
+      Date.now() < Date.parse(next.expiresAt)
+    )
+      setExpiredByServer(false)
     setChat(next)
   }, [])
   useEffect(() => {

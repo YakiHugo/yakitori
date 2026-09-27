@@ -70,6 +70,10 @@ export type SideChatService = {
   send(input: SideChatSend): Promise<SideChatSnapshot>
   cancel(sideChatId: string, turnId: string): Promise<SideChatSnapshot>
   remove(sideChatId: string): Promise<void>
+  removeForSessionDeletion(
+    sessionId: string,
+    discardSession: () => Promise<void>,
+  ): Promise<void>
   close(): Promise<void>
   importImagePaths(
     sideChatId: string,
@@ -94,6 +98,7 @@ export class SideChatError extends Error {
 }
 
 type LiveChat = {
+  parentSessionId?: string
   thread: AgentThread
   stored: StoredThread
   inheritedHistory: readonly ModelMessage[]
@@ -123,6 +128,7 @@ export function createSideChatService(options: {
 }): SideChatService {
   const chats = new Map<string, LiveChat>()
   const creating = new Set<Promise<SideChatSnapshot>>()
+  const deletingParents = new Set<string>()
   const now = options.now ?? Date.now
   const inactivityMs = 24 * 60 * 60 * 1_000
   const expiredChatError = () =>
@@ -170,6 +176,10 @@ export function createSideChatService(options: {
             "The source conversation is no longer available.",
             "not_found",
           )
+        const parentSessionId =
+          sourceChat === undefined
+            ? input.sourceSessionId
+            : sourceChat.parentSessionId
         const completedTurns = new Set(
           source?.rollout.flatMap(({ item }) =>
             item.type === "turn_completed" && item.outcome === "completed"
@@ -365,7 +375,18 @@ export function createSideChatService(options: {
             processor: await options.createProcessor(stored),
           }),
         )
+        if (
+          parentSessionId !== undefined &&
+          deletingParents.has(parentSessionId)
+        ) {
+          await options.releaseAssets?.(id)
+          throw new SideChatError(
+            "The source conversation is no longer available.",
+            "not_found",
+          )
+        }
         const chat: LiveChat = {
+          ...(parentSessionId === undefined ? {} : { parentSessionId }),
           thread,
           stored,
           inheritedHistory,
@@ -592,6 +613,31 @@ export function createSideChatService(options: {
         } finally {
           chats.delete(id)
         }
+      }
+    },
+    async removeForSessionDeletion(sessionId, discardSession) {
+      deletingParents.add(sessionId)
+      try {
+        await Promise.allSettled([...creating])
+        const results = await Promise.allSettled(
+          [...chats]
+            .filter(([, chat]) => chat.parentSessionId === sessionId)
+            .map(([id]) => service.remove(id)),
+        )
+        const errors = results.flatMap((result) =>
+          result.status === "rejected" ? [result.reason] : [],
+        )
+        if (errors.length > 0)
+          throw new AggregateError(
+            errors,
+            "Failed to close side conversations.",
+          )
+        await discardSession()
+        // A fork started while the durable session was being discarded must
+        // finish (and observe the deletion gate) before it is released.
+        await Promise.allSettled([...creating])
+      } finally {
+        deletingParents.delete(sessionId)
       }
     },
     async close() {
