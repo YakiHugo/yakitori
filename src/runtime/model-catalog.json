@@ -14,6 +14,7 @@
       "inputModalities": ["text", "image"],
       "imageDetailModes": ["high", "original"],
       "efforts": ["low", "medium", "high", "xhigh", "max"],
+      "defaultEffort": "low",
       "speeds": ["standard", "fast"],
       "contextWindowTokens": 1050000,
       "maxContextWindowTokens": 1050000,
@@ -208,6 +209,7 @@
       "effortStyle": "levels",
       "inputModalities": ["text", "image", "video"],
       "efforts": ["low", "high", "max"],
+      "defaultEffort": "max",
       "contextWindowTokens": 1048576,
       "maxContextWindowTokens": 1048576,
       "effectiveContextWindowPercent": 100
@@ -223,6 +225,7 @@
       "effortStyle": "levels",
       "inputModalities": ["text", "image"],
       "efforts": ["low", "high", "max"],
+      "defaultEffort": "max",
       "contextWindowTokens": 262144,
       "maxContextWindowTokens": 262144,
       "effectiveContextWindowPercent": 100
@@ -330,6 +333,7 @@
       "inputModalities": ["text", "image"],
       "imageDetailModes": ["high"],
       "efforts": ["low", "medium", "high", "xhigh"],
+      "defaultEffort": "high",
       "contextWindowTokens": 500000,
       "maxContextWindowTokens": 500000,
       "effectiveContextWindowPercent": 100
@@ -345,6 +349,7 @@
       "inputModalities": ["text", "image"],
       "imageDetailModes": ["high"],
       "efforts": ["low", "medium", "high"],
+      "defaultEffort": "high",
       "contextWindowTokens": 500000,
       "maxContextWindowTokens": 500000,
       "effectiveContextWindowPercent": 100
