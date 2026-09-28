@@ -2,14 +2,13 @@ import packageJson from "../../../package.json" with { type: "json" }
 import type { StoredEventEnvelope } from "../../kernel/index.ts"
 import type { LiveSessionEvent } from "../../runtime/live-events.ts"
 import type { ApiErrorCode } from "../../server/protocol.ts"
-import type { SideChatSnapshot } from "../../server/side-chat.ts"
 import type {
   McpStatusChangedNotification,
   ProjectChangedNotification,
   RpcMethodParams,
   RpcMethodResponses,
-  SessionEventNotification,
   SessionCompletedNotification,
+  SessionEventNotification,
   SessionPermissionRequestParams,
   SessionPermissionRequestResult,
   SessionReplayCompleteNotification,
@@ -17,6 +16,7 @@ import type {
   SessionSubscriptionErrorNotification,
   SidebarChangedNotification,
 } from "../../server/rpc/methods.ts"
+import type { SideChatSnapshot } from "../../server/side-chat.ts"
 
 // The GUI's only server channel: JSON-RPC over one WebSocket at /rpc,
 // reproducing the old REST+SSE behavior — snapshot via the session/subscribe
@@ -118,6 +118,13 @@ type StreamRecord = {
 
 const reconnectBaseDelayMs = 250
 const reconnectMaxDelayMs = 5_000
+// Local UI safety boundaries: a half-open WebSocket must not leave session
+// hydration pending indefinitely. A 15s interval plus 10s reply window bounds
+// detection to about 25s while allowing short local scheduling delays. The
+// ping is local RPC work and must answer even while a model request is stuck.
+const connectionTimeoutMs = 10_000
+const heartbeatIntervalMs = 15_000
+const heartbeatTimeoutMs = 10_000
 
 // One client per API origin: the store asks for the client on every action so
 // tests can substitute a fake between runs without resetting module state.
@@ -143,6 +150,8 @@ export function createAppRpcClient(options: {
   let connecting: Promise<void> | undefined
   let reconnectAttempt = 0
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined
+  let heartbeatTimer: ReturnType<typeof setTimeout> | undefined
+  let heartbeatDeadline: ReturnType<typeof setTimeout> | undefined
   let nextId = 1
   const inflight = new Map<
     number,
@@ -190,9 +199,14 @@ export function createAppRpcClient(options: {
       const ws = new WebSocket(url)
       socket = ws
       let settled = false
+      const connectionDeadline = setTimeout(() => {
+        fail(new ApiRequestError("The connection to the server timed out."))
+        dropSocket(ws)
+      }, connectionTimeoutMs)
       const fail = (error: unknown): void => {
         if (settled) return
         settled = true
+        clearTimeout(connectionDeadline)
         connecting = undefined
         reject(
           error instanceof Error
@@ -201,15 +215,29 @@ export function createAppRpcClient(options: {
         )
       }
       ws.addEventListener("open", () => {
+        if (socket !== ws) return
         // The handshake runs over the same correlation as every request.
-        sendInitialize(ws, resolve, fail, () => settled)
+        sendInitialize(
+          ws,
+          () => {
+            settled = true
+            clearTimeout(connectionDeadline)
+            resolve()
+          },
+          fail,
+          () => settled,
+        )
       })
-      ws.addEventListener("error", () => fail(undefined))
+      ws.addEventListener("error", () => {
+        fail(undefined)
+        dropSocket(ws)
+      })
       ws.addEventListener("close", () => {
         fail(undefined)
         onSocketClosed(ws)
       })
       ws.addEventListener("message", (event) => {
+        if (socket !== ws) return
         onMessage(typeof event.data === "string" ? event.data : "")
       })
     })
@@ -237,9 +265,13 @@ export function createAppRpcClient(options: {
           for (const listener of sideChatListeners) listener(undefined)
         }
         initializedOnce = true
+        scheduleHeartbeat(ws)
         resolve()
       },
-      reject: fail,
+      reject: (error) => {
+        fail(error)
+        dropSocket(ws)
+      },
     })
     ws.send(
       JSON.stringify({
@@ -260,6 +292,10 @@ export function createAppRpcClient(options: {
     if (socket !== ws) return
     socket = undefined
     ready = false
+    if (heartbeatTimer !== undefined) clearTimeout(heartbeatTimer)
+    if (heartbeatDeadline !== undefined) clearTimeout(heartbeatDeadline)
+    heartbeatTimer = undefined
+    heartbeatDeadline = undefined
     const lost = new ApiRequestError("The connection to the server was lost.")
     for (const [id, pending] of inflight) {
       inflight.delete(id)
@@ -279,6 +315,29 @@ export function createAppRpcClient(options: {
       reconnectTimer = undefined
       void ensureConnection().catch(() => {})
     }, delay)
+  }
+
+  function dropSocket(ws: WebSocket): void {
+    if (socket !== ws) return
+    onSocketClosed(ws)
+    ws.close()
+  }
+
+  function scheduleHeartbeat(ws: WebSocket): void {
+    heartbeatTimer = setTimeout(() => {
+      heartbeatTimer = undefined
+      if (socket !== ws || !ready) return
+      heartbeatDeadline = setTimeout(() => dropSocket(ws), heartbeatTimeoutMs)
+      void request("server/ping", {}).then(
+        () => {
+          if (socket !== ws) return
+          if (heartbeatDeadline !== undefined) clearTimeout(heartbeatDeadline)
+          heartbeatDeadline = undefined
+          scheduleHeartbeat(ws)
+        },
+        () => dropSocket(ws),
+      )
+    }, heartbeatIntervalMs)
   }
 
   function onMessage(text: string): void {
@@ -454,13 +513,26 @@ export function createAppRpcClient(options: {
     params: RpcMethodParams[M],
   ): Promise<RpcMethodResponses[M]> {
     await ensureConnection()
+    // The connection may close between the awaited handshake and this
+    // continuation. Registering a request after that close would leave it
+    // pending forever because the close sweep has already run.
+    const ws = socket
+    if (!ready || ws?.readyState !== WebSocket.OPEN) {
+      throw new ApiRequestError("The connection to the server was lost.")
+    }
     const id = nextId++
     return new Promise<RpcMethodResponses[M]>((resolve, reject) => {
       inflight.set(id, {
         resolve: (value) => resolve(value as RpcMethodResponses[M]),
         reject,
       })
-      send({ id, method, params })
+      try {
+        ws.send(JSON.stringify({ id, method, params }))
+      } catch (error) {
+        inflight.delete(id)
+        reject(error)
+        dropSocket(ws)
+      }
     })
   }
 
@@ -546,6 +618,8 @@ export function createAppRpcClient(options: {
     close() {
       closed = true
       if (reconnectTimer !== undefined) clearTimeout(reconnectTimer)
+      if (heartbeatTimer !== undefined) clearTimeout(heartbeatTimer)
+      if (heartbeatDeadline !== undefined) clearTimeout(heartbeatDeadline)
       const current = socket
       socket = undefined
       current?.close()

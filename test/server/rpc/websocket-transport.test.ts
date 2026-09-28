@@ -1,6 +1,6 @@
 import { createServer, type Server } from "node:http"
-import { createConnection, type AddressInfo, type Socket } from "node:net"
-import { describe, expect, it } from "vitest"
+import { type AddressInfo, createConnection, type Socket } from "node:net"
+import { describe, expect, it, vi } from "vitest"
 import { WebSocket } from "ws"
 import { createSessionEventHub } from "../../../src/server/event-hub.ts"
 import { createYakitoriHttpServer } from "../../../src/server/http.ts"
@@ -56,12 +56,52 @@ describe("websocket RPC transport", () => {
         })
         const list = await client.request("session/list")
         expect(list).toMatchObject({ result: { sessions: [] } })
+        const ping = await client.request("server/ping", {})
+        expect(ping).toMatchObject({ result: {} })
       } finally {
         client.ws.close()
         await client.closed
       }
     } finally {
       await closeServer(server)
+    }
+  })
+
+  it("reaps a half-open client that no longer answers WebSocket pings", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] })
+    const server = createYakitoriHttpServer({ handlers: createFakeHandlers() })
+    const port = await listen(server)
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/rpc`, {
+      autoPong: false,
+    })
+    const responsive = new WebSocket(`ws://127.0.0.1:${port}/rpc`)
+    try {
+      await Promise.all(
+        [ws, responsive].map(
+          (socket) =>
+            new Promise<void>((resolve) =>
+              socket.once("open", () => resolve()),
+            ),
+        ),
+      )
+      const closed = new Promise<void>((resolve) =>
+        ws.once("close", () => resolve()),
+      )
+      const answeredPing = new Promise<void>((resolve) =>
+        responsive.once("ping", () => resolve()),
+      )
+      await vi.advanceTimersByTimeAsync(20_000)
+      await answeredPing
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      await vi.advanceTimersByTimeAsync(20_000)
+      await closed
+      expect(ws.readyState).toBe(WebSocket.CLOSED)
+      expect(responsive.readyState).toBe(WebSocket.OPEN)
+    } finally {
+      ws.terminate()
+      responsive.terminate()
+      await closeServer(server)
+      vi.useRealTimers()
     }
   })
 

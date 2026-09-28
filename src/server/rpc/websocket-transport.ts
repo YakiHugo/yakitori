@@ -18,6 +18,10 @@ export const websocketRpcPath = "/rpc"
 // write buffer is full; sends resume from the send callbacks.
 const defaultMaxOutboundQueueFrames = 1024
 const outboundHighWaterMarkBytes = 4 * 1024 * 1024
+// Browser clients answer native WebSocket pings automatically. Two unanswered
+// 20s intervals bound half-open server resource retention to about 40s, after
+// the GUI has had time to reconnect on its own heartbeat deadline.
+const connectionPingIntervalMs = 20_000
 // A stuck client may never answer the close handshake; destroy the socket
 // after a short grace so teardown stays bounded.
 const closeHandshakeGraceMs = 250
@@ -155,6 +159,20 @@ export function attachWebsocketRpcTransport(
     ws.on("message", (data) => {
       handle.send(typeof data === "string" ? data : data.toString("utf8"))
     })
+    let awaitingPong = false
+    ws.on("pong", () => {
+      awaitingPong = false
+    })
+    const pingTimer = setInterval(() => {
+      if (ws.readyState !== WebSocket.OPEN) return
+      if (awaitingPong) {
+        ws.terminate()
+        return
+      }
+      awaitingPong = true
+      ws.ping()
+    }, connectionPingIntervalMs)
+    pingTimer.unref()
     ws.on("error", (error) => {
       // A 'close' event always follows; the close path owns cleanup.
       reportOperationalFailure(reporter, {
@@ -164,6 +182,7 @@ export function attachWebsocketRpcTransport(
       })
     })
     ws.once("close", () => {
+      clearInterval(pingTimer)
       if (cleanedUp) return
       cleanedUp = true
       closing = true
