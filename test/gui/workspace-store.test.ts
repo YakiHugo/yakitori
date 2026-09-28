@@ -79,6 +79,24 @@ it("keeps file and browser tabs in their opening session and preserves an emptie
   ).toEqual([])
 })
 
+it("reuses the same skill preview per session and keeps another session separate", async () => {
+  const { useWorkspaceStore } = await import(
+    "../../src/gui/store/workspace-store.ts"
+  )
+  const store = useWorkspaceStore.getState()
+  store.setSession("first")
+  store.openSkill("/home/.agents/skills/review/SKILL.md", "review")
+  const first = useWorkspaceStore.getState().activeId
+  store.openSkill("/home/.agents/skills/review/SKILL.md", "review")
+  expect(useWorkspaceStore.getState().activeId).toBe(first)
+  store.setSession("second")
+  store.openSkill("/home/.agents/skills/review/SKILL.md", "review")
+  expect(useWorkspaceStore.getState().activeId).not.toBe(first)
+  expect(
+    useWorkspaceStore.getState().tabs.filter((tab) => tab.kind === "skill"),
+  ).toHaveLength(2)
+})
+
 it("restores each session's pane and active tab after switching, including agent sizing", async () => {
   const { useWorkspaceStore } = await import(
     "../../src/gui/store/workspace-store.ts"

@@ -42,6 +42,10 @@ export class AgentThread {
     return this.#session.io.queueInput(input)
   }
 
+  compact(requestId: string): Promise<TurnInputSubmission> {
+    return this.#session.io.compact(requestId)
+  }
+
   cancelQueuedInput(inputId: string): Promise<boolean> {
     return this.#session.io.cancelQueuedInput(inputId)
   }

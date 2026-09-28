@@ -178,6 +178,7 @@ export type ApiUpdateProjectResponse = {
 
 export type ApiProviderModel = {
   readonly id: string
+  readonly effectiveContextWindowTokens?: number
   // Optional: servers before the model-directory work omit it; the GUI falls
   // back to the id.
   readonly displayName?: string

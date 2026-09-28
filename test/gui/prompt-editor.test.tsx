@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { useState } from "react"
 import { afterEach, expect, it, vi } from "vitest"
 import { PromptEditor } from "../../src/gui/components/prompt-editor.tsx"
+import { useWorkspaceStore } from "../../src/gui/store/workspace-store.ts"
 
 afterEach(cleanup)
 
@@ -160,4 +161,26 @@ it("deletes an inline skill atom with a single Backspace", () => {
   editor.focus()
   fireEvent.keyDown(editor, { key: "Backspace" })
   expect(screen.getByTestId("serialized").textContent).toBe("Use ")
+})
+
+it("opens a skill chip in the workspace without changing the prompt", () => {
+  useWorkspaceStore.getState().setSession("session_chip")
+  render(<SkillFixture />)
+  const chip = screen.getByRole("button", { name: "review" })
+  expect(chip.textContent).toBe("review")
+  fireEvent.click(chip)
+  expect(useWorkspaceStore.getState()).toMatchObject({ open: true })
+  expect(
+    useWorkspaceStore
+      .getState()
+      .tabs.find((tab) => tab.id === useWorkspaceStore.getState().activeId),
+  ).toMatchObject({
+    kind: "skill",
+    name: "review",
+    path: "/skills/review/SKILL.md",
+    workspaceSessionId: "session_chip",
+  })
+  expect(screen.getByTestId("serialized").textContent).toBe(
+    "Use [$review](/skills/review/SKILL.md)",
+  )
 })

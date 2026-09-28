@@ -1,4 +1,5 @@
 import {
+  catalogModelCapacity,
   type InstructionProfileId,
   listCatalogModels,
   type ProviderRegistry,
@@ -8,6 +9,7 @@ export type DirectoryModel = {
   readonly id: string
   readonly displayName: string
   readonly instructionProfileId: InstructionProfileId
+  readonly effectiveContextWindowTokens?: number
   readonly effortStyle?: "none" | "levels"
   readonly efforts?: readonly string[]
   readonly defaultEffort?: string
@@ -25,25 +27,41 @@ export function createModelDirectory(
 ): ModelDirectory {
   return {
     async listModels(provider) {
+      const manager = providerRegistry?.models(provider)
       const models =
-        providerRegistry === undefined
+        manager === undefined
           ? listCatalogModels(provider)
-          : await providerRegistry.models(provider).listModels()
-      return models.map((entry) => ({
-        id: entry.model,
-        displayName: entry.displayName ?? entry.model,
-        instructionProfileId: entry.instructionProfileId,
-        ...(entry.effortStyle === undefined
-          ? {}
-          : { effortStyle: entry.effortStyle }),
-        ...(entry.efforts === undefined ? {} : { efforts: entry.efforts }),
-        ...(entry.defaultEffort === undefined
-          ? {}
-          : { defaultEffort: entry.defaultEffort }),
-        ...(entry.speeds === undefined ? {} : { speeds: entry.speeds }),
-        inputModalities: entry.inputModalities,
-        imageDetailModes: entry.imageDetailModes,
-      }))
+          : await manager.listModels()
+      return models.map((entry) => {
+        const capacity = (manager?.capacity ?? catalogModelCapacity)({
+          provider,
+          model: entry.model,
+        })
+        return {
+          id: entry.model,
+          displayName: entry.displayName ?? entry.model,
+          instructionProfileId: entry.instructionProfileId,
+          ...(capacity === undefined
+            ? {}
+            : {
+                effectiveContextWindowTokens: Math.floor(
+                  (capacity.contextWindowTokens *
+                    capacity.effectiveContextWindowPercent) /
+                    100,
+                ),
+              }),
+          ...(entry.effortStyle === undefined
+            ? {}
+            : { effortStyle: entry.effortStyle }),
+          ...(entry.efforts === undefined ? {} : { efforts: entry.efforts }),
+          ...(entry.defaultEffort === undefined
+            ? {}
+            : { defaultEffort: entry.defaultEffort }),
+          ...(entry.speeds === undefined ? {} : { speeds: entry.speeds }),
+          inputModalities: entry.inputModalities,
+          imageDetailModes: entry.imageDetailModes,
+        }
+      })
     },
   }
 }

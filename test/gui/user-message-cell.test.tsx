@@ -11,6 +11,7 @@ import {
   defaultPreferences,
   usePreferencesStore,
 } from "../../src/gui/store/preferences-store.ts"
+import { useWorkspaceStore } from "../../src/gui/store/workspace-store.ts"
 import { pastePrompt } from "./prompt-editor-helpers.ts"
 
 beforeEach(() => {
@@ -137,6 +138,32 @@ describe("skill mentions", () => {
     expect(screen.getByText("$Template Creator")).toBeDefined()
     expect(screen.getByText("Use this please")).toBeDefined()
     expect(screen.queryByText(/SKILL\.md/)).toBeNull()
+  })
+
+  it("opens the same skill preview from an admitted message", async () => {
+    useWorkspaceStore.getState().setSession("session_1")
+    render(
+      <UserMessageCell
+        entry={{
+          ...entry,
+          text: "Use [$Review](/repo/.agents/skills/review/SKILL.md)",
+        }}
+        queued={false}
+      />,
+    )
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "View Review skill" }))
+    expect(
+      useWorkspaceStore
+        .getState()
+        .tabs.find((tab) => tab.id === useWorkspaceStore.getState().activeId),
+    ).toMatchObject({
+      kind: "skill",
+      name: "Review",
+      path: "/repo/.agents/skills/review/SKILL.md",
+      workspaceSessionId: "session_1",
+    })
   })
 })
 
@@ -276,7 +303,7 @@ it("edits in place, cancels with Escape and preserves skill mentions when sendin
   await user.click(screen.getByRole("button", { name: "Edit & resubmit" }))
   let editor = screen.getByRole("textbox", { name: "Edit message" })
   expect(document.activeElement).toBe(editor)
-  expect(editor.textContent).toBe("Original request $review")
+  expect(editor.textContent).toBe("Original request review")
   await user.keyboard("{Escape}")
   expect(screen.getByText("Original request")).toBeDefined()
   expect(forkSession).not.toHaveBeenCalled()

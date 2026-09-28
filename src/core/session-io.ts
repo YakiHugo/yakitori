@@ -1,8 +1,8 @@
 import type {
-  StartedExecutionItem,
   EventMetadata,
   KernelError,
   ModelSelection,
+  StartedExecutionItem,
   TextContent,
 } from "../kernel/events.ts"
 import { createRequestId } from "../kernel/ids.ts"
@@ -28,6 +28,7 @@ export type AgentStatus =
 export type TurnInput = {
   readonly submissionId: string
   readonly content: TextContent
+  readonly manualCompact?: boolean
   readonly modelSelection?: ModelSelection
   readonly metadata?: EventMetadata
   readonly parentInputId?: string
@@ -112,6 +113,11 @@ export type SessionOp =
       readonly type: "turn_input"
       readonly input: TurnInput
       readonly mode: TurnInputMode
+      readonly reply: TurnInputReply
+    }
+  | {
+      readonly type: "compact"
+      readonly requestId: string
       readonly reply: TurnInputReply
     }
   | {
@@ -277,6 +283,17 @@ export class SessionIo {
 
   queueInput(input: SubmitTurnInput): Promise<TurnInputSubmission> {
     return this.#submitTurnInput(input, { type: "queue" })
+  }
+
+  compact(requestId: string): Promise<TurnInputSubmission> {
+    this.#requireOpen()
+    return new Promise((resolve, reject) => {
+      void this.#send({
+        type: "compact",
+        requestId,
+        reply: { resolve, reject },
+      }).catch(reject)
+    })
   }
 
   cancelQueuedInput(inputId: string): Promise<boolean> {

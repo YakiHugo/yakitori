@@ -54,12 +54,20 @@ export function ModelSelector({
       : state.modelSelections[state.selection.sessionId],
   )
   const setModelSelection = useAppStore((state) => state.setModelSelection)
+  const modelPickerRevision = useAppStore((state) => state.modelPickerRevision)
   const current = onChange === undefined ? sessionCurrent : selection
   const changeSelection = (value: ModelSelection | undefined) => {
     if (onChange) onChange(value)
     else setModelSelection(sessionId, value)
   }
   const [menu, setMenu] = useState<"model" | "effort">()
+  const lastPickerRevision = useRef(modelPickerRevision)
+
+  useEffect(() => {
+    if (lastPickerRevision.current === modelPickerRevision) return
+    lastPickerRevision.current = modelPickerRevision
+    if (onChange === undefined) setMenu("model")
+  }, [modelPickerRevision, onChange])
 
   useEffect(() => {
     if (menu === undefined) return

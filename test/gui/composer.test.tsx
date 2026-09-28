@@ -925,7 +925,7 @@ describe("history navigation", () => {
 })
 
 describe("slash command menu", () => {
-  it("executes the highlighted command on Enter and clears the draft", async () => {
+  it("executes the highlighted command on Enter and retains it until admission succeeds", async () => {
     const user = userEvent.setup()
     const admitInput = vi.fn((_text: string) => Promise.resolve())
     useAppStore.setState({
@@ -939,11 +939,12 @@ describe("slash command menu", () => {
     await pastePrompt(screen.getByRole("textbox"), "/com")
 
     const menu = screen.getByRole("listbox", { name: "Slash commands" })
-    expect(menu.textContent).toContain("/compact")
+    expect(menu.textContent).toContain("Compact")
+    expect(menu.textContent).not.toContain("/compact")
 
     await user.keyboard("{Enter}")
     expect(admitInput).toHaveBeenCalledWith("/compact")
-    expect(useAppStore.getState().promptDraft).toBe("")
+    expect(useAppStore.getState().promptDraft).toBe("/compact")
     expect(screen.queryByRole("listbox")).toBeNull()
   })
 
@@ -975,10 +976,10 @@ describe("slash command menu", () => {
 
     await user.click(screen.getByRole("textbox"))
     await pastePrompt(screen.getByRole("textbox"), "/com")
-    await user.click(screen.getByRole("option", { name: /\/compact/ }))
+    await user.click(screen.getByRole("option", { name: /Compact/ }))
 
     expect(admitInput).toHaveBeenCalledWith("/compact")
-    expect(useAppStore.getState().promptDraft).toBe("")
+    expect(useAppStore.getState().promptDraft).toBe("/compact")
   })
 
   it("keeps the wrapped highlight selectable with arrow keys", async () => {
@@ -992,10 +993,60 @@ describe("slash command menu", () => {
 
     await user.click(screen.getByRole("textbox"))
     await pastePrompt(screen.getByRole("textbox"), "/")
-    // One command: cycling wraps back onto it and Enter still executes.
+    // Cycle back to the first command.
     await user.keyboard("{ArrowDown}{ArrowUp}{Enter}")
 
-    expect(admitInput).toHaveBeenCalledWith("/compact")
+    expect(useAppStore.getState().commandPanel?.kind).toBe("status")
+  })
+
+  it("routes status and MCP commands to data panels without sending a message", async () => {
+    const user = userEvent.setup()
+    const admitInput = vi.fn((_text: string) => Promise.resolve())
+    useAppStore.setState({
+      admitInput,
+      selection: { sessionId: "session_1" },
+    })
+    render(<Composer />)
+    expect(
+      document.querySelector(".composer-suggestion-panel:not([hidden])"),
+    ).toBeNull()
+
+    await pastePrompt(screen.getByRole("textbox"), "/status")
+    await user.keyboard("{Enter}")
+    expect(useAppStore.getState().commandPanel).toEqual({
+      kind: "status",
+      sessionId: "session_1",
+    })
+    expect(
+      screen
+        .getByRole("region", { name: "Session status" })
+        .closest(".composer-suggestion-panel"),
+    ).not.toBeNull()
+    expect(admitInput).not.toHaveBeenCalled()
+
+    await pastePrompt(screen.getByRole("textbox"), "/mcp")
+    await user.keyboard("{Enter}")
+    expect(useAppStore.getState().commandPanel).toEqual({
+      kind: "mcp",
+      sessionId: "session_1",
+    })
+    expect(
+      screen
+        .getByRole("region", { name: "MCP status" })
+        .closest(".composer-suggestion-panel"),
+    ).not.toBeNull()
+    expect(admitInput).not.toHaveBeenCalled()
+  })
+
+  it("opens the existing model picker from the command menu", async () => {
+    const user = userEvent.setup()
+    useAppStore.setState({ selection: { sessionId: "session_1" } })
+    render(<Composer />)
+
+    await pastePrompt(screen.getByRole("textbox"), "/model")
+    await user.keyboard("{Enter}")
+    expect(useAppStore.getState().modelPickerRevision).toBe(1)
+    expect(useAppStore.getState().promptDraft).toBe("")
   })
 
   it("completes compact as text instead of executing while images are staged", async () => {
@@ -1108,7 +1159,8 @@ describe("goal command", () => {
     await pastePrompt(textarea, "/g")
 
     const menu = screen.getByRole("listbox", { name: "Slash commands" })
-    expect(menu.textContent).toContain("/goal")
+    expect(menu.textContent).toContain("Goal")
+    expect(menu.textContent).not.toContain("/goal")
     await user.keyboard("{Enter}")
     expect(useAppStore.getState().promptDraft).toBe("/goal ")
 
@@ -1928,7 +1980,7 @@ describe("unified composer suggestions", () => {
     render(<Composer />)
     await pastePrompt(screen.getByRole("textbox"), "/com")
     await user.keyboard("{Tab}")
-    expect(useAppStore.getState().promptDraft).toBe("")
+    expect(useAppStore.getState().promptDraft).toBe("/compact")
     expect(admitInput).toHaveBeenCalledWith("/compact")
   })
 

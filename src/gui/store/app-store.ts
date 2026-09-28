@@ -164,6 +164,14 @@ export type AppStoreData = {
   usage: UsageState
   // Incremented to ask the session header to open its goal editor.
   goalDialogRevision: number
+  modelPickerRevision: number
+  renameDialogRevision: number
+  commandPanel:
+    | Readonly<{
+        sessionId?: string
+        kind: "status" | "mcp"
+      }>
+    | undefined
 }
 
 export type AppStoreActions = {
@@ -234,6 +242,10 @@ export type AppStoreActions = {
   setSettingsSection(section: SettingsSection): void
   loadUsage(): Promise<void>
   openGoalDialog(): void
+  openModelPicker(): void
+  openRenameDialog(): void
+  openCommandPanel(kind: "status" | "mcp"): void
+  closeCommandPanel(): void
   // False while any provider's quota snapshot is missing or older than 30s.
   subscriptionsFresh(): boolean
 }
@@ -306,6 +318,9 @@ export function createInitialAppState(): AppStoreData {
     settingsSection: undefined,
     usage: { loading: false },
     goalDialogRevision: 0,
+    modelPickerRevision: 0,
+    renameDialogRevision: 0,
+    commandPanel: undefined,
   }
 }
 
@@ -665,15 +680,21 @@ export const useAppStore = create<AppStore>()((set, get) => {
     set({ stream: undefined })
   }
 
-  const loadSessionSkills = (sessionId: string): void => {
+  const loadSkills = (
+    owner: Readonly<{ sessionId?: string; projectId?: string }>,
+  ): void => {
     const revision = get().sessionSelectionIntentRevision
-    set({ sessionSkillsError: undefined })
-    void getAppRpcClient(get().apiBase)
-      .request("session/skills", { sessionId })
+    const apiBase = get().apiBase
+    set({ sessionSkills: [], sessionSkillsError: undefined })
+    void getAppRpcClient(apiBase)
+      .request("session/skills", owner)
       .then((response) => {
         if (
-          get().selection.sessionId !== sessionId ||
-          get().sessionSelectionIntentRevision !== revision
+          get().selection.sessionId !== owner.sessionId ||
+          get().sessionSelectionIntentRevision !== revision ||
+          (owner.projectId !== undefined &&
+            get().currentProject !== owner.projectId) ||
+          get().apiBase !== apiBase
         ) {
           return
         }
@@ -681,14 +702,23 @@ export const useAppStore = create<AppStore>()((set, get) => {
       })
       .catch((error: unknown) => {
         if (
-          get().selection.sessionId !== sessionId ||
-          get().sessionSelectionIntentRevision !== revision
+          get().selection.sessionId !== owner.sessionId ||
+          get().sessionSelectionIntentRevision !== revision ||
+          (owner.projectId !== undefined &&
+            get().currentProject !== owner.projectId) ||
+          get().apiBase !== apiBase
         )
           return
         set({
           sessionSkillsError: errorMessage(error, "Could not load skills."),
         })
       })
+  }
+  const loadSessionSkills = (sessionId: string): void =>
+    loadSkills({ sessionId })
+  const loadDraftSkills = (projectId: string | undefined): void => {
+    if (projectId) loadSkills({ projectId })
+    else set({ sessionSkills: [], sessionSkillsError: undefined })
   }
 
   const connectEvents = (selection: SessionSelection, after: number): void => {
@@ -1197,6 +1227,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
             collapsedProjects,
           }
         })
+        if (get().selection.sessionId === undefined)
+          loadDraftSkills(get().currentProject)
       } catch (error) {
         if (revision !== projectReadRevision) return
         // Servers without a project store answer not_found; the switcher
@@ -1299,6 +1331,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
         execution: createExecutionViewState(),
         hydratingSessionId: undefined,
         sessionSkills: [],
+        commandPanel: undefined,
         settingsSection: undefined,
         promptAttachments: [],
         promptExcerpts:
@@ -1313,6 +1346,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
           state.sessionSelectionIntentRevision + 1,
         composerFocusRevision: state.composerFocusRevision + 1,
       })
+      loadDraftSkills(projectId)
       createNewSessionForCurrentIntent()
     },
 
@@ -1324,6 +1358,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
         sessionSelectionIntentRevision:
           state.sessionSelectionIntentRevision + 1,
       })
+      if (state.selection.sessionId === undefined) loadDraftSkills(projectId)
       window.localStorage.setItem("yakitori.project", projectId ?? "")
       // The dropdown changes the destination of the current draft, including
       // its staged attachments. Supersede the old request and create there.
@@ -1795,6 +1830,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
         execution: createExecutionViewState(),
         selectedSession: undefined,
         sessionSkills: [],
+        commandPanel: undefined,
         settingsSection: undefined,
         ...takeSessionDraft(get().sessionDrafts, sessionId),
       })
@@ -2443,6 +2479,24 @@ export const useAppStore = create<AppStore>()((set, get) => {
     },
     openGoalDialog: () =>
       set((state) => ({ goalDialogRevision: state.goalDialogRevision + 1 })),
+    openModelPicker: () =>
+      set((state) => ({
+        modelPickerRevision: state.modelPickerRevision + 1,
+      })),
+    openRenameDialog: () =>
+      set((state) => ({
+        renameDialogRevision: state.renameDialogRevision + 1,
+      })),
+    openCommandPanel: (kind) =>
+      set({
+        commandPanel: {
+          ...(get().selection.sessionId === undefined
+            ? {}
+            : { sessionId: get().selection.sessionId }),
+          kind,
+        },
+      }),
+    closeCommandPanel: () => set({ commandPanel: undefined }),
     subscriptionsFresh: () => {
       const states = get().subscriptionsByProvider
       return (["codex", "grok", "kimi"] as const).every((provider) => {

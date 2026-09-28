@@ -1140,6 +1140,9 @@ async function providerSummary(
       id: entry.id,
       displayName: entry.displayName,
       instructionProfileId: entry.instructionProfileId as string,
+      ...(entry.effectiveContextWindowTokens === undefined
+        ? {}
+        : { effectiveContextWindowTokens: entry.effectiveContextWindowTokens }),
       ...(entry.effortStyle === undefined
         ? {}
         : { effortStyle: entry.effortStyle }),
@@ -1314,8 +1317,7 @@ async function configureProviders(input: {
     (await resolveGrokAccessToken()
       .then(() => true)
       .catch(() => false))
-  if (grokAvailable)
-    providers.grok ??= createGrokProvider(input.modelsCacheDir)
+  if (grokAvailable) providers.grok ??= createGrokProvider(input.modelsCacheDir)
   await registerCodexLogin(
     providers,
     input.reportOperationalFailure,

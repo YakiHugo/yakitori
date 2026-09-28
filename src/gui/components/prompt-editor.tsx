@@ -5,6 +5,8 @@ import { Slice } from "prosemirror-model"
 import { EditorState, TextSelection } from "prosemirror-state"
 import { EditorView } from "prosemirror-view"
 import { type Ref, useImperativeHandle, useLayoutEffect, useRef } from "react"
+import { useAppStore } from "../store/app-store.ts"
+import { useWorkspaceStore } from "../store/workspace-store.ts"
 import {
   parsePrompt,
   promptOffset,
@@ -153,6 +155,42 @@ export function PromptEditor(props: Props) {
         ),
       clipboardTextParser: (text) => new Slice(parsePrompt(text).content, 1, 1),
       handleDOMEvents: {
+        click: (_view, event) => {
+          const chip =
+            event.target instanceof Element
+              ? event.target.closest<HTMLElement>("[data-skill-path]")
+              : null
+          if (!chip) return false
+          useWorkspaceStore
+            .getState()
+            .openSkill(
+              chip.dataset.skillPath ?? "",
+              chip.dataset.skillName ?? "",
+              useAppStore.getState().selection.sessionId
+                ? undefined
+                : useAppStore.getState().currentProject,
+            )
+          return true
+        },
+        keydown: (_view, event) => {
+          const chip =
+            event.target instanceof Element
+              ? event.target.closest<HTMLElement>("[data-skill-path]")
+              : null
+          if (!chip || (event.key !== "Enter" && event.key !== " "))
+            return false
+          event.preventDefault()
+          useWorkspaceStore
+            .getState()
+            .openSkill(
+              chip.dataset.skillPath ?? "",
+              chip.dataset.skillName ?? "",
+              useAppStore.getState().selection.sessionId
+                ? undefined
+                : useAppStore.getState().currentProject,
+            )
+          return true
+        },
         focus: () => {
           latest.current.onFocus?.()
           return false
