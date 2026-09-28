@@ -518,9 +518,9 @@ describe("application composition", () => {
               message.content.some((block) => block.text === "child task"),
           )
           if (isChild) {
-            yield { type: "snapshot", text: "child " }
+            yield { type: "delta", text: "child " }
             await childMayFinish.promise
-            yield { type: "snapshot", text: "child live answer" }
+            yield { type: "delta", text: "live answer" }
           }
           const hasToolResult = request.messages.some(
             (message) => message.role === "tool",
@@ -752,7 +752,7 @@ describe("application composition", () => {
               message.content.some((block) => block.text === "resume child"),
           )
           if (child) {
-            yield { type: "snapshot", text: `live followup ${turn}` }
+            yield { type: "delta", text: `live followup ${turn}` }
             await mayFinish.promise
           }
           const followup = !child && needsFollowup

@@ -988,7 +988,7 @@ describe("OpenAI Responses provider", () => {
     )
   })
 
-  it("streams full snapshots and uses the request's pinned model", async () => {
+  it("streams deltas and uses the request's pinned model", async () => {
     let body: unknown
     const client = {
       responses: {
@@ -1040,8 +1040,8 @@ describe("OpenAI Responses provider", () => {
     }
 
     expect(events).toEqual([
-      { type: "snapshot", text: "Hel" },
-      { type: "snapshot", text: "Hello" },
+      { type: "delta", text: "Hel" },
+      { type: "delta", text: "lo" },
       {
         type: "response",
         response: expect.objectContaining({
@@ -1064,7 +1064,7 @@ describe("OpenAI Responses provider", () => {
     })
   })
 
-  it("streams public reasoning summary snapshots", async () => {
+  it("streams public reasoning summary deltas", async () => {
     const client = {
       responses: {
         async create() {
@@ -1095,8 +1095,8 @@ describe("OpenAI Responses provider", () => {
     for await (const event of stream(requestFixture())) events.push(event)
 
     expect(events).toEqual([
-      { type: "reasoning_snapshot", text: "Inspect" },
-      { type: "reasoning_snapshot", text: "Inspect files" },
+      { type: "reasoning_delta", text: "Inspect" },
+      { type: "reasoning_delta", text: " files" },
       expect.objectContaining({ type: "response" }),
     ])
   })

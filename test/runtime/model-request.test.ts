@@ -34,10 +34,10 @@ describe("model request runtime", () => {
   })
 
   it.each([
-    ["snapshot", "stream_disconnected"],
-    ["reasoning_snapshot", "stream_disconnected"],
-    ["snapshot", "idle_timeout"],
-    ["reasoning_snapshot", "idle_timeout"],
+    ["delta", "stream_disconnected"],
+    ["reasoning_delta", "stream_disconnected"],
+    ["delta", "idle_timeout"],
+    ["reasoning_delta", "idle_timeout"],
   ] as const)("does not retry %s output followed by %s", async (type, kind) => {
     const terminalFailure = failure(kind)
     const provider = scriptedStream([
@@ -292,7 +292,7 @@ describe("model request runtime", () => {
     const stream = createModelRequestStream(
       async function* () {
         try {
-          yield { type: "snapshot", text: "partial" }
+          yield { type: "delta", text: "partial" }
           await new Promise(() => {})
         } finally {
           await Promise.resolve()
@@ -305,7 +305,7 @@ describe("model request runtime", () => {
 
     expect(await iterator.next()).toEqual({
       done: false,
-      value: { type: "snapshot", text: "partial" },
+      value: { type: "delta", text: "partial" },
     })
     await iterator.return?.()
 

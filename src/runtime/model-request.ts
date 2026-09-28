@@ -148,10 +148,7 @@ async function* runModelRequest(
             failureEvent = protocolFailureEvent(request, options)
             break
           }
-          if (
-            event.type === "snapshot" ||
-            event.type === "reasoning_snapshot"
-          ) {
+          if (event.type === "delta" || event.type === "reasoning_delta") {
             outputObserved = true
             yield event
             continue

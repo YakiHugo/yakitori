@@ -97,23 +97,13 @@ export type DeltaPublisher = {
     readonly sessionId: string
     readonly turnId: string
     readonly itemId: string
-    readonly text: string
+    readonly delta: string
   }): void
   flush(): void
 }
 
-export function suffixDelta(
-  previous: string,
-  next: string,
-): string | undefined {
-  if (next === previous || !next.startsWith(previous)) return undefined
-  const delta = next.slice(previous.length)
-  return delta.length === 0 ? undefined : delta
-}
-
-// Providers emit cumulative snapshots. Convert them to suffixes and coalesce
-// UI publications without making unfinished model output part of Session
-// history. flush() is the in-process barrier used before a terminal Turn event.
+// Coalesce provider deltas for UI publication without making unfinished model
+// output part of Session history. flush() is the in-process ordering barrier.
 export function createCoalescingDeltaPublisher(
   publisher: LiveEventPublisher,
   publicationsPerSecond: number,
@@ -122,13 +112,12 @@ export function createCoalescingDeltaPublisher(
     | LiveReasoningDelta["type"] = "assistant.delta",
 ): DeltaPublisher {
   const minIntervalMs = Math.max(1, Math.floor(1000 / publicationsPerSecond))
-  let previousText = ""
   let pending:
     | {
         readonly sessionId: string
         readonly turnId: string
         readonly itemId: string
-        readonly delta: string
+        readonly deltas: string[]
       }
     | undefined
   let lastPublishedAt = 0
@@ -138,7 +127,10 @@ export function createCoalescingDeltaPublisher(
     lastPublishedAt = Date.now()
     publisher.publishTransient({
       type,
-      ...input,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      itemId: input.itemId,
+      delta: input.deltas.join(""),
       createdAt: new Date().toISOString(),
     })
   }
@@ -156,25 +148,21 @@ export function createCoalescingDeltaPublisher(
 
   return {
     publish(input) {
-      const delta = suffixDelta(previousText, input.text)
-      if (delta === undefined) return
-      previousText = input.text
+      if (input.delta === "") return
 
       const now = Date.now()
       if (now - lastPublishedAt >= minIntervalMs) {
         if (pending === undefined) {
-          publishNow({ ...input, delta })
+          publishNow({ ...input, deltas: [input.delta] })
         } else {
-          pending = { ...input, delta: `${pending.delta}${delta}` }
+          pending.deltas.push(input.delta)
           flushPending()
         }
         return
       }
 
-      pending =
-        pending === undefined
-          ? { ...input, delta }
-          : { ...input, delta: `${pending.delta}${delta}` }
+      if (pending === undefined) pending = { ...input, deltas: [input.delta] }
+      else pending.deltas.push(input.delta)
       if (timer !== undefined) return
       timer = setTimeout(
         () => flushPending(),

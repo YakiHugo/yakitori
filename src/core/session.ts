@@ -75,7 +75,7 @@ export type TurnRuntime = {
   emitModelStream(input: {
     readonly itemId: string
     readonly kind: "assistant" | "reasoning"
-    readonly text: string
+    readonly delta: string
   }): void
   emitWarning(message: string, diagnostic?: KernelError): void
   emitItemStarted(item: StartedExecutionItem): void

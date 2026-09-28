@@ -532,6 +532,9 @@ function applyTransient(
       }
     }
     if (item.type === "agent_message" || item.type === "reasoning") {
+      // A replayed start for the same display item must not split its deltas
+      // into duplicate transcript entries.
+      if (state.itemEntryIndexes[item.itemId] !== undefined) return state
       return appendItemEntry(state, item.itemId, {
         kind: item.type === "agent_message" ? "assistant" : "reasoning",
         itemId: item.itemId,

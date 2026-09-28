@@ -330,7 +330,6 @@ export function createThreadServerHandlers(
           if (event === undefined) break
           if (event.type === "rollout.appended") {
             for (const publisher of streams.values()) publisher.flush()
-            streams.clear()
             try {
               await publishNewRollout(thread.id, event.throughSeq)
             } catch (error) {
@@ -386,7 +385,7 @@ export function createThreadServerHandlers(
               sessionId: event.threadId,
               turnId: event.turnId,
               itemId: displayItemId,
-              text: event.text,
+              delta: event.delta,
             })
             continue
           }
@@ -468,7 +467,7 @@ export function createThreadServerHandlers(
           if (event.type === "runtime.warning") {
             if (event.code === "model.retry") {
               // Buffered pre-failure output must precede the retry status.
-              // Keep publishers so resumed snapshots retain their suffix cursor.
+              // Keep publishers so resumed output retains its item identity.
               for (const publisher of streams.values()) publisher.flush()
             }
             options.eventHub?.publishTransient({

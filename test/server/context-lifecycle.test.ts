@@ -222,7 +222,7 @@ describe("structured context and ephemeral forks", () => {
         latestUser?.role === "user" &&
         latestUser.content[0]?.text === "unfinished parent task"
       ) {
-        yield { type: "snapshot", text: "unfinished parent answer" }
+        yield { type: "delta", text: "unfinished parent answer" }
         if (!request.signal) throw new Error("Missing abort signal")
         await new Promise<void>((resolve) =>
           request.signal?.addEventListener("abort", () => resolve(), {
@@ -441,7 +441,7 @@ describe("structured context and ephemeral forks", () => {
     const cancelled: string[] = []
     const context = await fixture(async function* (request) {
       if (request.messages.some((message) => message.role === "user")) {
-        yield { type: "snapshot", text: "working" }
+        yield { type: "delta", text: "working" }
         if (!request.signal) throw new Error("Expected cancellation signal")
         if (!request.signal.aborted)
           await new Promise<void>((resolve) =>

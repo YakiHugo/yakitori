@@ -765,8 +765,8 @@ describe("anthropic provider conversion", () => {
       thinking: { type: "adaptive", display: "summarized" },
     })
     expect(events).toEqual([
-      { type: "reasoning_snapshot", text: "Inspect" },
-      { type: "reasoning_snapshot", text: "Inspect files" },
+      { type: "reasoning_delta", text: "Inspect" },
+      { type: "reasoning_delta", text: " files" },
       expect.objectContaining({ type: "response" }),
     ])
   })
@@ -1378,7 +1378,7 @@ describe("anthropic provider error classification", () => {
     const events = await collectWithClient(client)
 
     expect(events).toEqual([
-      { type: "snapshot", text: "par" },
+      { type: "delta", text: "par" },
       {
         type: "failure",
         failure: {

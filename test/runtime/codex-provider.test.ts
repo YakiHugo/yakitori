@@ -44,7 +44,7 @@ describe("Codex provider auth recovery", () => {
           }
           return
         }
-        yield { type: "snapshot", text: "ok" }
+        yield { type: "delta", text: "ok" }
         yield {
           type: "response",
           response: {
@@ -63,7 +63,7 @@ describe("Codex provider auth recovery", () => {
     for await (const event of stream(requestFixture())) events.push(event)
 
     expect(events).toEqual([
-      { type: "snapshot", text: "ok" },
+      { type: "delta", text: "ok" },
       {
         type: "response",
         response: {
@@ -182,7 +182,7 @@ describe("Codex provider auth recovery", () => {
     }
     const createStream = vi.fn((): StreamFn => {
       return async function* (): AsyncGenerator<ModelStreamEvent> {
-        yield { type: "snapshot", text: "partial" }
+        yield { type: "delta", text: "partial" }
         yield unauthorized
       }
     })
@@ -194,10 +194,7 @@ describe("Codex provider auth recovery", () => {
       events.push(event)
     }
 
-    expect(events).toEqual([
-      { type: "snapshot", text: "partial" },
-      unauthorized,
-    ])
+    expect(events).toEqual([{ type: "delta", text: "partial" }, unauthorized])
     expect(auth.resolve).toHaveBeenCalledTimes(1)
     expect(auth.invalidate).not.toHaveBeenCalled()
     expect(createStream).toHaveBeenCalledTimes(1)

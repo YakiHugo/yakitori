@@ -7,7 +7,7 @@ import {
 } from "../../src/runtime/model.ts"
 
 describe("faux provider", () => {
-  it("emits scripted snapshots then a terminal response in order", async () => {
+  it("emits scripted deltas then a terminal response in order", async () => {
     const provider = createFauxProvider([
       {
         snapshots: ["Hel", "Hello"],
@@ -25,10 +25,10 @@ describe("faux provider", () => {
     const events = await collect(provider.stream(baseRequest()))
 
     expect(events).toEqual([
-      { type: "reasoning_snapshot", text: "Check" },
-      { type: "reasoning_snapshot", text: "Check context" },
-      { type: "snapshot", text: "Hel" },
-      { type: "snapshot", text: "Hello" },
+      { type: "reasoning_delta", text: "Check" },
+      { type: "reasoning_delta", text: " context" },
+      { type: "delta", text: "Hel" },
+      { type: "delta", text: "lo" },
       {
         type: "response",
         response: {

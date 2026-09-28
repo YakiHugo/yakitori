@@ -74,20 +74,33 @@ async function* streamScriptedResponse(
     await waitForAbort(request.signal)
   }
 
+  let previousReasoning = ""
   for (const text of step.reasoningSnapshots ?? []) {
     if (request.signal?.aborted) {
       yield { type: "cancelled" }
       return
     }
-    yield { type: "reasoning_snapshot", text }
+    if (!text.startsWith(previousReasoning))
+      throw new Error(
+        "Scripted reasoning snapshots must extend the previous snapshot.",
+      )
+    yield {
+      type: "reasoning_delta",
+      text: text.slice(previousReasoning.length),
+    }
+    previousReasoning = text
   }
 
+  let previousText = ""
   for (const text of step.snapshots ?? []) {
     if (request.signal?.aborted) {
       yield { type: "cancelled" }
       return
     }
-    yield { type: "snapshot", text }
+    if (!text.startsWith(previousText))
+      throw new Error("Scripted snapshots must extend the previous snapshot.")
+    yield { type: "delta", text: text.slice(previousText.length) }
+    previousText = text
   }
 
   if (step.throwDuring !== undefined) throw step.throwDuring
