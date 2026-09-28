@@ -84,9 +84,24 @@
   opacity: 0;
   transform: translateY(4px) scale(0.98);
 }
+.composer-suggestions {
+  container-type: inline-size;
+  max-height: min(25rem, 54vh, var(--composer-popup-available, 54vh));
+}
+@container (max-width: 34rem) {
+  .composer-suggestion-description {
+    display: none;
+  }
+  .composer-suggestion-label {
+    max-width: 100%;
+  }
+}
 .composer-control-popover {
-  transform-origin: bottom right;
+  width: min(17rem, calc(100vw - 2rem));
+  translate: -50% 0;
+  transform-origin: center bottom;
   animation: composer-control-enter 180ms var(--conversation-ease);
+  transition: height 220ms var(--conversation-ease);
 }
 .effort-slider-fill {
   overflow: hidden;
@@ -101,38 +116,14 @@
     rgb(190 40 150) 66%,
     rgb(82 92 238)
   );
-  background-size: 240% 100%;
-  animation: effort-peak-flow 3.2s linear infinite;
 }
-.effort-slider-fill[data-peak="true"]::before {
+.effort-slider-particle {
   position: absolute;
-  inset: -70% -20%;
-  content: "";
-  background:
-    radial-gradient(circle, rgb(255 255 255 / 90%) 0 1px, transparent 1.7px) 3px
-    8px / 29px 17px,
-    radial-gradient(circle, rgb(255 255 255 / 70%) 0 1.4px, transparent 2px)
-    16px 1px / 43px 23px,
-    radial-gradient(circle, rgb(230 220 255 / 75%) 0 0.8px, transparent 1.5px)
-    7px 4px / 19px 31px;
-  opacity: 0.8;
-  animation: effort-peak-stars 2.8s linear infinite;
-}
-.effort-slider-fill[data-peak="true"]::after {
-  position: absolute;
-  inset-block: -30%;
-  left: -35%;
-  width: 42%;
-  content: "";
-  background: linear-gradient(
-    90deg,
-    transparent,
-    rgb(255 255 255 / 26%),
-    transparent
-  );
-  filter: blur(3px);
-  transform: skewX(-16deg);
-  animation: effort-peak-glint 2.4s ease-in-out infinite;
+  border-radius: 50%;
+  background: rgb(255 255 255 / 90%);
+  box-shadow: 0 0 4px rgb(255 255 255 / 55%);
+  pointer-events: none;
+  animation: effort-particle-drift ease-in-out infinite alternate;
 }
 .effort-peak-label {
   color: rgb(124 58 217);
@@ -146,32 +137,42 @@
   background-size: 220% 100%;
   background-clip: text;
   -webkit-text-fill-color: transparent;
-  animation: effort-peak-flow 4s linear infinite;
 }
-@keyframes effort-peak-flow {
-  to {
-    background-position: -240% 0;
-  }
-}
-@keyframes effort-peak-stars {
+@keyframes effort-particle-drift {
   0% {
-    transform: translate3d(-8%, 4%, 0);
+    opacity: 0.4;
+    transform: translate3d(0, 0, 0) scale(0.75);
   }
-  50% {
+  24% {
+    opacity: 0.9;
+    transform: translate3d(var(--particle-x), var(--particle-y), 0) scale(1);
+  }
+  51% {
+    opacity: 0.55;
+    transform: translate3d(
+        calc(var(--particle-x) * -0.6),
+        calc(var(--particle-y) * 0.4),
+        0
+      )
+      scale(0.85);
+  }
+  78% {
     opacity: 1;
+    transform: translate3d(
+        calc(var(--particle-x) * 0.45),
+        calc(var(--particle-y) * -0.8),
+        0
+      )
+      scale(1.15);
   }
   100% {
-    transform: translate3d(10%, -4%, 0);
-  }
-}
-@keyframes effort-peak-glint {
-  0%,
-  28% {
-    transform: translateX(0) skewX(-16deg);
-  }
-  72%,
-  100% {
-    transform: translateX(330%) skewX(-16deg);
+    opacity: 0.65;
+    transform: translate3d(
+        calc(var(--particle-x) * -0.35),
+        var(--particle-y),
+        0
+      )
+      scale(0.75);
   }
 }
 @keyframes composer-control-enter {
@@ -193,10 +194,7 @@
 @media (prefers-reduced-motion: reduce) {
   .composer-suggestion-panel,
   .composer-control-popover,
-  .effort-slider-fill[data-peak="true"],
-  .effort-slider-fill[data-peak="true"]::before,
-  .effort-slider-fill[data-peak="true"]::after,
-  .effort-peak-label {
+  .effort-slider-particle {
     animation: none;
   }
 }

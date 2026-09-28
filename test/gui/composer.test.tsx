@@ -77,6 +77,55 @@ afterEach(() => {
 })
 
 describe("composer", () => {
+  it("uses the last matching model context and clears stale use when the model changes", () => {
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      defaultProvider: "kimi",
+      defaultModel: "k3",
+      providers: [
+        {
+          name: "kimi",
+          models: [
+            {
+              id: "k3",
+              instructionProfileId: "kimi",
+              effectiveContextWindowTokens: 258_000,
+            },
+            {
+              id: "k4",
+              instructionProfileId: "kimi",
+              effectiveContextWindowTokens: 100_000,
+            },
+          ],
+        },
+      ],
+      execution: {
+        ...createExecutionViewState(),
+        lastModel: { provider: "kimi", model: "k3" },
+        lastTurnUsage: {
+          inputTokens: 108_000,
+          outputTokens: 0,
+          activeContextTokens: 108_000,
+        },
+      },
+    })
+    render(<Composer />)
+
+    expect(
+      screen.getByRole("button", {
+        name: "Context window: 42% used, 58% remaining",
+      }),
+    ).toBeTruthy()
+
+    act(() => useAppStore.setState({ defaultModel: "k4" }))
+    expect(
+      screen.getByRole("button", {
+        name: "Context window usage unavailable",
+      }),
+    ).toBeTruthy()
+    expect(screen.getByRole("tooltip").textContent).toContain("100k total")
+  })
+
   it("sends the trimmed draft on Enter", async () => {
     const user = userEvent.setup()
     const admitInput = vi.fn((_text: string) => Promise.resolve())
@@ -257,9 +306,10 @@ describe("composer", () => {
     expect(screen.getByRole("textbox").getAttribute("contenteditable")).toBe(
       "true",
     )
-    expect(
-      screen.getByRole("button", { name: "Add attachment" }),
-    ).toHaveProperty("disabled", false)
+    expect(screen.getByRole("button", { name: "Add context" })).toHaveProperty(
+      "disabled",
+      false,
+    )
     await user.click(screen.getByRole("button", { name: "Send" }))
     const sending = screen.getByRole("button", { name: "Sending" })
     expect(sending).toHaveProperty("disabled", true)
@@ -318,8 +368,8 @@ describe("composer", () => {
       selection: { sessionId: "session_1" },
     })
     render(<Composer />)
-    await user.click(screen.getByRole("button", { name: "Add attachment" }))
-    await user.click(screen.getByRole("button", { name: "Upload image" }))
+    await user.click(screen.getByRole("button", { name: "Add context" }))
+    await user.click(screen.getByRole("option", { name: "Add image" }))
     await waitFor(() => {
       expect(useAppStore.getState().promptAttachments).toHaveLength(1)
     })
@@ -344,27 +394,195 @@ describe("composer", () => {
     ])
   })
 
-  it("opens a local upload choice before invoking the image picker", async () => {
+  it("opens a compact action list and invokes the existing image picker only after selection", async () => {
     const user = userEvent.setup()
     const bridge = window.yakitoriDesktop
     if (bridge === undefined) throw new Error("Expected the desktop bridge")
-    useAppStore.setState({ selection: { sessionId: "session_1" } })
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      promptDraft: "Keep this draft",
+      sessionSkills: [
+        {
+          name: "Review",
+          description: "Inspect changes",
+          path: "/repo/.agents/skills/review/SKILL.md",
+          scope: "repo",
+        },
+      ],
+    })
     render(<Composer />)
 
-    await user.click(screen.getByRole("button", { name: "Add attachment" }))
+    await user.click(screen.getByRole("button", { name: "Add context" }))
 
     expect(bridge.pickImages).not.toHaveBeenCalled()
-    expect(screen.getByRole("button", { name: "Upload image" })).toBeDefined()
+    const menu = screen.getByRole("listbox", { name: "Add context" })
+    expect(
+      Array.from(menu.querySelectorAll('[role="option"]')).map(
+        (option) =>
+          option.getAttribute("aria-label") ?? option.textContent?.trim(),
+      ),
+    ).toEqual(["Files and folders", "Add image"])
+    expect(menu.textContent).toContain("Images")
+    expect(menu.textContent).not.toContain("Review")
+    expect(menu.textContent).not.toContain("Goal")
+    expect(screen.queryByRole("combobox")).toBeNull()
 
     await user.keyboard("{Escape}")
-    expect(screen.queryByRole("button", { name: "Upload image" })).toBeNull()
+    expect(screen.queryByRole("listbox", { name: "Add context" })).toBeNull()
     expect(bridge.pickImages).not.toHaveBeenCalled()
+    expect(useAppStore.getState().promptDraft).toBe("Keep this draft")
 
-    await user.click(screen.getByRole("button", { name: "Add attachment" }))
-    await user.click(screen.getByRole("button", { name: "Upload image" }))
+    await user.click(screen.getByRole("button", { name: "Add context" }))
+    await user.click(screen.getByRole("option", { name: "Add image" }))
     await waitFor(() => {
       expect(bridge.pickImages).toHaveBeenCalledOnce()
     })
+  })
+
+  it("shows why file context is unavailable until a project is selected", async () => {
+    const user = userEvent.setup()
+    render(<Composer />)
+    await user.click(screen.getByRole("button", { name: "Add context" }))
+    expect(
+      screen.getByRole("option", { name: "Files and folders" }),
+    ).toHaveProperty("disabled", true)
+    expect(screen.getByText("Select a project to browse")).toBeDefined()
+    expect(screen.getByRole("option", { name: "Add image" })).toHaveProperty(
+      "disabled",
+      false,
+    )
+  })
+
+  it("switches from the add list to editor shortcuts when typing @ or /", async () => {
+    const user = userEvent.setup()
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      selectedSession: { ...createdSession, workingDirectory: "/repo" },
+    })
+    render(<Composer />)
+    const editor = screen.getByRole("textbox", { name: "Message the Mate" })
+    await user.click(screen.getByRole("button", { name: "Add context" }))
+    await pastePrompt(editor, "/")
+    expect(screen.queryByRole("listbox", { name: "Add context" })).toBeNull()
+    expect(
+      screen.getByRole("listbox", { name: "Slash commands" }),
+    ).toBeDefined()
+    await pastePrompt(editor, "@", true)
+    expect(
+      screen.getByRole("listbox", { name: "Files and folders" }),
+    ).toBeDefined()
+  })
+
+  it("inserts @ at the editor selection on keyboard action and searches folders in the shared picker", async () => {
+    const user = userEvent.setup()
+    const bridge = window.yakitoriDesktop
+    if (bridge === undefined) throw new Error("Expected the desktop bridge")
+    fakeRef.current.respond = (method) => {
+      if (method === "workspace/findFiles")
+        return {
+          paths: [
+            "src/gui/app.tsx",
+            "src/gui/composer.tsx",
+            "test/gui/app.test.tsx",
+          ],
+          truncated: false,
+        }
+      throw new ApiRequestError("not found", "not_found")
+    }
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      selectedSession: { ...createdSession, workingDirectory: "/repo" },
+      promptDraft: "Checkplease",
+    })
+    render(<Composer />)
+
+    const editor = screen.getByRole("textbox", { name: "Message the Mate" })
+    await selectPrompt(editor, 5)
+    await user.click(screen.getByRole("button", { name: "Add context" }))
+    await user.keyboard("{Enter}")
+    expect(useAppStore.getState().promptDraft).toBe("Check @ please")
+    expect(screen.queryByRole("listbox", { name: "Add context" })).toBeNull()
+    expect(
+      screen.getByRole("listbox", { name: "Files and folders" }),
+    ).toBeDefined()
+    expect(document.activeElement).toBe(editor)
+    expect(screen.queryByRole("combobox")).toBeNull()
+    await pastePrompt(editor, "gui")
+    await waitFor(() =>
+      expect(
+        screen
+          .getAllByRole("option", { name: /gui/ })
+          .some((option) => option.getAttribute("title") === "src/gui"),
+      ).toBe(true),
+    )
+    const folder = screen
+      .getAllByRole("option", { name: /gui/ })
+      .find((option) => option.getAttribute("title") === "src/gui")
+    if (!folder) throw new Error("Expected src/gui folder")
+    await user.click(folder)
+    expect(useAppStore.getState().promptDraft).toBe(
+      "Check [@gui](src/gui) please",
+    )
+    expect(editor.querySelector('[data-file-path="src/gui"]')).not.toBeNull()
+    expect(bridge.pickImages).not.toHaveBeenCalled()
+  })
+
+  it("clicks Files and folders, searches in the editor, and selects a file with Enter", async () => {
+    const user = userEvent.setup()
+    fakeRef.current.respond = (method) => {
+      if (method === "workspace/findFiles")
+        return { paths: ["src/gui/composer.tsx"], truncated: false }
+      throw new ApiRequestError("not found", "not_found")
+    }
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      selectedSession: { ...createdSession, workingDirectory: "/repo" },
+    })
+    render(<Composer />)
+    await user.click(screen.getByRole("button", { name: "Add context" }))
+    await user.click(screen.getByRole("option", { name: "Files and folders" }))
+    const editor = screen.getByRole("textbox", { name: "Message the Mate" })
+    expect(useAppStore.getState().promptDraft).toBe("@")
+    expect(document.activeElement).toBe(editor)
+    expect(screen.queryByRole("combobox")).toBeNull()
+    await pastePrompt(editor, "composer")
+    await waitFor(() =>
+      expect(
+        screen.getByRole("listbox", { name: "Files and folders" }).textContent,
+      ).toContain("composer.tsx"),
+    )
+    await user.keyboard("{Enter}")
+    expect(useAppStore.getState().promptDraft).toBe(
+      "[@composer.tsx](src/gui/composer.tsx) ",
+    )
+    expect(
+      editor.querySelector('[data-file-path="src/gui/composer.tsx"]'),
+    ).not.toBeNull()
+  })
+
+  it("replaces selected draft text with a file context trigger without losing nearby text", async () => {
+    const user = userEvent.setup()
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      selectedSession: { ...createdSession, workingDirectory: "/repo" },
+      promptDraft: "Check review please",
+    })
+    render(<Composer />)
+    const editor = screen.getByRole("textbox", { name: "Message the Mate" })
+    await act(async () => {
+      editor.focus()
+      const text = editor.querySelector("p")?.firstChild
+      if (!text) throw new Error("Expected a draft paragraph")
+      window.getSelection()?.setBaseAndExtent(text, 6, text, 12)
+      document.dispatchEvent(new Event("selectionchange"))
+      await new Promise((resolve) => setTimeout(resolve, 30))
+    })
+    await user.click(screen.getByRole("button", { name: "Add context" }))
+    await user.click(screen.getByRole("option", { name: "Files and folders" }))
+    expect(useAppStore.getState().promptDraft).toBe("Check @ please")
+    expect(
+      screen.getByRole("listbox", { name: "Files and folders" }),
+    ).toBeDefined()
   })
 
   it("previews an attached image with zoom controls", async () => {
@@ -480,10 +698,10 @@ describe("composer", () => {
     respondWithSessionCreate()
     render(<Composer />)
 
-    const attach = screen.getByRole("button", { name: "Add attachment" })
+    const attach = screen.getByRole("button", { name: "Add context" })
     expect(attach).toHaveProperty("disabled", false)
     await user.click(attach)
-    await user.click(screen.getByRole("button", { name: "Upload image" }))
+    await user.click(screen.getByRole("option", { name: "Add image" }))
 
     await waitFor(() => {
       expect(useAppStore.getState().promptAttachments).toHaveLength(1)
@@ -509,11 +727,11 @@ describe("composer", () => {
     respondWithSessionCreate()
     render(<Composer />)
 
-    await user.click(screen.getByRole("button", { name: "Add attachment" }))
-    await user.click(screen.getByRole("button", { name: "Upload image" }))
+    await user.click(screen.getByRole("button", { name: "Add context" }))
+    await user.click(screen.getByRole("option", { name: "Add image" }))
     await waitFor(() => {
       expect(
-        screen.getByRole("button", { name: "Add attachment" }),
+        screen.getByRole("button", { name: "Add context" }),
       ).toHaveProperty("disabled", false)
     })
 
@@ -532,8 +750,8 @@ describe("composer", () => {
     useAppStore.setState({ promptDraft: "keep this draft" })
     render(<Composer />)
 
-    await user.click(screen.getByRole("button", { name: "Add attachment" }))
-    await user.click(screen.getByRole("button", { name: "Upload image" }))
+    await user.click(screen.getByRole("button", { name: "Add context" }))
+    await user.click(screen.getByRole("option", { name: "Add image" }))
 
     await waitFor(() =>
       expect(screen.getByRole("alert").textContent).toBe(
@@ -567,8 +785,8 @@ describe("composer", () => {
     useAppStore.getState().startNewSession()
     render(<Composer />)
 
-    await user.click(screen.getByRole("button", { name: "Add attachment" }))
-    await user.click(screen.getByRole("button", { name: "Upload image" }))
+    await user.click(screen.getByRole("button", { name: "Add context" }))
+    await user.click(screen.getByRole("option", { name: "Add image" }))
     await act(async () => {
       resolveCreate({
         session: createdSession,
@@ -612,8 +830,8 @@ describe("composer", () => {
     useAppStore.getState().startNewSession()
     const intent = useAppStore.getState().sessionSelectionIntentRevision
     render(<Composer />)
-    await user.click(screen.getByRole("button", { name: "Add attachment" }))
-    await user.click(screen.getByRole("button", { name: "Upload image" }))
+    await user.click(screen.getByRole("button", { name: "Add context" }))
+    await user.click(screen.getByRole("option", { name: "Add image" }))
     await waitFor(() =>
       expect(bridge.importPickedImages).toHaveBeenCalledOnce(),
     )
@@ -650,8 +868,8 @@ describe("composer", () => {
     )
     useAppStore.getState().startNewSession()
     render(<Composer />)
-    await user.click(screen.getByRole("button", { name: "Add attachment" }))
-    await user.click(screen.getByRole("button", { name: "Upload image" }))
+    await user.click(screen.getByRole("button", { name: "Add context" }))
+    await user.click(screen.getByRole("option", { name: "Add image" }))
     await waitFor(() =>
       expect(bridge.importPickedImages).toHaveBeenCalledOnce(),
     )
@@ -699,8 +917,8 @@ describe("composer", () => {
     respondWithSessionCreate()
     render(<Composer />)
 
-    await user.click(screen.getByRole("button", { name: "Add attachment" }))
-    await user.click(screen.getByRole("button", { name: "Upload image" }))
+    await user.click(screen.getByRole("button", { name: "Add context" }))
+    await user.click(screen.getByRole("option", { name: "Add image" }))
 
     await waitFor(() => {
       expect(screen.getByRole("alert").textContent).toBe(
@@ -1224,7 +1442,9 @@ describe("file mention popup", () => {
     await user.click(screen.getByRole("textbox"))
     await pastePrompt(screen.getByRole("textbox"), "review @app")
 
-    const menu = await screen.findByRole("listbox", { name: "Files" })
+    const menu = await screen.findByRole("listbox", {
+      name: "Files and folders",
+    })
     await waitFor(() => expect(menu.textContent).toContain("app.tsx"))
 
     await user.keyboard("{ArrowDown}{Enter}")
@@ -1467,6 +1687,7 @@ describe("model selector", () => {
               displayName: "K3",
               instructionProfileId: "kimi",
               efforts: ["low", "high", "max"],
+              defaultEffort: "max",
             },
           ],
         },
@@ -1501,12 +1722,16 @@ describe("model selector", () => {
     screen.getByRole("button", { name: "Select model and effort" })
 
   async function openEffortMenu(user: ReturnType<typeof userEvent.setup>) {
-    await user.click(combinedSelector())
+    if (screen.queryByRole("slider", { name: "Reasoning effort" }) === null)
+      await user.click(combinedSelector())
   }
 
   async function openModelMenu(user: ReturnType<typeof userEvent.setup>) {
-    await user.click(combinedSelector())
-    const modelStep = screen.queryByRole("button", { name: "Select model" })
+    let modelStep = screen.queryByRole("button", { name: "Select model" })
+    if (modelStep === null) {
+      await user.click(combinedSelector())
+      modelStep = screen.queryByRole("button", { name: "Select model" })
+    }
     if (modelStep !== null) await user.click(modelStep)
   }
 
@@ -1546,11 +1771,13 @@ describe("model selector", () => {
     const user = userEvent.setup()
     window.localStorage.clear()
     useAppStore.setState({ ...selectModelState(), modelSelections: {} })
-    render(<Composer />)
+    const { container } = render(<Composer />)
 
     await openModelMenu(user)
 
-    expect(screen.getByText("Select model")).toBeDefined()
+    expect(
+      container.querySelector("[data-model-picker]")?.textContent,
+    ).toContain("Select model")
     expect(screen.getByText("Recommended set of models")).toBeDefined()
     expect(screen.getByText("openai")).toBeDefined()
     expect(screen.getByText("anthropic")).toBeDefined()
@@ -1617,6 +1844,10 @@ describe("model selector", () => {
     await openModelMenu(user)
     await user.click(screen.getByRole("button", { name: "GPT 5.1 Codex" }))
 
+    expect(combinedSelector().getAttribute("aria-expanded")).toBe("true")
+    expect(
+      screen.getByRole("slider", { name: "Reasoning effort" }),
+    ).toBeDefined()
     expect(useAppStore.getState().modelSelections).toEqual({
       session_1: { provider: "openai", model: "gpt-5.1-codex", effort: "low" },
     })
@@ -1674,21 +1905,59 @@ describe("model selector", () => {
     const user = userEvent.setup()
     window.localStorage.clear()
     useAppStore.setState({ ...selectModelState(), modelSelections: {} })
-    render(<Composer />)
+    const { container } = render(<Composer />)
 
     await openEffortMenu(user)
+    const popover = container.querySelector("[data-model-picker]")
+    expect(popover).not.toBeNull()
     expect(screen.getByRole("button", { name: "medium" })).toBeDefined()
     await user.click(screen.getByRole("button", { name: "Select model" }))
+    expect(container.querySelector("[data-model-picker]")).toBe(popover)
     await user.click(screen.getByRole("button", { name: "K3" }))
 
-    await openEffortMenu(user)
+    expect(container.querySelector("[data-model-picker]")).toBe(popover)
+    expect(combinedSelector().getAttribute("aria-expanded")).toBe("true")
     expect(screen.getByRole("button", { name: "low" })).toBeDefined()
     expect(screen.getByRole("button", { name: "high" })).toBeDefined()
     expect(screen.getByRole("button", { name: "max" })).toBeDefined()
     expect(screen.queryByRole("button", { name: "medium" })).toBeNull()
+    const slider = screen.getByRole("slider", { name: "Reasoning effort" })
+    expect(slider.getAttribute("aria-valuetext")).toBe("max")
+    expect(document.activeElement).toBe(slider)
+    expect(useAppStore.getState().modelSelections.session_1).toEqual({
+      provider: "kimi",
+      model: "k3",
+    })
   })
 
-  it("pins an effort for the effective model and resets it to default", async () => {
+  it("returns to the default model's effort controls when choosing Default", async () => {
+    const user = userEvent.setup()
+    window.localStorage.clear()
+    useAppStore.setState({
+      ...selectModelState(),
+      modelSelections: {
+        session_1: { provider: "grok", model: "grok-4.20-non-reasoning" },
+      },
+    })
+    render(<Composer />)
+
+    await user.click(combinedSelector())
+    await user.click(
+      screen.getByRole("button", {
+        name: /Default.*Recommended set of models/,
+      }),
+    )
+
+    expect(combinedSelector().getAttribute("aria-expanded")).toBe("true")
+    expect(
+      screen.getByRole("slider", { name: "Reasoning effort" }),
+    ).toBeDefined()
+    expect(combinedSelector().textContent).toBe("Select effort")
+    await user.click(combinedSelector())
+    expect(combinedSelector().textContent).toContain("GPT 5.1 Codex")
+  })
+
+  it("pins an effort for the effective model without a reset action", async () => {
     const user = userEvent.setup()
     window.localStorage.clear()
     useAppStore.setState({ ...selectModelState(), modelSelections: {} })
@@ -1700,16 +1969,13 @@ describe("model selector", () => {
     expect(useAppStore.getState().modelSelections).toEqual({
       session_1: { provider: "openai", model: "gpt-5.1-codex", effort: "high" },
     })
+    expect(combinedSelector().textContent).toBe("Select effort")
+    await user.click(combinedSelector())
     expect(combinedSelector().textContent).toContain("High")
 
-    // The reset control clears only the effort, keeping the model.
-    await user.click(
-      screen.getByRole("button", { name: "Reset effort to default" }),
-    )
-
-    expect(useAppStore.getState().modelSelections).toEqual({
-      session_1: { provider: "openai", model: "gpt-5.1-codex" },
-    })
+    expect(
+      screen.queryByRole("button", { name: "Reset effort to default" }),
+    ).toBeNull()
   })
 
   it("gives each model's top effort stop its dedicated animated presentation", async () => {
@@ -1751,7 +2017,6 @@ describe("model selector", () => {
     // K3's top stop is max: the effect follows the stop, not the ultra name.
     await user.click(screen.getByRole("button", { name: "Select model" }))
     await user.click(screen.getByRole("button", { name: "K3" }))
-    await openEffortMenu(user)
     expect(
       screen
         .getByRole("slider", { name: "Reasoning effort" })
@@ -1783,14 +2048,14 @@ describe("model selector", () => {
     expect(slider.getAttribute("aria-valuetext")).toBe("low")
     expect(slider.getAttribute("data-peak")).toBe("false")
 
-    // The default is display-only: nothing is pinned and reset stays disabled.
+    // The default is display-only: nothing is pinned.
     expect(useAppStore.getState().modelSelections.session_1).toEqual({
       provider: "codex",
       model: "gpt-5.6-sol",
     })
     expect(
-      screen.getByRole("button", { name: "Reset effort to default" }),
-    ).toHaveProperty("disabled", true)
+      screen.queryByRole("button", { name: "Reset effort to default" }),
+    ).toBeNull()
   })
 
   it("opens model selection directly when the effective model offers no effort", async () => {
@@ -1818,6 +2083,16 @@ describe("model selector", () => {
         .getByRole("button", { name: "GPT 5.1 Codex" })
         .getAttribute("aria-pressed"),
     ).toBe("false")
+    await user.click(screen.getByRole("button", { name: "GPT 5.1 Codex" }))
+    expect(
+      screen.getByRole("slider", { name: "Reasoning effort" }),
+    ).toBeDefined()
+
+    await user.click(screen.getByRole("button", { name: "Select model" }))
+    await user.click(
+      screen.getByRole("button", { name: "Grok 4.20 Non-Reasoning" }),
+    )
+    expect(combinedSelector().getAttribute("aria-expanded")).toBe("false")
   })
 
   it("pins and clears a speed tier for codex models", async () => {
@@ -1832,7 +2107,9 @@ describe("model selector", () => {
     render(<Composer />)
 
     await openEffortMenu(user)
+    expect(combinedSelector().textContent).toBe("Select effort")
     await user.click(screen.getByRole("button", { name: "Use fast speed" }))
+    expect(combinedSelector().textContent).toBe("Select effort")
 
     // Picking a speed keeps the pinned effort.
     expect(useAppStore.getState().modelSelections).toEqual({
@@ -1925,6 +2202,8 @@ describe("model selector", () => {
     expect(useAppStore.getState().modelSelections).toEqual({
       session_1: { provider: "openai", model: "gpt-5" },
     })
+    expect(combinedSelector().textContent).toBe("Select effort")
+    await user.click(combinedSelector())
     expect(combinedSelector().textContent).toContain("GPT-5")
 
     // The picked model row is now pressed; Default is not.
