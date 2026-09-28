@@ -413,6 +413,134 @@ describe("app RPC client", () => {
     client.close()
   })
 
+  it("reconnects a half-open connection and restores its session stream", async () => {
+    vi.useFakeTimers()
+    const onDisconnected = vi.fn()
+    const onSnapshot = vi.fn()
+    const client = createAppRpcClient({ apiBase: "http://api.test" })
+    client.openSessionStream("session_1", 0, {
+      onSnapshot,
+      onEvent: () => {},
+      onTransient: () => {},
+      onReplayComplete: () => {},
+      onDisconnected,
+    })
+    const first = completeHandshake(FakeWebSocket.instances[0])
+    await flushMicrotasks()
+    first.emitMessage({ id: 1, result: { session: { id: "session_1" } } })
+    await flushMicrotasks()
+
+    await vi.advanceTimersByTimeAsync(15_000)
+    expect(first.sentFrames().at(-1)).toMatchObject({
+      method: "server/ping",
+    })
+    // The socket stays OPEN and no close event arrives after network loss.
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(first.readyState).toBe(3)
+    expect(onDisconnected).toHaveBeenCalledOnce()
+    await vi.advanceTimersByTimeAsync(250)
+
+    const second = completeHandshake(FakeWebSocket.instances[1])
+    await flushMicrotasks()
+    const subscribe = second
+      .sentFrames()
+      .find((frame) => frame.method === "session/subscribe")
+    expect(subscribe).toMatchObject({
+      params: { sessionId: "session_1", after: 0 },
+    })
+    second.emitMessage({
+      id: subscribe?.id,
+      result: { session: { id: "session_1" } },
+    })
+    await flushMicrotasks()
+    expect(onSnapshot).toHaveBeenCalledTimes(2)
+    client.close()
+  })
+
+  it("keeps a responsive idle connection open across heartbeat intervals", async () => {
+    vi.useFakeTimers()
+    const client = createAppRpcClient({ apiBase: "http://api.test" })
+    const request = client.request("provider/list", {})
+    const socket = completeHandshake(FakeWebSocket.instances[0])
+    await flushMicrotasks()
+    socket.emitMessage({ id: 1, result: { providers: [] } })
+    await request
+
+    for (let index = 0; index < 2; index += 1) {
+      await vi.advanceTimersByTimeAsync(15_000)
+      const ping = socket.sentFrames().at(-1)
+      expect(ping).toMatchObject({ method: "server/ping" })
+      socket.emitMessage({ id: ping?.id, result: {} })
+      await flushMicrotasks()
+    }
+    expect(socket.readyState).toBe(FakeWebSocket.OPEN)
+    expect(FakeWebSocket.instances).toHaveLength(1)
+    client.close()
+  })
+
+  it("times out an unanswered initialize handshake and retries", async () => {
+    vi.useFakeTimers()
+    const client = createAppRpcClient({ apiBase: "http://api.test" })
+    const pending = client.request("provider/list", {})
+    const rejected = expect(pending).rejects.toThrow(
+      "The connection to the server timed out.",
+    )
+    FakeWebSocket.instances[0]?.emitOpen()
+    await vi.advanceTimersByTimeAsync(10_000)
+    await rejected
+    expect(FakeWebSocket.instances[0]?.readyState).toBe(3)
+    await vi.advanceTimersByTimeAsync(250)
+    expect(FakeWebSocket.instances).toHaveLength(2)
+    client.close()
+  })
+
+  it("rejects a request when the socket closes after the connection await", async () => {
+    vi.useFakeTimers()
+    const client = createAppRpcClient({ apiBase: "http://api.test" })
+    // Initialize the connection through a stream before issuing the request.
+    client.openSessionStream("session_1", 0, {
+      onSnapshot: () => {},
+      onEvent: () => {},
+      onTransient: () => {},
+      onReplayComplete: () => {},
+    })
+    const socket = completeHandshake(FakeWebSocket.instances[0])
+    await flushMicrotasks()
+    const pending = client.request("provider/list", {})
+    const rejected = expect(pending).rejects.toThrow(
+      "The connection to the server was lost.",
+    )
+    socket.emitClose()
+    await rejected
+    expect(
+      socket.sentFrames().filter((frame) => frame.method === "provider/list"),
+    ).toHaveLength(0)
+    client.close()
+  })
+
+  it("reconnects after an initialize error instead of leaving a stream waiting", async () => {
+    vi.useFakeTimers()
+    const onDisconnected = vi.fn()
+    const client = createAppRpcClient({ apiBase: "http://api.test" })
+    client.openSessionStream("session_1", 0, {
+      onSnapshot: () => {},
+      onEvent: () => {},
+      onTransient: () => {},
+      onReplayComplete: () => {},
+      onDisconnected,
+    })
+    const socket = FakeWebSocket.instances[0]
+    socket?.emitOpen()
+    socket?.emitMessage({
+      id: 0,
+      error: { code: -32603, message: "Initialization failed." },
+    })
+    expect(onDisconnected).toHaveBeenCalledOnce()
+    await vi.advanceTimersByTimeAsync(250)
+    expect(FakeWebSocket.instances).toHaveLength(2)
+    client.close()
+  })
+
   it("reports a dropped session stream while keeping it available for reconnect", async () => {
     vi.useFakeTimers()
     const onDisconnected = vi.fn()

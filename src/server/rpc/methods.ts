@@ -693,6 +693,13 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
   ...workspaceRpcMethods,
   ...computerMethods,
   {
+    method: "server/ping",
+    scope: () => undefined,
+    async invoke() {
+      return { result: {} }
+    },
+  },
+  {
     method: "server/diagnostics",
     experimental: true,
     scope: () => undefined,
@@ -1300,6 +1307,7 @@ export type RpcMethodParams = Readonly<
       "computer/connect": Readonly<Record<string, never>>
       "computer/disconnect": Readonly<Record<string, never>>
       initialize: InitializeParams
+      "server/ping": Readonly<Record<string, never>>
       "server/diagnostics": Readonly<Record<string, never>>
       "sidebar/read": Readonly<Record<string, never>>
       "sidebar/update": SidebarChange
@@ -1353,6 +1361,7 @@ export type RpcMethodResponses = Readonly<
       "computer/connect": ComputerUseStatus
       "computer/disconnect": ComputerUseStatus
       initialize: InitializeResponse
+      "server/ping": Readonly<Record<string, never>>
       "server/diagnostics": ApiServerDiagnostics
       "sidebar/read": SessionSidebar
       "sidebar/update": SessionSidebar
