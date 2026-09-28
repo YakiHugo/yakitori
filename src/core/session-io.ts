@@ -170,7 +170,7 @@ export type SessionEvent =
       readonly turnId: string
       readonly itemId: string
       readonly kind: "assistant" | "reasoning"
-      readonly text: string
+      readonly delta: string
     }
   | {
       readonly type: "item.started"
@@ -407,7 +407,8 @@ export class SessionIo {
 }
 
 export class AsyncQueue<T> {
-  readonly #items: T[] = []
+  #items: T[] = []
+  #head = 0
   readonly #receivers: Array<(value: T | undefined) => void> = []
   #closed = false
 
@@ -419,8 +420,18 @@ export class AsyncQueue<T> {
   }
 
   receive(): Promise<T | undefined> {
-    const item = this.#items.shift()
-    if (item !== undefined) return Promise.resolve(item)
+    if (this.#head < this.#items.length) {
+      const item = this.#items[this.#head]
+      this.#head += 1
+      if (this.#head === this.#items.length) {
+        this.#items = []
+        this.#head = 0
+      } else if (this.#head > 1024 && this.#head * 2 >= this.#items.length) {
+        this.#items = this.#items.slice(this.#head)
+        this.#head = 0
+      }
+      return Promise.resolve(item)
+    }
     if (this.#closed) return Promise.resolve(undefined)
     return new Promise((resolve) => this.#receivers.push(resolve))
   }

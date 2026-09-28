@@ -1267,6 +1267,8 @@ async function consumeModelStream(input: {
   input.setActiveStream(iterator)
   let terminal: ModelResponse | undefined
   let exhausted = false
+  const streamedBytes = { assistant: 0, reasoning: 0 }
+  const trailingHighSurrogate = { assistant: "", reasoning: "" }
   try {
     for (;;) {
       const next = await iterator.next()
@@ -1319,7 +1321,17 @@ async function consumeModelStream(input: {
       if (event.type !== "response") {
         if (input.request.compaction === "remote_v2") continue
         input.onFirstToken?.()
-        if (utf8Bytes(event.text) > input.assistantResponseBytes) {
+        const kind =
+          event.type === "reasoning_delta" ? "reasoning" : "assistant"
+        let text = trailingHighSurrogate[kind] + event.text
+        trailingHighSurrogate[kind] = ""
+        const last = text.charCodeAt(text.length - 1)
+        if (last >= 0xd800 && last <= 0xdbff) {
+          trailingHighSurrogate[kind] = text.slice(-1)
+          text = text.slice(0, -1)
+        }
+        streamedBytes[kind] += utf8Bytes(text)
+        if (streamedBytes[kind] > input.assistantResponseBytes) {
           throw new Error(
             "Model stream update exceeded the configured byte limit.",
           )
@@ -1327,9 +1339,8 @@ async function consumeModelStream(input: {
         if (input.itemId !== undefined) {
           input.emitModelStream?.({
             itemId: input.itemId,
-            kind:
-              event.type === "reasoning_snapshot" ? "reasoning" : "assistant",
-            text: event.text,
+            kind,
+            delta: event.text,
           })
         }
         continue
@@ -1338,6 +1349,14 @@ async function consumeModelStream(input: {
         throw new Error("Model stream emitted more than one terminal response.")
       }
       terminal = event.response
+      for (const kind of ["assistant", "reasoning"] as const) {
+        streamedBytes[kind] += utf8Bytes(trailingHighSurrogate[kind])
+        if (streamedBytes[kind] > input.assistantResponseBytes) {
+          throw new Error(
+            "Model stream update exceeded the configured byte limit.",
+          )
+        }
+      }
       input.onFirstToken?.()
       if (event.response.usage !== undefined)
         await input.onUsage(event.response.usage)

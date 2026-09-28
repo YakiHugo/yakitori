@@ -27,7 +27,7 @@ function titleStream(title: string | (() => string)) {
   return vi.fn((_request: ModelRequest): AsyncIterable<ModelStreamEvent> => {
     const body = typeof title === "function" ? title() : title
     const events: ModelStreamEvent[] = [
-      { type: "snapshot", text: body },
+      { type: "delta", text: body },
       {
         type: "response",
         response: {

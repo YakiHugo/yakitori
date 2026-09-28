@@ -134,8 +134,6 @@ async function* streamOpenAI(
             return data
           })
     failureStage = "response_body"
-    let text = ""
-    let reasoning = ""
     const completedItems = new Map<number, Response["output"][number]>()
     for await (const event of stream) {
       if (request.signal?.aborted) {
@@ -143,13 +141,11 @@ async function* streamOpenAI(
         return
       }
       if (event.type === "response.output_text.delta") {
-        text += event.delta
-        yield { type: "snapshot", text }
+        yield { type: "delta", text: event.delta }
         continue
       }
       if (event.type === "response.reasoning_summary_text.delta") {
-        reasoning += event.delta
-        yield { type: "reasoning_snapshot", text: reasoning }
+        yield { type: "reasoning_delta", text: event.delta }
         continue
       }
       if (event.type === "response.output_item.done") {

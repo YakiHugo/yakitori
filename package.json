@@ -34,6 +34,7 @@
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",
     "@types/fs-ext": "^2.0.3",
+    "@types/mdast": "^4.0.4",
     "@types/node": "^26.0.1",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
@@ -46,6 +47,7 @@
     "electron-builder": "^26.15.3",
     "happy-dom": "^20.11.1",
     "typescript": "^6.0.3",
+    "unified": "^11.0.5",
     "vite": "^8.1.0",
     "vitest": "^4.1.9",
     "yazl": "^3.3.1"

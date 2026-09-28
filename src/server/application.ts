@@ -1791,9 +1791,9 @@ function createFauxScenarioStream(scenario: string): StreamFn {
   let toolCallSequence = 0
   return async function* (request) {
     if (scenario === "text") {
-      yield { type: "reasoning_snapshot", text: "Preparing a concise reply." }
-      yield { type: "snapshot", text: "Hel" }
-      yield { type: "snapshot", text: "Hello from faux." }
+      yield { type: "reasoning_delta", text: "Preparing a concise reply." }
+      yield { type: "delta", text: "Hel" }
+      yield { type: "delta", text: "lo from faux." }
       yield {
         type: "response",
         response: {

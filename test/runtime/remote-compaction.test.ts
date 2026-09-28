@@ -48,7 +48,7 @@ describe("provider-native compaction history", () => {
       },
       stream: async function* () {
         attempts += 1
-        yield { type: "snapshot", text: "provisional output" }
+        yield { type: "delta", text: "provisional output" }
         yield {
           type: "failure",
           failure: {

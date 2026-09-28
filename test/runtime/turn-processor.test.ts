@@ -53,6 +53,53 @@ afterEach(async () => {
 })
 
 describe("Turn processor", () => {
+  it("enforces the output byte limit across deltas", async () => {
+    const runtime = await createRuntime(
+      async function* () {
+        yield { type: "delta", text: "ab" }
+        yield { type: "delta", text: "cd" }
+        yield { type: "delta", text: "ef" }
+        yield responseEvent("abcdef")
+      },
+      createToolRegistry([]),
+      {
+        executionPolicy: createSessionExecutionPolicy({
+          assistantResponseBytes: 5,
+        }),
+      },
+    )
+    const thread = await runtime.createThread()
+    await thread.startIfIdle({ content: { kind: "text", text: "go" } })
+    await expect
+      .poll(() => thread.agentStatus)
+      .toEqual({
+        errored: "Model stream update exceeded the configured byte limit.",
+      })
+  })
+
+  it("counts a Unicode character split across deltas once", async () => {
+    const emoji = "🙂"
+    const runtime = await createRuntime(
+      async function* () {
+        yield { type: "delta", text: emoji[0] ?? "" }
+        yield { type: "delta", text: emoji[1] ?? "" }
+        yield {
+          type: "response",
+          response: { stopReason: ModelStopReason.EndTurn, content: [] },
+        }
+      },
+      createToolRegistry([]),
+      {
+        executionPolicy: createSessionExecutionPolicy({
+          assistantResponseBytes: 4,
+        }),
+      },
+    )
+    const thread = await runtime.createThread()
+    await thread.startIfIdle({ content: { kind: "text", text: "go" } })
+    await expect.poll(() => thread.agentStatus).toEqual({ completed: null })
+  })
+
   it("snapshots model transport configuration once per Turn", async () => {
     const policies: Parameters<ModelClient["startTurn"]>[1][] = []
     const responses = ["first", "second"]
@@ -358,7 +405,7 @@ describe("Turn processor", () => {
             ? "old ".repeat(9000)
             : "done"
         now += compacting ? 100 : 50
-        yield { type: "snapshot", text }
+        yield { type: "delta", text }
         now += compacting ? 300 : 150
         yield {
           type: "response",
@@ -1795,7 +1842,8 @@ describe("Turn processor", () => {
         ),
     )
     const finalStreamAt = events.findIndex(
-      (event) => event.type === "model.stream" && event.text === "final answer",
+      (event) =>
+        event.type === "model.stream" && event.delta === "final answer",
     )
     expect(toolResultAt).toBeGreaterThan(-1)
     expect(finalStreamAt).toBeGreaterThan(toolResultAt)
@@ -2501,7 +2549,7 @@ describe("Turn processor", () => {
         await release.promise
         return {
           done: false as const,
-          value: { type: "snapshot" as const, text: "too late" },
+          value: { type: "delta" as const, text: "too late" },
         }
       },
       async return() {

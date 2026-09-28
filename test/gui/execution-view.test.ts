@@ -1459,6 +1459,50 @@ describe("execution view", () => {
       }),
     ])
   })
+
+  it("keeps one entry when an output item start is repeated", () => {
+    const started = {
+      type: "transient" as const,
+      event: {
+        type: "item.started" as const,
+        sessionId,
+        turnId: "turn_1",
+        item: { type: "agent_message" as const, itemId: "item_1" },
+        createdAt: "2026-07-24T00:00:00.000Z",
+      },
+    }
+    let state = reduceExecutionView(createExecutionViewState(), started)
+    state = reduceExecutionView(state, {
+      type: "transient",
+      event: {
+        type: "assistant.delta",
+        sessionId,
+        turnId: "turn_1",
+        itemId: "item_1",
+        delta: "Hello",
+        createdAt: started.event.createdAt,
+      },
+    })
+    state = reduceExecutionView(state, started)
+    state = reduceExecutionView(state, {
+      type: "transient",
+      event: {
+        type: "assistant.delta",
+        sessionId,
+        turnId: "turn_1",
+        itemId: "item_1",
+        delta: " world",
+        createdAt: started.event.createdAt,
+      },
+    })
+    expect(projectExecutionView(state).entries).toEqual([
+      expect.objectContaining({
+        kind: "assistant",
+        itemId: "item_1",
+        text: "Hello world",
+      }),
+    ])
+  })
 })
 
 function createExecutionEnvelope(

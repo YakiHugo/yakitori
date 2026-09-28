@@ -678,14 +678,14 @@ function reduceChat(chat: LiveChat, event: SessionEvent): boolean {
       (message) => message.id === event.itemId,
     )
     if (existing) {
-      existing.text = event.text
+      existing.text += event.delta
       existing.streaming = true
     } else
       state.messages.push({
         id: event.itemId,
         turnId: event.turnId,
         role: "assistant",
-        text: event.text,
+        text: event.delta,
         streaming: true,
       })
     return true

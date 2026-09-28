@@ -31,12 +31,12 @@ describe("runtime terminal delivery", () => {
               runtime.emitModelStream({
                 itemId: "answer",
                 kind: "assistant",
-                text: "first",
+                delta: "first",
               })
               runtime.emitModelStream({
                 itemId: "answer",
                 kind: "assistant",
-                text: "first last",
+                delta: " last",
               })
               control.signal.addEventListener("abort", () =>
                 mayFinish.resolve(),
@@ -352,11 +352,11 @@ describe("runtime terminal delivery", () => {
         prepare: prepareTurn,
         start(runtime) {
           for (const kind of ["assistant", "reasoning"] as const) {
-            runtime.emitModelStream({ itemId: "answer", kind, text: "first" })
+            runtime.emitModelStream({ itemId: "answer", kind, delta: "first" })
             runtime.emitModelStream({
               itemId: "answer",
               kind,
-              text: "first last",
+              delta: " last",
             })
           }
           runtime.emitWarning("Retrying attempt 2 of 3.", {
@@ -375,7 +375,7 @@ describe("runtime terminal delivery", () => {
                 runtime.emitModelStream({
                   itemId: "answer",
                   kind,
-                  text: "first last resumed",
+                  delta: " resumed",
                 })
               }
               await mayFinish.promise
@@ -464,6 +464,98 @@ describe("runtime terminal delivery", () => {
     } finally {
       vi.useRealTimers()
       mayResume.resolve()
+      mayFinish.resolve()
+      await manager.shutdown()
+      await handlers.close()
+      await processor.closeConnection(client.id)
+    }
+  })
+
+  it("keeps one output item when queued input is persisted during streaming", async () => {
+    const store = new MemoryThreadStore()
+    const continueOutput = deferred<void>()
+    const mayFinish = deferred<void>()
+    const manager = new ThreadManager({
+      store,
+      createTurnProcessor: () => ({
+        prepare: prepareTurn,
+        start(runtime) {
+          runtime.emitModelStream({
+            itemId: "answer",
+            kind: "assistant",
+            delta: "Hello",
+          })
+          return {
+            completion: continueOutput.promise.then(async () => {
+              runtime.emitModelStream({
+                itemId: "answer",
+                kind: "assistant",
+                delta: " world",
+              })
+              await mayFinish.promise
+            }),
+            abort() {},
+          }
+        },
+      }),
+    })
+    const eventHub = createSessionEventHub()
+    const handlers = createThreadServerHandlers({ manager, store, eventHub })
+    const processor = new MessageProcessor({ handlers, eventHub })
+    const client = openTestConnection(processor)
+    try {
+      await initializeConnection(client)
+      const created = await handlers.createSession()
+      if (!created.ok) throw new Error(created.body.error.message)
+      const sessionId = created.body.session.id
+      await client.sendRequest("session/subscribe", { sessionId })
+      await client.waitForFrame(
+        (frame) =>
+          "method" in frame && frame.method === "session/replayComplete",
+      )
+      const admitted = await handlers.admitInput({
+        sessionId,
+        requestId: "request_active",
+        content: { kind: "text", text: "start" },
+      })
+      if (!admitted.ok) throw new Error(admitted.body.error.message)
+      await client.waitForFrame(
+        (frame) =>
+          "method" in frame &&
+          frame.method === "session/transient" &&
+          (frame.params as LiveSessionEvent).type === "assistant.delta",
+      )
+      const queued = await handlers.queueInput({
+        sessionId,
+        requestId: "request_queued",
+        content: { kind: "text", text: "later" },
+      })
+      if (!queued.ok) throw new Error(queued.body.error.message)
+      continueOutput.resolve()
+      await client.waitForFrame(
+        (frame) =>
+          "method" in frame &&
+          frame.method === "session/transient" &&
+          (frame.params as LiveSessionEvent).type === "assistant.delta" &&
+          (frame.params as { delta?: string }).delta === " world",
+      )
+      const output = client
+        .notifications("session/transient")
+        .map((frame) => frame.params as LiveSessionEvent)
+        .filter(
+          (event) =>
+            event.type === "item.started" || event.type === "assistant.delta",
+        )
+      expect(output).toEqual([
+        expect.objectContaining({
+          type: "item.started",
+          item: { type: "agent_message", itemId: "answer" },
+        }),
+        expect.objectContaining({ type: "assistant.delta", delta: "Hello" }),
+        expect.objectContaining({ type: "assistant.delta", delta: " world" }),
+      ])
+    } finally {
+      continueOutput.resolve()
       mayFinish.resolve()
       await manager.shutdown()
       await handlers.close()

@@ -202,7 +202,7 @@ describe("temporary side conversations", () => {
     let finish: (() => void) | undefined
     const context = await fixture(
       async function* () {
-        yield { type: "snapshot", text: "working" }
+        yield { type: "delta", text: "working" }
         await new Promise<void>((resolve) => {
           finish = resolve
         })
@@ -261,7 +261,7 @@ describe("temporary side conversations", () => {
     let time = Date.parse("2026-01-01T00:00:00.000Z")
     const context = await fixture(
       async function* (request) {
-        yield { type: "snapshot", text: "unfinished answer" }
+        yield { type: "delta", text: "unfinished answer" }
         const signal = request.signal
         if (!signal) throw new Error("Expected cancellation signal")
         if (!signal.aborted)
@@ -367,7 +367,7 @@ describe("temporary side conversations", () => {
     const requests: ModelRequest[] = []
     const context = await fixture(async function* (request) {
       requests.push(request)
-      yield { type: "snapshot", text: "partial" }
+      yield { type: "delta", text: "partial" }
       yield {
         type: "response",
         response: {
@@ -481,7 +481,7 @@ describe("temporary side conversations", () => {
     const aborted: number[] = []
     const context = await fixture(async function* (request) {
       const call = ++calls
-      yield { type: "snapshot", text: `prefix ${call}` }
+      yield { type: "delta", text: `prefix ${call}` }
       if (call === 2) throw new Error("Fixture model failed")
       const signal = request.signal
       if (!signal) throw new Error("Expected cancellation signal")

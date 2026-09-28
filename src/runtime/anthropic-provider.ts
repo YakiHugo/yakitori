@@ -157,8 +157,6 @@ async function* streamAnthropic(
     return
   }
 
-  let text = ""
-  let reasoning = ""
   try {
     for await (const event of stream) {
       failureStage = "response_body"
@@ -170,16 +168,14 @@ async function* streamAnthropic(
         event.type === "content_block_delta" &&
         event.delta.type === "text_delta"
       ) {
-        text += event.delta.text
-        yield { type: "snapshot", text }
+        yield { type: "delta", text: event.delta.text }
         continue
       }
       if (
         event.type === "content_block_delta" &&
         event.delta.type === "thinking_delta"
       ) {
-        reasoning += event.delta.thinking
-        yield { type: "reasoning_snapshot", text: reasoning }
+        yield { type: "reasoning_delta", text: event.delta.thinking }
       }
     }
 

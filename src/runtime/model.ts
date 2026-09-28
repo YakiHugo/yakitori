@@ -154,13 +154,13 @@ export type ModelResponse = {
   readonly providerRequestId?: string
 }
 
-export type ModelStreamSnapshotEvent = {
-  readonly type: "snapshot"
+export type ModelStreamDeltaEvent = {
+  readonly type: "delta"
   readonly text: string
 }
 
-export type ModelStreamReasoningSnapshotEvent = {
-  readonly type: "reasoning_snapshot"
+export type ModelStreamReasoningDeltaEvent = {
+  readonly type: "reasoning_delta"
   readonly text: string
 }
 
@@ -192,8 +192,8 @@ export type ModelStreamRetryEvent = {
 }
 
 export type ModelStreamEvent =
-  | ModelStreamSnapshotEvent
-  | ModelStreamReasoningSnapshotEvent
+  | ModelStreamDeltaEvent
+  | ModelStreamReasoningDeltaEvent
   | ModelStreamResponseEvent
   | ModelStreamFailureEvent
   | ModelStreamCancelledEvent
