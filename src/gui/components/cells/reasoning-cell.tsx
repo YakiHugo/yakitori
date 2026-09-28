@@ -31,6 +31,7 @@ export function ReasoningCell({
       <CollapsibleContent className="pt-1 pb-2">
         <MarkdownView
           text={entry.text}
+          streaming={entry.status === "streaming"}
           className="markdown max-w-2xl text-sm text-muted-foreground"
           workspaceRoot={workspaceRoot}
         />

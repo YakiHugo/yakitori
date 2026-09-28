@@ -2,6 +2,7 @@ import { ArrowDown, ChevronRight, Info, Wrench } from "lucide-react"
 import {
   memo,
   type ReactNode,
+  useCallback,
   useEffect,
   useId,
   useLayoutEffect,
@@ -44,7 +45,16 @@ import "./activity-timeline.css"
 
 // Keep admission order, including queued/steering inputs between turn items.
 // Only adjacent items of the same turn share a disclosure.
-function groupEntries(entries: readonly ExecutionEntry[]) {
+type TranscriptBlock = {
+  key: string
+  turnId: string | undefined
+  entries: readonly ExecutionEntry[]
+}
+
+function groupEntries(
+  entries: readonly ExecutionEntry[],
+  previous: readonly TranscriptBlock[],
+): TranscriptBlock[] {
   const blocks: {
     key: string
     turnId: string | undefined
@@ -57,7 +67,16 @@ function groupEntries(entries: readonly ExecutionEntry[]) {
       last.entries.push(entry)
     else blocks.push({ key: entryKey(entry), turnId, entries: [entry] })
   }
-  return blocks
+  const previousByKey = new Map(previous.map((block) => [block.key, block]))
+  return blocks.map((block) => {
+    const stable = previousByKey.get(block.key)
+    return stable !== undefined &&
+      stable.turnId === block.turnId &&
+      stable.entries.length === block.entries.length &&
+      block.entries.every((entry, index) => entry === stable.entries[index])
+      ? stable
+      : block
+  })
 }
 
 function entryKey(entry: ExecutionEntry): string {
@@ -88,7 +107,17 @@ export function Transcript({ children }: Readonly<{ children?: ReactNode }>) {
   const [visibleInputs, setVisibleInputs] = useState<ReadonlySet<string>>(
     new Set(),
   )
-  const blocks = useMemo(() => groupEntries(view.entries), [view.entries])
+  const previousBlocks = useRef<readonly TranscriptBlock[]>([])
+  const previousSessionId = useRef(sessionId)
+  const blocks = useMemo(() => {
+    if (previousSessionId.current !== sessionId) {
+      previousBlocks.current = []
+      previousSessionId.current = sessionId
+    }
+    const next = groupEntries(view.entries, previousBlocks.current)
+    previousBlocks.current = next
+    return next
+  }, [sessionId, view.entries])
   // Steering inputs can split a turn into several blocks. Its current retry
   // belongs only to the latest block, even when earlier activity is expanded.
   const activeBlockIndex =
@@ -128,18 +157,21 @@ export function Transcript({ children }: Readonly<{ children?: ReactNode }>) {
   const inputs = view.entries
     .filter((entry) => entry.kind === "user_input")
     .filter((entry) => !entry.steered)
+  const inputIds = inputs.map((entry) => entry.inputId).join("\0")
   const queued = new Set(view.queuedInputIds)
   // A message counts as in view while its turn segment — from its own bubble
   // to the next bubble — intersects the viewport, like codex's rail. Only
   // those markers take the active color; there is no default selection.
-  const updateVisibleInputs = () => {
+  const updateVisibleInputs = useCallback(() => {
     const viewport = scroll.viewportRef.current
     if (!viewport) return
     const { top, bottom } = viewport.getBoundingClientRect()
-    const tops = inputs.map((input) => ({
-      inputId: input.inputId,
-      top: anchors.current.get(input.inputId)?.getBoundingClientRect().top,
-    }))
+    const tops = (inputIds === "" ? [] : inputIds.split("\0")).map(
+      (inputId) => ({
+        inputId,
+        top: anchors.current.get(inputId)?.getBoundingClientRect().top,
+      }),
+    )
     const next = new Set<string>()
     tops.forEach((entry, index) => {
       if (entry.top === undefined) return
@@ -151,14 +183,21 @@ export function Transcript({ children }: Readonly<{ children?: ReactNode }>) {
         ? previous
         : next,
     )
-  }
+  }, [inputIds, scroll.viewportRef])
   const updateScroll = () => {
     scroll.onScroll()
     updateVisibleInputs()
   }
+  // Streaming text changes entries but does not move input anchors. Measure
+  // those only when the set of visible input anchors changes or on scroll.
+  useLayoutEffect(updateVisibleInputs, [updateVisibleInputs])
   useLayoutEffect(() => {
-    updateVisibleInputs()
-  })
+    const content = scroll.contentRef.current
+    if (!content) return
+    const observer = new ResizeObserver(updateVisibleInputs)
+    observer.observe(content)
+    return () => observer.disconnect()
+  }, [scroll.contentRef, updateVisibleInputs])
   useLayoutEffect(() => {
     const surface = surfaceRef.current
     const dock = dockRef.current
@@ -424,6 +463,7 @@ const TurnBlock = memo(
                   {reasoningExpanded ? (
                     <MarkdownView
                       text={reasoningText}
+                      streaming={active}
                       className="markdown max-w-2xl pt-4 text-sm text-muted-foreground"
                       workspaceRoot={workspaceRoot}
                     />

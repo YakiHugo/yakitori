@@ -4,6 +4,7 @@ import type { Components } from "react-markdown"
 import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import type { HighlighterCore } from "shiki/core"
+import { createStreamingMarkdownPlugin } from "../lib/streaming-markdown.ts"
 import { openFileTarget, openUrlTarget } from "../lib/open-resource.ts"
 import {
   type BundledLanguage,
@@ -226,19 +227,30 @@ export const MarkdownView = memo(function MarkdownView({
   className,
   workspaceRoot,
   documentPath,
+  streaming = false,
 }: Readonly<{
   text: string
   className?: string
   workspaceRoot?: string | undefined
   documentPath?: string | undefined
+  streaming?: boolean
 }>) {
   const components = useMemo(
     () => createMarkdownComponents(workspaceRoot, documentPath),
     [workspaceRoot, documentPath],
   )
+  const useIncrementalParser =
+    streaming && /(?:^|\n) {0,3}(?:`{3}|~{3})/.test(text)
+  const remarkPlugins = useMemo(
+    () =>
+      useIncrementalParser
+        ? [remarkGfm, createStreamingMarkdownPlugin()]
+        : [remarkGfm],
+    [useIncrementalParser],
+  )
   return (
     <div className={className}>
-      <Markdown remarkPlugins={[remarkGfm]} components={components}>
+      <Markdown remarkPlugins={remarkPlugins} components={components}>
         {text}
       </Markdown>
     </div>

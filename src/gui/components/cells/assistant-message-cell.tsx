@@ -22,6 +22,7 @@ export function AssistantMessageCell({
     >
       <MarkdownView
         text={entry.text}
+        streaming={entry.status === "streaming"}
         className="markdown text-base"
         workspaceRoot={workspaceRoot}
       />
