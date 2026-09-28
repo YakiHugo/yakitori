@@ -1,4 +1,5 @@
 import { GitFork, Info, LoaderCircle, Search, Square } from "lucide-react"
+import { useEffect, useRef, useState } from "react"
 import { ApprovalBar } from "./components/approval-bar.tsx"
 import { Composer } from "./components/composer.tsx"
 import { openConversationFind } from "./components/conversation-find.tsx"
@@ -7,6 +8,7 @@ import { QueuedInputs } from "./components/queued-inputs.tsx"
 import { SessionGoal } from "./components/session-goal.tsx"
 import { SessionSummary } from "./components/session-summary.tsx"
 import { SettingsPage } from "./components/settings-page.tsx"
+import { SidebarNameDialog } from "./components/sidebar-name-dialog.tsx"
 import { Transcript } from "./components/transcript.tsx"
 import {
   Tooltip,
@@ -153,6 +155,7 @@ function SessionHeader() {
       </div>
       <div className="flex shrink-0 items-center gap-1">
         <SessionGoal />
+        <SessionRename />
         <button
           type="button"
           aria-label="Find in conversation"
@@ -185,6 +188,29 @@ function SessionHeader() {
       </div>
     </header>
   )
+}
+
+function SessionRename() {
+  const session = useAppStore((state) => state.selectedSession)
+  const revision = useAppStore((state) => state.renameDialogRevision)
+  const changeSidebar = useAppStore((state) => state.changeSidebar)
+  const [open, setOpen] = useState(false)
+  const previousRevision = useRef(revision)
+  useEffect(() => {
+    if (previousRevision.current === revision) return
+    previousRevision.current = revision
+    setOpen(true)
+  }, [revision])
+  return open && session ? (
+    <SidebarNameDialog
+      title="Rename conversation"
+      initialName={session.title ?? ""}
+      onClose={() => setOpen(false)}
+      onSave={(title) =>
+        changeSidebar({ type: "session", sessionId: session.id, title })
+      }
+    />
+  ) : null
 }
 
 function EmptyState() {

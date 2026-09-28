@@ -1113,6 +1113,81 @@ describe("project state", () => {
   const projectA = makeProject("project_a", "/p/a", "Alpha")
   const projectB = makeProject("project_b", "/p/b")
 
+  it("loads skills for a project draft and clears them when no project is selected", async () => {
+    window.localStorage.clear()
+    const skill = {
+      name: "review",
+      description: "Review code",
+      path: "/p/a/.agents/skills/review/SKILL.md",
+      scope: "repo" as const,
+    }
+    fakeRef.current.respond = (method, params) => {
+      if (method === "project/list") return { projects: [projectA, projectB] }
+      if (method === "session/skills")
+        return {
+          skills:
+            (params as { projectId: string }).projectId === "project_a"
+              ? [skill]
+              : [],
+        }
+      return notFound()
+    }
+
+    await useAppStore.getState().loadProjects()
+    await vi.waitFor(() => {
+      expect(useAppStore.getState().sessionSkills).toEqual([skill])
+    })
+    expect(fakeRef.current.requestsFor("session/skills")).toEqual([
+      { method: "session/skills", params: { projectId: "project_a" } },
+    ])
+
+    useAppStore.getState().setNewSessionProject(undefined)
+    expect(useAppStore.getState().sessionSkills).toEqual([])
+    expect(fakeRef.current.requestsFor("session/skills")).toHaveLength(1)
+  })
+
+  it("ignores stale skill responses after the draft project changes", async () => {
+    window.localStorage.clear()
+    const first = deferredResponse()
+    const second = deferredResponse()
+    const skillB = {
+      name: "beta",
+      description: "Beta",
+      path: "/p/b/.agents/skills/beta/SKILL.md",
+      scope: "repo" as const,
+    }
+    fakeRef.current.respond = (method, params) => {
+      if (method === "project/list") return { projects: [projectA, projectB] }
+      if (method === "session/skills")
+        return (params as { projectId: string }).projectId === "project_a"
+          ? first.promise
+          : second.promise
+      return notFound()
+    }
+    await useAppStore.getState().loadProjects()
+    useAppStore.getState().setNewSessionProject("project_b")
+    second.resolve({ skills: [skillB] })
+    await vi.waitFor(() => {
+      expect(useAppStore.getState().sessionSkills).toEqual([skillB])
+    })
+    first.resolve({
+      skills: [
+        {
+          name: "alpha",
+          description: "Alpha",
+          path: "/p/a/.agents/skills/alpha/SKILL.md",
+          scope: "repo",
+        },
+      ],
+    })
+    await first.promise
+    expect(useAppStore.getState().sessionSkills).toEqual([skillB])
+    expect(fakeRef.current.requestsFor("session/skills")).toEqual([
+      { method: "session/skills", params: { projectId: "project_a" } },
+      { method: "session/skills", params: { projectId: "project_b" } },
+    ])
+  })
+
   it("loads projects, falls back to the first project, and tolerates failures", async () => {
     window.localStorage.clear()
     fakeRef.current.respond = (method) => {

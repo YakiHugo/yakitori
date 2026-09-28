@@ -40,6 +40,15 @@
   padding-right: 4px;
   color: var(--muted-foreground);
 }
+.prompt-editor button.prompt-skill {
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+.prompt-editor button.prompt-skill:focus-visible {
+  outline: 2px solid var(--ring);
+}
 .prompt-skill.ProseMirror-selectednode {
   outline: 2px solid var(--ring);
 }

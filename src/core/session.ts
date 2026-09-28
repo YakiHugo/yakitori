@@ -343,6 +343,23 @@ export class Session {
       }
       return
     }
+    if (operation.type === "compact") {
+      try {
+        operation.reply.resolve(
+          await this.#routeTurnInput(
+            {
+              submissionId: operation.requestId,
+              content: { kind: "text", text: "/compact" },
+              manualCompact: true,
+            },
+            { type: "start_if_idle" },
+          ),
+        )
+      } catch (error) {
+        operation.reply.reject(error)
+      }
+      return
+    }
     if (operation.type === "interrupt") {
       if (
         operation.expectedTurnId !== undefined &&
@@ -1183,20 +1200,12 @@ export class Session {
           // A pre-Turn checkpoint covers only the old prefix. Keep both the
           // already admitted current input and messages appended meanwhile.
           const concurrentTail = current.slice(input.baseHistoryLength)
-          this.#contextManager.replace([
-            ...input.replacement,
-            ...concurrentTail,
-          ])
-          if (input.worldState !== undefined) {
-            this.#contextManager.setWorldStateBaseline(
-              input.worldState.snapshot,
-            )
-          }
-          await this.#appendRollout([
+          const replacement = [...input.replacement, ...concurrentTail]
+          const items: readonly RolloutItem[] = [
             {
               type: "compacted",
               turnId: active.input.submissionId,
-              replacement: [...input.replacement, ...concurrentTail],
+              replacement,
               summary: input.summary,
             },
             ...(input.worldState === undefined
@@ -1209,7 +1218,27 @@ export class Session {
                     state: input.worldState.state,
                   },
                 ]),
-          ])
+          ]
+          let throughSeq: number
+          try {
+            throughSeq = await this.#store.appendItems(this.id, items)
+            await this.#store.flushThread(this.id)
+          } catch (error) {
+            this.#reportPersistenceError(error)
+            throw error
+          }
+          this.#contextManager.replace(replacement)
+          if (input.worldState !== undefined) {
+            this.#contextManager.setWorldStateBaseline(
+              input.worldState.snapshot,
+            )
+          }
+          this.#events.send({
+            type: "rollout.appended",
+            threadId: this.id,
+            throughSeq,
+            items: structuredClone(items),
+          })
         })
       },
     }
@@ -1513,7 +1542,7 @@ export function queuedInputsFromRollout(
 }
 
 function turnInputFingerprint(input: TurnInput): string {
-  return fingerprintInputAdmission({
+  const fingerprint = fingerprintInputAdmission({
     role: InputRole.User,
     content: input.content,
     ...(input.modelSelection === undefined
@@ -1524,6 +1553,7 @@ function turnInputFingerprint(input: TurnInput): string {
       ? {}
       : { parentInputId: input.parentInputId }),
   })
+  return input.manualCompact === true ? `compact:${fingerprint}` : fingerprint
 }
 
 function buildInputItem(

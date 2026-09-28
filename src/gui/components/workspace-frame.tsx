@@ -46,6 +46,7 @@ const views = [
 ] as const
 
 function tabLabel(tab: WorkspaceTab): string {
+  if (tab.kind === "skill") return tab.name
   if (tab.kind === "file") return tab.path.split("/").at(-1) ?? tab.path
   if ((tab.kind === "browser" || tab.kind === "chat") && tab.title)
     return tab.title
@@ -311,7 +312,7 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
               const { id } = tab
               const label = tabLabel(tab)
               const Icon =
-                tab.kind === "file"
+                tab.kind === "file" || tab.kind === "skill"
                   ? Files
                   : (views.find((view) => view.id === tab.kind)?.icon ?? Files)
               return (
@@ -501,6 +502,17 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
                       askInSideChat(excerpt, sessionId)
                     else addToMain(excerpt)
                   }}
+                />
+              ) : tab.kind === "skill" ? (
+                <WorkspaceFilePreview
+                  cwd={tab.path.slice(0, tab.path.lastIndexOf("/")) || "/"}
+                  path={tab.path}
+                  apiBase={apiBase}
+                  skill
+                  {...(tab.workspaceSessionId
+                    ? { skillSessionId: tab.workspaceSessionId }
+                    : {})}
+                  {...(tab.projectId ? { skillProjectId: tab.projectId } : {})}
                 />
               ) : tab.kind === "file" ? (
                 <WorkspaceFilePreview

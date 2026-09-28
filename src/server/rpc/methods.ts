@@ -1,5 +1,5 @@
 import { realpath, stat } from "node:fs/promises"
-import { basename, isAbsolute, normalize } from "node:path"
+import { basename, dirname, isAbsolute, normalize } from "node:path"
 import type {
   SessionSidebar,
   SidebarChange,
@@ -10,6 +10,7 @@ import {
   YakitoriErrorCode,
 } from "../../kernel/index.ts"
 import type { LiveSessionEvent } from "../../runtime/live-events.ts"
+import { createSkillsLoader, type SkillMetadata } from "../../runtime/skills.ts"
 import type { ComputerUseStatus } from "../computer-use.ts"
 import type { ServerHandlers } from "../handlers.ts"
 import { requireUserModelPreference } from "../http.ts"
@@ -17,8 +18,6 @@ import type { McpService } from "../mcp-service.ts"
 import {
   type ApiAdmitInputRequest,
   type ApiAdmitInputResponse,
-  type ApiSteerInputRequest,
-  type ApiSteerInputResponse,
   type ApiCancelInputRequest,
   type ApiCancelInputResponse,
   type ApiCancelTurnRequest,
@@ -50,6 +49,8 @@ import {
   type ApiSearchSessionsRequest,
   type ApiSearchSessionsResponse,
   type ApiServerDiagnostics,
+  type ApiSteerInputRequest,
+  type ApiSteerInputResponse,
   type ApiSubscriptionProvider,
   type ApiUpdateProjectResponse,
   type ApiUpdateUserModelPreferenceResponse,
@@ -58,11 +59,17 @@ import {
 import type { SideChatService } from "../side-chat.ts"
 import {
   InvalidProjectCursorError,
+  isGeneratedProjectId,
   ProjectMoveOutcome,
   type ProjectStore,
 } from "../sqlite-project-store.ts"
 import type { ConfigurationSnapshot, UserConfigStore } from "../user-config.ts"
 import type { SessionInteractions } from "../user-interactions.ts"
+import {
+  readWorkspaceFile,
+  WorkspaceError,
+  type WorkspaceReadResponse,
+} from "../workspace.ts"
 import { computerMethods } from "./computer-methods.ts"
 import {
   type InteractionRpcParams,
@@ -635,6 +642,50 @@ function handlerEntry<TResult>(
   }
 }
 
+function skillOwner(
+  params: Record<string, unknown>,
+):
+  | { sessionId: string; projectId?: never }
+  | { sessionId?: never; projectId: string } {
+  const { sessionId, projectId } = params
+  if (
+    (sessionId !== undefined &&
+      (typeof sessionId !== "string" || sessionId.trim() === "")) ||
+    (projectId !== undefined &&
+      (typeof projectId !== "string" || !isGeneratedProjectId(projectId)))
+  )
+    throw invalidParams("sessionId or projectId is invalid.")
+  if ((sessionId !== undefined) === (projectId !== undefined))
+    throw invalidParams("Provide one sessionId or projectId.")
+  return sessionId === undefined
+    ? { projectId: projectId as string }
+    : { sessionId: sessionId as string }
+}
+
+async function discoverProjectSkills(
+  context: RpcMethodContext,
+  projectId: string,
+): Promise<readonly SkillMetadata[]> {
+  const store = requireProjectStore(context, "session/skills")
+  if (!context.userConfig) throw unavailable("session/skills")
+  const project = await store.readProject(projectId)
+  const root = project?.roots[0]
+  if (!root) throw projectNotFound(projectId)
+  const snapshot = await context.userConfig.readSnapshot({ cwd: root })
+  const configuration = snapshot.configuration
+  const discovered = await createSkillsLoader()({
+    workingDirectory: root,
+    workspaceRoot: root,
+    ...(configuration.projectRootMarkers === undefined
+      ? {}
+      : { projectRootMarkers: configuration.projectRootMarkers }),
+    ...(configuration.skills === undefined
+      ? {}
+      : { configuration: configuration.skills }),
+  })
+  return discovered.skills.filter((skill) => skill.enabled !== false)
+}
+
 export const rpcMethods: readonly RpcMethodDefinition[] = [
   ...sideChatMethods,
   ...interactionMethods,
@@ -725,11 +776,107 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
     sessionScope,
     (handlers, params) => handlers.readSession(params),
   ),
-  handlerEntry<ApiListSkillsResponse>(
-    "session/skills",
-    sessionScope,
-    (handlers, params) => handlers.listSkills(params),
-  ),
+  {
+    method: "session/skills",
+    scope: sessionScope,
+    async invoke(params, context) {
+      const owner = skillOwner(requireParamsRecord(params, "session/skills"))
+      if (owner.projectId === undefined)
+        return {
+          result: adaptHandlerResult(
+            await context.handlers.listSkills({ sessionId: owner.sessionId }),
+          ),
+        }
+      const skills = await discoverProjectSkills(context, owner.projectId)
+      return {
+        result: {
+          skills: skills.map(({ name, description, path, scope }) => ({
+            name,
+            description,
+            path,
+            scope,
+          })),
+        } satisfies ApiListSkillsResponse,
+      }
+    },
+  },
+  {
+    method: "session/skill/read",
+    scope: sessionScope,
+    async invoke(params, context) {
+      const record = requireParamsRecord(params, "session/skill/read")
+      const owner = skillOwner(record)
+      const { path, offset, limit } = record
+      if (
+        typeof path !== "string" ||
+        !isAbsolute(path) ||
+        basename(path) !== "SKILL.md"
+      )
+        throw invalidParams("path must be an absolute SKILL.md path.")
+      if (
+        (offset !== undefined &&
+          (typeof offset !== "number" ||
+            !Number.isSafeInteger(offset) ||
+            offset < 1)) ||
+        (limit !== undefined &&
+          (typeof limit !== "number" ||
+            !Number.isSafeInteger(limit) ||
+            limit < 1 ||
+            limit > 1000))
+      )
+        throw invalidParams("offset and limit must be valid positive integers.")
+      let skills: readonly { path: string }[]
+      if (owner.projectId === undefined) {
+        skills = adaptHandlerResult(
+          await context.handlers.listSkills({ sessionId: owner.sessionId }),
+        ).skills
+      } else {
+        skills = await discoverProjectSkills(context, owner.projectId)
+      }
+      if (!skills.some((skill) => skill.path === path))
+        throw new RpcMethodError(
+          INVALID_PARAMS,
+          "Skill is not available in this conversation or project.",
+          {
+            code: "invalid_input",
+          },
+        )
+      try {
+        const result = await readWorkspaceFile({
+          cwd: dirname(path),
+          path: "SKILL.md",
+          ...(offset === undefined ? {} : { offset }),
+          ...(limit === undefined ? {} : { limit }),
+        })
+        return { result }
+      } catch (error) {
+        if (error instanceof WorkspaceError)
+          throw new RpcMethodError(
+            error.code === "invalid_input" ? INVALID_PARAMS : INTERNAL_ERROR,
+            error.message,
+            { code: error.code },
+          )
+        const code = (error as NodeJS.ErrnoException).code
+        if (code === "ENOENT" || code === "ENOTDIR")
+          throw new RpcMethodError(
+            INTERNAL_ERROR,
+            "Skill file does not exist.",
+            {
+              code: "not_found",
+            },
+          )
+        if (code === "EACCES" || code === "EPERM")
+          throw new RpcMethodError(
+            INTERNAL_ERROR,
+            "Skill file cannot be accessed.",
+            {
+              code: "forbidden",
+            },
+          )
+        throw error
+      }
+    },
+  },
   handlerEntry<ApiDeleteSessionResponse>(
     "session/close",
     sessionScope,
@@ -1163,7 +1310,14 @@ export type RpcMethodParams = Readonly<
       "session/searchOccurrences": ApiSearchSessionOccurrencesRequest
       "session/create": ApiCreateSessionRequest
       "session/read": ApiReadSessionRequest
-      "session/skills": ApiReadSessionRequest
+      "session/skills": Readonly<{ sessionId?: string; projectId?: string }>
+      "session/skill/read": Readonly<{
+        sessionId?: string
+        projectId?: string
+        path: string
+        offset?: number
+        limit?: number
+      }>
       "session/delete": ApiReadSessionRequest
       "session/close": ApiReadSessionRequest
       "session/fork": ApiForkSessionRequest & Readonly<{ sessionId: string }>
@@ -1210,6 +1364,7 @@ export type RpcMethodResponses = Readonly<
       "session/create": ApiCreateSessionResponse
       "session/read": ApiReadSessionResponse
       "session/skills": ApiListSkillsResponse
+      "session/skill/read": WorkspaceReadResponse
       "session/delete": ApiDeleteSessionResponse
       "session/close": ApiDeleteSessionResponse
       "session/fork": ApiForkSessionResponse

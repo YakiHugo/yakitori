@@ -13,11 +13,13 @@ import {
   useExecutionView,
 } from "../store/app-store.ts"
 import { usePreferencesStore } from "../store/preferences-store.ts"
+import { useWorkspaceStore } from "../store/workspace-store.ts"
 import {
   type ComposerImageImport,
   ComposerSurface,
 } from "./composer-surface.tsx"
 import { ModelSelector } from "./model-selector.tsx"
+import { SessionCommandPanel } from "./session-command-panel.tsx"
 
 export function Composer() {
   const conversationScroll = useContext(ConversationScrollContext)
@@ -41,6 +43,8 @@ export function Composer() {
   const inFlightActions = useAppStore((state) => state.inFlightActions)
   const sendShortcut = usePreferencesStore((state) => state.sendShortcut)
   const sessionId = useAppStore((state) => state.selection.sessionId)
+  const commandPanel = useAppStore((state) => state.commandPanel)
+  const closeCommandPanel = useAppStore((state) => state.closeCommandPanel)
   const selectionRevision = useAppStore(
     (state) => state.sessionSelectionIntentRevision,
   )
@@ -185,6 +189,12 @@ export function Composer() {
       excerpts={excerpts}
       sessionSkills={sessionSkills}
       sessionSkillsError={sessionSkillsError}
+      commandPanel={
+        commandPanel !== undefined && commandPanel.sessionId === sessionId ? (
+          <SessionCommandPanel />
+        ) : null
+      }
+      dismissCommandPanel={closeCommandPanel}
       apiBase={apiBase}
       focusRevision={focusRevision}
       busy={
@@ -212,6 +222,78 @@ export function Composer() {
       updatePromptExcerpt={updatePromptExcerpt}
       onSubmit={(text, images, mode) => {
         conversationScroll?.jumpToBottom()
+        if (images.length === 0 && excerpts.length === 0) {
+          if (text === "/status" || text === "/mcp") {
+            useAppStore
+              .getState()
+              .openCommandPanel(text.slice(1) as "status" | "mcp")
+            setPromptDraft("")
+            return
+          }
+          if (text === "/model") {
+            useAppStore.getState().openModelPicker()
+            setPromptDraft("")
+            return
+          }
+          if (text === "/skills") {
+            setPromptDraft("$")
+            return
+          }
+          if (text === "/rename" && sessionId) {
+            useAppStore.getState().openRenameDialog()
+            setPromptDraft("")
+            return
+          }
+          if (text === "/usage") {
+            useAppStore.getState().openSettings("subscriptions")
+            setPromptDraft("")
+            return
+          }
+          if (text === "/side") {
+            useWorkspaceStore.getState().addTab("chat", sessionId)
+            setPromptDraft("")
+            return
+          }
+          if (sessionId && (text === "/archive" || text === "/pin")) {
+            const selected = useAppStore.getState().selectedSession
+            if (!selected) return
+            void changeSidebar({
+              type: "session",
+              sessionId,
+              ...(text === "/archive"
+                ? { archived: true }
+                : {
+                    sectionId:
+                      selected.sectionId === "pinned" ? null : "pinned",
+                  }),
+            }).then((changed) => {
+              if (changed && useAppStore.getState().promptDraft === text)
+                setPromptDraft("")
+            })
+            return
+          }
+          if (text === "/init") {
+            const cwd =
+              useAppStore.getState().selectedSession?.workingDirectory ??
+              useAppStore
+                .getState()
+                .projects.find(
+                  (project) =>
+                    project.id === useAppStore.getState().currentProject,
+                )?.roots[0]
+            if (!cwd) {
+              useAppStore.setState({
+                message: "Select a project before creating AGENTS.md.",
+              })
+              return
+            }
+            const prompt =
+              "Create an AGENTS.md file for this project. Inspect the repository and its existing instructions first, then write concise guidance that reflects how this project actually works."
+            setPromptDraft(prompt)
+            void admitInput(prompt)
+            return
+          }
+        }
         const goalCommand =
           text === GOAL_DIRECTIVE
             ? ""

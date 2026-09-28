@@ -1,6 +1,5 @@
 import { realpath, stat } from "node:fs/promises"
 import type { AgentThread } from "../core/agent-thread.ts"
-import { sessionCacheExpiry } from "../core/session-cache-expiry.ts"
 import type {
   RolloutItem,
   StoredRolloutItem,
@@ -8,6 +7,7 @@ import type {
   ThreadSummary,
 } from "../core/rollout.ts"
 import { queuedInputsFromRollout } from "../core/session.ts"
+import { sessionCacheExpiry } from "../core/session-cache-expiry.ts"
 import type { TurnInputSubmission } from "../core/session-io.ts"
 import {
   parseSidebarChange,
@@ -52,7 +52,6 @@ import {
 } from "./operational-errors.ts"
 import {
   type ApiAdmitInputResponse,
-  type ApiSteerInputResponse,
   type ApiCancelInputResponse,
   type ApiCancelTurnResponse,
   type ApiCompactSessionResponse,
@@ -72,6 +71,7 @@ import {
   type ApiSearchSessionsResponse,
   type ApiSessionDetail,
   type ApiSessionSummary,
+  type ApiSteerInputResponse,
 } from "./protocol.ts"
 import type { SessionCompletedNotification } from "./rpc/methods.ts"
 import type { SessionTitleGenerator } from "./session-title.ts"
@@ -1297,11 +1297,43 @@ export function createThreadServerHandlers(
     async compactSession(input) {
       try {
         const request = requireCompactSessionRequest(input)
-        await resumeRequired(request.sessionId)
-        throw conflict(
-          "Manual compaction is not exposed by the live Session boundary.",
-          { sessionId: request.sessionId },
+        if (
+          (await options.store.sessionPresentation(request.sessionId)).archived
+        ) {
+          throw conflict("Restore this conversation before compacting.")
+        }
+        const thread = await resumeRequired(request.sessionId)
+        const requestId =
+          request.requestId ?? `request_${globalThis.crypto.randomUUID()}`
+        const submitted = await thread.compact(requestId)
+        if (submitted.type === "not_submitted")
+          throw conflict(`Compaction was not submitted: ${submitted.reason}.`, {
+            reason: submitted.reason,
+          })
+        if (submitted.type !== "started" && submitted.type !== "replayed")
+          throw internalError("Compaction unexpectedly queued or steered.")
+        await options.store.flushThread(request.sessionId)
+        const stored = await requireStoredThread(
+          options.store,
+          request.sessionId,
         )
+        const record = stored.rollout.find(
+          (entry) =>
+            entry.item.type === "response_item" &&
+            entry.item.item.id === submitted.inputItemId,
+        )
+        if (record === undefined)
+          throw internalError(
+            "Compaction input was not present in the rollout.",
+          )
+        const event = mapRolloutEvent(record, request.sessionId)
+        if (!isKernelEvent(event) || event.type !== "input.admitted")
+          throw internalError("Compaction input did not map to an input event.")
+        return ok(submitted.type === "replayed" ? 200 : 201, {
+          requestId,
+          inputId: submitted.inputItemId,
+          event,
+        })
       } catch (error) {
         return fail(error, reporter, "compact-session")
       }

@@ -469,16 +469,18 @@ async function executeTurn(input: {
     throw new Error("Turn has no model stream.")
   }
   try {
-    const promptHook = await input.options.hookRunner?.run({
-      event: HookEvent.UserPromptSubmit,
-      payload: {
-        session_id: metadata.id,
-        turn_id: input.input.submissionId,
-        prompt: input.input.content.text,
-      },
-      cwd: requireValue(metadata.workingDirectory, "Working directory"),
-      signal: input.signal,
-    })
+    const promptHook = input.input.manualCompact
+      ? undefined
+      : await input.options.hookRunner?.run({
+          event: HookEvent.UserPromptSubmit,
+          payload: {
+            session_id: metadata.id,
+            turn_id: input.input.submissionId,
+            prompt: input.input.content.text,
+          },
+          cwd: requireValue(metadata.workingDirectory, "Working directory"),
+          signal: input.signal,
+        })
     if (promptHook?.continue === false) {
       throw new Error(
         promptHook.reason ?? "UserPromptSubmit hook blocked the Turn.",
@@ -676,7 +678,8 @@ async function executeTurnModelLoop(
         (entry) => entry.turnId === input.input.submissionId,
       )
       const compactionHistory =
-        modelCalls === 0 && currentInputIndex >= 0
+        (modelCalls === 0 || input.input.manualCompact) &&
+        currentInputIndex >= 0
           ? beforeStep.context.history.slice(0, currentInputIndex)
           : beforeStep.context.history
       const admission = assessModelRequest({
@@ -716,6 +719,52 @@ async function executeTurnModelLoop(
               ),
             }),
       })
+      if (input.input.manualCompact) {
+        await input.runtime.recordModelContext({
+          provider: step.target.provider,
+          model: step.target.model,
+          ...(step.modelInfo.compactionHash === undefined
+            ? {}
+            : { compactionHash: step.modelInfo.compactionHash }),
+        })
+        const compacted = await compactLiveHistory({
+          runtime: input.runtime,
+          turnId: input.input.submissionId,
+          step,
+          worldState,
+          history: compactionHistory,
+          baseHistoryLength: beforeStep.context.history.length,
+          stream,
+          remoteCompaction,
+          signal: input.signal,
+          rolloutAssets: input.options.rolloutAssets,
+          usages,
+          onModelTiming: onCompactionModelTiming,
+          rolloutBudget: budget,
+          onOperationalFailure: input.options.onOperationalFailure,
+          ...(input.options.hookRunner === undefined
+            ? {}
+            : { hookRunner: input.options.hookRunner }),
+          setActiveStream: input.setActiveStream,
+          trigger: "manual",
+        })
+        if (!compacted)
+          throw new Error("There is no conversation history to compact.")
+        input.runtime.recordTurnMetrics({
+          modelCalls: compactionModelCalls,
+          toolCalls: 0,
+          modelDurationMs,
+          toolDurationMs: 0,
+          ...(timeToFirstTokenSamples === 0
+            ? {}
+            : {
+                averageTimeToFirstTokenMs: Math.round(
+                  timeToFirstTokenTotalMs / timeToFirstTokenSamples,
+                ),
+              }),
+        })
+        return
+      }
       const foreignCheckpoint = beforeStep.context.history
         .flatMap(({ item }) => (item.role === "assistant" ? item.content : []))
         .find(
@@ -1369,6 +1418,7 @@ function assessModelRequest(input: {
 
 async function compactLiveHistory(
   input: Readonly<{
+    trigger?: "manual" | "auto"
     remoteCompaction?: boolean
     fallback?: Readonly<{ step: StepContext; stream: StreamFn }>
     injectWorldState?: boolean
@@ -1377,6 +1427,7 @@ async function compactLiveHistory(
     step: StepContext
     worldState: WorldState
     history: readonly ResponseItemEnvelope[]
+    baseHistoryLength?: number
     stream: StreamFn
     signal: AbortSignal
     rolloutAssets: RolloutAssets | undefined
@@ -1413,7 +1464,7 @@ async function compactLiveHistory(
     payload: {
       session_id: input.runtime.snapshot().metadata.id,
       turn_id: input.turnId,
-      trigger: "auto",
+      trigger: input.trigger ?? "auto",
       custom_instructions: null,
     },
     cwd: input.step.configuration.workspaceRoot,
@@ -1615,7 +1666,7 @@ async function compactLiveHistory(
     await input.runtime.replaceConversationHistory({
       replacement,
       summary: result.summary,
-      baseHistoryLength: input.history.length,
+      baseHistoryLength: input.baseHistoryLength ?? input.history.length,
       ...(input.injectWorldState === false
         ? {}
         : {
@@ -1653,7 +1704,7 @@ async function compactLiveHistory(
       payload: {
         session_id: input.runtime.snapshot().metadata.id,
         turn_id: input.turnId,
-        trigger: "auto",
+        trigger: input.trigger ?? "auto",
       },
       cwd: input.step.configuration.workspaceRoot,
       signal: input.signal,

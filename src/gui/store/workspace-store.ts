@@ -15,6 +15,13 @@ export type WorkspaceTab = (
   | { id: string; kind: "file"; path: string; cwd: string; dirty?: boolean }
   | {
       id: string
+      kind: "skill"
+      path: string
+      name: string
+      projectId?: string
+    }
+  | {
+      id: string
       kind: "agents"
       sourceSessionId?: string
       selectedAgentId?: string
@@ -53,6 +60,7 @@ type WorkspaceStore = {
   addTab(kind: WorkspaceView, sourceSessionId?: string): string
   closeTab(id: string): void
   openFile(path: string, cwd: string): void
+  openSkill(path: string, name: string, projectId?: string): void
   setFileDirty(id: string, dirty: boolean): void
   openBrowser(url: string): void
   openAgents(sourceSessionId: string, agentId?: string): void
@@ -245,6 +253,34 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
           ...(get().sessionId === undefined
             ? {}
             : { workspaceSessionId: get().sessionId }),
+        },
+      ],
+    })
+    get().activate(id)
+  },
+  openSkill(path, name, projectId) {
+    const current = get()
+    const existing = current.tabs.find(
+      (tab) =>
+        tab.kind === "skill" &&
+        tab.workspaceSessionId === current.sessionId &&
+        tab.projectId === projectId &&
+        tab.path === path,
+    )
+    if (existing) return get().activate(existing.id)
+    const id = `workspace_${crypto.randomUUID()}`
+    set({
+      tabs: [
+        ...current.tabs,
+        {
+          id,
+          kind: "skill",
+          path,
+          name,
+          ...(projectId === undefined ? {} : { projectId }),
+          ...(current.sessionId === undefined
+            ? {}
+            : { workspaceSessionId: current.sessionId }),
         },
       ],
     })

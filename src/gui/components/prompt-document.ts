@@ -35,14 +35,15 @@ export const promptSchema = new Schema({
       selectable: true,
       attrs: { name: {}, path: {} },
       toDOM: (node) => [
-        "span",
+        "button",
         {
           class: "prompt-skill",
+          type: "button",
           "data-skill-path": node.attrs.path,
+          "data-skill-name": node.attrs.name,
           contenteditable: "false",
           title: node.attrs.path,
         },
-        ["span", { "aria-hidden": "true", class: "prompt-skill-icon" }, "$"],
         node.attrs.name,
       ],
     },

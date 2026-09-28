@@ -79,6 +79,9 @@ export function WorkspaceFilePreview(
     cwd: string
     apiBase: string
     path: string
+    skill?: boolean
+    skillSessionId?: string
+    skillProjectId?: string
     onDirtyChange?: (dirty: boolean) => void
   }>,
 ) {
@@ -94,7 +97,7 @@ export function WorkspaceFilePreview(
       window.removeEventListener("yakitori:workspace-file-saved", refresh)
     }
   }, [])
-  if (editing)
+  if (editing && !props.skill)
     return (
       <FileEditor
         {...props}
@@ -118,14 +121,27 @@ function FilePreview({
   apiBase,
   path,
   onEdit,
-}: Readonly<{ cwd: string; apiBase: string; path: string; onEdit(): void }>) {
+  skill,
+  skillSessionId,
+  skillProjectId,
+}: Readonly<{
+  cwd: string
+  apiBase: string
+  path: string
+  skill?: boolean
+  skillSessionId?: string
+  skillProjectId?: string
+  onEdit(): void
+}>) {
   const [preview, setPreview] = useState<WorkspaceReadResponse>()
   const [media, setMedia] = useState<WorkspaceReadMediaResponse>()
   const [office, setOffice] = useState<WorkspaceReadOfficeResponse>()
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string>()
-  const [wrap, setWrap] = useState(false)
-  const [mode, setMode] = useState<"source" | "preview">("preview")
+  const [wrap, setWrap] = useState(skill === true)
+  const [mode, setMode] = useState<"source" | "preview">(
+    skill ? "source" : "preview",
+  )
   const [lightbox, setLightbox] = useState(false)
   const request = useRef(0)
   const sessionId = useAppStore((state) => state.selection.sessionId)
@@ -136,14 +152,30 @@ function FilePreview({
 
   useEffect(() => {
     const id = ++request.current
+    if (skill && !skillSessionId && !skillProjectId) {
+      setError("Select a project or conversation to view this skill.")
+      setLoading(false)
+      return
+    }
     void getAppRpcClient(apiBase)
       .request(
-        isOffice
-          ? "workspace/readOffice"
-          : isMedia
-            ? "workspace/readMedia"
-            : "workspace/read",
-        { cwd, path },
+        skill
+          ? "session/skill/read"
+          : isOffice
+            ? "workspace/readOffice"
+            : isMedia
+              ? "workspace/readMedia"
+              : "workspace/read",
+        skill
+          ? {
+              path,
+              ...(skillSessionId
+                ? { sessionId: skillSessionId }
+                : skillProjectId
+                  ? { projectId: skillProjectId }
+                  : {}),
+            }
+          : { cwd, path },
       )
       .then(
         (result) => {
@@ -166,7 +198,16 @@ function FilePreview({
     return () => {
       request.current += 1
     }
-  }, [apiBase, cwd, path, isMedia, isOffice])
+  }, [
+    apiBase,
+    cwd,
+    path,
+    isMedia,
+    isOffice,
+    skill,
+    skillSessionId,
+    skillProjectId,
+  ])
 
   const loadMore = async () => {
     if (preview?.nextOffset === undefined || loading) return
@@ -174,11 +215,21 @@ function FilePreview({
     setLoading(true)
     setError(undefined)
     try {
-      const result = await getAppRpcClient(apiBase).request("workspace/read", {
-        cwd,
-        path,
-        offset: preview.nextOffset,
-      })
+      const result = skill
+        ? await getAppRpcClient(apiBase).request("session/skill/read", {
+            path,
+            ...(skillSessionId
+              ? { sessionId: skillSessionId }
+              : skillProjectId
+                ? { projectId: skillProjectId }
+                : {}),
+            offset: preview.nextOffset,
+          })
+        : await getAppRpcClient(apiBase).request("workspace/read", {
+            cwd,
+            path,
+            offset: preview.nextOffset,
+          })
       if (request.current !== id) return
       setPreview({
         ...result,
@@ -274,7 +325,7 @@ function FilePreview({
           <span title={absolutePath}>{absolutePath}</span>
         </div>
         <CopyIconButton text={absolutePath} label="path" />
-        {preview && !preview.binary ? (
+        {preview && !preview.binary && !skill ? (
           <button
             type="button"
             className={iconButton}

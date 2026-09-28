@@ -43,6 +43,209 @@ afterEach(async () => {
 })
 
 describe("thread server handlers", () => {
+  it("runs manual compaction through the live Session and recovers its checkpoint and request replay", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "yakitori-handler-compact-"))
+    const store = new JsonlThreadStore({ root: join(workspace, "store") })
+    let requests = 0
+    let releaseCompaction!: () => void
+    const compactionGate = new Promise<void>((resolve) => {
+      releaseCompaction = resolve
+    })
+    const stream: StreamFn = async function* () {
+      requests += 1
+      if (requests === 2) await compactionGate
+      yield {
+        type: "response",
+        response: {
+          stopReason: ModelStopReason.EndTurn,
+          content: [
+            {
+              type: "text",
+              text: requests === 1 ? "original answer" : "durable summary",
+            },
+          ],
+        },
+      }
+    }
+    const manager = new ThreadManager({
+      store,
+      createTurnProcessor: () =>
+        createTurnProcessor({
+          stream,
+          toolRegistry: createToolRegistry([]),
+          loadProjectInstructions: async () => undefined,
+        }),
+    })
+    const handlers = createThreadServerHandlers({ manager, store })
+    cleanups.push(async () => {
+      releaseCompaction()
+      await manager.shutdown()
+      await handlers.close()
+      await rm(workspace, { recursive: true, force: true })
+    })
+    const created = await handlers.createSession({
+      workingDirectory: workspace,
+      mateId: "mate_test",
+      mateRevisionId: "mate_revision_test",
+    })
+    if (!created.ok) throw new Error(created.body.error.message)
+    const sessionId = created.body.session.id
+    const first = await handlers.admitInput({
+      sessionId,
+      requestId: "request_before_compact",
+      content: { kind: "text", text: "Remember the goal" },
+    })
+    if (!first.ok) throw new Error(first.body.error.message)
+    const thread = manager.getThread(sessionId)
+    if (thread === undefined) throw new Error("Missing live Session.")
+    await waitForValue(() =>
+      typeof thread.agentStatus === "object" &&
+      "completed" in thread.agentStatus
+        ? true
+        : undefined,
+    )
+
+    const compact = await handlers.compactSession({
+      sessionId,
+      requestId: "request_manual_compact",
+    })
+    if (!compact.ok) throw new Error(compact.body.error.message)
+    expect(compact.status).toBe(201)
+    expect(compact.body.event).toMatchObject({
+      type: "input.admitted",
+      data: {
+        requestId: "request_manual_compact",
+        inputId: compact.body.inputId,
+      },
+    })
+    const replay = await handlers.compactSession({
+      sessionId,
+      requestId: "request_manual_compact",
+    })
+    expect(replay).toMatchObject({
+      ok: true,
+      status: 200,
+      body: { inputId: compact.body.inputId },
+    })
+    const busy = await handlers.compactSession({
+      sessionId,
+      requestId: "request_manual_compact_again",
+    })
+    expect(busy).toMatchObject({
+      ok: false,
+      status: 409,
+    })
+    const incompatibleReplay = await handlers.admitInput({
+      sessionId,
+      requestId: "request_manual_compact",
+      content: { kind: "text", text: "/compact" },
+    })
+    expect(incompatibleReplay).toMatchObject({
+      ok: false,
+      status: 409,
+    })
+    releaseCompaction()
+    await waitForValue(() =>
+      thread.status === "idle" &&
+      typeof thread.agentStatus === "object" &&
+      "completed" in thread.agentStatus
+        ? true
+        : undefined,
+    )
+    expect(requests).toBe(2)
+    const saved = await store.readThread(sessionId)
+    expect(
+      saved?.rollout.find(
+        ({ item }) =>
+          item.type === "compacted" && item.turnId === "request_manual_compact",
+      )?.item,
+    ).toMatchObject({
+      type: "compacted",
+      summary: "durable summary",
+    })
+    expect(
+      saved?.rollout.find(
+        ({ item }) =>
+          item.type === "turn_completed" &&
+          item.turnId === "request_manual_compact",
+      )?.item,
+    ).toMatchObject({
+      outcome: "completed",
+      metrics: { modelCalls: 1, toolCalls: 0 },
+    })
+    expect(
+      saved?.rollout.some(
+        ({ item }) =>
+          item.type === "item_completed" &&
+          item.turnId === "request_manual_compact" &&
+          item.item.type === "context_compaction" &&
+          item.item.status === "completed",
+      ),
+    ).toBe(true)
+    const events = await handlers.readSessionEvents({ sessionId })
+    if (!events.ok) throw new Error(events.body.error.message)
+    expect(events.body.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "rollout.item",
+          data: {
+            item: expect.objectContaining({
+              type: "compacted",
+              turnId: "request_manual_compact",
+            }),
+          },
+        }),
+        expect.objectContaining({
+          type: "item.completed",
+          data: {
+            turnId: "request_manual_compact",
+            item: expect.objectContaining({
+              type: "context_compaction",
+              status: "completed",
+            }),
+          },
+        }),
+      ]),
+    )
+    await manager.closeThread(sessionId)
+    const resumed = await manager.resumeThread(sessionId)
+    expect(
+      resumed
+        ?.snapshot()
+        .context.history.some(
+          ({ item }) =>
+            item.role === "user" &&
+            item.content.some(
+              (block) => block.type === "text" && block.text === "/compact",
+            ),
+        ),
+    ).toBe(false)
+    expect(resumed?.snapshot().context.history).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          item: expect.objectContaining({
+            role: "user",
+            content: [
+              expect.objectContaining({
+                text: expect.stringContaining("durable summary"),
+              }),
+            ],
+          }),
+        }),
+      ]),
+    )
+    const resumedReplay = await handlers.compactSession({
+      sessionId,
+      requestId: "request_manual_compact",
+    })
+    expect(resumedReplay).toMatchObject({
+      ok: true,
+      status: 200,
+      body: { inputId: compact.body.inputId },
+    })
+    expect(requests).toBe(2)
+  })
+
   it("reads prior turn cache policy from the durable rollout after the selected model changes", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "yakitori-handler-cache-"))
     const store = new MemoryThreadStore()

@@ -20,6 +20,7 @@ import { contextSourceAttributes } from "../../conversation-context.ts"
 import type { ExecutionEntry } from "../../execution-view.ts"
 import { useAppStore } from "../../store/app-store.ts"
 import { usePreferencesStore } from "../../store/preferences-store.ts"
+import { useWorkspaceStore } from "../../store/workspace-store.ts"
 import { ImageLightbox } from "../image-lightbox.tsx"
 import { parsePrompt } from "../prompt-document.ts"
 import { PromptEditor, type PromptEditorHandle } from "../prompt-editor.tsx"
@@ -35,6 +36,22 @@ function MessageText({ text }: Readonly<{ text: string }>) {
       content.push(
         node.isText ? (
           node.text
+        ) : node.type.name === "skill" ? (
+          <button
+            type="button"
+            // biome-ignore lint/suspicious/noArrayIndexKey: ProseMirror supplies document offsets, not array indices; admitted messages are immutable.
+            key={offset}
+            title={node.attrs.path}
+            aria-label={`View ${node.attrs.name} skill`}
+            className="mx-0.5 inline cursor-pointer rounded-md bg-primary-foreground/15 px-1.5 py-0.5 font-medium hover:bg-primary-foreground/25 focus-visible:outline-2 focus-visible:outline-offset-2"
+            onClick={() =>
+              useWorkspaceStore
+                .getState()
+                .openSkill(node.attrs.path, node.attrs.name)
+            }
+          >
+            ${node.attrs.name}
+          </button>
         ) : (
           <span
             // biome-ignore lint/suspicious/noArrayIndexKey: ProseMirror supplies document offsets, not array indices; admitted messages are immutable.
@@ -42,7 +59,7 @@ function MessageText({ text }: Readonly<{ text: string }>) {
             title={node.attrs.path}
             className="mx-0.5 inline rounded-md bg-primary-foreground/15 px-1.5 py-0.5 font-medium"
           >
-            ${node.attrs.name}
+            @{node.attrs.name}
           </span>
         ),
       )

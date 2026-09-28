@@ -1,4 +1,24 @@
-import { ArrowUp, ImagePlus, LoaderCircle, Plus, Square, X } from "lucide-react"
+import {
+  Archive,
+  ArrowUp,
+  BookOpen,
+  ChartPie,
+  FilePlus2,
+  Gauge,
+  ImagePlus,
+  LoaderCircle,
+  type LucideIcon,
+  MessageSquarePlus,
+  Minimize2,
+  Pencil,
+  Pin,
+  Plus,
+  Server,
+  SlidersHorizontal,
+  Square,
+  Target,
+  X,
+} from "lucide-react"
 import {
   type ReactNode,
   useEffect,
@@ -37,16 +57,57 @@ import { Button } from "./ui/button.tsx"
 type SlashCommand = Readonly<{
   name: string
   description: string
+  icon: LucideIcon
 }>
 
 const SLASH_COMMANDS: readonly SlashCommand[] = [
   {
+    name: "/status",
+    description: "Show conversation context and usage limits",
+    icon: Gauge,
+  },
+  { name: "/mcp", description: "Show MCP server status", icon: Server },
+  {
+    name: "/model",
+    description: "Choose a model and reasoning effort",
+    icon: SlidersHorizontal,
+  },
+  { name: "/usage", description: "Open usage and billing", icon: ChartPie },
+  {
+    name: "/side",
+    description: "Start a temporary side chat",
+    icon: MessageSquarePlus,
+  },
+  {
+    name: "/archive",
+    description: "Archive this conversation",
+    icon: Archive,
+  },
+  { name: "/pin", description: "Pin or unpin this conversation", icon: Pin },
+  {
+    name: "/rename",
+    description: "Rename this conversation",
+    icon: Pencil,
+  },
+  {
+    name: "/skills",
+    description: "Browse skills in the composer",
+    icon: BookOpen,
+  },
+  {
+    name: "/init",
+    description: "Ask the agent to create project instructions",
+    icon: FilePlus2,
+  },
+  {
     name: COMPACT_DIRECTIVE,
     description: "Compact the conversation context",
+    icon: Minimize2,
   },
   {
     name: GOAL_DIRECTIVE,
     description: "Set or clear the session goal",
+    icon: Target,
   },
 ]
 
@@ -70,6 +131,8 @@ export function ComposerSurface({
   excerpts,
   sessionSkills,
   sessionSkillsError,
+  commandPanel,
+  dismissCommandPanel,
   apiBase,
   focusRevision = 0,
   busy = false,
@@ -104,6 +167,8 @@ export function ComposerSurface({
   excerpts: readonly ContextExcerpt[]
   sessionSkills: readonly ApiSkillSummary[]
   sessionSkillsError?: string | undefined
+  commandPanel?: ReactNode
+  dismissCommandPanel?: () => void
   apiBase: string
   focusRevision?: number
   busy?: boolean
@@ -324,9 +389,10 @@ export function ComposerSurface({
       return
     }
     const blocked =
-      sessionId === undefined ||
-      busy ||
-      sending ||
+      (command.name === COMPACT_DIRECTIVE && sessionId === undefined) ||
+      (command.name !== "/status" &&
+        command.name !== "/mcp" &&
+        (busy || sending)) ||
       (command.name === COMPACT_DIRECTIVE &&
         (attachments.length > 0 || excerpts.length > 0))
     if (blocked) {
@@ -334,7 +400,10 @@ export function ComposerSurface({
       editorRef.current?.focus()
       return
     }
-    setPromptDraft("")
+    setDismissedQuery(`${sessionId}:0:/:${command.name.slice(1)}`)
+    // The caller clears the draft after the action succeeds. This preserves
+    // the command when an asynchronous operation (notably /compact) fails.
+    setPromptDraft(command.name)
     onSubmit(command.name, [])
   }
 
@@ -359,6 +428,11 @@ export function ComposerSurface({
 
   const handleDraftKeyDown = (event: globalThis.KeyboardEvent): boolean => {
     if (event.isComposing) return false
+    if (!menuOpen && commandPanel && event.key === "Escape") {
+      event.preventDefault()
+      dismissCommandPanel?.()
+      return true
+    }
     if (menuOpen) {
       if (event.key === "Escape") {
         event.preventDefault()
@@ -424,16 +498,14 @@ export function ComposerSurface({
       // already sends); Shift+Mod+Enter in mod-enter mode (the plain chord
       // is already "send"). Sending steers an active Turn; queueing runs the
       // input as the next Turn.
-      const queue = mod && (sendShortcut === "enter" ? !event.shiftKey : event.shiftKey)
+      const queue =
+        mod && (sendShortcut === "enter" ? !event.shiftKey : event.shiftKey)
       if (queue) {
         event.preventDefault()
         submit("queue")
         return true
       }
-      if (
-        !event.shiftKey &&
-        (sendShortcut === "enter" || mod)
-      ) {
+      if (!event.shiftKey && (sendShortcut === "enter" || mod)) {
         event.preventDefault()
         submit()
         return true
@@ -460,29 +532,41 @@ export function ComposerSurface({
         }}
       >
         <div className="relative overflow-visible rounded-[18px] border bg-card shadow-[0_1px_2px_color-mix(in_oklab,var(--foreground)_7%,transparent),0_8px_24px_-10px_color-mix(in_oklab,var(--foreground)_14%,transparent)] transition-shadow focus-within:shadow-[0_1px_2px_color-mix(in_oklab,var(--foreground)_8%,transparent),0_10px_30px_-10px_color-mix(in_oklab,var(--foreground)_20%,transparent)]">
-          <ComposerSuggestions
-            id={suggestionsId}
-            open={menuOpen}
-            items={suggestions}
-            activeIndex={activeHighlight}
-            listLabel={
-              trigger === "@"
-                ? "Files"
-                : trigger === "$"
-                  ? "Skills"
-                  : "Slash commands"
-            }
-            error={trigger === "@" ? undefined : sessionSkillsError}
-            emptyLabel={
-              trigger === "@"
-                ? query === ""
-                  ? "Type to search for files"
-                  : "No matching files"
-                : undefined
-            }
-            onHighlight={(index) => setHighlight({ query: queryKey, index })}
-            onPick={pickSuggestion}
-          />
+          <div
+            hidden={!menuOpen && !commandPanel}
+            aria-hidden={!menuOpen && !commandPanel}
+            inert={!menuOpen && !commandPanel}
+            className="composer-suggestion-panel absolute bottom-full left-0 z-20 mb-2 w-full overflow-hidden rounded-xl border bg-popover shadow-[0_12px_36px_-16px_color-mix(in_oklab,var(--foreground)_22%,transparent),0_2px_8px_-3px_color-mix(in_oklab,var(--foreground)_12%,transparent)]"
+          >
+            {menuOpen ? (
+              <ComposerSuggestions
+                id={suggestionsId}
+                items={suggestions}
+                activeIndex={activeHighlight}
+                listLabel={
+                  trigger === "@"
+                    ? "Files"
+                    : trigger === "$"
+                      ? "Skills"
+                      : "Slash commands"
+                }
+                error={trigger === "@" ? undefined : sessionSkillsError}
+                emptyLabel={
+                  trigger === "@"
+                    ? query === ""
+                      ? "Type to search for files"
+                      : "No matching files"
+                    : undefined
+                }
+                onHighlight={(index) =>
+                  setHighlight({ query: queryKey, index })
+                }
+                onPick={pickSuggestion}
+              />
+            ) : (
+              commandPanel
+            )}
+          </div>
           <ContextExcerptChips
             excerpts={excerpts}
             onRemove={removePromptExcerpt}
@@ -587,6 +671,7 @@ export function ComposerSurface({
             placeholder={placeholder}
             disabled={sending}
             onChange={(text) => {
+              dismissCommandPanel?.()
               setDismissedQuery(undefined)
               setHistoryNavigation(undefined)
               setPromptDraft(text)
