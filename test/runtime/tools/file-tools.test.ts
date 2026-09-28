@@ -402,7 +402,7 @@ describe("bounded file tools", () => {
     })
   })
 
-  it("requires the edit revision to be observed in the current session", async () => {
+  it("edits an unread file only through an exact unique current anchor", async () => {
     await withWorkspace(async (workspace) => {
       const before = "const value = 1\n"
       await writeFile(join(workspace, "observed.ts"), before)
@@ -413,12 +413,25 @@ describe("bounded file tools", () => {
         newString: "value = 2",
       }
 
-      expect(
-        await edit.execute(request, { workspaceRoot: workspace }),
-      ).toMatchObject({
-        ok: false,
-        code: "file_not_observed",
+      const unread = await edit.execute(request, { workspaceRoot: workspace })
+      expect(unread).toMatchObject({
+        ok: true,
+        output: {
+          matchMode: "exact",
+          replacementCount: 1,
+          observedRevisionKnown: false,
+        },
       })
+      if (!unread.ok) return
+      expect(unread.output).not.toHaveProperty("observation")
+      expect(
+        createVisibleFileObservations([
+          toolProjection("edit_file", unread.output),
+        ]).latest("observed.ts"),
+      ).toBeUndefined()
+      expect(await readFile(join(workspace, "observed.ts"), "utf8")).toBe(
+        "const value = 2\n",
+      )
 
       const context = observedContext(workspace, "observed.ts", before)
       await writeFile(join(workspace, "observed.ts"), "const value = 3\n")
@@ -430,6 +443,58 @@ describe("bounded file tools", () => {
             "Read the file again and rebuild the edit from its latest contents.",
         },
       })
+    })
+  })
+
+  it("rejects unread edits without an exact unique anchor or with replaceAll", async () => {
+    await withWorkspace(async (workspace) => {
+      await writeFile(
+        join(workspace, "unread.ts"),
+        "const first = “hi”\nconst next = 1\nconst next = 1\n",
+      )
+      const edit = createEditFileTool()
+      const context = { workspaceRoot: workspace }
+
+      expect(
+        await edit.execute(
+          { path: "unread.ts", oldString: "missing", newString: "found" },
+          context,
+        ),
+      ).toMatchObject({ ok: false, code: "old_string_not_found" })
+      expect(
+        await edit.execute(
+          {
+            path: "unread.ts",
+            oldString: 'const first = "hi"',
+            newString: 'const first = "bye"',
+          },
+          context,
+        ),
+      ).toMatchObject({ ok: false, code: "old_string_not_found" })
+      expect(
+        await edit.execute(
+          {
+            path: "unread.ts",
+            oldString: "const next = 1",
+            newString: "const next = 2",
+          },
+          context,
+        ),
+      ).toMatchObject({ ok: false, code: "old_string_ambiguous" })
+      expect(
+        await edit.execute(
+          {
+            path: "unread.ts",
+            oldString: "const next = 1",
+            newString: "const next = 2",
+            replaceAll: true,
+          },
+          context,
+        ),
+      ).toMatchObject({ ok: false, code: "file_not_fully_observed" })
+      expect(await readFile(join(workspace, "unread.ts"), "utf8")).toBe(
+        "const first = “hi”\nconst next = 1\nconst next = 1\n",
+      )
     })
   })
 
@@ -1042,6 +1107,30 @@ describe("bounded file tools", () => {
       ])
       expect(["first", "second"]).toContain(
         await readFile(join(workspace, "shared.txt"), "utf8"),
+      )
+    })
+  })
+
+  it("applies a shared unread edit anchor only once under concurrent calls", async () => {
+    await withWorkspace(async (workspace) => {
+      await writeFile(join(workspace, "unread.txt"), "before\n")
+      const edit = createEditFileTool()
+      const context = { workspaceRoot: workspace }
+      const results = await Promise.all([
+        edit.execute(
+          { path: "unread.txt", oldString: "before", newString: "first" },
+          context,
+        ),
+        edit.execute(
+          { path: "unread.txt", oldString: "before", newString: "second" },
+          context,
+        ),
+      ])
+
+      expect(results.filter((result) => result.ok)).toHaveLength(1)
+      expect(results.filter((result) => !result.ok)).toHaveLength(1)
+      expect(["first\n", "second\n"]).toContain(
+        await readFile(join(workspace, "unread.txt"), "utf8"),
       )
     })
   })

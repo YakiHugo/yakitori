@@ -4,6 +4,7 @@ import {
   BookOpen,
   ChartPie,
   FilePlus2,
+  FolderSearch,
   Gauge,
   ImagePlus,
   LoaderCircle,
@@ -154,6 +155,7 @@ export function ComposerSurface({
   attachmentError,
   onAttachmentError,
   searchFiles,
+  fileSearchRoot,
   label = "Message the Mate",
   placeholder = "Ask anything",
   className = "conversation-composer-footer pt-3 pb-3",
@@ -194,9 +196,16 @@ export function ComposerSurface({
   attachmentError?: string | undefined
   onAttachmentError(error: string): void
   // Powers the @-mention file picker; without it the @ trigger stays inert.
-  searchFiles?: (
-    query: string,
-  ) => Promise<readonly Readonly<{ name: string; path: string }>[]>
+  searchFiles?:
+    | ((query: string) => Promise<
+        readonly Readonly<{
+          name: string
+          path: string
+          kind?: "file" | "folder"
+        }>[]
+      >)
+    | undefined
+  fileSearchRoot?: string | undefined
   label?: string
   placeholder?: string
   className?: string
@@ -207,7 +216,11 @@ export function ComposerSurface({
   const suggestionsId = useId()
   const sendShortcut = usePreferencesStore((state) => state.sendShortcut)
   const editorRef = useRef<PromptEditorHandle | null>(null)
-  const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false)
+  const contextPanelRef = useRef<HTMLDivElement>(null)
+  const addContextRef = useRef<HTMLButtonElement>(null)
+  const menuSession = useRef(sessionId)
+  const [addMenuOpen, setAddMenuOpen] = useState(false)
+  const [addHighlight, setAddHighlight] = useState(0)
   const [previewIndex, setPreviewIndex] = useState<number>()
   const [historyNavigation, setHistoryNavigation] =
     useState<
@@ -219,25 +232,52 @@ export function ComposerSurface({
     >()
   const [dismissedQuery, setDismissedQuery] = useState<string>()
   const [highlight, setHighlight] = useState<{ query: string; index: number }>()
-  const [cursor, setCursor] = useState(draft.length)
-  const [hasSelection, setHasSelection] = useState(false)
+  const [selection, setSelection] = useState({
+    from: draft.length,
+    to: draft.length,
+  })
   const [fileMatches, setFileMatches] = useState<{
     key: string
-    items: readonly Readonly<{ name: string; path: string }>[]
+    items: readonly Readonly<{
+      name: string
+      path: string
+      kind?: "file" | "folder"
+    }>[]
   }>()
+  const cursor = selection.from
+  const hasSelection = selection.from !== selection.to
 
   useLayoutEffect(() => {
     if (focusRevision > 0) editorRef.current?.focus()
   }, [focusRevision])
 
   useEffect(() => {
-    if (!attachmentMenuOpen) return
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setAttachmentMenuOpen(false)
+    if (menuSession.current !== sessionId) {
+      menuSession.current = sessionId
+      setAddMenuOpen(false)
     }
-    window.addEventListener("keydown", closeOnEscape)
-    return () => window.removeEventListener("keydown", closeOnEscape)
-  }, [attachmentMenuOpen])
+  }, [sessionId])
+
+  useEffect(() => {
+    if (!addMenuOpen) return
+    const closeOnOutsideClick = (event: PointerEvent) => {
+      if (
+        event.target instanceof Node &&
+        !contextPanelRef.current?.contains(event.target) &&
+        !addContextRef.current?.contains(event.target)
+      )
+        setAddMenuOpen(false)
+    }
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setAddMenuOpen(false)
+    }
+    document.addEventListener("pointerdown", closeOnOutsideClick)
+    document.addEventListener("keydown", closeOnEscape)
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsideClick)
+      document.removeEventListener("keydown", closeOnEscape)
+    }
+  }, [addMenuOpen])
 
   // Navigation parked for another session must not leak into this one.
   const activeHistoryNavigation =
@@ -250,7 +290,7 @@ export function ComposerSurface({
   const tokenStart = cursor - query.length - 1
   const tokenEnd =
     cursor + (/^[\p{L}\p{N}_:./-]*/u.exec(draft.slice(cursor))?.[0].length ?? 0)
-  const queryKey = `${sessionId}:${tokenStart}:${trigger}:${query}`
+  const queryKey = `${sessionId}:${fileSearchRoot}:${tokenStart}:${trigger}:${query}`
   const matchingSkills: ComposerSuggestion[] = [...sessionSkills]
     .sort((a, b) => a.name.localeCompare(b.name))
     .filter(
@@ -300,6 +340,31 @@ export function ComposerSurface({
       ? Math.min(highlight.index, suggestions.length - 1)
       : 0
 
+  useLayoutEffect(() => {
+    const panel = contextPanelRef.current
+    const composer = panel?.parentElement
+    if (!menuOpen || !panel || !composer) return
+    const updateAvailableHeight = () => {
+      panel.style.setProperty(
+        "--composer-popup-available",
+        `${Math.max(72, composer.getBoundingClientRect().top - 12)}px`,
+      )
+    }
+    updateAvailableHeight()
+    const observer =
+      typeof ResizeObserver === "undefined"
+        ? undefined
+        : new ResizeObserver(updateAvailableHeight)
+    observer?.observe(composer)
+    window.addEventListener("resize", updateAvailableHeight)
+    window.addEventListener("scroll", updateAvailableHeight, true)
+    return () => {
+      observer?.disconnect()
+      window.removeEventListener("resize", updateAvailableHeight)
+      window.removeEventListener("scroll", updateAvailableHeight, true)
+    }
+  }, [menuOpen])
+
   useEffect(() => {
     if (trigger !== "@" || searchFiles === undefined || !menuOpen) return
     let current = true
@@ -343,7 +408,7 @@ export function ComposerSurface({
   }
 
   const pickImages = async () => {
-    setAttachmentMenuOpen(false)
+    setAddMenuOpen(false)
     await importImages(async () => {
       const selection = await selectImages()
       if (selection === undefined) return
@@ -357,6 +422,28 @@ export function ComposerSurface({
         cleanup: () => discardPickedImages(selection.selectionId),
       }
     })
+  }
+
+  const pickAddAction = (action: "files" | "image") => {
+    setAddMenuOpen(false)
+    if (action === "image") {
+      void pickImages()
+    } else if (searchFiles) {
+      const prefix =
+        selection.from > 0 && !/\s/u.test(draft[selection.from - 1] ?? "")
+          ? " "
+          : ""
+      const suffix =
+        selection.to < draft.length && !/\s/u.test(draft[selection.to] ?? "")
+          ? " "
+          : ""
+      editorRef.current?.replaceRange(
+        selection.from,
+        selection.to,
+        `${prefix}@${suffix}`,
+        prefix.length + 1,
+      )
+    }
   }
 
   const submit = (mode?: "auto" | "queue") => {
@@ -400,7 +487,9 @@ export function ComposerSurface({
       editorRef.current?.focus()
       return
     }
-    setDismissedQuery(`${sessionId}:0:/:${command.name.slice(1)}`)
+    setDismissedQuery(
+      `${sessionId}:${fileSearchRoot}:0:/:${command.name.slice(1)}`,
+    )
     // The caller clears the draft after the action succeeds. This preserves
     // the command when an asynchronous operation (notably /compact) fails.
     setPromptDraft(command.name)
@@ -415,7 +504,7 @@ export function ComposerSurface({
       editorRef.current?.replaceRange(
         tokenStart,
         tokenEnd,
-        `${fileMentionText(item.file)} `,
+        `${fileMentionText(item.file)}${/^\s/u.test(draft.slice(tokenEnd)) ? "" : " "}`,
       )
     else
       editorRef.current?.replaceRange(
@@ -428,6 +517,24 @@ export function ComposerSurface({
 
   const handleDraftKeyDown = (event: globalThis.KeyboardEvent): boolean => {
     if (event.isComposing) return false
+    if (addMenuOpen) {
+      if (event.key === "Escape") {
+        event.preventDefault()
+        event.stopPropagation()
+        setAddMenuOpen(false)
+        return true
+      }
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault()
+        setAddHighlight(searchFiles ? (addHighlight === 0 ? 1 : 0) : 1)
+        return true
+      }
+      if ((event.key === "Enter" && !event.shiftKey) || event.key === "Tab") {
+        event.preventDefault()
+        pickAddAction(addHighlight === 0 && searchFiles ? "files" : "image")
+        return true
+      }
+    }
     if (!menuOpen && commandPanel && event.key === "Escape") {
       event.preventDefault()
       dismissCommandPanel?.()
@@ -533,23 +640,71 @@ export function ComposerSurface({
       >
         <div className="relative overflow-visible rounded-[18px] border bg-card shadow-[0_1px_2px_color-mix(in_oklab,var(--foreground)_7%,transparent),0_8px_24px_-10px_color-mix(in_oklab,var(--foreground)_14%,transparent)] transition-shadow focus-within:shadow-[0_1px_2px_color-mix(in_oklab,var(--foreground)_8%,transparent),0_10px_30px_-10px_color-mix(in_oklab,var(--foreground)_20%,transparent)]">
           <div
-            hidden={!menuOpen && !commandPanel}
-            aria-hidden={!menuOpen && !commandPanel}
-            inert={!menuOpen && !commandPanel}
-            className="composer-suggestion-panel absolute bottom-full left-0 z-20 mb-2 w-full overflow-hidden rounded-xl border bg-popover shadow-[0_12px_36px_-16px_color-mix(in_oklab,var(--foreground)_22%,transparent),0_2px_8px_-3px_color-mix(in_oklab,var(--foreground)_12%,transparent)]"
+            ref={contextPanelRef}
+            hidden={!addMenuOpen && !menuOpen && !commandPanel}
+            aria-hidden={!addMenuOpen && !menuOpen && !commandPanel}
+            inert={!addMenuOpen && !menuOpen && !commandPanel}
+            className="composer-suggestion-panel absolute bottom-full left-0 z-20 mb-1.5 w-full overflow-hidden rounded-[20px] border bg-popover shadow-[0_12px_32px_-16px_color-mix(in_oklab,var(--foreground)_15%,transparent),0_2px_8px_-4px_color-mix(in_oklab,var(--foreground)_10%,transparent)]"
           >
-            {menuOpen ? (
+            {addMenuOpen ? (
+              <div
+                id={`${suggestionsId}-add`}
+                role="listbox"
+                aria-label="Add context"
+                className="p-2 text-sm"
+              >
+                <div className="px-2 pt-1 pb-1.5 text-[13px] text-muted-foreground">
+                  Add
+                </div>
+                <button
+                  type="button"
+                  role="option"
+                  aria-label="Files and folders"
+                  aria-selected={addHighlight === 0}
+                  disabled={!searchFiles}
+                  title={searchFiles ? undefined : "Select a project to browse"}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onMouseEnter={() => {
+                    if (searchFiles) setAddHighlight(0)
+                  }}
+                  onClick={() => pickAddAction("files")}
+                  className={`flex w-full items-center gap-2 rounded-xl px-2 py-1 text-left text-[14px] leading-5 transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${addHighlight === 0 ? "bg-accent text-foreground" : "text-foreground/80 hover:bg-accent/60"}`}
+                >
+                  <FolderSearch className="size-4 shrink-0 text-muted-foreground" />
+                  <span>Files and folders</span>
+                  {!searchFiles ? (
+                    <span className="truncate text-muted-foreground">
+                      Select a project to browse
+                    </span>
+                  ) : null}
+                </button>
+                <button
+                  type="button"
+                  role="option"
+                  aria-label="Add image"
+                  aria-selected={addHighlight === 1}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onMouseEnter={() => setAddHighlight(1)}
+                  onClick={() => pickAddAction("image")}
+                  className={`flex w-full items-center gap-2 rounded-xl px-2 py-1 text-left text-[14px] leading-5 transition-colors ${addHighlight === 1 ? "bg-accent text-foreground" : "text-foreground/80 hover:bg-accent/60"}`}
+                >
+                  <ImagePlus className="size-4 shrink-0 text-muted-foreground" />
+                  <span>Images</span>
+                </button>
+              </div>
+            ) : menuOpen ? (
               <ComposerSuggestions
                 id={suggestionsId}
                 items={suggestions}
                 activeIndex={activeHighlight}
                 listLabel={
                   trigger === "@"
-                    ? "Files"
+                    ? "Files and folders"
                     : trigger === "$"
                       ? "Skills"
                       : "Slash commands"
                 }
+                showHeaders={query.length === 0}
                 error={trigger === "@" ? undefined : sessionSkillsError}
                 emptyLabel={
                   trigger === "@"
@@ -672,77 +827,59 @@ export function ComposerSurface({
             disabled={sending}
             onChange={(text) => {
               dismissCommandPanel?.()
+              setAddMenuOpen(false)
               setDismissedQuery(undefined)
               setHistoryNavigation(undefined)
               setPromptDraft(text)
             }}
             onSelection={(from, to) => {
-              setCursor(from)
-              setHasSelection(from !== to)
+              setSelection({ from, to })
             }}
-            menuOpen={menuOpen}
+            menuOpen={menuOpen && !addMenuOpen}
             suggestionsId={suggestionsId}
             activeSuggestion={
-              menuOpen && suggestions.length > 0
+              menuOpen && !addMenuOpen && suggestions.length > 0
                 ? `${suggestionsId}-${activeHighlight}`
                 : undefined
             }
             onBlur={() => setDismissedQuery(queryKey)}
-            onFocus={() => setDismissedQuery(undefined)}
+            onFocus={() => {
+              setDismissedQuery(undefined)
+              setAddMenuOpen(false)
+            }}
             onPasteImages={(images) => void addFiles(images)}
             onKeyDown={handleDraftKeyDown}
           />
 
           <div className="flex min-h-12 items-center justify-between gap-3 px-2.5 pb-2.5">
             <div className="relative flex shrink-0 items-center gap-1">
-              {attachmentMenuOpen ? (
-                <div
-                  aria-hidden="true"
-                  className="fixed inset-0 z-10"
-                  onClick={() => setAttachmentMenuOpen(false)}
-                />
-              ) : null}
               <Button
+                ref={addContextRef}
                 type="button"
                 variant="ghost"
                 size="icon-sm"
                 disabled={readingImages || sending}
-                aria-label="Add attachment"
-                aria-expanded={attachmentMenuOpen}
-                title="Add attachment"
-                className={`relative rounded-full text-muted-foreground hover:text-foreground ${attachmentMenuOpen ? "z-20" : ""}`}
-                onClick={() => setAttachmentMenuOpen((open) => !open)}
+                aria-label="Add context"
+                aria-expanded={addMenuOpen}
+                aria-controls={`${suggestionsId}-add`}
+                title="Add context"
+                className={`relative rounded-full text-muted-foreground hover:text-foreground ${addMenuOpen ? "z-20" : ""}`}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => {
+                  editorRef.current?.focus()
+                  setAddHighlight(searchFiles ? 0 : 1)
+                  setAddMenuOpen((open) => !open)
+                  setDismissedQuery(queryKey)
+                }}
               >
                 {readingImages ? (
                   <LoaderCircle className="animate-spin" />
                 ) : (
                   <Plus
-                    className={`transition-transform duration-150 ${attachmentMenuOpen ? "rotate-45" : ""}`}
+                    className={`transition-transform duration-150 ${addMenuOpen ? "rotate-45" : ""}`}
                   />
                 )}
               </Button>
-              {attachmentMenuOpen ? (
-                <div className="composer-control-popover absolute bottom-full left-0 z-20 mb-2 w-56 rounded-xl border bg-popover p-1.5 shadow-[0_12px_32px_-12px_color-mix(in_oklab,var(--foreground)_22%,transparent),0_3px_8px_-5px_color-mix(in_oklab,var(--foreground)_15%,transparent)]">
-                  <button
-                    type="button"
-                    aria-label="Upload image"
-                    onClick={() => void pickImages()}
-                    className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  >
-                    <span className="grid size-7 shrink-0 place-items-center rounded-md bg-muted text-muted-foreground">
-                      <ImagePlus className="size-4" />
-                    </span>
-                    <span className="min-w-0">
-                      <span className="block text-sm font-medium">
-                        Upload image
-                      </span>
-                      <span className="block truncate text-[11px] text-muted-foreground">
-                        PNG, JPEG, GIF, or WebP
-                      </span>
-                    </span>
-                  </button>
-                </div>
-              ) : null}
             </div>
 
             <div className="flex min-w-0 items-center gap-1">

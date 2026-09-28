@@ -16,7 +16,12 @@ import {
 
 export type PromptEditorHandle = Readonly<{
   focus(atEnd?: boolean): void
-  replaceRange(from: number, to: number, text: string): void
+  replaceRange(
+    from: number,
+    to: number,
+    text: string,
+    cursorOffset?: number,
+  ): void
 }>
 
 type Props = Readonly<{
@@ -59,7 +64,7 @@ export function PromptEditor(props: Props) {
           )
         view.focus()
       },
-      replaceRange(from, to, text) {
+      replaceRange(from, to, text, cursorOffset) {
         const view = editor.current
         if (!view) return
         const start = promptPosition(view.state.doc, from)
@@ -68,7 +73,9 @@ export function PromptEditor(props: Props) {
         if (!content) return
         const tr = closeHistory(view.state.tr).replaceWith(start, end, content)
         tr.setSelection(
-          TextSelection.near(tr.doc.resolve(start + content.size)),
+          TextSelection.near(
+            tr.doc.resolve(start + (cursorOffset ?? content.size)),
+          ),
         )
         view.dispatch(tr.scrollIntoView())
         view.focus()
@@ -151,7 +158,9 @@ export function PromptEditor(props: Props) {
         slice.content.textBetween(0, slice.content.size, "\n", (node) =>
           node.type.name === "skill"
             ? `[$${node.attrs.name}](${node.attrs.path})`
-            : "",
+            : node.type.name === "file"
+              ? `[@${node.attrs.name}](${node.attrs.path})`
+              : "",
         ),
       clipboardTextParser: (text) => new Slice(parsePrompt(text).content, 1, 1),
       handleDOMEvents: {

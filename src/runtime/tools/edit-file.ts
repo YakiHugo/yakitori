@@ -8,19 +8,19 @@ import {
   matchedEditLocations,
 } from "./edit-file-diagnostics.ts"
 import { locateEditMatches } from "./edit-file-match.ts"
-import { resolveReadPath, resolveWritePath } from "./path-policy.ts"
 import {
   completeFileChangeExecution,
   fileChangeExecution,
 } from "./execution-descriptors.ts"
+import { resolveReadPath, resolveWritePath } from "./path-policy.ts"
 import {
   dominantLineEnding,
   normalizeReplacementLineEndings,
   preserveCurlyQuoteStyle,
 } from "./text-file-format.ts"
 import { compareAndWriteTextFile } from "./text-file-write.ts"
-import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
 import { plainToolName } from "./tool-name.ts"
+import type { RuntimeTool, ToolExecutionResult } from "./types.ts"
 
 type EditInput = {
   readonly path: string
@@ -35,7 +35,7 @@ export function createEditFileTool(
   return {
     toolName: plainToolName("edit_file"),
     description:
-      "Replace text in an existing UTF-8 file, or create a new file by setting oldString to an empty string. Accepts paths relative to the workspace and absolute paths. An empty oldString never overwrites an existing file. Read existing files before editing them. Supply the smallest unique non-empty oldString, usually 2-4 lines, and exclude read_file's {N}\\t line prefixes. A ranged read requires an exact unique oldString; replaceAll requires a complete read. For a complete unchanged revision, matching is exact first, followed only by deterministic line-ending, curly-quote, and trailing-whitespace equivalence. No similarity edit is ever applied.",
+      "Replace text in an existing UTF-8 file, or create a new file by setting oldString to an empty string. Accepts paths relative to the workspace and absolute paths. An empty oldString never overwrites an existing file. Read the relevant text before editing when possible. Supply the smallest unique non-empty oldString, usually 2-4 lines, and exclude read_file's {N}\\t line prefixes. An unread file or a ranged read requires an exact unique oldString; replaceAll requires a complete read. For a complete unchanged revision, matching is exact first, followed only by deterministic line-ending, curly-quote, and trailing-whitespace equivalence. No similarity edit is ever applied.",
     approvalRequirement: fileChangeApprovalRequirement,
     effect: "mutate",
     describeExecution: fileChangeExecution("edit"),
@@ -116,15 +116,8 @@ export function createEditFileTool(
       const observed = context.visibleFileObservations?.latest(
         resolved.displayPath,
       )
-      if (observed === undefined) {
-        return editFailure(
-          "file_not_observed",
-          `${resolved.displayPath} is not visible in the current model context.`,
-          { suggestion: "Read it first with read_file." },
-        )
-      }
-      const observedSha256 = observed.sha256
-      if (!observed.complete && parsed.replaceAll) {
+      const observedSha256 = observed?.sha256
+      if (!observed?.complete && parsed.replaceAll) {
         return editFailure(
           "file_not_fully_observed",
           "replaceAll requires a complete visible file revision.",
@@ -155,7 +148,7 @@ export function createEditFileTool(
       const observedRevisionKnown = observedSha256 !== undefined
       const optimisticRebase =
         observedRevisionKnown && currentSha256 !== observedSha256
-      const exactAnchorRequired = !observed.complete || optimisticRebase
+      const exactAnchorRequired = !observed?.complete || optimisticRebase
       if (optimisticRebase && parsed.replaceAll) {
         return editFailure(
           "file_changed_since_observation",
@@ -233,9 +226,9 @@ export function createEditFileTool(
         : located.matches.slice(0, 1)
       const changedRanges = matchedEditLocations(content, matches)
       const editWithinObservedRanges =
-        observed.complete ||
+        observed?.complete === true ||
         changedRanges.every((changed) =>
-          observed.ranges?.some(
+          observed?.ranges?.some(
             (range) =>
               range.startLine <= changed.startLine &&
               range.endLine >= changed.endLine,
@@ -277,9 +270,16 @@ export function createEditFileTool(
       if (!written.ok) {
         if (written.code !== "stale_sha256") return written
         return editFailure(
-          "file_changed_since_observation",
+          observed === undefined
+            ? "file_changed_during_edit"
+            : "file_changed_since_observation",
           "The file changed while edit_file was preparing the write.",
-          { suggestion: "Read it again before rebuilding the edit." },
+          {
+            suggestion:
+              observed === undefined
+                ? "Retry with an exact anchor from the current file."
+                : "Read it again before rebuilding the edit.",
+          },
         )
       }
 
@@ -300,11 +300,15 @@ export function createEditFileTool(
         observedRevisionKnown,
         ...(observedSha256 === undefined ? {} : { observedSha256 }),
         changedRanges,
-        observation: {
-          kind: observed.observation,
-          complete: observed.complete,
-          editWithinObservedRanges,
-        },
+        ...(observed === undefined
+          ? {}
+          : {
+              observation: {
+                kind: observed.observation,
+                complete: observed.complete,
+                editWithinObservedRanges,
+              },
+            }),
         ...(editGrant === undefined ? {} : { fileObservation: editGrant }),
       }
       return {

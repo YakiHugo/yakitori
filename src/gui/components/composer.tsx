@@ -18,6 +18,7 @@ import {
   type ComposerImageImport,
   ComposerSurface,
 } from "./composer-surface.tsx"
+import { ContextWindowIndicator } from "./context-window-indicator.tsx"
 import { ModelSelector } from "./model-selector.tsx"
 import { SessionCommandPanel } from "./session-command-panel.tsx"
 
@@ -74,28 +75,52 @@ export function Composer() {
   // filters it locally; rescanning ripgrep per keystroke is slow enough on
   // large repos that the picker could return nothing at all.
   const fileIndexes = useRef(new Map<string, Promise<readonly string[]>>())
+  const contextIndexes = useRef(
+    new WeakMap<
+      readonly string[],
+      { paths: readonly string[]; directories: ReadonlySet<string> }
+    >(),
+  )
+  const getFileIndex = useCallback(async () => {
+    if (fileSearchCwd === undefined) return []
+    const key = `${apiBase}${fileSearchCwd}`
+    let index = fileIndexes.current.get(key)
+    if (index === undefined) {
+      index = getAppRpcClient(apiBase)
+        .request("workspace/findFiles", {
+          cwd: fileSearchCwd,
+          query: "",
+          limit: 20_000,
+        })
+        .then((response) => response.paths)
+      fileIndexes.current.set(key, index)
+      index.catch(() => fileIndexes.current.delete(key))
+    }
+    return index
+  }, [fileSearchCwd, apiBase])
   const searchFiles = useCallback(
     async (query: string) => {
-      if (fileSearchCwd === undefined) return []
-      const key = `${apiBase}${fileSearchCwd}`
-      let index = fileIndexes.current.get(key)
-      if (index === undefined) {
-        index = getAppRpcClient(apiBase)
-          .request("workspace/findFiles", {
-            cwd: fileSearchCwd,
-            query: "",
-            limit: 20_000,
-          })
-          .then((response) => response.paths)
-        fileIndexes.current.set(key, index)
-        index.catch(() => fileIndexes.current.delete(key))
+      const index = await getFileIndex()
+      let contextIndex = contextIndexes.current.get(index)
+      if (!contextIndex) {
+        const directories = new Set<string>()
+        for (const path of index) {
+          const parts = path.split("/")
+          for (let end = 1; end < parts.length; end++)
+            directories.add(parts.slice(0, end).join("/"))
+        }
+        contextIndex = { paths: [...directories, ...index], directories }
+        contextIndexes.current.set(index, contextIndex)
       }
-      return rankFileMatches(await index, query, 20).map((path) => ({
+      return rankFileMatches(contextIndex.paths, query, 20).map((path) => ({
         name: path.split("/").at(-1) ?? path,
         path,
+        kind: (contextIndex.directories.has(path) ? "folder" : "file") as
+          | "folder"
+          | "file",
       }))
     },
-    [fileSearchCwd, apiBase],
+    [getFileIndex],
   )
   const effectiveModel = normalizeKimiModelSelection(
     resolveEffectiveModel({
@@ -118,6 +143,13 @@ export function Composer() {
     modelEntry === undefined
       ? true
       : (modelEntry.imageDetailModes?.includes("original") ?? false)
+  const contextUsedTokens =
+    view.lastModel !== undefined &&
+    effectiveModel !== undefined &&
+    view.lastModel.provider === effectiveModel.provider &&
+    view.lastModel.model === effectiveModel.model
+      ? view.lastTurnUsage?.activeContextTokens
+      : undefined
 
   const importImages: ComposerImageImport = async (prepare, validate) => {
     if (readingImages) return
@@ -329,12 +361,21 @@ export function Composer() {
       onCancel={() => {
         if (activeTurnId) void cancelTurn(activeTurnId)
       }}
-      modelControls={<ModelSelector />}
+      modelControls={
+        <>
+          <ContextWindowIndicator
+            usedTokens={contextUsedTokens}
+            capacity={modelEntry?.effectiveContextWindowTokens}
+          />
+          <ModelSelector />
+        </>
+      }
       importImages={importImages}
       readingImages={readingImages}
       attachmentError={attachmentError}
       onAttachmentError={setAttachmentError}
-      searchFiles={searchFiles}
+      searchFiles={fileSearchCwd ? searchFiles : undefined}
+      fileSearchRoot={fileSearchCwd}
       placeholder={
         sessionId === undefined
           ? "Describe what you want to work on"

@@ -284,13 +284,22 @@ describe("model catalog context windows", () => {
         model: "gpt-5.5",
       }),
     ).toBe("medium")
-    // Models without a declared default keep the provider default.
-    expect(
-      resolveModelWireEffort({ provider: "kimi", model: "k3" }),
-    ).toBeUndefined()
+    expect(resolveModelWireEffort({ provider: "kimi", model: "k3" })).toBe(
+      "max",
+    )
+    expect(resolveModelWireEffort({ provider: "kimi", model: "k3-256k" })).toBe(
+      "max",
+    )
     expect(
       resolveModelWireEffort({ provider: "openai", model: "gpt-6-astra" }),
-    ).toBeUndefined()
+    ).toBe("low")
+    expect(
+      resolveModelWireEffort({ provider: "grok", model: "grok-4.6" }),
+    ).toBe("high")
+    expect(
+      resolveModelWireEffort({ provider: "grok", model: "grok-4.5" }),
+    ).toBe("high")
+    // Unknown models still leave the provider to decide.
     expect(
       resolveModelWireEffort({ provider: "codex", model: "gpt-future" }),
     ).toBeUndefined()

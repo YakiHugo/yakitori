@@ -68,6 +68,36 @@ it("roundtrips copied inline skills through the editor's rich clipboard", () => 
   expect(screen.getByTestId("serialized").textContent).toBe(text)
 })
 
+it("preserves a file context mention when copying and pasting the prompt", () => {
+  render(<Fixture />)
+  const editor = screen.getByRole("textbox")
+  editor.focus()
+  fireEvent.keyDown(editor, { key: "a", ctrlKey: true })
+  const text = "Check [@composer.tsx](src/gui/composer.tsx) here"
+  fireEvent.paste(editor, {
+    clipboardData: {
+      files: [],
+      getData: (type: string) => (type === "text/plain" ? text : ""),
+    },
+  })
+  fireEvent.keyDown(editor, { key: "a", ctrlKey: true })
+  const clipboard = new Map<string, string>()
+  fireEvent.copy(editor, {
+    clipboardData: {
+      clearData: () => clipboard.clear(),
+      setData: (type: string, value: string) => clipboard.set(type, value),
+    },
+  })
+  expect(clipboard.get("text/plain")).toBe(text)
+  fireEvent.paste(editor, {
+    clipboardData: {
+      files: [],
+      getData: (type: string) => clipboard.get(type) ?? "",
+    },
+  })
+  expect(screen.getByTestId("serialized").textContent).toBe(text)
+})
+
 function ExternalFixture() {
   const [text, setText] = useState("Replace this draft")
   return (

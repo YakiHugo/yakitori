@@ -1617,7 +1617,7 @@ describe("Turn processor", () => {
     expect(await readFile(path, "utf8")).toBe("changed externally\n")
   })
 
-  it("does not let a read authorize an edit from the same model call", async () => {
+  it("edits through an exact current anchor when read and edit share a model call", async () => {
     const provider = createFauxProvider([
       {
         stopReason: ModelStopReason.ToolUse,
@@ -1647,8 +1647,7 @@ describe("Turn processor", () => {
               expect.objectContaining({
                 role: "tool",
                 toolCallId: "tool_same_edit",
-                isError: true,
-                content: expect.stringContaining("file_not_observed"),
+                content: expect.stringContaining("Updated same-call.txt"),
               }),
             ]),
           )
@@ -1665,10 +1664,10 @@ describe("Turn processor", () => {
     await nextLifecycleEvent(thread)
     await nextLifecycleEvent(thread)
 
-    expect(await readFile(path, "utf8")).toBe("one\n")
+    expect(await readFile(path, "utf8")).toBe("two\n")
   })
 
-  it("removes observation grants when a tool result is context-truncated", async () => {
+  it("removes truncated read grants without blocking an exact edit", async () => {
     const provider = createFauxProvider([
       {
         stopReason: ModelStopReason.ToolUse,
@@ -1683,16 +1682,16 @@ describe("Turn processor", () => {
       },
       {
         assertRequest(request) {
-          expect(request.messages).toEqual(
-            expect.arrayContaining([
-              expect.objectContaining({
-                role: "tool",
-                toolCallId: "tool_truncated_read",
-                content: expect.stringContaining("Read preview truncated"),
-                fileObservation: undefined,
-              }),
-            ]),
+          const read = request.messages.find(
+            (message) =>
+              message.role === "tool" &&
+              message.toolCallId === "tool_truncated_read",
           )
+          expect(read).toMatchObject({
+            role: "tool",
+            content: expect.stringContaining("Read preview truncated"),
+          })
+          expect(read).not.toHaveProperty("fileObservations")
         },
         stopReason: ModelStopReason.ToolUse,
         content: [
@@ -1708,7 +1707,21 @@ describe("Turn processor", () => {
           },
         ],
       },
-      { content: [{ type: "text", text: "done" }] },
+      {
+        assertRequest(request) {
+          const edit = request.messages.find(
+            (message) =>
+              message.role === "tool" &&
+              message.toolCallId === "tool_edit_after_truncation",
+          )
+          expect(edit).toMatchObject({
+            role: "tool",
+            content: expect.stringContaining("Updated truncated.txt"),
+          })
+          expect(edit).not.toHaveProperty("isError", true)
+        },
+        content: [{ type: "text", text: "done" }],
+      },
     ])
     const runtime = await createRuntime(provider.stream, createToolRegistry(), {
       executionPolicy: createSessionExecutionPolicy({
@@ -1723,7 +1736,9 @@ describe("Turn processor", () => {
     await nextLifecycleEvent(thread)
     await nextLifecycleEvent(thread)
 
-    expect(await readFile(path, "utf8")).toBe("one\ntwo\n")
+    expect(thread.agentStatus).toEqual({ completed: "done" })
+    expect(provider.callCount).toBe(3)
+    expect(await readFile(path, "utf8")).toBe("changed\ntwo\n")
   })
 
   it("delivers committed tool history before the next model stream", async () => {
