@@ -783,31 +783,43 @@ html[data-desktop="macos"] body {
 html[data-desktop="macos"] .sidebar-frame {
   background: color-mix(in oklab, var(--background) 18%, transparent);
 }
-html[data-desktop="macos"] .sidebar-toolbar {
-  padding-left: 86px;
+html[data-desktop="macos"] .sidebar-toolbar,
+html[data-desktop="macos"] .app-shell > main > header,
+html[data-desktop="macos"] .workspace-header {
   -webkit-app-region: drag;
 }
-html[data-desktop="macos"] .sidebar-toolbar button,
-html[data-desktop="macos"] .sidebar-show {
+html[data-desktop="macos"] .sidebar-toolbar {
+  padding-left: 86px;
+}
+html[data-desktop="macos"]
+  :is(.sidebar-toolbar, .app-shell > main > header, .workspace-header)
+  :is(button, a, input, select, [role="button"], [role="tab"]),
+html[data-desktop="macos"] :is(.sidebar-show, .workspace-show, .settings-back) {
   -webkit-app-region: no-drag;
 }
 html[data-desktop="macos"] .sidebar-show {
   left: 86px;
   top: 6px;
 }
-html[data-desktop="macos"] :has(> .sidebar-frame[data-open="false"]) > main {
-  padding-top: 40px;
+html[data-desktop="macos"] .app-shell > main:not(:has(> header)) {
+  position: relative;
 }
-html[data-desktop="macos"]
-  .app-shell:has(.sidebar-frame[data-open="false"])::before {
+html[data-desktop="macos"] .app-shell > main:not(:has(> header))::before {
   content: "";
   position: absolute;
   top: 0;
   left: 0;
   right: 0;
   height: 40px;
-  pointer-events: none;
+  z-index: 1;
   -webkit-app-region: drag;
+}
+html[data-desktop="macos"] .settings-back {
+  position: relative;
+  z-index: 2;
+}
+html[data-desktop="macos"] .settings-sidebar {
+  padding-top: 48px;
 }
 
 .create-project-dialog {
