@@ -9,10 +9,7 @@ import {
 } from "@testing-library/react"
 import { useRef } from "react"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
-import {
-  ConversationFind,
-  openConversationFind,
-} from "../../src/gui/components/conversation-find.tsx"
+import { ConversationFind } from "../../src/gui/components/conversation-find.tsx"
 import { conversationFindRanges } from "../../src/gui/components/conversation-find-text.ts"
 import {
   createInitialAppState,
@@ -47,6 +44,10 @@ const hits: ApiSearchSessionOccurrencesResponse["data"] = [
     snippetMatchRange: { start: 6, end: 12 },
   },
 ]
+
+function openFind() {
+  fireEvent.keyDown(window, { key: "f", metaKey: true })
+}
 
 function Fixture({ sessionId = "session" }: Readonly<{ sessionId?: string }>) {
   const contentRef = useRef<HTMLDivElement>(null)
@@ -129,8 +130,6 @@ it("leaves the file editor shortcut and already-handled shortcuts alone", () => 
   handled.preventDefault()
   fireEvent(window, handled)
   expect(screen.queryByRole("search")).toBeNull()
-  act(openConversationFind)
-  expect(screen.getByRole("search")).toBeDefined()
 })
 
 it("loads every persisted occurrence page and navigates individual matches in both directions", async () => {
@@ -138,7 +137,7 @@ it("loads every persisted occurrence page and navigates individual matches in bo
     .mockResolvedValueOnce({ data: hits.slice(0, 2), nextCursor: "next" })
     .mockResolvedValueOnce({ data: hits.slice(2) })
   render(<Fixture />)
-  act(openConversationFind)
+  openFind()
   const input = screen.getByRole("searchbox")
   fireEvent.change(input, { target: { value: "needle" } })
   await screen.findByText("1 of 3")
@@ -179,7 +178,7 @@ it("reveals an older logical message inside a closed disclosure before jumping",
     data: [{ ...hits[2], itemId: "older", snippet: "Historical needle" }],
   })
   const { container } = render(<Fixture />)
-  act(openConversationFind)
+  openFind()
   fireEvent.change(screen.getByRole("searchbox"), {
     target: { value: "needle" },
   })
@@ -206,7 +205,7 @@ it("ignores a response for an earlier query and resets when the selected session
         : Promise.resolve({ data: hits }),
   )
   const { rerender } = render(<Fixture />)
-  act(openConversationFind)
+  openFind()
   fireEvent.change(screen.getByRole("searchbox"), { target: { value: "old" } })
   await waitFor(() => expect(resolveOld).toBeDefined())
   fireEvent.change(screen.getByRole("searchbox"), {
@@ -225,7 +224,7 @@ it("shows an operational failure with retry, and distinguishes a completed empty
     .mockRejectedValueOnce(new Error("Search projection unavailable"))
     .mockResolvedValueOnce({ data: [] })
   render(<Fixture />)
-  act(openConversationFind)
+  openFind()
   fireEvent.change(screen.getByRole("searchbox"), {
     target: { value: "needle" },
   })

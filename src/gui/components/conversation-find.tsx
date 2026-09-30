@@ -13,13 +13,8 @@ import { useAppStore } from "../store/app-store.ts"
 import { conversationFindRanges } from "./conversation-find-text.ts"
 import "./conversation-find.css"
 
-const findEvent = "yakitori:find-conversation"
 type Occurrence = ApiSearchSessionOccurrencesResponse["data"][number]
 const emptyMatches: readonly Occurrence[] = []
-
-export function openConversationFind() {
-  window.dispatchEvent(new Event(findEvent))
-}
 
 export function ConversationFind({
   sessionId,
@@ -99,10 +94,8 @@ export function ConversationFind({
         close()
       }
     }
-    window.addEventListener(findEvent, show)
     window.addEventListener("keydown", keydown)
     return () => {
-      window.removeEventListener(findEvent, show)
       window.removeEventListener("keydown", keydown)
     }
   }, [open, close])
