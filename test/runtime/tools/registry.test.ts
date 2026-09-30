@@ -682,7 +682,6 @@ describe("finalized tool router", () => {
       web_fetch: "none",
       web_search: "none",
       request_user_input_async: "none",
-      update_plan: "none",
       spawn_agent: "none",
       send_message: "none",
       followup_task: "none",

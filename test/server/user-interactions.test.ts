@@ -12,7 +12,7 @@ import {
 import { initializeConnection, openTestConnection } from "./rpc/testkit.ts"
 
 describe("session user interactions", () => {
-  it("persists a question and plan, correlates answers, and deduplicates answers after restart", async () => {
+  it("persists a question, correlates answers, and deduplicates answers after restart", async () => {
     const root = await mkdtemp(join(tmpdir(), "yakitori-questions-"))
     let calls = 0
     const stream: StreamFn = async function* () {
@@ -34,16 +34,6 @@ describe("session user interactions", () => {
                           title: "Where should the report be saved?",
                           options: ["Workspace", "Downloads"],
                         },
-                      ],
-                    },
-                  },
-                  {
-                    type: "tool_call",
-                    id: "plan_report",
-                    name: "update_plan",
-                    input: {
-                      plan: [
-                        { step: "Choose destination", status: "in_progress" },
                       ],
                     },
                   },
@@ -150,7 +140,9 @@ describe("session user interactions", () => {
           ({ item }) =>
             item.type === "item_completed" &&
             "output" in item.item &&
-            JSON.stringify(item.item.output).includes('"kind":"plan"'),
+            JSON.stringify(item.item.output).includes(
+              '"kind":"user_questions"',
+            ),
         ),
       ).toBe(true)
       await processor.closeConnection(connection.id)

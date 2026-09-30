@@ -9,7 +9,6 @@ import { createGrepTool } from "./grep.ts"
 import { createMultiAgentTools } from "./multi-agent.ts"
 import { createReadFileTool } from "./read-file.ts"
 import { createReadDocumentTool, createViewImageTool } from "./read-media.ts"
-import { createSessionProgressTools } from "./session-progress.ts"
 import {
   canonicalToolName,
   namespacedToolName,
@@ -28,6 +27,7 @@ import type {
   ToolExposure,
 } from "./types.ts"
 import { createUnifiedExecTools } from "./unified-exec.ts"
+import { createUserQuestionsTool } from "./user-questions.ts"
 import { createWebFetchTool } from "./web-fetch.ts"
 import { createWebSearchTool } from "./web-search.ts"
 import { createWriteFileTool } from "./write-file.ts"
@@ -892,7 +892,7 @@ export function createDefaultTools(
     }),
     createWebFetchTool(),
     createWebSearchTool(),
-    ...createSessionProgressTools(),
+    createUserQuestionsTool(),
     ...(input.includeMultiAgent === false ? [] : createMultiAgentTools()),
   ]
 }

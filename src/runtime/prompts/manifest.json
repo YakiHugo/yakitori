@@ -28,16 +28,16 @@
     "agent": "codex",
     "source": "https://github.com/openai/codex/blob/1d74c3ba1ee98be2025ab066dcc3fd654fe8a3b6/codex-rs/models-manager/prompt.md",
     "version": "1d74c3ba1ee98be2025ab066dcc3fd654fe8a3b6",
-    "selection": "Model absent from current official catalog; uses the official Codex fallback, not a guessed newer model prompt.",
-    "sha256": "ebfcbdce4a6c353e85d6cde37e508b89c77a902bd27771c91caba5fd494bdb83"
+    "selection": "Model absent from current official catalog; uses the official Codex fallback with the update_plan sections removed, not a guessed newer model prompt.",
+    "sha256": "57162c3200c2c81b61f5c48c4702aeaf8ace09fb5ce144e714a8bc4f7d13296b"
   },
   "gpt-5": {
     "file": "codex-fallback.md",
     "agent": "codex",
     "source": "https://github.com/openai/codex/blob/1d74c3ba1ee98be2025ab066dcc3fd654fe8a3b6/codex-rs/models-manager/prompt.md",
     "version": "1d74c3ba1ee98be2025ab066dcc3fd654fe8a3b6",
-    "selection": "Model absent from current official catalog; uses the official Codex fallback, not a guessed newer model prompt.",
-    "sha256": "ebfcbdce4a6c353e85d6cde37e508b89c77a902bd27771c91caba5fd494bdb83"
+    "selection": "Model absent from current official catalog; uses the official Codex fallback with the update_plan sections removed, not a guessed newer model prompt.",
+    "sha256": "57162c3200c2c81b61f5c48c4702aeaf8ace09fb5ce144e714a8bc4f7d13296b"
   },
   "gpt-5.6-sol": {
     "file": "codex-gpt-5.6-sol.md",
