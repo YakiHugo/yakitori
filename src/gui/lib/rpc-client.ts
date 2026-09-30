@@ -99,6 +99,7 @@ export type AppRpcClient = {
   subscribeToSessionActivity(
     listener: (activeSessionIds: readonly string[] | undefined) => void,
   ): () => void
+  subscribeToQueueChanges(listener: (sessionId: string) => void): () => void
   // Answers the pending session/permission/request for this permission;
   // throws when no answer channel is open (e.g. already answered, or the
   // request pruned while disconnected).
@@ -174,6 +175,7 @@ export function createAppRpcClient(options: {
   const sessionActivityListeners = new Set<
     (activeSessionIds: readonly string[] | undefined) => void
   >()
+  const queueChangeListeners = new Set<(sessionId: string) => void>()
   const sideChatListeners = new Set<
     (snapshot: SideChatSnapshot | undefined) => void
   >()
@@ -465,6 +467,11 @@ export function createAppRpcClient(options: {
           : []
       for (const listener of sessionActivityListeners) listener(ids)
     }
+    if (message.method === "session/queue/changed") {
+      const sessionId = (message.params as { sessionId?: unknown } | undefined)?.sessionId
+      if (typeof sessionId === "string")
+        for (const listener of queueChangeListeners) listener(sessionId)
+    }
     if (message.method === "project/changed") {
       const params = message.params as ProjectChangedNotification
       for (const listener of projectChangeListeners) listener(params)
@@ -567,6 +574,10 @@ export function createAppRpcClient(options: {
       return () => {
         sessionActivityListeners.delete(listener)
       }
+    },
+    subscribeToQueueChanges(listener) {
+      queueChangeListeners.add(listener)
+      return () => queueChangeListeners.delete(listener)
     },
     subscribeToSideChatChanges(listener) {
       sideChatListeners.add(listener)

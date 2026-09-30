@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
 import type { SessionEvent } from "../../src/core/session-io.ts"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
 import { createRolloutAssets } from "../../src/kernel/rollout-assets.ts"
@@ -53,6 +54,132 @@ afterEach(async () => {
 })
 
 describe("Turn processor", () => {
+  it("materializes a new Session only after the prompt hook accepts its input", async () => {
+    const root = await mkdtemp(
+      join(tmpdir(), "yakitori-prompt-materialization-"),
+    )
+    const store = new JsonlThreadStore({ root })
+    let threadId = ""
+    let sampled = false
+    const manager = new ThreadManager({
+      store,
+      createTurnProcessor: () =>
+        createTurnProcessor({
+          stream: async function* () {
+            sampled = true
+            expect(
+              (await store.listThreads()).threads.map((thread) => thread.id),
+            ).toContain(threadId)
+            yield responseEvent("accepted")
+          },
+          toolRegistry: createToolRegistry([]),
+          loadProjectInstructions: async () => undefined,
+          hookRunner: {
+            async dispose() {},
+            async run(request) {
+              if (request.event === HookEvent.UserPromptSubmit)
+                expect(
+                  (await store.listThreads()).threads.map(
+                    (thread) => thread.id,
+                  ),
+                ).not.toContain(threadId)
+              return {
+                continue: request.payload.prompt !== "block",
+                additionalContext: [],
+              }
+            },
+          },
+        }),
+    })
+    try {
+      const thread = await manager.createThread({
+        workingDirectory: root,
+        mateId: "mate_test",
+        mateRevisionId: "mate_revision_test",
+      })
+      threadId = thread.id
+      await thread.startIfIdle({
+        content: { kind: "text", text: "Persist after hook" },
+      })
+      await expect
+        .poll(() => thread.agentStatus)
+        .toEqual({
+          completed: "accepted",
+        })
+      expect(sampled).toBe(true)
+
+      sampled = false
+      const blocked = await manager.createThread({
+        workingDirectory: root,
+        mateId: "mate_test",
+        mateRevisionId: "mate_revision_test",
+      })
+      threadId = blocked.id
+      await blocked.startIfIdle({ content: { kind: "text", text: "block" } })
+      await expect.poll(() => blocked.agentStatus).toEqual({ completed: null })
+      expect(sampled).toBe(false)
+      expect(
+        (await store.listThreads()).threads.map((entry) => entry.id),
+      ).not.toContain(blocked.id)
+      await manager.closeThread(blocked.id)
+      expect(await store.readThread(blocked.id)).toBeUndefined()
+    } finally {
+      await manager.shutdown()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it("records a user message only after its prompt hook accepts it", async () => {
+    const sampled: string[] = []
+    const hookRunner: HookRunner = {
+      async dispose() {},
+      async run(request) {
+        if (request.event === HookEvent.UserPromptSubmit) {
+          return {
+            continue: request.payload.prompt !== "blocked",
+            additionalContext: [],
+          }
+        }
+        return { continue: true, additionalContext: [] }
+      },
+    }
+    const runtime = await createRuntime(
+      async function* (request) {
+        sampled.push(JSON.stringify(request.messages))
+        yield responseEvent("accepted")
+      },
+      createToolRegistry([]),
+      { hookRunner },
+    )
+    const thread = await runtime.createThread()
+
+    await thread.startIfIdle({
+      submissionId: "turn_blocked",
+      content: { kind: "text", text: "blocked" },
+    })
+    await expect.poll(() => thread.status).toBe("idle")
+    expect(sampled).toEqual([])
+    expect(
+      (await runtime.store.readThread(thread.id))?.rollout.some(
+        ({ item }) =>
+          item.type === "response_item" &&
+          item.item.turnId === "turn_blocked" &&
+          item.item.item.role === "user",
+      ),
+    ).toBe(false)
+
+    await thread.startIfIdle({
+      submissionId: "turn_accepted",
+      content: { kind: "text", text: "accepted prompt" },
+    })
+    await expect
+      .poll(() => thread.agentStatus)
+      .toEqual({ completed: "accepted" })
+    expect(sampled).toHaveLength(1)
+    expect(sampled[0]).toContain("accepted prompt")
+    expect(sampled[0]).not.toContain("blocked")
+  })
+
   it("enforces the output byte limit across deltas", async () => {
     const runtime = await createRuntime(
       async function* () {
@@ -394,6 +521,7 @@ describe("Turn processor", () => {
   it("pairs compaction token usage with model timing while excluding compaction hooks", async () => {
     let now = 1_000
     let normalCalls = 0
+    const hooks: HookEvent[] = []
     const dateNow = vi.spyOn(Date, "now").mockImplementation(() => now)
     try {
       const stream: StreamFn = async function* (request) {
@@ -427,6 +555,7 @@ describe("Turn processor", () => {
         hookRunner: {
           async dispose() {},
           async run(request) {
+            hooks.push(request.event)
             if (request.event === HookEvent.PreCompact) now += 1_000
             if (request.event === HookEvent.PostCompact) now += 2_000
             return { continue: true, additionalContext: [] }
@@ -440,6 +569,12 @@ describe("Turn processor", () => {
         await nextLifecycleEvent(thread)
       }
       expect(thread.agentStatus).toEqual({ completed: "done" })
+      expect(hooks.filter((event) => event !== HookEvent.Stop)).toEqual([
+        HookEvent.UserPromptSubmit,
+        HookEvent.PreCompact,
+        HookEvent.PostCompact,
+        HookEvent.UserPromptSubmit,
+      ])
       const stored = await runtime.store.readThread(thread.id)
       const completed = stored?.rollout
         .filter(({ item }) => item.type === "turn_completed")
@@ -2338,6 +2473,63 @@ describe("Turn processor", () => {
           entry.item.outcome === "interrupted",
       ),
     ).toBe(true)
+  })
+
+  it("does not record steering rejected by its prompt hook", async () => {
+    const entered = deferred<void>()
+    const release = deferred<void>()
+    let calls = 0
+    const runtime = await createRuntime(
+      async function* (request) {
+        calls += 1
+        if (calls === 1) {
+          entered.resolve()
+          await release.promise
+        } else {
+          expect(JSON.stringify(request.messages)).not.toContain(
+            "blocked steer",
+          )
+        }
+        yield responseEvent(calls === 1 ? "first" : "done")
+      },
+      createToolRegistry([]),
+      {
+        hookRunner: {
+          async dispose() {},
+          async run(request) {
+            return {
+              continue:
+                request.event !== HookEvent.UserPromptSubmit ||
+                request.payload.prompt !== "blocked steer",
+              additionalContext: [],
+            }
+          },
+        },
+      },
+    )
+    const thread = await runtime.createThread()
+    const started = await thread.startIfIdle({
+      content: { kind: "text", text: "start" },
+    })
+    if (started.type !== "started") throw new Error("Turn did not start.")
+    await entered.promise
+    await thread.steer(
+      { content: { kind: "text", text: "blocked steer" } },
+      started.turnId,
+    )
+    release.resolve()
+    await expect.poll(() => thread.agentStatus).toEqual({ completed: "done" })
+    expect(calls).toBe(2)
+    expect(
+      (await runtime.store.readThread(thread.id))?.rollout.some(
+        ({ item }) =>
+          item.type === "response_item" &&
+          item.item.item.role === "user" &&
+          item.item.item.content.some(
+            (block) => block.type === "text" && block.text === "blocked steer",
+          ),
+      ),
+    ).toBe(false)
   })
 
   it("applies a steered model to later Turns while the active Turn stays frozen", async () => {

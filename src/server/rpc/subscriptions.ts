@@ -481,14 +481,19 @@ export function reconcileBufferedSessionDeliveries(
   }
 }
 
-function isLiveDisplayEvent(
-  event: LiveSessionEvent,
-): event is Extract<
+function isLiveDisplayEvent(event: LiveSessionEvent): event is Extract<
   LiveSessionEvent,
-  { readonly type: "item.started" | "assistant.delta" | "reasoning.delta" }
+  Readonly<{
+    type:
+      | "item.started"
+      | "item.discarded"
+      | "assistant.delta"
+      | "reasoning.delta"
+  }>
 > {
   return (
     event.type === "item.started" ||
+    event.type === "item.discarded" ||
     event.type === "assistant.delta" ||
     event.type === "reasoning.delta"
   )

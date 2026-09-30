@@ -690,6 +690,16 @@ function reduceChat(chat: LiveChat, event: SessionEvent): boolean {
       })
     return true
   }
+  if (event.type === "runtime.warning" && event.code === "model.retry") {
+    const itemId = event.details?.discardedResponseItemId
+    state.messages = state.messages.filter(
+      (message) =>
+        message.id !== itemId ||
+        message.turnId !== event.turnId ||
+        !message.streaming,
+    )
+    return true
+  }
   if (event.type === "rollout.appended") {
     let changed = false
     for (const item of event.items) {

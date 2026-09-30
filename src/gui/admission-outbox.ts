@@ -12,6 +12,7 @@ export type AdmissionDraft = {
   readonly attachments?: readonly ImageAttachment[]
   readonly contextAttachments?: readonly ContextExcerpt[]
   readonly modelSelection?: ModelSelection
+  readonly supersedesRequestId?: string
 }
 
 export type PendingAdmission = AdmissionDraft & {
@@ -68,6 +69,44 @@ export async function acknowledgeAdmission(
   storage.removeItem(key)
 }
 
+export function readAdmissionByRequestId(
+  storage: Pick<Storage, "length" | "key" | "getItem">,
+  apiBase: string,
+  sessionId: string,
+  requestId: string,
+): PendingAdmission | undefined {
+  return listAdmissionsForSession(storage, apiBase, sessionId).find(
+    (admission) => admission.requestId === requestId,
+  )
+}
+
+export function listAdmissionsForSession(
+  storage: Pick<Storage, "length" | "key" | "getItem">,
+  apiBase: string,
+  sessionId: string,
+): PendingAdmission[] {
+  return listAdmissionsForApiBase(storage, apiBase).filter(
+    (admission) => admission.sessionId === sessionId,
+  )
+}
+
+export function listAdmissionsForApiBase(
+  storage: Pick<Storage, "length" | "key" | "getItem">,
+  apiBase: string,
+): PendingAdmission[] {
+  const normalizedApiBase = normalizeApiBase(apiBase)
+  const admissions: PendingAdmission[] = []
+  for (let index = 0; index < storage.length; index += 1) {
+    const key = storage.key(index)
+    if (!key?.startsWith("yakitori.admission.v1:")) continue
+    const stored = readStoredAdmission(storage.getItem(key))
+    if (stored === undefined || stored.draft.apiBase !== normalizedApiBase)
+      continue
+    admissions.push({ ...stored.draft, requestId: stored.requestId })
+  }
+  return admissions
+}
+
 export function normalizeApiBase(value: string): string {
   const url = new URL(value)
   url.hash = ""
@@ -76,10 +115,11 @@ export function normalizeApiBase(value: string): string {
   return url.toString()
 }
 
-// Entries written by older versions held a bare request id; those predate
-// model-keyed identity and are discarded so a stale id cannot wedge a retry
-// against a changed submission.
-function readStoredAdmission(value: string | null): StoredAdmission | undefined {
+// The in-memory snapshots are validated before retrying so a damaged entry
+// cannot reserve an unrelated request id.
+function readStoredAdmission(
+  value: string | null,
+): StoredAdmission | undefined {
   if (value === null) return undefined
   try {
     const parsed: unknown = JSON.parse(value)
@@ -88,12 +128,24 @@ function readStoredAdmission(value: string | null): StoredAdmission | undefined 
       parsed !== null &&
       "requestId" in parsed &&
       typeof parsed.requestId === "string" &&
-      isRequestId(parsed.requestId)
+      isRequestId(parsed.requestId) &&
+      "draft" in parsed &&
+      typeof parsed.draft === "object" &&
+      parsed.draft !== null &&
+      "apiBase" in parsed.draft &&
+      typeof parsed.draft.apiBase === "string" &&
+      "sessionId" in parsed.draft &&
+      typeof parsed.draft.sessionId === "string" &&
+      "text" in parsed.draft &&
+      typeof parsed.draft.text === "string" &&
+      (!("supersedesRequestId" in parsed.draft) ||
+        (typeof parsed.draft.supersedesRequestId === "string" &&
+          isRequestId(parsed.draft.supersedesRequestId)))
     ) {
       return parsed as StoredAdmission
     }
   } catch {
-    // Corrupt storage is an expected localStorage outcome; re-reserve below.
+    // A damaged snapshot is ignored and re-reserved below.
   }
   return undefined
 }
@@ -109,6 +161,7 @@ async function storageKey(draft: AdmissionDraft): Promise<string> {
         draft.attachments ?? [],
         draft.contextAttachments ?? [],
         draft.modelSelection ?? null,
+        draft.supersedesRequestId ?? null,
       ]),
     ),
   )

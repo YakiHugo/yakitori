@@ -5,20 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { QueuedInputs } from "../../src/gui/components/queued-inputs.tsx"
 import { TooltipProvider } from "../../src/gui/components/ui/tooltip.tsx"
 import {
-  createExecutionViewState,
-  reduceExecutionView,
-} from "../../src/gui/execution-view.ts"
-import {
   createInitialAppState,
   useAppStore,
 } from "../../src/gui/store/app-store.ts"
-import {
-  createEventEnvelope,
-  EventType,
-  InputRole,
-} from "../../src/kernel/events.ts"
-
-const sessionId = "session_1"
 
 beforeEach(() => {
   useAppStore.setState(createInitialAppState())
@@ -30,7 +19,7 @@ afterEach(() => {
 
 describe("queued inputs", () => {
   it("renders nothing while no input is queued", () => {
-    useAppStore.setState({ execution: createExecutionViewState() })
+    useAppStore.setState({ queuedItems: [] })
     const { container } = render(
       <TooltipProvider>
         <QueuedInputs />
@@ -41,7 +30,7 @@ describe("queued inputs", () => {
   })
 
   it("lists the queued input text", () => {
-    useAppStore.setState({ execution: seedQueuedInput() })
+    useAppStore.setState({ queuedItems: seedQueuedInput() })
     render(
       <TooltipProvider>
         <QueuedInputs />
@@ -56,7 +45,7 @@ describe("queued inputs", () => {
     const user = userEvent.setup()
     const cancelQueuedInput = vi.fn((_inputId: string) => Promise.resolve())
     useAppStore.setState({
-      execution: seedQueuedInput(),
+      queuedItems: seedQueuedInput(),
       cancelQueuedInput,
     })
     render(
@@ -73,7 +62,7 @@ describe("queued inputs", () => {
 
   it("disables the cancel button while the cancel is in flight", () => {
     useAppStore.setState({
-      execution: seedQueuedInput(),
+      queuedItems: seedQueuedInput(),
       inFlightActions: new Set(["cancel-input:input_1"]),
     })
     render(
@@ -89,20 +78,10 @@ describe("queued inputs", () => {
 })
 
 function seedQueuedInput() {
-  return reduceExecutionView(createExecutionViewState(), {
-    type: "durable",
-    event: createEventEnvelope({
-      sessionId,
-      seq: 1,
-      event: {
-        type: EventType.InputAdmitted,
-        data: {
-          requestId: "request:1",
-          inputId: "input_1",
-          role: InputRole.User,
-          content: { kind: "text", text: "hello" },
-        },
-      },
-    }),
-  })
+  return [{
+    id: "input_1",
+    sessionId: "session_1",
+    input: { submissionId: "request_1", content: { kind: "text" as const, text: "hello" } },
+    createdAt: "2026-01-01T00:00:00.000Z",
+  }]
 }

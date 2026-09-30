@@ -5,6 +5,7 @@ import {
   projectExecutionView,
 } from "../../src/gui/execution-view.ts"
 import { ApiRequestError } from "../../src/gui/lib/rpc-client.ts"
+import { inputRecoveryMemory } from "../../src/gui/input-recovery-memory.ts"
 import {
   createInitialAppState,
   normalizeKimiModelSelection,
@@ -91,6 +92,7 @@ function makeProject(id: string, root: string, name = ""): ApiProject {
 
 beforeEach(() => {
   window.localStorage.clear()
+  inputRecoveryMemory.clear()
   fakeRef.current = new FakeRpcClient()
   useAppStore.setState(createInitialAppState())
   useAppStore.setState({ apiBase: "http://api.test" })
@@ -435,6 +437,7 @@ describe("app store event stream", () => {
     const stream = fakeRef.current.streams[0]
     emitSnapshot(stream)
     expect(fakeRef.current.requests).toEqual([
+      { method: "session/queue/list", params: { sessionId: "session_1" } },
       { method: "session/skills", params: { sessionId: "session_1" } },
     ])
     expect(stream?.sessionId).toBe("session_1")
@@ -462,7 +465,7 @@ describe("app store event stream", () => {
     ).toEqual([expect.objectContaining({ kind: "user_input", text: "hello" })])
     expect(useAppStore.getState().selectedSession?.counts).toMatchObject({
       inputs: 1,
-      pendingInputs: 1,
+      pendingInputs: 0,
       turns: 0,
     })
     stream?.emitReplayComplete()
@@ -668,66 +671,29 @@ describe("app store event stream", () => {
 })
 
 describe("cancel queued input", () => {
-  it("sends the cancel method and clears the queue when input.cancelled flows", async () => {
-    const cancelled = createEventEnvelope({
+  it("removes a cancelled item from the separate queue view", async () => {
+    let items = [{
+      id: "input_1",
       sessionId: "session_1",
-      seq: 3,
-      event: {
-        type: EventType.InputCancelled,
-        data: { inputId: "input_1", reason: "user_cancel" },
-      },
-    })
+      input: { submissionId: "request_1", content: { kind: "text", text: "hello" } },
+      createdAt: sessionDetail.createdAt,
+    }]
     fakeRef.current.respond = (method) => {
+      if (method === "session/queue/list") return { items }
       if (method === "session/input/cancel") {
-        return { sessionId: "session_1", inputId: "input_1", event: cancelled }
+        items = []
+        return { sessionId: "session_1", inputId: "input_1" }
       }
       return notFound()
     }
-
     await useAppStore.getState().selectSession("session_1")
-    const stream = fakeRef.current.streams[0]
-    emitSnapshot(stream)
-    stream?.emitEvent(
-      createEventEnvelope({
-        sessionId: "session_1",
-        seq: 2,
-        event: {
-          type: EventType.InputAdmitted,
-          data: {
-            requestId: "request:1",
-            inputId: "input_1",
-            role: InputRole.User,
-            content: { kind: "text", text: "hello" },
-          },
-        },
-      }),
-    )
-    await vi.waitFor(() => {
-      expect(
-        projectExecutionView(useAppStore.getState().execution).queuedInputIds,
-      ).toContain("input_1")
-    })
-
+    await vi.waitFor(() => expect(useAppStore.getState().queuedItems).toHaveLength(1))
     await useAppStore.getState().cancelQueuedInput("input_1")
-
-    expect(fakeRef.current.requests).toContainEqual({
+    expect(fakeRef.current.requestsFor("session/input/cancel")).toEqual([{
       method: "session/input/cancel",
-      params: {
-        sessionId: "session_1",
-        inputId: "input_1",
-        reason: "user_cancel",
-      },
-    })
-    expect(useAppStore.getState().inFlightActions.size).toBe(0)
-    expect(
-      projectExecutionView(useAppStore.getState().execution).queuedInputIds,
-    ).toContain("input_1")
-
-    // The ordered stream owns the queue transition.
-    stream?.emitEvent(cancelled)
-    expect(
-      projectExecutionView(useAppStore.getState().execution).queuedInputIds,
-    ).not.toContain("input_1")
+      params: { sessionId: "session_1", inputId: "input_1", reason: "user_cancel" },
+    }])
+    expect(useAppStore.getState().queuedItems).toEqual([])
   })
 
   it("treats a conflict as a stale queue row: no error banner", async () => {
@@ -1978,8 +1944,8 @@ describe("model selection", () => {
     expect(useAppStore.getState().promptDraft).toBeUndefined()
     // Steering is ephemeral acceptance: no admission outbox entry.
     expect(
-      Array.from({ length: window.localStorage.length }, (_, index) =>
-        window.localStorage.key(index),
+      Array.from({ length: inputRecoveryMemory.length }, (_, index) =>
+        inputRecoveryMemory.key(index),
       ).filter((key) => key?.startsWith("yakitori.admission")),
     ).toEqual([])
   })
@@ -2126,8 +2092,8 @@ describe("model selection", () => {
     useAppStore.setState({ promptDraft: "survive reload" })
     await useAppStore.getState().admitInput("survive reload")
     expect(
-      Array.from({ length: window.localStorage.length }, (_, index) =>
-        window.localStorage.key(index),
+      Array.from({ length: inputRecoveryMemory.length }, (_, index) =>
+        inputRecoveryMemory.key(index),
       ).filter((key) => key?.startsWith("yakitori.steer.v1:")),
     ).toHaveLength(1)
 
@@ -2162,8 +2128,8 @@ describe("model selection", () => {
     fakeRef.current.respond = admissionResponder()
     await useAppStore.getState().admitInput("survive reload")
     expect(
-      Array.from({ length: window.localStorage.length }, (_, index) =>
-        window.localStorage.key(index),
+      Array.from({ length: inputRecoveryMemory.length }, (_, index) =>
+        inputRecoveryMemory.key(index),
       ).filter((key) => key?.startsWith("yakitori.steer.v1:")),
     ).toHaveLength(0)
   })
@@ -2396,8 +2362,8 @@ describe("model selection", () => {
     await useAppStore.getState().admitInput("hello")
 
     const admissionKeys = () =>
-      Array.from({ length: window.localStorage.length }, (_, index) =>
-        window.localStorage.key(index),
+      Array.from({ length: inputRecoveryMemory.length }, (_, index) =>
+        inputRecoveryMemory.key(index),
       ).filter((key) => key?.startsWith("yakitori.admission"))
     expect(useAppStore.getState().message).toBeUndefined()
     expect(fakeRef.current.requestsFor("session/input")).toHaveLength(1)
@@ -2427,6 +2393,124 @@ describe("model selection", () => {
     )
 
     await vi.waitFor(() => expect(admissionKeys()).toHaveLength(0))
+  })
+
+  it("acknowledges a queued request from the queue write", async () => {
+    let items: Array<{
+      id: string
+      sessionId: string
+      input: { submissionId: string; content: { kind: "text"; text: string } }
+      createdAt: string
+    }> = []
+    fakeRef.current.respond = (method, params) => {
+      if (method === "session/queue/list") return { items }
+      if (method === "session/input/queue") {
+        const body = params as { requestId: string }
+        items = [{
+          id: "input_queued",
+          sessionId: "session_1",
+          input: { submissionId: body.requestId, content: { kind: "text", text: "run later" } },
+          createdAt: sessionDetail.createdAt,
+        }]
+        return { requestId: body.requestId, turnId: body.requestId, inputId: "input_queued" }
+      }
+      return notFound()
+    }
+    await useAppStore.getState().selectSession("session_1")
+    emitSnapshot(fakeRef.current.streams[0])
+    fakeRef.current.streams[0]?.emitReplayComplete()
+    useAppStore.setState({ promptDraft: "run later" })
+    await useAppStore.getState().admitInput("run later", [], "queue")
+    expect(inputRecoveryMemory.length).toBe(0)
+    expect(useAppStore.getState().queuedItems.map((item) => item.id)).toEqual(["input_queued"])
+    expect(projectExecutionView(useAppStore.getState().execution).entries).toEqual([])
+  })
+
+  it("restores a prompt rejected before its durable input event", async () => {
+    window.localStorage.clear()
+    fakeRef.current.respond = admissionResponder()
+    useAppStore.setState({
+      modelSelections: {
+        session_1: { provider: "openai", model: "gpt-5.1-codex" },
+      },
+    })
+    await useAppStore.getState().selectSession("session_1")
+    emitSnapshot(fakeRef.current.streams[0])
+    useAppStore.setState({ promptDraft: "Please review this" })
+
+    await useAppStore.getState().admitInput("Please review this")
+    expect(useAppStore.getState().promptDraft).toBeUndefined()
+    const requestId = (
+      fakeRef.current.requestsFor("session/input")[0]?.params as {
+        requestId: string
+      }
+    ).requestId
+    fakeRef.current.streams[0]?.emitEvent(
+      createEventEnvelope({
+        sessionId: "session_1",
+        seq: 2,
+        event: {
+          type: EventType.TurnCompleted,
+          data: { turnId: requestId, outcome: { status: "completed" } },
+        },
+      }),
+    )
+
+    await vi.waitFor(() =>
+      expect(useAppStore.getState().promptDraft).toBe("Please review this"),
+    )
+    await vi.waitFor(() =>
+      expect(
+        Array.from({ length: inputRecoveryMemory.length }, (_, index) =>
+          inputRecoveryMemory.key(index),
+        ).filter((key) => key?.startsWith("yakitori.admission")),
+      ).toHaveLength(0),
+    )
+  })
+
+  it("restores an unconfirmed submission and its attachments within the app", async () => {
+    window.localStorage.clear()
+    fakeRef.current.respond = admissionResponder()
+    const attachment = {
+      name: "screen.png",
+      mediaType: "image/png" as const,
+      detail: "high" as const,
+      sizeBytes: 9,
+      file: {
+        rolloutId: "session_1",
+        path: "attachments/staging/draft_reload/1.png",
+      },
+    }
+    useAppStore.setState({
+      modelSelections: {
+        session_1: { provider: "openai", model: "gpt-5.1-codex" },
+      },
+    })
+    await useAppStore.getState().selectSession("session_1")
+    emitSnapshot(fakeRef.current.streams[0])
+    useAppStore.setState({
+      promptDraft: "recover after reload",
+      promptAttachments: [attachment],
+    })
+    await useAppStore
+      .getState()
+      .admitInput("recover after reload", [attachment])
+    expect(useAppStore.getState().promptDraft).toBeUndefined()
+
+    useAppStore.getState().stream?.close()
+    useAppStore.setState({
+      ...createInitialAppState(),
+      apiBase: "http://api.test",
+    })
+    await useAppStore.getState().selectSession("session_1")
+    const replay = fakeRef.current.streams.at(-1)
+    emitSnapshot(replay)
+    replay?.emitReplayComplete()
+
+    await vi.waitFor(() =>
+      expect(useAppStore.getState().promptDraft).toBe("recover after reload"),
+    )
+    expect(useAppStore.getState().promptAttachments).toEqual([attachment])
   })
 
   it("clears an attachment-only draft after admission", async () => {
@@ -2774,6 +2858,112 @@ it("resumes the source event stream after an edit request fails", async () => {
 })
 
 describe("new session drafts", () => {
+  it("recovers a first send interrupted before session creation", async () => {
+    const creation = deferredResponse()
+    fakeRef.current.respond = (method) =>
+      method === "session/create" ? creation.promise : notFound()
+    const attachment = {
+      name: "unsent.png",
+      mediaType: "image/png" as const,
+      sizeBytes: 9,
+      file: {
+        rolloutId: "draft_new_session",
+        path: "attachments/staging/draft_new_session/1.png",
+      },
+    }
+    useAppStore.setState({
+      promptDraft: "first send",
+      promptAttachments: [attachment],
+    })
+    const sending = useAppStore
+      .getState()
+      .admitInput("first send", [attachment])
+    await vi.waitFor(() =>
+      expect(fakeRef.current.requestsFor("session/create")).toHaveLength(1),
+    )
+    const pending = Array.from(
+      { length: inputRecoveryMemory.length },
+      (_, index) => inputRecoveryMemory.key(index),
+    )
+      .filter(
+        (key): key is string =>
+          key?.startsWith("yakitori.admission.v1:") ?? false,
+      )
+      .map((key) => JSON.parse(inputRecoveryMemory.getItem(key) ?? ""))
+    expect(pending).toEqual([
+      expect.objectContaining({
+        draft: expect.objectContaining({
+          sessionId: "draft_first_input",
+          text: "first send",
+          attachments: [attachment],
+        }),
+      }),
+    ])
+    creation.reject(new ApiRequestError("Creation failed", "internal_error"))
+    await sending
+
+    useAppStore.setState({
+      ...createInitialAppState(),
+      apiBase: "http://api.test",
+    })
+    fakeRef.current.respond = (method) => {
+      if (method === "provider/list")
+        return { providers: [], defaultProvider: "faux", defaultModel: "m" }
+      if (method === "project/list") return { projects: [] }
+      if (method === "session/list") return { sessions: [] }
+      if (method === "session/create")
+        return {
+          session: sessionDetail,
+          event: createEventEnvelope({
+            sessionId: "session_1",
+            seq: 1,
+            event: { type: EventType.SessionCreated, data: {} },
+          }),
+        }
+      if (method === "session/input") {
+        const input = fakeRef.current.requestsFor("session/input").at(-1)
+          ?.params as { requestId: string }
+        return { requestId: input.requestId, inputId: "input_1" }
+      }
+      return notFound()
+    }
+    await useAppStore.getState().boot()
+    expect(useAppStore.getState().promptDraft).toBe("first send")
+    expect(useAppStore.getState().promptAttachments).toEqual([attachment])
+
+    await useAppStore.getState().admitInput("first send", [attachment])
+    const remaining = Array.from(
+      { length: inputRecoveryMemory.length },
+      (_, index) => inputRecoveryMemory.key(index),
+    )
+      .filter(
+        (key): key is string =>
+          key?.startsWith("yakitori.admission.v1:") ?? false,
+      )
+      .map((key) => JSON.parse(inputRecoveryMemory.getItem(key) ?? ""))
+    expect(remaining).toEqual([
+      expect.objectContaining({
+        draft: expect.objectContaining({
+          sessionId: "session_1",
+          supersedesRequestId: pending[0]?.requestId,
+        }),
+      }),
+    ])
+
+    useAppStore.getState().stream?.close()
+    useAppStore.setState({
+      ...createInitialAppState(),
+      apiBase: "http://api.test",
+    })
+    await useAppStore.getState().boot()
+    expect(fakeRef.current.requestsFor("session/read")).toContainEqual({
+      method: "session/read",
+      params: { sessionId: "session_1" },
+    })
+    expect(useAppStore.getState().promptDraft).toBe("first send")
+    expect(useAppStore.getState().promptAttachments).toEqual([attachment])
+  })
+
   it("keeps the new-session draft separate from an existing session draft", async () => {
     useAppStore.getState().startNewSession()
     useAppStore.getState().setPromptDraft("new task")

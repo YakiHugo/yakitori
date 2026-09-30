@@ -131,28 +131,57 @@ function user(id: string, text: string): ResponseItemEnvelope {
   }
 }
 
-it("retains selected skill identity through local and remote compaction", () => {
-  const message: ResponseItemEnvelope = {
-    ...user("skill", ""),
-    item: {
-      role: "user",
-      content: [
-        {
-          type: "text",
-          text: `<skill>${"rules ".repeat(60_000)}</skill>`,
-        },
-      ],
-      context: { type: "skill_invocation", inputId: "submission" },
-    },
-  }
-  for (const retain of [
-    retainCompactionUserMessages,
-    retainRemoteCompactionMessages,
-  ]) {
-    const retained = retain([message])
-    expect(retained).toHaveLength(1)
-    expect(retained[0]?.item).toMatchObject({
-      context: { type: "skill_invocation", inputId: "submission" },
+describe.each([
+  ["local", retainCompactionUserMessages],
+  ["remote", retainRemoteCompactionMessages],
+])("%s compaction context attribution", (_name, retain) => {
+  it("excludes large injected context before spending the user retention budget", () => {
+    const request: ResponseItemEnvelope = {
+      ...user(
+        "request",
+        "Use $review to fix the parser. Keep the public API unchanged.",
+      ),
+      submissionMetadata: { metadata: { source: "user" } },
+    }
+    const correction = user(
+      "correction",
+      "Preserve the existing error messages too.",
+    )
+    const injected = (
+      type: "skill_invocation" | "world_state",
+    ): ResponseItemEnvelope => ({
+      ...user(type, ""),
+      item: {
+        role: "user",
+        content: [{ type: "text", text: "x".repeat(260_000) }],
+        context:
+          type === "skill_invocation"
+            ? { type, inputId: "request" }
+            : { type, sectionId: "environment", revision: "1" },
+      },
     })
-  }
+    expect(
+      retain([
+        request,
+        injected("world_state"),
+        correction,
+        injected("skill_invocation"),
+      ]),
+    ).toEqual([request, correction])
+  })
+
+  it("uses source attribution rather than skill-like user text to identify injected instructions", () => {
+    const request = user("request", "<skill>Explain this example.</skill>")
+    const injected: ResponseItemEnvelope = {
+      ...user("injected", ""),
+      item: {
+        role: "user",
+        content: [
+          { type: "text", text: "<skill>Explain this example.</skill>" },
+        ],
+        context: { type: "skill_invocation", inputId: "request" },
+      },
+    }
+    expect(retain([request, injected])).toEqual([request])
+  })
 })

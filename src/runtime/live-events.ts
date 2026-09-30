@@ -50,6 +50,14 @@ export type LiveSessionUsage = {
   readonly createdAt: string
 }
 
+export type LiveDisplayItemDiscarded = Readonly<{
+  type: "item.discarded"
+  sessionId: string
+  turnId: string
+  itemId: string
+  createdAt: string
+}>
+
 export type LiveTurnFinished = Readonly<{
   type: "turn.finished"
   sessionId: string
@@ -80,6 +88,7 @@ export type LiveRuntimeWarning = {
 
 export type LiveSessionEvent =
   | LiveDisplayItemStarted
+  | LiveDisplayItemDiscarded
   | LiveAssistantDelta
   | LiveReasoningDelta
   | LiveSessionUsage

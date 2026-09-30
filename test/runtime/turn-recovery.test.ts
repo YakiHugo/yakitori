@@ -1,0 +1,320 @@
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { afterEach, describe, expect, it } from "vitest"
+import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
+import { ThreadManager } from "../../src/core/thread-manager.ts"
+import { createSessionExecutionPolicy } from "../../src/runtime/limits.ts"
+import { ModelStopReason, type StreamFn } from "../../src/runtime/model.ts"
+import { createModelProvider } from "../../src/runtime/model-provider.ts"
+import { createStaticModelsManager } from "../../src/runtime/models-manager.ts"
+import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
+import { createReadFileTool } from "../../src/runtime/tools/read-file.ts"
+import {
+  createToolRegistry,
+  plainToolName,
+  type RuntimeTool,
+} from "../../src/runtime/tools/registry.ts"
+import { createWriteFileTool } from "../../src/runtime/tools/write-file.ts"
+import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
+import { createFauxProvider } from "../support/faux-provider.ts"
+
+const cleanups: Array<() => Promise<void>> = []
+afterEach(async () => {
+  for (const cleanup of cleanups.splice(0)) await cleanup()
+})
+
+describe("Turn recovery", () => {
+  it("persists a completed file change while a later tool is pending and retains it after interruption and reload", async () => {
+    const waiting = deferred()
+    const provider = createFauxProvider([
+      {
+        stopReason: ModelStopReason.ToolUse,
+        content: [
+          {
+            type: "tool_call",
+            id: "write",
+            name: "write_file",
+            input: { path: "result.txt", content: "saved" },
+          },
+          { type: "tool_call", id: "wait", name: "wait", input: {} },
+        ],
+      },
+      {
+        assertRequest(request) {
+          expect(
+            request.messages.filter((item) => item.role === "tool"),
+          ).toEqual([
+            expect.objectContaining({ toolCallId: "write" }),
+            expect.objectContaining({ toolCallId: "wait", isError: true }),
+          ])
+          expect(
+            request.messages.find(
+              (item) => item.role === "tool" && item.toolCallId === "write",
+            ),
+          ).not.toHaveProperty("isError", true)
+        },
+        content: [{ type: "text", text: "continued" }],
+      },
+    ])
+    const runtime = await fixture(provider.stream, [
+      createWriteFileTool(),
+      waitingTool(waiting.resolve),
+    ])
+    const thread = await runtime.createThread()
+    await thread.startIfIdle({
+      content: { kind: "text", text: "write then wait" },
+    })
+    await waiting.promise
+    expect(await readFile(join(runtime.root, "result.txt"), "utf8")).toBe(
+      "saved",
+    )
+    await expect
+      .poll(async () => {
+        const stored = await runtime.store.readThread(thread.id)
+        return stored?.rollout.some(
+          ({ item }) =>
+            item.type === "item_completed" && item.item.type === "file_change",
+        )
+      })
+      .toBe(true)
+    await thread.interrupt("stop pending tool")
+    await runtime.manager.closeThread(thread.id)
+
+    const resumed = await runtime.manager.resumeThread(thread.id)
+    if (resumed === undefined) throw new Error("Missing persisted thread")
+    await resumed.startIfIdle({ content: { kind: "text", text: "continue" } })
+    await expect
+      .poll(() => resumed.agentStatus)
+      .toEqual({ completed: "continued" })
+    const stored = await runtime.store.readThread(thread.id)
+    const changes = stored?.rollout.filter(
+      ({ item }) =>
+        item.type === "item_completed" && item.item.type === "file_change",
+    )
+    expect(changes).toHaveLength(1)
+    expect(changes?.[0]?.item).toMatchObject({
+      item: {
+        type: "file_change",
+        changes: [{ path: "result.txt", kind: "add" }],
+      },
+    })
+    expect(provider.callCount).toBe(2)
+  })
+
+  it("drains successful results after an earlier parallel tool is cancelled", async () => {
+    const waiting = deferred()
+    const readCompleted = deferred()
+    const read = createReadFileTool()
+    const provider = createFauxProvider([
+      {
+        stopReason: ModelStopReason.ToolUse,
+        content: [
+          { type: "tool_call", id: "wait", name: "wait", input: {} },
+          {
+            type: "tool_call",
+            id: "read",
+            name: "read_file",
+            input: { path: "existing.txt" },
+          },
+        ],
+      },
+    ])
+    const runtime = await fixture(provider.stream, [
+      waitingTool(waiting.resolve),
+      {
+        ...read,
+        async execute(input, context) {
+          const result = await read.execute(input, context)
+          readCompleted.resolve()
+          return result
+        },
+      },
+    ])
+    await writeFile(join(runtime.root, "existing.txt"), "known content")
+    const thread = await runtime.createThread()
+    await thread.startIfIdle({
+      content: { kind: "text", text: "read while waiting" },
+    })
+    await waiting.promise
+    await readCompleted.promise
+    await thread.interrupt("stop first tool")
+    await expect.poll(() => thread.agentStatus).toBe("interrupted")
+    const stored = await runtime.store.readThread(thread.id)
+    const readResult = stored?.rollout.find(
+      ({ item }) =>
+        item.type === "response_item" &&
+        item.item.item.role === "tool" &&
+        item.item.item.toolCallId === "read",
+    )?.item
+    expect(readResult).toMatchObject({
+      type: "response_item",
+      item: {
+        item: {
+          role: "tool",
+          toolCallId: "read",
+          content: expect.stringContaining("known content"),
+        },
+      },
+    })
+    const resultIndex =
+      stored?.rollout.findIndex(({ item }) => item === readResult) ?? -1
+    const terminalIndex =
+      stored?.rollout.findIndex(({ item }) => item.type === "turn_completed") ??
+      -1
+    expect(resultIndex).toBeGreaterThan(-1)
+    expect(terminalIndex).toBeGreaterThan(resultIndex)
+  })
+
+  it("retries partial output without committing it, accumulating its byte budget, or repeating completed tools", async () => {
+    let executions = 0
+    const partial = "x".repeat(100)
+    const provider = createFauxProvider([
+      {
+        stopReason: ModelStopReason.ToolUse,
+        content: [{ type: "tool_call", id: "once", name: "once", input: {} }],
+      },
+      {
+        snapshots: [`${partial}\ud83d`],
+        reasoningSnapshots: [`${partial}\ud83d`],
+        failure: {
+          kind: "stream_disconnected",
+          provider: "faux",
+          wireApi: "unknown",
+          stage: "response_body",
+          message: "Disconnected",
+        },
+        usage: { inputTokens: 5, outputTokens: 2 },
+      },
+      {
+        assertRequest(request) {
+          expect(JSON.stringify(request.messages)).not.toContain(partial)
+          expect(
+            request.messages.filter((item) => item.role === "tool"),
+          ).toHaveLength(1)
+        },
+        snapshots: ["y".repeat(110)],
+        reasoningSnapshots: ["y".repeat(110)],
+        content: [{ type: "text", text: "done" }],
+        usage: { inputTokens: 6, outputTokens: 3 },
+      },
+    ])
+    const runtime = await fixture(
+      provider.stream,
+      [
+        {
+          toolName: plainToolName("once"),
+          description: "Execute once",
+          inputSchema: { type: "object" },
+          effect: "observe",
+          approvalRequirement: { kind: "none" },
+          async execute() {
+            executions += 1
+            return { ok: true, content: "executed", output: "executed" }
+          },
+        },
+      ],
+      111,
+    )
+    const thread = await runtime.createThread()
+    await thread.startIfIdle({ content: { kind: "text", text: "recover" } })
+    await expect.poll(() => thread.agentStatus).toEqual({ completed: "done" })
+    expect(executions).toBe(1)
+    expect(provider.callCount).toBe(3)
+    const stored = await runtime.store.readThread(thread.id)
+    expect(JSON.stringify(stored?.rollout)).not.toContain(partial)
+    expect(
+      stored?.rollout.find(({ item }) => item.type === "turn_completed")?.item,
+    ).toMatchObject({ usage: { inputTokens: 11, outputTokens: 5 } })
+  })
+})
+
+function waitingTool(entered: () => void): RuntimeTool {
+  return {
+    toolName: plainToolName("wait"),
+    description: "Wait until interrupted",
+    inputSchema: { type: "object" },
+    effect: "observe",
+    supportsParallelToolCalls: true,
+    approvalRequirement: { kind: "none" },
+    execute(_input, context) {
+      return new Promise((_resolve, reject) => {
+        context.signal?.addEventListener(
+          "abort",
+          () => reject(new DOMException("Stopped", "AbortError")),
+          { once: true },
+        )
+        entered()
+      })
+    },
+  }
+}
+
+function deferred() {
+  let resolve!: () => void
+  const promise = new Promise<void>((accept) => {
+    resolve = accept
+  })
+  return { promise, resolve }
+}
+
+async function fixture(
+  stream: StreamFn,
+  tools: RuntimeTool[],
+  assistantResponseBytes?: number,
+) {
+  const root = await mkdtemp(join(tmpdir(), "yakitori-turn-recovery-"))
+  const store = new JsonlThreadStore({ root: join(root, "store") })
+  const models = createStaticModelsManager("faux")
+  const registry = createProviderRegistry({
+    faux: createModelProvider({
+      models: {
+        ...models,
+        resolve(selection) {
+          return {
+            ...models.resolve(selection),
+            fileEditingToolType: "edit_write",
+          }
+        },
+      },
+      info: {
+        id: "faux",
+        wireApi: "unknown",
+        capabilities: { remoteCompaction: false },
+        retry: { sleep: async () => {}, random: () => 0 },
+      },
+      stream,
+    }),
+  })
+  const manager = new ThreadManager({
+    store,
+    createTurnProcessor: () =>
+      createTurnProcessor({
+        modelClient: registry.createClient(),
+        provider: "faux",
+        model: "faux",
+        toolRegistry: createToolRegistry(tools),
+        loadProjectInstructions: async () => undefined,
+        executionPolicy: createSessionExecutionPolicy({
+          ...(assistantResponseBytes === undefined
+            ? {}
+            : { assistantResponseBytes }),
+        }),
+      }),
+  })
+  cleanups.push(async () => {
+    await manager.shutdown()
+    await rm(root, { recursive: true, force: true })
+  })
+  return {
+    root,
+    store,
+    manager,
+    createThread: () =>
+      manager.createThread({
+        workingDirectory: root,
+        mateId: "mate_test",
+        mateRevisionId: "revision_test",
+      }),
+  }
+}

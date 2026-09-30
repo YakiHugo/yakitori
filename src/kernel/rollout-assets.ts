@@ -7,7 +7,6 @@ import {
   mkdir,
   open,
   readFile,
-  readdir,
   rm,
   stat,
 } from "node:fs/promises"
@@ -75,7 +74,6 @@ export type RolloutAssets = {
   discardDraftImageAttachments(
     attachments: readonly ImageAttachment[],
   ): Promise<void>
-  cleanupStagingImageAttachments(): Promise<void>
   discardEphemeralRolloutFiles(rolloutId: string): Promise<void>
   read(reference: RolloutAssetReference): Promise<Buffer>
   readRange(
@@ -345,20 +343,6 @@ export function createRolloutAssets(
           requireDraftImageAttachment(attachment.file.rolloutId, attachment)
           await rm(resolveReference(attachment.file), { force: true })
         }),
-      )
-    },
-
-    async cleanupStagingImageAttachments() {
-      const entries = await readdirIfPresent(root)
-      await Promise.all(
-        entries
-          .filter((entry) => entry.isDirectory())
-          .map((entry) =>
-            rm(join(root, entry.name, "files", "attachments", "staging"), {
-              recursive: true,
-              force: true,
-            }),
-          ),
       )
     },
 
@@ -756,13 +740,4 @@ function isNotFound(error: unknown): boolean {
     "code" in error &&
     error.code === "ENOENT"
   )
-}
-
-async function readdirIfPresent(path: string) {
-  try {
-    return await readdir(path, { withFileTypes: true })
-  } catch (error) {
-    if (isNotFound(error)) return []
-    throw error
-  }
 }

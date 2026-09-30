@@ -38,7 +38,7 @@ describe("model request runtime", () => {
     ["reasoning_delta", "stream_disconnected"],
     ["delta", "idle_timeout"],
     ["reasoning_delta", "idle_timeout"],
-  ] as const)("does not retry %s output followed by %s", async (type, kind) => {
+  ] as const)("retries provisional %s output followed by %s", async (type, kind) => {
     const terminalFailure = failure(kind)
     const provider = scriptedStream([
       [{ type, text: "partial" }, terminalFailure],
@@ -52,16 +52,17 @@ describe("model request runtime", () => {
     expect(await collect(stream)).toEqual([
       { type, text: "partial" },
       expect.objectContaining({
-        type: "failure",
+        type: "retry",
         failure: expect.objectContaining({
           kind,
           attempt: 1,
           outputObserved: true,
-          retryDecision: "fail",
+          retryDecision: "retry",
         }),
       }),
+      success,
     ])
-    expect(provider.calls()).toBe(1)
+    expect(provider.calls()).toBe(2)
   })
 
   it("classifies a clean EOF as a retryable disconnect", async () => {
@@ -161,7 +162,7 @@ describe("model request runtime", () => {
 
   it("stops repeated idle timeouts at the request attempt budget", async () => {
     const provider = scriptedStream([
-      [failure("idle_timeout")],
+      [{ type: "delta", text: "partial" }, failure("idle_timeout")],
       [failure("idle_timeout")],
       [success],
     ])
@@ -172,6 +173,7 @@ describe("model request runtime", () => {
     })
 
     expect(await collect(stream)).toEqual([
+      { type: "delta", text: "partial" },
       expect.objectContaining({ type: "retry", nextAttempt: 2 }),
       expect.objectContaining({
         type: "failure",
@@ -179,6 +181,7 @@ describe("model request runtime", () => {
           kind: "idle_timeout",
           attempt: 2,
           maxAttempts: 2,
+          outputObserved: false,
           retryDecision: "fail",
         }),
       }),
@@ -220,7 +223,10 @@ describe("model request runtime", () => {
   it("honors a server retry veto on an idle timeout", async () => {
     const event = failure("idle_timeout")
     const provider = scriptedStream([
-      [{ ...event, failure: { ...event.failure, serverShouldRetry: false } }],
+      [
+        { type: "delta", text: "partial" },
+        { ...event, failure: { ...event.failure, serverShouldRetry: false } },
+      ],
       [success],
     ])
     const stream = createModelRequestStream(provider.stream, {
@@ -228,6 +234,7 @@ describe("model request runtime", () => {
     })
 
     expect(await collect(stream)).toEqual([
+      { type: "delta", text: "partial" },
       expect.objectContaining({
         type: "failure",
         failure: expect.objectContaining({ retryDecision: "fail" }),
@@ -238,13 +245,17 @@ describe("model request runtime", () => {
 
   it("does not start another attempt when cancelled during retry backoff", async () => {
     const controller = new AbortController()
-    const provider = scriptedStream([[failure("idle_timeout")], [success]])
+    const provider = scriptedStream([
+      [{ type: "reasoning_delta", text: "partial" }, failure("idle_timeout")],
+      [success],
+    ])
     const stream = createModelRequestStream(provider.stream, {
       wireApi: "unknown",
       sleep: async () => controller.abort(),
     })
 
     expect(await collect(stream, controller.signal)).toEqual([
+      { type: "reasoning_delta", text: "partial" },
       expect.objectContaining({ type: "retry" }),
       { type: "cancelled" },
     ])

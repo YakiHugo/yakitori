@@ -178,7 +178,7 @@ export class JsonlThreadStore implements ThreadStore {
 
   // Ephemeral owners (side chats and unsent composer drafts) keep files
   // without a durable thread index. A live host lease protects those files
-  // from GC; restart deliberately drops the lease.
+  // from GC while the app is running.
   retainEphemeralRolloutAssets(rolloutId: string): () => void {
     requireThreadId(rolloutId)
     if (this.#ephemeralAssetOwners.has(rolloutId))
@@ -403,7 +403,9 @@ export class JsonlThreadStore implements ThreadStore {
       staged.materializing ??= this.#materializeStagedThread(threadId, staged)
       return staged.materializing
     }
-    return this.flushThread(threadId)
+    return context === PersistContext.TurnStart
+      ? Promise.resolve()
+      : this.flushThread(threadId)
   }
 
   flushThread(threadId: string): Promise<void> {
@@ -518,7 +520,7 @@ export class JsonlThreadStore implements ThreadStore {
     const staged = this.#staged.get(input.sourceThreadId)
     if (staged !== undefined) {
       // Explicit forks need a physical byte cutoff for inherited history.
-      await this.persistThread(input.sourceThreadId, PersistContext.TurnStart)
+      await this.flushThread(input.sourceThreadId)
     }
     const reservationId = `fork_${globalThis.crypto.randomUUID()}`
     const localWriter = this.#writers.get(input.sourceThreadId)
@@ -1443,30 +1445,7 @@ export class JsonlThreadStore implements ThreadStore {
         entry.item.type !== "session_meta" &&
         entry.seq < position.endSeqExclusive,
     )
-    const started = new Set(
-      prefix.flatMap(({ item }) =>
-        item.type === "turn_started" ? [item.inputItemId] : [],
-      ),
-    )
-    const inheritedPending = new Set(
-      prefix.flatMap(({ item }) =>
-        item.type === "input_admitted" && !started.has(item.inputItemId)
-          ? [item.inputItemId]
-          : [],
-      ),
-    )
-    // A fork inherits the conversation prefix, not its parent's outstanding
-    // queue or its cancellation receipts. Keep physical seq values intact.
-    return prefix.filter(
-      ({ item }) =>
-        !(
-          item.type === "input_admitted" &&
-          inheritedPending.has(item.inputItemId)
-        ) &&
-        !(
-          item.type === "input_cancelled" && inheritedPending.has(item.inputId)
-        ),
-    )
+    return prefix
   }
 
   async #snapshotForFork(
@@ -1760,6 +1739,18 @@ export class JsonlThreadStore implements ThreadStore {
         }),
       ),
     )
+    // Composer staging files belong to the running renderer. Queue and
+    // accepted message attachments have already moved to requests/.
+    await Promise.all(
+      [...retained]
+        .filter((rolloutId) => !this.#ephemeralAssetOwners.has(rolloutId))
+        .map((rolloutId) =>
+          rm(
+            join(this.#rolloutsDirectory, rolloutId, "files", "attachments", "staging"),
+            { recursive: true, force: true },
+          ),
+        ),
+    )
     if (unreferenced.length > 0) await syncDirectory(this.#rolloutsDirectory)
   }
 
@@ -1817,9 +1808,7 @@ function forkBoundaryIndex(
     const turnId = input.boundary.turnId
     return history.findIndex(
       (entry) =>
-        entry.item.type === "response_item" &&
-        entry.item.item.turnId === turnId &&
-        entry.item.item.item.role === "user",
+        entry.item.type === "turn_started" && entry.item.turnId === turnId,
     )
   }
   const turnId = input.boundary.turnId
@@ -2136,39 +2125,6 @@ function isRolloutItem(value: unknown): value is RolloutItem {
   if (value.type === "response_item") {
     return hasOnlyKeys(value, ["type", "item"]) && isResponseItem(value.item)
   }
-  if (value.type === "input_admitted") {
-    return (
-      hasOnlyKeys(value, [
-        "type",
-        "input",
-        "inputItemId",
-        "requestFingerprint",
-      ]) &&
-      isRecord(value.input) &&
-      hasOnlyKeys(value.input, [
-        "submissionId",
-        "content",
-        "modelSelection",
-        "parentInputId",
-        "metadata",
-      ]) &&
-      typeof value.inputItemId === "string" &&
-      value.inputItemId.startsWith("input_") &&
-      typeof value.requestFingerprint === "string" &&
-      isKernelEvent({
-        type: EventType.InputAdmitted,
-        data: {
-          requestId: value.input.submissionId,
-          inputId: value.inputItemId,
-          role: "user",
-          content: value.input.content,
-          modelSelection: value.input.modelSelection,
-          parentInputId: value.input.parentInputId,
-          metadata: value.input.metadata,
-        },
-      })
-    )
-  }
   if (value.type === "turn_context") {
     return (
       hasOnlyKeys(value, ["type", "context"]) &&
@@ -2229,12 +2185,6 @@ function isRolloutItem(value: unknown): value is RolloutItem {
       (value.usage === undefined || isTokenUsage(value.usage)) &&
       (value.metrics === undefined || isTurnMetrics(value.metrics)) &&
       (value.error === undefined || isRolloutError(value.error))
-    )
-  }
-  if (value.type === "input_cancelled") {
-    return (
-      hasOnlyKeys(value, ["type", "inputId"]) &&
-      typeof value.inputId === "string"
     )
   }
   if (value.type === "agent_status") {

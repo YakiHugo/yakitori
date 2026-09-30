@@ -43,6 +43,8 @@ export function createCompactionReplacementHistory(input: {
 // Codex local compaction retains recent user text independently of the summary
 // within a 20,000 approximate-token budget. Preserve Yakitori's envelope
 // attribution while dropping images from this text-only retained history.
+// Codex classifies contextual user fragments before charging that budget.
+// Yakitori identifies injected context by its typed source, not its text.
 export function retainCompactionUserMessages(
   history: readonly ResponseItemEnvelope[],
 ): ResponseItemEnvelope[] {
@@ -50,8 +52,7 @@ export function retainCompactionUserMessages(
   let remaining = 20_000
   for (const envelope of [...history].reverse()) {
     const message = envelope.item
-    if (message.role !== "user" || message.context?.type === "world_state")
-      continue
+    if (message.role !== "user" || message.context !== undefined) continue
     const text = message.content.map((block) => block.text).join("\n")
     if (
       text.length === 0 ||
@@ -67,7 +68,6 @@ export function retainCompactionUserMessages(
       item: {
         role: "user",
         content: [{ type: "text", text: retainedText }],
-        ...(message.context === undefined ? {} : { context: message.context }),
       },
     })
     remaining = Math.max(0, remaining - tokens)
@@ -85,8 +85,7 @@ export function retainRemoteCompactionMessages(
   for (const envelope of [...history].reverse()) {
     if (remaining === 0) break
     const message = envelope.item
-    if (message.role !== "user" || message.context?.type === "world_state")
-      continue
+    if (message.role !== "user" || message.context !== undefined) continue
     const text = message.content.map((block) => block.text).join("\n")
     if (
       text.startsWith("<context_compacted>") ||
@@ -127,9 +126,6 @@ export function retainRemoteCompactionMessages(
         ...envelope,
         item: {
           role: "user",
-          ...(message.context === undefined
-            ? {}
-            : { context: message.context }),
           content:
             keptText.length === 0 ? [] : [{ type: "text", text: keptText }],
           ...(keptImages.length === 0 ? {} : { images: keptImages.reverse() }),

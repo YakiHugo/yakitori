@@ -20,83 +20,119 @@ import type { ApiSessionDetail } from "../../src/server/protocol.ts"
 const sessionId = "session_00000000-0000-4000-8000-000000000000"
 
 describe("execution view", () => {
-  it("reindexes item and permission entries after removing a cancelled input", () => {
+  it("discards only the failed provisional item and accepts a fresh retry without stale reasoning", () => {
     let state = createExecutionViewState()
-    const durable = (seq: number, event: KernelFact) => {
+    for (const [itemId, kind] of [
+      ["committed", "agent_message"],
+      ["answer", "agent_message"],
+      ["answer_reasoning", "reasoning"],
+    ] as const) {
       state = reduceExecutionView(state, {
-        type: "durable",
-        event: createExecutionEnvelope({ sessionId, seq, event }),
+        type: "transient",
+        event: {
+          type: "item.started",
+          sessionId,
+          turnId: "turn_1",
+          item: { type: kind, itemId },
+          createdAt: "2026-09-30T00:00:00.000Z",
+        },
+      })
+      state = reduceExecutionView(state, {
+        type: "transient",
+        event: {
+          type: kind === "reasoning" ? "reasoning.delta" : "assistant.delta",
+          sessionId,
+          turnId: "turn_1",
+          itemId,
+          delta: "old",
+          createdAt: "2026-09-30T00:00:00.000Z",
+        },
       })
     }
-    durable(1, {
-      type: EventType.InputAdmitted,
-      data: {
-        requestId: "request:1",
-        inputId: "input_1",
-        role: InputRole.User,
-        content: { kind: "text", text: "running input" },
-      },
-    })
-    durable(2, {
-      type: EventType.TurnStarted,
-      data: { turnId: "turn_1", inputId: "input_1" },
-    })
-    durable(3, {
-      type: EventType.InputAdmitted,
-      data: {
-        requestId: "request:2",
-        inputId: "input_2",
-        role: InputRole.User,
-        content: { kind: "text", text: "cancel me" },
-      },
-    })
-    durable(
-      4,
-      toolStarted({
-        turnId: "turn_1",
-        itemId: "item_1",
-        toolCallId: "call_1",
-        name: "read_file",
-        input: { path: "README.md" },
-        requiresPermission: false,
+    state = reduceExecutionView(state, {
+      type: "durable",
+      event: createExecutionEnvelope({
+        sessionId,
+        seq: 1,
+        event: agentCompleted({
+          itemId: "committed",
+          turnId: "turn_1",
+          text: "keep",
+        }),
       }),
-    )
+    })
+    for (const itemId of ["answer", "answer_reasoning", "committed"]) {
+      state = reduceExecutionView(state, {
+        type: "transient",
+        event: {
+          type: "item.discarded",
+          sessionId,
+          turnId: "turn_1",
+          itemId,
+          createdAt: "2026-09-30T00:00:01.000Z",
+        },
+      })
+    }
+    expect(projectExecutionView(state).entries).toEqual([
+      expect.objectContaining({
+        itemId: "committed",
+        text: "keep",
+        status: "completed",
+      }),
+    ])
     state = reduceExecutionView(state, {
       type: "transient",
       event: {
-        type: "permission.requested",
+        type: "item.started",
         sessionId,
         turnId: "turn_1",
-        permissionRequestId: "permission_1",
-        toolCallId: "call_1",
-        action: "read",
-        createdAt: "2026-07-24T00:00:00.000Z",
+        item: { type: "agent_message", itemId: "answer" },
+        createdAt: "2026-09-30T00:00:02.000Z",
       },
     })
-    durable(5, {
-      type: EventType.InputCancelled,
-      data: { inputId: "input_2" },
-    })
     state = reduceExecutionView(state, {
-      type: "permission_resolving",
-      permissionRequestId: "permission_1",
-      behavior: "allow",
-    })
-    durable(
-      6,
-      toolCompleted({
-        itemId: "item_1",
-        resultItemId: "result_1",
-        toolCallId: "call_1",
+      type: "transient",
+      event: {
+        type: "assistant.delta",
+        sessionId,
         turnId: "turn_1",
-        content: { kind: "text", text: "done" },
-      }),
-    )
+        itemId: "answer",
+        delta: "fresh",
+        createdAt: "2026-09-30T00:00:02.000Z",
+      },
+    })
     expect(projectExecutionView(state).entries).toEqual([
-      expect.objectContaining({ kind: "user_input", text: "running input" }),
-      expect.objectContaining({ kind: "tool", resultText: "done" }),
-      expect.objectContaining({ kind: "permission", state: "resolving" }),
+      expect.objectContaining({
+        itemId: "committed",
+        text: "keep",
+        status: "completed",
+      }),
+      expect.objectContaining({
+        itemId: "answer",
+        text: "fresh",
+        status: "streaming",
+      }),
     ])
+  })
+
+  it("shows queue snapshots without adding waiting input to the transcript", () => {
+    const session: ApiSessionDetail = {
+      id: sessionId,
+      conversationId: "conversation_1",
+      seq: 0,
+      createdAt: "2026-07-24T00:00:00.000Z",
+      updatedAt: "2026-07-24T00:00:00.000Z",
+      pendingInputs: [{ id: "input_queued", text: "queued message", admittedAt: "2026-07-24T00:00:00.000Z" }],
+      pendingPermissions: [],
+      counts: { inputs: 0, pendingInputs: 1, turns: 0, items: 0, permissions: 0, tools: 0 },
+    }
+    let state = reduceExecutionView(createExecutionViewState(), { type: "snapshot", session })
+    expect(projectExecutionView(state).queuedInputIds).toEqual(["input_queued"])
+    expect(projectExecutionView(state).entries).toEqual([])
+    state = reduceExecutionView(state, { type: "snapshot", session: {
+      ...session, pendingInputs: [], counts: { ...session.counts, pendingInputs: 0 },
+    } })
+    expect(projectExecutionView(state).queuedInputIds).toEqual([])
   })
 
   it("appends transient deltas until an agent item completion is authoritative", () => {
@@ -1117,90 +1153,31 @@ describe("execution view", () => {
     })
   })
 
-  it("drops cancelled inputs from the queue and reports the active turn start", () => {
-    let state = createExecutionViewState()
-    state = [
-      {
-        type: EventType.InputAdmitted,
-        data: {
-          requestId: "request:1",
-          inputId: "input_1",
-          role: InputRole.User,
-          content: { kind: "text" as const, text: "first" },
-        },
-      },
-      {
-        type: EventType.InputAdmitted,
-        data: {
-          requestId: "request:2",
-          inputId: "input_2",
-          role: InputRole.User,
-          content: { kind: "text" as const, text: "cancelled" },
-        },
-      },
-      {
-        type: EventType.InputCancelled,
-        data: { inputId: "input_2" },
-      },
-    ].reduce(
-      (current, event, index) =>
-        reduceExecutionView(current, {
-          type: "durable",
-          event: createExecutionEnvelope({
-            sessionId,
-            seq: index + 1,
-            event,
-            createdAt: `2026-07-24T00:00:0${index}.000Z`,
-          }),
-        }),
-      state,
-    )
-    const session = {
+  it("reports a Turn start after a queue snapshot is refreshed", () => {
+    const session: ApiSessionDetail = {
       id: sessionId,
       conversationId: "conversation_1",
-      seq: 3,
+      seq: 0,
       createdAt: "2026-07-24T00:00:00.000Z",
-      updatedAt: "2026-07-24T00:00:02.000Z",
-      activeTurnId: "turn_9",
-      pendingInputs: [
-        {
-          id: "input_1",
-          text: "first",
-          admittedAt: "2026-07-24T00:00:00.000Z",
-        },
-      ],
+      updatedAt: "2026-07-24T00:00:00.000Z",
+      pendingInputs: [{ id: "queue_1", text: "first", admittedAt: "2026-07-24T00:00:00.000Z" }],
       pendingPermissions: [],
-      counts: {
-        inputs: 2,
-        pendingInputs: 1,
-        turns: 0,
-        items: 0,
-        permissions: 0,
-        tools: 0,
-      },
+      counts: { inputs: 0, pendingInputs: 1, turns: 0, items: 0, permissions: 0, tools: 0 },
     }
-
-    const view = projectSnapshot(state, session)
-    expect(view.queuedInputIds).toEqual(["input_1"])
-    expect(view.activeTurnId).toBe("turn_9")
-    expect(view.activeTurnStartedAt).toBeUndefined()
-
+    let state = reduceExecutionView(createExecutionViewState(), { type: "snapshot", session })
     state = reduceExecutionView(state, {
       type: "durable",
       event: createExecutionEnvelope({
-        sessionId,
-        seq: 4,
-        createdAt: "2026-07-24T00:00:03.000Z",
-        event: {
-          type: EventType.TurnStarted,
-          data: { turnId: "turn_9", inputId: "input_1" },
-        },
+        sessionId, seq: 1, createdAt: "2026-07-24T00:00:03.000Z",
+        event: { type: EventType.TurnStarted, data: { turnId: "turn_9", inputId: "input_1" } },
       }),
     })
-
-    const next = projectExecutionView(state)
-    expect(next.queuedInputIds).toEqual([])
-    expect(next.activeTurnStartedAt).toBe("2026-07-24T00:00:03.000Z")
+    expect(projectExecutionView(state).activeTurnStartedAt).toBe("2026-07-24T00:00:03.000Z")
+    state = reduceExecutionView(state, { type: "snapshot", session: {
+      ...session, seq: 1, activeTurnId: "turn_9", pendingInputs: [],
+      counts: { ...session.counts, pendingInputs: 0 },
+    } })
+    expect(projectExecutionView(state).queuedInputIds).toEqual([])
   })
 
   it("derives the active activity from snapshots, tools, and permissions", () => {

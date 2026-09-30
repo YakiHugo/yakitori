@@ -3,6 +3,7 @@ import {
   type AdmissionStorage,
   acknowledgeAdmission,
   normalizeApiBase,
+  readAdmissionByRequestId,
   reserveAdmission,
 } from "../../src/gui/admission-outbox.ts"
 
@@ -170,6 +171,36 @@ describe("admission outbox", () => {
     })
   })
 
+  it("finds an unacknowledged submission by request after a reload", async () => {
+    const storage = createMemoryStorage()
+    const admission = await reserveAdmission(
+      storage,
+      {
+        apiBase: "http://127.0.0.1:4141/",
+        sessionId: "session_one",
+        text: "Restore me",
+      },
+      () => "request_first",
+    )
+
+    expect(
+      readAdmissionByRequestId(
+        storage,
+        "http://127.0.0.1:4141",
+        "session_one",
+        "request_first",
+      ),
+    ).toEqual(admission)
+    expect(
+      readAdmissionByRequestId(
+        storage,
+        "http://127.0.0.1:4141",
+        "session_other",
+        "request_first",
+      ),
+    ).toBeUndefined()
+  })
+
   it("removes a request id only after its matching acknowledgement", async () => {
     const storage = createMemoryStorage()
     const draft = {
@@ -241,11 +272,19 @@ describe("admission outbox", () => {
 
 function createMemoryStorage(): AdmissionStorage & {
   readonly keys: () => string[]
+  readonly length: number
+  key(index: number): string | null
 } {
   const values = new Map<string, string>()
   return {
+    get length() {
+      return values.size
+    },
     getItem(key) {
       return values.get(key) ?? null
+    },
+    key(index) {
+      return [...values.keys()][index] ?? null
     },
     keys() {
       return [...values.keys()]

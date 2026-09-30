@@ -16,7 +16,6 @@ import {
 import {
   createEventEnvelope,
   EventType,
-  InputRole,
   type StoredEventEnvelope,
 } from "../../src/kernel/events.ts"
 import type { ApiSessionDetail } from "../../src/server/protocol.ts"
@@ -181,29 +180,17 @@ describe("app shell", () => {
     useAppStore.setState({
       selection: { sessionId },
       selectedSession: sessionDetail({ activeTurnId: "turn_1" }),
-      execution: seedExecution([
-        createEventEnvelope({
-          sessionId,
-          seq: 1,
-          event: {
-            type: EventType.TurnStarted,
-            data: { turnId: "turn_1", inputId: "input_1" },
-          },
-        }),
-        createEventEnvelope({
-          sessionId,
-          seq: 2,
-          event: {
-            type: EventType.InputAdmitted,
-            data: {
-              requestId: "request:2",
-              inputId: "input_2",
-              role: InputRole.User,
-              content: { kind: "text", text: "queued follow-up" },
-            },
-          },
-        }),
-      ]),
+      queuedItems: [{
+        id: "input_2",
+        sessionId,
+        input: { submissionId: "request_2", content: { kind: "text", text: "queued follow-up" } },
+        createdAt: "2026-01-01T00:00:00.000Z",
+      }],
+      execution: seedExecution([createEventEnvelope({
+        sessionId,
+        seq: 1,
+        event: { type: EventType.TurnStarted, data: { turnId: "turn_1", inputId: "input_1" } },
+      })]),
     })
     render(<App />)
 

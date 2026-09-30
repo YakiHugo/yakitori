@@ -468,34 +468,43 @@ async function executeTurn(input: {
   if (stream === undefined) {
     throw new Error("Turn has no model stream.")
   }
-  try {
-    const promptHook = input.input.manualCompact
-      ? undefined
-      : await input.options.hookRunner?.run({
-          event: HookEvent.UserPromptSubmit,
-          payload: {
-            session_id: metadata.id,
-            turn_id: input.input.submissionId,
-            prompt: input.input.content.text,
-          },
-          cwd: requireValue(metadata.workingDirectory, "Working directory"),
-          signal: input.signal,
-        })
+  let initialInputHandled = false
+  const admitInitialInput = async (): Promise<boolean> => {
+    if (initialInputHandled) return true
+    initialInputHandled = true
+    const promptHook = await input.options.hookRunner?.run({
+      event: HookEvent.UserPromptSubmit,
+      payload: {
+        session_id: metadata.id,
+        turn_id: input.input.submissionId,
+        prompt: input.input.content.text,
+      },
+      cwd: requireValue(metadata.workingDirectory, "Working directory"),
+      signal: input.signal,
+    })
     if (promptHook?.continue === false) {
-      throw new Error(
-        promptHook.reason ?? "UserPromptSubmit hook blocked the Turn.",
+      await recordHookContext(
+        input.runtime,
+        input.input.submissionId,
+        promptHook.additionalContext ?? [],
       )
+      return false
     }
+    await input.runtime.recordInitialInput()
     await recordHookContext(
       input.runtime,
       input.input.submissionId,
       promptHook?.additionalContext ?? [],
     )
+    return true
+  }
+  try {
     await executeTurnModelLoop(
       input,
       turn,
       stream,
       modelSession?.remoteCompaction ?? false,
+      admitInitialInput,
     )
   } catch (error) {
     if (input.signal.aborted || isAbortError(error)) {
@@ -531,6 +540,7 @@ async function executeTurnModelLoop(
   turn: ReturnType<typeof createTurnContext>,
   stream: StreamFn,
   remoteCompaction: boolean,
+  admitInitialInput: () => Promise<boolean>,
 ): Promise<void> {
   const metadata = input.runtime.snapshot().metadata
   const usages: ModelUsage[] = []
@@ -556,6 +566,7 @@ async function executeTurnModelLoop(
   }
   let compactedAtModelCall = -1
   const pendingSkillInputs = [input.input]
+  const pendingSteering: TurnInput[] = []
   let previousDiagnostics = new Set<string>()
   for (;;) {
     let step: StepContext | undefined
@@ -578,9 +589,7 @@ async function executeTurnModelLoop(
         ])
         budget?.markDelivered(metadata.id, reminder)
       }
-      const steering = input.control.takeSteering()
-      await recordSteering(input.runtime, steering)
-      pendingSkillInputs.push(...steering)
+      pendingSteering.push(...input.control.takeSteering())
       const instructionConfiguration =
         (await input.options.prepareStepExtensions?.(input.signal)) ?? {}
       step = captureStepContext({
@@ -633,36 +642,6 @@ async function executeTurnModelLoop(
       }
       previousDiagnostics = currentDiagnostics
       const skills = renderSkillsCatalog(skillSnapshot)
-      for (const submitted of pendingSkillInputs.splice(0)) {
-        const alreadyLoaded = input.runtime
-          .snapshot()
-          .context.history.some(
-            ({ item }) =>
-              (item.role === "user" || item.role === "developer") &&
-              item.context?.type === "skill_invocation" &&
-              item.context.inputId === submitted.submissionId,
-          )
-        if (alreadyLoaded) continue
-        const text = await loadExplicitSkillInstructions(
-          submitted.content.text,
-          skillSnapshot,
-          (message) => input.runtime.emitWarning(message),
-          instructionConfiguration.skillMcpServers === undefined
-            ? undefined
-            : { mcpServers: instructionConfiguration.skillMcpServers },
-        )
-        if (text !== undefined)
-          await input.runtime.recordConversationItems([
-            envelope(submitted.submissionId, {
-              role: "user",
-              content: [{ type: "text", text }],
-              context: {
-                type: "skill_invocation",
-                inputId: submitted.submissionId,
-              },
-            }),
-          ])
-      }
       const environment = observeEnvironment({
         workspaceRoot,
         workingDirectory: configuration.workspaceRoot,
@@ -879,6 +858,71 @@ async function executeTurnModelLoop(
           continue
         }
       }
+      if (admission.shouldCompact && compactedAtModelCall !== modelCalls) {
+        const compacted = await compactLiveHistory({
+          runtime: input.runtime,
+          turnId: input.input.submissionId,
+          step,
+          worldState,
+          history: compactionHistory,
+          injectWorldState: modelCalls !== 0,
+          stream,
+          remoteCompaction,
+          signal: input.signal,
+          rolloutAssets: input.options.rolloutAssets,
+          usages,
+          onModelTiming: onCompactionModelTiming,
+          rolloutBudget: budget,
+          onOperationalFailure: input.options.onOperationalFailure,
+          ...(input.options.hookRunner === undefined
+            ? {}
+            : { hookRunner: input.options.hookRunner }),
+          setActiveStream: input.setActiveStream,
+        })
+        if (compacted) {
+          compactedAtModelCall = modelCalls
+          continue
+        }
+        throw new Error(
+          "Context limit reached with no history available to compact.",
+        )
+      }
+      if (modelCalls === 0 && !input.input.manualCompact) {
+        if (!(await admitInitialInput())) return
+      }
+      pendingSkillInputs.push(
+        ...(await recordSteering(input, pendingSteering.splice(0))),
+      )
+      for (const submitted of pendingSkillInputs.splice(0)) {
+        const alreadyLoaded = input.runtime
+          .snapshot()
+          .context.history.some(
+            ({ item }) =>
+              (item.role === "user" || item.role === "developer") &&
+              item.context?.type === "skill_invocation" &&
+              item.context.inputId === submitted.submissionId,
+          )
+        if (alreadyLoaded) continue
+        const text = await loadExplicitSkillInstructions(
+          submitted.content.text,
+          skillSnapshot,
+          (message) => input.runtime.emitWarning(message),
+          instructionConfiguration.skillMcpServers === undefined
+            ? undefined
+            : { mcpServers: instructionConfiguration.skillMcpServers },
+        )
+        if (text !== undefined)
+          await input.runtime.recordConversationItems([
+            envelope(submitted.submissionId, {
+              role: "user",
+              content: [{ type: "text", text }],
+              context: {
+                type: "skill_invocation",
+                inputId: submitted.submissionId,
+              },
+            }),
+          ])
+      }
       const worldDiff = diffWorldState(
         beforeStep.context.worldStateBaseline,
         worldState,
@@ -934,35 +978,6 @@ async function executeTurnModelLoop(
         tools: toolPlan.modelDefinitions,
         toolWireProtocol: step.toolWireProtocol,
         signal: input.signal,
-      }
-      if (admission.shouldCompact && compactedAtModelCall !== modelCalls) {
-        const compacted = await compactLiveHistory({
-          runtime: input.runtime,
-          turnId: input.input.submissionId,
-          step,
-          worldState,
-          history: compactionHistory,
-          injectWorldState: modelCalls !== 0,
-          stream,
-          remoteCompaction,
-          signal: input.signal,
-          rolloutAssets: input.options.rolloutAssets,
-          usages,
-          onModelTiming: onCompactionModelTiming,
-          rolloutBudget: budget,
-          onOperationalFailure: input.options.onOperationalFailure,
-          ...(input.options.hookRunner === undefined
-            ? {}
-            : { hookRunner: input.options.hookRunner }),
-          setActiveStream: input.setActiveStream,
-        })
-        if (compacted) {
-          compactedAtModelCall = modelCalls
-          continue
-        }
-        throw new Error(
-          "Context limit reached with no history available to compact.",
-        )
       }
       if (modelCalls === 0) {
         await input.runtime.recordModelContext({
@@ -1090,7 +1105,7 @@ async function executeTurnModelLoop(
 
       if (response.stopReason === ModelStopReason.ToolUse) {
         const toolsStartedAt = Date.now()
-        const results = await executeToolCalls({
+        const results = executeToolCalls({
           calls,
           threadId: metadata.id,
           rolloutId: metadata.rolloutId,
@@ -1127,8 +1142,7 @@ async function executeTurnModelLoop(
               }),
         })
         toolCalls += calls.length
-        toolDurationMs += Date.now() - toolsStartedAt
-        for (const { call, item, result } of results) {
+        for await (const { call, item, result } of results) {
           const { toolContentTruncated, ...modelContent } =
             await finalizeToolOutput(
               result,
@@ -1165,8 +1179,8 @@ async function executeTurnModelLoop(
               : {}),
             ...(fileObservations.length === 0 ? {} : { fileObservations }),
           })
-          await input.runtime.recordConversationItems([resultItem])
-          await input.runtime.recordItemCompletions([
+          await input.runtime.recordToolResult(
+            resultItem,
             completeToolItem(
               toolPlan,
               item,
@@ -1174,15 +1188,15 @@ async function executeTurnModelLoop(
               result,
               modelContent,
             ),
-          ])
+          )
         }
+        toolDurationMs += Date.now() - toolsStartedAt
         continue
       }
 
       const completion = input.control.takeSteeringOrComplete()
       if (completion.type === "steering") {
-        await recordSteering(input.runtime, completion.inputs)
-        pendingSkillInputs.push(...completion.inputs)
+        pendingSteering.push(...completion.inputs)
         continue
       }
       const stopHook = await input.options.hookRunner?.run({
@@ -1224,6 +1238,12 @@ async function executeTurnModelLoop(
       })
       return
     } catch (error) {
+      if (
+        modelCalls === 0 &&
+        !input.input.manualCompact &&
+        !input.signal.aborted
+      )
+        await admitInitialInput()
       if (!input.signal.aborted && isContextOverflowError(error)) {
         const capacity =
           step?.configuration.modelCapacity?.effectiveContextWindowTokens
@@ -1280,6 +1300,10 @@ async function consumeModelStream(input: {
       const event = next.value
       if (event.type === "retry") {
         input.onRetry?.()
+        streamedBytes.assistant = 0
+        streamedBytes.reasoning = 0
+        trailingHighSurrogate.assistant = ""
+        trailingHighSurrogate.reasoning = ""
         if (event.usage !== undefined) await input.onUsage(event.usage)
         input.emitWarning?.(
           `Model request failed (${event.failure.kind}); retrying attempt ${String(event.nextAttempt)} of ${String(event.maxAttempts)} in ${String(Math.round(event.delayMs))} ms.`,
@@ -1287,6 +1311,9 @@ async function consumeModelStream(input: {
             message: event.failure.message,
             code: "model.retry",
             details: {
+              ...(input.itemId === undefined
+                ? {}
+                : { discardedResponseItemId: input.itemId }),
               attempt: event.attempt,
               nextAttempt: event.nextAttempt,
               maxAttempts: event.maxAttempts,
@@ -1785,14 +1812,15 @@ type PreparedToolCall = {
   readonly hookContext?: readonly string[]
 }
 
-async function executeToolCalls(
-  input: ToolExecutionScope & { readonly calls: readonly ModelToolCallBlock[] },
-): Promise<
-  readonly {
-    readonly call: ModelToolCallBlock
-    readonly item: ToolExecutionItem
-    readonly result: ToolExecutionResult
-  }[]
+async function* executeToolCalls(
+  input: ToolExecutionScope &
+    Readonly<{ calls: readonly ModelToolCallBlock[] }>,
+): AsyncGenerator<
+  Readonly<{
+    call: ModelToolCallBlock
+    item: ToolExecutionItem
+    result: ToolExecutionResult
+  }>
 > {
   const prepared = await Promise.all(
     input.calls.map(async (call): Promise<PreparedToolCall> => {
@@ -1883,26 +1911,29 @@ async function executeToolCalls(
       input.signal,
     ),
   }))
-  const results: Array<{
-    readonly call: ModelToolCallBlock
-    readonly item: ToolExecutionItem
-    readonly result: ToolExecutionResult
-  }> = []
-
-  const settled = await Promise.allSettled(
-    scheduled.map(async ({ item, reservation }) => ({
-      call: item.call,
-      item: item.item,
-      result: await executePreparedTool(input, item, reservation),
-    })),
+  // Like Codex's ordered in-flight drain, commit each available result in call
+  // order and drain past cancellation before propagating it to the Turn.
+  const inFlight = scheduled.map(({ item, reservation }) =>
+    executePreparedTool(input, item, reservation).then(
+      (result) => ({
+        status: "fulfilled" as const,
+        value: { call: item.call, item: item.item, result },
+      }),
+      (reason: unknown) => ({ status: "rejected" as const, reason }),
+    ),
   )
-  let firstError: unknown
-  for (const outcome of settled) {
-    if (outcome.status === "fulfilled") results.push(outcome.value)
-    else if (firstError === undefined) firstError = outcome.reason
+  let failure: PromiseRejectedResult | undefined
+  try {
+    for (const pending of inFlight) {
+      const outcome = await pending
+      if (outcome.status === "fulfilled") yield outcome.value
+      else failure ??= outcome
+    }
+    if (failure !== undefined) throw failure.reason
+  } finally {
+    // Also drain scheduled work when the consumer exits early.
+    await Promise.all(inFlight)
   }
-  if (firstError !== undefined) throw firstError
-  return results
 }
 
 function completedResponseItems(
@@ -1945,7 +1976,7 @@ function completeToolItem(
   resultItemId: string,
   result: ToolExecutionResult,
   modelContent: import("./tools/types.ts").ToolModelContent,
-): CompletedExecutionItem {
+): Extract<CompletedExecutionItem, { toolCallId: string }> {
   const completed = completeToolExecution(toolPlan, started, result)
   return {
     ...completed,
@@ -1961,7 +1992,10 @@ function completeToolItem(
                 ? []
                 : [
                     {
-                      name: image.file.path.split("/").at(-1) ?? "image",
+                      name:
+                        image.name ??
+                        image.file.path.split("/").at(-1) ??
+                        "image",
                       mediaType: image.mediaType,
                       sizeBytes: image.sizeBytes,
                       detail: image.detail ?? "high",
@@ -2241,13 +2275,36 @@ function toolFileObservations(name: string, result: ToolExecutionResult) {
 }
 
 async function recordSteering(
-  runtime: TurnRuntime,
+  input: Parameters<typeof executeTurn>[0],
   steering: readonly TurnInput[],
-): Promise<void> {
-  if (steering.length === 0) return
-  await runtime.recordConversationItems(
-    steering.map((item) => inputEnvelope(item, item.submissionId)),
-  )
+): Promise<readonly TurnInput[]> {
+  const accepted: TurnInput[] = []
+  if (steering.length === 0) return accepted
+  const metadata = input.runtime.snapshot().metadata
+  for (const item of steering) {
+    const hook = await input.options.hookRunner?.run({
+      event: HookEvent.UserPromptSubmit,
+      payload: {
+        session_id: metadata.id,
+        turn_id: input.input.submissionId,
+        prompt: item.content.text,
+      },
+      cwd: requireValue(metadata.workingDirectory, "Working directory"),
+      signal: input.signal,
+    })
+    if (hook?.continue !== false) {
+      await input.runtime.recordConversationItems([
+        inputEnvelope(item, item.submissionId),
+      ])
+      accepted.push(item)
+    }
+    await recordHookContext(
+      input.runtime,
+      input.input.submissionId,
+      hook?.additionalContext ?? [],
+    )
+  }
+  return accepted
 }
 
 async function recordHookContext(

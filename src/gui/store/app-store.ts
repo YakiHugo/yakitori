@@ -13,6 +13,7 @@ import {
 } from "../../kernel/events.ts"
 import { createRequestId } from "../../kernel/ids.ts"
 import type { LiveSessionEvent } from "../../runtime/live-events.ts"
+import type { QueuedInput } from "../../server/input-queue.ts"
 import type {
   ApiPendingPermission,
   ApiProject,
@@ -28,9 +29,13 @@ import type {
 import {
   acknowledgeAdmission,
   type PendingAdmission,
+  readAdmissionByRequestId,
   reserveAdmission,
+  listAdmissionsForApiBase,
+  listAdmissionsForSession,
 } from "../admission-outbox.ts"
 import type { ContextExcerpt } from "../conversation-context.ts"
+import { inputRecoveryMemory } from "../input-recovery-memory.ts"
 import {
   createExecutionViewState,
   type ExecutionView,
@@ -56,6 +61,8 @@ type SessionSelection = {
   readonly revision: number
   readonly sessionId: string
 }
+
+const firstInputDraftSessionId = "draft_first_input"
 
 export type SessionDraft = Readonly<{
   text: string | undefined
@@ -131,6 +138,8 @@ export type AppStoreData = {
   promptDraft: string | undefined
   promptAttachments: readonly ImageAttachment[]
   promptExcerpts: readonly ContextExcerpt[]
+  queuedItems: readonly QueuedInput[]
+  recoveredAdmission: PendingAdmission | undefined
   sessionDrafts: Record<string, SessionDraft>
   pendingSteers: Record<string, readonly StoredSteer[]>
   restoredSteerRequestIds: Readonly<Record<string, true>>
@@ -223,6 +232,10 @@ export type AppStoreActions = {
   ): Promise<void>
   cancelTurn(turnId: string): Promise<void>
   cancelQueuedInput(inputId: string): Promise<void>
+  refreshQueuedInputs(): Promise<void>
+  updateQueuedInput(inputId: string, text: string): Promise<void>
+  reorderQueuedInputs(inputIds: readonly string[]): Promise<void>
+  startQueuedInput(inputId: string): Promise<void>
   resolvePermission(
     turnId: string,
     permissionRequestId: string,
@@ -297,6 +310,8 @@ export function createInitialAppState(): AppStoreData {
     promptDraft: undefined,
     promptAttachments: [],
     promptExcerpts: [],
+    queuedItems: [],
+    recoveredAdmission: undefined,
     sessionDrafts: {},
     pendingSteers: {},
     restoredSteerRequestIds: {},
@@ -365,6 +380,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
   // Admissions whose server acknowledgment arrived but whose durable event is
   // still pending; the outbox entry clears when the stream confirms it.
   const pendingAdmissions = new Map<string, PendingAdmission>()
+  const inFlightAdmissions = new Set<string>()
+  const rejectedAdmissions = new Set<string>()
   const inFlightSteerRequests = new Set<string>()
   const committedSteerRequests = new Set<string>()
   // Set only after a complete replay or a durable terminal event. A live
@@ -376,6 +393,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
     kimi: 0,
   }
   let projectChangesSubscribedClient: AppRpcClient | undefined
+  let queueReadRevision = 0
   const runTask = async (
     task: () => Promise<void>,
     isCurrent: () => boolean = () => true,
@@ -583,7 +601,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
         ...state.pendingSteers,
         [sessionId]: pending.filter((steer) => !restoring.includes(steer)),
       }
-      updateSteers(window.localStorage, state.apiBase, sessionId, (steers) =>
+      updateSteers(inputRecoveryMemory, state.apiBase, sessionId, (steers) =>
         steers.map((steer) =>
           restoring.some((item) => item.requestId === steer.requestId)
             ? { ...steer, restored: true }
@@ -652,9 +670,73 @@ export const useAppStore = create<AppStore>()((set, get) => {
     })
   }
 
+  const restoreUncommittedAdmission = (
+    sessionId: string,
+    requestId: string,
+  ): void => {
+    if (get().execution.admittedRequestIds[requestId]) return
+    const admission =
+      pendingAdmissions.get(requestId) ??
+      readAdmissionByRequestId(
+        inputRecoveryMemory,
+        get().apiBase,
+        sessionId,
+        requestId,
+      )
+    if (admission === undefined) return
+    if (inFlightAdmissions.has(requestId)) rejectedAdmissions.add(requestId)
+    pendingAdmissions.delete(requestId)
+    void acknowledgeAdmission(inputRecoveryMemory, admission)
+    set((state) => {
+      const selected = state.selection.sessionId === sessionId
+      const draft: SessionDraft = selected
+        ? {
+            text: state.promptDraft,
+            attachments: state.promptAttachments,
+            excerpts: state.promptExcerpts,
+          }
+        : (state.sessionDrafts[sessionId] ?? {
+            text: undefined,
+            attachments: [],
+            excerpts: [],
+          })
+      const alreadyInDraft =
+        (draft.text ?? "").trim() === admission.text &&
+        sameAttachments(draft.attachments, admission.attachments ?? [])
+      const restored: SessionDraft = {
+        text: alreadyInDraft
+          ? draft.text
+          : [admission.text, draft.text]
+              .filter(
+                (text): text is string => text !== undefined && text.length > 0,
+              )
+              .join("\n"),
+        attachments: alreadyInDraft
+          ? draft.attachments
+          : [...(admission.attachments ?? []), ...draft.attachments],
+        excerpts: [
+          ...(admission.contextAttachments ?? []).filter(
+            (excerpt) =>
+              !draft.excerpts.some((current) => current.id === excerpt.id),
+          ),
+          ...draft.excerpts,
+        ],
+      }
+      return selected
+        ? {
+            promptDraft: restored.text,
+            promptAttachments: restored.attachments,
+            promptExcerpts: restored.excerpts,
+          }
+        : {
+            sessionDrafts: { ...state.sessionDrafts, [sessionId]: restored },
+          }
+    })
+  }
+
   const retireRestoredSteers = (sessionId: string): void => {
     const ids = readSteers(
-      window.localStorage,
+      inputRecoveryMemory,
       get().apiBase,
       sessionId,
     ).flatMap((steer) =>
@@ -663,7 +745,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
         : [],
     )
     if (ids.length === 0) return
-    updateSteers(window.localStorage, get().apiBase, sessionId, (steers) =>
+    updateSteers(inputRecoveryMemory, get().apiBase, sessionId, (steers) =>
       steers.filter((steer) => !ids.includes(steer.requestId)),
     )
     set((state) => ({
@@ -729,7 +811,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
       pendingSteers: {
         ...state.pendingSteers,
         [selection.sessionId]: readSteers(
-          window.localStorage,
+          inputRecoveryMemory,
           state.apiBase,
           selection.sessionId,
         ).filter((steer) => !state.restoredSteerRequestIds[steer.requestId]),
@@ -811,22 +893,69 @@ export const useAppStore = create<AppStore>()((set, get) => {
             if (get().restoringModelSelectionFor === selection.sessionId) {
               set({ restoringModelSelectionFor: undefined })
             }
+            void (async () => {
+              let queuedRequestIds = new Set<string>()
+              try {
+                const queue = await getAppRpcClient(get().apiBase).request(
+                  "session/queue/list",
+                  { sessionId: selection.sessionId },
+                )
+                queuedRequestIds = new Set(
+                  queue.items.map((item) => item.input.submissionId),
+                )
+              } catch {
+                // A failed queue lookup leaves the in-memory snapshot available
+                // for retry. Restoring it favors recovery over deduplication.
+              }
+              if (!isCurrentSelection(selection)) return
+              const execution = get().execution
+              for (const admission of listAdmissionsForSession(
+                inputRecoveryMemory,
+                get().apiBase,
+                selection.sessionId,
+              )) {
+                if (
+                  execution.admittedRequestIds[admission.requestId] ||
+                  queuedRequestIds.has(admission.requestId)
+                ) {
+                  await acknowledgeAdmission(inputRecoveryMemory, admission)
+                } else if (execution.activeTurnId !== admission.requestId) {
+                  restoreUncommittedAdmission(
+                    selection.sessionId,
+                    admission.requestId,
+                  )
+                }
+              }
+            })()
           },
           onEvent: (event) => {
             if (get().stream !== source || !isCurrentSelection(selection)) {
               return
             }
             if (event.sessionId !== selection.sessionId) return
-            if (isKernelEvent(event) && event.type === "input.admitted") {
-              if (inFlightSteerRequests.has(event.data.requestId))
+            if (
+              isKernelEvent(event) &&
+              event.type === "input.admitted"
+            ) {
+              if (
+                event.type === "input.admitted" &&
+                inFlightSteerRequests.has(event.data.requestId)
+              )
                 committedSteerRequests.add(event.data.requestId)
-              const admission = pendingAdmissions.get(event.data.requestId)
+              const admission =
+                pendingAdmissions.get(event.data.requestId) ??
+                readAdmissionByRequestId(
+                  inputRecoveryMemory,
+                  get().apiBase,
+                  selection.sessionId,
+                  event.data.requestId,
+                )
               if (admission !== undefined) {
                 pendingAdmissions.delete(event.data.requestId)
-                void acknowledgeAdmission(window.localStorage, admission)
+                void acknowledgeAdmission(inputRecoveryMemory, admission)
               }
               updateSteers(
-                window.localStorage,
+                inputRecoveryMemory,
                 get().apiBase,
                 selection.sessionId,
                 (steers) =>
@@ -871,6 +1000,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
                 get().execution.activeTurnId,
               )
               restoreUncommittedSteers(selection.sessionId, event.data.turnId)
+              restoreUncommittedAdmission(
+                selection.sessionId,
+                event.data.turnId,
+              )
             }
           },
           onTransient: (event) => {
@@ -1001,6 +1134,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
             return changed ? { sessionsByProject } : {}
           })
         })
+        client.subscribeToQueueChanges((sessionId) => {
+          if (get().selection.sessionId === sessionId)
+            void get().refreshQueuedInputs()
+        })
       }
       await get().loadSidebar()
       await get().loadProviders()
@@ -1009,6 +1146,61 @@ export const useAppStore = create<AppStore>()((set, get) => {
       const loaded = await get().loadSessions(currentProject)
       if (!loaded || get().sessionSelectionIntentRevision !== intentRevision) {
         return
+      }
+      const admissions = listAdmissionsForApiBase(
+        inputRecoveryMemory,
+        get().apiBase,
+      )
+      const superseded = new Set(
+        admissions.flatMap((admission) =>
+          admission.supersedesRequestId === undefined
+            ? []
+            : [admission.supersedesRequestId],
+        ),
+      )
+      for (const admission of admissions) {
+        if (superseded.has(admission.requestId))
+          await acknowledgeAdmission(inputRecoveryMemory, admission)
+      }
+      const pending = admissions
+        .filter((admission) => !superseded.has(admission.requestId))
+        .at(-1)
+      if (pending !== undefined) {
+        let missing = pending.sessionId === firstInputDraftSessionId
+        if (!missing) {
+          try {
+            await client.request("session/read", {
+              sessionId: pending.sessionId,
+            })
+            if (get().sessionSelectionIntentRevision !== intentRevision) return
+            await get().selectSession(pending.sessionId)
+            return
+          } catch (error) {
+            if (
+              !(error instanceof ApiRequestError) ||
+              error.code !== "not_found"
+            ) {
+              throw error
+            }
+            missing = true
+          }
+        }
+        if (
+          missing &&
+          get().sessionSelectionIntentRevision === intentRevision
+        ) {
+          closeStream()
+          set({
+            selection: {},
+            selectedSession: undefined,
+            execution: createExecutionViewState(),
+            promptDraft: pending.text,
+            promptAttachments: pending.attachments ?? [],
+            promptExcerpts: pending.contextAttachments ?? [],
+            recoveredAdmission: pending,
+          })
+          return
+        }
       }
       const session =
         get().sessionsByProject[sessionListKey(currentProject)]?.sessions.at(0)
@@ -1818,6 +2010,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
           state.sessionSelectionIntentRevision + 1,
         sessionDrafts: stashSessionDraft(state),
       }))
+      queueReadRevision += 1
       set({
         restoringModelSelectionFor:
           get().modelSelections[sessionId] === undefined
@@ -1828,6 +2021,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
       closeStream()
       set({
         execution: createExecutionViewState(),
+        queuedItems: [],
         selectedSession: undefined,
         sessionSkills: [],
         commandPanel: undefined,
@@ -1835,6 +2029,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
         ...takeSessionDraft(get().sessionDrafts, sessionId),
       })
       connectEvents(selection, 0)
+      void get().refreshQueuedInputs()
       loadSessionSkills(sessionId)
     },
 
@@ -1843,11 +2038,16 @@ export const useAppStore = create<AppStore>()((set, get) => {
       if (text === COMPACT_DIRECTIVE && excerpts.length > 0) return
       let queuedModelSelection: ModelSelection | undefined
       let queuedForCreation = false
+      let firstInputAdmission: PendingAdmission | undefined
       if (get().selection.sessionId === undefined) {
         if (text === COMPACT_DIRECTIVE) return
         const revision = get().sessionSelectionIntentRevision
         const queuedKey = `queue-first-input:${revision}`
         if (get().inFlightActions.has(queuedKey)) return
+        const pendingCreation =
+          newSessionCreation?.revision === revision
+            ? newSessionCreation.promise
+            : undefined
         queuedForCreation = true
         const state = get()
         queuedModelSelection = normalizeKimiModelSelection(
@@ -1863,15 +2063,26 @@ export const useAppStore = create<AppStore>()((set, get) => {
         set((current) => ({
           inFlightActions: new Set(current.inFlightActions).add(queuedKey),
         }))
-        if (state.promptDraft === undefined) set({ promptDraft: text })
         // A newly opened draft already has a create request in flight. Direct
         // first sends still use the explicit create action when needed.
         let sessionId: string | undefined
         try {
-          const creation =
-            newSessionCreation?.revision === revision
-              ? newSessionCreation.promise
-              : get().createSession()
+          firstInputAdmission =
+            state.recoveredAdmission ??
+            (await reserveAdmission(inputRecoveryMemory, {
+              apiBase: state.apiBase,
+              sessionId: firstInputDraftSessionId,
+              text,
+              ...(attachments.length === 0 ? {} : { attachments }),
+              ...(excerpts.length === 0
+                ? {}
+                : { contextAttachments: excerpts }),
+              ...(queuedModelSelection === undefined
+                ? {}
+                : { modelSelection: queuedModelSelection }),
+            }))
+          if (state.promptDraft === undefined) set({ promptDraft: text })
+          const creation = pendingCreation ?? get().createSession()
           sessionId = await creation
         } finally {
           set((current) => {
@@ -1916,7 +2127,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
             let promotedAttachments: readonly ImageAttachment[] | undefined
             try {
               reserveSteer(
-                window.localStorage,
+                inputRecoveryMemory,
                 get().apiBase,
                 selection.sessionId,
                 {
@@ -1957,7 +2168,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
               committedSteerRequests.delete(requestId)
               if (reserved)
                 updateSteers(
-                  window.localStorage,
+                  inputRecoveryMemory,
                   get().apiBase,
                   selection.sessionId,
                   (steers) =>
@@ -1984,7 +2195,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
             const acceptedAttachments = promotedAttachments
             if (acceptedAttachments !== undefined) {
               updateSteers(
-                window.localStorage,
+                inputRecoveryMemory,
                 get().apiBase,
                 selection.sessionId,
                 (steers) =>
@@ -2152,14 +2363,15 @@ export const useAppStore = create<AppStore>()((set, get) => {
       if (text === COMPACT_DIRECTIVE) {
         await runTask(
           async () => {
+            const requestId = createRequestId()
             const response = await getAppRpcClient(get().apiBase).request(
               "session/compact",
               {
                 sessionId: selection.sessionId,
-                requestId: createRequestId(),
+                requestId,
               },
             )
-            if (response.event.sessionId !== selection.sessionId) {
+            if (response.requestId !== requestId) {
               throw new Error("Compact response did not match the request.")
             }
             if (!isCurrentSelection(selection)) return
@@ -2193,7 +2405,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
           const admittedModelSelection = queuedForCreation
             ? queuedModelSelection
             : normalizeKimiModelSelection(modelSelection, state.providers)
-          const pendingAdmission = await reserveAdmission(window.localStorage, {
+          const pendingAdmission = await reserveAdmission(inputRecoveryMemory, {
             apiBase: get().apiBase,
             sessionId: selection.sessionId,
             text,
@@ -2202,35 +2414,51 @@ export const useAppStore = create<AppStore>()((set, get) => {
             ...(admittedModelSelection === undefined
               ? {}
               : { modelSelection: admittedModelSelection }),
+            ...(firstInputAdmission === undefined
+              ? {}
+              : { supersedesRequestId: firstInputAdmission.requestId }),
           })
+          if (firstInputAdmission !== undefined) {
+            await acknowledgeAdmission(inputRecoveryMemory, firstInputAdmission)
+            set({ recoveredAdmission: undefined })
+          }
           if (!isCurrentSelection(selection)) return
-          const response = await getAppRpcClient(get().apiBase).request(
-            queueAdmission ? "session/input/queue" : "session/input",
-            {
-              sessionId: selection.sessionId,
-              requestId: pendingAdmission.requestId,
-              content: {
-                kind: "text",
-                text,
-                ...(attachments.length === 0 ? {} : { attachments }),
-                ...(excerpts.length === 0
+          inFlightAdmissions.add(pendingAdmission.requestId)
+          let response: Awaited<ReturnType<AppRpcClient["request"]>>
+          try {
+            response = await getAppRpcClient(get().apiBase).request(
+              queueAdmission ? "session/input/queue" : "session/input",
+              {
+                sessionId: selection.sessionId,
+                requestId: pendingAdmission.requestId,
+                content: {
+                  kind: "text",
+                  text,
+                  ...(attachments.length === 0 ? {} : { attachments }),
+                  ...(excerpts.length === 0
+                    ? {}
+                    : { contextAttachments: excerpts }),
+                },
+                ...(admittedModelSelection === undefined
                   ? {}
-                  : { contextAttachments: excerpts }),
+                  : { modelSelection: admittedModelSelection }),
               },
-              ...(admittedModelSelection === undefined
-                ? {}
-                : { modelSelection: admittedModelSelection }),
-            },
-          )
+            )
+          } finally {
+            inFlightAdmissions.delete(pendingAdmission.requestId)
+          }
           if (response.requestId !== pendingAdmission.requestId) {
             throw new Error("Admission response did not match the request.")
           }
+          if (rejectedAdmissions.delete(pendingAdmission.requestId)) return
           retireRestoredSteers(selection.sessionId)
-          // The response acknowledges the routing decision only; the outbox
-          // entry clears once the durable input.admitted event confirms the
-          // write (it may already have been replayed to this view).
-          if (get().execution.admittedRequestIds[pendingAdmission.requestId]) {
-            await acknowledgeAdmission(window.localStorage, pendingAdmission)
+          // Queue storage has committed before its response. Direct starts
+          // still wait for input.admitted from the rollout stream.
+          if (
+            queueAdmission ||
+            get().execution.admittedRequestIds[pendingAdmission.requestId]
+          ) {
+            await acknowledgeAdmission(inputRecoveryMemory, pendingAdmission)
           } else {
             pendingAdmissions.set(pendingAdmission.requestId, pendingAdmission)
           }
@@ -2257,6 +2485,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
             return { inFlightActions }
           })
           if (!isCurrentSelection(selection)) return
+          if (queueAdmission) await get().refreshQueuedInputs()
           await get().refreshSidebar()
         },
         () => isCurrentSelection(selection),
@@ -2307,6 +2536,105 @@ export const useAppStore = create<AppStore>()((set, get) => {
       })
     },
 
+    refreshQueuedInputs: async () => {
+      const selection = currentSelection()
+      if (!selection) return
+      const revision = ++queueReadRevision
+      try {
+        const { items } = await getAppRpcClient(get().apiBase).request(
+          "session/queue/list",
+          { sessionId: selection.sessionId },
+        )
+        if (!isCurrentSelection(selection) || revision !== queueReadRevision) return
+        const pendingInputs = items.map((item) => ({
+          id: item.id,
+          text: item.input.content.text,
+          admittedAt: item.createdAt,
+        }))
+        set((state) => ({
+          queuedItems: items,
+          execution: {
+            ...state.execution,
+            queuedInputs: Object.fromEntries(
+              pendingInputs.map((item) => [item.id, item]),
+            ),
+          },
+          ...(state.selectedSession?.id === selection.sessionId
+            ? {
+                selectedSession: {
+                  ...state.selectedSession,
+                  pendingInputs,
+                  counts: {
+                    ...state.selectedSession.counts,
+                    pendingInputs: pendingInputs.length,
+                  },
+                },
+              }
+            : {}),
+        }))
+        for (const item of items) {
+          const admission =
+            pendingAdmissions.get(item.input.submissionId) ??
+            readAdmissionByRequestId(
+              inputRecoveryMemory,
+              get().apiBase,
+              selection.sessionId,
+              item.input.submissionId,
+            )
+          if (admission === undefined) continue
+          pendingAdmissions.delete(item.input.submissionId)
+          await acknowledgeAdmission(inputRecoveryMemory, admission)
+        }
+      } catch (error) {
+        if (isCurrentSelection(selection))
+          set({ message: errorMessage(error, "Could not load queued inputs.") })
+      }
+    },
+
+    updateQueuedInput: async (inputId, text) => {
+      const selection = currentSelection()
+      if (!selection) return
+      const item = get().queuedItems.find((entry) => entry.id === inputId)
+      if (item === undefined) return
+      const requestId = createRequestId()
+      await runTask(async () => {
+        await getAppRpcClient(get().apiBase).request("session/queue/update", {
+          sessionId: selection.sessionId,
+          inputId,
+          requestId,
+          content: { ...item.input.content, text },
+          ...(item.input.modelSelection === undefined
+            ? {}
+            : { modelSelection: item.input.modelSelection }),
+        })
+        await get().refreshQueuedInputs()
+      }, () => isCurrentSelection(selection))
+    },
+
+    reorderQueuedInputs: async (inputIds) => {
+      const selection = currentSelection()
+      if (!selection) return
+      await runTask(async () => {
+        await getAppRpcClient(get().apiBase).request("session/queue/reorder", {
+          sessionId: selection.sessionId,
+          inputIds,
+        })
+        await get().refreshQueuedInputs()
+      }, () => isCurrentSelection(selection))
+    },
+
+    startQueuedInput: async (inputId) => {
+      const selection = currentSelection()
+      if (!selection) return
+      await runTask(async () => {
+        await getAppRpcClient(get().apiBase).request("session/queue/start", {
+          sessionId: selection.sessionId,
+          inputId,
+        })
+        await get().refreshQueuedInputs()
+      }, () => isCurrentSelection(selection))
+    },
+
     cancelQueuedInput: async (inputId) => {
       const selection = currentSelection()
       if (!selection) return
@@ -2326,6 +2654,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
                 reason: "user_cancel",
               },
             )
+            await get().refreshQueuedInputs()
           } catch (error) {
             if (
               !(error instanceof ApiRequestError && error.code === "conflict")
@@ -2800,30 +3129,9 @@ function applyDurableSessionDetail(
   }
   switch (event.type) {
     case "input.admitted":
-      if (!event.data.steered) {
-        pendingInputs.push({
-          id: event.data.inputId,
-          text: event.data.content.text,
-          admittedAt: event.createdAt,
-        })
-      }
       return {
         ...next,
-        pendingInputs,
-        counts: {
-          ...counts,
-          inputs: counts.inputs + 1,
-          pendingInputs: pendingInputs.length,
-        },
-      }
-    case "input.cancelled":
-      pendingInputs = pendingInputs.filter(
-        (input) => input.id !== event.data.inputId,
-      )
-      return {
-        ...next,
-        pendingInputs,
-        counts: { ...counts, pendingInputs: pendingInputs.length },
+        counts: { ...counts, inputs: counts.inputs + 1 },
       }
     case "turn.started":
       pendingInputs = pendingInputs.filter(

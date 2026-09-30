@@ -18,14 +18,14 @@ export const MAX_TIMER_DELAY_MS = 2_147_483_647
 const DEFAULT_MAX_ATTEMPTS = 8
 const DEFAULT_RATE_LIMIT_MAX_ATTEMPTS = 2
 
-export type ModelRequestOptions = ModelRequestPolicy & {
-  readonly wireApi: ModelWireApi
-  readonly baseDelayMs?: number
-  readonly maxDelayMs?: number
-  readonly retryAfterOutput?: boolean
-  readonly sleep?: (ms: number, signal?: AbortSignal) => Promise<void>
-  readonly random?: () => number
-}
+export type ModelRequestOptions = ModelRequestPolicy &
+  Readonly<{
+    wireApi: ModelWireApi
+    baseDelayMs?: number
+    maxDelayMs?: number
+    sleep?: (ms: number, signal?: AbortSignal) => Promise<void>
+    random?: () => number
+  }>
 
 type ResolvedModelRequestOptions = Required<
   Omit<ModelRequestOptions, "sleep" | "random">
@@ -46,7 +46,6 @@ export function createModelRequestStream(
     baseDelayMs: options.baseDelayMs ?? 500,
     maxDelayMs: options.maxDelayMs ?? 8_000,
     streamIdleTimeoutMs: options.streamIdleTimeoutMs ?? 300_000,
-    retryAfterOutput: options.retryAfterOutput ?? false,
     sleep: options.sleep ?? realSleep,
     random: options.random ?? Math.random,
   }
@@ -59,9 +58,9 @@ async function* runModelRequest(
   request: ModelRequest,
   options: ResolvedModelRequestOptions,
 ): AsyncGenerator<ModelStreamEvent> {
-  let outputObserved = false
   let previousFailure: ModelFailure | undefined
   for (let attempt = 1; ; attempt += 1) {
+    let outputObserved = false
     if (request.signal?.aborted) {
       yield { type: "cancelled" }
       return
@@ -240,12 +239,7 @@ async function* runModelRequest(
     if (failureEvent === undefined) {
       throw new Error("Model attempt ended without an outcome.")
     }
-    const retry = shouldRetry(
-      failureEvent.failure,
-      attempt,
-      outputObserved,
-      options,
-    )
+    const retry = shouldRetry(failureEvent.failure, attempt, options)
     const effectiveMaxAttempts =
       failureEvent.failure.kind === "rate_limited"
         ? Math.min(options.maxAttempts, options.rateLimitMaxAttempts)
@@ -300,11 +294,9 @@ function protocolFailureEvent(
 function shouldRetry(
   failure: ModelFailure,
   attempt: number,
-  outputObserved: boolean,
   options: ResolvedModelRequestOptions,
 ): boolean {
   if (failure.serverShouldRetry === false) return false
-  if (outputObserved && !options.retryAfterOutput) return false
   if (attempt >= options.maxAttempts) return false
   if (
     failure.kind === "rate_limited" &&
