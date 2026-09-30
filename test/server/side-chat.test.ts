@@ -8,6 +8,7 @@ import {
   type StreamFn,
 } from "../../src/runtime/model.ts"
 import { createToolRegistry } from "../../src/runtime/tools/registry.ts"
+import { createModelRequestStream } from "../../src/runtime/model-request.ts"
 import { createTurnProcessor } from "../../src/runtime/turn-processor.ts"
 import { createYakitoriApplication } from "../../src/server/application.ts"
 import {
@@ -472,6 +473,75 @@ describe("temporary side conversations", () => {
       ).toBe(true)
       expect(context.errors).toEqual([])
     } finally {
+      await context.close()
+    }
+  })
+
+  it("replaces failed attempt text in a side chat before the next response completes", async () => {
+    let attempts = 0
+    let finish!: () => void
+    const completed = new Promise<void>((resolve) => {
+      finish = resolve
+    })
+    const context = await fixture(
+      createModelRequestStream(
+        async function* () {
+          if (++attempts === 1) {
+            yield { type: "delta", text: "discard this" }
+            yield {
+              type: "failure",
+              failure: {
+                kind: "stream_disconnected",
+                stage: "response_body",
+                provider: "faux",
+                wireApi: "unknown",
+                message: "Disconnected",
+              },
+            }
+            return
+          }
+          yield { type: "delta", text: "fresh answer" }
+          await completed
+          yield {
+            type: "response",
+            response: {
+              stopReason: ModelStopReason.EndTurn,
+              content: [{ type: "text", text: "fresh answer" }],
+            },
+          }
+        },
+        { wireApi: "unknown", sleep: async () => {} },
+      ),
+    )
+    try {
+      const created = await context.service.create({})
+      await context.service.send({
+        sideChatId: created.id,
+        requestId: "retry",
+        text: "recover",
+      })
+      await until(() =>
+        context.service
+          .read(created.id)
+          .messages.some((message) => message.text === "fresh answer"),
+      )
+      expect(
+        context.service
+          .read(created.id)
+          .messages.filter((message) => message.role === "assistant"),
+      ).toEqual([
+        expect.objectContaining({ text: "fresh answer", streaming: true }),
+      ])
+      finish()
+      await until(
+        () => context.service.read(created.id).activeTurnId === undefined,
+      )
+      expect(context.service.read(created.id).messages.at(-1)).toMatchObject({
+        text: "fresh answer",
+        streaming: false,
+      })
+    } finally {
+      finish()
       await context.close()
     }
   })

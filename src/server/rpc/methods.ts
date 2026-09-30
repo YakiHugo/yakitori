@@ -13,6 +13,7 @@ import type { LiveSessionEvent } from "../../runtime/live-events.ts"
 import { createSkillsLoader, type SkillMetadata } from "../../runtime/skills.ts"
 import type { ComputerUseStatus } from "../computer-use.ts"
 import type { ServerHandlers } from "../handlers.ts"
+import type { QueuedInput } from "../input-queue.ts"
 import { requireUserModelPreference } from "../http.ts"
 import type { McpService } from "../mcp-service.ts"
 import {
@@ -916,6 +917,26 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
     sessionScope,
     (handlers, params) => handlers.queueInput(params),
   ),
+  handlerEntry<{ items: readonly QueuedInput[] }>(
+    "session/queue/list",
+    sessionScope,
+    (handlers, params) => handlers.listQueuedInputs(params),
+  ),
+  handlerEntry<{ item: QueuedInput }>(
+    "session/queue/update",
+    sessionScope,
+    (handlers, params) => handlers.updateQueuedInput(params),
+  ),
+  handlerEntry<{ items: readonly QueuedInput[] }>(
+    "session/queue/reorder",
+    sessionScope,
+    (handlers, params) => handlers.reorderQueuedInputs(params),
+  ),
+  handlerEntry<ApiAdmitInputResponse>(
+    "session/queue/start",
+    sessionScope,
+    (handlers, params) => handlers.startQueuedInput(params),
+  ),
   handlerEntry<ApiSteerInputResponse>(
     "session/input/steer",
     sessionScope,
@@ -1332,6 +1353,10 @@ export type RpcMethodParams = Readonly<
       "session/compact": Readonly<{ sessionId: string; requestId?: string }>
       "session/input": ApiAdmitInputRequest
       "session/input/queue": ApiAdmitInputRequest
+      "session/queue/list": ApiReadSessionRequest
+      "session/queue/update": ApiAdmitInputRequest & Readonly<{ inputId: string }>
+      "session/queue/reorder": Readonly<{ sessionId: string; inputIds: readonly string[] }>
+      "session/queue/start": Readonly<{ sessionId: string; inputId?: string }>
       "session/input/steer": ApiSteerInputRequest
       "session/input/cancel": ApiCancelInputRequest
       "session/turn/cancel": ApiCancelTurnRequest
@@ -1380,6 +1405,10 @@ export type RpcMethodResponses = Readonly<
       "session/compact": ApiCompactSessionResponse
       "session/input": ApiAdmitInputResponse
       "session/input/queue": ApiAdmitInputResponse
+      "session/queue/list": Readonly<{ items: readonly QueuedInput[] }>
+      "session/queue/update": Readonly<{ item: QueuedInput }>
+      "session/queue/reorder": Readonly<{ items: readonly QueuedInput[] }>
+      "session/queue/start": ApiAdmitInputResponse
       "session/input/steer": ApiSteerInputResponse
       "session/input/cancel": ApiCancelInputResponse
       "session/turn/cancel": ApiCancelTurnResponse

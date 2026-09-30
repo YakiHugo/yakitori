@@ -180,22 +180,34 @@ export function createFakeHandlers(
         events: [],
       }),
     admitInput: async () =>
-      okResult({ requestId: "request_1", turnId: "turn_1", inputId: "input_1" }),
+      okResult({
+        requestId: "request_1",
+        turnId: "turn_1",
+        inputId: "input_1",
+      }),
     queueInput: async () =>
+      okResult({
+        requestId: "request_1",
+        turnId: "turn_1",
+        inputId: "input_1",
+      }),
+    listQueuedInputs: async () => okResult({ items: [] }),
+    updateQueuedInput: async () =>
+      okResult({ item: { id: "input_1", sessionId: "session_1", input: { submissionId: "request_1", content: { kind: "text", text: "queued" } }, createdAt: "2026-01-01T00:00:00.000Z" } }),
+    reorderQueuedInputs: async () => okResult({ items: [] }),
+    startQueuedInput: async () =>
       okResult({ requestId: "request_1", turnId: "turn_1", inputId: "input_1" }),
     steerInput: async () =>
       okResult({ requestId: "request_1", turnId: "turn_1" }),
     compactSession: async () =>
       okResult({
         requestId: "request_1",
-        inputId: "input_1",
-        event: makeTurnStarted("session_1", 2, "turn_1"),
+        turnId: "turn_1",
       }),
     cancelInput: async () =>
       okResult({
         sessionId: "session_1",
         inputId: "input_1",
-        event: makeTurnStarted("session_1", 2, "turn_1"),
       }),
     cancelTurn: async () =>
       okResult({ sessionId: "session_1", turnId: "turn_1" }),

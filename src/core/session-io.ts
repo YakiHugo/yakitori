@@ -16,6 +16,8 @@ export const SessionStatus = {
 
 export type SessionStatus = (typeof SessionStatus)[keyof typeof SessionStatus]
 
+export type SessionIdleCause = "completed" | "interrupted" | "failed"
+
 export type AgentStatus =
   | "pending_init"
   | "running"
@@ -55,11 +57,6 @@ export type TurnInputSubmission =
       readonly inputItemId: string
     }
   | { readonly type: "steered"; readonly turnId: string }
-  | {
-      readonly type: "queued"
-      readonly turnId: string
-      readonly inputItemId: string
-    }
   | {
       readonly type: "replayed"
       readonly turnId: string
@@ -101,7 +98,6 @@ export type TurnInputMode =
   | { readonly type: "start_or_steer" }
   | { readonly type: "start_if_idle" }
   | { readonly type: "steer"; readonly expectedTurnId: string }
-  | { readonly type: "queue" }
 
 type TurnInputReply = {
   readonly resolve: (submission: TurnInputSubmission) => void
@@ -120,15 +116,6 @@ export type SessionOp =
       readonly requestId: string
       readonly reply: TurnInputReply
     }
-  | {
-      readonly type: "cancel_queued_input"
-      readonly inputId: string
-      readonly reply: {
-        readonly resolve: (cancelled: boolean) => void
-        readonly reject: (error: unknown) => void
-      }
-    }
-  | { readonly type: "dispatch_queued" }
   | {
       readonly type: "interrupt"
       readonly reason?: string
@@ -226,7 +213,7 @@ export class SessionIo {
   readonly #beforeShutdown: () => void
   readonly #readStatus: () => SessionStatus
   readonly #subscribeStatus: (
-    listener: (status: SessionStatus) => void,
+    listener: (status: SessionStatus, idleCause?: SessionIdleCause) => void,
   ) => () => void
   readonly #readAgentStatus: () => AgentStatus
   readonly #subscribeAgentStatus: (
@@ -240,7 +227,9 @@ export class SessionIo {
     beforeShutdown: () => void
     events: AsyncQueue<SessionEvent>
     readStatus: () => SessionStatus
-    subscribeStatus: (listener: (status: SessionStatus) => void) => () => void
+    subscribeStatus: (
+      listener: (status: SessionStatus, idleCause?: SessionIdleCause) => void,
+    ) => () => void
     readAgentStatus: () => AgentStatus
     subscribeAgentStatus: (
       listener: (status: AgentStatus) => void,
@@ -261,7 +250,9 @@ export class SessionIo {
     return this.#readStatus()
   }
 
-  subscribeStatus(listener: (status: SessionStatus) => void): () => void {
+  subscribeStatus(
+    listener: (status: SessionStatus, idleCause?: SessionIdleCause) => void,
+  ): () => void {
     return this.#subscribeStatus(listener)
   }
 
@@ -281,27 +272,12 @@ export class SessionIo {
     return this.#submitTurnInput(input, { type: "start_if_idle" })
   }
 
-  queueInput(input: SubmitTurnInput): Promise<TurnInputSubmission> {
-    return this.#submitTurnInput(input, { type: "queue" })
-  }
-
   compact(requestId: string): Promise<TurnInputSubmission> {
     this.#requireOpen()
     return new Promise((resolve, reject) => {
       void this.#send({
         type: "compact",
         requestId,
-        reply: { resolve, reject },
-      }).catch(reject)
-    })
-  }
-
-  cancelQueuedInput(inputId: string): Promise<boolean> {
-    this.#requireOpen()
-    return new Promise((resolve, reject) => {
-      void this.#send({
-        type: "cancel_queued_input",
-        inputId,
         reply: { resolve, reject },
       }).catch(reject)
     })

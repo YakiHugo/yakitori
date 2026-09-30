@@ -2,6 +2,7 @@ import type { Session, SessionSnapshot } from "./session.ts"
 import type {
   AgentStatus,
   SessionEvent,
+  SessionIdleCause,
   SessionStatus,
   SubmitTurnInput,
   TurnInputSubmission,
@@ -38,16 +39,8 @@ export class AgentThread {
     return this.#session.io.startIfIdle(input)
   }
 
-  queueInput(input: SubmitTurnInput): Promise<TurnInputSubmission> {
-    return this.#session.io.queueInput(input)
-  }
-
   compact(requestId: string): Promise<TurnInputSubmission> {
     return this.#session.io.compact(requestId)
-  }
-
-  cancelQueuedInput(inputId: string): Promise<boolean> {
-    return this.#session.io.cancelQueuedInput(inputId)
   }
 
   steer(
@@ -81,7 +74,9 @@ export class AgentThread {
     return this.#session.io.nextEvent()
   }
 
-  subscribeStatus(listener: (status: SessionStatus) => void): () => void {
+  subscribeStatus(
+    listener: (status: SessionStatus, idleCause?: SessionIdleCause) => void,
+  ): () => void {
     return this.#session.io.subscribeStatus(listener)
   }
 

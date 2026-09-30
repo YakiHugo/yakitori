@@ -462,7 +462,6 @@ export async function createYakitoriApplication(
         })
       },
     })
-    await rolloutAssets.cleanupStagingImageAttachments()
     const agentGraphStore = createSqliteAgentGraphStore({
       databasePath: join(sessionStoreRoot, "agent-graph.sqlite"),
     })
@@ -825,10 +824,13 @@ export async function createYakitoriApplication(
           agentRuntime.discardThread(threadId),
         ) ?? agentRuntime.discardThread(threadId),
       store: threadStore,
+      inputQueueDatabasePath: join(sessionStoreRoot, "input-queue.sqlite"),
       eventHub,
       sessionDefaults,
       onRootTurnCompleted: (event) =>
         broadcastNotification?.("session/completed", event),
+      notifyQueueChanged: (sessionId) =>
+        broadcastNotification?.("session/queue/changed", { sessionId }),
       projectStore: ownedProjectStore,
       resolvePermission: (input) => permissionGate.resolve(input),
       listPendingPermissions: (sessionId) => permissionGate.list(sessionId),

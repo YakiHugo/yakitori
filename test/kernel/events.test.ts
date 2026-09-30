@@ -12,7 +12,6 @@ describe("kernel facts", () => {
     expect(Object.values(EventType)).toEqual([
       "session.created",
       "input.admitted",
-      "input.cancelled",
       "turn.started",
       "turn.completed",
       "item.started",
@@ -31,7 +30,7 @@ describe("kernel facts", () => {
     expect(envelope).toMatchObject({
       sessionId: "session_00000000-0000-4000-8000-000000000000",
       seq: 1,
-      version: 6,
+      version: 7,
       type: EventType.SessionCreated,
       data: { title: "Witness" },
     })

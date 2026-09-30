@@ -342,7 +342,7 @@ describe("runtime terminal delivery", () => {
     }
   })
 
-  it("flushes pending output before retry warnings and preserves resumed stream suffixes", async () => {
+  it("discards failed attempt output after flushing and starts fresh display items on retry", async () => {
     const store = new MemoryThreadStore()
     const mayResume = deferred<void>()
     const mayFinish = deferred<void>()
@@ -363,6 +363,7 @@ describe("runtime terminal delivery", () => {
             code: "model.retry",
             message: "Stream disconnected",
             details: {
+              discardedResponseItemId: "answer",
               kind: "stream_disconnected",
               nextAttempt: 2,
               maxAttempts: 3,
@@ -430,6 +431,8 @@ describe("runtime terminal delivery", () => {
         ["reasoning.delta", "first"],
         ["assistant.delta", " last"],
         ["reasoning.delta", " last"],
+        ["item.discarded"],
+        ["item.discarded"],
         ["runtime.warning"],
       ])
       // A held retry must not receive delayed pre-failure output after its warning.
@@ -451,9 +454,17 @@ describe("runtime terminal delivery", () => {
         .map((frame) => frame.params as LiveSessionEvent)
       expect(resumed.slice(beforeResume.length)).toEqual([
         expect.objectContaining({
+          type: "item.started",
+          item: { type: "agent_message", itemId: "answer" },
+        }),
+        expect.objectContaining({
           type: "assistant.delta",
           itemId: "answer",
           delta: " resumed",
+        }),
+        expect.objectContaining({
+          type: "item.started",
+          item: { type: "reasoning", itemId: "answer_reasoning" },
         }),
         expect.objectContaining({
           type: "reasoning.delta",

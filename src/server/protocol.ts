@@ -275,9 +275,8 @@ export type ApiAdmitInputRequest = {
 
 export type ApiAdmitInputResponse = {
   readonly requestId: string
-  // Acknowledged at the routing decision (Codex turn/start): the input is
-  // recorded by the run task, so durability is signaled by the durable
-  // input.admitted event on the session stream, not by this response.
+  // Direct admission acknowledges a routing decision; input.admitted confirms
+  // its rollout record. Queue admission acknowledges the separate queue write.
   readonly turnId: string
   readonly inputId: string
 }
@@ -304,8 +303,7 @@ export type ApiSteerInputResponse = {
 
 export type ApiCompactSessionResponse = {
   readonly requestId: string
-  readonly inputId: string
-  readonly event: EventEnvelope
+  readonly turnId: string
 }
 
 export type ApiCancelInputRequest = {
@@ -317,7 +315,6 @@ export type ApiCancelInputRequest = {
 export type ApiCancelInputResponse = {
   readonly sessionId: string
   readonly inputId: string
-  readonly event: EventEnvelope
 }
 
 export type ApiCancelTurnRequest = {

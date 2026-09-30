@@ -201,6 +201,34 @@ describe("JsonlThreadStore", () => {
     await store.shutdownThread(id)
   })
 
+  it("defers a live TurnStart sync until the normal persistence barrier", async () => {
+    const { root, store } = await createStore()
+    const id = "thread_deferred_turn_sync"
+    await createPersistentThread(store, metadata(id))
+    const probe = await open(join(root, "probe-turn-sync"), "w+")
+    const prototype = Object.getPrototypeOf(probe) as {
+      sync(): Promise<void>
+    }
+    const originalSync = prototype.sync
+    let syncs = 0
+    prototype.sync = async function sync() {
+      syncs += 1
+      await originalSync.call(this)
+    }
+    try {
+      await store.appendItems(id, [response("turn_one", "accepted")])
+      const afterAppend = syncs
+      await store.persistThread(id, "turn_start")
+      expect(syncs).toBe(afterAppend)
+      await store.persistThread(id, "standard")
+      expect(syncs).toBeGreaterThan(afterAppend)
+    } finally {
+      prototype.sync = originalSync
+      await probe.close()
+      await store.shutdownThread(id)
+    }
+  })
+
   it("keeps a failed first turn private while preserving its original event sequence on retry", async () => {
     const { root, store } = await createStore()
     const id = "thread_private_first_turn"
@@ -733,8 +761,10 @@ describe("JsonlThreadStore", () => {
     const { root, store } = await createStore()
     await createPersistentThread(store, metadata("thread_source"))
     await store.appendItems("thread_source", [
+      { type: "turn_started", turnId: "turn_one", inputItemId: "input_one" },
       response("turn_one", "one"),
       terminal("turn_one"),
+      { type: "turn_started", turnId: "turn_two", inputItemId: "input_two" },
       response("turn_two", "two"),
       terminal("turn_two"),
     ])
@@ -763,7 +793,7 @@ describe("JsonlThreadStore", () => {
     expect(childLines).toHaveLength(1)
     expect(fork.thread.metadata.historyBase).toEqual({
       rolloutId: "thread_source",
-      endSeqExclusive: 3,
+      endSeqExclusive: 4,
       endByteOffset: expect.any(Number),
     })
     expect(
@@ -942,78 +972,6 @@ describe("JsonlThreadStore", () => {
       "turn_later",
     ])
     await store.releasePreparedFork(prepared)
-    await store.shutdownThread("thread_source")
-  })
-
-  it("keeps pending and cancelled queue receipts out of fork model context", async () => {
-    const { store } = await createStore()
-    await createPersistentThread(store, metadata("thread_source"))
-    const queued = {
-      type: "input_admitted",
-      input: {
-        submissionId: "turn_queued",
-        content: { kind: "text", text: "queued" },
-      },
-      inputItemId: "input_queued",
-      requestFingerprint: "queued-fingerprint",
-    } as const
-    const cancelled = {
-      type: "input_admitted",
-      input: {
-        submissionId: "turn_cancelled",
-        content: { kind: "text", text: "cancelled" },
-      },
-      inputItemId: "input_cancelled",
-      requestFingerprint: "cancelled-fingerprint",
-    } as const
-    await store.appendItems("thread_source", [
-      response("turn_first", "first"),
-      queued,
-      cancelled,
-      { type: "input_cancelled", inputId: "input_cancelled" },
-    ])
-
-    const beforeDispatch = await store.prepareFork({
-      sourceThreadId: "thread_source",
-      boundary: { type: "latest" },
-    })
-    expect(beforeDispatch.modelContext.map((item) => item.turnId)).toEqual([
-      "turn_first",
-    ])
-    const child = await store.createFork({
-      prepared: beforeDispatch,
-      target: metadata("thread_child", { parentThreadId: "thread_source" }),
-    })
-    expect(
-      child.thread.rollout.flatMap(({ item }) =>
-        item.type === "input_admitted" ? [item.inputItemId] : [],
-      ),
-    ).toEqual([])
-    expect(
-      child.thread.rollout.some(({ item }) => item.type === "input_cancelled"),
-    ).toBe(false)
-
-    await store.appendItems("thread_source", [
-      {
-        ...response("turn_queued", "queued"),
-        item: { ...response("turn_queued", "queued").item, id: "input_queued" },
-      },
-      {
-        type: "turn_started",
-        turnId: "turn_queued",
-        inputItemId: "input_queued",
-      },
-    ])
-    const afterDispatch = await store.prepareFork({
-      sourceThreadId: "thread_source",
-      boundary: { type: "latest" },
-    })
-    expect(afterDispatch.modelContext.map((item) => item.turnId)).toEqual([
-      "turn_first",
-      "turn_queued",
-    ])
-    await store.releasePreparedFork(afterDispatch)
-    await store.shutdownThread("thread_child")
     await store.shutdownThread("thread_source")
   })
 
@@ -1348,8 +1306,18 @@ describe("JsonlThreadStore", () => {
     const { store } = await createStore()
     await createPersistentThread(store, metadata("thread_boundary"))
     await store.appendItems("thread_boundary", [
+      {
+        type: "turn_started",
+        turnId: "turn_repeat",
+        inputItemId: "input_first",
+      },
       response("turn_repeat", "first"),
       terminal("turn_repeat"),
+      {
+        type: "turn_started",
+        turnId: "turn_repeat",
+        inputItemId: "input_second",
+      },
       response("turn_repeat", "second"),
       terminal("turn_repeat"),
     ])
@@ -1364,7 +1332,7 @@ describe("JsonlThreadStore", () => {
       sourceThreadId: "thread_boundary",
       boundary: { type: "through_turn", turnId: "turn_repeat" },
     })
-    expect(through.historyPosition?.endSeqExclusive).toBe(5)
+    expect(through.historyPosition?.endSeqExclusive).toBe(7)
     await store.releasePreparedFork(through)
     await store.shutdownThread("thread_boundary")
   })

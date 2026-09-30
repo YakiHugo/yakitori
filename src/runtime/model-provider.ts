@@ -112,6 +112,9 @@ export function createModelProvider(
                       request.attempt ?? { number: 1, maxAttempts: 1 },
                     )(request)
                 : input.stream
+          // All providers commit tools only after a complete response. Failed
+          // attempts may therefore retry after provisional text/reasoning; the
+          // consumer discards that output before displaying the next attempt.
           const stream = createModelRequestStream(providerStream, {
             wireApi: input.info.wireApi,
             ...(input.info.streamIdleTimeoutMs === undefined
@@ -139,7 +142,6 @@ export function createModelProvider(
                 2,
               3,
             ),
-            retryAfterOutput: true,
           })
           return {
             remoteCompaction: input.info.capabilities.remoteCompaction,

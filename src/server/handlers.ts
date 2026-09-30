@@ -6,9 +6,8 @@ import type {
   StoredThread,
   ThreadSummary,
 } from "../core/rollout.ts"
-import { queuedInputsFromRollout } from "../core/session.ts"
 import { sessionCacheExpiry } from "../core/session-cache-expiry.ts"
-import type { TurnInputSubmission } from "../core/session-io.ts"
+import type { TurnInput, TurnInputSubmission } from "../core/session-io.ts"
 import {
   parseSidebarChange,
   type SessionSidebar,
@@ -46,6 +45,11 @@ import type {
 } from "../runtime/permission-gate.ts"
 import type { SkillMetadata } from "../runtime/skills.ts"
 import {
+  InputQueue,
+  InputQueueFullError,
+  type QueuedInput,
+} from "./input-queue.ts"
+import {
   consoleOperationalFailureReporter,
   type OperationalFailureReporter,
   reportOperationalFailure,
@@ -73,6 +77,11 @@ import {
   type ApiSessionSummary,
   type ApiSteerInputResponse,
 } from "./protocol.ts"
+import {
+  MAX_QUEUED_INPUT_TEXT_CHARS,
+  QueuedInputTooLargeError,
+  QueuedItemService,
+} from "./queued-item-service.ts"
 import type { SessionCompletedNotification } from "./rpc/methods.ts"
 import type { SessionTitleGenerator } from "./session-title.ts"
 import type { ProjectStore } from "./sqlite-project-store.ts"
@@ -81,6 +90,9 @@ import { readWorkspaceGitInfo } from "./workspace.ts"
 // Input payload allocation boundary for local RPC commands, independent of
 // model context capacity. Retains the existing 256 KiB admission bound.
 const DEFAULT_MAX_INPUT_BYTES = 256 * 1024
+// Every Unicode scalar occupies at most four UTF-8 bytes. This allocation
+// boundary lets the Codex queue character limit be the effective text limit.
+const MAX_QUEUED_INPUT_TEXT_BYTES = MAX_QUEUED_INPUT_TEXT_CHARS * 4
 
 export type SessionCreateDefaults = {
   readonly workingDirectory: string
@@ -128,6 +140,9 @@ export type ThreadServerHandlerOptions = {
   }) => Promise<readonly SkillMetadata[]>
   // Enables projectId on session create/list and orphan suppression on reads.
   readonly projectStore?: ProjectStore
+  readonly inputQueue?: InputQueue
+  readonly inputQueueDatabasePath?: string
+  readonly notifyQueueChanged?: (sessionId: string) => void
   readonly reportOperationalFailure?: OperationalFailureReporter
   readonly onRootTurnCompleted?: (event: SessionCompletedNotification) => void
 }
@@ -160,6 +175,18 @@ export type ServerHandlers = {
   forkSession(input: unknown): Promise<ApiHandlerResult<ApiForkSessionResponse>>
   admitInput(input: unknown): Promise<ApiHandlerResult<ApiAdmitInputResponse>>
   queueInput(input: unknown): Promise<ApiHandlerResult<ApiAdmitInputResponse>>
+  listQueuedInputs(
+    input: unknown,
+  ): Promise<ApiHandlerResult<{ items: readonly QueuedInput[] }>>
+  updateQueuedInput(
+    input: unknown,
+  ): Promise<ApiHandlerResult<{ item: QueuedInput }>>
+  reorderQueuedInputs(
+    input: unknown,
+  ): Promise<ApiHandlerResult<{ items: readonly QueuedInput[] }>>
+  startQueuedInput(
+    input: unknown,
+  ): Promise<ApiHandlerResult<ApiAdmitInputResponse>>
   steerInput(input: unknown): Promise<ApiHandlerResult<ApiSteerInputResponse>>
   compactSession(
     input: unknown,
@@ -194,7 +221,29 @@ export function createThreadServerHandlers(
   const pumpReady = new Map<AgentThread, Promise<void>>()
   const publishedThrough = new Map<string, number>()
   const admissionTails = new Map<string, Promise<void>>()
+  const pendingInitialDrafts = new Map<string, TextContent>()
   const pendingSteerDrafts = new Map<string, TextContent>()
+  const startingQueuedInputs = new Map<string, TextContent>()
+  const inputQueue =
+    options.inputQueue ?? new InputQueue(options.inputQueueDatabasePath)
+  const queueOptions = { ...options, inputQueue }
+  const queuedItems = new QueuedItemService({
+    queue: inputQueue,
+    manager: options.manager,
+    ...(options.notifyQueueChanged === undefined
+      ? {}
+      : { notifyChanged: options.notifyQueueChanged }),
+    onStarting: (item) =>
+      startingQueuedInputs.set(
+        `${item.sessionId}\0${item.input.submissionId}`,
+        item.input.content,
+      ),
+    onNotStarted: (item) =>
+      startingQueuedInputs.delete(
+        `${item.sessionId}\0${item.input.submissionId}`,
+      ),
+    reporter,
+  })
   let closing = false
   let stopPumps: (() => void) | undefined
   const pumpsStopped = new Promise<void>((resolve) => {
@@ -220,6 +269,56 @@ export function createThreadServerHandlers(
     if (last !== undefined) publishedThrough.set(threadId, hostSeq(last))
     maybeGenerateSessionTitle(threadId, stored, records)
     for (const record of records) {
+      if (record.item.type === "turn_completed") {
+        const requestId = record.item.turnId
+        const key = `${threadId}\0${requestId}`
+        const draft = pendingInitialDrafts.get(key)
+        pendingInitialDrafts.delete(key)
+        const queuedContent = startingQueuedInputs.get(key)
+        startingQueuedInputs.delete(key)
+        const started = stored.rollout.find(
+          (entry) =>
+            entry.item.type === "turn_started" &&
+            entry.item.turnId === requestId,
+        )?.item
+        if (started?.type === "turn_started") {
+          const accepted = stored.rollout.some(
+            (entry) =>
+              entry.item.type === "response_item" &&
+              entry.item.item.id === started.inputItemId,
+          )
+          if (accepted && draft !== undefined)
+            void discardAdmittedDraftAttachments(threadId, requestId, draft)
+          if (!accepted)
+            void discardUnacceptedRequestAttachments(
+              threadId,
+              stored.metadata.rolloutId,
+              requestId,
+            )
+          if (!accepted && queuedContent !== undefined) {
+            for (const ownerId of requestAttachmentOwners(queuedContent))
+              if (ownerId !== requestId)
+                void discardUnacceptedRequestAttachments(
+                  threadId,
+                  stored.metadata.rolloutId,
+                  ownerId,
+                )
+          }
+        }
+      }
+      if (
+        record.item.type === "response_item" &&
+        record.item.item.id.startsWith("input_") &&
+        record.item.item.item.role === "user"
+      ) {
+        const requestId = record.item.item.turnId
+        const key = `${threadId}\0${requestId}`
+        const draft = pendingInitialDrafts.get(key)
+        if (draft !== undefined) {
+          pendingInitialDrafts.delete(key)
+          void discardAdmittedDraftAttachments(threadId, requestId, draft)
+        }
+      }
       if (
         record.item.type !== "response_item" ||
         !record.item.item.id.startsWith("message_") ||
@@ -244,52 +343,29 @@ export function createThreadServerHandlers(
     records: readonly StoredRolloutItem[],
   ) {
     if (options.sessionTitle === undefined) return
-    const inheritedPending = inheritedPendingInputIds(stored)
     const isUserInput = (
       record: StoredRolloutItem,
     ): record is StoredRolloutItem & {
-      item: Extract<
-        RolloutItem,
-        { readonly type: "input_admitted" | "response_item" }
-      >
+      item: Extract<RolloutItem, { readonly type: "response_item" }>
     } =>
-      (record.item.type === "input_admitted" &&
-        !inheritedPending.has(record.item.inputItemId)) ||
-      (record.item.type === "response_item" &&
-        record.item.item.id.startsWith("input_") &&
-        record.item.item.item.role === "user" &&
-        record.item.item.item.context === undefined &&
-        record.item.item.submissionMetadata?.queuedDispatch !== true)
+      record.item.type === "response_item" &&
+      record.item.item.id.startsWith("input_") &&
+      record.item.item.item.role === "user" &&
+      record.item.item.item.context === undefined
     const admitted = records.find(isUserInput)
     if (admitted === undefined) return
     const first = stored.rollout.find(isUserInput)
-    if (
-      first === undefined ||
-      (first.item.type === "input_admitted"
-        ? first.item.inputItemId
-        : first.item.item.id) !==
-        (admitted.item.type === "input_admitted"
-          ? admitted.item.inputItemId
-          : admitted.item.item.id)
-    ) {
+    if (first === undefined || first.item.item.id !== admitted.item.item.id) {
       return
     }
-    let text: string
-    if (admitted.item.type === "input_admitted") {
-      text = admitted.item.input.content.text
-    } else {
-      const message = admitted.item.item.item
-      if (message.role !== "user") return
-      text = message.content
-        .filter((block) => block.type === "text")
-        .map((block) => block.text)
-        .join("")
-    }
+    const message = admitted.item.item.item
+    if (message.role !== "user") return
+    const text = message.content
+      .filter((block) => block.type === "text")
+      .map((block) => block.text)
+      .join("")
     if (text.trim() === "") return
-    const modelSelection =
-      admitted.item.type === "input_admitted"
-        ? admitted.item.input.modelSelection
-        : admitted.item.item.submissionMetadata?.modelSelection
+    const modelSelection = admitted.item.item.submissionMetadata?.modelSelection
     void options.sessionTitle.generate({
       sessionId: threadId,
       text,
@@ -466,9 +542,23 @@ export function createThreadServerHandlers(
           }
           if (event.type === "runtime.warning") {
             if (event.code === "model.retry") {
-              // Buffered pre-failure output must precede the retry status.
-              // Keep publishers so resumed output retains its item identity.
+              // Flush before discard so a coalesced delta cannot revive output
+              // from the failed attempt after the retry starts.
               for (const publisher of streams.values()) publisher.flush()
+              const itemId = event.details?.discardedResponseItemId
+              if (typeof itemId === "string") {
+                for (const kind of ["assistant", "reasoning"] as const) {
+                  streams.delete(`${itemId}:${kind}`)
+                  options.eventHub?.publishTransient({
+                    type: "item.discarded",
+                    sessionId: event.threadId,
+                    turnId: event.turnId,
+                    itemId:
+                      kind === "reasoning" ? `${itemId}_reasoning` : itemId,
+                    createdAt: new Date().toISOString(),
+                  })
+                }
+              }
             }
             options.eventHub?.publishTransient({
               type: "runtime.warning",
@@ -499,6 +589,7 @@ export function createThreadServerHandlers(
           pumpReady.delete(thread)
         })
       pumps.set(thread, pump)
+      queuedItems.install(thread)
     })()
     pumpReady.set(thread, ready)
     try {
@@ -614,9 +705,28 @@ export function createThreadServerHandlers(
     }
   }
 
-  // Shared admission pipeline for session/input (start-if-idle) and
-  // session/input/queue (queue-or-start): validate, promote attachments,
-  // submit through the Session, and answer with the durable input event.
+  const discardUnacceptedRequestAttachments = async (
+    sessionId: string,
+    rolloutId: string,
+    requestId: string,
+  ) => {
+    try {
+      await options.rolloutAssets?.discardRequestImageAttachments(
+        rolloutId,
+        requestId,
+      )
+    } catch (error) {
+      reportOperationalFailure(reporter, {
+        component: "thread-handlers",
+        operation: "discard-unaccepted-request-attachments",
+        cause: error,
+        sessionId,
+        turnId: requestId,
+      })
+    }
+  }
+
+  // Direct input enters the rollout only when the Turn accepts it.
   const admitTurnInput = async (
     request: ReturnType<typeof requireAdmitInputRequest>,
     submit: (
@@ -646,22 +756,55 @@ export function createThreadServerHandlers(
         // Session may have appended an admission even when its durability
         // fence failed. Keep promoted files for a retry with the same request
         // ID; deleting them would leave a durable queued image dangling.
-        const submitted = await submit(thread, content)
+        const draftKey = `${request.sessionId}\0${request.requestId}`
+        pendingInitialDrafts.set(draftKey, request.content)
+        let submitted: TurnInputSubmission
+        try {
+          submitted = await submit(thread, content)
+        } catch (error) {
+          pendingInitialDrafts.delete(draftKey)
+          throw error
+        }
         if (submitted.type === "not_submitted") {
+          pendingInitialDrafts.delete(draftKey)
           await rollbackPromotion?.()
           throw conflict(`Input was not submitted: ${submitted.reason}.`, {
             reason: submitted.reason,
           })
         }
         if (submitted.type === "steered") {
+          pendingInitialDrafts.delete(draftKey)
           throw internalError("Admission unexpectedly returned steering.")
         }
+        if (submitted.type === "replayed") {
+          const stored = await options.store.readThread(request.sessionId)
+          const accepted = stored?.rollout.some(
+            ({ item }) =>
+              item.type === "response_item" &&
+              item.item.id === submitted.inputItemId,
+          )
+          const completed = stored?.rollout.some(
+            ({ item }) =>
+              item.type === "turn_completed" &&
+              item.turnId === submitted.turnId,
+          )
+          if (accepted || completed) pendingInitialDrafts.delete(draftKey)
+          if (accepted)
+            await discardAdmittedDraftAttachments(
+              request.sessionId,
+              request.requestId,
+              request.content,
+            )
+          if (completed && !accepted) {
+            await rollbackPromotion?.()
+            await discardUnacceptedRequestAttachments(
+              request.sessionId,
+              rolloutId,
+              request.requestId,
+            )
+          }
+        }
         rollbackPromotion = undefined
-        await discardAdmittedDraftAttachments(
-          request.sessionId,
-          request.requestId,
-          request.content,
-        )
         return ok(submitted.type === "replayed" ? 200 : 201, {
           requestId: request.requestId,
           turnId: submitted.turnId,
@@ -678,10 +821,12 @@ export function createThreadServerHandlers(
     async close() {
       closing = true
       unsubscribeThreadInstalled()
+      await queuedItems.close()
       stopPumps?.()
       await Promise.allSettled([...admissionTails.values()])
       await Promise.allSettled([...pumpReady.values()])
       await Promise.allSettled([...pumps.values()])
+      if (options.inputQueue === undefined) inputQueue.close()
     },
     async createSession(input = {}) {
       try {
@@ -727,7 +872,7 @@ export function createThreadServerHandlers(
         publishedThrough.set(thread.id, event.seq)
         options.eventHub?.publishDurable([event])
         return ok(201, {
-          session: await mapStoredThread(stored, thread, options),
+          session: await mapStoredThread(stored, thread, queueOptions),
           event,
         })
       } catch (error) {
@@ -934,7 +1079,7 @@ export function createThreadServerHandlers(
           throw notFound(`Session ${sessionId} was not found.`, { sessionId })
         }
         return ok(200, {
-          session: await mapStoredThread(stored, live, options),
+          session: await mapStoredThread(stored, live, queueOptions),
         })
       } catch (error) {
         return fail(error, reporter, "read-session")
@@ -1007,8 +1152,11 @@ export function createThreadServerHandlers(
           // never reappear as an unrelated conversation after the head is gone.
           await options.store.setSessionHead(sessionId, sessionId)
         }
-        await (options.discardThread?.(sessionId) ??
-          options.manager.discardThread(sessionId))
+        await queuedItems.withLock(sessionId, async () => {
+          await (options.discardThread?.(sessionId) ??
+            options.manager.discardThread(sessionId))
+          queuedItems.deleteSession(sessionId)
+        })
         publishedThrough.delete(sessionId)
         return ok(200, { sessionId })
       } catch (error) {
@@ -1124,24 +1272,13 @@ export function createThreadServerHandlers(
           options.store,
           forked.thread.id,
         )
-        const inheritedPending = inheritedPendingInputIds(stored)
-        const events = stored.rollout
-          .filter(
-            ({ item }) =>
-              !(
-                item.type === "input_admitted" &&
-                inheritedPending.has(item.inputItemId)
-              ) &&
-              !(
-                item.type === "input_cancelled" &&
-                inheritedPending.has(item.inputId)
-              ),
-          )
-          .map((record) => mapRolloutEvent(record, forked.thread.id))
+        const events = stored.rollout.map((record) =>
+          mapRolloutEvent(record, forked.thread.id),
+        )
         publishedThrough.set(forked.thread.id, threadSeq(stored))
         options.eventHub?.publishDurable(events)
         return ok(201, {
-          session: await mapStoredThread(stored, forked.thread, options),
+          session: await mapStoredThread(stored, forked.thread, queueOptions),
           historyEndSeqExclusive:
             (forked.result.historyEndSeqExclusive ?? 1) + 1,
           events,
@@ -1185,27 +1322,73 @@ export function createThreadServerHandlers(
       }
     },
 
-    // Queue-or-start (Codex thread/queue): admitted durably at once; while a
-    // Turn is running the input joins the pending queue and dispatches when
-    // the Session goes idle, otherwise it starts immediately.
+    // Queue storage owns the input until the core accepts a Turn start. It is
+    // editable while waiting and independent of replay.
     async queueInput(input) {
       try {
         const request = requireAdmitInputRequest(
           input,
+          options.maxInputBytes ?? MAX_QUEUED_INPUT_TEXT_BYTES,
           options.maxInputBytes ?? DEFAULT_MAX_INPUT_BYTES,
         )
-        if (request.role !== undefined && request.role !== InputRole.User) {
-          throw invalidInput(
-            "Only user input can be submitted to a live Session.",
-            {
-              field: "role",
-            },
+        if (request.role !== undefined && request.role !== InputRole.User)
+          throw invalidInput("Only user input can be queued.")
+        if (
+          (await options.store.sessionPresentation(request.sessionId)).archived
+        )
+          throw conflict("Restore this conversation before sending a message.")
+        requireAvailableProvider(
+          request.modelSelection?.provider,
+          options.availableProviders,
+        )
+        const item = await queuedItems.withLock(request.sessionId, async () => {
+          const stored = await requireStoredThread(
+            options.store,
+            request.sessionId,
           )
-        }
-        return await admitTurnInput(request, (thread, content) =>
-          thread.queueInput({
+          const existing = queuedItems.getByRequest(
+            request.sessionId,
+            request.requestId,
+          )
+          if (existing !== undefined) {
+            const attachmentDetails = (
+              attachments: TextContent["attachments"],
+            ) =>
+              attachments?.map(({ name, mediaType, sizeBytes, detail }) => ({
+                name,
+                mediaType,
+                sizeBytes,
+                detail,
+              })) ?? []
+            if (
+              existing.input.content.text !== request.content.text ||
+              JSON.stringify(
+                existing.input.content.contextAttachments ?? [],
+              ) !== JSON.stringify(request.content.contextAttachments ?? []) ||
+              JSON.stringify(
+                attachmentDetails(existing.input.content.attachments),
+              ) !==
+                JSON.stringify(
+                  attachmentDetails(request.content.attachments),
+                ) ||
+              JSON.stringify(existing.input.modelSelection) !==
+                JSON.stringify(request.modelSelection) ||
+              JSON.stringify(existing.input.metadata) !==
+                JSON.stringify(request.metadata) ||
+              existing.input.parentInputId !== request.parentInputId
+            )
+              throw conflict("Input was not queued: request_conflict.")
+            return existing
+          }
+          const rolloutId = stored.metadata.rolloutId
+          const promoted = await promoteRequestAttachments(
+            rolloutId,
+            request.requestId,
+            request.content,
+          )
+          const turnInput: TurnInput = {
             submissionId: request.requestId,
-            content,
+            content: promoted.content,
             ...(request.modelSelection === undefined
               ? {}
               : { modelSelection: request.modelSelection }),
@@ -1215,10 +1398,202 @@ export function createThreadServerHandlers(
             ...(request.parentInputId === undefined
               ? {}
               : { parentInputId: request.parentInputId }),
-          }),
-        )
+          }
+          try {
+            const queued = queuedItems.enqueue(request.sessionId, turnInput)
+            await discardAdmittedDraftAttachments(
+              request.sessionId,
+              request.requestId,
+              request.content,
+            )
+            return queued
+          } catch (error) {
+            await promoted.rollback?.()
+            throw error
+          }
+        })
+        queuedItems.wake(request.sessionId)
+        return ok(201, {
+          requestId: request.requestId,
+          turnId: request.requestId,
+          inputId: item.id,
+        })
       } catch (error) {
-        return fail(error, reporter, "queue-input")
+        return fail(
+          error instanceof InputQueueFullError ||
+            error instanceof QueuedInputTooLargeError
+            ? invalidInput(error.message)
+            : error,
+          reporter,
+          "queue-input",
+        )
+      }
+    },
+
+    async listQueuedInputs(input) {
+      try {
+        const { sessionId } = requireReadSessionRequest(input)
+        await requireStoredThread(options.store, sessionId)
+        return ok(200, { items: queuedItems.list(sessionId) })
+      } catch (error) {
+        return fail(error, reporter, "list-queued-inputs")
+      }
+    },
+
+    async updateQueuedInput(input) {
+      try {
+        const record = requireRecord(input, "Queue update must be an object.")
+        const inputId = requireInputId(record.inputId, "inputId")
+        const request = requireAdmitInputRequest(
+          input,
+          options.maxInputBytes ?? MAX_QUEUED_INPUT_TEXT_BYTES,
+          options.maxInputBytes ?? DEFAULT_MAX_INPUT_BYTES,
+        )
+        requireAvailableProvider(
+          request.modelSelection?.provider,
+          options.availableProviders,
+        )
+        const item = await queuedItems.withLock(request.sessionId, async () => {
+          const existing = queuedItems.get(request.sessionId, inputId)
+          if (existing === undefined)
+            throw notFound("Queued input was not found.")
+          const stored = await requireStoredThread(
+            options.store,
+            request.sessionId,
+          )
+          const rolloutId = stored.metadata.rolloutId
+          const sameAttachments =
+            JSON.stringify(request.content.attachments ?? []) ===
+            JSON.stringify(existing.input.content.attachments ?? [])
+          if (
+            !sameAttachments &&
+            request.requestId === existing.input.submissionId
+          )
+            throw invalidInput("Attachment edits require a new requestId.")
+          if (
+            !sameAttachments &&
+            queuedItems.getByRequest(request.sessionId, request.requestId) !==
+              undefined
+          )
+            throw conflict("Attachment owner is already used by queued input.")
+          const promoted = sameAttachments
+            ? { content: request.content, rollback: undefined }
+            : await promoteRequestAttachments(
+                rolloutId,
+                request.requestId,
+                request.content,
+              )
+          const updatedInput: TurnInput = {
+            ...existing.input,
+            content: promoted.content,
+            ...(request.modelSelection === undefined
+              ? {}
+              : { modelSelection: request.modelSelection }),
+          }
+          try {
+            const updated = queuedItems.update(
+              request.sessionId,
+              inputId,
+              updatedInput,
+            )
+            if (updated === undefined)
+              throw notFound("Queued input was not found.")
+            await discardAdmittedDraftAttachments(
+              request.sessionId,
+              request.requestId,
+              request.content,
+            )
+            if (!sameAttachments) {
+              for (const ownerId of requestAttachmentOwners(
+                existing.input.content,
+              ))
+                await discardUnacceptedRequestAttachments(
+                  request.sessionId,
+                  rolloutId,
+                  ownerId,
+                )
+            }
+            return updated
+          } catch (error) {
+            await promoted.rollback?.()
+            throw error
+          }
+        })
+        return ok(200, { item })
+      } catch (error) {
+        return fail(
+          error instanceof QueuedInputTooLargeError
+            ? invalidInput(error.message)
+            : error,
+          reporter,
+          "update-queued-input",
+        )
+      }
+    },
+
+    async reorderQueuedInputs(input) {
+      try {
+        const record = requireRecord(input, "Queue reorder must be an object.")
+        const sessionId = requireSessionId(record.sessionId, "sessionId")
+        if (
+          !Array.isArray(record.inputIds) ||
+          !record.inputIds.every((id) => typeof id === "string")
+        )
+          throw invalidInput("inputIds must be an array of input IDs.")
+        const inputIds = record.inputIds as string[]
+        const items = await queuedItems.withLock(sessionId, async () => {
+          const currentIds = queuedItems.list(sessionId).map((item) => item.id)
+          if (
+            currentIds.length !== inputIds.length ||
+            new Set(inputIds).size !== currentIds.length ||
+            inputIds.some((id) => !currentIds.includes(id))
+          )
+            throw invalidInput(
+              "Reorder must include every queued input exactly once.",
+            )
+          return queuedItems.reorder(sessionId, inputIds)
+        })
+        return ok(200, { items })
+      } catch (error) {
+        return fail(error, reporter, "reorder-queued-inputs")
+      }
+    },
+
+    async startQueuedInput(input) {
+      try {
+        const record = requireRecord(input, "Queue start must be an object.")
+        const sessionId = requireSessionId(record.sessionId, "sessionId")
+        const inputId =
+          record.inputId === undefined
+            ? undefined
+            : requireInputId(record.inputId, "inputId")
+        const result = await queuedItems.withLock(sessionId, async () => {
+          const item =
+            inputId === undefined
+              ? queuedItems.list(sessionId)[0]
+              : queuedItems.get(sessionId, inputId)
+          if (item === undefined) throw notFound("Queued input was not found.")
+          const thread = options.manager.getThread(sessionId)
+          if (thread === undefined)
+            throw conflict(
+              "Resume this conversation before starting queued input.",
+            )
+          const submission = await queuedItems.start(thread, item)
+          if (submission.type === "not_submitted")
+            throw conflict(
+              `Queued input was not started: ${submission.reason}.`,
+            )
+          if (submission.type !== "started" && submission.type !== "replayed")
+            throw internalError("Queue start returned an unexpected result.")
+          return { item, submission }
+        })
+        return ok(200, {
+          requestId: result.item.input.submissionId,
+          turnId: result.submission.turnId,
+          inputId: result.submission.inputItemId,
+        })
+      } catch (error) {
+        return fail(error, reporter, "start-queued-input")
       }
     },
 
@@ -1311,27 +1686,9 @@ export function createThreadServerHandlers(
           })
         if (submitted.type !== "started" && submitted.type !== "replayed")
           throw internalError("Compaction unexpectedly queued or steered.")
-        await options.store.flushThread(request.sessionId)
-        const stored = await requireStoredThread(
-          options.store,
-          request.sessionId,
-        )
-        const record = stored.rollout.find(
-          (entry) =>
-            entry.item.type === "response_item" &&
-            entry.item.item.id === submitted.inputItemId,
-        )
-        if (record === undefined)
-          throw internalError(
-            "Compaction input was not present in the rollout.",
-          )
-        const event = mapRolloutEvent(record, request.sessionId)
-        if (!isKernelEvent(event) || event.type !== "input.admitted")
-          throw internalError("Compaction input did not map to an input event.")
         return ok(submitted.type === "replayed" ? 200 : 201, {
           requestId,
-          inputId: submitted.inputItemId,
-          event,
+          turnId: submitted.turnId,
         })
       } catch (error) {
         return fail(error, reporter, "compact-session")
@@ -1341,39 +1698,31 @@ export function createThreadServerHandlers(
     async cancelInput(input) {
       try {
         const request = requireCancelInputRequest(input)
-        const thread = await resumeRequired(request.sessionId)
-        const cancelled = await thread.cancelQueuedInput(request.inputId)
-        if (!cancelled) {
-          throw conflict(
-            `Input ${request.inputId} is already started or unknown.`,
-            {
-              sessionId: request.sessionId,
-              inputId: request.inputId,
-            },
-          )
-        }
+        const item = await queuedItems.withLock(request.sessionId, async () => {
+          const queued = queuedItems.get(request.sessionId, request.inputId)
+          if (queued === undefined)
+            throw conflict(
+              `Input ${request.inputId} is already started or unknown.`,
+            )
+          if (!queuedItems.delete(request.sessionId, request.inputId))
+            throw conflict(
+              `Input ${request.inputId} is already started or unknown.`,
+            )
+          return queued
+        })
         const stored = await requireStoredThread(
           options.store,
           request.sessionId,
         )
-        const record = [...stored.rollout]
-          .reverse()
-          .find(
-            (entry) =>
-              entry.item.type === "input_cancelled" &&
-              entry.item.inputId === request.inputId,
+        for (const ownerId of requestAttachmentOwners(item.input.content))
+          await discardUnacceptedRequestAttachments(
+            request.sessionId,
+            stored.metadata.rolloutId,
+            ownerId,
           )
-        if (record === undefined) {
-          throw internalError("Cancelled input was not present in the rollout.")
-        }
-        const event = mapRolloutEvent(record, request.sessionId)
-        if (!isKernelEvent(event)) {
-          throw internalError("Cancelled input did not map to a host event.")
-        }
         return ok(200, {
           sessionId: request.sessionId,
           inputId: request.inputId,
-          event,
         })
       } catch (error) {
         return fail(error, reporter, "cancel-input")
@@ -1503,20 +1852,16 @@ async function mapStoredThread(
   options: ThreadServerHandlerOptions,
 ): Promise<ApiSessionDetail> {
   const rollout = stored.rollout.map((record) => record.item)
-  const inheritedPending = inheritedPendingInputIds(stored)
   const contexts = rollout.filter(
     (item): item is Extract<RolloutItem, { readonly type: "turn_context" }> =>
       item.type === "turn_context",
   )
   const inputs = stored.rollout.filter(
     ({ item }) =>
-      (item.type === "input_admitted" &&
-        !inheritedPending.has(item.inputItemId)) ||
-      (item.type === "response_item" &&
-        item.item.item.role === "user" &&
-        item.item.id.startsWith("input_") &&
-        item.item.item.context === undefined &&
-        item.item.submissionMetadata?.queuedDispatch !== true),
+      item.type === "response_item" &&
+      item.item.item.role === "user" &&
+      item.item.id.startsWith("input_") &&
+      item.item.item.context === undefined,
   ).length
   const turns = rollout.filter((item) => item.type === "turn_started").length
   const completedItems = rollout.filter(
@@ -1544,10 +1889,7 @@ async function mapStoredThread(
     seq: Math.max(0, threadSeq(stored) - 1),
   }
   const liveProjects = await liveProjectIds(options, [stored.metadata])
-  const pendingQueue = queuedInputsFromRollout(
-    stored.rollout,
-    stored.metadata.rolloutId,
-  )
+  const pendingQueue = options.inputQueue?.list(stored.metadata.id) ?? []
   return {
     ...mapThreadSummary(summary, liveProjects),
     ...(live?.snapshot().activeTurnId === undefined
@@ -1559,9 +1901,9 @@ async function mapStoredThread(
     ...(usage === undefined ? {} : { usage }),
     ...(cacheExpiry === undefined ? {} : { cacheExpiry }),
     pendingInputs: pendingQueue.map((entry) => ({
-      id: entry.inputItemId,
+      id: entry.id,
       text: entry.input.content.text,
-      admittedAt: entry.admittedAt,
+      admittedAt: entry.createdAt,
     })),
     pendingPermissions: pendingPermissions.map(
       ({ sessionId: _, ...entry }) => entry,
@@ -1575,23 +1917,6 @@ async function mapStoredThread(
       tools,
     },
   }
-}
-
-function inheritedPendingInputIds(stored: StoredThread): Set<string> {
-  const started = new Set(
-    stored.rollout.flatMap(({ item }) =>
-      item.type === "turn_started" ? [item.inputItemId] : [],
-    ),
-  )
-  return new Set(
-    stored.rollout.flatMap(({ item, rolloutId }) =>
-      item.type === "input_admitted" &&
-      rolloutId !== stored.metadata.rolloutId &&
-      !started.has(item.inputItemId)
-        ? [item.inputItemId]
-        : [],
-    ),
-  )
 }
 
 // Resolves which of the referenced projectIds still exist. Returns undefined
@@ -1665,36 +1990,12 @@ function mapRolloutEvent(
       },
     })
   }
-  if (item.type === "input_admitted") {
-    return createEventEnvelope({
-      ...base,
-      event: {
-        type: "input.admitted",
-        data: {
-          requestId: item.input.submissionId,
-          inputId: item.inputItemId,
-          role: InputRole.User,
-          content: item.input.content,
-          ...(item.input.modelSelection === undefined
-            ? {}
-            : { modelSelection: item.input.modelSelection }),
-          ...(item.input.parentInputId === undefined
-            ? {}
-            : { parentInputId: item.input.parentInputId }),
-          ...(item.input.metadata === undefined
-            ? {}
-            : { metadata: item.input.metadata }),
-        },
-      },
-    })
-  }
   if (
     item.type === "response_item" &&
     item.item.item.role === "user" &&
     (item.item.id.startsWith("input_") ||
       item.item.id.startsWith("message_")) &&
-    item.item.item.context === undefined &&
-    item.item.submissionMetadata?.queuedDispatch !== true
+    item.item.item.context === undefined
   ) {
     // message_-prefixed user items are steered inputs, recorded when the
     // active Turn sampled them; input_-prefixed items start Turns.
@@ -1725,7 +2026,10 @@ function mapRolloutEvent(
                     "file" in image && typeof image.sizeBytes === "number"
                       ? [
                           {
-                            name: image.file.path.split("/").at(-1) ?? "image",
+                            name:
+                              image.name ??
+                              image.file.path.split("/").at(-1) ??
+                              "image",
                             mediaType: image.mediaType,
                             sizeBytes: image.sizeBytes,
                             detail: image.detail ?? "high",
@@ -1748,15 +2052,6 @@ function mapRolloutEvent(
             ? {}
             : { metadata: item.item.submissionMetadata.metadata }),
         },
-      },
-    })
-  }
-  if (item.type === "input_cancelled") {
-    return createEventEnvelope({
-      ...base,
-      event: {
-        type: "input.cancelled",
-        data: { inputId: item.inputId },
       },
     })
   }
@@ -1827,6 +2122,19 @@ async function requireStoredThread(
   throw notFound(`Session ${threadId} was not found.`, { sessionId: threadId })
 }
 
+function requestAttachmentOwners(content: TextContent): readonly string[] {
+  return [
+    ...new Set(
+      content.attachments?.flatMap((attachment) => {
+        const match = /^attachments\/requests\/([^/]+)\//.exec(
+          attachment.file.path,
+        )
+        return match?.[1] === undefined ? [] : [match[1]]
+      }) ?? [],
+    ),
+  ]
+}
+
 function turnIdForInput(stored: StoredThread, inputId: string): string {
   const started = stored.rollout.find(
     (record) =>
@@ -1855,7 +2163,7 @@ function inputAttachments(
     "file" in image && typeof image.sizeBytes === "number"
       ? [
           {
-            name: image.file.path.split("/").at(-1) ?? "image",
+            name: image.name ?? image.file.path.split("/").at(-1) ?? "image",
             mediaType: image.mediaType,
             sizeBytes: image.sizeBytes,
             detail: image.detail ?? "high",
@@ -2125,7 +2433,11 @@ function requireForkSessionRequest(input: unknown, maxInputBytes: number) {
   }
 }
 
-function requireAdmitInputRequest(input: unknown, maxInputBytes: number) {
+function requireAdmitInputRequest(
+  input: unknown,
+  maxInputBytes: number,
+  maxContextBytes = maxInputBytes,
+) {
   const record = requireRecord(
     input,
     "Input admission request must be an object.",
@@ -2137,7 +2449,11 @@ function requireAdmitInputRequest(input: unknown, maxInputBytes: number) {
   return {
     sessionId: requireSessionId(record.sessionId, "sessionId"),
     requestId: requireRequestId(record.requestId),
-    content: requireAdmissionTextContent(record.content, maxInputBytes),
+    content: requireAdmissionTextContent(
+      record.content,
+      maxInputBytes,
+      maxContextBytes,
+    ),
     ...optionalModelSelectionField(record, "modelSelection"),
     ...optionalInputRoleField(record, "role"),
     ...(parentInputId === undefined ? {} : { parentInputId }),
@@ -2389,6 +2705,7 @@ function requireForkTextContent(
 function requireAdmissionTextContent(
   value: unknown,
   maxInputBytes: number,
+  maxContextBytes = maxInputBytes,
 ): AdmissionTextContent {
   if (!isRecord(value)) {
     throw invalidInput("content must be a text content object.")
@@ -2414,10 +2731,10 @@ function requireAdmissionTextContent(
     if (
       value.contextAttachments !== undefined &&
       Buffer.byteLength(JSON.stringify(value.contextAttachments), "utf8") >
-        maxInputBytes
+        maxContextBytes
     )
       throw invalidInput(
-        `content.contextAttachments must not exceed ${maxInputBytes} bytes.`,
+        `content.contextAttachments must not exceed ${maxContextBytes} bytes.`,
       )
     return {
       kind: "text",

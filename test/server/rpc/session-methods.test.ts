@@ -8,7 +8,7 @@ import {
 } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { ThreadManager } from "../../../src/core/thread-manager.ts"
 import { EventType } from "../../../src/kernel/events.ts"
 import { createSessionId } from "../../../src/kernel/ids.ts"
@@ -82,8 +82,8 @@ function createRealHandlers(
           }).snapshot,
         }
       },
-      start() {
-        return { completion: Promise.resolve(), abort() {} }
+      start(runtime) {
+        return { completion: runtime.recordInitialInput(), abort() {} }
       },
     }),
   })
@@ -434,19 +434,25 @@ describe("session methods over real handlers", () => {
       (frame) =>
         "method" in frame &&
         frame.method === "session/event" &&
-        (frame.params as { seq: number }).seq === 2,
+        (frame.params as { event: { type: string } }).event.type ===
+          EventType.InputAdmitted,
     )
 
     const notification = connection
       .notifications("session/event")
-      .map((frame) => frame.params)[0] as {
+      .map((frame) => frame.params)
+      .find(
+        (params) =>
+          (params as { event: { type: string } }).event.type ===
+          EventType.InputAdmitted,
+      ) as {
       sessionId: string
       seq: number
       event: { type: string; data: { content: { text: string } } }
     }
     expect(notification).toMatchObject({
       sessionId,
-      seq: 2,
+      seq: 4,
       event: {
         type: EventType.InputAdmitted,
         data: { content: { kind: "text", text: "tail this" } },
@@ -455,15 +461,23 @@ describe("session methods over real handlers", () => {
   })
 
   it("replays durable events after the subscribe cursor", async () => {
-    const { connection } = realSetup()
+    const { connection, handlers } = realSetup()
     await initializeConnection(connection)
     const created = await createSession(connection)
     const sessionId = created.session.id
-    for (const requestId of ["request_rpc-resume-1", "request_rpc-resume-2"]) {
+    for (const [index, requestId] of [
+      "request_rpc-resume-1",
+      "request_rpc-resume-2",
+    ].entries()) {
       await rpc(connection, "session/input", {
         sessionId,
         requestId,
         content: { kind: "text", text: requestId },
+      })
+      await vi.waitFor(async () => {
+        const read = await handlers.readSession({ sessionId })
+        expect(read.ok && read.body.session.counts.inputs).toBe(index + 1)
+        expect(read.ok && read.body.session.active).toBeFalsy()
       })
     }
     const snapshot = await rpc<ApiReadSessionResponse>(

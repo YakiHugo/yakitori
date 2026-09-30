@@ -103,15 +103,22 @@ export class FakeRpcClient {
   ) => void)[] = []
 
   // Per-test responder; the default mirrors a route that does not exist.
-  respond: (method: string, params: unknown) => unknown = () => {
-    throw new ApiRequestError("not found", "not_found" as never)
-  }
+  respond: (method: string, params: unknown) => unknown = defaultResponder
   answerError: Error | undefined
 
   async request(method: string, params: unknown): Promise<unknown> {
     if (method === "sidebar/read") return this.sidebarResponse
     this.requests.push({ method, params })
-    return await this.respond(method, params)
+    try {
+      return await this.respond(method, params)
+    } catch (error) {
+      if (
+        method === "session/queue/list" &&
+        error instanceof ApiRequestError &&
+        error.code === "not_found"
+      ) return { items: [] }
+      throw error
+    }
   }
 
   openSessionStream(
@@ -184,9 +191,22 @@ export class FakeRpcClient {
     }
   }
 
+  readonly queueChangeListeners = new Set<(sessionId: string) => void>()
+  subscribeToQueueChanges(listener: (sessionId: string) => void): () => void {
+    this.queueChangeListeners.add(listener)
+    return () => this.queueChangeListeners.delete(listener)
+  }
+  emitQueueChanged(sessionId: string): void {
+    for (const listener of this.queueChangeListeners) listener(sessionId)
+  }
+
   close(): void {}
 
   requestsFor(method: string): FakeRequest[] {
     return this.requests.filter((request) => request.method === method)
   }
+}
+
+function defaultResponder(): never {
+  throw new ApiRequestError("not found", "not_found" as never)
 }

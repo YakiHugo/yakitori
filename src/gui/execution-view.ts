@@ -171,9 +171,8 @@ export type ExecutionViewState = Readonly<{
   permissionEntryIndexes: Readonly<Record<string, number>>
   openCompactionItems: Readonly<Record<string, string>>
   queuedInputs: Readonly<Record<string, ApiPendingInput>>
-  // requestIds whose durable input.admitted event this view has seen; the
-  // admission outbox acknowledges against this set (including events that
-  // arrived while the client was offline).
+  // A queued or admitted event confirms that the server owns the request;
+  // the admission outbox acknowledges against this set after replay too.
   admittedRequestIds: Readonly<Record<string, true>>
   timeToFirstTokenWeightedMs: number
   timeToFirstTokenSamples: number
@@ -468,6 +467,16 @@ function applyTransient(
   state: ExecutionViewState,
   event: LiveSessionEvent,
 ): ExecutionViewState {
+  if (event.type === "item.discarded") {
+    const entries = state.entries.filter(
+      (entry) =>
+        (entry.kind !== "assistant" && entry.kind !== "reasoning") ||
+        entry.itemId !== event.itemId ||
+        entry.turnId !== event.turnId ||
+        entry.status !== "streaming",
+    )
+    return { ...state, entries, ...indexEntries(entries) }
+  }
   if (event.type === "runtime.warning") {
     if (event.code !== "model.retry" || event.turnId !== state.activeTurnId) {
       return state
@@ -603,20 +612,8 @@ function applyDurable(
     case "session.created":
       return next
     case "input.admitted": {
-      const queuedInputs =
-        event.data.steered === true
-          ? next.queuedInputs
-          : {
-              ...next.queuedInputs,
-              [event.data.inputId]: {
-                id: event.data.inputId,
-                text: event.data.content.text,
-                admittedAt: event.createdAt,
-              },
-            }
       return {
         ...next,
-        queuedInputs,
         admittedRequestIds: {
           ...next.admittedRequestIds,
           [event.data.requestId]: true,
@@ -646,21 +643,7 @@ function applyDurable(
             : next.entries,
       }
     }
-    case "input.cancelled": {
-      next = removeQueuedInput(next, event.data.inputId)
-      // A cancelled queued input never ran; it leaves the transcript too.
-      const entries = next.entries.filter(
-        (entry) =>
-          entry.kind !== "user_input" || entry.inputId !== event.data.inputId,
-      )
-      return {
-        ...next,
-        entries,
-        ...indexEntries(entries),
-      }
-    }
     case "turn.started":
-      next = removeQueuedInput(next, event.data.inputId)
       return {
         ...next,
         activeTurnId: event.data.turnId,
@@ -1093,14 +1076,6 @@ function projectActiveActivity(
   }
   if (streamingAssistant) return { kind: "responding" }
   return { kind: "reasoning" }
-}
-
-function removeQueuedInput(
-  state: ExecutionViewState,
-  inputId: string,
-): ExecutionViewState {
-  const { [inputId]: _, ...queuedInputs } = state.queuedInputs
-  return { ...state, queuedInputs }
 }
 
 function replaceUsage(

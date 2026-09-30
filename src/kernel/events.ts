@@ -2,12 +2,11 @@ import { isContextExcerpts, type ContextExcerpt } from "./input-context.ts"
 import { createEventId, isStorageKey } from "./ids.ts"
 import { jsonValuesEqual } from "./json-equality.ts"
 
-export const EVENT_SCHEMA_VERSION = 6
+export const EVENT_SCHEMA_VERSION = 7
 
 export const EventType = {
   SessionCreated: "session.created",
   InputAdmitted: "input.admitted",
-  InputCancelled: "input.cancelled",
   TurnStarted: "turn.started",
   TurnCompleted: "turn.completed",
   ItemStarted: "item.started",
@@ -128,6 +127,7 @@ export type ModelImageBlock =
       readonly detail?: ImageDetail
       readonly file: RolloutAssetReference
       readonly sizeBytes: number
+      readonly name?: string
       readonly data?: never
     }
 
@@ -422,14 +422,6 @@ export type InputAdmittedEvent = {
   }
 }
 
-export type InputCancelledEvent = {
-  readonly type: typeof EventType.InputCancelled
-  readonly data: {
-    readonly inputId: string
-    readonly reason?: string
-  }
-}
-
 export type TurnStartedEvent = {
   readonly type: typeof EventType.TurnStarted
   readonly data: {
@@ -709,7 +701,6 @@ export type ContextCompactedEvent = {
 export type KernelEvent =
   | SessionCreatedEvent
   | InputAdmittedEvent
-  | InputCancelledEvent
   | TurnStartedEvent
   | TurnCompletedEvent
   | ItemStartedEvent
@@ -832,8 +823,6 @@ function requireKernelEvent(value: unknown): asserts value is KernelEvent {
             isModelSelection(data.modelSelection)) &&
           (data.steered === undefined || data.steered === true)
         )
-      case EventType.InputCancelled:
-        return onlyKeys(data, ["inputId", "reason"]) && isString(data.inputId)
       case EventType.TurnStarted:
         return (
           onlyKeys(data, ["turnId", "inputId", "parentTurnId", "metadata"]) &&
@@ -1556,11 +1545,19 @@ function isModelImageBlock(value: unknown): boolean {
   return (
     isRecord(value) &&
     value.type === "image" &&
-    onlyKeys(value, ["type", "mediaType", "detail", "file", "sizeBytes"]) &&
+    onlyKeys(value, [
+      "type",
+      "mediaType",
+      "detail",
+      "file",
+      "sizeBytes",
+      "name",
+    ]) &&
     isSupportedImageMediaType(value.mediaType) &&
     (value.detail === undefined || isImageDetail(value.detail)) &&
     isRolloutAssetReference(value.file) &&
-    isNonNegativeInteger(value.sizeBytes)
+    isNonNegativeInteger(value.sizeBytes) &&
+    (value.name === undefined || isString(value.name))
   )
 }
 

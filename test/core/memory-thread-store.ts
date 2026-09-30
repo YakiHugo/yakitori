@@ -540,9 +540,7 @@ function forkBoundaryIndex(
   if (input.boundary.type === "before_turn") {
     return source.rollout.findIndex(
       (entry) =>
-        entry.item.type === "response_item" &&
-        entry.item.item.turnId === turnId &&
-        entry.item.item.item.role === "user",
+        entry.item.type === "turn_started" && entry.item.turnId === turnId,
     )
   }
   const terminal = findLastIndex(

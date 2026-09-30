@@ -322,19 +322,21 @@ describe("application composition", () => {
             ),
           ).toEqual([committedId])
         })
-        const replay = await application.handlers.readSessionEvents({
-          sessionId: committedId,
-        })
-        expectOk(replay)
-        expect(
-          replay.body.events
-            .map((event) => event.type)
-            .filter((type) =>
-              ["session.created", "input.admitted", "turn.started"].includes(
-                type,
+        await vi.waitFor(async () => {
+          const replay = await application.handlers.readSessionEvents({
+            sessionId: committedId,
+          })
+          expectOk(replay)
+          expect(
+            replay.body.events
+              .map((event) => event.type)
+              .filter((type) =>
+                ["session.created", "input.admitted", "turn.started"].includes(
+                  type,
+                ),
               ),
-            ),
-        ).toEqual(["session.created", "input.admitted", "turn.started"])
+          ).toEqual(["session.created", "turn.started", "input.admitted"])
+        })
       } finally {
         await application.close()
       }
@@ -1464,6 +1466,61 @@ describe("application composition", () => {
       } finally {
         await closeServer(server)
         await application.close()
+      }
+    })
+  })
+
+  it("cleans unsent image attachments after server restart", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const options = testApplicationOptions({ rootDir, workspace })
+      const first = await createYakitoriApplication(options)
+      const bytes = pngBuffer(128)
+      let existingSessionId: string
+      let existingAttachment:
+        | Awaited<
+            ReturnType<typeof first.rolloutAssets.importImageBytes>
+          >[number]
+        | undefined
+      let newSessionAttachment: typeof existingAttachment
+      try {
+        const created = await first.handlers.createSession()
+        expectOk(created)
+        existingSessionId = created.body.session.id
+        expectOk(
+          await first.handlers.admitInput({
+            sessionId: existingSessionId,
+            requestId: "request_restart_seed",
+            content: { kind: "text", text: "seed" },
+          }),
+        )
+        await waitForThreadIdle(first, existingSessionId)
+        ;[existingAttachment] = await first.rolloutAssets.importImageBytes(
+          existingSessionId,
+          "draft_existing_restart",
+          [{ name: "existing.png", data: bytes }],
+        )
+        ;[newSessionAttachment] = await first.rolloutAssets.importImageBytes(
+          "draft_new_session_restart",
+          "draft_new_session_restart",
+          [{ name: "new.png", data: bytes }],
+        )
+      } finally {
+        await first.close()
+      }
+
+      const resumed = await createYakitoriApplication(options)
+      try {
+        if (
+          existingAttachment === undefined ||
+          newSessionAttachment === undefined
+        )
+          throw new Error("Missing staged image attachment.")
+        await expect(resumed.rolloutAssets.read(existingAttachment.file))
+          .rejects.toMatchObject({ code: "ENOENT" })
+        await expect(resumed.rolloutAssets.read(newSessionAttachment.file))
+          .rejects.toMatchObject({ code: "ENOENT" })
+      } finally {
+        await resumed.close()
       }
     })
   })

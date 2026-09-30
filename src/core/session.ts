@@ -16,7 +16,6 @@ import type {
   ModelContextSettings,
   ResponseItemEnvelope,
   RolloutItem,
-  StoredRolloutItem,
   StoredThread,
   ThreadMetadata,
   TurnContextItem,
@@ -28,6 +27,7 @@ import {
   type NotSubmittedReason,
   NotSubmittedReason as Reason,
   type SessionEvent,
+  type SessionIdleCause,
   SessionIo,
   type SessionOp,
   type SessionPermissionEvent,
@@ -56,6 +56,7 @@ export type TurnControl = {
 }
 
 export type TurnRuntime = {
+  recordInitialInput(): Promise<void>
   recordModelContext(settings: ModelContextSettings): Promise<void>
   snapshot(): SessionSnapshot
   recordUsage(usage: TokenUsage): void
@@ -82,6 +83,10 @@ export type TurnRuntime = {
   emitPermissionEvent(event: SessionPermissionEvent): void
   recordConversationItems(items: readonly ResponseItemEnvelope[]): Promise<void>
   recordItemCompletions(items: readonly CompletedExecutionItem[]): Promise<void>
+  recordToolResult(
+    response: ResponseItemEnvelope,
+    completion: Extract<CompletedExecutionItem, { toolCallId: string }>,
+  ): Promise<void>
   recordWorldStateUpdate(
     items: readonly ResponseItemEnvelope[],
     update: Readonly<{
@@ -125,10 +130,13 @@ export type TurnTask = {
 
 type ActiveTurn = {
   readonly input: TurnInput
+  readonly inputItem: ResponseItemEnvelope
+  inputRecorded: boolean
   readonly context: TurnContextItem
   readonly abort: AbortController
   readonly steering: TurnInput[]
   acceptingSteering: boolean
+  finishing: boolean
   usage: TokenUsage | undefined
   lastRequestStartedAt: string | undefined
   metrics: TurnMetrics | undefined
@@ -172,17 +180,6 @@ export class Session {
     string,
     { readonly fingerprint: string; readonly inputItemId: string }
   >()
-  // Inputs admitted while a Turn is running, keyed by submissionId. Map order
-  // is the dispatch order. Entries are durable: they are admissions in
-  // the rollout and rebuilt on resume by queuedInputsFromRollout.
-  readonly #queuedInputs = new Map<string, QueuedInputEntry>()
-  readonly #pendingAdmissions = new Map<
-    string,
-    {
-      readonly fingerprint: string
-      readonly item: Extract<RolloutItem, { readonly type: "input_admitted" }>
-    }
-  >()
   #pendingTurnStart: PendingTurnStart | undefined
   // Resolves when the pending Turn's recording has either launched or failed,
   // so barrier operations (fork) can wait out the recording instead of
@@ -192,7 +189,9 @@ export class Session {
   readonly #processor: TurnProcessor
   readonly #submissions = new BoundedQueue<SessionCommand>(submissionCapacity)
   readonly #events = new AsyncQueue<SessionEvent>()
-  readonly #statusListeners = new Set<(status: SessionStatus) => void>()
+  readonly #statusListeners = new Set<
+    (status: SessionStatus, idleCause?: SessionIdleCause) => void
+  >()
   readonly #agentStatusListeners = new Set<(status: AgentStatus) => void>()
   readonly #receivedAgentMessageIds = new Set<string>()
   readonly #acceptedAgentMessages = new Map<string, AcceptedAgentMessage>()
@@ -228,12 +227,6 @@ export class Session {
           inputItemId: record.item.inputItemId,
         })
       }
-    }
-    for (const entry of queuedInputsFromRollout(
-      input.stored.rollout,
-      input.stored.metadata.rolloutId,
-    )) {
-      this.#queuedInputs.set(entry.input.submissionId, entry)
     }
     this.#store = input.store
     this.#processor = input.processor
@@ -329,20 +322,6 @@ export class Session {
   async #dispatch(
     operation: Exclude<SessionOp, { readonly type: "shutdown" }>,
   ): Promise<void> {
-    if (operation.type === "dispatch_queued") {
-      await this.#dispatchQueuedInput()
-      return
-    }
-    if (operation.type === "cancel_queued_input") {
-      try {
-        operation.reply.resolve(
-          await this.#cancelQueuedInput(operation.inputId),
-        )
-      } catch (error) {
-        operation.reply.reject(error)
-      }
-      return
-    }
     if (operation.type === "compact") {
       try {
         operation.reply.resolve(
@@ -421,32 +400,11 @@ export class Session {
         inputItemId: submitted.inputItemId,
       }
     }
-    // A queued-but-undispatched input replays as accepted for every mode, so a
-    // retry can never start it twice alongside its queue entry.
-    const queuedReplay = this.#queuedInputs.get(input.submissionId)
-    if (queuedReplay !== undefined) {
-      if (queuedReplay.fingerprint !== fingerprint) {
-        return notSubmitted(Reason.RequestConflict)
-      }
-      return {
-        type: "replayed",
-        turnId: input.submissionId,
-        inputItemId: queuedReplay.inputItemId,
-      }
-    }
-    if (this.#pendingAdmissions.has(input.submissionId)) {
-      return this.#queueInput(input)
-    }
     const active = this.#activeTurn
     if (mode.type === "start_if_idle") {
       return active === undefined
         ? this.#startTurn(input)
         : notSubmitted(Reason.NotIdle)
-    }
-    if (mode.type === "queue") {
-      return active === undefined && this.#queuedInputs.size === 0
-        ? this.#startTurn(input)
-        : this.#queueInput(input)
     }
     if (mode.type === "start_or_steer") {
       if (active === undefined) return this.#startTurn(input)
@@ -491,172 +449,13 @@ export class Session {
     ])
   }
 
-  // Yakitori has one rollout journal. The admission belongs there so the
-  // receipt and its replay event cannot diverge across two non-atomic writes;
-  // the model item is written only with the Turn start at dispatch.
-  async #queueInput(input: TurnInput): Promise<TurnInputSubmission> {
-    const fingerprint = turnInputFingerprint(input)
-    const reserved = this.#pendingAdmissions.get(input.submissionId)
-    if (reserved !== undefined && reserved.fingerprint !== fingerprint)
-      return notSubmitted(Reason.RequestConflict)
-    const item: Extract<RolloutItem, { readonly type: "input_admitted" }> =
-      reserved?.item ?? {
-        type: "input_admitted",
-        input: structuredClone(input),
-        inputItemId: `input_${globalThis.crypto.randomUUID()}`,
-        requestFingerprint: fingerprint,
-      }
-    this.#pendingAdmissions.set(input.submissionId, { fingerprint, item })
-    const { inputItemId } = item
-    const items: readonly RolloutItem[] = [item]
-    let throughSeq: number
-    try {
-      // A prior rejected append may already exist in the writer buffer. Drain
-      // and inspect the same ID before issuing another append.
-      if (reserved !== undefined) {
-        await this.#store.flushThread(this.id)
-        const previous = (await this.#store.readThread(this.id))?.rollout.find(
-          (record) =>
-            record.item.type === "input_admitted" &&
-            record.item.inputItemId === inputItemId,
-        )
-        throughSeq =
-          previous === undefined
-            ? await this.#store.appendItems(this.id, items)
-            : previous.seq + 1
-      } else {
-        throughSeq = await this.#store.appendItems(this.id, items)
-      }
-      await this.#store.persistThread(this.id, PersistContext.TurnStart)
-    } catch {
-      try {
-        await this.#store.flushThread(this.id)
-        const rollout = (await this.#store.readThread(this.id))?.rollout ?? []
-        const matching = rollout.find(
-          (record) =>
-            record.item.type === "input_admitted" &&
-            record.item.inputItemId === inputItemId &&
-            record.item.requestFingerprint === fingerprint,
-        )
-        if (matching === undefined) {
-          throughSeq = await this.#store.appendItems(this.id, items)
-        } else {
-          throughSeq = matching.seq + 1
-        }
-        await this.#store.persistThread(this.id, PersistContext.TurnStart)
-      } catch (recoveryError) {
-        this.#reportPersistenceError(recoveryError)
-        throw recoveryError
-      }
-    }
-    this.#pendingAdmissions.delete(input.submissionId)
-    this.#queuedInputs.set(input.submissionId, {
-      input,
-      inputItemId,
-      admittedAt: new Date().toISOString(),
-      fingerprint,
-    })
-    this.#events.send({
-      type: "rollout.appended",
-      threadId: this.id,
-      throughSeq,
-      items: structuredClone(items),
-    })
-    return {
-      type: "queued",
-      turnId: input.submissionId,
-      inputItemId,
-    }
-  }
-
-  async #cancelQueuedInput(inputId: string): Promise<boolean> {
-    const entry = [...this.#queuedInputs.values()].find(
-      (candidate) => candidate.inputItemId === inputId,
-    )
-    if (entry === undefined) return false
-    const items: readonly RolloutItem[] = [{ type: "input_cancelled", inputId }]
-    let throughSeq: number
-    try {
-      throughSeq = await this.#store.appendItems(this.id, items)
-      await this.#store.persistThread(this.id, PersistContext.TurnStart)
-    } catch {
-      try {
-        await this.#store.flushThread(this.id)
-        const rollout = (await this.#store.readThread(this.id))?.rollout ?? []
-        const existing = rollout.find(
-          (record) =>
-            record.item.type === "input_cancelled" &&
-            record.item.inputId === inputId,
-        )
-        throughSeq =
-          existing?.seq === undefined
-            ? await this.#store.appendItems(this.id, items)
-            : existing.seq + 1
-        await this.#store.persistThread(this.id, PersistContext.TurnStart)
-      } catch (recoveryError) {
-        this.#reportPersistenceError(recoveryError)
-        throw recoveryError
-      }
-    }
-    this.#queuedInputs.delete(entry.input.submissionId)
-    this.#events.send({
-      type: "rollout.appended",
-      threadId: this.id,
-      throughSeq,
-      items: structuredClone(items),
-    })
-    return true
-  }
-
-  // Runs on the submission actor so a dispatch never races a fresh admission:
-  // if a Turn started in between, the head simply dispatches when that Turn
-  // finishes instead.
-  async #dispatchQueuedInput(): Promise<void> {
-    if (
-      this.#closing ||
-      this.#activeTurn !== undefined ||
-      this.#pendingTurnStart !== undefined
-    ) {
-      return
-    }
-    const head = this.#queuedInputs.entries().next().value
-    if (head === undefined) return
-    const [, entry] = head
-    try {
-      await this.#store.flushThread(this.id)
-      const start = (await this.#store.readThread(this.id))?.rollout.find(
-        ({ item }) =>
-          item.type === "turn_started" &&
-          item.turnId === entry.input.submissionId &&
-          item.inputItemId === entry.inputItemId,
-      )
-      if (start !== undefined) {
-        this.#queuedInputs.delete(entry.input.submissionId)
-        return
-      }
-      await this.#startTurn(entry.input, entry)
-    } catch (error) {
-      try {
-        await this.#recordAgentFailure(
-          error instanceof Error
-            ? error.message
-            : "Queued Turn failed to start.",
-        )
-      } catch (failureError) {
-        this.#reportPersistenceError(failureError)
-      }
-    }
-  }
-
   // The admission decision happens here, on the actor: prepare the batch,
   // register the dedupe entry, and establish the active Turn so follow-up
   // commands (steer, interrupt, shutdown) see it synchronously. Durability
   // continues in the background (Codex: ack at the routing decision, record
-  // in the run task), fenced before the first sampling request.
-  async #startTurn(
-    input: TurnInput,
-    queued?: QueuedInputEntry,
-  ): Promise<TurnInputSubmission> {
+  // in the run task). Accepted input materializes the new rollout before
+  // sampling; a blocked prompt leaves the staged Session unmaterialized.
+  async #startTurn(input: TurnInput): Promise<TurnInputSubmission> {
     let context: TurnContextItem
     try {
       context = await this.#processor.prepare(this.snapshot(), input)
@@ -670,18 +469,16 @@ export class Session {
       throw new Error("Turn processor prepared a mismatched Turn id.")
     }
     this.#configuration = structuredClone(context.configuration)
-    const inputItem = buildInputItem(input, queued)
-    const requestFingerprint =
-      queued?.fingerprint ?? turnInputFingerprint(input)
+    const inputItem = buildInputItem(input)
+    const requestFingerprint = turnInputFingerprint(input)
     const items: readonly RolloutItem[] = [
-      { type: "response_item", item: inputItem },
-      { type: "turn_context", context },
       {
         type: "turn_started",
         turnId: input.submissionId,
         inputItemId: inputItem.id,
         requestFingerprint,
       },
+      { type: "turn_context", context },
     ]
     const pending: PendingTurnStart = {
       input,
@@ -698,7 +495,10 @@ export class Session {
     const abort = new AbortController()
     const aborted = deferred<void>()
     const active: ActiveTurn = {
+      finishing: false,
       input,
+      inputItem,
+      inputRecorded: false,
       context,
       abort,
       steering: [],
@@ -766,13 +566,9 @@ export class Session {
               entry.item.type === "turn_context" &&
               entry.item.context.turnId === input.submissionId,
           )
-          if (
-            inputRecord?.seq !== start.seq - 2 ||
-            contextRecord?.seq !== start.seq - 1
-          ) {
-            throw new Error("The pending Turn has incomplete stored input.")
-          }
-          pending.throughSeq = start.seq + 1
+          if (inputRecord !== undefined || contextRecord?.seq !== start.seq + 1)
+            throw new Error("The pending Turn has incomplete stored start.")
+          pending.throughSeq = contextRecord.seq + 1
         } else {
           const inputPresent = rollout.some(
             (entry) =>
@@ -786,7 +582,7 @@ export class Session {
           )
           const partial = inputPresent || contextPresent
           if (partial)
-            throw new Error("The pending Turn has incomplete stored input.")
+            throw new Error("The pending Turn has incomplete stored start.")
           pending.throughSeq = await this.#store.appendItems(
             this.id,
             pending.items,
@@ -797,15 +593,7 @@ export class Session {
         throw error
       }
     }
-    try {
-      await this.#store.persistThread(this.id, PersistContext.TurnStart)
-    } catch (error) {
-      this.#reportPersistenceError(error)
-      throw error
-    }
     if (this.#pendingTurnStart === pending) this.#pendingTurnStart = undefined
-    this.#queuedInputs.delete(input.submissionId)
-    this.#contextManager.record([pending.inputItem])
     if (pending.throughSeq === undefined)
       throw new Error("A persisted Turn has no rollout sequence.")
     this.#events.send({
@@ -905,14 +693,13 @@ export class Session {
             item.inputItemId === pending.inputItem.id,
         )
       ) {
-        this.#queuedInputs.delete(pending.input.submissionId)
       }
     } catch (recoveryError) {
       this.#reportPersistenceError(recoveryError)
     }
     if (this.#activeTurn === active) {
       this.#activeTurn = undefined
-      if (!this.#closing) this.#setStatus(SessionStatus.Idle)
+      if (!this.#closing) this.#setStatus(SessionStatus.Idle, "failed")
     }
     try {
       await this.#recordAgentFailure(
@@ -931,7 +718,11 @@ export class Session {
       | { readonly type: "failed"; readonly error: unknown },
   ): Promise<void> {
     if (this.#activeTurn !== active) return
+    active.finishing = true
     active.acceptingSteering = false
+    // Results already being committed must precede the terminal record. New
+    // commits are rejected, including tools that outlive the interruption grace.
+    await this.#contextMutationTail
 
     if (outcome.type === "interrupted") {
       await this.#appendRollout([
@@ -953,7 +744,7 @@ export class Session {
           : { reason: active.interruptReason }),
       })
       this.#setAgentStatus("interrupted")
-      this.#releaseTurn(active)
+      this.#releaseTurn(active, "interrupted")
       return
     }
 
@@ -984,7 +775,7 @@ export class Session {
         error,
       })
       this.#setAgentStatus({ errored: message })
-      this.#releaseTurn(active)
+      this.#releaseTurn(active, "failed")
       return
     }
 
@@ -1009,23 +800,13 @@ export class Session {
     this.#setAgentStatus({
       completed: this.#latestAssistantText(active.input.submissionId),
     })
-    this.#releaseTurn(active)
+    this.#releaseTurn(active, "completed")
   }
 
-  #releaseTurn(active: ActiveTurn): void {
+  #releaseTurn(active: ActiveTurn, idleCause: SessionIdleCause): void {
     if (this.#activeTurn !== active) return
     this.#activeTurn = undefined
-    if (!this.#closing) this.#setStatus(SessionStatus.Idle)
-    this.#requestQueuedDispatch()
-  }
-
-  // The queue head dispatches through the actor so it serializes with fresh
-  // admissions; during shutdown the closed submissions queue swallows it.
-  #requestQueuedDispatch(): void {
-    if (this.#closing || this.#queuedInputs.size === 0) return
-    void this.#submissions
-      .send({ type: "dispatch_queued" })
-      .catch(() => undefined)
+    if (!this.#closing) this.#setStatus(SessionStatus.Idle, idleCause)
   }
 
   #interruptActiveTurn(reason: string): void {
@@ -1038,7 +819,7 @@ export class Session {
 
   #turnRuntime(active: ActiveTurn): TurnRuntime {
     const requireActive = () => {
-      if (this.#activeTurn !== active) {
+      if (this.#activeTurn !== active || active.finishing) {
         throw new Error("Turn is no longer active.")
       }
     }
@@ -1049,6 +830,64 @@ export class Session {
       }
     }
     return {
+      recordInitialInput: async () => {
+        requireLease()
+        if (active.inputRecorded) return
+        await this.#withContextMutation(async () => {
+          requireLease()
+          if (active.inputRecorded) return
+          const items: readonly RolloutItem[] = [
+            { type: "response_item", item: active.inputItem },
+          ]
+          this.#contextManager.record([active.inputItem])
+          active.inputRecorded = true
+          let throughSeq: number
+          try {
+            throughSeq = await this.#store.appendItems(this.id, items)
+          } catch (error) {
+            this.#reportPersistenceError(error)
+            try {
+              await this.#store.flushThread(this.id)
+              const stored = await this.#store.readThread(this.id)
+              const existing = stored?.rollout.find(
+                ({ item }) =>
+                  item.type === "response_item" &&
+                  item.item.id === active.inputItem.id,
+              )
+              throughSeq =
+                existing === undefined
+                  ? await this.#store.appendItems(this.id, items)
+                  : existing.seq + 1
+            } catch (recoveryError) {
+              this.#reportPersistenceError(recoveryError)
+              this.#events.send({
+                type: "runtime.warning",
+                threadId: this.id,
+                turnId: active.input.submissionId,
+                message: "Failed to save the accepted user input.",
+              })
+              return
+            }
+          }
+          try {
+            await this.#store.persistThread(this.id, PersistContext.TurnStart)
+          } catch (error) {
+            this.#reportPersistenceError(error)
+            this.#events.send({
+              type: "runtime.warning",
+              threadId: this.id,
+              turnId: active.input.submissionId,
+              message: "Failed to save the accepted user input.",
+            })
+          }
+          this.#events.send({
+            type: "rollout.appended",
+            threadId: this.id,
+            throughSeq,
+            items: structuredClone(items),
+          })
+        })
+      },
       recordModelContext: async (settings) => {
         requireLease()
         await this.#appendRollout([{ type: "model_context", settings }])
@@ -1170,6 +1009,31 @@ export class Session {
             }),
           ),
         )
+      },
+      recordToolResult: async (response, completion) => {
+        // Cancellation stops new work, but Codex-style draining still records
+        // completed tool effects until this Turn begins finalization.
+        requireActive()
+        if (
+          response.turnId !== active.input.submissionId ||
+          response.item.role !== "tool" ||
+          response.item.toolCallId !== completion.toolCallId ||
+          response.id !== completion.resultItemId
+        ) {
+          throw new Error("Tool result does not match its completion and Turn.")
+        }
+        await this.#withContextMutation(async () => {
+          requireActive()
+          await this.#appendRollout([
+            { type: "response_item", item: response },
+            {
+              type: "item_completed",
+              turnId: active.input.submissionId,
+              item: completion,
+            },
+          ])
+          this.#contextManager.record([response])
+        })
       },
       recordWorldStateUpdate: async (items, update) => {
         requireLease()
@@ -1308,13 +1172,13 @@ export class Session {
     })
   }
 
-  #setStatus(status: SessionStatus): void {
+  #setStatus(status: SessionStatus, idleCause?: SessionIdleCause): void {
     if (this.#status === status) return
     this.#status = status
     for (const listener of this.#statusListeners) {
       queueMicrotask(() => {
         try {
-          listener(status)
+          listener(status, idleCause)
         } catch {
           // A watch subscriber cannot break Session lifecycle transitions.
         }
@@ -1499,48 +1363,6 @@ function latestAssistantTextForTurn(
   return null
 }
 
-export type QueuedInputEntry = {
-  readonly input: TurnInput
-  readonly inputItemId: string
-  readonly admittedAt: string
-  readonly fingerprint: string
-}
-
-// Only this thread's admission receipts can dispatch. A fork can inherit a
-// prefix containing a parent's pending receipts, but not the parent's queue.
-export function queuedInputsFromRollout(
-  rollout: readonly StoredRolloutItem[],
-  rolloutId = rollout[0]?.rolloutId,
-): QueuedInputEntry[] {
-  const startedInputIds = new Set<string>()
-  const cancelledInputIds = new Set<string>()
-  for (const record of rollout) {
-    if (record.item.type === "turn_started") {
-      startedInputIds.add(record.item.inputItemId)
-    } else if (record.item.type === "input_cancelled") {
-      cancelledInputIds.add(record.item.inputId)
-    }
-  }
-  const queued: QueuedInputEntry[] = []
-  for (const record of rollout) {
-    if (
-      record.item.type !== "input_admitted" ||
-      record.rolloutId !== rolloutId ||
-      startedInputIds.has(record.item.inputItemId) ||
-      cancelledInputIds.has(record.item.inputItemId)
-    ) {
-      continue
-    }
-    queued.push({
-      input: structuredClone(record.item.input),
-      inputItemId: record.item.inputItemId,
-      admittedAt: record.createdAt,
-      fingerprint: record.item.requestFingerprint,
-    })
-  }
-  return queued
-}
-
 function turnInputFingerprint(input: TurnInput): string {
   const fingerprint = fingerprintInputAdmission({
     role: InputRole.User,
@@ -1556,13 +1378,10 @@ function turnInputFingerprint(input: TurnInput): string {
   return input.manualCompact === true ? `compact:${fingerprint}` : fingerprint
 }
 
-function buildInputItem(
-  input: TurnInput,
-  queued?: QueuedInputEntry,
-): ResponseItemEnvelope {
+function buildInputItem(input: TurnInput): ResponseItemEnvelope {
   const submissionMetadata = turnInputSubmissionMetadata(input)
   return {
-    id: queued?.inputItemId ?? `input_${globalThis.crypto.randomUUID()}`,
+    id: `input_${globalThis.crypto.randomUUID()}`,
     turnId: input.submissionId,
     createdAt: new Date().toISOString(),
     item: {
@@ -1584,17 +1403,11 @@ function buildInputItem(
               detail: attachment.detail ?? "high",
               file: attachment.file,
               sizeBytes: attachment.sizeBytes,
+              name: attachment.name,
             })),
           }),
     },
-    ...(queued !== undefined
-      ? {
-          submissionMetadata: {
-            ...submissionMetadata?.submissionMetadata,
-            queuedDispatch: true,
-          },
-        }
-      : submissionMetadata),
+    ...submissionMetadata,
   }
 }
 

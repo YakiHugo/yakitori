@@ -221,7 +221,7 @@ describe("rollout assets", () => {
     )
   })
 
-  it("imports a native path as a snapshot and cleans abandoned staging", async () => {
+  it("imports a native path as a snapshot and discards it on request", async () => {
     const root = await makeRoot()
     const sessionId = createSessionId()
     const sourcePath = join(root, "selected.png")
@@ -236,7 +236,7 @@ describe("rollout assets", () => {
     if (attachment === undefined) throw new Error("missing imported attachment")
     await expect(files.read(attachment.file)).resolves.toEqual(pngBytes())
 
-    await files.cleanupStagingImageAttachments()
+    await files.discardDraftImageAttachments([attachment])
     await expect(files.read(attachment.file)).rejects.toMatchObject({
       code: "ENOENT",
     })
