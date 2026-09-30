@@ -1,8 +1,7 @@
-import { GitFork, Info, LoaderCircle, Search, Square } from "lucide-react"
+import { GitFork, LoaderCircle, Square } from "lucide-react"
 import { useEffect, useRef, useState } from "react"
 import { ApprovalBar } from "./components/approval-bar.tsx"
 import { Composer } from "./components/composer.tsx"
-import { openConversationFind } from "./components/conversation-find.tsx"
 import { PreferencesEffects } from "./components/preferences-effects.tsx"
 import { QueuedInputs } from "./components/queued-inputs.tsx"
 import { SessionGoal } from "./components/session-goal.tsx"
@@ -10,12 +9,7 @@ import { SessionSummary } from "./components/session-summary.tsx"
 import { SettingsPage } from "./components/settings-page.tsx"
 import { SidebarNameDialog } from "./components/sidebar-name-dialog.tsx"
 import { Transcript } from "./components/transcript.tsx"
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "./components/ui/tooltip.tsx"
+import { TooltipProvider } from "./components/ui/tooltip.tsx"
 import { WorkspaceFrame } from "./components/workspace-frame.tsx"
 import { useAppStore, useExecutionView } from "./store/app-store.ts"
 
@@ -125,7 +119,6 @@ function SessionHeader() {
   const session = useAppStore((state) => state.selectedSession)
   const sessionsByProject = useAppStore((state) => state.sessionsByProject)
   const selectSession = useAppStore((state) => state.selectSession)
-  const view = useExecutionView()
   if (!session) return null
   const parent = Object.values(sessionsByProject)
     .flatMap((list) => list.sessions)
@@ -156,35 +149,7 @@ function SessionHeader() {
       <div className="flex shrink-0 items-center gap-1">
         <SessionGoal />
         <SessionRename />
-        <button
-          type="button"
-          aria-label="Find in conversation"
-          title="Find in conversation (⌘F / Ctrl+F)"
-          onClick={openConversationFind}
-          className="shrink-0 rounded-md p-1.5 text-muted-foreground hover:bg-accent"
-        >
-          <Search className="size-4" />
-        </button>
         <SessionSummary />
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              aria-label="Session details"
-              className="shrink-0 rounded-md p-1.5 text-muted-foreground hover:bg-accent"
-            >
-              <Info className="size-4" />
-            </button>
-          </TooltipTrigger>
-          <TooltipContent side="bottom" className="max-w-sm">
-            <p>{view.workingDirectory}</p>
-            <p>
-              {session.counts.turns} turns · {session.counts.inputs} inputs ·{" "}
-              {session.counts.tools} tools
-            </p>
-            <p className="font-mono text-[10px]">{session.id}</p>
-          </TooltipContent>
-        </Tooltip>
       </div>
     </header>
   )
