@@ -12,6 +12,7 @@ describe("model request runtime", () => {
   it("does not replay a request after a completed item committed side effects", async () => {
     const item: ModelStreamEvent = {
       type: "output_item",
+      itemId: "fc_once",
       content: [{ type: "tool_call", id: "once", name: "write", input: {} }],
     }
     const provider = scriptedStream([

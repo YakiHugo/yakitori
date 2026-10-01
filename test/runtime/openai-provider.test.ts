@@ -127,10 +127,12 @@ describe("OpenAI Responses provider", () => {
     expect(events.slice(0, 2)).toEqual([
       {
         type: "output_item",
+        itemId: "msg_intro",
         content: [{ type: "text", text: "I will inspect the file." }],
       },
       {
         type: "output_item",
+        itemId: "fc_read",
         content: [
           {
             type: "tool_call",

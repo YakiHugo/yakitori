@@ -2,6 +2,12 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
+import {
+  createExecutionViewState,
+  projectExecutionView,
+  reduceExecutionView,
+} from "../../src/gui/execution-view.ts"
+import { createThreadServerHandlers } from "../../src/server/handlers.ts"
 import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
 import { createSessionExecutionPolicy } from "../../src/runtime/limits.ts"
@@ -45,7 +51,7 @@ describe("Turn recovery", () => {
         requests += 1
         if (requests === 1) {
           expect(request.streamOutputItems).toBe(true)
-          yield { type: "output_item", content: [call] }
+          yield { type: "output_item", itemId: "fc_early", content: [call] }
           await release.promise
           if (terminal !== "completed") {
             yield {
@@ -151,12 +157,14 @@ describe("Turn recovery", () => {
         if (requests === 1) {
           yield {
             type: "output_item",
+            itemId: "fc_wait",
             content: [
               { type: "tool_call", id: "wait", name: "wait", input: {} },
             ],
           }
           yield {
             type: "output_item",
+            itemId: "fc_read",
             content: [
               { type: "tool_call", id: "read", name: "read", input: {} },
             ],
@@ -218,6 +226,114 @@ describe("Turn recovery", () => {
     await expect
       .poll(() => resumed.agentStatus)
       .toEqual({ completed: "resumed" })
+  })
+
+  it("replays completed text and an in-flight tool before the model response ends, then completes the same tool card", async () => {
+    const entered = deferred()
+    const finishTool = deferred()
+    const finishStream = deferred()
+    let requests = 0
+    const intro = { type: "text" as const, text: "Inspecting the file." }
+    const call = {
+      type: "tool_call" as const,
+      id: "read",
+      name: "read",
+      input: {},
+    }
+    const runtime = await fixture(
+      async function* () {
+        requests += 1
+        if (requests === 1) {
+          yield { type: "delta", itemId: "intro", text: intro.text }
+          yield { type: "output_item", itemId: "intro", content: [intro] }
+          yield { type: "output_item", itemId: "call", content: [call] }
+          await finishStream.promise
+          yield {
+            type: "response",
+            response: {
+              stopReason: ModelStopReason.ToolUse,
+              content: [intro, call],
+            },
+          }
+        } else
+          yield {
+            type: "response",
+            response: {
+              stopReason: ModelStopReason.EndTurn,
+              content: [{ type: "text", text: "done" }],
+            },
+          }
+      },
+      [
+        {
+          toolName: plainToolName("read"),
+          description: "Read",
+          inputSchema: { type: "object" },
+          effect: "observe",
+          approvalRequirement: { kind: "none" },
+          async execute() {
+            entered.resolve()
+            await finishTool.promise
+            return { ok: true, content: "found", output: "found" }
+          },
+        },
+      ],
+    )
+    const thread = await runtime.createThread()
+    const handlers = createThreadServerHandlers({
+      manager: runtime.manager,
+      store: runtime.store,
+    })
+    const replay = async () => {
+      const result = await handlers.readSessionEvents({ sessionId: thread.id })
+      if (!result.ok) throw new Error(result.body.error.message)
+      let state = createExecutionViewState()
+      for (const event of result.body.events)
+        state = reduceExecutionView(state, { type: "durable", event })
+      return projectExecutionView(state)
+    }
+    try {
+      await thread.startIfIdle({ content: { kind: "text", text: "read" } })
+      await entered.promise
+      const before = await replay()
+      expect(
+        before.entries.filter((entry) => entry.kind === "assistant"),
+      ).toEqual([
+        expect.objectContaining({ text: intro.text, status: "completed" }),
+      ])
+      const tools = before.entries.filter((entry) => entry.kind === "tool")
+      expect(tools).toEqual([
+        expect.objectContaining({ toolCallId: "read", state: "requested" }),
+      ])
+      const itemId = tools[0]?.execution.itemId
+      finishTool.resolve()
+      await expect
+        .poll(
+          async () =>
+            (await replay()).entries.find((entry) => entry.kind === "tool")
+              ?.state,
+        )
+        .toBe("completed")
+      const after = await replay()
+      expect(after.entries.filter((entry) => entry.kind === "tool")).toEqual([
+        expect.objectContaining({
+          execution: expect.objectContaining({ itemId }),
+          resultText: "found",
+          state: "completed",
+        }),
+      ])
+      expect(requests).toBe(1)
+    } finally {
+      finishTool.resolve()
+      finishStream.resolve()
+    }
+    await expect.poll(() => thread.agentStatus).toEqual({ completed: "done" })
+    const final = await replay()
+    expect(
+      final.entries
+        .filter((entry) => entry.kind === "assistant")
+        .map((entry) => entry.text),
+    ).toEqual([intro.text, "done"])
   })
 
   it("persists a completed file change while a later tool is pending and retains it after interruption and reload", async () => {

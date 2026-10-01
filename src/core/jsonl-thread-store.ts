@@ -2222,12 +2222,15 @@ function isRolloutItem(value: unknown): value is RolloutItem {
       isResponseItem(value.item)
     )
   }
-  if (value.type === "item_completed") {
+  if (value.type === "item_started" || value.type === "item_completed") {
     return (
       hasOnlyKeys(value, ["type", "turnId", "item"]) &&
       typeof value.turnId === "string" &&
       isKernelEvent({
-        type: EventType.ItemCompleted,
+        type:
+          value.type === "item_started"
+            ? EventType.ItemStarted
+            : EventType.ItemCompleted,
         data: { turnId: value.turnId, item: value.item },
       })
     )

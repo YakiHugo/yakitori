@@ -547,17 +547,13 @@ function applyTransient(
         at: event.createdAt,
       })
     }
-    return appendItemEntry(
-      settleStreamingEntries(state, event.turnId, false),
-      item.itemId,
-      {
-        kind: "tool",
-        toolCallId: item.toolCallId,
-        turnId: event.turnId,
-        execution: item,
-        state: "requested",
-      },
-    )
+    return appendItemEntry(state, item.itemId, {
+      kind: "tool",
+      toolCallId: item.toolCallId,
+      turnId: event.turnId,
+      execution: item,
+      state: "requested",
+    })
   }
   if (event.type === "assistant.delta" || event.type === "reasoning.delta") {
     const index = state.itemEntryIndexes[event.itemId]
@@ -718,17 +714,13 @@ function applyDurable(
           },
         }
       }
-      return appendItemEntry(
-        settleStreamingEntries(next, event.data.turnId, false),
-        item.itemId,
-        {
-          kind: "tool",
-          toolCallId: item.toolCallId,
-          turnId: event.data.turnId,
-          execution: item,
-          state: "requested",
-        },
-      )
+      return appendItemEntry(next, item.itemId, {
+        kind: "tool",
+        toolCallId: item.toolCallId,
+        turnId: event.data.turnId,
+        execution: item,
+        state: "requested",
+      })
     }
     case "item.completed": {
       next = clearActiveRetry(next, event.data.turnId)

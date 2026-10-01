@@ -1,5 +1,6 @@
 import type {
   CompletedExecutionItem,
+  StartedExecutionItem,
   EventMetadata,
   JsonObject,
   KernelError,
@@ -100,6 +101,11 @@ export type RolloutItem =
       readonly type: "agent_message"
       readonly messageId: string
       readonly item: ResponseItemEnvelope
+    }
+  | {
+      readonly type: "item_started"
+      readonly turnId: string
+      readonly item: StartedExecutionItem
     }
   | {
       readonly type: "item_completed"

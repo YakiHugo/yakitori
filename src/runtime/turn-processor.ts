@@ -987,20 +987,6 @@ async function executeTurnModelLoop(
             if (outcome.status === "rejected") throw outcome.reason
           }
           throwIfAborted(input.signal)
-          await input.runtime.recordItemCompletions(
-            completedResponseItems(
-              envelope(
-                input.input.submissionId,
-                { role: "assistant", content: committedContent },
-                {
-                  provider: executionStep.target.provider,
-                  model: executionStep.target.model,
-                  callIndex,
-                },
-                responseItemId,
-              ),
-            ),
-          )
           const history = completeToolCallHistory(
             input.runtime.snapshot().context.history.map(({ item }) => item),
           )
@@ -1108,7 +1094,7 @@ async function executeTurnModelLoop(
               },
               toolPlan,
               permissionGate: input.permissionGate,
-              emitItemStarted: input.runtime.emitItemStarted,
+              recordToolStarted: input.runtime.recordToolStarted,
               publishPermissionEvent: (event) =>
                 input.runtime.emitPermissionEvent(event),
               permissionTimeoutMs: input.runtimeTiming.permissionWaitTimeoutMs,
@@ -1213,11 +1199,12 @@ async function executeTurnModelLoop(
           itemId,
         )
         await input.runtime.recordConversationItems([item])
+        await input.runtime.recordItemCompletions(completedResponseItems(item))
       }
       const response = await consumeModelStream({
         request,
         stream,
-        async onOutputItem(content) {
+        async onOutputItem(content, itemId) {
           throwIfAborted(input.signal)
           committedBytes += utf8Bytes(JSON.stringify(content))
           if (
@@ -1234,10 +1221,7 @@ async function executeTurnModelLoop(
               throw new Error("Model repeated a committed tool call id.")
             committedCallIds.add(block.id)
           }
-          await recordOutput(
-            content,
-            `${responseItemId}_${committedContent.length}`,
-          )
+          await recordOutput(content, itemId)
           committedContent.push(...content)
           startCalls(
             content.filter(
@@ -1339,20 +1323,6 @@ async function executeTurnModelLoop(
           responseItemId,
           response.providerRequestId,
         )
-      await input.runtime.recordItemCompletions(
-        completedResponseItems(
-          envelope(
-            input.input.submissionId,
-            { role: "assistant", content: response.content },
-            {
-              provider: step.target.provider,
-              model: step.target.model,
-              callIndex: modelCalls,
-            },
-            responseItemId,
-          ),
-        ),
-      )
       // A tool result recorded during streaming was not part of this model
       // response's usage. Do not anchor that counter past unseen tool output.
       if (
@@ -1470,6 +1440,7 @@ async function consumeModelStream(input: {
     | undefined
   readonly onOutputItem?: (
     content: readonly ModelContentBlock[],
+    itemId: string,
   ) => Promise<void>
   readonly onFirstToken?: () => void
   readonly onRetry?: (committedOutput: boolean) => void
@@ -1482,6 +1453,11 @@ async function consumeModelStream(input: {
   input.setActiveStream(iterator)
   let terminal: ModelResponse | undefined
   let exhausted = false
+  const provisionalItems = new Set<string>()
+  const displayItemId = (providerItemId?: string) =>
+    input.itemId === undefined || providerItemId === undefined
+      ? input.itemId
+      : `${input.itemId}_${providerItemId}`
   const streamedBytes = { assistant: 0, reasoning: 0 }
   const trailingHighSurrogate = { assistant: "", reasoning: "" }
   try {
@@ -1494,6 +1470,8 @@ async function consumeModelStream(input: {
       }
       const event = next.value
       if (event.type === "retry") {
+        const discardedResponseItemIds = [...provisionalItems]
+        provisionalItems.clear()
         input.onRetry?.(event.committedOutput === true)
         streamedBytes.assistant = 0
         streamedBytes.reasoning = 0
@@ -1506,9 +1484,9 @@ async function consumeModelStream(input: {
             message: event.failure.message,
             code: "model.retry",
             details: {
-              ...(input.itemId === undefined || event.committedOutput === true
+              ...(discardedResponseItemIds.length === 0
                 ? {}
-                : { discardedResponseItemId: input.itemId }),
+                : { discardedResponseItemIds }),
               attempt: event.attempt,
               nextAttempt: event.nextAttempt,
               maxAttempts: event.maxAttempts,
@@ -1543,7 +1521,11 @@ async function consumeModelStream(input: {
       if (event.type === "output_item") {
         if (input.onOutputItem === undefined)
           throw new Error("Unexpected committed model output.")
-        await input.onOutputItem(event.content)
+        const itemId = displayItemId(event.itemId)
+        if (itemId === undefined)
+          throw new Error("Committed output requires a display item id.")
+        await input.onOutputItem(event.content, itemId)
+        provisionalItems.delete(itemId)
         continue
       }
       if (event.type !== "response") {
@@ -1564,9 +1546,11 @@ async function consumeModelStream(input: {
             "Model stream update exceeded the configured byte limit.",
           )
         }
-        if (input.itemId !== undefined) {
+        const itemId = displayItemId(event.itemId)
+        if (itemId !== undefined) {
+          provisionalItems.add(itemId)
           input.emitModelStream?.({
-            itemId: input.itemId,
+            itemId,
             kind,
             delta: event.text,
           })
@@ -1986,7 +1970,7 @@ type ToolExecutionScope = {
   readonly signal: AbortSignal
   readonly toolPlan: ReturnType<ToolRegistry["finalize"]>
   readonly permissionGate: PermissionGate
-  readonly emitItemStarted: TurnRuntime["emitItemStarted"]
+  readonly recordToolStarted: TurnRuntime["recordToolStarted"]
   readonly publishPermissionEvent: TurnRuntime["emitPermissionEvent"]
   readonly permissionTimeoutMs: number
   readonly approvalPolicy: ApprovalPolicy
@@ -2107,7 +2091,7 @@ async function* executeToolCalls(
       }
     }),
   )
-  for (const item of prepared) input.emitItemStarted(item.item)
+  for (const item of prepared) await input.recordToolStarted(item.item)
   const scheduled = prepared.map((item) => ({
     item,
     reservation: input.toolExecutionGate.reserve(

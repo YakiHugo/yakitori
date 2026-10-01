@@ -158,18 +158,21 @@ export type ModelResponse = {
   readonly providerRequestId?: string
 }
 
-export type ModelStreamDeltaEvent = {
-  readonly type: "delta"
-  readonly text: string
-}
+export type ModelStreamDeltaEvent = Readonly<{
+  type: "delta"
+  text: string
+  itemId?: string
+}>
 
-export type ModelStreamReasoningDeltaEvent = {
-  readonly type: "reasoning_delta"
-  readonly text: string
-}
+export type ModelStreamReasoningDeltaEvent = Readonly<{
+  type: "reasoning_delta"
+  text: string
+  itemId?: string
+}>
 
 export type ModelStreamOutputItemEvent = Readonly<{
   type: "output_item"
+  itemId: string
   content: readonly ModelContentBlock[]
 }>
 

@@ -142,11 +142,23 @@ async function* streamOpenAI(
         return
       }
       if (event.type === "response.output_text.delta") {
-        yield { type: "delta", text: event.delta }
+        yield {
+          type: "delta",
+          text: event.delta,
+          ...(request.streamOutputItems && event.item_id !== undefined
+            ? { itemId: event.item_id }
+            : {}),
+        }
         continue
       }
       if (event.type === "response.reasoning_summary_text.delta") {
-        yield { type: "reasoning_delta", text: event.delta }
+        yield {
+          type: "reasoning_delta",
+          text: event.delta,
+          ...(request.streamOutputItems && event.item_id !== undefined
+            ? { itemId: event.item_id }
+            : {}),
+        }
         continue
       }
       if (event.type === "response.output_item.done") {
@@ -165,7 +177,12 @@ async function* streamOpenAI(
               request.continuationScope,
               request.target.model,
             )
-            if (content.length > 0) yield { type: "output_item", content }
+            if (content.length > 0)
+              yield {
+                type: "output_item",
+                itemId: item.id ?? `output_${nextOutputIndex - 1}`,
+                content,
+              }
           }
         }
         continue
