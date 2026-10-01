@@ -8,19 +8,39 @@ export function usePinnedScroll(sessionId?: string) {
   const following = useRef(true)
   const followingPaused = useRef(false)
   const animation = useRef<number | undefined>(undefined)
+  const lastScrollTop = useRef(0)
   const [atBottom, setAtBottom] = useState(true)
 
   const cancelAnimation = useCallback(() => {
     if (animation.current !== undefined) cancelAnimationFrame(animation.current)
     animation.current = undefined
   }, [])
+  // Programmatic writes keep lastScrollTop in sync, so the scroll observer's
+  // direction check attributes only native motion to the user.
+  const writeScrollTop = useCallback(
+    (viewport: HTMLDivElement, value: number) => {
+      viewport.scrollTop = value
+      lastScrollTop.current = viewport.scrollTop
+    },
+    [],
+  )
   const onScroll = useCallback(() => {
     const viewport = viewportRef.current
     if (!viewport) return
     const bottom =
       viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= 24
     setAtBottom(bottom)
-    if (animation.current === undefined && !followingPaused.current && bottom)
+    // Re-follow only on downward motion into the bottom threshold. An upward
+    // gesture inside the threshold must never re-pin: the next render would
+    // snap back to the bottom and the two fight every frame.
+    const downward = viewport.scrollTop > lastScrollTop.current
+    lastScrollTop.current = viewport.scrollTop
+    if (
+      animation.current === undefined &&
+      !followingPaused.current &&
+      bottom &&
+      downward
+    )
       following.current = true
   }, [])
   const pauseFollowing = useCallback(() => {
@@ -49,7 +69,10 @@ export function usePinnedScroll(sessionId?: string) {
           0,
           Math.min(target(), viewport.scrollHeight - viewport.clientHeight),
         )
-        viewport.scrollTop = start + (end - start) * (1 - (1 - progress) ** 3)
+        writeScrollTop(
+          viewport,
+          start + (end - start) * (1 - (1 - progress) ** 3),
+        )
         if (progress < 1) animation.current = requestAnimationFrame(step)
         else {
           animation.current = undefined
@@ -64,7 +87,7 @@ export function usePinnedScroll(sessionId?: string) {
       }
       animation.current = requestAnimationFrame(step)
     },
-    [cancelAnimation],
+    [cancelAnimation, writeScrollTop],
   )
   const jumpToBottom = useCallback(() => {
     scrollTo(() => viewportRef.current?.scrollHeight ?? 0, true)
@@ -91,23 +114,26 @@ export function usePinnedScroll(sessionId?: string) {
       // Find navigation is immediate: syntax highlighting can replace text
       // nodes and invalidate a Range during an animated jump.
       pauseFollowing()
-      viewport.scrollTop +=
-        target.getBoundingClientRect().top -
-        viewport.getBoundingClientRect().top -
-        80
+      writeScrollTop(
+        viewport,
+        viewport.scrollTop +
+          target.getBoundingClientRect().top -
+          viewport.getBoundingClientRect().top -
+          80,
+      )
       onScroll()
     },
-    [pauseFollowing, onScroll],
+    [pauseFollowing, onScroll, writeScrollTop],
   )
   const onLayoutChange = useCallback(() => {
     const viewport = viewportRef.current
     if (!viewport) return
     if (following.current && animation.current === undefined)
-      viewport.scrollTop = viewport.scrollHeight
+      writeScrollTop(viewport, viewport.scrollHeight)
     setAtBottom(
       viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= 24,
     )
-  }, [])
+  }, [writeScrollTop])
 
   useLayoutEffect(() => {
     if (sessionId === undefined) return
@@ -115,9 +141,9 @@ export function usePinnedScroll(sessionId?: string) {
     following.current = true
     followingPaused.current = false
     const viewport = viewportRef.current
-    if (viewport) viewport.scrollTop = viewport.scrollHeight
+    if (viewport) writeScrollTop(viewport, viewport.scrollHeight)
     setAtBottom(true)
-  }, [sessionId, cancelAnimation])
+  }, [sessionId, cancelAnimation, writeScrollTop])
 
   useLayoutEffect(() => {
     const viewport = viewportRef.current
@@ -232,7 +258,7 @@ export function usePinnedScroll(sessionId?: string) {
   useLayoutEffect(() => {
     const viewport = viewportRef.current
     if (viewport && following.current && animation.current === undefined)
-      viewport.scrollTop = viewport.scrollHeight
+      writeScrollTop(viewport, viewport.scrollHeight)
   })
   return {
     viewportRef,
