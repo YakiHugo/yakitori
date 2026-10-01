@@ -76,6 +76,22 @@ it("restores at the bottom without animating and keeps layout growth pinned", ()
   expect(viewport.scrollTop).toBe(800)
   expect(frames.size).toBe(0)
 })
+it("scrolling up inside the bottom threshold stays detached", () => {
+  render(<Fixture />)
+  const viewport = geometry()
+  act(() => resize())
+  expect(viewport.scrollTop).toBe(800)
+  // A trackpad scroll-up starts with small deltas that stay inside the 24px
+  // bottom threshold; the scroll observer must not re-pin following, or the
+  // next render snaps back to the bottom and the two fight every frame.
+  fireEvent.wheel(viewport, { deltaY: -5 })
+  viewport.scrollTop = 790
+  fireEvent.scroll(viewport)
+  expect(scroll.atBottom).toBe(true)
+  Object.defineProperty(viewport, "scrollHeight", { value: 1400 })
+  act(() => resize())
+  expect(viewport.scrollTop).toBe(790)
+})
 it("does not resume following when layout changes during history reading", () => {
   render(<Fixture />)
   const viewport = geometry()
