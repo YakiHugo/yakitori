@@ -11,6 +11,7 @@ export const EventType = {
   TurnCompleted: "turn.completed",
   ItemStarted: "item.started",
   ItemCompleted: "item.completed",
+  ContextTokens: "context.tokens",
 } as const
 
 export const ForkReason = {
@@ -421,6 +422,22 @@ export type TurnCompletedEvent = {
   }
 }
 
+// Sample of the model-visible context window taken after a model response,
+// compaction, or an overflow. `capacityTokens` is the effective window of the
+// model that produced the sample, so the pair stays self-consistent when the
+// selected model later changes. Derived from rollout `token_count` records;
+// clients replace their snapshot on each event rather than aggregating.
+export type ContextTokensEvent = {
+  readonly type: typeof EventType.ContextTokens
+  readonly data: {
+    readonly turnId: string
+    readonly activeContextTokens: number
+    readonly capacityTokens?: number
+    readonly provider?: string
+    readonly model?: string
+  }
+}
+
 export type TurnOutcome =
   | Readonly<{ status: "completed" }>
   | Readonly<{ status: "failed"; error: KernelError }>
@@ -668,6 +685,7 @@ export type KernelEvent =
   | TurnCompletedEvent
   | ItemStartedEvent
   | ItemCompletedEvent
+  | ContextTokensEvent
 
 export type KernelFact = KernelEvent
 
@@ -820,6 +838,22 @@ function requireKernelEvent(value: unknown): asserts value is KernelEvent {
           onlyKeys(data, ["turnId", "item"]) &&
           isString(data.turnId) &&
           isCompletedExecutionItem(data.item)
+        )
+      case EventType.ContextTokens:
+        return (
+          onlyKeys(data, [
+            "turnId",
+            "activeContextTokens",
+            "capacityTokens",
+            "provider",
+            "model",
+          ]) &&
+          isString(data.turnId) &&
+          isNonNegativeInteger(data.activeContextTokens) &&
+          (data.capacityTokens === undefined ||
+            isNonNegativeInteger(data.capacityTokens)) &&
+          (data.provider === undefined || isString(data.provider)) &&
+          (data.model === undefined || isString(data.model))
         )
     }
   })()

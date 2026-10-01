@@ -2087,6 +2087,23 @@ function mapRolloutEvent(
       },
     })
   }
+  if (item.type === "token_count") {
+    return createEventEnvelope({
+      ...base,
+      event: {
+        type: "context.tokens",
+        data: {
+          turnId: item.turnId,
+          activeContextTokens: item.activeContextTokens,
+          ...(item.capacityTokens === undefined
+            ? {}
+            : { capacityTokens: item.capacityTokens }),
+          ...(item.provider === undefined ? {} : { provider: item.provider }),
+          ...(item.model === undefined ? {} : { model: item.model }),
+        },
+      },
+    })
+  }
   if (item.type === "item_completed") {
     return createEventEnvelope({
       ...base,

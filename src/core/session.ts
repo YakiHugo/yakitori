@@ -68,6 +68,7 @@ export type TurnRuntime = {
       activeContextTokens: number
       inputTokens?: number
       estimatedPrefill?: boolean
+      capacityTokens?: number
       historyAnchorItemId: string
       provider: string
       model: string
@@ -915,6 +916,9 @@ export class Session {
           (input.inputTokens !== undefined &&
             (!Number.isSafeInteger(input.inputTokens) ||
               input.inputTokens < 0)) ||
+          (input.capacityTokens !== undefined &&
+            (!Number.isSafeInteger(input.capacityTokens) ||
+              input.capacityTokens < 0)) ||
           input.historyAnchorItemId.trim().length === 0 ||
           input.provider.trim().length === 0 ||
           input.model.trim().length === 0
@@ -929,6 +933,9 @@ export class Session {
             type: "token_count",
             turnId: active.input.submissionId,
             ...next,
+            ...(input.capacityTokens === undefined
+              ? {}
+              : { capacityTokens: input.capacityTokens }),
           },
         ])
         this.#contextManager.setContextTokens(next)

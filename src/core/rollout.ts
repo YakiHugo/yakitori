@@ -121,6 +121,7 @@ export type RolloutItem =
       readonly historyAnchorItemId?: string
       readonly provider?: string
       readonly model?: string
+      readonly capacityTokens?: number
     }
   | {
       readonly type: "compacted"

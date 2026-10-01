@@ -77,7 +77,7 @@ afterEach(() => {
 })
 
 describe("composer", () => {
-  it("uses the last matching model context and clears stale use when the model changes", () => {
+  it("pairs the context snapshot with the sampled model's window across selection changes", () => {
     useAppStore.setState({
       selection: { sessionId: "session_1" },
       defaultProvider: "kimi",
@@ -101,11 +101,60 @@ describe("composer", () => {
       ],
       execution: {
         ...createExecutionViewState(),
-        lastModel: { provider: "kimi", model: "k3" },
-        lastTurnUsage: {
-          inputTokens: 108_000,
-          outputTokens: 0,
+        contextTokens: {
           activeContextTokens: 108_000,
+          capacityTokens: 258_000,
+          provider: "kimi",
+          model: "k3",
+        },
+      },
+    })
+    render(<Composer />)
+
+    expect(
+      screen.getByRole("button", {
+        name: "Context window: 42% used, 58% remaining",
+      }),
+    ).toBeTruthy()
+
+    // The sampled capacity travels with the snapshot, so switching the
+    // selected model never re-pairs old tokens with a new window.
+    act(() => useAppStore.setState({ defaultModel: "k4" }))
+    expect(
+      screen.getByRole("button", {
+        name: "Context window: 42% used, 58% remaining",
+      }),
+    ).toBeTruthy()
+  })
+
+  it("falls back to the catalog window only while the sampled model is selected", () => {
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      defaultProvider: "kimi",
+      defaultModel: "k3",
+      providers: [
+        {
+          name: "kimi",
+          models: [
+            {
+              id: "k3",
+              instructionProfileId: "kimi",
+              effectiveContextWindowTokens: 258_000,
+            },
+            {
+              id: "k4",
+              instructionProfileId: "kimi",
+              effectiveContextWindowTokens: 100_000,
+            },
+          ],
+        },
+      ],
+      execution: {
+        ...createExecutionViewState(),
+        contextTokens: {
+          activeContextTokens: 108_000,
+          provider: "kimi",
+          model: "k3",
         },
       },
     })
@@ -123,7 +172,9 @@ describe("composer", () => {
         name: "Context window usage unavailable",
       }),
     ).toBeTruthy()
-    expect(screen.getByRole("tooltip").textContent).toContain("100k total")
+    expect(screen.getByRole("tooltip").textContent).toContain(
+      "108k tokens used",
+    )
   })
 
   it("sends the trimmed draft on Enter", async () => {

@@ -1823,6 +1823,13 @@ function createFauxScenarioStream(scenario: string): StreamFn {
             { type: "text", text: "Hello from faux." },
           ],
           stopReason: ModelStopReason.EndTurn,
+          // Dev-mode fixture usage so the composer's context indicator and
+          // token_count records exercise the real event path.
+          usage: {
+            inputTokens: 1_240,
+            outputTokens: 42,
+            activeContextTokens: 1_282,
+          },
         },
       }
       return

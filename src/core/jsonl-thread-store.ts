@@ -2260,6 +2260,7 @@ function isRolloutItem(value: unknown): value is RolloutItem {
         "historyAnchorItemId",
         "provider",
         "model",
+        "capacityTokens",
       ]) &&
       typeof value.turnId === "string" &&
       typeof value.activeContextTokens === "number" &&
@@ -2274,7 +2275,11 @@ function isRolloutItem(value: unknown): value is RolloutItem {
       (value.historyAnchorItemId === undefined ||
         typeof value.historyAnchorItemId === "string") &&
       (value.provider === undefined || typeof value.provider === "string") &&
-      (value.model === undefined || typeof value.model === "string")
+      (value.model === undefined || typeof value.model === "string") &&
+      (value.capacityTokens === undefined ||
+        (typeof value.capacityTokens === "number" &&
+          Number.isSafeInteger(value.capacityTokens) &&
+          value.capacityTokens >= 0))
     )
   }
   return false

@@ -1334,6 +1334,85 @@ describe("thread server handlers", () => {
     })
   })
 
+  it("publishes context window snapshots as durable events before the turn boundary", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "yakitori-handler-tokens-"))
+    const store = new MemoryThreadStore()
+    const provider = createFauxProvider([
+      {
+        content: [{ type: "text", text: "answer" }],
+        usage: { inputTokens: 10, outputTokens: 2, activeContextTokens: 12 },
+      },
+    ])
+    const manager = new ThreadManager({
+      store,
+      createTurnProcessor: () =>
+        createTurnProcessor({
+          stream: provider.stream,
+          toolRegistry: createToolRegistry([]),
+          loadProjectInstructions: async () => undefined,
+        }),
+    })
+    const eventHub = createSessionEventHub()
+    const handlers = createThreadServerHandlers({ manager, store, eventHub })
+    cleanups.push(async () => {
+      await manager.shutdown()
+      await handlers.close()
+      await rm(workspace, { recursive: true, force: true })
+    })
+    const created = await handlers.createSession({
+      workingDirectory: workspace,
+      mateId: "mate_test",
+      mateRevisionId: "mate_revision_test",
+    })
+    if (!created.ok) throw new Error(created.body.error.message)
+    const sessionId = created.body.session.id
+    const delivered: string[] = []
+    const subscription = eventHub.subscribe(sessionId, (delivery) => {
+      if (delivery.kind === "durable")
+        delivered.push(...delivery.events.map((event) => event.type))
+    })
+    cleanups.push(async () => subscription.close())
+
+    // A catalog model with a known window: 1_050_000 tokens at 100%.
+    const admitted = await handlers.admitInput({
+      sessionId,
+      requestId: "request_tokens",
+      content: { kind: "text", text: "answer" },
+      modelSelection: { provider: "openai", model: "gpt-6-sol" },
+    })
+    if (!admitted.ok) throw new Error(admitted.body.error.message)
+    await waitForValue(() =>
+      manager.getThread(sessionId)?.status === "idle" ? true : undefined,
+    )
+    await waitForValue(() =>
+      delivered.includes("turn.completed") ? true : undefined,
+    )
+
+    // The snapshot is its own durable record, delivered ahead of the turn
+    // boundary instead of riding turn completion.
+    expect(delivered.indexOf("context.tokens")).toBeGreaterThanOrEqual(0)
+    expect(delivered.indexOf("context.tokens")).toBeLessThan(
+      delivered.indexOf("turn.completed"),
+    )
+
+    const events = await handlers.readSessionEvents({ sessionId })
+    if (!events.ok) throw new Error(events.body.error.message)
+    const snapshots = events.body.events.filter(
+      (event) => event.type === "context.tokens",
+    )
+    expect(snapshots).toEqual([
+      expect.objectContaining({
+        data: {
+          turnId: "request_tokens",
+          activeContextTokens: 12,
+          capacityTokens: 1_050_000,
+          provider: "openai",
+          model: "gpt-6-sol",
+        },
+      }),
+    ])
+  })
+
   it("publishes each rollout event only through its append fence", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "yakitori-handler-fence-"))
     const store = new MemoryThreadStore()
