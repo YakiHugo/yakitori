@@ -1,5 +1,5 @@
-import { isContextExcerpts, type ContextExcerpt } from "./input-context.ts"
 import { createEventId, isStorageKey } from "./ids.ts"
+import { type ContextExcerpt, isContextExcerpts } from "./input-context.ts"
 import { jsonValuesEqual } from "./json-equality.ts"
 
 export const EVENT_SCHEMA_VERSION = 7
@@ -11,7 +11,6 @@ export const EventType = {
   TurnCompleted: "turn.completed",
   ItemStarted: "item.started",
   ItemCompleted: "item.completed",
-  ContextCompacted: "context.compacted",
 } as const
 
 export const ForkReason = {
@@ -37,17 +36,7 @@ export const COMPACT_DIRECTIVE = "/compact"
 // "/goal" opens the goal editor. Never admitted as an Input.
 export const GOAL_DIRECTIVE = "/goal"
 
-// Items are a consumer-facing projection over coarse durable facts.
-export const ItemKind = {
-  AssistantMessage: "assistant_message",
-  Reasoning: "reasoning",
-  ContextCompaction: "context_compaction",
-  ToolCall: "tool_call",
-  ToolResult: "tool_result",
-} as const
-
 export const ItemStatus = {
-  InProgress: "in_progress",
   Completed: "completed",
   Failed: "failed",
 } as const
@@ -59,7 +48,6 @@ export const MISSING_TOOL_RESULT_TEXT =
 
 export type EventType = (typeof EventType)[keyof typeof EventType]
 export type InputRole = (typeof InputRole)[keyof typeof InputRole]
-export type ItemKind = (typeof ItemKind)[keyof typeof ItemKind]
 export type ItemStatus = (typeof ItemStatus)[keyof typeof ItemStatus]
 
 export type JsonValue =
@@ -259,18 +247,6 @@ export type ModelMessage =
   | ModelDeveloperMessage
   | ModelAssistantMessage
   | ModelToolResultMessage
-
-export type ContextWindowReplacement = {
-  readonly windowId: string
-  readonly firstWindowId: string
-  readonly previousWindowId?: string
-  readonly windowNumber: number
-  readonly replacesInheritedContext?: boolean
-  /** Exact provider-neutral prefix that replaces history through throughSeq. */
-  readonly history: readonly ModelMessage[]
-  /** State against which later world-state changes must be diffed. */
-  readonly worldStateBaseline: JsonObject
-}
 
 export type AssistantContentBlock =
   | { readonly type: "text"; readonly text: string }
@@ -685,19 +661,6 @@ export type WorldStateFragment = {
   readonly text: string
 }
 
-export type ContextCompactedEvent = {
-  readonly type: typeof EventType.ContextCompacted
-  readonly data: {
-    readonly compactionId: string
-    readonly turnId: string
-    readonly throughSeq: number
-    readonly coveredTurnIds: readonly string[]
-    readonly summary: string
-    readonly usage?: TokenUsage
-    readonly replacement: ContextWindowReplacement
-  }
-}
-
 export type KernelEvent =
   | SessionCreatedEvent
   | InputAdmittedEvent
@@ -705,7 +668,6 @@ export type KernelEvent =
   | TurnCompletedEvent
   | ItemStartedEvent
   | ItemCompletedEvent
-  | ContextCompactedEvent
 
 export type KernelFact = KernelEvent
 
@@ -858,26 +820,6 @@ function requireKernelEvent(value: unknown): asserts value is KernelEvent {
           onlyKeys(data, ["turnId", "item"]) &&
           isString(data.turnId) &&
           isCompletedExecutionItem(data.item)
-        )
-      case EventType.ContextCompacted:
-        return (
-          onlyKeys(data, [
-            "compactionId",
-            "turnId",
-            "throughSeq",
-            "coveredTurnIds",
-            "summary",
-            "usage",
-            "replacement",
-          ]) &&
-          isString(data.compactionId) &&
-          isString(data.turnId) &&
-          isPositiveInteger(data.throughSeq) &&
-          Array.isArray(data.coveredTurnIds) &&
-          data.coveredTurnIds.every(isString) &&
-          isString(data.summary) &&
-          (data.usage === undefined || isTokenUsage(data.usage)) &&
-          isContextWindowReplacement(data.replacement)
         )
     }
   })()
@@ -1298,33 +1240,6 @@ function isCollaborationAction(value: unknown): value is CollaborationAction {
     value === "wait" ||
     value === "interrupt" ||
     value === "list"
-  )
-}
-
-function isContextWindowReplacement(
-  value: unknown,
-): value is ContextWindowReplacement {
-  return (
-    isRecord(value) &&
-    onlyKeys(value, [
-      "windowId",
-      "firstWindowId",
-      "previousWindowId",
-      "windowNumber",
-      "replacesInheritedContext",
-      "history",
-      "worldStateBaseline",
-    ]) &&
-    isString(value.windowId) &&
-    isString(value.firstWindowId) &&
-    (value.previousWindowId === undefined ||
-      isString(value.previousWindowId)) &&
-    isPositiveInteger(value.windowNumber) &&
-    (value.replacesInheritedContext === undefined ||
-      typeof value.replacesInheritedContext === "boolean") &&
-    Array.isArray(value.history) &&
-    value.history.every(isModelMessage) &&
-    isJsonObject(value.worldStateBaseline)
   )
 }
 

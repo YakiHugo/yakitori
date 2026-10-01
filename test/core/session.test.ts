@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest"
+import type { RolloutItem } from "../../src/core/rollout.ts"
 import type {
   TurnControl,
   TurnProcessor,
   TurnRuntime,
 } from "../../src/core/session.ts"
-import type { RolloutItem } from "../../src/core/rollout.ts"
 import { SessionStatus, type TurnInput } from "../../src/core/session-io.ts"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
 import { SessionConfiguration } from "../../src/runtime/session-configuration.ts"
@@ -326,9 +326,10 @@ describe("live Session actor", () => {
       ),
     ).toEqual({ type: "not_submitted", reason: "turn_mismatch" })
     expect(
-      await thread.startOrSteer({
-        content: { kind: "text", text: "correction one" },
-      }),
+      await thread.steer(
+        { content: { kind: "text", text: "correction one" } },
+        "turn_first",
+      ),
     ).toEqual({ type: "steered", turnId: "turn_first" })
     expect(
       await thread.steer(
@@ -362,9 +363,6 @@ describe("live Session actor", () => {
     })
     await closed.promise
 
-    await expect(
-      thread.startOrSteer({ content: { kind: "text", text: "too late" } }),
-    ).resolves.toEqual({ type: "not_submitted", reason: "not_idle" })
     await expect(
       thread.steer(
         { content: { kind: "text", text: "too late" } },

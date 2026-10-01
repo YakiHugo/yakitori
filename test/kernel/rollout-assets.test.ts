@@ -242,7 +242,7 @@ describe("rollout assets", () => {
     })
   })
 
-  it("pages assets and rejects references that escape the rollout", async () => {
+  it("rejects references that escape the rollout", async () => {
     const root = await makeRoot()
     const sessionId = createSessionId()
     const files = await createTestRolloutAssets(root, sessionId)
@@ -254,10 +254,9 @@ describe("rollout assets", () => {
     )
     await writeFile(prepared.path, "0123456789")
 
-    await expect(files.readRange(prepared.reference, 3, 4)).resolves.toEqual({
-      bytes: Buffer.from("3456"),
-      totalBytes: 10,
-    })
+    await expect(files.read(prepared.reference)).resolves.toEqual(
+      Buffer.from("0123456789"),
+    )
     await expect(
       files.read({ rolloutId: sessionId, path: "../events.jsonl" }),
     ).rejects.toThrow("Invalid rollout asset path")

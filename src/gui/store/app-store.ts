@@ -28,14 +28,13 @@ import type {
 } from "../../server/protocol.ts"
 import {
   acknowledgeAdmission,
+  listAdmissionsForApiBase,
+  listAdmissionsForSession,
   type PendingAdmission,
   readAdmissionByRequestId,
   reserveAdmission,
-  listAdmissionsForApiBase,
-  listAdmissionsForSession,
 } from "../admission-outbox.ts"
 import type { ContextExcerpt } from "../conversation-context.ts"
-import { inputRecoveryMemory } from "../input-recovery-memory.ts"
 import {
   createExecutionViewState,
   type ExecutionView,
@@ -43,6 +42,7 @@ import {
   projectExecutionView,
   reduceExecutionView,
 } from "../execution-view.ts"
+import { inputRecoveryMemory } from "../input-recovery-memory.ts"
 import {
   ApiRequestError,
   type AppRpcClient,
@@ -933,10 +933,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
               return
             }
             if (event.sessionId !== selection.sessionId) return
-            if (
-              isKernelEvent(event) &&
-              event.type === "input.admitted"
-            ) {
+            if (isKernelEvent(event) && event.type === "input.admitted") {
               if (
                 event.type === "input.admitted" &&
                 inFlightSteerRequests.has(event.data.requestId)
@@ -2545,7 +2542,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
           "session/queue/list",
           { sessionId: selection.sessionId },
         )
-        if (!isCurrentSelection(selection) || revision !== queueReadRevision) return
+        if (!isCurrentSelection(selection) || revision !== queueReadRevision)
+          return
         const pendingInputs = items.map((item) => ({
           id: item.id,
           text: item.input.content.text,
@@ -2597,42 +2595,54 @@ export const useAppStore = create<AppStore>()((set, get) => {
       const item = get().queuedItems.find((entry) => entry.id === inputId)
       if (item === undefined) return
       const requestId = createRequestId()
-      await runTask(async () => {
-        await getAppRpcClient(get().apiBase).request("session/queue/update", {
-          sessionId: selection.sessionId,
-          inputId,
-          requestId,
-          content: { ...item.input.content, text },
-          ...(item.input.modelSelection === undefined
-            ? {}
-            : { modelSelection: item.input.modelSelection }),
-        })
-        await get().refreshQueuedInputs()
-      }, () => isCurrentSelection(selection))
+      await runTask(
+        async () => {
+          await getAppRpcClient(get().apiBase).request("session/queue/update", {
+            sessionId: selection.sessionId,
+            inputId,
+            requestId,
+            content: { ...item.input.content, text },
+            ...(item.input.modelSelection === undefined
+              ? {}
+              : { modelSelection: item.input.modelSelection }),
+          })
+          await get().refreshQueuedInputs()
+        },
+        () => isCurrentSelection(selection),
+      )
     },
 
     reorderQueuedInputs: async (inputIds) => {
       const selection = currentSelection()
       if (!selection) return
-      await runTask(async () => {
-        await getAppRpcClient(get().apiBase).request("session/queue/reorder", {
-          sessionId: selection.sessionId,
-          inputIds,
-        })
-        await get().refreshQueuedInputs()
-      }, () => isCurrentSelection(selection))
+      await runTask(
+        async () => {
+          await getAppRpcClient(get().apiBase).request(
+            "session/queue/reorder",
+            {
+              sessionId: selection.sessionId,
+              inputIds,
+            },
+          )
+          await get().refreshQueuedInputs()
+        },
+        () => isCurrentSelection(selection),
+      )
     },
 
     startQueuedInput: async (inputId) => {
       const selection = currentSelection()
       if (!selection) return
-      await runTask(async () => {
-        await getAppRpcClient(get().apiBase).request("session/queue/start", {
-          sessionId: selection.sessionId,
-          inputId,
-        })
-        await get().refreshQueuedInputs()
-      }, () => isCurrentSelection(selection))
+      await runTask(
+        async () => {
+          await getAppRpcClient(get().apiBase).request("session/queue/start", {
+            sessionId: selection.sessionId,
+            inputId,
+          })
+          await get().refreshQueuedInputs()
+        },
+        () => isCurrentSelection(selection),
+      )
     },
 
     cancelQueuedInput: async (inputId) => {
@@ -2997,6 +3007,10 @@ function withSidebarPresentation<T extends ApiSessionSummary>(
     sectionId: _sectionId,
     sectionPosition: _sectionPosition,
     goal: _goal,
+    goalStatus: _goalStatus,
+    goalUpdatedAt: _goalUpdatedAt,
+    goalTimeUsedSeconds: _goalTimeUsedSeconds,
+    goalInputId: _goalInputId,
     ...base
   } = session
   return {

@@ -8,6 +8,7 @@ import type { TurnInput } from "../core/session-io.ts"
 import {
   type CompletedExecutionItem,
   type ContextCompactionCompletedItem,
+  createCompactionId,
   type JsonObject,
   type KernelError,
   MISSING_TOOL_RESULT_TEXT,
@@ -120,7 +121,19 @@ export type TurnProcessorOptions = {
   readonly modelAutoCompactTokenLimit?: number
   readonly modelAutoCompactTokenLimitScope?: import("../kernel/index.ts").AutoCompactTokenLimitScope
   readonly loadModelTransport?: () => Promise<ModelTransportPolicy | undefined>
-  readonly loadSessionGoal?: () => Promise<string | undefined>
+  readonly loadSessionGoal?: () => Promise<
+    | Readonly<{
+        objective: string
+        status?:
+          | "active"
+          | "paused"
+          | "blocked"
+          | "usage_limited"
+          | "budget_limited"
+          | "complete"
+      }>
+    | undefined
+  >
   readonly loadProjectInstructions?: typeof loadProjectInstructions
   readonly prepareStepExtensions?: (signal: AbortSignal) => Promise<
     Readonly<{
@@ -689,7 +702,14 @@ async function executeTurnModelLoop(
         environment,
         ...(projectInstructions === undefined ? {} : { projectInstructions }),
         ...(skills === undefined ? {} : { skills }),
-        ...(sessionGoal === undefined ? {} : { goal: sessionGoal }),
+        ...(sessionGoal === undefined
+          ? {}
+          : {
+              goal: sessionGoal.objective,
+              ...(sessionGoal.status === undefined
+                ? {}
+                : { goalStatus: sessionGoal.status }),
+            }),
         ...(input.options.agentControl === undefined
           ? {}
           : {
@@ -1527,7 +1547,7 @@ async function compactLiveHistory(
 
   const compactionItem: StartedExecutionItem = {
     type: "context_compaction",
-    itemId: `compaction_${globalThis.crypto.randomUUID()}`,
+    itemId: createCompactionId(),
   }
   input.runtime.emitItemStarted(compactionItem)
   let completed = false

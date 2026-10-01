@@ -76,11 +76,6 @@ export type RolloutAssets = {
   ): Promise<void>
   discardEphemeralRolloutFiles(rolloutId: string): Promise<void>
   read(reference: RolloutAssetReference): Promise<Buffer>
-  readRange(
-    reference: RolloutAssetReference,
-    offset: number,
-    limit: number,
-  ): Promise<{ readonly bytes: Buffer; readonly totalBytes: number }>
   openRead(
     reference: RolloutAssetReference,
   ): Promise<{ readonly stream: ReadStream; readonly totalBytes: number }>
@@ -369,31 +364,6 @@ export function createRolloutAssets(
         if (!stat.isFile())
           throw new Error("Rollout asset is not a regular file.")
         return await handle.readFile()
-      } finally {
-        await handle.close()
-      }
-    },
-
-    async readRange(reference, offset, limit) {
-      if (!Number.isSafeInteger(offset) || offset < 0) {
-        throw new Error("Rollout asset offset must be a non-negative integer.")
-      }
-      if (!Number.isSafeInteger(limit) || limit <= 0) {
-        throw new Error("Rollout asset limit must be a positive integer.")
-      }
-      const path = resolveReference(reference)
-      const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
-      try {
-        const stat = await handle.stat()
-        if (!stat.isFile())
-          throw new Error("Rollout asset is not a regular file.")
-        const length = Math.min(limit, Math.max(0, stat.size - offset))
-        const bytes = Buffer.alloc(length)
-        const read = await handle.read(bytes, 0, length, offset)
-        return {
-          bytes: bytes.subarray(0, read.bytesRead),
-          totalBytes: stat.size,
-        }
       } finally {
         await handle.close()
       }

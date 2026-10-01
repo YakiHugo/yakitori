@@ -1,5 +1,21 @@
 import packageJson from "../../../package.json" with { type: "json" }
 import type { StoredEventEnvelope } from "../../kernel/index.ts"
+import {
+  mcpStatusChangedMethod,
+  projectChangedMethod,
+  sessionCompletedMethod,
+  sessionEventMethod,
+  sessionPermissionRequestedMethod,
+  sessionPermissionRequestMethod,
+  sessionQueueChangedMethod,
+  sessionReplayCompleteMethod,
+  sessionSubscriptionErrorMethod,
+  sessionsActivityMethod,
+  sessionTransientMethod,
+  sidebarChangedMethod,
+  sideChatChangedMethod,
+  websocketRpcPath,
+} from "../../protocol/rpc-wire.ts"
 import type { LiveSessionEvent } from "../../runtime/live-events.ts"
 import type { ApiErrorCode } from "../../server/protocol.ts"
 import type {
@@ -37,7 +53,7 @@ export class ApiRequestError extends Error {
 export function rpcUrl(apiBase: string): string {
   const url = new URL(apiBase)
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:"
-  url.pathname = "/rpc"
+  url.pathname = websocketRpcPath
   url.search = ""
   url.hash = ""
   return url.toString()
@@ -259,7 +275,6 @@ export function createAppRpcClient(options: {
         reconnectAttempt = 0
         connecting = undefined
         inflight.delete(id)
-        send({ method: "initialized" })
         resubscribeAll()
         if (initializedOnce) {
           for (const listener of sidebarChangeListeners) listener({})
@@ -378,7 +393,7 @@ export function createAppRpcClient(options: {
     method: string
     params?: unknown
   }): void {
-    if (message.method !== "session/permission/request") {
+    if (message.method !== sessionPermissionRequestMethod) {
       send({
         id: message.id,
         error: { code: -32601, message: `Unknown method: ${message.method}` },
@@ -402,17 +417,17 @@ export function createAppRpcClient(options: {
   }
 
   function onNotification(message: { method: string; params?: unknown }): void {
-    if (message.method === "session/completed") {
+    if (message.method === sessionCompletedMethod) {
       const params = message.params as SessionCompletedNotification
       for (const listener of completionListeners) listener(params)
       return
     }
-    if (message.method === "sideChat/changed") {
+    if (message.method === sideChatChangedMethod) {
       const params = message.params as { sideChat: SideChatSnapshot }
       for (const listener of sideChatListeners) listener(params.sideChat)
       return
     }
-    if (message.method === "session/event") {
+    if (message.method === sessionEventMethod) {
       const params = message.params as SessionEventNotification
       const record = streams.get(params.sessionId)
       if (record === undefined || record.closed) return
@@ -420,25 +435,25 @@ export function createAppRpcClient(options: {
       record.handlers.onEvent(params.event)
       return
     }
-    if (message.method === "session/transient") {
+    if (message.method === sessionTransientMethod) {
       dispatchTransient(message.params as LiveSessionEvent)
       return
     }
-    if (message.method === "session/permissionRequested") {
+    if (message.method === sessionPermissionRequestedMethod) {
       // The replay form of a still-pending permission; the store consumes it
       // as the same permission.requested transient the SSE stream produced.
       const params = message.params as SessionPermissionRequestParams
       dispatchTransient({ type: "permission.requested", ...params })
       return
     }
-    if (message.method === "session/replayComplete") {
+    if (message.method === sessionReplayCompleteMethod) {
       const params = message.params as SessionReplayCompleteNotification
       const record = streams.get(params.sessionId)
       if (record === undefined || record.closed) return
       record.handlers.onReplayComplete()
       return
     }
-    if (message.method === "session/subscriptionError") {
+    if (message.method === sessionSubscriptionErrorMethod) {
       const params = message.params as SessionSubscriptionErrorNotification
       const record = streams.get(params.sessionId)
       if (record === undefined || record.closed) return
@@ -447,11 +462,11 @@ export function createAppRpcClient(options: {
       record.handlers.onError?.(new ApiRequestError(params.message))
       return
     }
-    if (message.method === "sidebar/changed") {
+    if (message.method === sidebarChangedMethod) {
       const notification = (message.params ?? {}) as SidebarChangedNotification
       for (const listener of sidebarChangeListeners) listener(notification)
     }
-    if (message.method === "sessions/activity") {
+    if (message.method === sessionsActivityMethod) {
       const params: unknown = message.params
       const ids =
         typeof params === "object" &&
@@ -467,16 +482,17 @@ export function createAppRpcClient(options: {
           : []
       for (const listener of sessionActivityListeners) listener(ids)
     }
-    if (message.method === "session/queue/changed") {
-      const sessionId = (message.params as { sessionId?: unknown } | undefined)?.sessionId
+    if (message.method === sessionQueueChangedMethod) {
+      const sessionId = (message.params as { sessionId?: unknown } | undefined)
+        ?.sessionId
       if (typeof sessionId === "string")
         for (const listener of queueChangeListeners) listener(sessionId)
     }
-    if (message.method === "project/changed") {
+    if (message.method === projectChangedMethod) {
       const params = message.params as ProjectChangedNotification
       for (const listener of projectChangeListeners) listener(params)
     }
-    if (message.method === "mcp/statusChanged") {
+    if (message.method === mcpStatusChangedMethod) {
       const params = message.params as McpStatusChangedNotification
       for (const listener of mcpStatusChangedListeners) listener(params)
     }

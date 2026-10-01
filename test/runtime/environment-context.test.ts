@@ -2,16 +2,21 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { buildEnvironmentContext } from "../../src/runtime/environment-context.ts"
+import {
+  observeEnvironment,
+  renderEnvironmentContext,
+} from "../../src/runtime/environment-context.ts"
 
 describe("environment context", () => {
   it("renders the environment block for a non-git directory", async () => {
     const dir = await mkdtemp(join(tmpdir(), "yakitori-env-"))
     try {
-      const context = buildEnvironmentContext({
-        workingDirectory: dir,
-        now: new Date(2026, 6, 31, 12, 0, 0),
-      })
+      const context = renderEnvironmentContext(
+        observeEnvironment({
+          workingDirectory: dir,
+          now: new Date(2026, 6, 31, 12, 0, 0),
+        }),
+      )
 
       expect(context.split("\n")).toEqual([
         "<environment>",
@@ -34,10 +39,12 @@ describe("environment context", () => {
     try {
       await mkdir(join(dir, ".git"))
 
-      const context = buildEnvironmentContext({
-        workingDirectory: dir,
-        now: new Date(2026, 0, 5),
-      })
+      const context = renderEnvironmentContext(
+        observeEnvironment({
+          workingDirectory: dir,
+          now: new Date(2026, 0, 5),
+        }),
+      )
 
       expect(context).toContain("Is workspace a git repo: yes")
       expect(context).toContain("Today's date: 2026-01-05")
@@ -49,15 +56,19 @@ describe("environment context", () => {
   it("renders the shell name when the host supplies one", async () => {
     const dir = await mkdtemp(join(tmpdir(), "yakitori-env-"))
     try {
-      const withShell = buildEnvironmentContext({
-        workingDirectory: dir,
-        now: new Date(2026, 6, 31),
-        shell: "zsh",
-      })
-      const withoutShell = buildEnvironmentContext({
-        workingDirectory: dir,
-        now: new Date(2026, 6, 31),
-      })
+      const withShell = renderEnvironmentContext(
+        observeEnvironment({
+          workingDirectory: dir,
+          now: new Date(2026, 6, 31),
+          shell: "zsh",
+        }),
+      )
+      const withoutShell = renderEnvironmentContext(
+        observeEnvironment({
+          workingDirectory: dir,
+          now: new Date(2026, 6, 31),
+        }),
+      )
 
       expect(withShell).toContain("Shell: zsh")
       expect(withoutShell).not.toContain("Shell:")

@@ -20,7 +20,6 @@ import {
 import { usePinnedScroll } from "../hooks/use-pinned-scroll.ts"
 import { type AppRpcClient, createAppRpcClient } from "../lib/rpc-client.ts"
 import { ApprovalRequests } from "./approval-bar.tsx"
-import { CompactionCell } from "./cells/compaction-cell.tsx"
 import { PermissionCell } from "./cells/permission-cell.tsx"
 import { ReasoningCell } from "./cells/reasoning-cell.tsx"
 import { ToolCell } from "./cells/tool-cell.tsx"
@@ -174,7 +173,6 @@ function ChildTrace({
           entry.state !== "failed" &&
           entry.state !== "interrupted") ||
         entry.kind === "reasoning" ||
-        entry.kind === "context_compacted" ||
         (entry.kind === "permission" && entry.state === "resolved")
       const previous = result.at(-1)
       if (activity && previous?.activity) previous.entries.push(entry)
@@ -350,8 +348,6 @@ function traceEntryKey(entry: ExecutionEntry): string {
       return entry.permissionRequestId
     case "turn_terminal":
       return `${entry.turnId}:${entry.state}`
-    case "context_compacted":
-      return entry.compactionId
   }
 }
 
@@ -431,7 +427,5 @@ function TraceEntry({
       return <PermissionCell entry={entry} />
     case "turn_terminal":
       return <TurnTerminalCell entry={entry} />
-    case "context_compacted":
-      return <CompactionCell entry={entry} />
   }
 }

@@ -23,7 +23,6 @@ import { useAppStore, useExecutionView } from "../store/app-store.ts"
 import { useWorkspaceStore } from "../store/workspace-store.ts"
 import { presentTool } from "../tool-presentation.ts"
 import { AssistantMessageCell } from "./cells/assistant-message-cell.tsx"
-import { CompactionCell } from "./cells/compaction-cell.tsx"
 import { PermissionCell } from "./cells/permission-cell.tsx"
 import { ReasoningCell } from "./cells/reasoning-cell.tsx"
 import { ToolCell } from "./cells/tool-cell.tsx"
@@ -92,8 +91,6 @@ function entryKey(entry: ExecutionEntry): string {
       return entry.permissionRequestId
     case "turn_terminal":
       return `${entry.turnId}:${entry.state}`
-    case "context_compacted":
-      return entry.compactionId
   }
 }
 
@@ -537,8 +534,7 @@ function groupTurnTimeline(
     if (
       (entry.kind === "tool" &&
         entry.execution.type !== "collaboration_tool_call" &&
-        entry.execution.name !== "request_user_input_async" &&
-        entry.execution.name !== "update_plan") ||
+        entry.execution.name !== "request_user_input_async") ||
       entry.kind === "permission"
     ) {
       actions.push(entry)
@@ -649,8 +645,6 @@ const EntryCell = memo(function EntryCell({
       return <PermissionCell entry={entry} />
     case "turn_terminal":
       return <TurnTerminalCell entry={entry} />
-    case "context_compacted":
-      return <CompactionCell entry={entry} />
     case "user_input":
       return <UserMessageCell entry={entry} queued={false} />
   }

@@ -31,10 +31,6 @@ export class AgentThread {
     return this.#session.io.agentStatus
   }
 
-  startOrSteer(input: SubmitTurnInput): Promise<TurnInputSubmission> {
-    return this.#session.io.startOrSteer(input)
-  }
-
   startIfIdle(input: SubmitTurnInput): Promise<TurnInputSubmission> {
     return this.#session.io.startIfIdle(input)
   }

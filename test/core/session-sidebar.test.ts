@@ -70,4 +70,44 @@ describe("session sidebar goal", () => {
       title: "named",
     })
   })
+
+  it("pauses a goal without dropping the objective, and clears the status with the goal", () => {
+    const set = changeSessionSidebar(
+      emptySessionSidebar(),
+      {
+        type: "session",
+        sessionId: "session_a",
+        goal: "ship it",
+        goalStatus: "active",
+        goalUpdatedAt: "2026-09-30T00:00:00.000Z",
+        goalTimeUsedSeconds: 4,
+        goalInputId: "input_1",
+      },
+      sessions,
+    )
+    const paused = changeSessionSidebar(
+      set,
+      {
+        type: "session",
+        sessionId: "session_a",
+        goalStatus: "paused",
+        goalUpdatedAt: "2026-09-30T00:00:05.000Z",
+        goalTimeUsedSeconds: 9,
+      },
+      sessions,
+    )
+    expect(paused.entries.session_a).toMatchObject({
+      goal: "ship it",
+      goalStatus: "paused",
+      goalTimeUsedSeconds: 9,
+      goalInputId: "input_1",
+    })
+    const cleared = changeSessionSidebar(
+      paused,
+      { type: "session", sessionId: "session_a", goal: null },
+      sessions,
+    )
+    expect(cleared.entries.session_a?.goalStatus).toBeUndefined()
+    expect(cleared.entries.session_a?.goalInputId).toBeUndefined()
+  })
 })

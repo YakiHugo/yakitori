@@ -13,7 +13,6 @@ import {
   createSkillsLoader,
   getSkillDependencyDiagnostics,
   loadExplicitSkillInstructions,
-  loadSkillsCatalog,
   renderSkillsCatalog,
 } from "../../src/runtime/skills.ts"
 
@@ -62,12 +61,14 @@ describe("skills catalog", () => {
         "---\nname: deploy\ndescription: >\n  Deploy the current\n  service safely.\n---\nLONG BODY\n",
       )
 
-      const catalog = await loadSkillsCatalog({
-        workspaceRoot: workspace,
-        workingDirectory: nested,
-        homeDir: home,
-        userHomeDir: home,
-      })
+      const catalog = await renderSkillsCatalog(
+        await createSkillsLoader()({
+          workspaceRoot: workspace,
+          workingDirectory: nested,
+          homeDir: home,
+          userHomeDir: home,
+        }),
+      )
 
       expect(catalog?.skills.map((skill) => [skill.name, skill.scope])).toEqual(
         [

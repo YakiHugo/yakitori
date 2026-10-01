@@ -9,7 +9,7 @@ import type {
   TurnMetrics,
 } from "../kernel/events.ts"
 import { InputRole } from "../kernel/events.ts"
-import { createTurnId } from "../kernel/ids.ts"
+import { createInputId, createTurnId } from "../kernel/ids.ts"
 import { fingerprintInputAdmission } from "../kernel/operation.ts"
 import { ContextManager, type ContextSnapshot } from "./context-manager.ts"
 import type {
@@ -405,12 +405,6 @@ export class Session {
       return active === undefined
         ? this.#startTurn(input)
         : notSubmitted(Reason.NotIdle)
-    }
-    if (mode.type === "start_or_steer") {
-      if (active === undefined) return this.#startTurn(input)
-      if (!active.acceptingSteering) return notSubmitted(Reason.NotIdle)
-      await this.#acceptSteering(active, input)
-      return { type: "steered", turnId: active.input.submissionId }
     }
     if (active === undefined || !active.acceptingSteering) {
       return notSubmitted(Reason.NoActiveTurn)
@@ -1381,7 +1375,7 @@ function turnInputFingerprint(input: TurnInput): string {
 function buildInputItem(input: TurnInput): ResponseItemEnvelope {
   const submissionMetadata = turnInputSubmissionMetadata(input)
   return {
-    id: `input_${globalThis.crypto.randomUUID()}`,
+    id: createInputId(),
     turnId: input.submissionId,
     createdAt: new Date().toISOString(),
     item: {

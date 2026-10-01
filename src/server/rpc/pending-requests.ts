@@ -1,8 +1,4 @@
-import {
-  INTERNAL_ERROR,
-  type JsonRpcErrorObject,
-  type RequestId,
-} from "./messages.ts"
+import type { JsonRpcErrorObject, RequestId } from "./messages.ts"
 
 // Marker carried in the rejection data when a turn transition aborts a pending
 // server→client request; handlers distinguish it from a user denial and return
@@ -133,37 +129,5 @@ export class PendingServerRequests {
         method: entry.method,
         ...(entry.params === undefined ? {} : { params: entry.params }),
       }))
-  }
-
-  cancelForSession(sessionId: string, message: string): void {
-    this.rejectMatching((entry) => entry.sessionId === sessionId, {
-      code: INTERNAL_ERROR,
-      message,
-    })
-  }
-
-  cancelAll(message: string): void {
-    this.rejectMatching(() => true, { code: INTERNAL_ERROR, message })
-  }
-
-  abortForTurnTransition(sessionId: string): void {
-    this.rejectMatching((entry) => entry.sessionId === sessionId, {
-      code: INTERNAL_ERROR,
-      message: "client request resolved because the turn state was changed",
-      data: { reason: TURN_TRANSITION_PENDING_REQUEST_REASON },
-    })
-  }
-
-  private rejectMatching(
-    matches: (entry: PendingEntry) => boolean,
-    error: JsonRpcErrorObject,
-  ): void {
-    const entries = [...this.pending.entries()].filter(([, entry]) =>
-      matches(entry),
-    )
-    for (const [id, entry] of entries) {
-      this.pending.delete(id)
-      entry.reject(new ServerRequestRejectedError(error))
-    }
   }
 }

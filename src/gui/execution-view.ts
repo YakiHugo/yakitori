@@ -73,12 +73,6 @@ export type ExecutionEntry =
       readonly state: "failed" | "cancelled" | "interrupted"
       readonly message: string
     }
-  | {
-      readonly kind: "context_compacted"
-      readonly compactionId: string
-      readonly summary: string
-      readonly createdAt: string
-    }
 
 export type ToolDiff = { readonly text: string; readonly truncated: boolean }
 
@@ -793,19 +787,6 @@ function applyDurable(
           : { resultError: true, resultErrorMessage: item.error.message }),
       })
     }
-    case "context.compacted":
-      return {
-        ...clearActiveRetry(next, event.data.turnId),
-        entries: [
-          ...next.entries,
-          {
-            kind: "context_compacted",
-            compactionId: event.data.compactionId,
-            summary: event.data.summary,
-            createdAt: event.createdAt,
-          },
-        ],
-      }
     default:
       return next
   }

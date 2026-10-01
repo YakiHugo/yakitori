@@ -214,6 +214,49 @@ describe("world state", () => {
       ],
     })
   })
+
+  it("tells the model a paused goal is not being pursued, then that it was resumed", () => {
+    const set = diffWorldState(
+      undefined,
+      worldState(
+        undefined,
+        "2026-08-21",
+        [],
+        undefined,
+        "always_approve",
+        "ship the feature",
+        "active",
+      ),
+    )
+    const paused = diffWorldState(
+      set?.snapshot,
+      worldState(
+        undefined,
+        "2026-08-21",
+        [],
+        undefined,
+        "always_approve",
+        "ship the feature",
+        "paused",
+      ),
+    )
+    expect(paused?.fragments[0]?.text).toContain("paused this session goal")
+    expect(paused?.fragments[0]?.text).toContain("Do not keep working")
+
+    const resumed = diffWorldState(
+      paused?.snapshot,
+      worldState(
+        undefined,
+        "2026-08-21",
+        [],
+        undefined,
+        "always_approve",
+        "ship the feature",
+        "active",
+      ),
+    )
+    expect(resumed?.fragments[0]?.text).toContain("resumed this session goal")
+  })
 })
 
 function worldState(
@@ -223,6 +266,7 @@ function worldState(
   multiAgent?: Parameters<typeof buildWorldStateFromSnapshot>[0]["multiAgent"],
   approvalPolicy: "always_approve" | "auto_file_tools" = "always_approve",
   goal?: string,
+  goalStatus?: "active" | "paused",
 ) {
   const sessionConfiguration = SessionConfiguration.create({
     promptCacheKey: "session-cache",
@@ -247,6 +291,7 @@ function worldState(
     ...(multiAgent === undefined ? {} : { multiAgent }),
     ...(project === undefined ? {} : { projectInstructions: project }),
     ...(goal === undefined ? {} : { goal }),
+    ...(goalStatus === undefined ? {} : { goalStatus }),
   })
 }
 
