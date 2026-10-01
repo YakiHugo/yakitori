@@ -1,6 +1,5 @@
 export const IdPrefix = {
   Compaction: "compaction",
-  ContextWindow: "context_window",
   Event: "event",
   Input: "input",
   Item: "item",
@@ -13,10 +12,6 @@ export type IdPrefix = (typeof IdPrefix)[keyof typeof IdPrefix]
 
 export function createCompactionId(): string {
   return createPrefixedId(IdPrefix.Compaction)
-}
-
-export function createContextWindowId(): string {
-  return createPrefixedId(IdPrefix.ContextWindow)
 }
 
 export function createEventId(): string {

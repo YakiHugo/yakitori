@@ -95,7 +95,6 @@ export type SessionPermissionEvent =
     }
 
 export type TurnInputMode =
-  | { readonly type: "start_or_steer" }
   | { readonly type: "start_if_idle" }
   | { readonly type: "steer"; readonly expectedTurnId: string }
 
@@ -262,10 +261,6 @@ export class SessionIo {
 
   subscribeAgentStatus(listener: (status: AgentStatus) => void): () => void {
     return this.#subscribeAgentStatus(listener)
-  }
-
-  startOrSteer(input: SubmitTurnInput): Promise<TurnInputSubmission> {
-    return this.#submitTurnInput(input, { type: "start_or_steer" })
   }
 
   startIfIdle(input: SubmitTurnInput): Promise<TurnInputSubmission> {

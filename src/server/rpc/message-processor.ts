@@ -219,8 +219,7 @@ export class MessageProcessor {
         this.dispatchRequest(connectionId, connection, message)
         return
       }
-      // Client notifications need no answer: "initialized" acknowledges the
-      // handshake and unknown notifications are ignored by design.
+      // Client notifications need no answer. Unknown notifications are ignored.
       return
     }
     // Responses resolve process-wide pending server→client requests; any

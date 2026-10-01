@@ -1,4 +1,12 @@
 import { isKernelEvent } from "../../kernel/index.ts"
+import {
+  sessionEventMethod,
+  sessionPermissionRequestedMethod,
+  sessionPermissionRequestMethod,
+  sessionReplayCompleteMethod,
+  sessionSubscriptionErrorMethod,
+  sessionTransientMethod,
+} from "../../protocol/rpc-wire.ts"
 import type { LiveSessionEvent } from "../../runtime/live-events.ts"
 import type { SessionDelivery, SessionEventHub } from "../event-hub.ts"
 import type { ServerHandlers } from "../handlers.ts"
@@ -12,13 +20,12 @@ import type {
   ApiPendingPermission,
   ApiReadSessionResponse,
 } from "../protocol.ts"
-import {
-  sessionPermissionRequestMethod,
-  type SessionPermissionRequestParams,
-  type SessionPermissionRequestResult,
-  type SessionSubscriptionErrorNotification,
-} from "./methods.ts"
 import { INTERNAL_ERROR } from "./messages.ts"
+import type {
+  SessionPermissionRequestParams,
+  SessionPermissionRequestResult,
+  SessionSubscriptionErrorNotification,
+} from "./methods.ts"
 import {
   isTurnTransitionRejection,
   type PendingServerRequest,
@@ -225,7 +232,7 @@ export function createSessionSubscriptions(
           // arrive through the buffer as well; the cursor dedupes them.
           if (event.seq <= lastSeq) continue
           lastSeq = event.seq
-          options.notify(input.connectionId, "session/event", {
+          options.notify(input.connectionId, sessionEventMethod, {
             sessionId: input.sessionId,
             seq: event.seq,
             event,
@@ -242,7 +249,7 @@ export function createSessionSubscriptions(
         const request = ensurePermissionRequest(input.sessionId, permission)
         options.sendRequest(input.connectionId, request)
       }
-      options.notify(input.connectionId, "session/transient", delivery.event)
+      options.notify(input.connectionId, sessionTransientMethod, delivery.event)
     }
 
     const hub = options.eventHub.subscribe(input.sessionId, (delivery) => {
@@ -283,7 +290,7 @@ export function createSessionSubscriptions(
     )) {
       // Permission snapshots can only retire permission requests. Other
       // interactions have their own owners and cancellation contracts.
-      if (pending.method !== "session/permission/request") continue
+      if (pending.method !== sessionPermissionRequestMethod) continue
       const permissionRequestId =
         typeof pending.params === "object" &&
         pending.params !== null &&
@@ -326,7 +333,7 @@ export function createSessionSubscriptions(
           cursor = page.body.nextAfter
         }
         if (closed) return
-        options.notify(input.connectionId, "session/replayComplete", {
+        options.notify(input.connectionId, sessionReplayCompleteMethod, {
           sessionId: input.sessionId,
           seq: watermark,
         })
@@ -344,7 +351,7 @@ export function createSessionSubscriptions(
             input.connectionId,
             ensurePermissionRequest(input.sessionId, permission),
           )
-          options.notify(input.connectionId, "session/permissionRequested", {
+          options.notify(input.connectionId, sessionPermissionRequestedMethod, {
             sessionId: input.sessionId,
             ...permission,
           })
@@ -362,7 +369,7 @@ export function createSessionSubscriptions(
         // not terminate the current subscription for the same session.
         if (!closed) {
           remove(input.connectionId, input.sessionId)
-          options.notify(input.connectionId, "session/subscriptionError", {
+          options.notify(input.connectionId, sessionSubscriptionErrorMethod, {
             sessionId: input.sessionId,
             message: "Session event replay failed.",
           } satisfies SessionSubscriptionErrorNotification)
@@ -435,8 +442,7 @@ export function reconcileBufferedSessionDeliveries(
           (event.type === "turn.started" ||
             event.type === "turn.completed" ||
             event.type === "item.started" ||
-            event.type === "item.completed" ||
-            event.type === "context.compacted")
+            event.type === "item.completed")
         ) {
           progressedTurns.add(event.data.turnId)
         }

@@ -1,5 +1,4 @@
 import type { ImageAttachment } from "../kernel/events.ts"
-import { apiUrl } from "./lib/api-client.ts"
 
 export async function appendPickedImages(
   current: readonly ImageAttachment[],
@@ -55,13 +54,14 @@ export function imageAttachmentUrl(
   attachment: ImageAttachment,
   apiBase = window.location.origin,
 ): string {
-  return apiUrl(
-    apiBase,
-    `/rollouts/${encodeURIComponent(attachment.file.rolloutId)}/assets/${attachment.file.path
+  const base = apiBase.endsWith("/") ? apiBase : `${apiBase}/`
+  return new URL(
+    `rollouts/${encodeURIComponent(attachment.file.rolloutId)}/assets/${attachment.file.path
       .split("/")
       .map(encodeURIComponent)
       .join("/")}`,
-  )
+    base,
+  ).toString()
 }
 
 export function requireDesktopBridge(): YakitoriDesktopBridge {

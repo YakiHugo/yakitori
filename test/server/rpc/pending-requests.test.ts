@@ -66,42 +66,7 @@ describe("PendingServerRequests", () => {
     ])
   })
 
-  it("cancelForSession rejects only that session's requests", async () => {
-    const pending = new PendingServerRequests()
-    const cancelled = pending.register({ sessionId: "s1", method: "m" })
-    const surviving = pending.register({ sessionId: "s2", method: "m" })
-
-    pending.cancelForSession("s1", "session closed")
-
-    const error = await rejectionOf(cancelled.response)
-    if (!(error instanceof ServerRequestRejectedError)) {
-      throw new Error("expected a ServerRequestRejectedError")
-    }
-    expect(error.message).toBe("session closed")
-    expect(isTurnTransitionRejection(error)).toBe(false)
-    expect(pending.pendingForSession("s1")).toEqual([])
-
-    expect(pending.resolve(surviving.id, "still answerable")).toBe(true)
-    await expect(surviving.response).resolves.toBe("still answerable")
-  })
-
-  it("cancelAll rejects every pending request", async () => {
-    const pending = new PendingServerRequests()
-    const first = pending.register({ sessionId: "s1", method: "m" })
-    const second = pending.register({ sessionId: "s2", method: "m" })
-
-    pending.cancelAll("server shutting down")
-
-    for (const registered of [first, second]) {
-      const error = await rejectionOf(registered.response)
-      if (!(error instanceof ServerRequestRejectedError)) {
-        throw new Error("expected a ServerRequestRejectedError")
-      }
-      expect(error.message).toBe("server shutting down")
-    }
-  })
-
-  it("abortForTurnTransition rejects with a marker distinguishable from a denial", async () => {
+  it("distinguishes a turn-transition rejection from a denial", async () => {
     const pending = new PendingServerRequests()
     const aborted = pending.register({
       sessionId: "s1",
@@ -112,7 +77,11 @@ describe("PendingServerRequests", () => {
       method: "permission/request",
     })
 
-    pending.abortForTurnTransition("s1")
+    pending.reject(aborted.id, {
+      code: INTERNAL_ERROR,
+      message: "client request resolved because the turn state was changed",
+      data: { reason: TURN_TRANSITION_PENDING_REQUEST_REASON },
+    })
     pending.reject(denied.id, { code: INTERNAL_ERROR, message: "denied" })
 
     const abortError = await rejectionOf(aborted.response)

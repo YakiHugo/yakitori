@@ -30,6 +30,14 @@ import {
   type SqliteMateStore,
 } from "../mates/index.ts"
 import {
+  mcpStatusChangedMethod,
+  sessionCompletedMethod,
+  sessionQueueChangedMethod,
+  sessionsActivityMethod,
+  sidebarChangedMethod,
+  sideChatChangedMethod,
+} from "../protocol/rpc-wire.ts"
+import {
   type AgentRuntime,
   type ApprovalPolicy,
   acquireRuntimeLock,
@@ -584,7 +592,7 @@ export async function createYakitoriApplication(
           }),
       })
       mcpManager.subscribeStatus(() =>
-        broadcastNotification?.("mcp/statusChanged", {
+        broadcastNotification?.(mcpStatusChangedMethod, {
           sessionId: stored.metadata.id,
         }),
       )
@@ -654,8 +662,19 @@ export async function createYakitoriApplication(
                 cwd: workingDirectory,
               })
             ).configuration.modelTransport,
-          loadSessionGoal: async () =>
-            (await threadStore.sessionPresentation(stored.metadata.id)).goal,
+          loadSessionGoal: async () => {
+            const presentation = await threadStore.sessionPresentation(
+              stored.metadata.id,
+            )
+            return presentation.goal === undefined
+              ? undefined
+              : {
+                  objective: presentation.goal,
+                  ...(presentation.goalStatus === undefined
+                    ? {}
+                    : { status: presentation.goalStatus }),
+                }
+          },
           modelClient: providerRegistry.createClient(),
           provider: provider.provider,
           model: provider.model,
@@ -804,13 +823,13 @@ export async function createYakitoriApplication(
             store: threadStore,
             availableProviders: providerRegistry.providers,
             notifySidebarChanged: () =>
-              broadcastNotification?.("sidebar/changed", {}),
+              broadcastNotification?.(sidebarChangedMethod, {}),
           })
         : undefined
     // "Is it working" broadcasts: every running-turn transition refreshes the
     // full active-id list so clients patch their session lists without a refetch.
     threadManager.subscribeRunningTurnCount(() => {
-      broadcastNotification?.("sessions/activity", {
+      broadcastNotification?.(sessionsActivityMethod, {
         activeSessionIds: threadManager.runningSessionIds,
       })
     })
@@ -828,9 +847,9 @@ export async function createYakitoriApplication(
       eventHub,
       sessionDefaults,
       onRootTurnCompleted: (event) =>
-        broadcastNotification?.("session/completed", event),
+        broadcastNotification?.(sessionCompletedMethod, event),
       notifyQueueChanged: (sessionId) =>
-        broadcastNotification?.("session/queue/changed", { sessionId }),
+        broadcastNotification?.(sessionQueueChangedMethod, { sessionId }),
       projectStore: ownedProjectStore,
       resolvePermission: (input) => permissionGate.resolve(input),
       listPendingPermissions: (sessionId) => permissionGate.list(sessionId),
@@ -923,7 +942,7 @@ export async function createYakitoriApplication(
         }
       },
       changed: (sideChat) =>
-        broadcastNotification?.("sideChat/changed", { sideChat }),
+        broadcastNotification?.(sideChatChangedMethod, { sideChat }),
       reportError: (cause) =>
         reportOperationalFailure(reporter, {
           component: "turn-processor",

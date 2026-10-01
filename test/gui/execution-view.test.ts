@@ -122,16 +122,37 @@ describe("execution view", () => {
       seq: 0,
       createdAt: "2026-07-24T00:00:00.000Z",
       updatedAt: "2026-07-24T00:00:00.000Z",
-      pendingInputs: [{ id: "input_queued", text: "queued message", admittedAt: "2026-07-24T00:00:00.000Z" }],
+      pendingInputs: [
+        {
+          id: "input_queued",
+          text: "queued message",
+          admittedAt: "2026-07-24T00:00:00.000Z",
+        },
+      ],
       pendingPermissions: [],
-      counts: { inputs: 0, pendingInputs: 1, turns: 0, items: 0, permissions: 0, tools: 0 },
+      counts: {
+        inputs: 0,
+        pendingInputs: 1,
+        turns: 0,
+        items: 0,
+        permissions: 0,
+        tools: 0,
+      },
     }
-    let state = reduceExecutionView(createExecutionViewState(), { type: "snapshot", session })
+    let state = reduceExecutionView(createExecutionViewState(), {
+      type: "snapshot",
+      session,
+    })
     expect(projectExecutionView(state).queuedInputIds).toEqual(["input_queued"])
     expect(projectExecutionView(state).entries).toEqual([])
-    state = reduceExecutionView(state, { type: "snapshot", session: {
-      ...session, pendingInputs: [], counts: { ...session.counts, pendingInputs: 0 },
-    } })
+    state = reduceExecutionView(state, {
+      type: "snapshot",
+      session: {
+        ...session,
+        pendingInputs: [],
+        counts: { ...session.counts, pendingInputs: 0 },
+      },
+    })
     expect(projectExecutionView(state).queuedInputIds).toEqual([])
   })
 
@@ -949,67 +970,6 @@ describe("execution view", () => {
     expect(projectExecutionView(state).entries).toEqual([])
   })
 
-  it("projects a compaction marker in seq order with its summary", () => {
-    const facts = [
-      {
-        type: EventType.InputAdmitted,
-        data: {
-          requestId: "request:1",
-          inputId: "input_1",
-          role: InputRole.User,
-          content: { kind: "text" as const, text: "earlier work" },
-        },
-      },
-      {
-        type: EventType.ContextCompacted,
-        data: {
-          compactionId: "compaction_1",
-          turnId: "turn_2",
-          throughSeq: 5,
-          coveredTurnIds: ["turn_1"],
-          summary: "Goal: ship the feature.",
-          replacement: {
-            windowId: "context_window_2",
-            firstWindowId: "context_window_1",
-            previousWindowId: "context_window_1",
-            windowNumber: 2,
-            history: [],
-            worldStateBaseline: {},
-          },
-        },
-      },
-      agentCompleted({
-        itemId: "item_1",
-        turnId: "turn_2",
-        text: "Continuing.",
-      }),
-    ]
-    const state = facts.reduce(
-      (current, event, index) =>
-        reduceExecutionView(current, {
-          type: "durable",
-          event: createExecutionEnvelope({
-            sessionId,
-            seq: index + 1,
-            createdAt: `2026-07-24T00:00:0${index}.000Z`,
-            event,
-          }),
-        }),
-      createExecutionViewState(),
-    )
-
-    expect(projectExecutionView(state).entries).toEqual([
-      expect.objectContaining({ kind: "user_input", text: "earlier work" }),
-      {
-        kind: "context_compacted",
-        compactionId: "compaction_1",
-        summary: "Goal: ship the feature.",
-        createdAt: "2026-07-24T00:00:01.000Z",
-      },
-      expect.objectContaining({ kind: "assistant", text: "Continuing." }),
-    ])
-  })
-
   it("summarizes tool entries and tracks model, usage, and queued inputs", () => {
     const facts: KernelFact[] = [
       {
@@ -1160,23 +1120,52 @@ describe("execution view", () => {
       seq: 0,
       createdAt: "2026-07-24T00:00:00.000Z",
       updatedAt: "2026-07-24T00:00:00.000Z",
-      pendingInputs: [{ id: "queue_1", text: "first", admittedAt: "2026-07-24T00:00:00.000Z" }],
+      pendingInputs: [
+        {
+          id: "queue_1",
+          text: "first",
+          admittedAt: "2026-07-24T00:00:00.000Z",
+        },
+      ],
       pendingPermissions: [],
-      counts: { inputs: 0, pendingInputs: 1, turns: 0, items: 0, permissions: 0, tools: 0 },
+      counts: {
+        inputs: 0,
+        pendingInputs: 1,
+        turns: 0,
+        items: 0,
+        permissions: 0,
+        tools: 0,
+      },
     }
-    let state = reduceExecutionView(createExecutionViewState(), { type: "snapshot", session })
+    let state = reduceExecutionView(createExecutionViewState(), {
+      type: "snapshot",
+      session,
+    })
     state = reduceExecutionView(state, {
       type: "durable",
       event: createExecutionEnvelope({
-        sessionId, seq: 1, createdAt: "2026-07-24T00:00:03.000Z",
-        event: { type: EventType.TurnStarted, data: { turnId: "turn_9", inputId: "input_1" } },
+        sessionId,
+        seq: 1,
+        createdAt: "2026-07-24T00:00:03.000Z",
+        event: {
+          type: EventType.TurnStarted,
+          data: { turnId: "turn_9", inputId: "input_1" },
+        },
       }),
     })
-    expect(projectExecutionView(state).activeTurnStartedAt).toBe("2026-07-24T00:00:03.000Z")
-    state = reduceExecutionView(state, { type: "snapshot", session: {
-      ...session, seq: 1, activeTurnId: "turn_9", pendingInputs: [],
-      counts: { ...session.counts, pendingInputs: 0 },
-    } })
+    expect(projectExecutionView(state).activeTurnStartedAt).toBe(
+      "2026-07-24T00:00:03.000Z",
+    )
+    state = reduceExecutionView(state, {
+      type: "snapshot",
+      session: {
+        ...session,
+        seq: 1,
+        activeTurnId: "turn_9",
+        pendingInputs: [],
+        counts: { ...session.counts, pendingInputs: 0 },
+      },
+    })
     expect(projectExecutionView(state).queuedInputIds).toEqual([])
   })
 

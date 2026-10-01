@@ -5,6 +5,7 @@ import {
   MessageSquare,
   PencilLine,
   RotateCcw,
+  Target,
 } from "lucide-react"
 import {
   type ReactNode,
@@ -81,6 +82,9 @@ export function UserMessageCell({
 }>) {
   const busy = useAppStore((state) => state.busy)
   const sessionId = useAppStore((state) => state.selection.sessionId)
+  const goalInputId = useAppStore((state) => state.selectedSession?.goalInputId)
+  const changeSidebar = useAppStore((state) => state.changeSidebar)
+  const sentAsGoal = goalInputId !== undefined && goalInputId === entry.inputId
   const apiBase = useAppStore((state) => state.apiBase)
   const forkSession = useAppStore((state) => state.forkSession)
   const sendShortcut = usePreferencesStore((state) => state.sendShortcut)
@@ -139,12 +143,40 @@ export function UserMessageCell({
               <MessageText text={entry.text} />
             </div>
           ) : null}
+          {sentAsGoal ? (
+            <div className="flex items-center gap-1 text-xs text-muted-foreground">
+              <Target className="size-3" />
+              <span>Sent as goal</span>
+            </div>
+          ) : null}
           <div className="flex min-h-5 items-center gap-1">
             {queued ? <Badge variant="secondary">queued</Badge> : null}
             {mode === undefined ? (
               <div className="flex items-center gap-1 text-xs text-muted-foreground opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
                 <MessageTimestamp at={entry.at} />
                 <CopyIconButton text={entry.text} label="message" />
+                {entry.text.trim() && sessionId !== undefined && !sentAsGoal ? (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    aria-label="Set as goal"
+                    title="Set as goal"
+                    onClick={() =>
+                      void changeSidebar({
+                        type: "session",
+                        sessionId,
+                        goal: entry.text.trim(),
+                        goalStatus: "active",
+                        goalUpdatedAt: new Date().toISOString(),
+                        goalTimeUsedSeconds: 0,
+                        goalInputId: entry.inputId,
+                      })
+                    }
+                    className="rounded-md p-1 transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+                  >
+                    <Target className="size-4" />
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   disabled={busy}

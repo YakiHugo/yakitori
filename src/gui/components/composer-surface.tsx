@@ -107,7 +107,7 @@ const SLASH_COMMANDS: readonly SlashCommand[] = [
   },
   {
     name: GOAL_DIRECTIVE,
-    description: "Set or clear the session goal",
+    description: "Set or edit the session goal",
     icon: Target,
   },
 ]

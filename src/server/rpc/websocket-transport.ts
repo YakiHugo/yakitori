@@ -1,6 +1,7 @@
 import type { IncomingMessage, Server } from "node:http"
 import type { Duplex } from "node:stream"
 import { WebSocket, WebSocketServer } from "ws"
+import { websocketRpcPath } from "../../protocol/rpc-wire.ts"
 import { isAllowedCorsOrigin } from "../http.ts"
 import {
   consoleOperationalFailureReporter,
@@ -8,8 +9,6 @@ import {
   reportOperationalFailure,
 } from "../operational-errors.ts"
 import type { MessageProcessor } from "./message-processor.ts"
-
-export const websocketRpcPath = "/rpc"
 
 // Implementation safety boundaries, not product quotas. The queue cap is the
 // disconnect trigger: like Codex's disconnectable transports, a client whose

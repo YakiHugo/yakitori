@@ -192,25 +192,6 @@ export function dynamicToolExecution(): ToolExecutionDescriptor {
   return { type: "dynamic_tool_call" }
 }
 
-export function mcpToolExecution(
-  input: Readonly<{
-    server: string
-    tool: string
-    arguments: JsonValue
-    readOnlyHint?: boolean
-  }>,
-): ToolExecutionDescriptor {
-  return {
-    type: "mcp_tool_call",
-    server: input.server,
-    tool: input.tool,
-    arguments: input.arguments,
-    ...(input.readOnlyHint === undefined
-      ? {}
-      : { readOnlyHint: input.readOnlyHint }),
-  }
-}
-
 function recordOf(
   value: JsonValue | undefined,
 ): Record<string, JsonValue> | undefined {

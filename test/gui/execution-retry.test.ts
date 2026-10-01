@@ -263,24 +263,6 @@ describe("model retry execution state", () => {
         item: { type: "context_compaction", itemId: "compaction_1" },
       },
     }),
-    durable({
-      type: "context.compacted",
-      data: {
-        turnId: live.turnId,
-        compactionId: "compaction_1",
-        throughSeq: 1,
-        coveredTurnIds: ["turn_old"],
-        summary: "Earlier work",
-        replacement: {
-          windowId: "window_2",
-          firstWindowId: "window_1",
-          previousWindowId: "window_1",
-          windowNumber: 2,
-          history: [],
-          worldStateBaseline: {},
-        },
-      },
-    }),
   ]
 
   it.each(

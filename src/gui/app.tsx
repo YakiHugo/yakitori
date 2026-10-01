@@ -4,7 +4,7 @@ import { ApprovalBar } from "./components/approval-bar.tsx"
 import { Composer } from "./components/composer.tsx"
 import { PreferencesEffects } from "./components/preferences-effects.tsx"
 import { QueuedInputs } from "./components/queued-inputs.tsx"
-import { SessionGoal } from "./components/session-goal.tsx"
+import { GoalBar, GoalEditor } from "./components/session-goal.tsx"
 import { SessionSummary } from "./components/session-summary.tsx"
 import { SettingsPage } from "./components/settings-page.tsx"
 import { SidebarNameDialog } from "./components/sidebar-name-dialog.tsx"
@@ -48,14 +48,18 @@ export function App() {
               Loading conversation…
             </div>
           ) : hasSession ? (
-            <>
-              <SessionHeader />
-              <Transcript>
-                <ApprovalBar />
-                <QueuedInputs />
-                <SessionComposer />
-              </Transcript>
-            </>
+            <div className="flex min-h-0 flex-1">
+              <div className="flex min-w-0 flex-1 flex-col">
+                <SessionHeader />
+                <Transcript>
+                  <ApprovalBar />
+                  <QueuedInputs />
+                  <GoalBar />
+                  <SessionComposer />
+                </Transcript>
+              </div>
+              <GoalEditor />
+            </div>
           ) : (
             <EmptyState />
           )}
@@ -147,7 +151,6 @@ function SessionHeader() {
         ) : null}
       </div>
       <div className="flex shrink-0 items-center gap-1">
-        <SessionGoal />
         <SessionRename />
         <SessionSummary />
       </div>

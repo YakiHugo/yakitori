@@ -61,13 +61,6 @@ export function createVisibleFileObservationsFromMessages(
   return observations
 }
 
-export function grantFromToolOutput(
-  name: string,
-  output: JsonValue,
-): FileObservationGrant | undefined {
-  return grantsFromToolOutput(name, output)[0]
-}
-
 export function grantsFromToolOutput(
   name: string,
   output: JsonValue,

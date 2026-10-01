@@ -1384,11 +1384,16 @@ describe("goal command", () => {
 
     await user.keyboard("ship the feature")
     await user.keyboard("{Enter}")
-    expect(changeSidebar).toHaveBeenCalledWith({
-      type: "session",
-      sessionId: "session_1",
-      goal: "ship the feature",
-    })
+    expect(changeSidebar).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "session",
+        sessionId: "session_1",
+        goal: "ship the feature",
+        goalStatus: "active",
+        goalTimeUsedSeconds: 0,
+        goalInputId: null,
+      }),
+    )
     expect(admitInput).not.toHaveBeenCalled()
     expect(useAppStore.getState().promptDraft ?? "").toBe("")
   })

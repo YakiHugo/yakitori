@@ -54,12 +54,6 @@ export function renderEnvironmentContext(
   ].join("\n")
 }
 
-export function buildEnvironmentContext(
-  input: EnvironmentContextInput,
-): string {
-  return renderEnvironmentContext(observeEnvironment(input))
-}
-
 function formatLocalDate(date: Date): string {
   const year = date.getFullYear()
   const month = String(date.getMonth() + 1).padStart(2, "0")

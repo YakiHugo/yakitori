@@ -9,12 +9,15 @@ import {
   type StoredEventEnvelope,
   YakitoriErrorCode,
 } from "../../kernel/index.ts"
-import type { LiveSessionEvent } from "../../runtime/live-events.ts"
+import {
+  projectChangedMethod,
+  sidebarChangedMethod,
+} from "../../protocol/rpc-wire.ts"
 import { createSkillsLoader, type SkillMetadata } from "../../runtime/skills.ts"
 import type { ComputerUseStatus } from "../computer-use.ts"
 import type { ServerHandlers } from "../handlers.ts"
-import type { QueuedInput } from "../input-queue.ts"
 import { requireUserModelPreference } from "../http.ts"
+import type { QueuedInput } from "../input-queue.ts"
 import type { McpService } from "../mcp-service.ts"
 import {
   type ApiAdmitInputRequest,
@@ -196,16 +199,6 @@ export type SessionSubscriptionErrorNotification = Readonly<{
   message: string
 }>
 
-export type SessionPermissionRequestedNotification = Readonly<
-  { sessionId: string } & ApiPendingPermission
->
-
-export type SessionTransientNotification = LiveSessionEvent
-
-// Broadcast to every initialized connection when a Project changes; no-op
-// updates suppress it, matching Codex's ProjectChangedNotification.
-export const projectChangedMethod = "project/changed"
-
 export type ProjectChangeType = "created" | "updated" | "deleted"
 
 export type ProjectChangedNotification = Readonly<{
@@ -218,19 +211,9 @@ export type SidebarChangedNotification = Readonly<{
   sessionId?: string
 }>
 
-// Broadcast when a session's MCP server connections change state (connecting,
-// ready, failed); clients refetch mcp/status instead of relying on polling.
-export const mcpStatusChangedMethod = "mcp/statusChanged"
-
 export type McpStatusChangedNotification = Readonly<{
   sessionId: string
 }>
-
-// The session/permission/request server→client method (Codex parity:
-// approvals are correlated RPCs, not POST + notification). Params carry the
-// same tool detail as the permission.requested transient; the response result
-// is the resolve body the old REST route accepted.
-export const sessionPermissionRequestMethod = "session/permission/request"
 
 export type SessionPermissionRequestParams = Readonly<
   { sessionId: string } & ApiPendingPermission
@@ -637,7 +620,8 @@ function handlerEntry<TResult>(
     scope,
     invoke: async (params, context) => {
       const result = adaptHandlerResult(await call(context.handlers, params))
-      if (changesSidebar) context.broadcastNotification("sidebar/changed", {})
+      if (changesSidebar)
+        context.broadcastNotification(sidebarChangedMethod, {})
       return { result }
     },
   }
@@ -740,7 +724,7 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
       const result = adaptHandlerResult(
         await context.handlers.updateSidebar(params),
       )
-      context.broadcastNotification("sidebar/changed", {
+      context.broadcastNotification(sidebarChangedMethod, {
         sidebar: result,
         ...(isRecord(params) &&
         (params.type === "session" || params.type === "move-session") &&
@@ -1354,8 +1338,12 @@ export type RpcMethodParams = Readonly<
       "session/input": ApiAdmitInputRequest
       "session/input/queue": ApiAdmitInputRequest
       "session/queue/list": ApiReadSessionRequest
-      "session/queue/update": ApiAdmitInputRequest & Readonly<{ inputId: string }>
-      "session/queue/reorder": Readonly<{ sessionId: string; inputIds: readonly string[] }>
+      "session/queue/update": ApiAdmitInputRequest &
+        Readonly<{ inputId: string }>
+      "session/queue/reorder": Readonly<{
+        sessionId: string
+        inputIds: readonly string[]
+      }>
       "session/queue/start": Readonly<{ sessionId: string; inputId?: string }>
       "session/input/steer": ApiSteerInputRequest
       "session/input/cancel": ApiCancelInputRequest

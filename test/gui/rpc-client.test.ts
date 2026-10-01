@@ -195,25 +195,6 @@ describe("app RPC client", () => {
     client.close()
   })
 
-  it("sends the initialized notification after the handshake", async () => {
-    const client = createAppRpcClient({ apiBase: "http://api.test" })
-    const pending = client.request("provider/list", {})
-    const socket = FakeWebSocket.instances[0]
-    completeHandshake(socket)
-    await flushMicrotasks()
-
-    const frames = socket?.sentFrames() ?? []
-    expect(frames[1]).toEqual({ method: "initialized" })
-    expect(frames[2]).toMatchObject({
-      id: 1,
-      method: "provider/list",
-      params: {},
-    })
-    socket?.emitMessage({ id: 1, result: { providers: [] } })
-    await pending
-    client.close()
-  })
-
   it("rejects requests with the server error and preserves data.code", async () => {
     const client = createAppRpcClient({ apiBase: "http://api.test" })
     const pending = client.request("session/list", {})

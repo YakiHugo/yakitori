@@ -347,6 +347,10 @@ export function Composer() {
               type: "session",
               sessionId,
               goal: goalCommand,
+              goalStatus: "active",
+              goalUpdatedAt: new Date().toISOString(),
+              goalTimeUsedSeconds: 0,
+              goalInputId: null,
             })
           return
         }

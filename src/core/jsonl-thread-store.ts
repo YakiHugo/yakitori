@@ -843,7 +843,22 @@ export class JsonlThreadStore implements ThreadStore {
             (entry.sectionPosition === undefined ||
               (typeof entry.sectionPosition === "number" &&
                 Number.isSafeInteger(entry.sectionPosition))) &&
-            (entry.goal === undefined || typeof entry.goal === "string"),
+            (entry.goal === undefined || typeof entry.goal === "string") &&
+            (entry.goalStatus === undefined ||
+              entry.goalStatus === "active" ||
+              entry.goalStatus === "paused" ||
+              entry.goalStatus === "blocked" ||
+              entry.goalStatus === "usage_limited" ||
+              entry.goalStatus === "budget_limited" ||
+              entry.goalStatus === "complete") &&
+            (entry.goalUpdatedAt === undefined ||
+              typeof entry.goalUpdatedAt === "string") &&
+            (entry.goalTimeUsedSeconds === undefined ||
+              (typeof entry.goalTimeUsedSeconds === "number" &&
+                Number.isSafeInteger(entry.goalTimeUsedSeconds) &&
+                entry.goalTimeUsedSeconds >= 0)) &&
+            (entry.goalInputId === undefined ||
+              typeof entry.goalInputId === "string"),
         )
       ) {
         throw new Error("Invalid session sidebar state.")
@@ -1746,7 +1761,13 @@ export class JsonlThreadStore implements ThreadStore {
         .filter((rolloutId) => !this.#ephemeralAssetOwners.has(rolloutId))
         .map((rolloutId) =>
           rm(
-            join(this.#rolloutsDirectory, rolloutId, "files", "attachments", "staging"),
+            join(
+              this.#rolloutsDirectory,
+              rolloutId,
+              "files",
+              "attachments",
+              "staging",
+            ),
             { recursive: true, force: true },
           ),
         ),

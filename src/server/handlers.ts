@@ -16,6 +16,7 @@ import type { ThreadManager } from "../core/thread-manager.ts"
 import type { ThreadStore } from "../core/thread-store.ts"
 import {
   createEventEnvelope,
+  createRequestId,
   EVENT_SCHEMA_VERSION,
   type EventMetadata,
   ForkReason,
@@ -1217,7 +1218,7 @@ export function createThreadServerHandlers(
         try {
           await ensureEventPump(forked.thread)
           if (request.content !== undefined) {
-            submissionId = `request_${globalThis.crypto.randomUUID()}`
+            submissionId = createRequestId()
             const attachments =
               sourceAttachments.length === 0
                 ? undefined
@@ -1677,8 +1678,7 @@ export function createThreadServerHandlers(
           throw conflict("Restore this conversation before compacting.")
         }
         const thread = await resumeRequired(request.sessionId)
-        const requestId =
-          request.requestId ?? `request_${globalThis.crypto.randomUUID()}`
+        const requestId = request.requestId ?? createRequestId()
         const submitted = await thread.compact(requestId)
         if (submitted.type === "not_submitted")
           throw conflict(`Compaction was not submitted: ${submitted.reason}.`, {

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto"
+import { GoalStatus } from "../core/goal.ts"
 import type {
   JsonObject,
   JsonValue,
@@ -60,6 +61,7 @@ export function buildWorldStateFromSnapshot(input: {
   readonly multiAgent?: AgentRuntimeContext
   readonly skills?: SkillsCatalog
   readonly goal?: string
+  readonly goalStatus?: GoalStatus
 }): WorldState {
   return {
     sections: [
@@ -85,7 +87,7 @@ export function buildWorldStateFromSnapshot(input: {
       ),
       projectInstructionsSection(input.projectInstructions),
       skillsSection(input.skills),
-      goalSection(input.goal),
+      goalSection(input.goal, input.goalStatus),
       environmentSection(input.environment),
     ],
   }
@@ -388,10 +390,16 @@ function projectInstructionsSection(
   })
 }
 
-type GoalSnapshot = Readonly<{ text?: string }>
+type GoalSnapshot = Readonly<{ text?: string; status?: GoalStatus }>
 
-function goalSection(goal: string | undefined): ErasedWorldStateSection {
-  const snapshot: GoalSnapshot = goal === undefined ? {} : { text: goal }
+function goalSection(
+  goal: string | undefined,
+  status: GoalStatus | undefined,
+): ErasedWorldStateSection {
+  const snapshot: GoalSnapshot =
+    goal === undefined
+      ? {}
+      : { text: goal, status: status ?? GoalStatus.Active }
   return section({
     id: WorldStateSectionId.Goal,
     snapshot: snapshot as JsonObject,
@@ -406,14 +414,30 @@ function goalSection(goal: string | undefined): ErasedWorldStateSection {
       const previousMayContainGoal =
         previous.type === "unknown" ||
         (previous.type === "known" && previous.snapshot.text !== undefined)
+      const previousStatus =
+        previous.type === "known" ? previous.snapshot.status : undefined
+      // Older snapshots stored only the objective. Treat that as active so a
+      // status field added later does not look like a resume.
+      if (
+        goal !== undefined &&
+        previous.type === "known" &&
+        previous.snapshot.text === goal &&
+        previousStatus === undefined &&
+        (snapshot.status === undefined || snapshot.status === GoalStatus.Active)
+      ) {
+        return []
+      }
       if (goal !== undefined) {
         return [
           fragment(
             WorldStateSectionId.Goal,
             "developer",
-            previousMayContainGoal
-              ? `<session_goal_update>\nThis goal replaces the previous session goal. Keep working toward it across turns until it is met or the user changes it.\n\nGoal: ${goal}\n</session_goal_update>`
-              : `<session_goal>\nThe user has set a goal for this session. Keep working toward it across turns until it is met or the user changes it.\n\nGoal: ${goal}\n</session_goal>`,
+            goalFragment(
+              goal,
+              snapshot.status,
+              previousMayContainGoal,
+              previousStatus,
+            ),
           ),
         ]
       }
@@ -428,6 +452,37 @@ function goalSection(goal: string | undefined): ErasedWorldStateSection {
         : []
     },
   })
+}
+
+function goalFragment(
+  goal: string,
+  status: GoalStatus | undefined,
+  previousMayContainGoal: boolean,
+  previousStatus: GoalStatus | undefined,
+): string {
+  if (status === undefined || status === GoalStatus.Active) {
+    if (
+      previousMayContainGoal &&
+      previousStatus !== undefined &&
+      previousStatus !== GoalStatus.Active
+    ) {
+      return `<session_goal_update>\nThe user resumed this session goal. Keep working toward it across turns until it is met or the user changes it.\n\nGoal: ${goal}\n</session_goal_update>`
+    }
+    return previousMayContainGoal
+      ? `<session_goal_update>\nThis goal replaces the previous session goal. Keep working toward it across turns until it is met or the user changes it.\n\nGoal: ${goal}\n</session_goal_update>`
+      : `<session_goal>\nThe user has set a goal for this session. Keep working toward it across turns until it is met or the user changes it.\n\nGoal: ${goal}\n</session_goal>`
+  }
+  const reason =
+    status === GoalStatus.Paused
+      ? "The user paused this session goal. Do not keep working toward it until they resume it."
+      : status === GoalStatus.Complete
+        ? "This session goal is achieved. Do not keep working toward it unless the user sets a new one."
+        : status === GoalStatus.Blocked
+          ? "This session goal is stalled. Do not keep working toward it until the user resumes it."
+          : status === GoalStatus.UsageLimited
+            ? "This session goal is usage limited. Do not keep working toward it until the user resumes it."
+            : "This session goal is budget limited. Do not keep working toward it unless the user sets a new one."
+  return `<session_goal_update>\n${reason}\n\nGoal: ${goal}\n</session_goal_update>`
 }
 
 function environmentSection(
@@ -540,9 +595,25 @@ function projectInstructionsSnapshot(
 
 function goalSnapshot(value: JsonValue): GoalSnapshot | undefined {
   if (!isJsonRecord(value)) return undefined
-  return value.text === undefined || typeof value.text === "string"
-    ? (value as GoalSnapshot)
-    : undefined
+  if (value.text !== undefined && typeof value.text !== "string")
+    return undefined
+  if (
+    value.status !== undefined &&
+    value.status !== GoalStatus.Active &&
+    value.status !== GoalStatus.Paused &&
+    value.status !== GoalStatus.Blocked &&
+    value.status !== GoalStatus.UsageLimited &&
+    value.status !== GoalStatus.BudgetLimited &&
+    value.status !== GoalStatus.Complete
+  ) {
+    return undefined
+  }
+  return {
+    ...(value.text === undefined ? {} : { text: value.text }),
+    ...(value.status === undefined
+      ? {}
+      : { status: value.status as GoalStatus }),
+  }
 }
 
 function environmentSnapshot(

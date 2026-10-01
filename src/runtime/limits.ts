@@ -6,10 +6,6 @@ export const SessionExecutionPolicyDefaults = {
   assistantResponseBytes: 256 * 1024,
 } as const satisfies SessionExecutionPolicyDefaultsSnapshot
 
-// Server input bytes are an admission safety boundary, separate from the
-// model context and auto-compaction token budgets.
-export const DEFAULT_INPUT_ADMISSION_BYTES = 256 * 1024
-
 // Tool-installation defaults are intentionally absent from Session history.
 export type ToolLimitPolicy = Readonly<{
   toolPreviewBytes: number

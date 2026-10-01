@@ -71,11 +71,6 @@ export type ApiForkSessionResponse = {
   readonly events: readonly StoredEventEnvelope[]
 }
 
-export type ApiListSessionsRequest = {
-  readonly limit?: number
-  readonly cursor?: string
-}
-
 export type ApiListSessionsResponse = {
   readonly sessions: readonly ApiSessionSummary[]
   readonly nextCursor?: string
@@ -346,13 +341,6 @@ export type ApiResolvePermissionResponse = {
   readonly behavior: "allow" | "deny"
 }
 
-export type ApiReadSessionEventsRequest = {
-  readonly sessionId: string
-  readonly after?: number | string
-  readonly through?: number | string
-  readonly limit?: number | string
-}
-
 export type ApiReadSessionEventsResponse = {
   readonly events: readonly StoredEventEnvelope[]
   readonly nextAfter?: number
@@ -370,6 +358,16 @@ export type ApiSessionSummary = Readonly<{
   updatedAt: string
   title?: string
   goal?: string
+  goalStatus?:
+    | "active"
+    | "paused"
+    | "blocked"
+    | "usage_limited"
+    | "budget_limited"
+    | "complete"
+  goalUpdatedAt?: string
+  goalTimeUsedSeconds?: number
+  goalInputId?: string
   // True while a Turn is running in this Session.
   active?: boolean
   workingDirectory?: string

@@ -283,12 +283,6 @@ export function renderSkillsCatalog(
   return { skills: snapshot.skills, text, truncated: true }
 }
 
-export async function loadSkillsCatalog(
-  input: SkillLoadInput,
-): Promise<SkillsCatalog | undefined> {
-  return renderSkillsCatalog(await createSkillsLoader()(input), input.maxBytes)
-}
-
 export async function loadExplicitSkillInstructions(
   text: string,
   snapshot: SkillsSnapshot,
