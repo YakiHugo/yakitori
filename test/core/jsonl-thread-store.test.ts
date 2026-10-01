@@ -638,6 +638,32 @@ describe("JsonlThreadStore", () => {
     ).toBe(0)
   })
 
+  it("persists the sampled window capacity on token_count records", async () => {
+    const { store } = await createStore()
+    await createPersistentThread(store, metadata("thread_capacity"))
+    await store.appendItems("thread_capacity", [
+      {
+        type: "token_count",
+        turnId: "turn_one",
+        activeContextTokens: 900,
+        provider: "kimi",
+        model: "k3",
+        capacityTokens: 258_000,
+      },
+    ])
+    const stored = await store.readThread("thread_capacity")
+    if (stored === undefined) throw new Error("missing stored thread")
+    expect(stored.rollout.at(-1)?.item).toEqual({
+      type: "token_count",
+      turnId: "turn_one",
+      activeContextTokens: 900,
+      provider: "kimi",
+      model: "k3",
+      capacityTokens: 258_000,
+    })
+    await store.shutdownThread("thread_capacity")
+  })
+
   it("restores and replaces the auto-compaction prefill estimate", async () => {
     const { store } = await createStore()
     await createPersistentThread(store, metadata("thread_prefill"))

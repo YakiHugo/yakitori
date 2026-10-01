@@ -34,12 +34,19 @@ function CommandPanel({ kind }: Readonly<{ kind: "status" | "mcp" }>) {
   const [subscription, setSubscription] = useState<Subscription>()
   const [error, setError] = useState<string>()
   const model = view.lastModel ?? session?.currentModel
-  const capacity = providers
-    .find((provider) => provider.name === model?.provider)
-    ?.models.find(
-      (entry) => entry.id === model?.model,
-    )?.effectiveContextWindowTokens
-  const activeTokens = view.lastTurnUsage?.activeContextTokens
+  const contextTokens = view.contextTokens
+  const usageModel =
+    contextTokens?.provider !== undefined &&
+    contextTokens?.model !== undefined
+      ? { provider: contextTokens.provider, model: contextTokens.model }
+      : model
+  const capacity =
+    contextTokens?.capacityTokens ??
+    providers
+      .find((provider) => provider.name === usageModel?.provider)
+      ?.models.find((entry) => entry.id === usageModel?.model)
+      ?.effectiveContextWindowTokens
+  const activeTokens = contextTokens?.activeContextTokens
   const usedPercent =
     capacity !== undefined && activeTokens !== undefined
       ? Math.min(100, (activeTokens / capacity) * 100)

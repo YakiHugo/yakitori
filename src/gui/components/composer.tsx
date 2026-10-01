@@ -143,13 +143,18 @@ export function Composer() {
     modelEntry === undefined
       ? true
       : (modelEntry.imageDetailModes?.includes("original") ?? false)
-  const contextUsedTokens =
-    view.lastModel !== undefined &&
+  const contextTokens = view.contextTokens
+  // The snapshot pairs tokens with the window of the model that produced
+  // them. Records written before capacity was persisted fall back to the
+  // selected model's catalog window only when the model still matches.
+  const contextCapacity =
+    contextTokens?.capacityTokens ??
+    (contextTokens !== undefined &&
     effectiveModel !== undefined &&
-    view.lastModel.provider === effectiveModel.provider &&
-    view.lastModel.model === effectiveModel.model
-      ? view.lastTurnUsage?.activeContextTokens
-      : undefined
+    contextTokens.provider === effectiveModel.provider &&
+    contextTokens.model === effectiveModel.model
+      ? modelEntry?.effectiveContextWindowTokens
+      : undefined)
 
   const importImages: ComposerImageImport = async (prepare, validate) => {
     if (readingImages) return
@@ -368,8 +373,8 @@ export function Composer() {
       modelControls={
         <>
           <ContextWindowIndicator
-            usedTokens={contextUsedTokens}
-            capacity={modelEntry?.effectiveContextWindowTokens}
+            usedTokens={contextTokens?.activeContextTokens}
+            capacity={contextCapacity}
           />
           <ModelSelector />
         </>

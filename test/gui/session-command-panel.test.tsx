@@ -115,10 +115,10 @@ it("uses the last model context and the provider's reported quota window", async
     execution: {
       ...createExecutionViewState(),
       lastModel: { provider: "codex", model: "gpt-6-sol" },
-      lastTurnUsage: {
-        inputTokens: 105000,
-        outputTokens: 2000,
-        activeContextTokens: 100000,
+      contextTokens: {
+        activeContextTokens: 100_000,
+        provider: "codex",
+        model: "gpt-6-sol",
       },
     },
     commandPanel: { kind: "status", sessionId: "session_a" },

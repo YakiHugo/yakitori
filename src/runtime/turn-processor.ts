@@ -1119,6 +1119,14 @@ async function executeTurnModelLoop(
             historyAnchorItemId,
             provider: step.target.provider,
             model: step.target.model,
+            ...(step.configuration.modelCapacity
+              ?.effectiveContextWindowTokens === undefined
+              ? {}
+              : {
+                  capacityTokens:
+                    step.configuration.modelCapacity
+                      .effectiveContextWindowTokens,
+                }),
           })
         }
       }
@@ -1270,6 +1278,7 @@ async function executeTurnModelLoop(
         if (capacity !== undefined && step !== undefined)
           await input.runtime.recordContextTokens({
             activeContextTokens: capacity,
+            capacityTokens: capacity,
             historyAnchorItemId:
               input.runtime.snapshot().context.history.at(-1)?.id ??
               input.input.submissionId,
@@ -1759,6 +1768,14 @@ async function compactLiveHistory(
         input.runtime.snapshot().context.history.at(-1)?.id ?? input.turnId,
       provider: compactionStep.target.provider,
       model: compactionStep.target.model,
+      ...(compactionStep.configuration.modelCapacity
+        ?.effectiveContextWindowTokens === undefined
+        ? {}
+        : {
+            capacityTokens:
+              compactionStep.configuration.modelCapacity
+                .effectiveContextWindowTokens,
+          }),
     })
     await input.runtime.recordItemCompletions([
       completeCompactionItem(compactionItem, "completed"),
