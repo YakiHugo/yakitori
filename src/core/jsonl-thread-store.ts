@@ -2261,8 +2261,10 @@ function isRolloutItem(value: unknown): value is RolloutItem {
         "autoCompactPrefillTokens",
         "autoCompactPrefillEstimated",
         "historyAnchorItemId",
+        "historyAnchorTokens",
         "provider",
         "model",
+        "capacityTokens",
       ]) &&
       typeof value.turnId === "string" &&
       typeof value.activeContextTokens === "number" &&
@@ -2274,10 +2276,18 @@ function isRolloutItem(value: unknown): value is RolloutItem {
           value.autoCompactPrefillTokens >= 0)) &&
       (value.autoCompactPrefillEstimated === undefined ||
         typeof value.autoCompactPrefillEstimated === "boolean") &&
+      (value.historyAnchorTokens === undefined ||
+        (typeof value.historyAnchorTokens === "number" &&
+          Number.isSafeInteger(value.historyAnchorTokens) &&
+          value.historyAnchorTokens >= 0)) &&
       (value.historyAnchorItemId === undefined ||
         typeof value.historyAnchorItemId === "string") &&
       (value.provider === undefined || typeof value.provider === "string") &&
-      (value.model === undefined || typeof value.model === "string")
+      (value.model === undefined || typeof value.model === "string") &&
+      (value.capacityTokens === undefined ||
+        (typeof value.capacityTokens === "number" &&
+          Number.isSafeInteger(value.capacityTokens) &&
+          value.capacityTokens >= 0))
     )
   }
   return false

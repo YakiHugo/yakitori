@@ -130,6 +130,17 @@ export type TurnTiming = Readonly<{
   completedAt?: string
 }>
 
+// Latest model-reported context window sample. `capacityTokens` is the
+// effective window of the model that produced the sample, so the pair stays
+// consistent across model switches; pre-capacity records fall back to the
+// selected model's catalog capacity when provider/model match.
+export type ContextTokens = Readonly<{
+  activeContextTokens: number
+  capacityTokens?: number
+  provider?: string
+  model?: string
+}>
+
 export type ExecutionView = Readonly<{
   turnTimings: Readonly<Record<string, TurnTiming>>
   entries: readonly ExecutionEntry[]
@@ -141,6 +152,7 @@ export type ExecutionView = Readonly<{
   lastModel?: { readonly provider: string; readonly model: string }
   lastTurnUsage?: TokenUsage
   lastTurnMetrics?: TurnMetrics
+  contextTokens?: ContextTokens
   telemetry: SessionTelemetry
   activeTurnStartedAt?: string
   activeActivity?: ActiveTurnActivity
@@ -157,6 +169,7 @@ export type ExecutionViewState = Readonly<{
   lastModel: { readonly provider: string; readonly model: string } | undefined
   lastTurnUsage: TokenUsage | undefined
   lastTurnMetrics: TurnMetrics | undefined
+  contextTokens: ContextTokens | undefined
   telemetry: SessionTelemetry
   activeTurnStartedAt: string | undefined
   activeRetry: ActiveModelRetry | undefined
@@ -213,6 +226,7 @@ export function createExecutionViewState(
     lastModel: undefined,
     lastTurnUsage: undefined,
     lastTurnMetrics: undefined,
+    contextTokens: undefined,
     telemetry: EMPTY_TELEMETRY,
     activeTurnStartedAt: undefined,
     activeRetry: undefined,
@@ -305,6 +319,9 @@ export function projectExecutionView(state: ExecutionViewState): ExecutionView {
     ...(state.lastTurnMetrics === undefined
       ? {}
       : { lastTurnMetrics: state.lastTurnMetrics }),
+    ...(state.contextTokens === undefined
+      ? {}
+      : { contextTokens: state.contextTokens }),
     telemetry: state.telemetry,
     turnTimings: state.turnTimings,
     ...(state.activeTurnStartedAt === undefined
@@ -701,6 +718,23 @@ function applyDurable(
         event.createdAt,
         event.data.outcome.status !== "completed",
       )
+    }
+    case "context.tokens": {
+      return {
+        ...next,
+        contextTokens: {
+          activeContextTokens: event.data.activeContextTokens,
+          ...(event.data.capacityTokens === undefined
+            ? {}
+            : { capacityTokens: event.data.capacityTokens }),
+          ...(event.data.provider === undefined
+            ? {}
+            : { provider: event.data.provider }),
+          ...(event.data.model === undefined
+            ? {}
+            : { model: event.data.model }),
+        },
+      }
     }
     case "item.started": {
       next = clearActiveRetry(next, event.data.turnId)

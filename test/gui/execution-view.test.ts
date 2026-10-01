@@ -1565,6 +1565,89 @@ describe("execution view", () => {
       }),
     ])
   })
+
+  it("replaces the context window snapshot on each context.tokens event", () => {
+    let state = reduceExecutionView(createExecutionViewState(), {
+      type: "durable",
+      event: createExecutionEnvelope({
+        sessionId,
+        seq: 1,
+        event: {
+          type: EventType.ContextTokens,
+          data: {
+            turnId: "turn_1",
+            activeContextTokens: 40_000,
+            capacityTokens: 200_000,
+            provider: "faux",
+            model: "faux-1",
+          },
+        },
+      }),
+    })
+    expect(projectExecutionView(state).contextTokens).toEqual({
+      activeContextTokens: 40_000,
+      capacityTokens: 200_000,
+      provider: "faux",
+      model: "faux-1",
+    })
+
+    state = reduceExecutionView(state, {
+      type: "durable",
+      event: createExecutionEnvelope({
+        sessionId,
+        seq: 2,
+        event: {
+          type: EventType.ContextTokens,
+          data: {
+            turnId: "turn_1",
+            activeContextTokens: 52_000,
+            capacityTokens: 200_000,
+            provider: "faux",
+            model: "faux-1",
+          },
+        },
+      }),
+    })
+    expect(projectExecutionView(state).contextTokens).toEqual({
+      activeContextTokens: 52_000,
+      capacityTokens: 200_000,
+      provider: "faux",
+      model: "faux-1",
+    })
+  })
+
+  it("keeps the context window snapshot across turn boundaries", () => {
+    let state = reduceExecutionView(createExecutionViewState(), {
+      type: "durable",
+      event: createExecutionEnvelope({
+        sessionId,
+        seq: 1,
+        event: {
+          type: EventType.ContextTokens,
+          data: {
+            turnId: "turn_1",
+            activeContextTokens: 40_000,
+            capacityTokens: 200_000,
+          },
+        },
+      }),
+    })
+    state = reduceExecutionView(state, {
+      type: "durable",
+      event: createExecutionEnvelope({
+        sessionId,
+        seq: 2,
+        event: {
+          type: EventType.TurnStarted,
+          data: { turnId: "turn_2", inputId: "input_2" },
+        },
+      }),
+    })
+    expect(projectExecutionView(state).contextTokens).toEqual({
+      activeContextTokens: 40_000,
+      capacityTokens: 200_000,
+    })
+  })
 })
 
 function createExecutionEnvelope(

@@ -253,6 +253,11 @@ describe("Turn recovery", () => {
             response: {
               stopReason: ModelStopReason.ToolUse,
               content: [intro, call],
+              usage: {
+                inputTokens: 100,
+                outputTokens: 20,
+                activeContextTokens: 120,
+              },
             },
           }
         } else
@@ -334,6 +339,14 @@ describe("Turn recovery", () => {
         .filter((entry) => entry.kind === "assistant")
         .map((entry) => entry.text),
     ).toEqual([intro.text, "done"])
+    expect(final.contextTokens?.activeContextTokens).toBe(120)
+    expect(thread.snapshot().context.contextTokenHistoryAnchorTokens).toBe(100)
+    await runtime.manager.closeThread(thread.id)
+    const restored = await runtime.manager.resumeThread(thread.id)
+    expect(restored?.snapshot().context.activeContextTokens).toBe(120)
+    expect(restored?.snapshot().context.contextTokenHistoryAnchorTokens).toBe(
+      100,
+    )
   })
 
   it("persists a completed file change while a later tool is pending and retains it after interruption and reload", async () => {

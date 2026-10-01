@@ -125,8 +125,10 @@ export type RolloutItem =
       readonly autoCompactPrefillTokens?: number
       readonly autoCompactPrefillEstimated?: boolean
       readonly historyAnchorItemId?: string
+      readonly historyAnchorTokens?: number
       readonly provider?: string
       readonly model?: string
+      readonly capacityTokens?: number
     }
   | {
       readonly type: "compacted"

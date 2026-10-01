@@ -16,7 +16,53 @@ describe("kernel facts", () => {
       "turn.completed",
       "item.started",
       "item.completed",
+      "context.tokens",
     ])
+  })
+
+  it("validates context token snapshots as kernel facts", () => {
+    const sessionId = "session_00000000-0000-4000-8000-000000000000"
+    const envelope = createEventEnvelope({
+      sessionId,
+      seq: 1,
+      event: {
+        type: EventType.ContextTokens,
+        data: {
+          turnId: "turn_1",
+          activeContextTokens: 40_000,
+          capacityTokens: 200_000,
+          provider: "kimi",
+          model: "k3",
+        },
+      },
+    })
+    expect(envelope.type).toBe(EventType.ContextTokens)
+    expect(isKernelEvent(envelope)).toBe(true)
+
+    expect(() =>
+      createEventEnvelope({
+        sessionId,
+        seq: 2,
+        event: {
+          type: EventType.ContextTokens,
+          data: { turnId: "turn_1", activeContextTokens: -1 },
+        },
+      }),
+    ).toThrow("Invalid event data")
+    expect(() =>
+      createEventEnvelope({
+        sessionId,
+        seq: 3,
+        event: {
+          type: EventType.ContextTokens,
+          data: {
+            turnId: "turn_1",
+            activeContextTokens: 40_000,
+            capacityTokens: 1.5,
+          },
+        },
+      }),
+    ).toThrow("Invalid event data")
   })
 
   it("creates a versioned envelope for a valid fact", () => {

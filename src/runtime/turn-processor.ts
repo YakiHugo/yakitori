@@ -678,7 +678,9 @@ async function executeTurnModelLoop(
           : beforeStep.context.history
       const admission = assessModelRequest({
         history: compactionHistory,
-        activeContextTokens: beforeStep.context.activeContextTokens,
+        activeContextTokens:
+          beforeStep.context.contextTokenHistoryAnchorTokens ??
+          beforeStep.context.activeContextTokens,
         autoCompactPrefillTokens: beforeStep.context.autoCompactPrefillTokens,
         historyAnchorItemId: beforeStep.context.contextTokenHistoryAnchorItemId,
         baselineProvider: beforeStep.context.contextTokenProvider,
@@ -977,6 +979,9 @@ async function executeTurnModelLoop(
       const visibleFileObservations =
         createVisibleFileObservationsFromMessages(messages)
       const adapted = adaptImagesForModel(messages, step.target, step.modelInfo)
+      let requestHistoryAnchorItemId = input.runtime
+        .snapshot()
+        .context.history.at(-1)?.id
       const request: ModelRequest = {
         streamOutputItems: true,
         async rebuildMessagesAfterOutput() {
@@ -987,8 +992,10 @@ async function executeTurnModelLoop(
             if (outcome.status === "rejected") throw outcome.reason
           }
           throwIfAborted(input.signal)
+          const currentHistory = input.runtime.snapshot().context.history
+          requestHistoryAnchorItemId = currentHistory.at(-1)?.id
           const history = completeToolCallHistory(
-            input.runtime.snapshot().context.history.map(({ item }) => item),
+            currentHistory.map(({ item }) => item),
           )
           return resolveRolloutAssetMedia(
             adaptImagesForModel(
@@ -1323,21 +1330,33 @@ async function executeTurnModelLoop(
           responseItemId,
           response.providerRequestId,
         )
-      // A tool result recorded during streaming was not part of this model
-      // response's usage. Do not anchor that counter past unseen tool output.
-      if (
-        sampledContext !== undefined &&
-        !committedContent.some((block) => block.type === "tool_call")
-      ) {
-        const historyAnchorItemId = input.runtime
-          .snapshot()
-          .context.history.at(-1)?.id
+      // GUI shows the model's full usage sample. Streaming tools can interleave
+      // unseen results in history: budget calibration instead anchors input
+      // tokens at the exact request prefix, then estimates the appended tail.
+      if (sampledContext !== undefined) {
+        const streamedTools = committedContent.some(
+          (block) => block.type === "tool_call",
+        )
+        const historyAnchorItemId = streamedTools
+          ? requestHistoryAnchorItemId
+          : input.runtime.snapshot().context.history.at(-1)?.id
         if (historyAnchorItemId !== undefined) {
           await input.runtime.recordContextTokens({
             ...sampledContext,
+            ...(streamedTools
+              ? { historyAnchorTokens: sampledContext.inputTokens }
+              : {}),
             historyAnchorItemId,
             provider: step.target.provider,
             model: step.target.model,
+            ...(step.configuration.modelCapacity
+              ?.effectiveContextWindowTokens === undefined
+              ? {}
+              : {
+                  capacityTokens:
+                    step.configuration.modelCapacity
+                      .effectiveContextWindowTokens,
+                }),
           })
         }
       }
@@ -1411,6 +1430,7 @@ async function executeTurnModelLoop(
         if (capacity !== undefined && step !== undefined)
           await input.runtime.recordContextTokens({
             activeContextTokens: capacity,
+            capacityTokens: capacity,
             historyAnchorItemId:
               input.runtime.snapshot().context.history.at(-1)?.id ??
               input.input.submissionId,
@@ -1924,6 +1944,14 @@ async function compactLiveHistory(
         input.runtime.snapshot().context.history.at(-1)?.id ?? input.turnId,
       provider: compactionStep.target.provider,
       model: compactionStep.target.model,
+      ...(compactionStep.configuration.modelCapacity
+        ?.effectiveContextWindowTokens === undefined
+        ? {}
+        : {
+            capacityTokens:
+              compactionStep.configuration.modelCapacity
+                .effectiveContextWindowTokens,
+          }),
     })
     await input.runtime.recordItemCompletions([
       completeCompactionItem(compactionItem, "completed"),
