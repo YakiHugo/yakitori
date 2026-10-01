@@ -61,6 +61,7 @@ async function* runModelRequest(
   let previousFailure: ModelFailure | undefined
   for (let attempt = 1; ; attempt += 1) {
     let outputObserved = false
+    let committedOutput = false
     if (request.signal?.aborted) {
       yield { type: "cancelled" }
       return
@@ -83,8 +84,10 @@ async function* runModelRequest(
       | undefined
     try {
       try {
+        const { rebuildMessagesAfterOutput: _rebuild, ...providerRequest } =
+          request
         iterator = stream({
-          ...request,
+          ...providerRequest,
           attempt: {
             number: attempt,
             maxAttempts: options.maxAttempts,
@@ -148,6 +151,12 @@ async function* runModelRequest(
             break
           }
           if (event.type === "delta" || event.type === "reasoning_delta") {
+            outputObserved = true
+            yield event
+            continue
+          }
+          if (event.type === "output_item") {
+            committedOutput = true
             outputObserved = true
             yield event
             continue
@@ -239,7 +248,9 @@ async function* runModelRequest(
     if (failureEvent === undefined) {
       throw new Error("Model attempt ended without an outcome.")
     }
-    const retry = shouldRetry(failureEvent.failure, attempt, options)
+    const retry =
+      (!committedOutput || request.rebuildMessagesAfterOutput !== undefined) &&
+      shouldRetry(failureEvent.failure, attempt, options)
     const effectiveMaxAttempts =
       failureEvent.failure.kind === "rate_limited"
         ? Math.min(options.maxAttempts, options.rateLimitMaxAttempts)
@@ -255,9 +266,16 @@ async function* runModelRequest(
       yield { ...failureEvent, failure }
       return
     }
+    if (committedOutput && request.rebuildMessagesAfterOutput !== undefined) {
+      request = {
+        ...request,
+        messages: await request.rebuildMessagesAfterOutput(),
+      }
+    }
     const delayMs = retryDelay(failure, attempt, options)
     yield {
       type: "retry",
+      ...(committedOutput ? { committedOutput: true } : {}),
       attempt,
       nextAttempt: attempt + 1,
       maxAttempts: effectiveMaxAttempts,

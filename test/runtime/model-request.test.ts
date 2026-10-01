@@ -9,6 +9,30 @@ import {
 import { createModelRequestStream } from "../../src/runtime/model-request.ts"
 
 describe("model request runtime", () => {
+  it("does not replay a request after a completed item committed side effects", async () => {
+    const item: ModelStreamEvent = {
+      type: "output_item",
+      content: [{ type: "tool_call", id: "once", name: "write", input: {} }],
+    }
+    const provider = scriptedStream([
+      [item, failure("stream_disconnected")],
+      [success],
+    ])
+    const stream = createModelRequestStream(provider.stream, {
+      wireApi: "unknown",
+      sleep: async () => {},
+    })
+    const events = await collect(stream)
+    expect(events).toEqual([
+      item,
+      expect.objectContaining({
+        type: "failure",
+        failure: expect.objectContaining({ retryDecision: "fail" }),
+      }),
+    ])
+    expect(provider.calls()).toBe(1)
+  })
+
   it("retries a transient failure before visible output", async () => {
     const provider = scriptedStream([[failure("rate_limited")], [success]])
     const sleeps: number[] = []

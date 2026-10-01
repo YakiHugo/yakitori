@@ -66,29 +66,33 @@ export type ModelSystemSection = {
   readonly text: string
 }
 
-export type ModelRequest = {
+export type ModelRequest = Readonly<{
+  // Commit completed provider items while the response is still streaming.
+  streamOutputItems?: boolean
+  // After committed output, retry only from the consumer's updated history.
+  rebuildMessagesAfterOutput?: () => Promise<readonly ModelMessage[]>
   // Request-only control; the resulting native item enters normal history.
-  readonly compaction?: "local" | "remote_v2"
-  readonly target: ModelTarget
+  compaction?: "local" | "remote_v2"
+  target: ModelTarget
   // Runtime-only fence for opaque provider continuation state. The provider
   // owner adds it immediately before transport serialization; Session target
   // configuration never sets or persists it.
-  readonly continuationScope?: string
-  readonly cacheKey?: string
-  readonly system: readonly ModelSystemSection[]
-  readonly messages: readonly ModelMessage[]
-  readonly tools: readonly ModelToolDefinition[]
-  readonly toolWireProtocol: ToolWireProtocol
-  readonly maxOutputTokens?: number
+  continuationScope?: string
+  cacheKey?: string
+  system: readonly ModelSystemSection[]
+  messages: readonly ModelMessage[]
+  tools: readonly ModelToolDefinition[]
+  toolWireProtocol: ToolWireProtocol
+  maxOutputTokens?: number
   // Runtime-only physical attempt context. Provider adapters may use it to
   // rebuild transport resources; it is never serialized onto the wire.
-  readonly attempt?: Readonly<{
+  attempt?: Readonly<{
     number: number
     maxAttempts: number
     previousFailure?: ModelFailure
   }>
-  readonly signal?: AbortSignal
-}
+  signal?: AbortSignal
+}>
 
 export const DEFAULT_MODEL_MAX_OUTPUT_TOKENS = 8_192
 
@@ -164,6 +168,11 @@ export type ModelStreamReasoningDeltaEvent = {
   readonly text: string
 }
 
+export type ModelStreamOutputItemEvent = Readonly<{
+  type: "output_item"
+  content: readonly ModelContentBlock[]
+}>
+
 export type ModelStreamResponseEvent = {
   readonly type: "response"
   readonly response: ModelResponse
@@ -181,19 +190,21 @@ export type ModelStreamCancelledEvent = {
   readonly type: "cancelled"
 }
 
-export type ModelStreamRetryEvent = {
-  readonly type: "retry"
-  readonly attempt: number
-  readonly nextAttempt: number
-  readonly maxAttempts: number
-  readonly delayMs: number
-  readonly failure: ModelFailure
-  readonly usage?: ModelUsage
-}
+export type ModelStreamRetryEvent = Readonly<{
+  type: "retry"
+  committedOutput?: boolean
+  attempt: number
+  nextAttempt: number
+  maxAttempts: number
+  delayMs: number
+  failure: ModelFailure
+  usage?: ModelUsage
+}>
 
 export type ModelStreamEvent =
   | ModelStreamDeltaEvent
   | ModelStreamReasoningDeltaEvent
+  | ModelStreamOutputItemEvent
   | ModelStreamResponseEvent
   | ModelStreamFailureEvent
   | ModelStreamCancelledEvent

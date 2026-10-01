@@ -25,6 +25,201 @@ afterEach(async () => {
 })
 
 describe("Turn recovery", () => {
+  it.each([
+    "completed",
+    "disconnected",
+    "failed",
+  ] as const)("starts and persists a tool before the response is %s, without duplicating effects on resume", async (terminal) => {
+    const entered = deferred()
+    const release = deferred()
+    let executions = 0
+    let requests = 0
+    const call = {
+      type: "tool_call" as const,
+      id: "early",
+      name: "once",
+      input: {},
+    }
+    const runtime = await fixture(
+      async function* (request) {
+        requests += 1
+        if (requests === 1) {
+          expect(request.streamOutputItems).toBe(true)
+          yield { type: "output_item", content: [call] }
+          await release.promise
+          if (terminal !== "completed") {
+            yield {
+              type: "failure",
+              failure: {
+                kind:
+                  terminal === "failed"
+                    ? "authentication"
+                    : "stream_disconnected",
+                provider: "faux",
+                wireApi: "unknown",
+                stage: "response_body",
+                message: "Disconnected",
+              },
+            }
+          } else {
+            yield {
+              type: "response",
+              response: {
+                stopReason: ModelStopReason.ToolUse,
+                content: [call],
+              },
+            }
+          }
+          return
+        }
+        const calls = request.messages.flatMap((message) =>
+          message.role === "assistant"
+            ? message.content.filter((block) => block.type === "tool_call")
+            : [],
+        )
+        expect(calls).toEqual([call])
+        expect(
+          request.messages.filter((message) => message.role === "tool"),
+        ).toEqual([
+          expect.objectContaining({ toolCallId: "early", content: "saved" }),
+        ])
+        yield {
+          type: "response",
+          response: {
+            stopReason: ModelStopReason.EndTurn,
+            content: [{ type: "text", text: "done" }],
+          },
+        }
+      },
+      [
+        {
+          toolName: plainToolName("once"),
+          description: "Execute once",
+          inputSchema: { type: "object" },
+          effect: "observe",
+          approvalRequirement: { kind: "none" },
+          async execute() {
+            executions += 1
+            entered.resolve()
+            return { ok: true, content: "saved", output: "saved" }
+          },
+        },
+      ],
+    )
+    const thread = await runtime.createThread()
+    try {
+      await thread.startIfIdle({ content: { kind: "text", text: "run" } })
+      await expect.poll(() => executions).toBe(1)
+      await entered.promise
+      expect(requests).toBe(1)
+      await expect
+        .poll(async () =>
+          (await runtime.store.readThread(thread.id))?.rollout.some(
+            ({ item }) =>
+              item.type === "response_item" &&
+              item.item.item.role === "tool" &&
+              item.item.item.toolCallId === "early",
+          ),
+        )
+        .toBe(true)
+    } finally {
+      release.resolve()
+    }
+    if (terminal === "failed") {
+      await expect.poll(() => thread.agentStatus).toHaveProperty("errored")
+      expect(requests).toBe(1)
+      await runtime.manager.closeThread(thread.id)
+      const resumed = await runtime.manager.resumeThread(thread.id)
+      if (!resumed) throw new Error("Missing thread")
+      await resumed.startIfIdle({ content: { kind: "text", text: "continue" } })
+      await expect
+        .poll(() => resumed.agentStatus)
+        .toEqual({ completed: "done" })
+    } else
+      await expect.poll(() => thread.agentStatus).toEqual({ completed: "done" })
+    expect(executions).toBe(1)
+    expect(requests).toBe(2)
+  })
+
+  it("keeps results from separate streamed items after cancellation and pairs them in the next request", async () => {
+    const waiting = deferred()
+    const finished = deferred()
+    let requests = 0
+    const runtime = await fixture(
+      async function* (request) {
+        requests += 1
+        if (requests === 1) {
+          yield {
+            type: "output_item",
+            content: [
+              { type: "tool_call", id: "wait", name: "wait", input: {} },
+            ],
+          }
+          yield {
+            type: "output_item",
+            content: [
+              { type: "tool_call", id: "read", name: "read", input: {} },
+            ],
+          }
+          await new Promise<void>((resolve) => {
+            if (request.signal?.aborted) resolve()
+            else
+              request.signal?.addEventListener("abort", () => resolve(), {
+                once: true,
+              })
+          })
+          yield { type: "cancelled" }
+          return
+        }
+        const results = request.messages.filter(
+          (message) => message.role === "tool",
+        )
+        expect(results).toHaveLength(2)
+        expect(results).toContainEqual(
+          expect.objectContaining({ toolCallId: "wait", isError: true }),
+        )
+        expect(results).toContainEqual(
+          expect.objectContaining({ toolCallId: "read", content: "known" }),
+        )
+        yield {
+          type: "response",
+          response: {
+            stopReason: ModelStopReason.EndTurn,
+            content: [{ type: "text", text: "resumed" }],
+          },
+        }
+      },
+      [
+        waitingTool(waiting.resolve),
+        {
+          toolName: plainToolName("read"),
+          description: "Read",
+          inputSchema: { type: "object" },
+          effect: "observe",
+          supportsParallelToolCalls: true,
+          approvalRequirement: { kind: "none" },
+          async execute() {
+            finished.resolve()
+            return { ok: true, content: "known", output: "known" }
+          },
+        },
+      ],
+    )
+    const thread = await runtime.createThread()
+    await thread.startIfIdle({ content: { kind: "text", text: "run" } })
+    await waiting.promise
+    await finished.promise
+    await thread.interrupt("stop")
+    await expect.poll(() => thread.agentStatus).toBe("interrupted")
+    await runtime.manager.closeThread(thread.id)
+    const resumed = await runtime.manager.resumeThread(thread.id)
+    if (!resumed) throw new Error("Missing thread")
+    await resumed.startIfIdle({ content: { kind: "text", text: "continue" } })
+    await expect
+      .poll(() => resumed.agentStatus)
+      .toEqual({ completed: "resumed" })
+  })
+
   it("persists a completed file change while a later tool is pending and retains it after interruption and reload", async () => {
     const waiting = deferred()
     const provider = createFauxProvider([
