@@ -135,21 +135,56 @@ async function* streamOpenAI(
           })
     failureStage = "response_body"
     const completedItems = new Map<number, Response["output"][number]>()
+    let nextOutputIndex = 0
     for await (const event of stream) {
       if (request.signal?.aborted) {
         yield abortedResponse()
         return
       }
       if (event.type === "response.output_text.delta") {
-        yield { type: "delta", text: event.delta }
+        yield {
+          type: "delta",
+          text: event.delta,
+          ...(request.streamOutputItems && event.item_id !== undefined
+            ? { itemId: event.item_id }
+            : {}),
+        }
         continue
       }
       if (event.type === "response.reasoning_summary_text.delta") {
-        yield { type: "reasoning_delta", text: event.delta }
+        yield {
+          type: "reasoning_delta",
+          text: event.delta,
+          ...(request.streamOutputItems && event.item_id !== undefined
+            ? { itemId: event.item_id }
+            : {}),
+        }
         continue
       }
       if (event.type === "response.output_item.done") {
+        if (completedItems.has(event.output_index)) continue
         completedItems.set(event.output_index, event.item)
+        if (request.streamOutputItems && request.compaction === undefined) {
+          // Preserve provider output order even when completed items arrive out of order.
+          for (;;) {
+            const item = completedItems.get(nextOutputIndex)
+            if (item === undefined) break
+            nextOutputIndex += 1
+            const content = fromOpenAIOutput(
+              [item],
+              customFallbackKeys,
+              request.target.provider,
+              request.continuationScope,
+              request.target.model,
+            )
+            if (content.length > 0)
+              yield {
+                type: "output_item",
+                itemId: item.id ?? `output_${nextOutputIndex - 1}`,
+                content,
+              }
+          }
+        }
         continue
       }
       if (
@@ -481,8 +516,32 @@ export function fromOpenAIResponse(
     throw new Error(response.error?.message ?? "OpenAI response failed.")
   }
 
+  const content = fromOpenAIOutput(
+    response.output,
+    customFallbackKeys,
+    provider,
+    continuationScope,
+    model,
+  )
+  return responseResult(
+    response,
+    content.some((block) => block.type === "tool_call")
+      ? ModelStopReason.ToolUse
+      : ModelStopReason.EndTurn,
+    content,
+    provider,
+  )
+}
+
+function fromOpenAIOutput(
+  output: Response["output"],
+  customFallbackKeys: ReadonlyMap<string, string>,
+  provider: string,
+  continuationScope: string | undefined,
+  model: string,
+): ModelContentBlock[] {
   const content: ModelContentBlock[] = []
-  for (const item of response.output) {
+  for (const item of output) {
     if (item.type === "compaction") {
       if (
         continuationScope === undefined ||
@@ -594,14 +653,7 @@ export function fromOpenAIResponse(
     })
   }
 
-  return responseResult(
-    response,
-    content.some((block) => block.type === "tool_call")
-      ? ModelStopReason.ToolUse
-      : ModelStopReason.EndTurn,
-    content,
-    provider,
-  )
+  return content
 }
 
 function customToolInput(

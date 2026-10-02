@@ -40,6 +40,7 @@ import {
   type SessionExecutionPolicy,
 } from "./limits.ts"
 import {
+  type ModelContentBlock,
   type ModelRequest,
   type ModelResponse,
   ModelStopReason,
@@ -583,6 +584,7 @@ async function executeTurnModelLoop(
   let previousDiagnostics = new Set<string>()
   for (;;) {
     let step: StepContext | undefined
+    const pendingTools: Promise<PromiseSettledResult<void>>[] = []
     try {
       throwIfAborted(input.signal)
       const budget = input.options.agentControl?.rolloutBudget
@@ -676,7 +678,9 @@ async function executeTurnModelLoop(
           : beforeStep.context.history
       const admission = assessModelRequest({
         history: compactionHistory,
-        activeContextTokens: beforeStep.context.activeContextTokens,
+        activeContextTokens:
+          beforeStep.context.contextTokenHistoryAnchorTokens ??
+          beforeStep.context.activeContextTokens,
         autoCompactPrefillTokens: beforeStep.context.autoCompactPrefillTokens,
         historyAnchorItemId: beforeStep.context.contextTokenHistoryAnchorItemId,
         baselineProvider: beforeStep.context.contextTokenProvider,
@@ -972,10 +976,47 @@ async function executeTurnModelLoop(
         input.runtime.snapshot().context.history.map(({ item }) => item),
       )
       const messages = durableMessages
-      const visibleFileObservations =
+      let visibleFileObservations =
         createVisibleFileObservationsFromMessages(messages)
       const adapted = adaptImagesForModel(messages, step.target, step.modelInfo)
+      let requestHistoryAnchorItemId = input.runtime
+        .snapshot()
+        .context.history.at(-1)?.id
       const request: ModelRequest = {
+        streamOutputItems: true,
+        async rebuildMessagesAfterOutput() {
+          // Codex rebuilds retry input from history after draining in-flight
+          // tools. Replaying the original prompt would hide completed effects.
+          const outcomes = await Promise.all(pendingTools)
+          for (const outcome of outcomes) {
+            if (outcome.status === "rejected") throw outcome.reason
+          }
+          throwIfAborted(input.signal)
+          const currentHistory = input.runtime.snapshot().context.history
+          requestHistoryAnchorItemId = currentHistory.at(-1)?.id
+          const history = completeToolCallHistory(
+            currentHistory.map(({ item }) => item),
+          )
+          // The retry can now act on newly visible reads. Reads completed
+          // during the previous attempt did not authorize that attempt's tools.
+          visibleFileObservations =
+            createVisibleFileObservationsFromMessages(history)
+          return resolveRolloutAssetMedia(
+            adaptImagesForModel(
+              history,
+              executionStep.target,
+              executionStep.modelInfo,
+            ).messages,
+            input.options.rolloutAssets,
+            {
+              nativePdf:
+                executionStep.target.provider === "openai" ||
+                executionStep.target.provider === "anthropic",
+              images: executionStep.modelInfo.inputModalities.includes("image"),
+            },
+            input.signal,
+          )
+        },
         target: step.target,
         cacheKey: configuration.promptCacheKey,
         system: [
@@ -1008,7 +1049,7 @@ async function executeTurnModelLoop(
             : { compactionHash: step.modelInfo.compactionHash }),
         })
       }
-      const responseItemId = `message_${globalThis.crypto.randomUUID()}`
+      let responseItemId = `message_${globalThis.crypto.randomUUID()}`
       const estimatedInputTokens =
         estimateModelRequestBudget(request).estimatedInputTokens
       let sampledContext:
@@ -1021,18 +1062,204 @@ async function executeTurnModelLoop(
       const modelStartedAt = Date.now()
       input.runtime.recordRequestStartedAt(modelStartedAt)
       let firstTokenAt: number | undefined
+      const executionStep = step
+      const callIndex = modelCalls + 1
+      let scheduled = Promise.resolve()
+      let drained = Promise.resolve()
+      const dispatchedCallIds = new Set<string>()
+      const startCalls = (calls: readonly ModelToolCallBlock[]) => {
+        if (calls.length === 0) return
+        for (const call of calls) {
+          if (dispatchedCallIds.has(call.id))
+            throw new Error("Model repeated an executed tool call id.")
+          dispatchedCallIds.add(call.id)
+        }
+        let resolveScheduled!: () => void
+        const ready = {
+          promise: new Promise<void>((resolve) => {
+            resolveScheduled = resolve
+          }),
+          resolve: () => resolveScheduled(),
+        }
+        const previousSchedule = scheduled
+        const previousResults = drained
+        scheduled = ready.promise
+        const work = previousSchedule
+          .then(async () => {
+            const onScheduled = () => ready.resolve()
+            const toolsStartedAt = Date.now()
+            const results = executeToolCalls({
+              calls,
+              onScheduled,
+              threadId: metadata.id,
+              rolloutId: metadata.rolloutId,
+              turnId: input.input.submissionId,
+              workspaceRoot,
+              signal: input.signal,
+              documentReading: {
+                nativePdf:
+                  executionStep.target.provider === "openai" ||
+                  executionStep.target.provider === "anthropic",
+                images:
+                  executionStep.modelInfo.inputModalities.includes("image"),
+              },
+              toolPlan,
+              permissionGate: input.permissionGate,
+              recordToolStarted: input.runtime.recordToolStarted,
+              publishPermissionEvent: (event) =>
+                input.runtime.emitPermissionEvent(event),
+              permissionTimeoutMs: input.runtimeTiming.permissionWaitTimeoutMs,
+              approvalPolicy: configuration.approvalPolicy,
+              rolloutAssets: input.options.rolloutAssets,
+              visibleFileObservations,
+              toolExecutionGate: input.toolExecutionGate,
+              onOperationalFailure: input.options.onOperationalFailure,
+              ...(input.options.hookRunner === undefined
+                ? {}
+                : { hookRunner: input.options.hookRunner }),
+              ...(input.options.agentControl === undefined
+                ? {}
+                : {
+                    agentControl: input.options.agentControl.bind(
+                      metadata.id,
+                      executionStep.target,
+                    ),
+                  }),
+            })
+            toolCalls += calls.length
+            for await (const { call, item, result } of results) {
+              await previousResults
+              const { toolContentTruncated, ...modelContent } =
+                await finalizeToolOutput(
+                  result,
+                  {
+                    maxBytes:
+                      executionStep.executionPolicy.modelVisibleToolResultBytes,
+                    maxLines:
+                      executionStep.executionPolicy.modelVisibleToolResultLines,
+                  },
+                  {
+                    workspaceRoot,
+                    rolloutId: metadata.rolloutId,
+                    toolCallId: call.id,
+                    ...(input.options.rolloutAssets === undefined
+                      ? {}
+                      : { rolloutAssets: input.options.rolloutAssets }),
+                  },
+                )
+              const fileObservations =
+                toolContentTruncated !== true
+                  ? toolFileObservations(item.name, result)
+                  : []
+              const resultItem = envelope(input.input.submissionId, {
+                role: "tool",
+                toolCallId: call.id,
+                ...modelContent,
+                ...(!result.ok ? { isError: true } : {}),
+                ...(call.toolKind === "tool_search"
+                  ? {
+                      toolSearch: {
+                        tools: result.ok
+                          ? discoveredTools(toolPlan, call.input)
+                          : [],
+                      },
+                    }
+                  : {}),
+                ...(fileObservations.length === 0 ? {} : { fileObservations }),
+              })
+              await input.runtime.recordToolResult(
+                resultItem,
+                completeToolItem(
+                  toolPlan,
+                  item,
+                  resultItem.id,
+                  result,
+                  modelContent,
+                ),
+              )
+            }
+            toolDurationMs += Date.now() - toolsStartedAt
+          })
+          .finally(() => ready.resolve())
+        const outcome = work.then(
+          () => ({ status: "fulfilled" as const, value: undefined }),
+          (reason: unknown) => ({ status: "rejected" as const, reason }),
+        )
+        pendingTools.push(outcome)
+        drained = outcome.then(() => {})
+      }
+      const committedContent: ModelContentBlock[] = []
+      const committedCallIds = new Set<string>()
+      let committedBytes = 0
+      const recordOutput = async (
+        content: readonly ModelContentBlock[],
+        itemId: string,
+        providerRequestId?: string,
+      ) => {
+        const item = envelope(
+          input.input.submissionId,
+          { role: "assistant", content },
+          {
+            provider: executionStep.target.provider,
+            model: executionStep.target.model,
+            callIndex,
+            ...(providerRequestId === undefined
+              ? {}
+              : { requestId: providerRequestId }),
+          },
+          itemId,
+        )
+        await input.runtime.recordConversationItems([item])
+        await input.runtime.recordItemCompletions(completedResponseItems(item))
+      }
       const response = await consumeModelStream({
         request,
         stream,
+        async onOutputItem(content, itemId) {
+          throwIfAborted(input.signal)
+          committedBytes += utf8Bytes(JSON.stringify(content))
+          if (
+            committedBytes >
+            executionStep.executionPolicy.assistantResponseBytes
+          ) {
+            throw new Error(
+              "Assistant response exceeded the configured byte limit.",
+            )
+          }
+          for (const block of content) {
+            if (block.type !== "tool_call") continue
+            if (committedCallIds.has(block.id))
+              throw new Error("Model repeated a committed tool call id.")
+            committedCallIds.add(block.id)
+          }
+          await recordOutput(content, itemId)
+          committedContent.push(...content)
+          startCalls(
+            content.filter(
+              (block): block is ModelToolCallBlock =>
+                block.type === "tool_call",
+            ),
+          )
+        },
         threadId: metadata.id,
         turnId: input.input.submissionId,
-        itemId: responseItemId,
+        get itemId() {
+          return responseItemId
+        },
         emitModelStream: (event) => input.runtime.emitModelStream(event),
         emitWarning: (message, diagnostic) =>
           input.runtime.emitWarning(message, diagnostic),
         assistantResponseBytes: step.executionPolicy.assistantResponseBytes,
         onOperationalFailure: input.options.onOperationalFailure,
-        onRetry: input.runtime.invalidateRequestStartedAt,
+        onRetry(committed) {
+          input.runtime.invalidateRequestStartedAt()
+          if (committed) {
+            committedContent.length = 0
+            committedBytes = 0
+            sampledContext = undefined
+            responseItemId = `message_${globalThis.crypto.randomUUID()}`
+          }
+        },
         onFirstToken: () => {
           firstTokenAt ??= Date.now()
         },
@@ -1071,6 +1298,9 @@ async function executeTurnModelLoop(
       const calls = response.content.filter(
         (block): block is ModelToolCallBlock => block.type === "tool_call",
       )
+      if (new Set(calls.map((call) => call.id)).size !== calls.length) {
+        throw new Error("Model repeated a tool call id.")
+      }
       if (
         response.stopReason === ModelStopReason.ToolUse &&
         calls.length === 0
@@ -1090,32 +1320,36 @@ async function executeTurnModelLoop(
           "Assistant response exceeded the configured byte limit.",
         )
       }
-      if (response.content.length > 0) {
-        const responseItem = envelope(
-          input.input.submissionId,
-          { role: "assistant", content: response.content },
-          {
-            provider: step.target.provider,
-            model: step.target.model,
-            callIndex: modelCalls,
-            ...(response.providerRequestId === undefined
-              ? {}
-              : { requestId: response.providerRequestId }),
-          },
-          responseItemId,
-        )
-        await input.runtime.recordConversationItems([responseItem])
-        await input.runtime.recordItemCompletions(
-          completedResponseItems(responseItem),
-        )
+      // Terminal output includes completed items; never record or execute them twice.
+      if (
+        JSON.stringify(response.content.slice(0, committedContent.length)) !==
+        JSON.stringify(committedContent)
+      ) {
+        throw new Error("Terminal model output disagrees with committed items.")
       }
+      const remaining = response.content.slice(committedContent.length)
+      if (remaining.length > 0)
+        await recordOutput(
+          remaining,
+          responseItemId,
+          response.providerRequestId,
+        )
+      // GUI shows the model's full usage sample. Streaming tools can interleave
+      // unseen results in history: budget calibration instead anchors input
+      // tokens at the exact request prefix, then estimates the appended tail.
       if (sampledContext !== undefined) {
-        const historyAnchorItemId = input.runtime
-          .snapshot()
-          .context.history.at(-1)?.id
+        const streamedTools = committedContent.some(
+          (block) => block.type === "tool_call",
+        )
+        const historyAnchorItemId = streamedTools
+          ? requestHistoryAnchorItemId
+          : input.runtime.snapshot().context.history.at(-1)?.id
         if (historyAnchorItemId !== undefined) {
           await input.runtime.recordContextTokens({
             ...sampledContext,
+            ...(streamedTools
+              ? { historyAnchorTokens: sampledContext.inputTokens }
+              : {}),
             historyAnchorItemId,
             provider: step.target.provider,
             model: step.target.model,
@@ -1130,95 +1364,17 @@ async function executeTurnModelLoop(
           })
         }
       }
+      startCalls(
+        remaining.filter(
+          (block): block is ModelToolCallBlock => block.type === "tool_call",
+        ),
+      )
+      const outcomes = await Promise.all(pendingTools)
+      for (const outcome of outcomes) {
+        if (outcome.status === "rejected") throw outcome.reason
+      }
 
       if (response.stopReason === ModelStopReason.ToolUse) {
-        const toolsStartedAt = Date.now()
-        const results = executeToolCalls({
-          calls,
-          threadId: metadata.id,
-          rolloutId: metadata.rolloutId,
-          turnId: input.input.submissionId,
-          workspaceRoot,
-          signal: input.signal,
-          documentReading: {
-            nativePdf:
-              step.target.provider === "openai" ||
-              step.target.provider === "anthropic",
-            images: step.modelInfo.inputModalities.includes("image"),
-          },
-          toolPlan,
-          permissionGate: input.permissionGate,
-          emitItemStarted: input.runtime.emitItemStarted,
-          publishPermissionEvent: (event) =>
-            input.runtime.emitPermissionEvent(event),
-          permissionTimeoutMs: input.runtimeTiming.permissionWaitTimeoutMs,
-          approvalPolicy: configuration.approvalPolicy,
-          rolloutAssets: input.options.rolloutAssets,
-          visibleFileObservations,
-          toolExecutionGate: input.toolExecutionGate,
-          onOperationalFailure: input.options.onOperationalFailure,
-          ...(input.options.hookRunner === undefined
-            ? {}
-            : { hookRunner: input.options.hookRunner }),
-          ...(input.options.agentControl === undefined
-            ? {}
-            : {
-                agentControl: input.options.agentControl.bind(
-                  metadata.id,
-                  step.target,
-                ),
-              }),
-        })
-        toolCalls += calls.length
-        for await (const { call, item, result } of results) {
-          const { toolContentTruncated, ...modelContent } =
-            await finalizeToolOutput(
-              result,
-              {
-                maxBytes: step.executionPolicy.modelVisibleToolResultBytes,
-                maxLines: step.executionPolicy.modelVisibleToolResultLines,
-              },
-              {
-                workspaceRoot,
-                rolloutId: metadata.rolloutId,
-                toolCallId: call.id,
-                ...(input.options.rolloutAssets === undefined
-                  ? {}
-                  : { rolloutAssets: input.options.rolloutAssets }),
-              },
-            )
-          const fileObservations =
-            toolContentTruncated !== true
-              ? toolFileObservations(item.name, result)
-              : []
-          const resultItem = envelope(input.input.submissionId, {
-            role: "tool",
-            toolCallId: call.id,
-            ...modelContent,
-            ...(!result.ok ? { isError: true } : {}),
-            ...(call.toolKind === "tool_search"
-              ? {
-                  toolSearch: {
-                    tools: result.ok
-                      ? discoveredTools(toolPlan, call.input)
-                      : [],
-                  },
-                }
-              : {}),
-            ...(fileObservations.length === 0 ? {} : { fileObservations }),
-          })
-          await input.runtime.recordToolResult(
-            resultItem,
-            completeToolItem(
-              toolPlan,
-              item,
-              resultItem.id,
-              result,
-              modelContent,
-            ),
-          )
-        }
-        toolDurationMs += Date.now() - toolsStartedAt
         continue
       }
 
@@ -1288,6 +1444,7 @@ async function executeTurnModelLoop(
       }
       throw error
     } finally {
+      await Promise.all(pendingTools)
       await step?.toolRouter.release()
     }
   }
@@ -1305,8 +1462,12 @@ async function consumeModelStream(input: {
   readonly onOperationalFailure:
     | TurnProcessorOperationalFailureReporter
     | undefined
+  readonly onOutputItem?: (
+    content: readonly ModelContentBlock[],
+    itemId: string,
+  ) => Promise<void>
   readonly onFirstToken?: () => void
-  readonly onRetry?: () => void
+  readonly onRetry?: (committedOutput: boolean) => void
   readonly onUsage: (usage: ModelUsage) => void | Promise<void>
   readonly setActiveStream: (
     stream: AsyncIterator<ModelStreamEvent> | undefined,
@@ -1316,6 +1477,11 @@ async function consumeModelStream(input: {
   input.setActiveStream(iterator)
   let terminal: ModelResponse | undefined
   let exhausted = false
+  const provisionalItems = new Set<string>()
+  const displayItemId = (providerItemId?: string) =>
+    input.itemId === undefined || providerItemId === undefined
+      ? input.itemId
+      : `${input.itemId}_${providerItemId}`
   const streamedBytes = { assistant: 0, reasoning: 0 }
   const trailingHighSurrogate = { assistant: "", reasoning: "" }
   try {
@@ -1328,7 +1494,9 @@ async function consumeModelStream(input: {
       }
       const event = next.value
       if (event.type === "retry") {
-        input.onRetry?.()
+        const discardedResponseItemIds = [...provisionalItems]
+        provisionalItems.clear()
+        input.onRetry?.(event.committedOutput === true)
         streamedBytes.assistant = 0
         streamedBytes.reasoning = 0
         trailingHighSurrogate.assistant = ""
@@ -1340,9 +1508,9 @@ async function consumeModelStream(input: {
             message: event.failure.message,
             code: "model.retry",
             details: {
-              ...(input.itemId === undefined
+              ...(discardedResponseItemIds.length === 0
                 ? {}
-                : { discardedResponseItemId: input.itemId }),
+                : { discardedResponseItemIds }),
               attempt: event.attempt,
               nextAttempt: event.nextAttempt,
               maxAttempts: event.maxAttempts,
@@ -1374,6 +1542,16 @@ async function consumeModelStream(input: {
         })
         throw new ModelFailureError(event.failure, { cause: event.cause })
       }
+      if (event.type === "output_item") {
+        if (input.onOutputItem === undefined)
+          throw new Error("Unexpected committed model output.")
+        const itemId = displayItemId(event.itemId)
+        if (itemId === undefined)
+          throw new Error("Committed output requires a display item id.")
+        await input.onOutputItem(event.content, itemId)
+        provisionalItems.delete(itemId)
+        continue
+      }
       if (event.type !== "response") {
         if (input.request.compaction === "remote_v2") continue
         input.onFirstToken?.()
@@ -1392,9 +1570,11 @@ async function consumeModelStream(input: {
             "Model stream update exceeded the configured byte limit.",
           )
         }
-        if (input.itemId !== undefined) {
+        const itemId = displayItemId(event.itemId)
+        if (itemId !== undefined) {
+          provisionalItems.add(itemId)
           input.emitModelStream?.({
-            itemId: input.itemId,
+            itemId,
             kind,
             delta: event.text,
           })
@@ -1822,7 +2002,7 @@ type ToolExecutionScope = {
   readonly signal: AbortSignal
   readonly toolPlan: ReturnType<ToolRegistry["finalize"]>
   readonly permissionGate: PermissionGate
-  readonly emitItemStarted: TurnRuntime["emitItemStarted"]
+  readonly recordToolStarted: TurnRuntime["recordToolStarted"]
   readonly publishPermissionEvent: TurnRuntime["emitPermissionEvent"]
   readonly permissionTimeoutMs: number
   readonly approvalPolicy: ApprovalPolicy
@@ -1851,7 +2031,10 @@ type PreparedToolCall = {
 
 async function* executeToolCalls(
   input: ToolExecutionScope &
-    Readonly<{ calls: readonly ModelToolCallBlock[] }>,
+    Readonly<{
+      calls: readonly ModelToolCallBlock[]
+      onScheduled?: () => void
+    }>,
 ): AsyncGenerator<
   Readonly<{
     call: ModelToolCallBlock
@@ -1940,7 +2123,7 @@ async function* executeToolCalls(
       }
     }),
   )
-  for (const item of prepared) input.emitItemStarted(item.item)
+  for (const item of prepared) await input.recordToolStarted(item.item)
   const scheduled = prepared.map((item) => ({
     item,
     reservation: input.toolExecutionGate.reserve(
@@ -1959,6 +2142,7 @@ async function* executeToolCalls(
       (reason: unknown) => ({ status: "rejected" as const, reason }),
     ),
   )
+  input.onScheduled?.()
   let failure: PromiseRejectedResult | undefined
   try {
     for (const pending of inFlight) {
@@ -2542,13 +2726,15 @@ function completeToolCallHistory(
       continue
     }
     if (message.role === "tool") continue
-    if (pending.length > 0) flushMissing()
+    if (message.role !== "assistant" && pending.length > 0) flushMissing()
     completed.push(message)
     if (message.role === "assistant") {
-      pending = message.content.flatMap((block) =>
-        block.type === "tool_call"
-          ? [{ id: block.id, toolKind: block.toolKind }]
-          : [],
+      pending.push(
+        ...message.content.flatMap((block) =>
+          block.type === "tool_call"
+            ? [{ id: block.id, toolKind: block.toolKind }]
+            : [],
+        ),
       )
     }
   }

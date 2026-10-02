@@ -20,6 +20,94 @@ import type { ApiSessionDetail } from "../../src/server/protocol.ts"
 const sessionId = "session_00000000-0000-4000-8000-000000000000"
 
 describe("execution view", () => {
+  it.each([
+    "transient",
+    "durable",
+  ] as const)("keeps assistant and reasoning streams alive when a %s tool starts", (delivery) => {
+    let state = createExecutionViewState()
+    const at = "2026-10-01T00:00:00.000Z"
+    for (const kind of ["assistant", "reasoning"] as const) {
+      const itemId = kind
+      state = reduceExecutionView(state, {
+        type: "transient",
+        event: {
+          type: "item.started",
+          sessionId,
+          turnId: "turn_1",
+          item: {
+            type: kind === "assistant" ? "agent_message" : "reasoning",
+            itemId,
+          },
+          createdAt: at,
+        },
+      })
+      state = reduceExecutionView(state, {
+        type: "transient",
+        event: {
+          type: kind === "assistant" ? "assistant.delta" : "reasoning.delta",
+          sessionId,
+          turnId: "turn_1",
+          itemId,
+          delta: "before ",
+          createdAt: at,
+        },
+      })
+    }
+    const item = toolStartedItem({
+      itemId: "tool_1",
+      toolCallId: "call_1",
+      name: "read_file",
+      input: { path: "a.ts" },
+      requiresPermission: false,
+    })
+    state =
+      delivery === "transient"
+        ? reduceExecutionView(state, {
+            type: "transient",
+            event: {
+              type: "item.started",
+              sessionId,
+              turnId: "turn_1",
+              item,
+              createdAt: at,
+            },
+          })
+        : reduceExecutionView(state, {
+            type: "durable",
+            event: createExecutionEnvelope({
+              sessionId,
+              seq: 1,
+              event: { type: "item.started", data: { turnId: "turn_1", item } },
+            }),
+          })
+    for (const kind of ["assistant", "reasoning"] as const) {
+      state = reduceExecutionView(state, {
+        type: "transient",
+        event: {
+          type: kind === "assistant" ? "assistant.delta" : "reasoning.delta",
+          sessionId,
+          turnId: "turn_1",
+          itemId: kind,
+          delta: "after",
+          createdAt: at,
+        },
+      })
+    }
+    expect(projectExecutionView(state).entries).toEqual([
+      expect.objectContaining({
+        kind: "assistant",
+        text: "before after",
+        status: "streaming",
+      }),
+      expect.objectContaining({
+        kind: "reasoning",
+        text: "before after",
+        status: "streaming",
+      }),
+      expect.objectContaining({ kind: "tool", state: "requested" }),
+    ])
+  })
+
   it("discards only the failed provisional item and accepts a fresh retry without stale reasoning", () => {
     let state = createExecutionViewState()
     for (const [itemId, kind] of [
@@ -385,6 +473,14 @@ describe("execution view", () => {
       event: createExecutionEnvelope({
         sessionId,
         seq: 1,
+        event: agentCompleted({ itemId: "item_1", turnId: "turn_1", text: "" }),
+      }),
+    })
+    state = reduceExecutionView(state, {
+      type: "durable",
+      event: createExecutionEnvelope({
+        sessionId,
+        seq: 2,
         event: toolStarted({
           turnId: "turn_1",
           itemId: "tool_item_1",

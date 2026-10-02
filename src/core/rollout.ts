@@ -1,5 +1,6 @@
 import type {
   CompletedExecutionItem,
+  StartedExecutionItem,
   EventMetadata,
   JsonObject,
   KernelError,
@@ -102,6 +103,11 @@ export type RolloutItem =
       readonly item: ResponseItemEnvelope
     }
   | {
+      readonly type: "item_started"
+      readonly turnId: string
+      readonly item: StartedExecutionItem
+    }
+  | {
       readonly type: "item_completed"
       readonly turnId: string
       readonly item: CompletedExecutionItem
@@ -119,6 +125,7 @@ export type RolloutItem =
       readonly autoCompactPrefillTokens?: number
       readonly autoCompactPrefillEstimated?: boolean
       readonly historyAnchorItemId?: string
+      readonly historyAnchorTokens?: number
       readonly provider?: string
       readonly model?: string
       readonly capacityTokens?: number

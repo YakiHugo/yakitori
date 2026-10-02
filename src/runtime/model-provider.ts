@@ -112,9 +112,8 @@ export function createModelProvider(
                       request.attempt ?? { number: 1, maxAttempts: 1 },
                     )(request)
                 : input.stream
-          // All providers commit tools only after a complete response. Failed
-          // attempts may therefore retry after provisional text/reasoning; the
-          // consumer discards that output before displaying the next attempt.
+          // Text deltas remain provisional. A completed output item commits
+          // history and may start tools, so retries must rebuild from that history.
           const stream = createModelRequestStream(providerStream, {
             wireApi: input.info.wireApi,
             ...(input.info.streamIdleTimeoutMs === undefined

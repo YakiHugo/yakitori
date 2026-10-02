@@ -2222,12 +2222,15 @@ function isRolloutItem(value: unknown): value is RolloutItem {
       isResponseItem(value.item)
     )
   }
-  if (value.type === "item_completed") {
+  if (value.type === "item_started" || value.type === "item_completed") {
     return (
       hasOnlyKeys(value, ["type", "turnId", "item"]) &&
       typeof value.turnId === "string" &&
       isKernelEvent({
-        type: EventType.ItemCompleted,
+        type:
+          value.type === "item_started"
+            ? EventType.ItemStarted
+            : EventType.ItemCompleted,
         data: { turnId: value.turnId, item: value.item },
       })
     )
@@ -2258,6 +2261,7 @@ function isRolloutItem(value: unknown): value is RolloutItem {
         "autoCompactPrefillTokens",
         "autoCompactPrefillEstimated",
         "historyAnchorItemId",
+        "historyAnchorTokens",
         "provider",
         "model",
         "capacityTokens",
@@ -2272,6 +2276,10 @@ function isRolloutItem(value: unknown): value is RolloutItem {
           value.autoCompactPrefillTokens >= 0)) &&
       (value.autoCompactPrefillEstimated === undefined ||
         typeof value.autoCompactPrefillEstimated === "boolean") &&
+      (value.historyAnchorTokens === undefined ||
+        (typeof value.historyAnchorTokens === "number" &&
+          Number.isSafeInteger(value.historyAnchorTokens) &&
+          value.historyAnchorTokens >= 0)) &&
       (value.historyAnchorItemId === undefined ||
         typeof value.historyAnchorItemId === "string") &&
       (value.provider === undefined || typeof value.provider === "string") &&

@@ -1020,9 +1020,24 @@ describe("Turn processor", () => {
         entry.item.type === "item_completed" ? [entry.item.item.type] : [],
       ),
     ).toEqual(["dynamic_tool_call", "agent_message"])
-    expect(rollout.map((entry) => String(entry.item.type))).not.toContain(
-      "item_started",
+    const started = rollout.filter(
+      (entry) => entry.item.type === "item_started",
     )
+    expect(started).toHaveLength(1)
+    const completed = rollout.find(
+      (entry) =>
+        entry.item.type === "item_completed" &&
+        entry.item.item.type === "dynamic_tool_call",
+    )
+    expect(started[0]?.item).toMatchObject({
+      item: {
+        itemId:
+          completed?.item.type === "item_completed"
+            ? completed.item.item.itemId
+            : undefined,
+      },
+    })
+    expect(started[0]?.seq).toBeLessThan(completed?.seq ?? -1)
     expect(
       rollout.find(
         (entry) =>

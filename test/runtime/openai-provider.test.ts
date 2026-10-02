@@ -120,7 +120,29 @@ describe("OpenAI Responses provider", () => {
       client,
     })
     const events = []
-    for await (const event of stream(requestFixture())) events.push(event)
+    for await (const event of stream(
+      requestFixture({ streamOutputItems: true }),
+    ))
+      events.push(event)
+    expect(events.slice(0, 2)).toEqual([
+      {
+        type: "output_item",
+        itemId: "msg_intro",
+        content: [{ type: "text", text: "I will inspect the file." }],
+      },
+      {
+        type: "output_item",
+        itemId: "fc_read",
+        content: [
+          {
+            type: "tool_call",
+            id: "call_read",
+            name: "read_file",
+            input: { path: "sum.mjs" },
+          },
+        ],
+      },
+    ])
     expect(events.at(-1)).toMatchObject({
       type: "response",
       response: {

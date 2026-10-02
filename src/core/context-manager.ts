@@ -12,6 +12,7 @@ export type ContextSnapshot = Readonly<{
   autoCompactPrefillTokens?: number
   autoCompactPrefillEstimated?: boolean
   contextTokenHistoryAnchorItemId?: string
+  contextTokenHistoryAnchorTokens?: number
   contextTokenProvider?: string
   contextTokenModel?: string
   history: readonly ResponseItemEnvelope[]
@@ -26,6 +27,7 @@ export class ContextManager {
   #autoCompactPrefillTokens: number | undefined
   #autoCompactPrefillEstimated = false
   #contextTokenHistoryAnchorItemId: string | undefined
+  #contextTokenHistoryAnchorTokens: number | undefined
   #contextTokenProvider: string | undefined
   #contextTokenModel: string | undefined
   #history: ResponseItemEnvelope[]
@@ -42,6 +44,8 @@ export class ContextManager {
       snapshot.autoCompactPrefillEstimated ?? false
     this.#contextTokenHistoryAnchorItemId =
       snapshot.contextTokenHistoryAnchorItemId
+    this.#contextTokenHistoryAnchorTokens =
+      snapshot.contextTokenHistoryAnchorTokens
     this.#contextTokenProvider = snapshot.contextTokenProvider
     this.#contextTokenModel = snapshot.contextTokenModel
     this.#history = structuredClone([...snapshot.history])
@@ -60,6 +64,7 @@ export class ContextManager {
     let autoCompactPrefillTokens: number | undefined
     let autoCompactPrefillEstimated = false
     let contextTokenHistoryAnchorItemId: string | undefined
+    let contextTokenHistoryAnchorTokens: number | undefined
     let contextTokenProvider: string | undefined
     let contextTokenModel: string | undefined
     let previousModel: ModelContextSettings | undefined
@@ -73,6 +78,7 @@ export class ContextManager {
         autoCompactPrefillTokens = undefined
         autoCompactPrefillEstimated = false
         contextTokenHistoryAnchorItemId = undefined
+        contextTokenHistoryAnchorTokens = undefined
         contextTokenProvider = undefined
         contextTokenModel = undefined
         history = structuredClone([...item.replacement])
@@ -82,6 +88,7 @@ export class ContextManager {
         autoCompactPrefillTokens = item.autoCompactPrefillTokens
         autoCompactPrefillEstimated = item.autoCompactPrefillEstimated ?? false
         contextTokenHistoryAnchorItemId = item.historyAnchorItemId
+        contextTokenHistoryAnchorTokens = item.historyAnchorTokens
         contextTokenProvider = item.provider
         contextTokenModel = item.model
       } else if (item.type === "world_state") {
@@ -107,6 +114,9 @@ export class ContextManager {
       ...(contextTokenHistoryAnchorItemId === undefined
         ? {}
         : { contextTokenHistoryAnchorItemId }),
+      ...(contextTokenHistoryAnchorTokens === undefined
+        ? {}
+        : { contextTokenHistoryAnchorTokens }),
       ...(contextTokenProvider === undefined ? {} : { contextTokenProvider }),
       ...(contextTokenModel === undefined ? {} : { contextTokenModel }),
       history,
@@ -134,6 +144,12 @@ export class ContextManager {
             contextTokenHistoryAnchorItemId:
               this.#contextTokenHistoryAnchorItemId,
           }),
+      ...(this.#contextTokenHistoryAnchorTokens === undefined
+        ? {}
+        : {
+            contextTokenHistoryAnchorTokens:
+              this.#contextTokenHistoryAnchorTokens,
+          }),
       ...(this.#contextTokenProvider === undefined
         ? {}
         : { contextTokenProvider: this.#contextTokenProvider }),
@@ -156,6 +172,7 @@ export class ContextManager {
     this.#autoCompactPrefillTokens = undefined
     this.#autoCompactPrefillEstimated = false
     this.#contextTokenHistoryAnchorItemId = undefined
+    this.#contextTokenHistoryAnchorTokens = undefined
     this.#contextTokenProvider = undefined
     this.#contextTokenModel = undefined
     this.#history = structuredClone([...items])
@@ -172,6 +189,7 @@ export class ContextManager {
       inputTokens?: number
       estimatedPrefill?: boolean
       historyAnchorItemId: string
+      historyAnchorTokens?: number
       provider: string
       model: string
     }>,
@@ -180,6 +198,7 @@ export class ContextManager {
     autoCompactPrefillTokens?: number
     autoCompactPrefillEstimated?: boolean
     historyAnchorItemId: string
+    historyAnchorTokens?: number
     provider: string
     model: string
   }> {
@@ -207,6 +226,9 @@ export class ContextManager {
         ? { autoCompactPrefillEstimated: true }
         : {}),
       historyAnchorItemId: input.historyAnchorItemId,
+      ...(input.historyAnchorTokens === undefined
+        ? {}
+        : { historyAnchorTokens: input.historyAnchorTokens }),
       provider: input.provider,
       model: input.model,
     }
@@ -220,6 +242,7 @@ export class ContextManager {
     this.#autoCompactPrefillEstimated =
       input.autoCompactPrefillEstimated ?? false
     this.#contextTokenHistoryAnchorItemId = input.historyAnchorItemId
+    this.#contextTokenHistoryAnchorTokens = input.historyAnchorTokens
     this.#contextTokenProvider = input.provider
     this.#contextTokenModel = input.model
   }

@@ -546,8 +546,14 @@ export function createThreadServerHandlers(
               // Flush before discard so a coalesced delta cannot revive output
               // from the failed attempt after the retry starts.
               for (const publisher of streams.values()) publisher.flush()
-              const itemId = event.details?.discardedResponseItemId
-              if (typeof itemId === "string") {
+              const itemIds = event.details?.discardedResponseItemIds
+              const singleId = event.details?.discardedResponseItemId
+              const discarded = Array.isArray(itemIds)
+                ? itemIds.filter((id): id is string => typeof id === "string")
+                : typeof singleId === "string"
+                  ? [singleId]
+                  : []
+              for (const itemId of discarded) {
                 for (const kind of ["assistant", "reasoning"] as const) {
                   streams.delete(`${itemId}:${kind}`)
                   options.eventHub?.publishTransient({
@@ -2084,6 +2090,15 @@ function mapRolloutEvent(
           ...(item.usage === undefined ? {} : { usage: item.usage }),
           ...(item.metrics === undefined ? {} : { metrics: item.metrics }),
         },
+      },
+    })
+  }
+  if (item.type === "item_started") {
+    return createEventEnvelope({
+      ...base,
+      event: {
+        type: "item.started",
+        data: { turnId: item.turnId, item: item.item },
       },
     })
   }

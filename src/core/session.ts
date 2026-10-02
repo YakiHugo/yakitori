@@ -5,6 +5,7 @@ import type {
   KernelError,
   SessionConfigurationSnapshot,
   StartedExecutionItem,
+  ToolExecutionItem,
   TokenUsage,
   TurnMetrics,
 } from "../kernel/events.ts"
@@ -70,6 +71,7 @@ export type TurnRuntime = {
       estimatedPrefill?: boolean
       capacityTokens?: number
       historyAnchorItemId: string
+      historyAnchorTokens?: number
       provider: string
       model: string
     }>,
@@ -81,6 +83,7 @@ export type TurnRuntime = {
   }): void
   emitWarning(message: string, diagnostic?: KernelError): void
   emitItemStarted(item: StartedExecutionItem): void
+  recordToolStarted(item: ToolExecutionItem): Promise<void>
   emitPermissionEvent(event: SessionPermissionEvent): void
   recordConversationItems(items: readonly ResponseItemEnvelope[]): Promise<void>
   recordItemCompletions(items: readonly CompletedExecutionItem[]): Promise<void>
@@ -919,6 +922,9 @@ export class Session {
           (input.capacityTokens !== undefined &&
             (!Number.isSafeInteger(input.capacityTokens) ||
               input.capacityTokens < 0)) ||
+          (input.historyAnchorTokens !== undefined &&
+            (!Number.isSafeInteger(input.historyAnchorTokens) ||
+              input.historyAnchorTokens < 0)) ||
           input.historyAnchorItemId.trim().length === 0 ||
           input.provider.trim().length === 0 ||
           input.model.trim().length === 0
@@ -961,6 +967,19 @@ export class Session {
             ? {}
             : { details: diagnostic.details }),
         })
+      },
+      recordToolStarted: async (item) => {
+        requireLease()
+        // Tool starts must survive a GUI reconnect while the model stream is
+        // still active. Use the same durable item id for start and completion.
+        await this.#appendRollout([
+          {
+            type: "item_started",
+            turnId: active.input.submissionId,
+            item: structuredClone(item),
+          },
+        ])
+        requireLease()
       },
       emitItemStarted: (item) => {
         requireLease()

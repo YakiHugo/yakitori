@@ -691,10 +691,12 @@ function reduceChat(chat: LiveChat, event: SessionEvent): boolean {
     return true
   }
   if (event.type === "runtime.warning" && event.code === "model.retry") {
-    const itemId = event.details?.discardedResponseItemId
+    const itemIds = event.details?.discardedResponseItemIds
+    const singleId = event.details?.discardedResponseItemId
+    const discarded = Array.isArray(itemIds) ? itemIds : [singleId]
     state.messages = state.messages.filter(
       (message) =>
-        message.id !== itemId ||
+        !discarded.includes(message.id) ||
         message.turnId !== event.turnId ||
         !message.streaming,
     )
