@@ -190,6 +190,45 @@ describe("thread usage projection", () => {
     ).toEqual(["2026-10-01", "2026-10-02"])
   })
 
+  it("counts inherited fork history only in its originating rollout", () => {
+    const projection = new SqliteThreadUsageProjection(":memory:")
+    const parent = thread("parent", "Original", [
+      turnContext("parent_turn", "codex", "gpt-6"),
+      turnCompleted("parent_turn", "2026-10-02T10:00:00Z", {
+        inputTokens: 100,
+        outputTokens: 20,
+      }),
+    ])
+    const child = thread("child", "Fork", [
+      turnContext("child_turn", "other", "model"),
+      turnCompleted("child_turn", "2026-10-02T11:00:00Z", {
+        inputTokens: 40,
+        outputTokens: 10,
+      }),
+    ])
+    projection.rebuild(parent, stamp)
+    projection.rebuild(
+      { ...child, rollout: [...parent.rollout, ...child.rollout] },
+      stamp,
+    )
+    const usage = projection.readUsage({
+      now: new Date("2026-10-02T12:00:00Z"),
+    })
+    expect(usage.totals.turns).toBe(2)
+    expect(usage.totals.inputTokens).toBe(140)
+    expect(usage.totals.outputTokens).toBe(30)
+    expect(
+      usage.threads.map((row) => [row.threadId, row.turns, row.totalTokens]),
+    ).toEqual([
+      ["parent", 1, 120],
+      ["child", 1, 50],
+    ])
+    expect(usage.models.map((row) => [row.provider, row.turns])).toEqual([
+      ["codex", 1],
+      ["other", 1],
+    ])
+  })
+
   it("tracks currency by file stamp and skips turns without usage", () => {
     const projection = new SqliteThreadUsageProjection(":memory:")
     const stored = thread("session_a", "t", [

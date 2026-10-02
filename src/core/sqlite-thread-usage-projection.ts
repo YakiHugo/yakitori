@@ -40,7 +40,7 @@ type StampRow = Readonly<{
   rollout_mtime_ms: number
 }>
 
-const schemaVersion = 1
+const schemaVersion = 2
 
 // Disposable SQLite materialization of per-turn token usage. The rollout
 // remains authoritative; stamps let readers rebuild only stale projections.
@@ -121,6 +121,9 @@ export class SqliteThreadUsageProjection {
           continue
         }
         if (item.type !== "turn_completed" || item.usage === undefined) continue
+        // Forks materialize their inherited history for reading, but those
+        // completions were executed in the source rollout, not again here.
+        if (record.rolloutId !== stored.metadata.rolloutId) continue
         const target = turnModels.get(item.turnId)
         insertTurn.run(
           stored.metadata.id,
