@@ -30,6 +30,7 @@ export type WorkspaceTab = (
       id: string
       kind: "chat"
       draft: string
+      composerFocusRevision?: number
       excerpts: readonly ContextExcerpt[]
       attachments: readonly ImageAttachment[]
       sourceSessionId?: string
@@ -65,7 +66,14 @@ type WorkspaceStore = {
   openBrowser(url: string): void
   openAgents(sourceSessionId: string, agentId?: string): void
   selectAgent(tabId: string, agentId?: string): void
-  askInSideChat(excerpt: ContextExcerpt, sourceSessionId?: string): void
+  askInSideChat(
+    excerpt: ContextExcerpt,
+    sourceSessionId?: string,
+    sourceTabId?: string,
+  ): void
+  addChatExcerpt(id: string, excerpt: ContextExcerpt): void
+  updateChatExcerpt(excerpt: ContextExcerpt): void
+  removeChatExcerpt(id: string): void
   updateChatStatus(
     id: string,
     status: {
@@ -326,11 +334,12 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
       }),
     })
   },
-  askInSideChat(excerpt, sourceSessionId) {
+  askInSideChat(excerpt, sourceSessionId, sourceTabId) {
     const state = get()
     const available = state.tabs.filter(
       (tab) =>
         tab.kind === "chat" &&
+        tab.id !== sourceTabId &&
         tab.workspaceSessionId === state.sessionId &&
         !tab.activeTurnId &&
         (tab.expiresAt === undefined ||
@@ -338,16 +347,57 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
         tab.sourceSessionId === sourceSessionId,
     )
     const current =
-      available.find((tab) => tab.id === state.activeId) ?? available.at(-1)
+      available.find((tab) => tab.id === state.activeId) ??
+      (available.length === 1 ? available[0] : undefined)
     const id = current?.id ?? get().addTab("chat", sourceSessionId)
+    get().addChatExcerpt(id, excerpt)
+  },
+  addChatExcerpt(id, excerpt) {
+    const state = get()
+    if (
+      !state.tabs.some(
+        (tab) =>
+          tab.id === id &&
+          tab.kind === "chat" &&
+          tab.workspaceSessionId === state.sessionId,
+      )
+    )
+      return
     set({
-      tabs: get().tabs.map((tab) =>
+      tabs: state.tabs.map((tab) =>
         tab.id === id && tab.kind === "chat"
-          ? { ...tab, excerpts: [...tab.excerpts, excerpt] }
+          ? {
+              ...tab,
+              excerpts: [...tab.excerpts, excerpt],
+              composerFocusRevision: (tab.composerFocusRevision ?? 0) + 1,
+            }
           : tab,
       ),
     })
     get().activate(id)
+  },
+  updateChatExcerpt(excerpt) {
+    set((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.kind === "chat" && tab.workspaceSessionId === state.sessionId
+          ? {
+              ...tab,
+              excerpts: tab.excerpts.map((item) =>
+                item.id === excerpt.id ? excerpt : item,
+              ),
+            }
+          : tab,
+      ),
+    }))
+  },
+  removeChatExcerpt(id) {
+    set((state) => ({
+      tabs: state.tabs.map((tab) =>
+        tab.kind === "chat" && tab.workspaceSessionId === state.sessionId
+          ? { ...tab, excerpts: tab.excerpts.filter((item) => item.id !== id) }
+          : tab,
+      ),
+    }))
   },
   updateChatStatus(id, status) {
     const update = (tab: WorkspaceTab): WorkspaceTab => {

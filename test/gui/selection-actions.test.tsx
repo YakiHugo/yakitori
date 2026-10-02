@@ -227,6 +227,8 @@ it("keeps a new annotation at its source and preserves its note when returning t
     screen.getByRole("button", { name: "Edit annotation 1" }).textContent,
   ).toBe("1")
   expect(document.querySelector(".annotation-highlight")).not.toBeNull()
+  expect(screen.queryByRole("textbox")).toBeNull()
+  await user.click(screen.getByRole("button", { name: "Edit annotation 1" }))
   const comment = screen.getByRole("textbox", {
     name: "Annotation comment (optional)",
   })
@@ -246,15 +248,16 @@ it("keeps a new annotation at its source and preserves its note when returning t
   )
 })
 
-it("Escape removes a just-created annotation but restores the existing note during editing", async () => {
+it("Escape preserves an attached annotation and restores the existing note during editing", async () => {
   const user = userEvent.setup()
   render(<Draft />)
   selectText(screen.getByText("useful explanation"))
   await user.click(screen.getByRole("button", { name: "Add to conversation" }))
   await user.keyboard("{Escape}")
-  expect(screen.queryByRole("button", { name: "Edit annotation 1" })).toBeNull()
-  selectText(screen.getByText("useful explanation"))
-  await user.click(screen.getByRole("button", { name: "Add to conversation" }))
+  expect(
+    screen.getByRole("button", { name: "Edit annotation 1" }),
+  ).toBeDefined()
+  await user.click(screen.getByRole("button", { name: "Edit annotation 1" }))
   await user.type(screen.getByRole("textbox"), "Saved note")
   await user.keyboard("{Enter}")
   await user.click(screen.getByRole("button", { name: "Edit annotation 1" }))
@@ -349,4 +352,78 @@ it("aggregates annotations and selected text into compact read-only preview pill
   expect(screen.queryByRole("button", { name: /Remove/ })).toBeNull()
   expect(screen.queryByRole("button", { name: /Edit annotation/ })).toBeNull()
   expect(screen.getAllByText("useful explanation")).toHaveLength(2)
+})
+
+it("removes a reference from its source editor without opening the composer chips", async () => {
+  const user = userEvent.setup()
+  render(<Draft />)
+  selectText(screen.getByText("useful explanation"))
+  await user.click(screen.getByRole("button", { name: "Add to conversation" }))
+  await user.click(screen.getByRole("button", { name: "Edit annotation 1" }))
+  await user.click(screen.getByRole("button", { name: "Remove annotation" }))
+  expect(screen.queryByRole("button", { name: "1 annotation" })).toBeNull()
+  expect(screen.queryByRole("dialog")).toBeNull()
+  expect(document.querySelector(".annotation-highlight")).toBeNull()
+})
+
+it("captures side conversation ownership and clears native selection after either action", async () => {
+  const user = userEvent.setup()
+  const props = defaultProps()
+  render(
+    <>
+      <div data-side-chat-id="side-tab">
+        <p {...contextSourceAttributes(source)}>Side response</p>
+      </div>
+      <SelectionActions {...props} />
+    </>,
+  )
+  selectText(screen.getByText("Side response"))
+  await user.click(screen.getByRole("button", { name: "Add to conversation" }))
+  expect(props.onAddToConversation).toHaveBeenCalledWith(
+    expect.objectContaining({ text: "Side response" }),
+    "side-tab",
+  )
+  expect(window.getSelection()?.isCollapsed).toBe(true)
+  selectText(screen.getByText("Side response"))
+  await user.click(screen.getByRole("button", { name: "Ask in side chat" }))
+  expect(props.onAskInSideChat).toHaveBeenCalledWith(
+    expect.objectContaining({ text: "Side response" }),
+    "side-tab",
+  )
+  expect(window.getSelection()?.isCollapsed).toBe(true)
+})
+
+it("refuses a captured selection after its source tab becomes hidden", async () => {
+  const props = defaultProps()
+  const user = userEvent.setup()
+  render(
+    <>
+      <div data-testid="tab">
+        <p {...contextSourceAttributes(source)}>Response</p>
+      </div>
+      <SelectionActions {...props} />
+    </>,
+  )
+  selectText(screen.getByText("Response"))
+  screen.getByTestId("tab").hidden = true
+  await user.click(screen.getByRole("button", { name: "Add to conversation" }))
+  expect(props.onAddToConversation).not.toHaveBeenCalled()
+  expect(screen.queryByRole("toolbar")).toBeNull()
+})
+
+it("does not attach a selection whose source changed before the action", async () => {
+  const user = userEvent.setup()
+  const props = defaultProps()
+  render(
+    <>
+      <p {...contextSourceAttributes(source)}>Original response</p>
+      <SelectionActions {...props} />
+    </>,
+  )
+  const sourceElement = screen.getByText("Original response")
+  selectText(sourceElement)
+  sourceElement.textContent = "Replaced response"
+  await user.click(screen.getByRole("button", { name: "Add to conversation" }))
+  expect(props.onAddToConversation).not.toHaveBeenCalled()
+  expect(screen.queryByRole("toolbar")).toBeNull()
 })

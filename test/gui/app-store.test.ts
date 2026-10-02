@@ -4211,3 +4211,159 @@ it("keeps the sidebar order when an already listed search result is selected", a
     useAppStore.getState().sessionsByProject[""]?.sessions.map((s) => s.id),
   ).toEqual(["session_first", "session_second"])
 })
+
+it.each(
+  [
+    { draft: "hi", expected: undefined, order: "queue-first" },
+    { draft: "Next question", expected: "Next question", order: "queue-first" },
+    { draft: "hi", expected: undefined, order: "rpc-first" },
+    { draft: "Next question", expected: "Next question", order: "rpc-first" },
+  ].flatMap((scenario) =>
+    ["before-replay", "during-replay"].map((start) => ({ ...scenario, start })),
+  ),
+)("settles the first admitted draft after overlapping initial replay: $draft / $order / $start", async ({
+  draft,
+  expected,
+  order,
+  start,
+}) => {
+  const admission = deferredResponse()
+  const queue = deferredResponse()
+  fakeRef.current.respond = (method) => {
+    if (method === "session/create")
+      return {
+        session: sessionDetail,
+        event: createEventEnvelope({
+          sessionId: "session_1",
+          seq: 1,
+          event: { type: EventType.SessionCreated, data: {} },
+        }),
+      }
+    if (method === "session/input") return admission.promise
+    if (method === "session/queue/list") return queue.promise
+    if (method === "session/skills") return { skills: [] }
+    if (method === "session/list") return { sessions: [] }
+    return notFound()
+  }
+  if (start === "during-replay") {
+    await useAppStore.getState().createSession()
+    const initialStream = fakeRef.current.streams[0]
+    if (!initialStream) throw new Error("Missing initial stream")
+    emitSnapshot(initialStream)
+    initialStream.emitReplayComplete()
+  }
+  useAppStore.getState().setPromptDraft("hi")
+  const sending = useAppStore.getState().admitInput("hi")
+  await vi.waitFor(() =>
+    expect(fakeRef.current.requestsFor("session/input")).toHaveLength(1),
+  )
+  useAppStore.getState().setPromptDraft(draft)
+  const request = fakeRef.current.requestsFor("session/input")[0]?.params as {
+    requestId: string
+  }
+  const stream = fakeRef.current.streams[0]
+  if (!stream) throw new Error("Missing initial stream")
+  if (start === "before-replay") {
+    emitSnapshot(stream)
+    stream.emitReplayComplete()
+  }
+  // Let the replay's empty queue read reconcile while the live send is pending.
+  await vi.waitFor(() =>
+    expect(fakeRef.current.requestsFor("session/queue/list")).toHaveLength(1),
+  )
+  if (order === "rpc-first") {
+    admission.resolve({ requestId: request.requestId, inputId: "input_1" })
+    await sending
+  }
+  queue.resolve({ items: [] })
+  await queue.promise
+  await new Promise<void>((resolve) => setTimeout(resolve, 0))
+  stream.emitEvent(
+    createEventEnvelope({
+      sessionId: "session_1",
+      seq: 2,
+      event: {
+        type: EventType.InputAdmitted,
+        data: {
+          requestId: request.requestId,
+          inputId: "input_1",
+          role: InputRole.User,
+          content: { kind: "text", text: "hi" },
+        },
+      },
+    }),
+  )
+  admission.resolve({ requestId: request.requestId, inputId: "input_1" })
+  await sending
+  expect(
+    useAppStore.getState().execution.admittedRequestIds[request.requestId],
+  ).toBe(true)
+  expect(useAppStore.getState().promptDraft).toBe(expected)
+})
+
+it.each([
+  "terminal rejection",
+  "transport failure",
+])("preserves admission recovery after overlapping replay and %s", async (failure) => {
+  const admission = deferredResponse()
+  const queue = deferredResponse()
+  fakeRef.current.respond = (method) => {
+    if (method === "session/create")
+      return {
+        session: sessionDetail,
+        event: createEventEnvelope({
+          sessionId: "session_1",
+          seq: 1,
+          event: { type: EventType.SessionCreated, data: {} },
+        }),
+      }
+    if (method === "session/input") return admission.promise
+    if (method === "session/queue/list") return queue.promise
+    if (method === "session/skills") return { skills: [] }
+    if (method === "session/list") return { sessions: [] }
+    return notFound()
+  }
+  useAppStore.getState().setPromptDraft("hi")
+  const sending = useAppStore.getState().admitInput("hi")
+  await vi.waitFor(() =>
+    expect(fakeRef.current.requestsFor("session/input")).toHaveLength(1),
+  )
+  const request = fakeRef.current.requestsFor("session/input")[0]?.params as {
+    requestId: string
+  }
+  const stream = fakeRef.current.streams[0]
+  if (!stream) throw new Error("Missing initial stream")
+  useAppStore.getState().setPromptDraft("Next question")
+  emitSnapshot(stream)
+  stream.emitReplayComplete()
+  queue.resolve({ items: [] })
+  await queue.promise
+  await new Promise<void>((resolve) => setTimeout(resolve, 0))
+  expect(useAppStore.getState().promptDraft).toBe("Next question")
+  if (failure === "terminal rejection") {
+    stream.emitEvent(
+      createEventEnvelope({
+        sessionId: "session_1",
+        seq: 2,
+        event: {
+          type: EventType.TurnCompleted,
+          data: { turnId: request.requestId, outcome: { status: "completed" } },
+        },
+      }),
+    )
+    admission.resolve({ requestId: request.requestId, inputId: "input_1" })
+  } else {
+    admission.reject(new Error("Connection lost"))
+  }
+  await sending
+  if (failure === "transport failure") {
+    expect(useAppStore.getState().message).toBe("Connection lost")
+    stream.emitReplayComplete()
+  }
+  await vi.waitFor(() =>
+    expect(useAppStore.getState().promptDraft).toBe("hi\nNext question"),
+  )
+  expect(
+    useAppStore.getState().execution.admittedRequestIds[request.requestId],
+  ).toBeUndefined()
+})

@@ -7,6 +7,7 @@ import type {
   SelectedTextAttachment,
 } from "../conversation-context.ts"
 import {
+  type AnnotationDetails,
   AnnotationLayer,
   findContextSource,
   requestAnnotationEdit,
@@ -19,24 +20,26 @@ type CapturedSelection = {
   excerpt: SelectedTextAttachment
   source: HTMLElement
   range: Range
+  sideChatId?: string
   anchor: ResponseAnnotation["anchor"]
 }
 
 export function SelectionActions({
   annotations,
+  annotationDetails,
   onAddToConversation,
   onUpdateAnnotation,
   onRemoveAnnotation,
   onAskInSideChat,
 }: Readonly<{
   annotations: readonly ResponseAnnotation[]
-  onAddToConversation(annotation: ResponseAnnotation): void
+  annotationDetails?: AnnotationDetails
+  onAddToConversation(annotation: ResponseAnnotation, sideChatId?: string): void
   onUpdateAnnotation(annotation: ResponseAnnotation): void
   onRemoveAnnotation(id: string): void
-  onAskInSideChat(excerpt: SelectedTextAttachment): void
+  onAskInSideChat(excerpt: SelectedTextAttachment, sideChatId?: string): void
 }>) {
   const [captured, setCaptured] = useState<CapturedSelection>()
-  const [createdAnnotationId, setCreatedAnnotationId] = useState<string>()
   const [position, setPosition] = useState({ top: 0, left: 0 })
   const menu = useRef<HTMLDivElement>(null)
 
@@ -70,6 +73,7 @@ export function SelectionActions({
       const source = start?.closest<HTMLElement>("[data-context-kind]")
       if (
         !source ||
+        source.closest("[hidden]") ||
         source !== end?.closest("[data-context-kind]") ||
         start?.closest("input, textarea, [contenteditable=true]") ||
         end?.closest("input, textarea, [contenteditable=true]")
@@ -94,6 +98,8 @@ export function SelectionActions({
         setCaptured(undefined)
         return
       }
+      const sideChatId = source.closest<HTMLElement>("[data-side-chat-id]")
+        ?.dataset.sideChatId
       setCaptured({
         excerpt: {
           id: `selection_${crypto.randomUUID()}`,
@@ -109,6 +115,7 @@ export function SelectionActions({
           },
         },
         source,
+        ...(sideChatId ? { sideChatId } : {}),
         range: range.cloneRange(),
         anchor: selectionOffsets(source, range),
       })
@@ -119,7 +126,12 @@ export function SelectionActions({
       setCaptured(undefined)
     }
     const keydown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setCaptured(undefined)
+      if (event.key === "Escape" && menu.current) {
+        event.preventDefault()
+        event.stopPropagation()
+        window.getSelection()?.removeAllRanges()
+        setCaptured(undefined)
+      }
     }
     document.addEventListener("pointerup", capture)
     document.addEventListener("keyup", capture)
@@ -130,13 +142,14 @@ export function SelectionActions({
       document.removeEventListener("keyup", capture)
       document.removeEventListener("pointerdown", close)
       document.removeEventListener("keydown", keydown)
+      window.getSelection()?.removeAllRanges()
     }
   }, [])
 
   useLayoutEffect(() => {
     if (!captured) return
     const place = () => {
-      if (!captured.source.isConnected) {
+      if (!captured.source.isConnected || captured.source.closest("[hidden]")) {
         setCaptured(undefined)
         return
       }
@@ -166,18 +179,32 @@ export function SelectionActions({
     }
   }, [captured])
 
-  const actOnSelection = (action: "main" | "side") => {
-    if (!captured) return
-    if (action === "main") {
+  const actOnSelection = (action: "conversation" | "side") => {
+    if (
+      !captured?.source.isConnected ||
+      captured.source.closest("[hidden]") ||
+      captured.source.textContent?.slice(
+        captured.anchor.startOffset,
+        captured.anchor.endOffset,
+      ) !== captured.excerpt.text
+    ) {
+      setCaptured(undefined)
+      return
+    }
+    if (action === "conversation") {
       const annotation: ResponseAnnotation = {
         ...captured.excerpt,
         id: `annotation_${crypto.randomUUID()}`,
         kind: "annotation",
         anchor: captured.anchor,
       }
-      onAddToConversation(annotation)
-      setCreatedAnnotationId(annotation.id)
-    } else onAskInSideChat(captured.excerpt)
+      if (captured.sideChatId)
+        onAddToConversation(annotation, captured.sideChatId)
+      else onAddToConversation(annotation)
+    } else if (captured.sideChatId)
+      onAskInSideChat(captured.excerpt, captured.sideChatId)
+    else onAskInSideChat(captured.excerpt)
+    window.getSelection()?.removeAllRanges()
     setCaptured(undefined)
   }
 
@@ -185,9 +212,9 @@ export function SelectionActions({
     <>
       <AnnotationLayer
         annotations={annotations}
+        details={annotationDetails}
         onChange={onUpdateAnnotation}
         onRemove={onRemoveAnnotation}
-        createdAnnotationId={createdAnnotationId}
       />
       {captured
         ? createPortal(
@@ -199,7 +226,10 @@ export function SelectionActions({
               aria-label="Selected text actions"
               onPointerDown={(event) => event.preventDefault()}
             >
-              <button type="button" onClick={() => actOnSelection("main")}>
+              <button
+                type="button"
+                onClick={() => actOnSelection("conversation")}
+              >
                 Add to conversation
               </button>
               <span className="selection-actions-divider" />

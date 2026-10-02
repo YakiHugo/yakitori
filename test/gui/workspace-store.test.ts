@@ -197,3 +197,70 @@ it("opens a fresh side chat when the previous one has expired", async () => {
     },
   )
 })
+
+it("keeps selected context in its explicit side draft and advances focus only when adding", async () => {
+  const { useWorkspaceStore } = await import(
+    "../../src/gui/store/workspace-store.ts"
+  )
+  const store = useWorkspaceStore.getState()
+  store.setSession("main")
+  const first = store.addTab("chat", "main")
+  const second = store.addTab("chat", "main")
+  const excerpt = {
+    kind: "selection" as const,
+    id: "quote",
+    text: "Answer",
+    source: {
+      kind: "message" as const,
+      label: "Response",
+      sessionId: "side",
+      messageId: "answer",
+    },
+  }
+  store.addChatExcerpt(first, excerpt)
+  expect(useWorkspaceStore.getState().activeId).toBe(first)
+  expect(
+    useWorkspaceStore.getState().tabs.find((tab) => tab.id === first),
+  ).toMatchObject({ excerpts: [excerpt], composerFocusRevision: 1 })
+  expect(
+    useWorkspaceStore.getState().tabs.find((tab) => tab.id === second),
+  ).toMatchObject({ excerpts: [] })
+  store.updateChatDraft(first, "", [])
+  store.addChatExcerpt(first, { ...excerpt, id: "again" })
+  expect(
+    useWorkspaceStore.getState().tabs.find((tab) => tab.id === first),
+  ).toMatchObject({ composerFocusRevision: 2 })
+  store.setSession("another")
+  store.addChatExcerpt(first, { ...excerpt, id: "stale" })
+  expect(
+    useWorkspaceStore.getState().tabs.find((tab) => tab.id === first),
+  ).toMatchObject({ composerFocusRevision: 2 })
+})
+
+it("asks in a distinct side chat and does not choose between unrelated idle drafts", async () => {
+  const { useWorkspaceStore } = await import(
+    "../../src/gui/store/workspace-store.ts"
+  )
+  const store = useWorkspaceStore.getState()
+  store.setSession("main")
+  const first = store.addTab("chat", "main")
+  const excerpt = {
+    kind: "selection" as const,
+    id: "quote",
+    text: "Answer",
+    source: { kind: "message" as const, label: "Response" },
+  }
+  store.askInSideChat(excerpt, "main", first)
+  const second = useWorkspaceStore.getState().activeId
+  expect(second).not.toBe(first)
+  expect(
+    useWorkspaceStore.getState().tabs.find((tab) => tab.id === first),
+  ).toMatchObject({ excerpts: [] })
+  store.addTab("browser")
+  store.askInSideChat({ ...excerpt, id: "next" }, "main")
+  expect(useWorkspaceStore.getState().activeId).not.toBe(first)
+  expect(useWorkspaceStore.getState().activeId).not.toBe(second)
+  expect(
+    useWorkspaceStore.getState().tabs.filter((tab) => tab.kind === "chat"),
+  ).toHaveLength(3)
+})

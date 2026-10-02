@@ -2,6 +2,8 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
+import type { BrowserPanelProps } from "../../src/gui/components/browser-panel.tsx"
+import { Composer } from "../../src/gui/components/composer.tsx"
 import { WorkspaceFrame } from "../../src/gui/components/workspace-frame.tsx"
 import { contextSourceAttributes } from "../../src/gui/conversation-context.ts"
 import {
@@ -10,6 +12,10 @@ import {
 } from "../../src/gui/store/app-store.ts"
 import { useWorkspaceStore } from "../../src/gui/store/workspace-store.ts"
 import type { ApiProject, ApiSessionDetail } from "../../src/server/protocol.ts"
+
+const browserSelections = vi.hoisted(
+  () => new Map<string, BrowserPanelProps["onSelection"]>(),
+)
 
 const rpc = vi.hoisted(() => ({
   request: vi.fn(),
@@ -47,9 +53,10 @@ vi.mock("../../src/gui/components/computer-panel.tsx", () => ({
   ComputerPanel: () => <p>Computer view</p>,
 }))
 vi.mock("../../src/gui/components/browser-panel.tsx", () => ({
-  BrowserPanel: () => (
-    <input aria-label="Browser address" defaultValue="about:blank" />
-  ),
+  BrowserPanel: ({ tabId, onSelection }: BrowserPanelProps) => {
+    browserSelections.set(tabId, onSelection)
+    return <input aria-label="Browser address" defaultValue="about:blank" />
+  },
 }))
 
 function project(id: string, root: string): ApiProject {
@@ -90,6 +97,7 @@ let measuredWidth = 1440
 const resizeCallbacks = new Set<() => void>()
 beforeEach(() => {
   measuredWidth = 1440
+  browserSelections.clear()
   resizeCallbacks.clear()
   vi.stubGlobal(
     "ResizeObserver",
@@ -637,4 +645,254 @@ it("reuses an idle side discussion after browsing and confirms closing a draft",
   await user.click(screen.getByRole("button", { name: "Close Side chat" }))
   await user.click(screen.getByRole("button", { name: "Close side chat" }))
   expect(screen.queryByRole("tab", { name: "Side chat" })).toBeNull()
+})
+
+function selectQuote(element: HTMLElement) {
+  const range = document.createRange()
+  range.selectNodeContents(element)
+  window.getSelection()?.removeAllRanges()
+  window.getSelection()?.addRange(range)
+  fireEvent.pointerUp(element)
+}
+
+it("routes side selections to their own draft, focuses that composer, and removes the reference at its source", async () => {
+  const user = userEvent.setup()
+  const rect = new DOMRect(100, 100, 120, 20)
+  vi.spyOn(Range.prototype, "getBoundingClientRect").mockReturnValue(rect)
+  vi.spyOn(Range.prototype, "getClientRects").mockReturnValue(
+    Object.assign([rect], { item: () => rect }),
+  )
+  rpc.request.mockImplementation(async (method: string) =>
+    method === "sideChat/create"
+      ? {
+          id: "side-source",
+          revision: 0,
+          cwd: "/project/one",
+          modelSelection: { provider: "faux", model: "scripted" },
+          messages: [
+            {
+              id: "response",
+              turnId: "turn",
+              role: "assistant",
+              text: "Side explanation",
+              streaming: false,
+            },
+          ],
+        }
+      : { skills: [] },
+  )
+  useAppStore.setState({ promptDraft: "Keep main draft" })
+  const tabId = useWorkspaceStore.getState().addTab("chat")
+  render(
+    <WorkspaceFrame>
+      <main>
+        <Composer />
+      </main>
+    </WorkspaceFrame>,
+  )
+  const response = await screen.findByText("Side explanation")
+  const mainDraft = useAppStore.getState().promptDraft
+  selectQuote(response)
+  await user.click(screen.getByRole("button", { name: "Add to conversation" }))
+  expect(useAppStore.getState().promptExcerpts).toEqual([])
+  expect(useAppStore.getState().promptDraft).toBe(mainDraft)
+  expect(document.activeElement).toBe(
+    screen.getByRole("textbox", { name: "Message side chat" }),
+  )
+  expect(
+    screen.queryByRole("dialog", { name: "Annotation comment" }),
+  ).toBeNull()
+  const side = () =>
+    useWorkspaceStore.getState().tabs.find((tab) => tab.id === tabId)
+  expect(side()).toMatchObject({
+    excerpts: [
+      expect.objectContaining({
+        text: "Side explanation",
+        source: expect.objectContaining({
+          sessionId: "side-source",
+          messageId: "response",
+        }),
+      }),
+    ],
+  })
+  await user.click(
+    screen.getByRole("button", { name: "Edit annotation 1 in Side chat" }),
+  )
+  await user.type(
+    screen.getByRole("textbox", { name: "Annotation comment (optional)" }),
+    "A note",
+  )
+  await user.click(screen.getByRole("button", { name: "Done" }))
+  expect(side()).toMatchObject({
+    excerpts: [expect.objectContaining({ comment: "A note" })],
+  })
+  await user.click(
+    screen.getByRole("button", { name: "Edit annotation 1 in Side chat" }),
+  )
+  await user.click(screen.getByRole("button", { name: "Remove annotation" }))
+  expect(side()).toMatchObject({ excerpts: [] })
+  expect(screen.getByText("Side explanation")).toBeDefined()
+  selectQuote(response)
+  await user.click(screen.getByRole("button", { name: "Add to conversation" }))
+  expect(document.activeElement).toBe(
+    screen.getByRole("textbox", { name: "Message side chat" }),
+  )
+  selectQuote(response)
+  await user.click(screen.getByRole("button", { name: "Ask in side chat" }))
+  expect(useWorkspaceStore.getState().activeId).not.toBe(tabId)
+  expect(useAppStore.getState().promptExcerpts).toEqual([])
+  expect(document.activeElement).toBe(
+    screen.getByRole("textbox", { name: "Message side chat" }),
+  )
+  expect(
+    rpc.request.mock.calls.filter(([method]) => method === "sideChat/send"),
+  ).toEqual([])
+})
+
+it("focuses the main composer after adding main text while a side composer is open", async () => {
+  const user = userEvent.setup()
+  vi.spyOn(Range.prototype, "getBoundingClientRect").mockReturnValue(
+    new DOMRect(100, 100, 120, 20),
+  )
+  useWorkspaceStore.getState().addTab("chat")
+  render(
+    <WorkspaceFrame>
+      <main>
+        <p
+          {...contextSourceAttributes({
+            kind: "message",
+            label: "Main response",
+            sessionId: "main",
+            messageId: "response",
+          })}
+        >
+          Main explanation
+        </p>
+        <Composer />
+      </main>
+    </WorkspaceFrame>,
+  )
+  selectQuote(screen.getByText("Main explanation"))
+  await user.click(screen.getByRole("button", { name: "Add to conversation" }))
+  expect(useAppStore.getState().promptExcerpts).toEqual([
+    expect.objectContaining({ text: "Main explanation" }),
+  ])
+  expect(document.activeElement).toBe(
+    screen.getByRole("textbox", { name: "Message the Mate" }),
+  )
+  expect(
+    useWorkspaceStore.getState().tabs.find((tab) => tab.kind === "chat"),
+  ).toMatchObject({ excerpts: [] })
+})
+
+it("dismisses a selection on tab changes and does not recapture hidden side text", async () => {
+  const user = userEvent.setup()
+  vi.spyOn(Range.prototype, "getBoundingClientRect").mockReturnValue(
+    new DOMRect(100, 100, 120, 20),
+  )
+  render(
+    <WorkspaceFrame>
+      <p
+        {...contextSourceAttributes({
+          kind: "message",
+          label: "Main",
+          sessionId: "main",
+          messageId: "response",
+        })}
+      >
+        Quote
+      </p>
+    </WorkspaceFrame>,
+  )
+  selectQuote(screen.getByText("Quote"))
+  expect(screen.getByRole("toolbar")).toBeDefined()
+  act(() => {
+    useWorkspaceStore.getState().addTab("chat")
+  })
+  expect(screen.queryByRole("toolbar")).toBeNull()
+  await user.click(screen.getByRole("textbox", { name: "Message side chat" }))
+  expect(screen.queryByRole("toolbar")).toBeNull()
+  expect(useAppStore.getState().promptExcerpts).toEqual([])
+})
+
+it("Escape dismisses the selection toolbar without closing a narrow side workspace", () => {
+  Object.defineProperty(window, "innerWidth", {
+    configurable: true,
+    value: 1000,
+  })
+  vi.spyOn(Range.prototype, "getBoundingClientRect").mockReturnValue(
+    new DOMRect(100, 100, 120, 20),
+  )
+  useWorkspaceStore.getState().addTab("chat")
+  render(
+    <WorkspaceFrame>
+      <p
+        {...contextSourceAttributes({
+          kind: "message",
+          label: "Main",
+          sessionId: "main",
+          messageId: "response",
+        })}
+      >
+        Quote
+      </p>
+    </WorkspaceFrame>,
+  )
+  selectQuote(screen.getByText("Quote"))
+  fireEvent.keyDown(document, { key: "Escape" })
+  expect(screen.queryByRole("toolbar")).toBeNull()
+  expect(useWorkspaceStore.getState().open).toBe(true)
+  expect(window.getSelection()?.isCollapsed).toBe(true)
+})
+
+it("ignores delayed native selections after tab or session changes and accepts only the active browser", () => {
+  const browserId = useWorkspaceStore.getState().addTab("browser")
+  render(
+    <WorkspaceFrame>
+      <Composer />
+    </WorkspaceFrame>,
+  )
+  const callback = browserSelections.get(browserId)
+  if (!callback) throw new Error("Missing browser selection callback")
+  const selection = {
+    action: "add" as const,
+    text: "Browser quote",
+    title: "Page",
+    url: "https://example.com",
+  }
+  act(() => callback(selection))
+  expect(useAppStore.getState().promptExcerpts).toEqual([
+    expect.objectContaining({ text: "Browser quote" }),
+  ])
+  expect(document.activeElement).toBe(
+    screen.getByRole("textbox", { name: "Message the Mate" }),
+  )
+  act(() => {
+    useWorkspaceStore.getState().addTab("chat")
+  })
+  act(() => {
+    callback(selection)
+    callback({ ...selection, action: "chat" })
+  })
+  expect(useAppStore.getState().promptExcerpts).toHaveLength(1)
+  expect(
+    useWorkspaceStore.getState().tabs.find((tab) => tab.kind === "chat"),
+  ).toMatchObject({ excerpts: [] })
+  act(() => {
+    useAppStore.setState({
+      selection: { sessionId: "other" },
+      promptExcerpts: [],
+    })
+  })
+  act(() => {
+    callback(selection)
+    callback({ ...selection, action: "chat" })
+  })
+  expect(useAppStore.getState().promptExcerpts).toEqual([])
+  expect(
+    useWorkspaceStore.getState().tabs.filter((tab) => tab.kind === "chat"),
+  ).toHaveLength(1)
+  expect(
+    useWorkspaceStore.getState().tabs.find((tab) => tab.kind === "chat"),
+  ).toMatchObject({ excerpts: [] })
 })

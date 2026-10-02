@@ -114,9 +114,8 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
         : undefined,
   )
   const addToMain = (excerpt: ContextExcerpt) => {
-    if (excerpt.kind === "selection") {
-      useWorkspaceStore.getState().setExpanded(false)
-    }
+    useWorkspaceStore.getState().setExpanded(false)
+    if (window.innerWidth < 1180) setOpen(false)
     addPromptExcerpt(excerpt)
   }
   const requestClose = (tab: WorkspaceTab) => {
@@ -488,6 +487,14 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
                     useWorkspaceStore.getState().setBrowserTitle(tab.id, title)
                   }
                   onSelection={(selection) => {
+                    const workspace = useWorkspaceStore.getState()
+                    if (
+                      !workspace.open ||
+                      workspace.activeId !== tab.id ||
+                      tab.workspaceSessionId !==
+                        useAppStore.getState().selection.sessionId
+                    )
+                      return
                     const excerpt: ContextExcerpt = {
                       kind: "selection",
                       id: `excerpt_${crypto.randomUUID()}`,
@@ -597,14 +604,47 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
         />
       ) : null}
       <SelectionActions
-        key={`${apiBase}:${sessionId ?? "draft"}`}
-        annotations={excerpts.filter(
-          (excerpt) => excerpt.kind === "annotation",
-        )}
-        onAddToConversation={addToMain}
-        onUpdateAnnotation={updateExcerpt}
-        onRemoveAnnotation={removeExcerpt}
-        onAskInSideChat={(excerpt) => askInSideChat(excerpt, sessionId)}
+        key={`${apiBase}:${sessionId ?? "draft"}:${open}:${activeId}`}
+        annotations={[
+          ...excerpts,
+          ...visibleTabs.flatMap((tab) =>
+            tab.kind === "chat" ? tab.excerpts : [],
+          ),
+        ].filter((excerpt) => excerpt.kind === "annotation")}
+        annotationDetails={Object.fromEntries([
+          ...excerpts
+            .filter((excerpt) => excerpt.kind === "annotation")
+            .map((excerpt, index) => [
+              excerpt.id,
+              { number: index + 1, conversation: "main conversation" },
+            ]),
+          ...visibleTabs.flatMap((tab) =>
+            tab.kind === "chat"
+              ? tab.excerpts
+                  .filter((excerpt) => excerpt.kind === "annotation")
+                  .map((excerpt, index) => [
+                    excerpt.id,
+                    { number: index + 1, conversation: tabLabel(tab) },
+                  ])
+              : [],
+          ),
+        ])}
+        onAddToConversation={(excerpt, sideChatId) => {
+          if (sideChatId)
+            useWorkspaceStore.getState().addChatExcerpt(sideChatId, excerpt)
+          else addToMain(excerpt)
+        }}
+        onUpdateAnnotation={(excerpt) => {
+          updateExcerpt(excerpt)
+          useWorkspaceStore.getState().updateChatExcerpt(excerpt)
+        }}
+        onRemoveAnnotation={(id) => {
+          removeExcerpt(id)
+          useWorkspaceStore.getState().removeChatExcerpt(id)
+        }}
+        onAskInSideChat={(excerpt, sideChatId) =>
+          askInSideChat(excerpt, sessionId, sideChatId)
+        }
       />
       {closing && (
         <CloseSideChatDialog
