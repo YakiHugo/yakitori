@@ -976,7 +976,7 @@ async function executeTurnModelLoop(
         input.runtime.snapshot().context.history.map(({ item }) => item),
       )
       const messages = durableMessages
-      const visibleFileObservations =
+      let visibleFileObservations =
         createVisibleFileObservationsFromMessages(messages)
       const adapted = adaptImagesForModel(messages, step.target, step.modelInfo)
       let requestHistoryAnchorItemId = input.runtime
@@ -997,6 +997,10 @@ async function executeTurnModelLoop(
           const history = completeToolCallHistory(
             currentHistory.map(({ item }) => item),
           )
+          // The retry can now act on newly visible reads. Reads completed
+          // during the previous attempt did not authorize that attempt's tools.
+          visibleFileObservations =
+            createVisibleFileObservationsFromMessages(history)
           return resolveRolloutAssetMedia(
             adaptImagesForModel(
               history,

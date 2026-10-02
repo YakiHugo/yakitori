@@ -228,6 +228,110 @@ describe("Turn recovery", () => {
       .toEqual({ completed: "resumed" })
   })
 
+  it.each([
+    "retry",
+    "same response",
+  ] as const)("uses only model-visible reads for file replacement after %s", async (continuation) => {
+    let requests = 0
+    const read = {
+      type: "tool_call" as const,
+      id: "read",
+      name: "read_file",
+      input: { path: "existing.txt" },
+    }
+    const write = {
+      type: "tool_call" as const,
+      id: "write",
+      name: "write_file",
+      input: { path: "existing.txt", content: "updated" },
+    }
+    const runtime = await fixture(
+      async function* (request) {
+        requests += 1
+        if (requests === 1) {
+          yield {
+            type: "output_item",
+            itemId: "fc_read",
+            content: [read],
+          }
+          if (continuation === "same response") {
+            yield {
+              type: "output_item",
+              itemId: "fc_write",
+              content: [write],
+            }
+            yield {
+              type: "response",
+              response: {
+                stopReason: ModelStopReason.ToolUse,
+                content: [read, write],
+              },
+            }
+            return
+          }
+          yield {
+            type: "failure",
+            failure: {
+              kind: "stream_disconnected",
+              provider: "faux",
+              wireApi: "unknown",
+              stage: "response_body",
+              message: "Disconnected after reading",
+            },
+          }
+          return
+        }
+        if (requests === 2 && continuation === "retry") {
+          expect(request.messages).toContainEqual(
+            expect.objectContaining({
+              role: "tool",
+              toolCallId: "read",
+              content: expect.stringContaining("original"),
+            }),
+          )
+          yield {
+            type: "response",
+            response: {
+              stopReason: ModelStopReason.ToolUse,
+              content: [write],
+            },
+          }
+          return
+        }
+        yield {
+          type: "response",
+          response: {
+            stopReason: ModelStopReason.EndTurn,
+            content: [{ type: "text", text: "done" }],
+          },
+        }
+      },
+      [createReadFileTool(), createWriteFileTool()],
+    )
+    await writeFile(join(runtime.root, "existing.txt"), "original")
+    const thread = await runtime.createThread()
+    await thread.startIfIdle({ content: { kind: "text", text: "update file" } })
+    await expect.poll(() => thread.agentStatus).toEqual({ completed: "done" })
+    expect(await readFile(join(runtime.root, "existing.txt"), "utf8")).toBe(
+      continuation === "retry" ? "updated" : "original",
+    )
+    expect(requests).toBe(continuation === "retry" ? 3 : 2)
+    const results = thread
+      .snapshot()
+      .context.history.flatMap(({ item }) =>
+        item.role === "tool" ? [item] : [],
+      )
+    expect(results).toHaveLength(2)
+    expect(results[1]).toMatchObject({ toolCallId: "write" })
+    if (continuation === "retry")
+      expect(results[1]).not.toHaveProperty("isError", true)
+    else
+      expect(results[1]).toMatchObject({
+        isError: true,
+        content: expect.stringContaining("file_not_observed"),
+      })
+  })
+
   it("replays completed text and an in-flight tool before the model response ends, then completes the same tool card", async () => {
     const entered = deferred()
     const finishTool = deferred()
