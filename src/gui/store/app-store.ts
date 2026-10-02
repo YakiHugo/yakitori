@@ -894,6 +894,17 @@ export const useAppStore = create<AppStore>()((set, get) => {
               set({ restoringModelSelectionFor: undefined })
             }
             void (async () => {
+              const recoverableRequests = new Set(
+                listAdmissionsForSession(
+                  inputRecoveryMemory,
+                  get().apiBase,
+                  selection.sessionId,
+                )
+                  .filter(
+                    (admission) => !inFlightAdmissions.has(admission.requestId),
+                  )
+                  .map((admission) => admission.requestId),
+              )
               let queuedRequestIds = new Set<string>()
               try {
                 const queue = await getAppRpcClient(get().apiBase).request(
@@ -919,7 +930,13 @@ export const useAppStore = create<AppStore>()((set, get) => {
                   queuedRequestIds.has(admission.requestId)
                 ) {
                   await acknowledgeAdmission(inputRecoveryMemory, admission)
-                } else if (execution.activeTurnId !== admission.requestId) {
+                } else if (
+                  recoverableRequests.has(admission.requestId) &&
+                  !inFlightAdmissions.has(admission.requestId) &&
+                  execution.activeTurnId !== admission.requestId
+                ) {
+                  // Recover only pre-existing orphaned submissions. An idle
+                  // snapshot cannot reject sends overlapping this queue read.
                   restoreUncommittedAdmission(
                     selection.sessionId,
                     admission.requestId,
@@ -2415,14 +2432,17 @@ export const useAppStore = create<AppStore>()((set, get) => {
               ? {}
               : { supersedesRequestId: firstInputAdmission.requestId }),
           })
-          if (firstInputAdmission !== undefined) {
-            await acknowledgeAdmission(inputRecoveryMemory, firstInputAdmission)
-            set({ recoveredAdmission: undefined })
-          }
-          if (!isCurrentSelection(selection)) return
           inFlightAdmissions.add(pendingAdmission.requestId)
           let response: Awaited<ReturnType<AppRpcClient["request"]>>
           try {
+            if (firstInputAdmission !== undefined) {
+              await acknowledgeAdmission(
+                inputRecoveryMemory,
+                firstInputAdmission,
+              )
+              set({ recoveredAdmission: undefined })
+            }
+            if (!isCurrentSelection(selection)) return
             response = await getAppRpcClient(get().apiBase).request(
               queueAdmission ? "session/input/queue" : "session/input",
               {
