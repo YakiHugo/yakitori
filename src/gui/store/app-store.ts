@@ -2744,10 +2744,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
           ...state.promptExcerpts,
           { ...excerpt, source: { ...excerpt.source } },
         ],
-        composerFocusRevision:
-          excerpt.kind === "annotation"
-            ? state.composerFocusRevision
-            : state.composerFocusRevision + 1,
+        composerFocusRevision: state.composerFocusRevision + 1,
       }))
     },
 

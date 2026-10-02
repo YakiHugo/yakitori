@@ -1,4 +1,4 @@
-import { Check } from "lucide-react"
+import { Check, Trash2 } from "lucide-react"
 import { useEffect, useLayoutEffect, useRef, useState } from "react"
 import { createPortal } from "react-dom"
 import type {
@@ -20,6 +20,7 @@ export function findContextSource(
     document.querySelectorAll<HTMLElement>("[data-context-kind]"),
   ).find(
     (element) =>
+      !element.closest("[hidden]") &&
       element.dataset.contextKind === source.kind &&
       element.dataset.contextLabel === source.label &&
       element.dataset.contextSessionId === source.sessionId &&
@@ -63,6 +64,11 @@ export function resolveAnnotationRange(
   }
   return undefined
 }
+
+export type AnnotationDetails = Record<
+  string,
+  { number: number; conversation: string }
+>
 
 type Rect = { top: number; left: number; width: number; height: number }
 type LocatedAnnotation = {
@@ -109,26 +115,25 @@ function visibleRectangles(range: Range, source: HTMLElement): Rect[] {
 
 export function AnnotationLayer({
   annotations,
+  details,
   onChange,
   onRemove,
-  createdAnnotationId,
 }: Readonly<{
   annotations: readonly ResponseAnnotation[]
+  details?: AnnotationDetails | undefined
   onChange(annotation: ResponseAnnotation): void
   onRemove(id: string): void
-  createdAnnotationId?: string | undefined
 }>) {
   const [located, setLocated] = useState<LocatedAnnotation[]>([])
   const [editing, setEditing] = useState<{
     id: string
     originalComment: string | undefined
-    creating: boolean
   }>()
   const input = useRef<HTMLTextAreaElement>(null)
   const editor = useRef<HTMLDivElement>(null)
   const [editorPosition, setEditorPosition] = useState({ top: 0, left: 0 })
-  const current = useRef({ annotations, onChange, onRemove })
-  current.current = { annotations, onChange, onRemove }
+  const current = useRef({ annotations, onChange })
+  current.current = { annotations, onChange }
   const supportsHighlight =
     typeof Highlight !== "undefined" &&
     typeof CSS !== "undefined" &&
@@ -153,7 +158,7 @@ export function AnnotationLayer({
         return [
           {
             annotation,
-            number: index + 1,
+            number: details?.[annotation.id]?.number ?? index + 1,
             rectangles: visibleRectangles(range, source),
           },
         ]
@@ -211,7 +216,7 @@ export function AnnotationLayer({
       document.removeEventListener("scroll", schedule, true)
       if (supportsHighlight) CSS.highlights.delete(highlightName)
     }
-  }, [annotations, supportsHighlight])
+  }, [annotations, details, supportsHighlight])
 
   useEffect(() => {
     const edit = (event: Event) => {
@@ -227,24 +232,11 @@ export function AnnotationLayer({
       setEditing({
         id: annotation.id,
         originalComment: annotation.comment,
-        creating: false,
       })
     }
     window.addEventListener(editEvent, edit)
     return () => window.removeEventListener(editEvent, edit)
   }, [])
-
-  useEffect(() => {
-    const annotation = current.current.annotations.find(
-      (item) => item.id === createdAnnotationId,
-    )
-    if (annotation)
-      setEditing({
-        id: annotation.id,
-        originalComment: annotation.comment,
-        creating: true,
-      })
-  }, [createdAnnotationId])
 
   const active = annotations.find((annotation) => annotation.id === editing?.id)
   const activeLocation = located.find(
@@ -280,15 +272,6 @@ export function AnnotationLayer({
         )
       )
         return
-      const annotation = current.current.annotations.find(
-        (item) => item.id === editing.id,
-      )
-      // Codex keeps an annotation when returning to its source or the composer.
-      const preserve = event.target.closest(
-        "[data-context-kind], [data-composer-surface]",
-      )
-      if (editing.creating && !preserve && !annotation?.comment?.trim())
-        current.current.onRemove(editing.id)
       setEditing(undefined)
     }
     const keydown = (event: KeyboardEvent) => {
@@ -298,8 +281,7 @@ export function AnnotationLayer({
       const annotation = current.current.annotations.find(
         (item) => item.id === editing.id,
       )
-      if (editing.creating) current.current.onRemove(editing.id)
-      else if (annotation) {
+      if (annotation) {
         const { comment: _comment, ...withoutComment } = annotation
         current.current.onChange(
           editing.originalComment === undefined
@@ -337,9 +319,11 @@ export function AnnotationLayer({
             key={annotation.id}
             type="button"
             className="annotation-marker"
-            aria-label={`Edit annotation ${number}`}
+            aria-label={`Edit annotation ${number}${details?.[annotation.id] ? ` in ${details[annotation.id]?.conversation}` : ""}`}
             aria-expanded={active?.id === annotation.id}
-            title={annotation.comment}
+            title={[details?.[annotation.id]?.conversation, annotation.comment]
+              .filter(Boolean)
+              .join(" · ")}
             style={{
               top: Math.max(
                 0,
@@ -356,7 +340,6 @@ export function AnnotationLayer({
                 setEditing({
                   id: annotation.id,
                   originalComment: annotation.comment,
-                  creating: false,
                 })
             }}
           >
@@ -392,6 +375,18 @@ export function AnnotationLayer({
               onChange({ ...active, comment: event.target.value })
             }
           />
+          <button
+            type="button"
+            className="annotation-editor-done"
+            aria-label="Remove annotation"
+            title="Remove annotation"
+            onClick={() => {
+              onRemove(active.id)
+              setEditing(undefined)
+            }}
+          >
+            <Trash2 size={14} />
+          </button>
           <button
             type="button"
             className="annotation-editor-done"

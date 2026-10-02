@@ -413,7 +413,7 @@ export function SideChatPanel({
     .find((provider) => provider.name === selection?.provider)
     ?.models.find((model) => model.id === selection?.model)
   return (
-    <div className="side-chat-panel">
+    <div className="side-chat-panel" data-side-chat-id={tab.id}>
       <div
         ref={viewport}
         role="log"
@@ -556,7 +556,7 @@ export function SideChatPanel({
           attachments={tab.attachments}
           sessionSkills={sessionSkills}
           apiBase={apiBase}
-          focusRevision={active ? tab.excerpts.length + 1 : 0}
+          focusRevision={active ? (tab.composerFocusRevision ?? 0) + 1 : 0}
           sending={pending}
           busy={chat?.activeTurnId !== undefined}
           activeTurnId={chat?.activeTurnId}
