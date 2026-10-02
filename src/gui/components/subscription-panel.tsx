@@ -65,7 +65,7 @@ export function SubscriptionPanelButton() {
     return () => window.removeEventListener("keydown", onKeyDown)
   }, [])
 
-  const openSection = (section: "general" | "subscriptions") => {
+  const openSection = (section: "general" | "subscriptions" | "usage") => {
     setOpen(false)
     openSettings(section)
   }
@@ -104,12 +104,21 @@ export function SubscriptionPanelButton() {
             onClick={() => openSection("subscriptions")}
           >
             <ChartColumn size={15} className="account-menu-icon" />
-            <span className="flex-1 text-left">Usage</span>
+            <span className="flex-1 text-left">Subscriptions</span>
             {primaryBucket === undefined ? null : (
               <small className="account-menu-meta">
                 {Math.max(0, 100 - Math.round(primaryBucket.usedPercent))}% left
               </small>
             )}
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            className="account-menu-item"
+            onClick={() => openSection("usage")}
+          >
+            <ChartColumn size={15} className="account-menu-icon" />
+            <span className="flex-1 text-left">Usage</span>
           </button>
           <button
             type="button"

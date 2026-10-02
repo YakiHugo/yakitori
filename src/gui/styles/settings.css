@@ -426,3 +426,239 @@ html[data-desktop="macos"] .settings-sidebar {
     gap: 10px;
   }
 }
+
+/* Usage is an analytics surface; keep every chart paired with exact values. */
+.settings-content-inner:has(.usage-dashboard) {
+  max-width: 1080px;
+}
+.usage-dashboard {
+  min-width: 0;
+}
+.usage-toolbar,
+.usage-card-heading,
+.usage-period-heading,
+.usage-axis {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.usage-toolbar {
+  flex-wrap: wrap;
+  margin-bottom: 22px;
+}
+.usage-range {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+}
+.usage-range button {
+  min-height: 36px;
+  padding: 5px 12px;
+  font-size: 13px;
+  border-radius: 6px;
+  color: var(--muted-foreground);
+}
+.usage-range button[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--foreground);
+  font-weight: 600;
+}
+.usage-muted,
+.usage-axis,
+.usage-card-heading > span {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+.usage-period-heading {
+  margin-bottom: 12px;
+}
+.usage-period-heading h4,
+.usage-card h4 {
+  font-size: 14px;
+  font-weight: 600;
+}
+.usage-period-heading button {
+  font-size: 13px;
+  text-decoration: underline;
+  min-height: 36px;
+}
+.usage-dashboard .usage-stat-grid {
+  margin-bottom: 12px;
+}
+.usage-dashboard .usage-stat {
+  padding: 16px;
+}
+.usage-dashboard .usage-stat strong {
+  font-size: 27px;
+  letter-spacing: -0.6px;
+  margin: 8px 0 4px;
+  font-variant-numeric: tabular-nums;
+}
+.usage-dashboard .usage-stat span,
+.usage-dashboard .usage-stat small {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+.usage-cache-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 24px;
+  padding: 4px 0 20px;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+.usage-cache-strip strong {
+  color: var(--foreground);
+  margin-left: 7px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.usage-card {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 16px;
+  min-width: 0;
+}
+.usage-card-heading {
+  flex-wrap: wrap;
+  margin-bottom: 18px;
+}
+.usage-trend {
+  min-inline-size: 0;
+  width: 100%;
+  display: flex;
+  align-items: stretch;
+  gap: 3px;
+  height: 140px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border);
+}
+.usage-trend button {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: flex-end;
+  height: 100%;
+  border-radius: 3px 3px 0 0;
+}
+.usage-trend button span {
+  width: 100%;
+  min-height: 2px;
+  background: color-mix(in oklab, var(--foreground) 60%, transparent);
+  border-radius: 3px 3px 0 0;
+}
+.usage-trend button:hover span,
+.usage-trend button[aria-pressed="true"] span {
+  background: var(--foreground);
+}
+.usage-axis {
+  margin-top: 12px;
+  font-size: 11px;
+}
+.usage-calendar-scroll,
+.usage-table-scroll {
+  overflow-x: auto;
+}
+.usage-calendar {
+  display: grid;
+  grid-auto-flow: column;
+  grid-template-rows: repeat(7, 12px);
+  grid-auto-columns: minmax(10px, 1fr);
+  gap: 3px;
+  min-width: 690px;
+}
+.usage-calendar button,
+.usage-legend i {
+  border-radius: 2px;
+  background: var(--muted);
+  border: 1px solid color-mix(in oklab, var(--foreground) 5%, transparent);
+}
+.usage-calendar button[data-level="1"],
+.usage-legend i[data-level="1"] {
+  background: color-mix(in oklab, var(--foreground) 20%, var(--background));
+}
+.usage-calendar button[data-level="2"],
+.usage-legend i[data-level="2"] {
+  background: color-mix(in oklab, var(--foreground) 40%, var(--background));
+}
+.usage-calendar button[data-level="3"],
+.usage-legend i[data-level="3"] {
+  background: color-mix(in oklab, var(--foreground) 65%, var(--background));
+}
+.usage-calendar button[data-level="4"],
+.usage-legend i[data-level="4"] {
+  background: var(--foreground);
+}
+.usage-calendar button[aria-pressed="true"] {
+  outline: 2px solid var(--foreground);
+  outline-offset: 1px;
+}
+.usage-legend {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.usage-legend i {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+}
+.usage-dashboard .usage-threads {
+  font-size: 13px;
+}
+.usage-dashboard .usage-threads th,
+.usage-dashboard .usage-threads td {
+  padding: 10px 8px;
+}
+.usage-dashboard .usage-threads th:not(:first-child),
+.usage-dashboard .usage-threads td:not(:first-child) {
+  text-align: right;
+  white-space: nowrap;
+}
+.usage-models {
+  min-width: 600px;
+}
+.usage-models strong {
+  font-weight: 500;
+}
+.usage-dashboard .usage-models small {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted-foreground);
+}
+.usage-footnote {
+  font-size: 12px;
+  color: var(--muted-foreground);
+  line-height: 1.6;
+  margin: 8px 0;
+}
+.usage-empty {
+  padding: 16px;
+  margin-bottom: 16px;
+  background: var(--muted);
+  border-radius: 8px;
+  font-size: 13px;
+}
+.usage-dashboard button:focus-visible {
+  outline: 2px solid var(--foreground);
+  outline-offset: 2px;
+}
+@media (max-width: 620px) {
+  .usage-card {
+    padding: 14px;
+  }
+  .usage-dashboard .usage-stat-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .usage-axis {
+    flex-wrap: wrap;
+  }
+  .usage-range button {
+    min-height: 44px;
+    padding: 5px 10px;
+  }
+}

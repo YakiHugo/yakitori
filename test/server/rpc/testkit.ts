@@ -148,6 +148,9 @@ export function createFakeHandlers(
     readUsage: async () =>
       okResult({
         usage: {
+          generatedAt: "2026-10-02T00:00:00.000Z",
+          models: [],
+          modelDays: [],
           totals: {
             turns: 0,
             inputTokens: 0,
@@ -193,10 +196,24 @@ export function createFakeHandlers(
       }),
     listQueuedInputs: async () => okResult({ items: [] }),
     updateQueuedInput: async () =>
-      okResult({ item: { id: "input_1", sessionId: "session_1", input: { submissionId: "request_1", content: { kind: "text", text: "queued" } }, createdAt: "2026-01-01T00:00:00.000Z" } }),
+      okResult({
+        item: {
+          id: "input_1",
+          sessionId: "session_1",
+          input: {
+            submissionId: "request_1",
+            content: { kind: "text", text: "queued" },
+          },
+          createdAt: "2026-01-01T00:00:00.000Z",
+        },
+      }),
     reorderQueuedInputs: async () => okResult({ items: [] }),
     startQueuedInput: async () =>
-      okResult({ requestId: "request_1", turnId: "turn_1", inputId: "input_1" }),
+      okResult({
+        requestId: "request_1",
+        turnId: "turn_1",
+        inputId: "input_1",
+      }),
     steerInput: async () =>
       okResult({ requestId: "request_1", turnId: "turn_1" }),
     compactSession: async () =>

@@ -47,7 +47,9 @@ describe("thread usage projection", () => {
       stamp,
     )
 
-    const usage = projection.readUsage()
+    const usage = projection.readUsage({
+      now: new Date("2026-10-02T12:00:00Z"),
+    })
     expect(usage.totals).toEqual({
       turns: 3,
       inputTokens: 450,
@@ -96,7 +98,96 @@ describe("thread usage projection", () => {
     ])
 
     projection.delete("session_a")
-    expect(projection.readUsage().totals.turns).toBe(1)
+    expect(
+      projection.readUsage({ now: new Date("2026-10-02T12:00:00Z") }).totals
+        .turns,
+    ).toBe(1)
+  })
+
+  it("keeps provider/model attribution and UTC calendar windows accurate", () => {
+    const projection = new SqliteThreadUsageProjection(":memory:")
+    projection.rebuild(
+      thread("one", "Mixed", [
+        turnContext("old", "codex", "same"),
+        turnCompleted("old", "2025-01-01T12:00:00Z", {
+          inputTokens: 900,
+          outputTokens: 100,
+        }),
+        turnContext("a", "codex", "same"),
+        turnCompleted("a", "2026-10-02T00:30:00+08:00", {
+          inputTokens: 100,
+          outputTokens: 20,
+          cacheReadInputTokens: 70,
+        }),
+        turnContext("b", "other", "same"),
+        turnCompleted("b", "2026-10-02T01:00:00Z", {
+          inputTokens: 40,
+          outputTokens: 10,
+        }),
+        turnCompleted("unknown", "2026-10-02T02:00:00Z", {
+          inputTokens: 5,
+          outputTokens: 5,
+        }),
+        turnCompleted("unknown", "2026-10-02T02:00:00Z", {
+          inputTokens: 5,
+          outputTokens: 5,
+        }),
+      ]),
+      stamp,
+    )
+    const usage = projection.readUsage({
+      days: 1,
+      now: new Date("2026-10-02T12:00:00Z"),
+    })
+    expect(usage.totals.turns).toBe(4)
+    expect(usage.days).toEqual([
+      {
+        date: "2026-10-02",
+        turns: 2,
+        inputTokens: 45,
+        outputTokens: 15,
+        cacheReadInputTokens: 0,
+        cacheWriteInputTokens: 0,
+      },
+    ])
+    expect(
+      usage.models.map(
+        ({ provider, model, turns, inputTokens, outputTokens }) => ({
+          provider,
+          model,
+          turns,
+          inputTokens,
+          outputTokens,
+        }),
+      ),
+    ).toEqual([
+      {
+        provider: "codex",
+        model: "same",
+        turns: 2,
+        inputTokens: 1000,
+        outputTokens: 120,
+      },
+      {
+        provider: "other",
+        model: "same",
+        turns: 1,
+        inputTokens: 40,
+        outputTokens: 10,
+      },
+      { provider: "", model: "", turns: 1, inputTokens: 5, outputTokens: 5 },
+    ])
+    expect(
+      usage.modelDays.map(({ date, provider }) => ({ date, provider })),
+    ).toEqual([
+      { date: "2026-10-02", provider: "" },
+      { date: "2026-10-02", provider: "other" },
+    ])
+    expect(
+      projection
+        .readUsage({ days: 2, now: new Date("2026-10-02T12:00:00Z") })
+        .days.map((day) => day.date),
+    ).toEqual(["2026-10-01", "2026-10-02"])
   })
 
   it("tracks currency by file stamp and skips turns without usage", () => {
@@ -110,7 +201,10 @@ describe("thread usage projection", () => {
     expect(
       projection.isCurrent("session_a", { ...stamp, rolloutSize: 2 }),
     ).toBe(false)
-    expect(projection.readUsage().totals.turns).toBe(0)
+    expect(
+      projection.readUsage({ now: new Date("2026-10-02T12:00:00Z") }).totals
+        .turns,
+    ).toBe(0)
   })
 })
 
