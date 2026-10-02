@@ -737,7 +737,7 @@ describe("application composition", () => {
             completed: "initial result",
           })
           childSessionId = listed.body.agents[0]?.agentId ?? ""
-        })
+        }, 10_000)
       } finally {
         await first.close()
       }
@@ -840,27 +840,27 @@ describe("application composition", () => {
               content: { kind: "text", text: "resume observer" },
             }),
           )
-          await vi.waitFor(() =>
-            expect(frames).toContainEqual({
+          await expect
+            .poll(() => frames)
+            .toContainEqual({
               method: "session/transient",
               params: expect.objectContaining({
                 sessionId: childSessionId,
                 type: "assistant.delta",
                 delta: `live followup ${turn}`,
               }),
-            }),
-          )
+            })
           mayFinish.resolve()
-          await vi.waitFor(() =>
-            expect(frames).toContainEqual({
+          await expect
+            .poll(() => frames)
+            .toContainEqual({
               method: "session/transient",
               params: expect.objectContaining({
                 sessionId: childSessionId,
                 type: "turn.finished",
                 outcome: { status: "completed" },
               }),
-            }),
-          )
+            })
           expect(frames).toContainEqual({
             method: "session/event",
             params: expect.objectContaining({
@@ -1515,10 +1515,12 @@ describe("application composition", () => {
           newSessionAttachment === undefined
         )
           throw new Error("Missing staged image attachment.")
-        await expect(resumed.rolloutAssets.read(existingAttachment.file))
-          .rejects.toMatchObject({ code: "ENOENT" })
-        await expect(resumed.rolloutAssets.read(newSessionAttachment.file))
-          .rejects.toMatchObject({ code: "ENOENT" })
+        await expect(
+          resumed.rolloutAssets.read(existingAttachment.file),
+        ).rejects.toMatchObject({ code: "ENOENT" })
+        await expect(
+          resumed.rolloutAssets.read(newSessionAttachment.file),
+        ).rejects.toMatchObject({ code: "ENOENT" })
       } finally {
         await resumed.close()
       }

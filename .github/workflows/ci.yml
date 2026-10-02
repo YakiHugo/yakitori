@@ -5,33 +5,110 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  # Supersede older PR checks; every main commit keeps its own full validation.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  check:
+  quality-build:
     runs-on: ubuntu-latest
+    # Implementation safety bound: ordinary CI took about two minutes; leave
+    # room for cold dependency/browser downloads without allowing a stuck job.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v4
 
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-
-      - name: Enable Corepack
-        run: corepack enable
-
-      - name: Install ripgrep
-        run: |
-          if command -v rg; then exit 0; fi
-          # ripgrep comes from Ubuntu; unrelated runner repositories must not
-          # block its installation when their indexes are temporarily broken.
-          ubuntu_sources=(
-            -o Dir::Etc::sourcelist="sources.list.d/ubuntu.sources"
-            -o Dir::Etc::sourceparts="-"
-          )
-          sudo apt-get "${ubuntu_sources[@]}" update
-          sudo apt-get "${ubuntu_sources[@]}" install --yes ripgrep
+          cache: pnpm
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Check
-        run: pnpm check
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Build renderer and desktop bundles
+        run: pnpm build:gui && pnpm build:desktop
+
+      - name: Install Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Verify the renderer in Chromium
+        run: pnpm test:browser
+
+      - name: Upload browser failure diagnostics
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-failure-diagnostics
+          path: |
+            test-results
+            playwright-report
+          if-no-files-found: ignore
+          retention-days: 7
+
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run the full test suite
+        run: pnpm test --reporter=default --reporter=junit --outputFile.junit=test-results/vitest.xml
+
+      - name: Upload test failure diagnostics
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-failure-diagnostics
+          path: test-results
+          if-no-files-found: ignore
+          retention-days: 7
+
+  desktop:
+    uses: ./.github/workflows/desktop.yml
+
+  required:
+    name: CI required
+    if: always()
+    needs: [quality-build, tests, desktop]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require every validation job to succeed
+        env:
+          QUALITY_BUILD: ${{ needs.quality-build.result }}
+          TESTS: ${{ needs.tests.result }}
+          DESKTOP: ${{ needs.desktop.result }}
+        run: |
+          echo "quality-build=$QUALITY_BUILD tests=$TESTS desktop=$DESKTOP"
+          if [[ "$QUALITY_BUILD" != success || "$TESTS" != success || "$DESKTOP" != success ]]; then
+            exit 1
+          fi

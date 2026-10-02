@@ -8,7 +8,7 @@ import {
 } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { describe, expect, it, vi } from "vitest"
+import { describe, expect, it } from "vitest"
 import { ThreadManager } from "../../../src/core/thread-manager.ts"
 import { EventType } from "../../../src/kernel/events.ts"
 import { createSessionId } from "../../../src/kernel/ids.ts"
@@ -474,11 +474,16 @@ describe("session methods over real handlers", () => {
         requestId,
         content: { kind: "text", text: requestId },
       })
-      await vi.waitFor(async () => {
-        const read = await handlers.readSession({ sessionId })
-        expect(read.ok && read.body.session.counts.inputs).toBe(index + 1)
-        expect(read.ok && read.body.session.active).toBeFalsy()
-      })
+      await expect
+        .poll(async () => {
+          const read = await handlers.readSession({ sessionId })
+          if (!read.ok) throw new Error(read.body.error.message)
+          return {
+            inputs: read.body.session.counts.inputs,
+            active: Boolean(read.body.session.active),
+          }
+        })
+        .toEqual({ inputs: index + 1, active: false })
     }
     const snapshot = await rpc<ApiReadSessionResponse>(
       connection,

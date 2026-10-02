@@ -60,27 +60,51 @@ describe("unified exec tools", () => {
     if (execCommand === undefined || writeStdin === undefined) {
       throw new Error("missing unified exec tools")
     }
-    const initial = await execCommand.execute(
-      {
-        cmd: "printf first; sleep 0.35; printf second",
-        yield_time_ms: 250,
-      },
-      context,
-    )
-    const initialOutput = requireOutput(initial)
+    const root = await mkdtemp(join(tmpdir(), "yakitori-exec-output-"))
+    try {
+      const initial = await execCommand.execute(
+        {
+          // Hold the second chunk until the first has been observed, even
+          // when CI schedules the test worker later than the yield timer.
+          cmd: "printf first; while test ! -e release; do sleep 0.01; done; printf second",
+          yield_time_ms: 250,
+        },
+        { workspaceRoot: root },
+      )
+      const initialOutput = requireOutput(initial)
+      expect(initialOutput.session_id).toEqual(expect.any(Number))
+      let firstOutput = initialOutput.output
+      await expect
+        .poll(async () => {
+          if (firstOutput !== "first") {
+            const output = requireOutput(
+              await writeStdin.execute(
+                { session_id: initialOutput.session_id, yield_time_ms: 250 },
+                { workspaceRoot: root },
+              ),
+            )
+            firstOutput += output.output
+          }
+          return firstOutput
+        })
+        .toBe("first")
+      await writeFile(join(root, "release"), "")
+      const completed = await writeStdin.execute(
+        { session_id: initialOutput.session_id, yield_time_ms: 5_000 },
+        { workspaceRoot: root },
+      )
 
-    expect(initialOutput.output).toBe("first")
-    expect(initialOutput.session_id).toEqual(expect.any(Number))
-    const completed = await writeStdin.execute(
-      { session_id: initialOutput.session_id, yield_time_ms: 5_000 },
-      context,
-    )
-
-    expect(completed).toMatchObject({
-      ok: true,
-      output: { exit_code: 0, output: "second" },
-    })
-    await execCommand.dispose?.()
+      expect(completed).toMatchObject({
+        ok: true,
+        output: { exit_code: 0, output: "second" },
+      })
+    } finally {
+      try {
+        await execCommand.dispose?.()
+      } finally {
+        await rm(root, { recursive: true, force: true })
+      }
+    }
   })
 
   it("delivers EOF immediately to non-PTY commands that read stdin", async () => {
