@@ -44,7 +44,7 @@ jobs:
         run: pnpm build:gui && pnpm build:desktop
 
       - name: Install Chromium
-        run: pnpm exec playwright install --with-deps chromium
+        run: pnpm exec playwright install --with-deps --only-shell chromium
 
       - name: Verify the renderer in Chromium
         run: pnpm test:browser
