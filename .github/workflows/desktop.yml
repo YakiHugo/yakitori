@@ -1,31 +1,65 @@
 name: Desktop
 
 on:
-  push:
-    branches: [main]
+  workflow_call:
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   package:
     runs-on: macos-latest
+    # Implementation safety bound for cold Electron downloads and native builds.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v4
 
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-
-      - name: Enable Corepack
-        run: corepack enable
+          cache: pnpm
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Verify macOS shell and sidecar behavior
+        run: pnpm test test/runtime/user-shell-env.test.ts test/runtime/tools/unified-exec.test.ts test/desktop/server-process.test.ts
+
       - name: Package the desktop app
         run: pnpm package:desktop
 
+      - name: Archive and restore the desktop app
+        # Artifact uploads do not preserve executable modes or symlinks. Verify
+        # the app restored from the same tar archive that installers download.
+        run: |
+          tar -cf release/yakitori-macos-arm64.tar -C release/mac-arm64 Yakitori.app
+          rm -rf release/mac-arm64/Yakitori.app
+          tar -xf release/yakitori-macos-arm64.tar -C release/mac-arm64
+
+      - name: Verify the packaged Electron app
+        run: pnpm test:desktop-smoke
+
+      - name: Upload desktop failure diagnostics
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-failure-diagnostics
+          path: |
+            test-results
+            playwright-report
+          if-no-files-found: ignore
+          retention-days: 7
+
       - uses: actions/upload-artifact@v4
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
         with:
           name: yakitori-macos-arm64
-          path: release/mac-arm64
+          path: release/yakitori-macos-arm64.tar
+          compression-level: 1
           retention-days: 14

@@ -1,7 +1,7 @@
 // Installs the latest main-branch desktop build into /Applications.
 //
 // Default mode downloads the yakitori-macos-arm64 artifact from the newest
-// successful Desktop workflow run on origin/main (requires the gh CLI).
+// successful CI main-push run on origin/main (requires the gh CLI).
 // `--local` skips CI and builds origin/main in a throwaway git worktree,
 // leaving the current checkout untouched.
 // YAKITORI_INSTALL_TARGET overrides the install destination.
@@ -22,7 +22,7 @@ try {
   console.log(`Installed ${installTarget}. Restart Yakitori to run it.`)
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error))
-  process.exit(1)
+  process.exitCode = 1
 } finally {
   await rm(staging, { recursive: true, force: true })
 }
@@ -32,9 +32,11 @@ async function download(staging: string): Promise<string> {
     "run",
     "list",
     "--workflow",
-    "desktop.yml",
+    "ci.yml",
     "--branch",
     "main",
+    "--event",
+    "push",
     "--status",
     "success",
     "--limit",
@@ -44,32 +46,33 @@ async function download(staging: string): Promise<string> {
   ]).catch(() => undefined)
   if (listed === undefined) {
     throw new Error(
-      "Could not query Desktop workflow runs. Check gh auth, or build locally with: pnpm install:main --local",
+      "Could not query CI workflow runs. Check gh auth, or build locally with: pnpm install:main --local",
     )
   }
-  const run = (
-    JSON.parse(listed) as readonly {
-      readonly databaseId: number
-      readonly headSha: string
-    }[]
+  const workflowRun = (
+    JSON.parse(listed) as Readonly<{
+      databaseId: number
+      headSha: string
+    }>[]
   )[0]
-  if (run === undefined) {
+  if (workflowRun === undefined) {
     throw new Error(
-      "No successful Desktop run on main yet. Build locally instead: pnpm install:main --local",
+      "No successful CI main-push run yet. Build locally instead: pnpm install:main --local",
     )
   }
   console.log(
-    `Downloading main@${run.headSha.slice(0, 7)} (run ${run.databaseId})…`,
+    `Downloading main@${workflowRun.headSha.slice(0, 7)} (run ${workflowRun.databaseId})…`,
   )
   await run("gh", [
     "run",
     "download",
-    String(run.databaseId),
+    String(workflowRun.databaseId),
     "--name",
     artifactName,
     "--dir",
     staging,
   ])
+  await run("tar", ["-xf", join(staging, `${artifactName}.tar`), "-C", staging])
   return join(staging, "Yakitori.app")
 }
 
@@ -89,8 +92,6 @@ async function buildAndInstallFromMain(staging: string): Promise<void> {
 
 async function install(app: string): Promise<void> {
   await access(join(app, "Contents", "MacOS", "Yakitori"))
-  // The artifact zip may not preserve the executable bit.
-  await run("chmod", ["+x", join(app, "Contents", "MacOS", "Yakitori")])
   await rm(installTarget, { recursive: true, force: true })
   await run("ditto", [app, installTarget])
   // gh downloads carry no quarantine attribute; clear one copied from an

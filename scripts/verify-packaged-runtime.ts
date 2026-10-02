@@ -76,7 +76,23 @@ await new Promise<void>((resolve, reject) => {
     cwd: runtimeDirectory,
     env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
     stdio: ["ignore", "pipe", "pipe"],
+    detached: true,
   })
+  // Two PDF workers each allow 30s; this safety bound adds 30s for the
+  // remaining native probes and kills the probe's process group if stuck.
+  let timedOut = false
+  const timeout = setTimeout(() => {
+    timedOut = true
+    if (child.pid === undefined) return
+    try {
+      process.kill(-child.pid, "SIGKILL")
+    } catch (error) {
+      if (
+        !(error instanceof Error && "code" in error && error.code === "ESRCH")
+      )
+        reject(error)
+    }
+  }, 90_000)
   let stdout = ""
   let stderr = ""
   child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
@@ -85,9 +101,15 @@ await new Promise<void>((resolve, reject) => {
   child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
     stderr += chunk
   })
-  child.once("error", reject)
-  child.once("exit", (code) => {
-    if (code === 0 && stdout === "native-runtime-ok\n") resolve()
+  child.once("error", (error) => {
+    clearTimeout(timeout)
+    reject(error)
+  })
+  child.once("close", (code) => {
+    clearTimeout(timeout)
+    if (timedOut)
+      reject(new Error(`Packaged runtime probe timed out after 90s: ${stderr}`))
+    else if (code === 0 && stdout === "native-runtime-ok\n") resolve()
     else reject(new Error(`Packaged runtime probe failed (${code}): ${stderr}`))
   })
 })

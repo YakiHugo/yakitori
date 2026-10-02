@@ -23,6 +23,8 @@
     "install:main": "node scripts/install-main-app.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:browser": "playwright test --project=browser",
+    "test:desktop-smoke": "playwright test --project=desktop",
     "test:watch": "vitest",
     "lint": "biome lint .",
     "format": "biome format --write .",
@@ -31,6 +33,7 @@
   "devDependencies": {
     "@biomejs/biome": "^2.5.1",
     "@electron/rebuild": "4.2.0",
+    "@playwright/test": "^1.63.0",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",
     "@types/fs-ext": "^2.0.3",

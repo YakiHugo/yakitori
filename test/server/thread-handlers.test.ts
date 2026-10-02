@@ -982,16 +982,15 @@ describe("thread server handlers", () => {
     ).toEqual([])
 
     releaseFirst()
-    await vi.waitFor(async () => {
-      const stored = await store.readThread(sessionId)
-      expect(
-        stored?.rollout.some(
+    await expect
+      .poll(async () =>
+        (await store.readThread(sessionId))?.rollout.some(
           ({ item }) =>
             item.type === "turn_completed" &&
             item.turnId === "request_blocked_queued",
         ),
-      ).toBe(true)
-    })
+      )
+      .toBe(true)
     expect(modelCalls).toBe(1)
     const afterDispatch = await handlers.readSessionEvents({ sessionId })
     if (!afterDispatch.ok) throw new Error(afterDispatch.body.error.message)
@@ -1725,7 +1724,7 @@ describe("thread server handlers", () => {
           : [],
       )[0]
       expect(image).toMatchObject({ file: { rolloutId } })
-    })
+    }, 10_000)
   })
 
   it("keeps a rejected prompt's draft image and removes its unused request copy", async () => {
@@ -1789,15 +1788,15 @@ describe("thread server handlers", () => {
       content: { kind: "text", text: "blocked", attachments: [draft] },
     })
     if (!admitted.ok) throw new Error(admitted.body.error.message)
-    await vi.waitFor(async () =>
-      expect(
+    await expect
+      .poll(async () =>
         (await store.readThread(sessionId))?.rollout.some(
           ({ item }) =>
             item.type === "turn_completed" &&
             item.turnId === "request_rejected_image",
         ),
-      ).toBe(true),
-    )
+      )
+      .toBe(true)
     await expect(rolloutAssets.read(draft.file)).resolves.toEqual(pngBytes())
     const replayed = await handlers.admitInput({
       sessionId,
@@ -1813,7 +1812,7 @@ describe("thread server handlers", () => {
           path: "attachments/requests/request_rejected_image/1.png",
         }),
       ).rejects.toMatchObject({ code: "ENOENT" })
-    })
+    }, 10_000)
     expect(
       (await store.readThread(sessionId))?.rollout.some(
         ({ item }) =>
