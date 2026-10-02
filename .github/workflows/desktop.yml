@@ -33,6 +33,14 @@ jobs:
       - name: Package the desktop app
         run: pnpm package:desktop
 
+      - name: Archive and restore the desktop app
+        # Artifact uploads do not preserve executable modes or symlinks. Verify
+        # the app restored from the same tar archive that installers download.
+        run: |
+          tar -cf release/yakitori-macos-arm64.tar -C release/mac-arm64 Yakitori.app
+          rm -rf release/mac-arm64/Yakitori.app
+          tar -xf release/yakitori-macos-arm64.tar -C release/mac-arm64
+
       - name: Verify the packaged Electron app
         run: pnpm test:desktop-smoke
 
@@ -52,5 +60,6 @@ jobs:
         if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
         with:
           name: yakitori-macos-arm64
-          path: release/mac-arm64
+          path: release/yakitori-macos-arm64.tar
+          compression-level: 1
           retention-days: 14

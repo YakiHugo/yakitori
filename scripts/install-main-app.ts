@@ -22,7 +22,7 @@ try {
   console.log(`Installed ${installTarget}. Restart Yakitori to run it.`)
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error))
-  process.exit(1)
+  process.exitCode = 1
 } finally {
   await rm(staging, { recursive: true, force: true })
 }
@@ -72,6 +72,7 @@ async function download(staging: string): Promise<string> {
     "--dir",
     staging,
   ])
+  await run("tar", ["-xf", join(staging, `${artifactName}.tar`), "-C", staging])
   return join(staging, "Yakitori.app")
 }
 
@@ -91,8 +92,6 @@ async function buildAndInstallFromMain(staging: string): Promise<void> {
 
 async function install(app: string): Promise<void> {
   await access(join(app, "Contents", "MacOS", "Yakitori"))
-  // The artifact zip may not preserve the executable bit.
-  await run("chmod", ["+x", join(app, "Contents", "MacOS", "Yakitori")])
   await rm(installTarget, { recursive: true, force: true })
   await run("ditto", [app, installTarget])
   // gh downloads carry no quarantine attribute; clear one copied from an
