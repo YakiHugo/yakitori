@@ -44,7 +44,11 @@ jobs:
         run: pnpm build:gui && pnpm build:desktop
 
       - name: Install Chromium
-        run: pnpm exec playwright install --with-deps --only-shell chromium
+        run: |
+          # Chromium's libraries come from Ubuntu. Unrelated runner repositories
+          # must not block this installation when their indexes are broken.
+          printf '%s\n' 'Dir::Etc::sourcelist "sources.list.d/ubuntu.sources";' 'Dir::Etc::sourceparts "-";' | sudo tee /etc/apt/apt.conf.d/99yakitori-sources > /dev/null
+          pnpm exec playwright install --with-deps --only-shell chromium
 
       - name: Verify the renderer in Chromium
         run: pnpm test:browser
