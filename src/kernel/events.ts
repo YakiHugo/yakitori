@@ -438,8 +438,14 @@ export type ContextTokensEvent = {
   }
 }
 
+export type TurnCompletion = Readonly<{
+  reason?: "truncated" | "refused"
+  /** Final answer pieces in continuation order; an empty array means no answer. */
+  answerItemIds?: readonly string[]
+}>
+
 export type TurnOutcome =
-  | Readonly<{ status: "completed" }>
+  | (Readonly<{ status: "completed" }> & TurnCompletion)
   | Readonly<{ status: "failed"; error: KernelError }>
   | Readonly<{ status: "cancelled"; reason?: string }>
   | Readonly<{ status: "interrupted"; reason?: string }>
@@ -1852,7 +1858,15 @@ function isTurnOutcome(value: unknown): value is TurnOutcome {
   if (!isRecord(value)) return false
   switch (value.status) {
     case "completed":
-      return onlyKeys(value, ["status"])
+      return (
+        onlyKeys(value, ["status", "reason", "answerItemIds"]) &&
+        isTurnCompletion({
+          ...(value.reason === undefined ? {} : { reason: value.reason }),
+          ...(value.answerItemIds === undefined
+            ? {}
+            : { answerItemIds: value.answerItemIds }),
+        })
+      )
     case "failed":
       return onlyKeys(value, ["status", "error"]) && isKernelError(value.error)
     case "cancelled":
@@ -1864,6 +1878,22 @@ function isTurnOutcome(value: unknown): value is TurnOutcome {
     default:
       return false
   }
+}
+
+export function isTurnCompletion(value: unknown): value is TurnCompletion {
+  return (
+    isRecord(value) &&
+    onlyKeys(value, ["reason", "answerItemIds"]) &&
+    (value.reason === undefined ||
+      value.reason === "truncated" ||
+      value.reason === "refused") &&
+    (value.answerItemIds === undefined ||
+      (Array.isArray(value.answerItemIds) &&
+        value.answerItemIds.every(
+          (id) => typeof id === "string" && id.length > 0,
+        ) &&
+        new Set(value.answerItemIds).size === value.answerItemIds.length))
+  )
 }
 
 export function isJsonObject(value: unknown): value is JsonObject {

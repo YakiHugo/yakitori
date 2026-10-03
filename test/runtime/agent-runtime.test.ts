@@ -231,6 +231,84 @@ describe("agent runtime", () => {
     await manager.shutdown()
   })
 
+  it.each([
+    "truncated",
+    "refused",
+  ] as const)("retains a completed child's %s reason and answer after unloading", async (reason) => {
+    const graph = memoryGraphStore()
+    const store = new MemoryThreadStore()
+    const controls = new Map<string, AgentControl>()
+    let manager: ThreadManager
+    const runtime = createAgentRuntime({
+      graphStore: graph.store,
+      getThreadManager: () => manager,
+    })
+    manager = new ThreadManager({
+      store,
+      createTurnProcessor(stored) {
+        controls.set(stored.metadata.id, runtime.registerThread(stored))
+        return {
+          ...immediateProcessor(),
+          start(turnRuntime, input) {
+            return {
+              completion: (async () => {
+                await turnRuntime.recordInitialInput()
+                const answer = (id: string, text: string) => ({
+                  id,
+                  turnId: input.submissionId,
+                  createdAt: "2026-10-02T00:00:00.000Z",
+                  item: {
+                    role: "assistant" as const,
+                    content: [{ type: "text" as const, text }],
+                  },
+                })
+                await turnRuntime.recordConversationItems([
+                  answer("answer_one", "Con"),
+                  answer("answer_two", "tinuation."),
+                ])
+                return { reason, answerItemIds: ["answer_one", "answer_two"] }
+              })(),
+              abort() {},
+            }
+          },
+        }
+      },
+    })
+    try {
+      const root = await manager.createThread({
+        workingDirectory: "/workspace",
+      })
+      const control = controls.get(root.id)
+      if (control === undefined) throw new Error("missing root control")
+      const agent = control.bind(root.id, TARGET)
+      const child = await agent.spawn({
+        taskName: "partial",
+        message: "work",
+        agentType: "general",
+        forkTurns: "none",
+      })
+      expect(await agent.wait(1_000)).toMatchObject([
+        { status: { completed: "Continuation.", reason } },
+      ])
+      const notification = (await store.readThread(root.id))?.rollout
+        .flatMap(({ item }) =>
+          item.type === "agent_message" && item.item.item.role === "user"
+            ? item.item.item.content.map((block) => block.text)
+            : [],
+        )
+        .find((text) => text.includes("<subagent_notification"))
+      expect(notification).toContain(`status="completed" reason="${reason}"`)
+      expect(notification).toContain("Continuation.")
+      await manager.closeThread(child.agentId)
+      expect(await agent.list()).toMatchObject([
+        { status: { completed: "Continuation.", reason } },
+      ])
+    } finally {
+      await runtime.close()
+      await manager.shutdown()
+    }
+  })
+
   it("deduplicates a recovered completion notification after restart", async () => {
     const graph = memoryGraphStore()
     const store = new MemoryThreadStore()

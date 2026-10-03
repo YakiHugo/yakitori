@@ -148,7 +148,9 @@
       "fileEditingToolType": "edit_write",
       "supportsNativeToolSearch": true,
       "inputModalities": ["text", "image"],
-      "contextWindowTokens": 200000
+      "contextWindowTokens": 1000000,
+      "defaultOutputTokens": 32000,
+      "maxOutputTokens": 128000
     },
     {
       "provider": "anthropic",
@@ -158,7 +160,9 @@
       "fileEditingToolType": "edit_write",
       "supportsNativeToolSearch": true,
       "inputModalities": ["text", "image"],
-      "contextWindowTokens": 200000
+      "contextWindowTokens": 1000000,
+      "defaultOutputTokens": 32000,
+      "maxOutputTokens": 128000
     },
     {
       "provider": "anthropic",
@@ -168,7 +172,9 @@
       "fileEditingToolType": "edit_write",
       "supportsNativeToolSearch": true,
       "inputModalities": ["text", "image"],
-      "contextWindowTokens": 200000
+      "contextWindowTokens": 200000,
+      "defaultOutputTokens": 32000,
+      "maxOutputTokens": 64000
     },
     {
       "provider": "kimi",

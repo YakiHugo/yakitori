@@ -503,7 +503,7 @@ export function createThreadServerHandlers(
                           ? {}
                           : { reason: event.reason }),
                       }
-                    : { status: "completed" },
+                    : { status: "completed", ...event.completion },
               createdAt: new Date().toISOString(),
             })
             if (event.type === "turn.completed") {
@@ -2073,7 +2073,7 @@ function mapRolloutEvent(
   if (item.type === "turn_completed") {
     const outcome =
       item.outcome === "completed"
-        ? ({ status: "completed" } as const)
+        ? ({ status: "completed", ...item.completion } as const)
         : item.outcome === "interrupted"
           ? ({ status: "interrupted" } as const)
           : ({

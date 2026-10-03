@@ -1,4 +1,5 @@
 import type { ForkedModelContext } from "./model-context.ts"
+import type { TurnCompletion } from "../kernel/events.ts"
 import type { AgentStatus } from "../core/session-io.ts"
 import { RolloutBudget, type RolloutBudgetConfig } from "./rollout-budget.ts"
 
@@ -12,7 +13,11 @@ export type AgentModelTarget = Readonly<{
 }>
 
 export type AgentRunOutcome =
-  | { readonly type: "completed"; readonly text: string }
+  | Readonly<{
+      type: "completed"
+      text: string
+      reason?: NonNullable<TurnCompletion["reason"]>
+    }>
   | { readonly type: "errored"; readonly error: string }
   | { readonly type: "interrupted"; readonly reason?: string }
 
@@ -726,7 +731,11 @@ function outcomeFromAgentStatus(
 ): AgentRunOutcome | undefined {
   if (typeof status === "object") {
     return "completed" in status
-      ? { type: "completed", text: status.completed ?? "" }
+      ? {
+          type: "completed",
+          text: status.completed ?? "",
+          ...(status.reason === undefined ? {} : { reason: status.reason }),
+        }
       : { type: "errored", error: status.errored }
   }
   return status === "interrupted" ? { type: "interrupted" } : undefined
@@ -754,7 +763,11 @@ function isRunning(status: AgentStatus): boolean {
 }
 
 function outcomeStatus(outcome: AgentRunOutcome): AgentStatus {
-  if (outcome.type === "completed") return { completed: outcome.text }
+  if (outcome.type === "completed")
+    return {
+      completed: outcome.text,
+      ...(outcome.reason === undefined ? {} : { reason: outcome.reason }),
+    }
   if (outcome.type === "errored") return { errored: outcome.error }
   return "interrupted"
 }
@@ -764,7 +777,7 @@ function completionMessage(
   outcome: AgentRunOutcome,
 ): string {
   if (outcome.type === "completed") {
-    return `<subagent_notification path="${agent.path}" status="completed">\n${outcome.text}\n</subagent_notification>`
+    return `<subagent_notification path="${agent.path}" status="completed"${outcome.reason === undefined ? "" : ` reason="${outcome.reason}"`}>\n${outcome.text}\n</subagent_notification>`
   }
   if (outcome.type === "errored") {
     return `<subagent_notification path="${agent.path}" status="errored">\n${outcome.error}\n</subagent_notification>`

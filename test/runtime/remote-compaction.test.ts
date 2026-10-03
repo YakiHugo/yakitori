@@ -5,9 +5,9 @@ import { afterEach, describe, expect, it } from "vitest"
 import { JsonlThreadStore } from "../../src/core/jsonl-thread-store.ts"
 import { ThreadManager } from "../../src/core/thread-manager.ts"
 import {
-  ModelStopReason,
   type ModelCompactionBlock,
   type ModelRequest,
+  ModelStopReason,
   type StreamFn,
 } from "../../src/runtime/model.ts"
 import { createModelProvider } from "../../src/runtime/model-provider.ts"
@@ -37,7 +37,10 @@ function nativeItems(request: ModelRequest) {
 }
 
 describe("provider-native compaction history", () => {
-  it("bounds remote stream retries even after provisional output", async () => {
+  it.each([
+    "server_error",
+    "length",
+  ])("bounds remote %s retries even after provisional output", async (failure) => {
     let attempts = 0
     const provider = createModelProvider({
       info: {
@@ -49,6 +52,17 @@ describe("provider-native compaction history", () => {
       stream: async function* () {
         attempts += 1
         yield { type: "delta", text: "provisional output" }
+        if (failure === "length") {
+          yield {
+            type: "response",
+            response: {
+              stopReason: ModelStopReason.Length,
+              content: [{ type: "text", text: "partial native checkpoint" }],
+              usage: { inputTokens: 10, outputTokens: 3 },
+            },
+          }
+          return
+        }
         yield {
           type: "failure",
           failure: {
@@ -87,8 +101,16 @@ describe("provider-native compaction history", () => {
     expect(events.filter((event) => event.type === "failure")).toHaveLength(1)
     expect(events.at(-1)).toMatchObject({
       type: "failure",
-      failure: { kind: "server_error" },
+      failure: {
+        kind: failure === "length" ? "provider_error" : "server_error",
+      },
     })
+    if (failure === "length") {
+      expect(events.some((event) => event.type === "response")).toBe(false)
+      expect(events.at(-1)).toMatchObject({
+        usage: { inputTokens: 10, outputTokens: 3 },
+      })
+    }
   })
   it("samples after one compaction even if the replacement still estimates above the trigger", async () => {
     let normalCalls = 0

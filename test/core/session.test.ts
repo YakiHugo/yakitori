@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 import type { RolloutItem } from "../../src/core/rollout.ts"
 import type {
   TurnControl,
+  TurnTask,
   TurnProcessor,
   TurnRuntime,
 } from "../../src/core/session.ts"
@@ -1222,6 +1223,100 @@ describe("live Session actor", () => {
     await manager.shutdown()
   })
 
+  it.each([
+    "truncated",
+    "refused",
+  ] as const)("keeps a %s answer chain complete in live status and replay after compaction", async (reason) => {
+    const store = new MemoryThreadStore()
+    const completion = {
+      reason,
+      answerItemIds: ["answer_first", "answer_second"],
+    }
+    const manager = createManager(
+      {
+        async run(runtime, input) {
+          const assistant = (id: string, text: string) => ({
+            id,
+            turnId: input.submissionId,
+            createdAt: "2026-10-02T00:00:00.000Z",
+            item: {
+              role: "assistant" as const,
+              content: [{ type: "text" as const, text }],
+            },
+          })
+          await runtime.recordConversationItems([
+            assistant("progress", "Earlier progress."),
+            assistant("answer_first", "Con"),
+          ])
+          await runtime.replaceConversationHistory({
+            replacement: [],
+            summary: "Compacted context.",
+            baseHistoryLength: runtime.snapshot().context.history.length,
+          })
+          await runtime.recordConversationItems([
+            assistant("answer_second", "tinuation."),
+          ])
+          return completion
+        },
+      },
+      store,
+    )
+    const thread = await manager.createThread()
+    await thread.startIfIdle({
+      submissionId: "turn_answer",
+      content: { kind: "text", text: "answer" },
+    })
+    expect(await nextEventOfType(thread, "turn.completed")).toMatchObject({
+      completion,
+    })
+    expect(thread.agentStatus).toEqual({ completed: "Continuation.", reason })
+    expect(
+      (await store.readThread(thread.id))?.rollout.at(-1)?.item,
+    ).toMatchObject({
+      type: "turn_completed",
+      outcome: "completed",
+      completion,
+    })
+    await manager.shutdown()
+    const resumedManager = createManager({ run() {} }, store)
+    const resumed = await resumedManager.resumeThread(thread.id)
+    expect(resumed?.agentStatus).toEqual({ completed: "Continuation.", reason })
+    await resumedManager.shutdown()
+  })
+
+  it("an explicit empty answer suppresses earlier text in the same Turn", async () => {
+    const store = new MemoryThreadStore()
+    const manager = createManager(
+      {
+        async run(runtime, input) {
+          await runtime.recordConversationItems([
+            {
+              id: "progress_only",
+              turnId: input.submissionId,
+              createdAt: "2026-10-02T00:00:00.000Z",
+              item: {
+                role: "assistant",
+                content: [{ type: "text", text: "Earlier progress." }],
+              },
+            },
+          ])
+          return { answerItemIds: [] }
+        },
+      },
+      store,
+    )
+    const thread = await manager.createThread()
+    await thread.startIfIdle({ content: { kind: "text", text: "run" } })
+    await nextEventOfType(thread, "turn.completed")
+    expect(thread.agentStatus).toEqual({ completed: null })
+    await manager.shutdown()
+    const resumedManager = createManager({ run() {} }, store)
+    expect((await resumedManager.resumeThread(thread.id))?.agentStatus).toEqual(
+      { completed: null },
+    )
+    await resumedManager.shutdown()
+  })
+
   it("deduplicates a stable agent message after its first flush fails", async () => {
     const store = new MemoryThreadStore()
     const manager = createManager({ run() {} }, store)
@@ -1338,7 +1433,8 @@ type TestProcessor = {
     runtime: TurnRuntime,
     input: TurnInput,
     control: TurnControl,
-  ): Promise<void> | void
+    // biome-ignore lint/suspicious/noConfusingVoidType: Test processors may complete synchronously without metadata.
+  ): TurnTask["completion"] | void
   abort?(): void
   dispose?(): void | Promise<void>
 }
@@ -1361,7 +1457,7 @@ function withPreparation(processor: TestProcessor): TurnProcessor {
       }
     },
     start(runtime, input, _context, control) {
-      let completion: Promise<void>
+      let completion: TurnTask["completion"]
       try {
         completion = runtime
           .recordInitialInput()

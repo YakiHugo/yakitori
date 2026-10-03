@@ -59,6 +59,204 @@ describe("model request runtime", () => {
   })
 
   it.each([
+    "local",
+    "remote_v2",
+  ] as const)("retries a truncated %s compaction using the original request and output budget", async (compaction) => {
+    const request: ModelRequest = {
+      ...requestFixture(),
+      compaction,
+      maxOutputTokens: 32_000,
+      system: [{ id: "summary", revision: "1", text: "Summarize history." }],
+      messages: [
+        { role: "user", content: [{ type: "text", text: "Original history" }] },
+      ],
+    }
+    const provider = scriptedStream([[truncatedSummary], [success]])
+    const sleeps: number[] = []
+    const stream = createModelRequestStream(provider.stream, {
+      wireApi: "openai_responses",
+      maxAttempts: 2,
+      sleep: async (ms) => {
+        sleeps.push(ms)
+      },
+      random: () => 1,
+    })
+
+    expect(await collect(stream, undefined, request)).toEqual([
+      expect.objectContaining({
+        type: "retry",
+        attempt: 1,
+        nextAttempt: 2,
+        delayMs: 500,
+        failure: expect.objectContaining({
+          kind: "provider_error",
+          providerCode: "max_output_tokens",
+          retryDecision: "retry",
+        }),
+        usage: { inputTokens: 31, outputTokens: 7 },
+      }),
+      success,
+    ])
+    expect(sleeps).toEqual([500])
+    expect(provider.calls()).toBe(2)
+    expect(
+      provider
+        .requests()
+        .map(({ attempt: _attempt, signal: _signal, ...original }) => original),
+    ).toEqual([request, request])
+  })
+
+  it("shares one attempt budget across transport failures and truncated compactions while retaining each usage result", async () => {
+    const exhaustedSummary: ModelStreamEvent = {
+      type: "response",
+      response: {
+        ...truncatedSummary.response,
+        usage: { inputTokens: 37, outputTokens: 9 },
+      },
+    }
+    const provider = scriptedStream([
+      [
+        {
+          ...failure("stream_disconnected"),
+          usage: { inputTokens: 5, outputTokens: 2 },
+        },
+      ],
+      [truncatedSummary],
+      [exhaustedSummary],
+      [success],
+    ])
+    const sleeps: number[] = []
+    const stream = createModelRequestStream(provider.stream, {
+      wireApi: "openai_responses",
+      maxAttempts: 3,
+      sleep: async (ms) => {
+        sleeps.push(ms)
+      },
+      random: () => 1,
+    })
+
+    expect(
+      await collect(stream, undefined, {
+        ...requestFixture(),
+        compaction: "local",
+      }),
+    ).toEqual([
+      expect.objectContaining({
+        type: "retry",
+        attempt: 1,
+        nextAttempt: 2,
+        failure: expect.objectContaining({ kind: "stream_disconnected" }),
+        usage: { inputTokens: 5, outputTokens: 2 },
+      }),
+      expect.objectContaining({
+        type: "retry",
+        attempt: 2,
+        nextAttempt: 3,
+        failure: expect.objectContaining({ kind: "provider_error" }),
+        usage: { inputTokens: 31, outputTokens: 7 },
+      }),
+      expect.objectContaining({
+        type: "failure",
+        failure: expect.objectContaining({
+          kind: "provider_error",
+          providerCode: "max_output_tokens",
+          attempt: 3,
+          maxAttempts: 3,
+          retryDecision: "fail",
+        }),
+        usage: { inputTokens: 37, outputTokens: 9 },
+      }),
+    ])
+    expect(provider.calls()).toBe(3)
+    expect(sleeps).toEqual([500, 1_000])
+  })
+
+  it("fails a truncated compaction immediately when only one attempt is allowed", async () => {
+    const provider = scriptedStream([[truncatedSummary], [success]])
+    const sleeps: number[] = []
+    const stream = createModelRequestStream(provider.stream, {
+      wireApi: "openai_responses",
+      maxAttempts: 1,
+      sleep: async (ms) => {
+        sleeps.push(ms)
+      },
+    })
+
+    expect(
+      await collect(stream, undefined, {
+        ...requestFixture(),
+        compaction: "local",
+      }),
+    ).toEqual([
+      expect.objectContaining({
+        type: "failure",
+        failure: expect.objectContaining({
+          kind: "provider_error",
+          providerCode: "max_output_tokens",
+          attempt: 1,
+          maxAttempts: 1,
+          retryDecision: "fail",
+        }),
+        usage: { inputTokens: 31, outputTokens: 7 },
+      }),
+    ])
+    expect(provider.calls()).toBe(1)
+    expect(sleeps).toEqual([])
+  })
+
+  it.each([
+    "second terminal",
+    "tail error",
+  ])("rejects a truncated compaction followed by a %s without retrying it", async (tail) => {
+    let calls = 0
+    const stream = createModelRequestStream(
+      async function* () {
+        calls += 1
+        yield truncatedSummary
+        if (tail === "second terminal") yield success
+        else throw new Error("terminated")
+      },
+      {
+        wireApi: "openai_responses",
+        maxAttempts: 3,
+        sleep: async () => {},
+      },
+    )
+
+    expect(
+      await collect(stream, undefined, {
+        ...requestFixture(),
+        compaction: "local",
+      }),
+    ).toEqual([
+      expect.objectContaining({
+        type: "failure",
+        failure: expect.objectContaining({
+          kind: "protocol_error",
+          retryDecision: "fail",
+        }),
+      }),
+    ])
+    expect(calls).toBe(1)
+  })
+
+  it("passes ordinary Length responses through unchanged without retrying", async () => {
+    const provider = scriptedStream([[truncatedSummary], [success]])
+    const sleeps: number[] = []
+    const stream = createModelRequestStream(provider.stream, {
+      wireApi: "openai_responses",
+      maxAttempts: 3,
+      sleep: async (ms) => {
+        sleeps.push(ms)
+      },
+    })
+
+    expect(await collect(stream)).toEqual([truncatedSummary])
+    expect(provider.calls()).toBe(1)
+    expect(sleeps).toEqual([])
+  })
+
+  it.each([
     ["delta", "stream_disconnected"],
     ["reasoning_delta", "stream_disconnected"],
     ["delta", "idle_timeout"],
@@ -397,6 +595,17 @@ const success: ModelStreamEvent = {
   },
 }
 
+const truncatedSummary: Extract<ModelStreamEvent, { type: "response" }> = {
+  type: "response",
+  response: {
+    stopReason: ModelStopReason.Length,
+    rawStopReason: "max_output_tokens",
+    lengthReason: "output",
+    content: [{ type: "text", text: "Incomplete summary" }],
+    usage: { inputTokens: 31, outputTokens: 7 },
+  },
+}
+
 function failure(
   kind: ModelFailure["kind"],
 ): Extract<ModelStreamEvent, { type: "failure" }> {
@@ -414,7 +623,9 @@ function failure(
 
 function scriptedStream(attempts: readonly (readonly ModelStreamEvent[])[]) {
   let callCount = 0
-  const stream: StreamFn = () => {
+  const requests: ModelRequest[] = []
+  const stream: StreamFn = (request) => {
+    requests.push(request)
     const attempt = attempts[callCount]
     callCount += 1
     if (attempt === undefined) throw new Error("Missing scripted attempt.")
@@ -422,7 +633,7 @@ function scriptedStream(attempts: readonly (readonly ModelStreamEvent[])[]) {
       yield* attempt
     })()
   }
-  return { stream, calls: () => callCount }
+  return { stream, calls: () => callCount, requests: () => requests }
 }
 
 function scriptedThrow(error: unknown): StreamFn {
@@ -438,9 +649,10 @@ function scriptedThrow(error: unknown): StreamFn {
 async function collect(
   stream: StreamFn,
   signal?: AbortSignal,
+  request: ModelRequest = requestFixture(signal),
 ): Promise<ModelStreamEvent[]> {
   const events: ModelStreamEvent[] = []
-  for await (const event of stream(requestFixture(signal))) events.push(event)
+  for await (const event of stream(request)) events.push(event)
   return events
 }
 

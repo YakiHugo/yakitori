@@ -31,8 +31,22 @@ describe("complete model request budgeting", () => {
     )
   })
   it("counts system, tools, output reserve, and detail-aware images", () => {
-    const high = estimateModelRequestBudget(requestWithImage("high"))
-    const original = estimateModelRequestBudget(requestWithImage("original"))
+    const high = estimateModelRequestBudget({
+      ...requestWithImage("high"),
+      target: {
+        ...requestWithImage("high").target,
+        provider: "openai",
+        model: "gpt-6-sol",
+      },
+    })
+    const original = estimateModelRequestBudget({
+      ...requestWithImage("original"),
+      target: {
+        ...requestWithImage("original").target,
+        provider: "openai",
+        model: "gpt-6-sol",
+      },
+    })
 
     expect(high.envelopeTokens).toBeGreaterThan(0)
     expect(high.systemTokens).toBeGreaterThan(0)
@@ -48,6 +62,51 @@ describe("complete model request budgeting", () => {
     expect(original.outputReserveTokens).toBe(4_096)
     expect(original.requiredContextTokens).toBe(
       original.estimatedInputTokens + 4_096,
+    )
+  })
+
+  it("does not invent an output parameter reserve for the Codex transport", () => {
+    const budget = estimateModelRequestBudget(requestWithImage("high"))
+    expect(budget.outputReserveTokens).toBe(0)
+    expect(budget.requiredContextTokens).toBe(budget.estimatedInputTokens)
+  })
+
+  it.each([
+    "openai",
+    "grok",
+    "codex",
+    "faux",
+  ])("does not reserve an unspecified server output budget for %s", (provider) => {
+    const base = { ...requestWithImage("high") }
+    delete base.maxOutputTokens
+    const budget = estimateModelRequestBudget({
+      ...base,
+      target: { ...base.target, provider },
+    })
+    expect(budget.outputReserveTokens).toBe(0)
+    expect(budget.requiredContextTokens).toBe(budget.estimatedInputTokens)
+  })
+
+  it.each([
+    "anthropic",
+    "kimi",
+  ])("reserves the required Messages application budget and respects an explicit override for %s", (provider) => {
+    const base = requestWithImage("high")
+    const request = {
+      ...base,
+      target: { ...base.target, provider },
+    }
+    const fallbackRequest = { ...request }
+    delete fallbackRequest.maxOutputTokens
+    const fallback = estimateModelRequestBudget(fallbackRequest)
+    expect(fallback.outputReserveTokens).toBe(32_000)
+    expect(fallback.requiredContextTokens).toBe(
+      fallback.estimatedInputTokens + 32_000,
+    )
+    const configured = estimateModelRequestBudget(request)
+    expect(configured.outputReserveTokens).toBe(4_096)
+    expect(configured.requiredContextTokens).toBe(
+      configured.estimatedInputTokens + 4_096,
     )
   })
 

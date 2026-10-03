@@ -84,6 +84,44 @@ describe("thread search projection", () => {
     expect(firstVisibleThreadMatch(steered, "stale needle")).toBeUndefined()
   })
 
+  it("searches the selected continuation chain and clears an explicitly empty answer", () => {
+    const assistant = (id: string, text: string): RolloutItem => ({
+      type: "response_item",
+      item: { ...envelope("turn_chain", "assistant", text), id },
+    })
+    const stored = thread([
+      assistant("progress", "excluded progress"),
+      assistant("piece_one", "**Con"),
+      assistant("piece_two", "tinuation**"),
+      {
+        type: "turn_completed",
+        turnId: "turn_chain",
+        outcome: "completed",
+        completion: {
+          reason: "truncated",
+          answerItemIds: ["piece_one", "piece_two"],
+        },
+      },
+      response("turn_empty", "assistant", "stale answer"),
+      {
+        type: "turn_completed",
+        turnId: "turn_empty",
+        outcome: "completed",
+        completion: { answerItemIds: [] },
+      },
+    ])
+    expect(visibleThreadSearchOccurrences(stored, "Continuation")).toEqual([
+      {
+        turnId: "turn_chain",
+        itemId: "piece_two",
+        snippet: "Continuation",
+        snippetMatchRange: { start: 0, end: 12 },
+      },
+    ])
+    expect(firstVisibleThreadMatch(stored, "excluded progress")).toBeUndefined()
+    expect(firstVisibleThreadMatch(stored, "stale answer")).toBeUndefined()
+  })
+
   it("continues after a deleted cursor anchor without duplicating the first page", async () => {
     const store = new MemoryThreadStore()
     for (const [id, updatedAt] of [

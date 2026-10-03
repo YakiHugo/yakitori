@@ -7,6 +7,10 @@ export type ResolvedModel = Readonly<{
   instructions?: string
   autoCompactTokenLimit?: number
   compactionHash?: string
+  // Requested budget and API capability are distinct. The curated Claude
+  // request default is Yakitori policy, not an Anthropic API default.
+  defaultOutputTokens?: number
+  maxOutputTokens?: number
   provider: string
   model: string
   instructionProfileId: InstructionProfileId
@@ -23,6 +27,8 @@ export type ResolvedModel = Readonly<{
 export type CatalogModel = Readonly<{
   autoCompactTokenLimit?: number
   compactionHash?: string
+  defaultOutputTokens?: number
+  maxOutputTokens?: number
   model: string
   instructionProfileId: InstructionProfileId
   shellToolType: ModelShellToolType
@@ -60,6 +66,8 @@ export type ModelCapacity = Readonly<{
   contextWindowTokens: number
   maxContextWindowTokens: number
   effectiveContextWindowPercent: number
+  // Codex's effective window already reserves model output headroom.
+  contextWindowScope: "input" | "total"
 }>
 
 export function listCatalogModels(provider: string): CatalogModel[] {
@@ -68,6 +76,7 @@ export function listCatalogModels(provider: string): CatalogModel[] {
     .filter((entry) => entry.provider.toLowerCase() === normalized)
     .map((entry) => ({
       model: entry.model,
+      ...catalogOutputTokens(entry),
       ...("autoCompactTokenLimit" in entry &&
       typeof entry.autoCompactTokenLimit === "number"
         ? { autoCompactTokenLimit: entry.autoCompactTokenLimit }
@@ -157,6 +166,7 @@ export function resolveModel(input: {
   if (entry !== undefined) {
     return {
       ...input,
+      ...catalogOutputTokens(entry),
       ...("autoCompactTokenLimit" in entry &&
       typeof entry.autoCompactTokenLimit === "number"
         ? { autoCompactTokenLimit: entry.autoCompactTokenLimit }
@@ -278,18 +288,38 @@ export function catalogModelCapacity(input: {
   readonly model: string
 }): ModelCapacity | undefined {
   const entry = findCatalogEntry(input)
-  if (
-    entry === undefined ||
-    !("contextWindowTokens" in entry) ||
-    !("maxContextWindowTokens" in entry) ||
-    !("effectiveContextWindowPercent" in entry)
-  ) {
+  if (entry === undefined || !("contextWindowTokens" in entry)) {
     return undefined
   }
   return {
     contextWindowTokens: entry.contextWindowTokens,
-    maxContextWindowTokens: entry.maxContextWindowTokens,
-    effectiveContextWindowPercent: entry.effectiveContextWindowPercent,
+    maxContextWindowTokens:
+      "maxContextWindowTokens" in entry
+        ? entry.maxContextWindowTokens
+        : entry.contextWindowTokens,
+    effectiveContextWindowPercent:
+      "effectiveContextWindowPercent" in entry
+        ? entry.effectiveContextWindowPercent
+        : 100,
+    contextWindowScope: entry.provider === "codex" ? "input" : "total",
+  }
+}
+
+// Claude limits: https://platform.claude.com/docs/en/models/overview and the
+// linked model specification pages. Yakitori uses 32k for curated Claude
+// requests, following the documented Claude Code fallback request budget:
+// https://code.claude.com/docs/en/env-vars#variables
+function catalogOutputTokens(entry: {
+  defaultOutputTokens?: number
+  maxOutputTokens?: number
+}): Pick<ResolvedModel, "defaultOutputTokens" | "maxOutputTokens"> {
+  return {
+    ...(entry.defaultOutputTokens === undefined
+      ? {}
+      : { defaultOutputTokens: entry.defaultOutputTokens }),
+    ...(entry.maxOutputTokens === undefined
+      ? {}
+      : { maxOutputTokens: entry.maxOutputTokens }),
   }
 }
 

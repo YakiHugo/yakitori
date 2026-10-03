@@ -84,6 +84,19 @@ function start() {
   emit({ type: "turn.started", data: { turnId: "turn", inputId: "input" } })
   stream.emitReplayComplete()
 }
+function answer(itemId: string, text: string, turnId = "turn") {
+  emit({
+    type: "item.completed",
+    data: {
+      turnId,
+      item: {
+        type: "agent_message",
+        itemId,
+        content: [{ type: "text", text }],
+      },
+    },
+  })
+}
 
 beforeEach(() => {
   rpc = new FakeRpcClient()
@@ -176,6 +189,137 @@ it("reconciles live output against an idle reconnect snapshot", () => {
   expect(screen.getByText("Interrupted")).toBeDefined()
   expect(screen.getByText(/Turn interrupted/)).toBeDefined()
   expect(screen.getByText("Partial result")).toBeDefined()
+})
+
+it("joins completed live answer fragments at the last message while preserving progress", () => {
+  const { container } = mount()
+  act(() => {
+    start()
+    answer("progress", "Planning the review")
+    answer("first", "**Ren")
+    answer("last", "derer verified**")
+  })
+  expect(screen.queryByText("Renderer verified")).toBeNull()
+  expect(
+    container.querySelector('[data-context-message-id="first"]'),
+  ).not.toBeNull()
+  const outcome: TurnOutcome = {
+    status: "completed",
+    reason: "truncated",
+    answerItemIds: ["first", "last"],
+  }
+  act(() =>
+    stream.emitTransient({
+      type: "turn.finished",
+      sessionId: "child",
+      turnId: "turn",
+      outcome,
+      createdAt: at,
+    }),
+  )
+  expect(screen.getByText("Renderer verified").tagName).toBe("STRONG")
+  expect(screen.getByText("Planning the review")).toBeDefined()
+  expect(screen.getByText("Completed · truncated")).toBeDefined()
+  expect(
+    container.querySelector('[data-context-message-id="first"]'),
+  ).toBeNull()
+  expect(
+    container.querySelector('[data-context-message-id="last"]')?.textContent,
+  ).toBe("Renderer verified")
+  act(() => emit({ type: "turn.completed", data: { turnId: "turn", outcome } }))
+  expect(screen.getAllByText("Renderer verified")).toHaveLength(1)
+})
+
+it("replays a continued code block as one completed answer", () => {
+  const { container } = mount()
+  act(() => {
+    stream.emitSnapshot({ session: { ...snapshot, seq: 5 } })
+    emit({
+      type: "input.admitted",
+      data: {
+        requestId: "request",
+        inputId: "input",
+        role: "user",
+        content: { kind: "text", text: "Review the renderer" },
+      },
+    })
+    emit({ type: "turn.started", data: { turnId: "turn", inputId: "input" } })
+    answer("first", "```text\nconst x = ")
+    answer("last", "1\n```\n\nDone.")
+    emit({
+      type: "turn.completed",
+      data: {
+        turnId: "turn",
+        outcome: { status: "completed", answerItemIds: ["first", "last"] },
+      },
+    })
+    stream.emitReplayComplete()
+  })
+  expect(container.querySelector("pre code")?.textContent).toBe("const x = 1\n")
+  expect(container.querySelectorAll("pre")).toHaveLength(1)
+  expect(screen.getByText("Done.")).toBeDefined()
+  expect(screen.getByText("Completed")).toBeDefined()
+  expect(
+    container.querySelector('[data-context-message-id="first"]'),
+  ).toBeNull()
+  expect(
+    container.querySelector('[data-context-message-id="last"]'),
+  ).not.toBeNull()
+})
+
+it("keeps answer fragments separate when the turn fails", () => {
+  const { container } = mount()
+  act(() => {
+    start()
+    answer("first", "**Con")
+    answer("last", "tinuation**")
+    emit({
+      type: "turn.completed",
+      data: {
+        turnId: "turn",
+        outcome: {
+          status: "failed",
+          error: { message: "Provider unavailable" },
+        },
+      },
+    })
+  })
+  expect(screen.queryByText("Continuation")).toBeNull()
+  expect(
+    container.querySelector('[data-context-message-id="first"]'),
+  ).not.toBeNull()
+  expect(
+    container.querySelector('[data-context-message-id="last"]'),
+  ).not.toBeNull()
+  expect(screen.getByText("Failed")).toBeDefined()
+})
+
+it("does not join an answer chain containing a message from another turn", () => {
+  const { container } = mount()
+  act(() => {
+    start()
+    answer("first", "**Con")
+    emit({
+      type: "turn.completed",
+      data: { turnId: "turn", outcome: { status: "completed" } },
+    })
+    emit({ type: "turn.started", data: { turnId: "next", inputId: "input" } })
+    answer("last", "tinuation**", "next")
+    emit({
+      type: "turn.completed",
+      data: {
+        turnId: "next",
+        outcome: { status: "completed", answerItemIds: ["first", "last"] },
+      },
+    })
+  })
+  expect(screen.queryByText("Continuation")).toBeNull()
+  expect(
+    container.querySelector('[data-context-message-id="first"]'),
+  ).not.toBeNull()
+  expect(
+    container.querySelector('[data-context-message-id="last"]'),
+  ).not.toBeNull()
 })
 
 it("keeps delegated agent navigation available while routine child activity is folded", () => {

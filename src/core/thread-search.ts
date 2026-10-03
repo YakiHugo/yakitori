@@ -77,13 +77,14 @@ function visibleSearchMessages(
   stored: StoredThread,
 ): readonly VisibleSearchMessage[] {
   const users: VisibleSearchMessage[] = []
-  const completedTurns = new Set(
+  const completedTurns = new Map(
     stored.rollout.flatMap(({ item }) =>
       item.type === "turn_completed" && item.outcome === "completed"
-        ? [item.turnId]
+        ? [[item.turnId, item.completion] as const]
         : [],
     ),
   )
+  const answerItems = new Map<string, VisibleSearchMessage>()
   const assistantTurns = new Map<
     string,
     { lastToolSeq: number; finalText?: VisibleSearchMessage }
@@ -110,12 +111,17 @@ function visibleSearchMessages(
       continue
     }
     if (message.role !== "assistant") continue
-    const text = markdownVisibleText(
-      message.content
-        .filter((block) => block.type === "text")
-        .map((block) => block.text)
-        .join("\n"),
-    )
+    const rawText = message.content
+      .filter((block) => block.type === "text")
+      .map((block) => block.text)
+      .join("")
+    answerItems.set(envelope.id, {
+      seq: record.seq,
+      turnId: envelope.turnId,
+      itemId: envelope.id,
+      text: rawText,
+    })
+    const text = markdownVisibleText(rawText)
     const state = assistantTurns.get(envelope.turnId) ?? { lastToolSeq: -1 }
     if (text === "") {
       delete state.finalText
@@ -130,13 +136,30 @@ function visibleSearchMessages(
     }
     assistantTurns.set(envelope.turnId, state)
   }
-  const finalAssistants = [...assistantTurns.entries()].flatMap(
-    ([turnId, state]) =>
-      completedTurns.has(turnId) &&
-      state.finalText !== undefined &&
-      state.finalText.seq > state.lastToolSeq
+  const finalAssistants = [...completedTurns.entries()].flatMap(
+    ([turnId, completion]) => {
+      if (completion?.answerItemIds !== undefined) {
+        const pieces = completion.answerItemIds.map((id) => {
+          const item = answerItems.get(id)
+          if (item?.turnId !== turnId) {
+            throw new Error(
+              `Turn answer references missing assistant item ${id}.`,
+            )
+          }
+          return item
+        })
+        const anchor = pieces.at(-1)
+        const text = markdownVisibleText(
+          pieces.map((piece) => piece.text).join(""),
+        )
+        return anchor === undefined || text === "" ? [] : [{ ...anchor, text }]
+      }
+      const state = assistantTurns.get(turnId)
+      return state?.finalText !== undefined &&
+        state.finalText.seq > state.lastToolSeq
         ? [state.finalText]
-        : [],
+        : []
+    },
   )
   return [...users, ...finalAssistants].sort(
     (left, right) => left.seq - right.seq,

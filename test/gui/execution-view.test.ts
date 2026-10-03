@@ -21,6 +21,71 @@ const sessionId = "session_00000000-0000-4000-8000-000000000000"
 
 describe("execution view", () => {
   it.each([
+    "truncated",
+    "refused",
+  ] as const)("projects %s completion consistently from live delivery and durable replay", (reason) => {
+    const outcome = {
+      status: "completed" as const,
+      reason,
+      answerItemIds: ["answer"],
+    }
+    const durable = [
+      createExecutionEnvelope({
+        sessionId,
+        seq: 1,
+        event: {
+          type: EventType.TurnStarted,
+          data: { turnId: "turn_chain", inputId: "input_chain" },
+        },
+      }),
+      createExecutionEnvelope({
+        sessionId,
+        seq: 2,
+        event: agentCompleted({
+          turnId: "turn_chain",
+          itemId: "answer",
+          text: "Partial answer.",
+        }),
+      }),
+    ]
+    let before = createExecutionViewState()
+    for (const event of durable)
+      before = reduceExecutionView(before, { type: "durable", event })
+    const terminal = createExecutionEnvelope({
+      sessionId,
+      seq: 3,
+      createdAt: "2026-10-02T00:00:00.000Z",
+      event: {
+        type: EventType.TurnCompleted,
+        data: { turnId: "turn_chain", outcome },
+      },
+    })
+    const live = reduceExecutionView(before, {
+      type: "transient",
+      event: {
+        type: "turn.finished",
+        sessionId,
+        turnId: "turn_chain",
+        outcome,
+        createdAt: terminal.createdAt,
+      },
+    })
+    const replay = reduceExecutionView(before, {
+      type: "durable",
+      event: terminal,
+    })
+    for (const state of [live, replay]) {
+      const view = projectExecutionView(state)
+      expect(view.activeTurnId).toBeUndefined()
+      expect(view.turnTimings.turn_chain?.outcome).toEqual(outcome)
+      expect(view.entries).toEqual([
+        expect.objectContaining({ kind: "assistant", text: "Partial answer." }),
+        expect.objectContaining({ kind: "turn_terminal", state: reason }),
+      ])
+    }
+  })
+
+  it.each([
     "transient",
     "durable",
   ] as const)("keeps assistant and reasoning streams alive when a %s tool starts", (delivery) => {

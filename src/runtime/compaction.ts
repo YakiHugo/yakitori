@@ -98,12 +98,16 @@ export function buildCompactionRequest(input: {
   readonly target: ModelTarget
   readonly baseInstructions: ModelSystemSection
   readonly cacheKey?: string
+  readonly maxOutputTokens?: number
   readonly instruction?: string
   readonly signal?: AbortSignal
 }): ModelRequest {
   return {
     target: input.target,
     ...(input.cacheKey === undefined ? {} : { cacheKey: input.cacheKey }),
+    ...(input.maxOutputTokens === undefined
+      ? {}
+      : { maxOutputTokens: input.maxOutputTokens }),
     compaction: "local",
     system: [input.baseInstructions],
     messages: [

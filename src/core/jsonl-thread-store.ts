@@ -24,6 +24,7 @@ import {
   isSessionConfigurationSnapshot,
   isTokenUsage,
   isTurnMetrics,
+  isTurnCompletion,
 } from "../kernel/events.ts"
 import { isStorageKey } from "../kernel/ids.ts"
 import { ContextManager } from "./context-manager.ts"
@@ -2190,6 +2191,7 @@ function isRolloutItem(value: unknown): value is RolloutItem {
         "turnId",
         "outcome",
         "lastRequestStartedAt",
+        "completion",
         "usage",
         "metrics",
         "error",
@@ -2203,6 +2205,9 @@ function isRolloutItem(value: unknown): value is RolloutItem {
           !Number.isNaN(Date.parse(value.lastRequestStartedAt)) &&
           new Date(value.lastRequestStartedAt).toISOString() ===
             value.lastRequestStartedAt)) &&
+      (value.completion === undefined ||
+        (value.outcome === "completed" &&
+          isTurnCompletion(value.completion))) &&
       (value.usage === undefined || isTokenUsage(value.usage)) &&
       (value.metrics === undefined || isTurnMetrics(value.metrics)) &&
       (value.error === undefined || isRolloutError(value.error))

@@ -84,7 +84,11 @@ export function useSessionAgents(
 
 export function agentStatusLabel(status: AgentSummary["status"]): string {
   if (typeof status === "object")
-    return "completed" in status ? "Completed" : "Failed"
+    return "completed" in status
+      ? status.reason === undefined
+        ? "Completed"
+        : `Completed · ${status.reason}`
+      : "Failed"
   switch (status) {
     case "pending_init":
       return "Starting"

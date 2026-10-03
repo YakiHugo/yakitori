@@ -57,6 +57,31 @@ describe("agent control", () => {
     ])
   })
 
+  it.each([
+    "truncated",
+    "refused",
+  ] as const)("delivers a completed child's %s reason with its partial answer", async (reason) => {
+    const harness = createHarness()
+    const root = harness.control.bind("root_session", TARGET)
+    const child = await root.spawn({
+      taskName: "partial",
+      message: "work",
+      agentType: "general",
+      forkTurns: "none",
+    })
+    harness.runs
+      .get(child.agentId)?.[0]
+      ?.resolve({ type: "completed", text: "partial answer", reason })
+    expect(await root.wait(1_000)).toMatchObject([
+      { status: { completed: "partial answer", reason } },
+    ])
+    expect(harness.deliveredMessages).toMatchObject([
+      {
+        text: expect.stringContaining(`status="completed" reason="${reason}"`),
+      },
+    ])
+  })
+
   it("allows two delegation levels and rejects a third without removing spawn", async () => {
     const harness = createHarness({ maxDepth: 2, maxConcurrentAgents: 4 })
     const root = harness.control.bind("root_session", TARGET)
@@ -429,7 +454,12 @@ function createHarness(
         statuses.set(
           request.sessionId,
           outcome.type === "completed"
-            ? { completed: outcome.text }
+            ? {
+                completed: outcome.text,
+                ...(outcome.reason === undefined
+                  ? {}
+                  : { reason: outcome.reason }),
+              }
             : outcome.type === "errored"
               ? { errored: outcome.error }
               : "interrupted",

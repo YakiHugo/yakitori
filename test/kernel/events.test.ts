@@ -5,6 +5,7 @@ import {
   InputRole,
   isKernelEvent,
   isModelMessage,
+  isTurnCompletion,
 } from "../../src/kernel/events.ts"
 
 describe("kernel facts", () => {
@@ -98,6 +99,42 @@ describe("kernel facts", () => {
         } as never,
       }),
     ).toThrow("Invalid event data")
+  })
+
+  it("validates completed response reasons and unique answer item IDs", () => {
+    for (const reason of ["truncated", "refused"] as const) {
+      expect(
+        isTurnCompletion({ reason, answerItemIds: ["piece_one", "piece_two"] }),
+      ).toBe(true)
+      expect(
+        isKernelEvent(
+          createEventEnvelope({
+            sessionId: "session_00000000-0000-4000-8000-000000000000",
+            seq: 1,
+            event: {
+              type: EventType.TurnCompleted,
+              data: {
+                turnId: "turn_chain",
+                outcome: {
+                  status: "completed",
+                  reason,
+                  answerItemIds: ["piece_one", "piece_two"],
+                },
+              },
+            },
+          }),
+        ),
+      ).toBe(true)
+    }
+    expect(isTurnCompletion({ answerItemIds: [] })).toBe(true)
+    for (const invalid of [
+      { reason: "length" },
+      { answerItemIds: ["duplicate", "duplicate"] },
+      { answerItemIds: [""] },
+      { answerItemIds: [1] },
+      { extra: true },
+    ])
+      expect(isTurnCompletion(invalid)).toBe(false)
   })
 
   it("enforces the durable custom-tool fallback invariant", () => {
