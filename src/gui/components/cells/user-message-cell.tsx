@@ -82,8 +82,10 @@ export function UserMessageCell({
 }>) {
   const busy = useAppStore((state) => state.busy)
   const sessionId = useAppStore((state) => state.selection.sessionId)
-  const goalInputId = useAppStore((state) => state.selectedSession?.goalInputId)
-  const changeSidebar = useAppStore((state) => state.changeSidebar)
+  const goalInputId = useAppStore(
+    (state) => state.selectedSession?.goal?.inputId,
+  )
+  const setGoal = useAppStore((state) => state.setGoal)
   const sentAsGoal = goalInputId !== undefined && goalInputId === entry.inputId
   const apiBase = useAppStore((state) => state.apiBase)
   const forkSession = useAppStore((state) => state.forkSession)
@@ -162,14 +164,11 @@ export function UserMessageCell({
                     aria-label="Set as goal"
                     title="Set as goal"
                     onClick={() =>
-                      void changeSidebar({
-                        type: "session",
+                      void setGoal({
                         sessionId,
-                        goal: entry.text.trim(),
-                        goalStatus: "active",
-                        goalUpdatedAt: new Date().toISOString(),
-                        goalTimeUsedSeconds: 0,
-                        goalInputId: entry.inputId,
+                        objective: entry.text.trim(),
+                        status: "active",
+                        inputId: entry.inputId,
                       })
                     }
                     className="rounded-md p-1 transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"

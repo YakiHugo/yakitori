@@ -1,11 +1,13 @@
 // @vitest-environment happy-dom
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import type { ThreadGoal } from "../../src/core/goal.ts"
 import {
   createExecutionViewState,
   projectExecutionView,
 } from "../../src/gui/execution-view.ts"
-import { ApiRequestError } from "../../src/gui/lib/rpc-client.ts"
 import { inputRecoveryMemory } from "../../src/gui/input-recovery-memory.ts"
+import { ApiRequestError } from "../../src/gui/lib/rpc-client.ts"
 import {
   createInitialAppState,
   normalizeKimiModelSelection,
@@ -672,12 +674,17 @@ describe("app store event stream", () => {
 
 describe("cancel queued input", () => {
   it("removes a cancelled item from the separate queue view", async () => {
-    let items = [{
-      id: "input_1",
-      sessionId: "session_1",
-      input: { submissionId: "request_1", content: { kind: "text", text: "hello" } },
-      createdAt: sessionDetail.createdAt,
-    }]
+    let items = [
+      {
+        id: "input_1",
+        sessionId: "session_1",
+        input: {
+          submissionId: "request_1",
+          content: { kind: "text", text: "hello" },
+        },
+        createdAt: sessionDetail.createdAt,
+      },
+    ]
     fakeRef.current.respond = (method) => {
       if (method === "session/queue/list") return { items }
       if (method === "session/input/cancel") {
@@ -687,12 +694,20 @@ describe("cancel queued input", () => {
       return notFound()
     }
     await useAppStore.getState().selectSession("session_1")
-    await vi.waitFor(() => expect(useAppStore.getState().queuedItems).toHaveLength(1))
+    await vi.waitFor(() =>
+      expect(useAppStore.getState().queuedItems).toHaveLength(1),
+    )
     await useAppStore.getState().cancelQueuedInput("input_1")
-    expect(fakeRef.current.requestsFor("session/input/cancel")).toEqual([{
-      method: "session/input/cancel",
-      params: { sessionId: "session_1", inputId: "input_1", reason: "user_cancel" },
-    }])
+    expect(fakeRef.current.requestsFor("session/input/cancel")).toEqual([
+      {
+        method: "session/input/cancel",
+        params: {
+          sessionId: "session_1",
+          inputId: "input_1",
+          reason: "user_cancel",
+        },
+      },
+    ])
     expect(useAppStore.getState().queuedItems).toEqual([])
   })
 
@@ -2406,13 +2421,22 @@ describe("model selection", () => {
       if (method === "session/queue/list") return { items }
       if (method === "session/input/queue") {
         const body = params as { requestId: string }
-        items = [{
-          id: "input_queued",
-          sessionId: "session_1",
-          input: { submissionId: body.requestId, content: { kind: "text", text: "run later" } },
-          createdAt: sessionDetail.createdAt,
-        }]
-        return { requestId: body.requestId, turnId: body.requestId, inputId: "input_queued" }
+        items = [
+          {
+            id: "input_queued",
+            sessionId: "session_1",
+            input: {
+              submissionId: body.requestId,
+              content: { kind: "text", text: "run later" },
+            },
+            createdAt: sessionDetail.createdAt,
+          },
+        ]
+        return {
+          requestId: body.requestId,
+          turnId: body.requestId,
+          inputId: "input_queued",
+        }
       }
       return notFound()
     }
@@ -2422,8 +2446,12 @@ describe("model selection", () => {
     useAppStore.setState({ promptDraft: "run later" })
     await useAppStore.getState().admitInput("run later", [], "queue")
     expect(inputRecoveryMemory.length).toBe(0)
-    expect(useAppStore.getState().queuedItems.map((item) => item.id)).toEqual(["input_queued"])
-    expect(projectExecutionView(useAppStore.getState().execution).entries).toEqual([])
+    expect(useAppStore.getState().queuedItems.map((item) => item.id)).toEqual([
+      "input_queued",
+    ])
+    expect(
+      projectExecutionView(useAppStore.getState().execution).entries,
+    ).toEqual([])
   })
 
   it("restores a prompt rejected before its durable input event", async () => {
@@ -4366,4 +4394,99 @@ it.each([
   expect(
     useAppStore.getState().execution.admittedRequestIds[request.requestId],
   ).toBeUndefined()
+})
+
+describe("goal projections", () => {
+  const goal: ThreadGoal = {
+    id: "goal_1",
+    threadId: "session_1",
+    objective: "Ship it",
+    status: "active",
+    tokensUsed: 30,
+    timeUsedSeconds: 5,
+    createdAt: "2026-10-03T00:00:00.000Z",
+    updatedAt: "2026-10-03T00:00:01.000Z",
+  }
+  async function boot() {
+    fakeRef.current.respond = (method) => {
+      if (method === "provider/list") return { providers: [] }
+      if (method === "project/list") return { projects: [] }
+      if (method === "session/list") return { sessions: [] }
+      throw new Error(`Unexpected request: ${method}`)
+    }
+    await useAppStore.getState().boot()
+    useAppStore.setState({
+      selection: { sessionId: "session_1" },
+      selectedSession: { ...sessionDetail, goal },
+      sessionsByProject: { "": { sessions: [{ ...sessionDetail, goal }] } },
+    })
+  }
+
+  it("updates selected and cached goals without a sidebar change, including clears", async () => {
+    await boot()
+    const paused = { ...goal, status: "paused" as const, tokensUsed: 50 }
+    fakeRef.current.emitGoalChanged({ sessionId: "session_1", goal: paused })
+    expect(useAppStore.getState().selectedSession?.goal).toEqual(paused)
+    expect(
+      useAppStore.getState().sessionsByProject[""]?.sessions[0]?.goal,
+    ).toEqual(paused)
+    fakeRef.current.emitGoalChanged({ sessionId: "session_1", goal: null })
+    expect(useAppStore.getState().selectedSession).not.toHaveProperty("goal")
+    expect(
+      useAppStore.getState().sessionsByProject[""]?.sessions[0],
+    ).not.toHaveProperty("goal")
+  })
+
+  it.each([
+    "complete",
+    "clear",
+  ])("keeps a newer %s notification when an older mutation response arrives", async (change) => {
+    await boot()
+    fakeRef.current.emitGoalChanged({ sessionId: "session_1", goal: null })
+    const response = deferredResponse()
+    fakeRef.current.respond = () => response.promise
+    const saving = useAppStore
+      .getState()
+      .setGoal({ sessionId: "session_1", status: "active" })
+    fakeRef.current.emitGoalChanged({ sessionId: "session_1", goal })
+    const completed =
+      change === "complete"
+        ? { ...goal, status: "complete" as const, tokensUsed: 200 }
+        : null
+    fakeRef.current.emitGoalChanged({ sessionId: "session_1", goal: completed })
+    response.resolve({ goal })
+    await saving
+    expect(useAppStore.getState().selectedSession?.goal).toEqual(
+      completed ?? undefined,
+    )
+  })
+
+  it("keeps a live clear when an older session list finishes loading", async () => {
+    await boot()
+    const response = deferredResponse()
+    fakeRef.current.respond = () => response.promise
+    const loading = useAppStore.getState().loadSessions(undefined)
+    fakeRef.current.emitGoalChanged({ sessionId: "session_1", goal: null })
+    response.resolve({ sessions: [{ ...sessionDetail, goal }] })
+    await loading
+    expect(
+      useAppStore.getState().sessionsByProject[""]?.sessions[0],
+    ).not.toHaveProperty("goal")
+    expect(useAppStore.getState().sessionsByProject[""]?.loading).not.toBe(true)
+  })
+
+  it("refreshes the selected goal after reconnect", async () => {
+    await boot()
+    fakeRef.current.respond = (method) => {
+      if (method === "goal/read") return { goal: null }
+      throw new Error(`Unexpected request: ${method}`)
+    }
+    fakeRef.current.emitGoalChanged(undefined)
+    await vi.waitFor(() =>
+      expect(useAppStore.getState().selectedSession).not.toHaveProperty("goal"),
+    )
+    expect(fakeRef.current.requestsFor("goal/read")[0]?.params).toEqual({
+      sessionId: "session_1",
+    })
+  })
 })

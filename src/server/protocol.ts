@@ -1,3 +1,4 @@
+import type { GoalStatus, ThreadGoal } from "../core/goal.ts"
 import type { GitInfo } from "../core/rollout.ts"
 import type {
   EventEnvelope,
@@ -79,6 +80,19 @@ export type ApiListSessionsResponse = {
 export type ApiListAgentsResponse = Readonly<{
   agents: readonly AgentSummary[]
 }>
+
+export type ApiReadGoalResponse = Readonly<{ goal: ThreadGoal | null }>
+
+export type ApiSetGoalRequest = Readonly<{
+  sessionId: string
+  objective?: string
+  status?: GoalStatus
+  tokenBudget?: number | null
+  inputId?: string | null
+}>
+
+export type ApiSetGoalResponse = Readonly<{ goal: ThreadGoal }>
+export type ApiClearGoalResponse = Readonly<{ goal: null }>
 
 export type ApiSearchSessionsRequest = {
   readonly archived?: boolean
@@ -357,17 +371,7 @@ export type ApiSessionSummary = Readonly<{
   createdAt: string
   updatedAt: string
   title?: string
-  goal?: string
-  goalStatus?:
-    | "active"
-    | "paused"
-    | "blocked"
-    | "usage_limited"
-    | "budget_limited"
-    | "complete"
-  goalUpdatedAt?: string
-  goalTimeUsedSeconds?: number
-  goalInputId?: string
+  goal?: ThreadGoal
   // True while a Turn is running in this Session.
   active?: boolean
   workingDirectory?: string

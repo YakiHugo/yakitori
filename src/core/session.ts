@@ -12,7 +12,10 @@ import type {
 } from "../kernel/events.ts"
 import { InputRole } from "../kernel/events.ts"
 import { createInputId, createTurnId } from "../kernel/ids.ts"
-import { fingerprintInputAdmission } from "../kernel/operation.ts"
+import {
+  fingerprintInputAdmission,
+  fingerprintOperation,
+} from "../kernel/operation.ts"
 import { ContextManager, type ContextSnapshot } from "./context-manager.ts"
 import type {
   ModelContextSettings,
@@ -1416,7 +1419,7 @@ function answerText(
 
 function turnInputFingerprint(input: TurnInput): string {
   const fingerprint = fingerprintInputAdmission({
-    role: InputRole.User,
+    role: input.goalId === undefined ? InputRole.User : InputRole.Runtime,
     content: input.content,
     ...(input.modelSelection === undefined
       ? {}
@@ -1426,11 +1429,26 @@ function turnInputFingerprint(input: TurnInput): string {
       ? {}
       : { parentInputId: input.parentInputId }),
   })
+  if (input.goalId !== undefined)
+    return fingerprintOperation({ goalId: input.goalId, input: fingerprint })
   return input.manualCompact === true ? `compact:${fingerprint}` : fingerprint
 }
 
 function buildInputItem(input: TurnInput): ResponseItemEnvelope {
   const submissionMetadata = turnInputSubmissionMetadata(input)
+  if (input.goalId !== undefined) {
+    return {
+      id: createInputId(),
+      turnId: input.submissionId,
+      createdAt: new Date().toISOString(),
+      item: {
+        role: "developer",
+        content: [{ type: "text", text: input.content.text }],
+        context: { type: "goal", goalId: input.goalId },
+      },
+      ...submissionMetadata,
+    }
+  }
   return {
     id: createInputId(),
     turnId: input.submissionId,

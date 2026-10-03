@@ -9,6 +9,29 @@ import {
 } from "../../src/kernel/events.ts"
 
 describe("kernel facts", () => {
+  it("validates goal identity on persisted model context", () => {
+    for (const goalId of ["goal_continue", "", "../goal", 1]) {
+      expect(
+        isModelMessage({
+          role: "developer",
+          content: [{ type: "text", text: "Continue the goal" }],
+          context: { type: "goal", goalId },
+        }),
+      ).toBe(goalId === "goal_continue")
+    }
+    expect(
+      isModelMessage({
+        role: "developer",
+        content: [],
+        context: {
+          type: "goal",
+          goalId: "goal_continue",
+          objective: "unexpected",
+        },
+      }),
+    ).toBe(false)
+  })
+
   it("contains exactly the coarse witness vocabulary", () => {
     expect(Object.values(EventType)).toEqual([
       "session.created",

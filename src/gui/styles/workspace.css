@@ -353,7 +353,10 @@
   z-index: 10;
   background: var(--background);
 }
-.workspace-shell[data-workspace-open="false"] > main > header {
+.workspace-shell[data-workspace-open="false"] .session-header {
+  padding-right: 52px;
+}
+.workspace-shell[data-workspace-open="false"] .goal-editor-header {
   padding-right: 52px;
 }
 .workspace-frame button:focus-visible {

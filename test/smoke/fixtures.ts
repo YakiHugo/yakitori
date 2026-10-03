@@ -68,3 +68,32 @@ export async function runFauxTurn(page: Page): Promise<void> {
     page.getByRole("button", { name: "Interrupt", exact: true }),
   ).toHaveCount(0)
 }
+
+// A small explicit budget makes the real faux-provider loop stop deterministically.
+// This traverses GUI -> RPC -> Session -> SQLite -> goal/changed notifications.
+export async function runBudgetedGoal(page: Page): Promise<void> {
+  const composer = page.getByRole("textbox", { name: "Message the Mate" })
+  await composer.fill("/goal")
+  await page.getByRole("button", { name: "Send", exact: true }).click()
+  await page
+    .getByRole("textbox", { name: "Goal", exact: true })
+    .fill("Verify the persistent goal runtime")
+  await page
+    .getByRole("spinbutton", { name: "Token budget (optional)" })
+    .fill("1")
+  await page.getByRole("button", { name: "Save", exact: true }).click()
+  await expect(page.getByText("Goal limited", { exact: true })).toBeVisible()
+  await expect(
+    page.getByText("· 1,282 / 1 tokens", { exact: true }),
+  ).toBeVisible()
+  await expect(
+    page.getByRole("button", { name: "Interrupt", exact: true }),
+  ).toHaveCount(0)
+  await page.reload()
+  await expect(page.getByText("Goal limited", { exact: true })).toBeVisible()
+  await expect(
+    page.getByText("Verify the persistent goal runtime", { exact: true }),
+  ).toBeVisible()
+  await page.getByRole("button", { name: "Clear goal", exact: true }).click()
+  await expect(page.getByText("Goal limited", { exact: true })).toHaveCount(0)
+}

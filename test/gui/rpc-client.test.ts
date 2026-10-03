@@ -99,6 +99,30 @@ afterEach(() => {
 })
 
 describe("app RPC client", () => {
+  it("delivers goal changes and invalidates them after reconnect", async () => {
+    vi.useFakeTimers()
+    const client = createAppRpcClient({ apiBase: "http://api.test" })
+    const changed = vi.fn()
+    const unsubscribe = client.subscribeToGoalChanges(changed)
+    const pending = client.request("goal/read", { sessionId: "session_1" })
+    const socket = completeHandshake(FakeWebSocket.instances[0])
+    await flushMicrotasks()
+    socket.emitMessage({ id: 1, result: { goal: null } })
+    await expect(pending).resolves.toEqual({ goal: null })
+    const notification = { sessionId: "session_1", goal: null }
+    socket.emitMessage({ method: "goal/changed", params: notification })
+    expect(changed).toHaveBeenCalledExactlyOnceWith(notification)
+    socket.emitClose()
+    await vi.advanceTimersByTimeAsync(250)
+    const reconnected = completeHandshake(FakeWebSocket.instances[1])
+    expect(changed).toHaveBeenLastCalledWith(undefined)
+    unsubscribe()
+    changed.mockClear()
+    reconnected.emitMessage({ method: "goal/changed", params: notification })
+    expect(changed).not.toHaveBeenCalled()
+    client.close()
+  })
+
   it("delivers live completions without a session stream and does not replay them on reconnect", async () => {
     vi.useFakeTimers()
     const client = createAppRpcClient({ apiBase: "http://api.test" })

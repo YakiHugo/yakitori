@@ -5,6 +5,7 @@ import { createApplyPatchTool } from "./apply-patch.ts"
 import { createEditFileTool } from "./edit-file.ts"
 import { dynamicToolExecution } from "./execution-descriptors.ts"
 import { createGlobTool } from "./glob.ts"
+import { createGoalTools, type GoalToolService } from "./goal.ts"
 import { createGrepTool } from "./grep.ts"
 import { createMultiAgentTools } from "./multi-agent.ts"
 import { createReadFileTool } from "./read-file.ts"
@@ -867,11 +868,12 @@ function deepFreeze<T>(value: T): T {
 }
 
 export function createDefaultTools(
-  input: {
-    readonly userShellEnv?: UserShellEnv
-    readonly execCommandLog?: (message: string) => void
-    readonly includeMultiAgent?: boolean
-  } = {},
+  input: Readonly<{
+    userShellEnv?: UserShellEnv
+    execCommandLog?: (message: string) => void
+    includeMultiAgent?: boolean
+    goalService?: GoalToolService
+  }> = {},
 ): ReadonlyArray<RuntimeTool> {
   return [
     createReadFileTool(),
@@ -893,6 +895,9 @@ export function createDefaultTools(
     createWebFetchTool(),
     createWebSearchTool(),
     createUserQuestionsTool(),
+    ...(input.goalService === undefined
+      ? []
+      : createGoalTools(input.goalService)),
     ...(input.includeMultiAgent === false ? [] : createMultiAgentTools()),
   ]
 }

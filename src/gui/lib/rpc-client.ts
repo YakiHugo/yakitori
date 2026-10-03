@@ -1,6 +1,7 @@
 import packageJson from "../../../package.json" with { type: "json" }
 import type { StoredEventEnvelope } from "../../kernel/index.ts"
 import {
+  goalChangedMethod,
   mcpStatusChangedMethod,
   projectChangedMethod,
   sessionCompletedMethod,
@@ -19,6 +20,7 @@ import {
 import type { LiveSessionEvent } from "../../runtime/live-events.ts"
 import type { ApiErrorCode } from "../../server/protocol.ts"
 import type {
+  GoalChangedNotification,
   McpStatusChangedNotification,
   ProjectChangedNotification,
   RpcMethodParams,
@@ -82,6 +84,9 @@ type AppMethod = Exclude<
 >
 
 export type AppRpcClient = {
+  subscribeToGoalChanges(
+    listener: (notification: GoalChangedNotification | undefined) => void,
+  ): () => void
   subscribeToCompletions(
     listener: (notification: SessionCompletedNotification) => void,
   ): () => void
@@ -182,6 +187,9 @@ export function createAppRpcClient(options: {
   const sidebarChangeListeners = new Set<
     (notification: SidebarChangedNotification) => void
   >()
+  const goalChangeListeners = new Set<
+    (notification: GoalChangedNotification | undefined) => void
+  >()
   const projectChangeListeners = new Set<
     (notification: ProjectChangedNotification) => void
   >()
@@ -277,6 +285,7 @@ export function createAppRpcClient(options: {
         inflight.delete(id)
         resubscribeAll()
         if (initializedOnce) {
+          for (const listener of goalChangeListeners) listener(undefined)
           for (const listener of sidebarChangeListeners) listener({})
           for (const listener of sessionActivityListeners) listener(undefined)
           for (const listener of sideChatListeners) listener(undefined)
@@ -417,6 +426,11 @@ export function createAppRpcClient(options: {
   }
 
   function onNotification(message: { method: string; params?: unknown }): void {
+    if (message.method === goalChangedMethod) {
+      const params = message.params as GoalChangedNotification
+      for (const listener of goalChangeListeners) listener(params)
+      return
+    }
     if (message.method === sessionCompletedMethod) {
       const params = message.params as SessionCompletedNotification
       for (const listener of completionListeners) listener(params)
@@ -561,6 +575,12 @@ export function createAppRpcClient(options: {
 
   return {
     request,
+    subscribeToGoalChanges(listener) {
+      goalChangeListeners.add(listener)
+      return () => {
+        goalChangeListeners.delete(listener)
+      }
+    },
     subscribeToCompletions(listener) {
       completionListeners.add(listener)
       return () => {

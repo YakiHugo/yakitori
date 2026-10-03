@@ -215,6 +215,29 @@ describe("world state", () => {
     })
   })
 
+  it("asks for a final progress report when a goal reaches its budget", () => {
+    const limited = diffWorldState(
+      undefined,
+      worldState(
+        undefined,
+        "2026-08-21",
+        [],
+        undefined,
+        "always_approve",
+        "ship the feature",
+        "budget_limited",
+      ),
+    )
+    const instruction = limited?.fragments.find(({ id }) => id === "goal")
+    expect(instruction?.role).toBe("developer")
+    expect(instruction?.text).toContain("Do not start further substantive work")
+    expect(instruction?.text).toContain("Wrap up this turn")
+    expect(instruction?.text).toContain("remaining work or blockers")
+    expect(instruction?.text).toContain(
+      "Only mark complete if all required work is actually finished",
+    )
+  })
+
   it("tells the model a paused goal is not being pursued, then that it was resumed", () => {
     const set = diffWorldState(
       undefined,
@@ -266,7 +289,7 @@ function worldState(
   multiAgent?: Parameters<typeof buildWorldStateFromSnapshot>[0]["multiAgent"],
   approvalPolicy: "always_approve" | "auto_file_tools" = "always_approve",
   goal?: string,
-  goalStatus?: "active" | "paused",
+  goalStatus?: Parameters<typeof buildWorldStateFromSnapshot>[0]["goalStatus"],
 ) {
   const sessionConfiguration = SessionConfiguration.create({
     promptCacheKey: "session-cache",

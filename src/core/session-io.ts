@@ -31,14 +31,16 @@ export type AgentStatus =
     }>
   | { readonly errored: string }
 
-export type TurnInput = {
-  readonly submissionId: string
-  readonly content: TextContent
-  readonly manualCompact?: boolean
-  readonly modelSelection?: ModelSelection
-  readonly metadata?: EventMetadata
-  readonly parentInputId?: string
-}
+export type TurnInput = Readonly<{
+  submissionId: string
+  content: TextContent
+  manualCompact?: boolean
+  modelSelection?: ModelSelection
+  metadata?: EventMetadata
+  parentInputId?: string
+  // Host-generated continuation, not a user message or user authorization.
+  goalId?: string
+}>
 
 export type SubmitTurnInput = Omit<TurnInput, "submissionId"> & {
   readonly submissionId?: string
@@ -359,6 +361,7 @@ export class SessionIo {
     const turnInput: TurnInput = {
       submissionId: input.submissionId ?? createRequestId(),
       content: input.content,
+      ...(input.goalId === undefined ? {} : { goalId: input.goalId }),
       ...(input.modelSelection === undefined
         ? {}
         : { modelSelection: input.modelSelection }),

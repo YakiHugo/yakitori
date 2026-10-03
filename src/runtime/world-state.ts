@@ -481,7 +481,7 @@ function goalFragment(
           ? "This session goal is stalled. Do not keep working toward it until the user resumes it."
           : status === GoalStatus.UsageLimited
             ? "This session goal is usage limited. Do not keep working toward it until the user resumes it."
-            : "This session goal is budget limited. Do not keep working toward it unless the user sets a new one."
+            : "This session goal has reached its token budget. Do not start further substantive work for it. Wrap up this turn soon: summarize useful progress, remaining work or blockers, and the next step for the user. Only mark complete if all required work is actually finished. A budget limit takes precedence over a requested pause."
   return `<session_goal_update>\n${reason}\n\nGoal: ${goal}\n</session_goal_update>`
 }
 

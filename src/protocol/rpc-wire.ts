@@ -3,6 +3,7 @@
 export const websocketRpcPath = "/rpc"
 
 export const sessionCompletedMethod = "session/completed"
+export const goalChangedMethod = "goal/changed"
 export const sideChatChangedMethod = "sideChat/changed"
 export const sessionEventMethod = "session/event"
 export const sessionTransientMethod = "session/transient"

@@ -312,14 +312,12 @@ describe("JsonlThreadStore", () => {
       type: "session",
       sessionId: id,
       title: "Renamed draft",
-      goal: "Finish task",
       archived: true,
       sectionId: "pinned",
     })
     expect(await store.sessionPresentation(id)).toMatchObject({
       navigationId: id,
       title: "Renamed draft",
-      goal: "Finish task",
       archived: true,
       sectionId: "pinned",
     })
@@ -351,7 +349,6 @@ describe("JsonlThreadStore", () => {
     expect(await reopened.sessionPresentation(id)).toMatchObject({
       navigationId: id,
       title: "Renamed draft",
-      goal: "Finish task",
       archived: true,
       sectionId: "pinned",
     })

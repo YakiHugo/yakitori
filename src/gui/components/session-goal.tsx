@@ -3,34 +3,21 @@ import { type ReactNode, useEffect, useState } from "react"
 import {
   GoalStatus,
   type GoalStatus as GoalStatusValue,
-  goalElapsedSeconds,
 } from "../../core/goal.ts"
 import { useAppStore } from "../store/app-store.ts"
 import { Button } from "./ui/button.tsx"
 
 export function GoalBar() {
   const session = useAppStore((state) => state.selectedSession)
-  const changeSidebar = useAppStore((state) => state.changeSidebar)
+  const setGoal = useAppStore((state) => state.setGoal)
   const openGoalEditor = useAppStore((state) => state.openGoalDialog)
-  const [now, setNow] = useState(() => Date.now())
-  const status = session?.goalStatus ?? GoalStatus.Active
-  const ticking = session?.goal !== undefined && status === GoalStatus.Active
-  useEffect(() => {
-    if (!ticking) return
-    const timer = window.setInterval(() => setNow(Date.now()), 1000)
-    return () => window.clearInterval(timer)
-  }, [ticking])
+  const clearGoal = useAppStore((state) => state.clearGoal)
+  const saving = useAppStore((state) =>
+    state.inFlightActions.has(`goal:${session?.id}`),
+  )
   if (session?.goal === undefined) return null
-  const elapsed = goalElapsedSeconds({
-    status,
-    ...(session.goalUpdatedAt === undefined
-      ? {}
-      : { updatedAt: session.goalUpdatedAt }),
-    ...(session.goalTimeUsedSeconds === undefined
-      ? {}
-      : { timeUsedSeconds: session.goalTimeUsedSeconds }),
-    now,
-  })
+  const goal = session.goal
+  const status = goal.status
   const nextStatus = goalToggleStatus(status)
   return (
     <div className="mx-auto mb-2 flex w-full max-w-3xl items-center gap-2 rounded-xl border bg-muted/40 px-3 py-1.5 text-xs text-muted-foreground">
@@ -38,34 +25,29 @@ export function GoalBar() {
       <span className="shrink-0 text-foreground">
         {goalStatusLabel(status)}
       </span>
-      <span className="min-w-0 truncate">{session.goal}</span>
-      <span className="shrink-0">· {formatGoalElapsed(elapsed)}</span>
+      <span className="min-w-0 truncate">{goal.objective}</span>
+      <span className="shrink-0">
+        ·{" "}
+        {goal.tokenBudget === undefined
+          ? formatGoalElapsed(goal.timeUsedSeconds)
+          : `${goal.tokensUsed.toLocaleString()} / ${goal.tokenBudget.toLocaleString()} tokens`}
+      </span>
       <div className="ml-auto flex shrink-0 items-center">
         <GoalIconButton
           label="Clear goal"
-          onClick={() =>
-            void changeSidebar({
-              type: "session",
-              sessionId: session.id,
-              goal: null,
-            })
-          }
+          disabled={saving}
+          onClick={() => void clearGoal(session.id)}
         >
           <Trash2 className="size-3.5" />
         </GoalIconButton>
         {nextStatus === undefined ? null : (
           <GoalIconButton
+            disabled={saving}
             label={
               nextStatus === GoalStatus.Paused ? "Pause goal" : "Resume goal"
             }
             onClick={() =>
-              void changeSidebar({
-                type: "session",
-                sessionId: session.id,
-                goalStatus: nextStatus,
-                goalUpdatedAt: new Date().toISOString(),
-                goalTimeUsedSeconds: elapsed,
-              })
+              void setGoal({ sessionId: session.id, status: nextStatus })
             }
           >
             {nextStatus === GoalStatus.Paused ? (
@@ -85,12 +67,18 @@ export function GoalBar() {
 
 export function GoalEditor() {
   const session = useAppStore((state) => state.selectedSession)
-  const changeSidebar = useAppStore((state) => state.changeSidebar)
+  const setGoal = useAppStore((state) => state.setGoal)
   const goalDialogRevision = useAppStore((state) => state.goalDialogRevision)
   const [open, setOpen] = useState(false)
   const [seenRevision, setSeenRevision] = useState(goalDialogRevision)
-  const [draft, setDraft] = useState(session?.goal ?? "")
-  const [savedObjective, setSavedObjective] = useState(session?.goal ?? "")
+  const [draft, setDraft] = useState(session?.goal?.objective ?? "")
+  const [savedObjective, setSavedObjective] = useState(
+    session?.goal?.objective ?? "",
+  )
+  const [budgetDraft, setBudgetDraft] = useState(
+    session?.goal?.tokenBudget?.toString() ?? "",
+  )
+  const [savedBudget, setSavedBudget] = useState(budgetDraft)
   const [saving, setSaving] = useState(false)
   const [now, setNow] = useState(() => Date.now())
   const [editorSessionId, setEditorSessionId] = useState(session?.id)
@@ -98,23 +86,32 @@ export function GoalEditor() {
   if (session?.id !== editorSessionId) {
     setEditorSessionId(session?.id)
     setLastSyncedGoal(session?.goal)
-    setDraft(session?.goal ?? "")
-    setSavedObjective(session?.goal ?? "")
+    setDraft(session?.goal?.objective ?? "")
+    setSavedObjective(session?.goal?.objective ?? "")
+    setBudgetDraft(session?.goal?.tokenBudget?.toString() ?? "")
+    setSavedBudget(session?.goal?.tokenBudget?.toString() ?? "")
   }
   // Follow clears and replacements that arrive from the goal bar or another
   // client while the editor is open, unless the user has unsaved edits.
   if (session?.goal !== lastSyncedGoal) {
     setLastSyncedGoal(session?.goal)
-    if (draft.trim() === savedObjective.trim()) {
-      setDraft(session?.goal ?? "")
-      setSavedObjective(session?.goal ?? "")
+    if (
+      draft.trim() === savedObjective.trim() &&
+      budgetDraft.trim() === savedBudget.trim()
+    ) {
+      setDraft(session?.goal?.objective ?? "")
+      setSavedObjective(session?.goal?.objective ?? "")
+      setBudgetDraft(session?.goal?.tokenBudget?.toString() ?? "")
+      setSavedBudget(session?.goal?.tokenBudget?.toString() ?? "")
     }
   }
   if (goalDialogRevision !== seenRevision) {
     setSeenRevision(goalDialogRevision)
     setOpen(true)
-    setDraft(session?.goal ?? "")
-    setSavedObjective(session?.goal ?? "")
+    setDraft(session?.goal?.objective ?? "")
+    setSavedObjective(session?.goal?.objective ?? "")
+    setBudgetDraft(session?.goal?.tokenBudget?.toString() ?? "")
+    setSavedBudget(session?.goal?.tokenBudget?.toString() ?? "")
   }
   useEffect(() => {
     if (!open) return
@@ -122,26 +119,26 @@ export function GoalEditor() {
     return () => window.clearInterval(timer)
   }, [open])
   if (!open || session === undefined) return null
-  const dirty = draft.trim() !== savedObjective.trim()
-  const elapsed = goalElapsedSeconds({
-    ...(session.goalStatus === undefined
-      ? {}
-      : { status: session.goalStatus }),
-    ...(session.goalUpdatedAt === undefined
-      ? {}
-      : { updatedAt: session.goalUpdatedAt }),
-    ...(session.goalTimeUsedSeconds === undefined
-      ? {}
-      : { timeUsedSeconds: session.goalTimeUsedSeconds }),
-    now: Date.now(),
-  })
+  const dirty =
+    draft.trim() !== savedObjective.trim() ||
+    budgetDraft.trim() !== savedBudget.trim()
+  const tokenBudget = budgetDraft.trim() === "" ? null : Number(budgetDraft)
+  const validBudget =
+    tokenBudget === null ||
+    (Number.isSafeInteger(tokenBudget) && tokenBudget > 0)
+  const replaceTerminal =
+    session.goal?.status === GoalStatus.Complete ||
+    session.goal?.status === GoalStatus.BudgetLimited
   return (
-    <aside className="flex w-[22rem] shrink-0 flex-col border-l bg-background">
-      <div className="flex h-12 items-center justify-between gap-2 border-b px-3">
-        <span className="text-sm text-muted-foreground">
-          {updatedAgoLabel(session.goalUpdatedAt, now)}
+    <aside
+      aria-label="Goal editor"
+      className="flex w-[22rem] shrink-0 flex-col border-l bg-background"
+    >
+      <div className="goal-editor-header flex h-12 items-center justify-between gap-2 border-b px-3">
+        <span className="truncate text-sm text-muted-foreground">
+          {updatedAgoLabel(session.goal?.updatedAt, now)}
         </span>
-        <div className="flex items-center gap-1">
+        <div className="flex shrink-0 items-center gap-1">
           <button
             type="button"
             aria-label="Close goal editor"
@@ -155,7 +152,10 @@ export function GoalEditor() {
             variant="ghost"
             size="sm"
             disabled={!dirty || saving}
-            onClick={() => setDraft(savedObjective)}
+            onClick={() => {
+              setDraft(savedObjective)
+              setBudgetDraft(savedBudget)
+            }}
           >
             <Undo2 />
             Revert
@@ -163,27 +163,30 @@ export function GoalEditor() {
           <Button
             type="button"
             size="sm"
-            disabled={saving || !draft.trim() || !dirty}
+            disabled={saving || !draft.trim() || !dirty || !validBudget}
             onClick={() => {
               const text = draft.trim()
-              if (!text) return
+              if (!text || !validBudget) return
               setSaving(true)
-              void changeSidebar({
-                type: "session",
+              void setGoal({
                 sessionId: session.id,
-                goal: text,
-                ...(session.goal === undefined
-                  ? {
-                      goalStatus: GoalStatus.Active,
-                      goalTimeUsedSeconds: 0,
-                      goalInputId: null,
-                    }
-                  : { goalTimeUsedSeconds: elapsed }),
-                goalUpdatedAt: new Date().toISOString(),
+                objective: text,
+                ...(session.goal === undefined || replaceTerminal
+                  ? { status: GoalStatus.Active, inputId: null }
+                  : {}),
+                ...(budgetDraft.trim() === savedBudget.trim() &&
+                !replaceTerminal
+                  ? {}
+                  : { tokenBudget }),
               }).then((done) => {
                 setSaving(false)
-                if (!done) return
+                if (
+                  !done ||
+                  useAppStore.getState().selection.sessionId !== session.id
+                )
+                  return
                 setSavedObjective(text)
+                setSavedBudget(budgetDraft.trim())
               })
             }}
           >
@@ -198,6 +201,31 @@ export function GoalEditor() {
         placeholder="What should this conversation accomplish?"
         className="min-h-0 flex-1 resize-none bg-transparent px-4 py-3 text-sm outline-none"
       />
+      <div className="flex flex-col gap-2 border-t p-4">
+        <label htmlFor="goal-token-budget" className="text-sm">
+          Token budget (optional)
+        </label>
+        <input
+          id="goal-token-budget"
+          type="number"
+          min="1"
+          step="1"
+          value={budgetDraft}
+          onChange={(event) => setBudgetDraft(event.target.value)}
+          aria-invalid={!validBudget}
+          aria-describedby="goal-token-budget-help"
+          placeholder="No token budget"
+          className="h-9 rounded-md border bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        />
+        <p
+          id="goal-token-budget-help"
+          className="text-xs text-muted-foreground"
+        >
+          {validBudget
+            ? "Leave blank to run without a token budget."
+            : "Enter a positive whole number of tokens."}
+        </p>
+      </div>
     </aside>
   )
 }

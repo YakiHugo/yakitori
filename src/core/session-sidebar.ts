@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto"
-import { type GoalStatus, isGoalStatus } from "./goal.ts"
 import { createYakitoriError, YakitoriErrorCode } from "../kernel/errors.ts"
 
 export type SessionPresentation = Readonly<{
@@ -7,11 +6,6 @@ export type SessionPresentation = Readonly<{
   archived?: boolean
   sectionId?: string
   sectionPosition?: number
-  goal?: string
-  goalStatus?: GoalStatus
-  goalUpdatedAt?: string
-  goalTimeUsedSeconds?: number
-  goalInputId?: string
 }>
 export type SidebarSection = Readonly<{ id: string; name: string }>
 export type SessionSidebar = Readonly<{
@@ -25,11 +19,6 @@ export type SidebarChange =
       title?: string
       archived?: boolean
       sectionId?: string | null
-      goal?: string | null
-      goalStatus?: GoalStatus
-      goalUpdatedAt?: string
-      goalTimeUsedSeconds?: number
-      goalInputId?: string | null
     }>
   | Readonly<{
       type: "move-session"
@@ -66,29 +55,10 @@ export function parseSidebarChange(value: unknown): SidebarChange {
       const sessionId = nonempty(v.sessionId, "sessionId")
       if (v.archived !== undefined && typeof v.archived !== "boolean")
         invalid("archived must be a boolean.")
-      if (v.goal !== undefined && v.goal !== null) nonempty(v.goal, "goal")
-      if (v.goalStatus !== undefined && !isGoalStatus(v.goalStatus))
-        invalid("goalStatus is not a goal status.")
-      if (v.goalUpdatedAt !== undefined)
-        nonempty(v.goalUpdatedAt, "goalUpdatedAt")
-      if (
-        v.goalTimeUsedSeconds !== undefined &&
-        (typeof v.goalTimeUsedSeconds !== "number" ||
-          !Number.isSafeInteger(v.goalTimeUsedSeconds) ||
-          v.goalTimeUsedSeconds < 0)
-      )
-        invalid("goalTimeUsedSeconds must be a non-negative integer.")
-      if (v.goalInputId !== undefined && v.goalInputId !== null)
-        nonempty(v.goalInputId, "goalInputId")
       if (
         v.title === undefined &&
         v.archived === undefined &&
-        v.sectionId === undefined &&
-        v.goal === undefined &&
-        v.goalStatus === undefined &&
-        v.goalUpdatedAt === undefined &&
-        v.goalTimeUsedSeconds === undefined &&
-        v.goalInputId === undefined
+        v.sectionId === undefined
       )
         invalid("No session changes supplied.")
       return {
@@ -105,26 +75,6 @@ export function parseSidebarChange(value: unknown): SidebarChange {
                 v.sectionId === null
                   ? null
                   : nonempty(v.sectionId, "sectionId"),
-            }),
-        ...(v.goal === undefined
-          ? {}
-          : { goal: v.goal === null ? null : nonempty(v.goal, "goal") }),
-        ...(v.goalStatus === undefined
-          ? {}
-          : { goalStatus: v.goalStatus as GoalStatus }),
-        ...(v.goalUpdatedAt === undefined
-          ? {}
-          : { goalUpdatedAt: nonempty(v.goalUpdatedAt, "goalUpdatedAt") }),
-        ...(v.goalTimeUsedSeconds === undefined
-          ? {}
-          : { goalTimeUsedSeconds: v.goalTimeUsedSeconds as number }),
-        ...(v.goalInputId === undefined
-          ? {}
-          : {
-              goalInputId:
-                v.goalInputId === null
-                  ? null
-                  : nonempty(v.goalInputId, "goalInputId"),
             }),
       }
     }
@@ -194,33 +144,6 @@ export function changeSessionSidebar(
       const entry = { ...entries[session.navigationId] }
       if (change.title !== undefined) entry.title = change.title
       if (change.archived !== undefined) entry.archived = change.archived
-      if (change.goal === null) {
-        delete entry.goal
-        delete entry.goalStatus
-        delete entry.goalUpdatedAt
-        delete entry.goalTimeUsedSeconds
-        delete entry.goalInputId
-      } else {
-        if (change.goal !== undefined) entry.goal = change.goal
-        if (
-          (change.goalStatus !== undefined ||
-            change.goalUpdatedAt !== undefined ||
-            change.goalTimeUsedSeconds !== undefined ||
-            change.goalInputId !== undefined) &&
-          entry.goal === undefined
-        )
-          invalid("Set a goal before updating its status.")
-        if (change.goalStatus !== undefined)
-          entry.goalStatus = change.goalStatus
-        if (change.goalUpdatedAt !== undefined)
-          entry.goalUpdatedAt = change.goalUpdatedAt
-        if (change.goalTimeUsedSeconds !== undefined)
-          entry.goalTimeUsedSeconds = change.goalTimeUsedSeconds
-        if (change.goalInputId !== undefined) {
-          if (change.goalInputId === null) delete entry.goalInputId
-          else entry.goalInputId = change.goalInputId
-        }
-      }
       entries[session.navigationId] = entry
       const next = { ...state, entries }
       return change.sectionId !== undefined &&

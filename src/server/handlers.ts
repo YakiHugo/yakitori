@@ -1,5 +1,6 @@
 import { realpath, stat } from "node:fs/promises"
 import type { AgentThread } from "../core/agent-thread.ts"
+import { isGoalStatus, type ThreadGoal } from "../core/goal.ts"
 import type {
   RolloutItem,
   StoredRolloutItem,
@@ -13,7 +14,7 @@ import {
   type SessionSidebar,
 } from "../core/session-sidebar.ts"
 import type { ThreadManager } from "../core/thread-manager.ts"
-import type { ThreadStore } from "../core/thread-store.ts"
+import { PersistContext, type ThreadStore } from "../core/thread-store.ts"
 import {
   createEventEnvelope,
   createRequestId,
@@ -39,12 +40,14 @@ import {
 } from "../kernel/index.ts"
 import { isContextExcerpts } from "../kernel/input-context.ts"
 import type { AgentSummary } from "../runtime/agent-control.ts"
+import type { GoalRuntime, SetGoalInput } from "../runtime/goal-runtime.ts"
 import { createCoalescingDeltaPublisher } from "../runtime/live-events.ts"
 import type {
   RuntimePermissionReason,
   RuntimePermissionRequest,
 } from "../runtime/permission-gate.ts"
 import type { SkillMetadata } from "../runtime/skills.ts"
+import { GoalToolError } from "../runtime/tools/goal.ts"
 import {
   InputQueue,
   InputQueueFullError,
@@ -55,6 +58,11 @@ import {
   type OperationalFailureReporter,
   reportOperationalFailure,
 } from "./operational-errors.ts"
+import type {
+  ApiClearGoalResponse,
+  ApiReadGoalResponse,
+  ApiSetGoalResponse,
+} from "./protocol.ts"
 import {
   type ApiAdmitInputResponse,
   type ApiCancelInputResponse,
@@ -102,6 +110,7 @@ export type SessionCreateDefaults = {
 }
 
 export type ThreadServerHandlerOptions = {
+  readonly goals?: GoalRuntime
   readonly manager: ThreadManager
   readonly discardThread?: (threadId: string) => Promise<void>
   readonly store: ThreadStore
@@ -149,6 +158,9 @@ export type ThreadServerHandlerOptions = {
 }
 
 export type ServerHandlers = {
+  readGoal(input: unknown): Promise<ApiHandlerResult<ApiReadGoalResponse>>
+  setGoal(input: unknown): Promise<ApiHandlerResult<ApiSetGoalResponse>>
+  clearGoal(input: unknown): Promise<ApiHandlerResult<ApiClearGoalResponse>>
   listAgents(input: unknown): Promise<ApiHandlerResult<ApiListAgentsResponse>>
   readSidebar(): Promise<ApiHandlerResult<SessionSidebar>>
   updateSidebar(input: unknown): Promise<ApiHandlerResult<SessionSidebar>>
@@ -517,6 +529,7 @@ export function createThreadServerHandlers(
                 agent.kind === "subagent"
               if (
                 !subagent &&
+                options.goals?.read(event.threadId)?.status !== "active" &&
                 (snapshot.activeTurnId === undefined ||
                   snapshot.activeTurnId === event.input.submissionId)
               ) {
@@ -597,6 +610,26 @@ export function createThreadServerHandlers(
         })
       pumps.set(thread, pump)
       queuedItems.install(thread)
+      options.goals?.install(thread, async () => {
+        if (closing || inputQueue.list(thread.id).length > 0) return false
+        const presentation = await options.store.sessionPresentation(thread.id)
+        if (presentation.archived) return false
+        const agent = thread.snapshot().metadata.metadata?.agent
+        const subagent =
+          typeof agent === "object" &&
+          agent !== null &&
+          "kind" in agent &&
+          agent.kind === "subagent"
+        // Historical edit heads have no navigation entry. They must not keep
+        // pursuing an inherited goal after the visible conversation moves on.
+        return (
+          (subagent || presentation.navigationId !== undefined) &&
+          inputQueue.list(thread.id).length === 0 &&
+          ![...admissionTails.keys()].some((key) =>
+            key.startsWith(`${thread.id}\0`),
+          )
+        )
+      })
     })()
     pumpReady.set(thread, ready)
     try {
@@ -636,6 +669,7 @@ export function createThreadServerHandlers(
     } finally {
       release()
       if (admissionTails.get(key) === tail) admissionTails.delete(key)
+      options.goals?.wake(sessionId)
     }
   }
 
@@ -962,7 +996,11 @@ export function createThreadServerHandlers(
         const liveProjects = await liveProjectIds(options, result.threads)
         return ok(200, {
           sessions: result.threads.map((thread) => {
-            const summary = mapThreadSummary(thread, liveProjects)
+            const summary = mapThreadSummary(
+              thread,
+              liveProjects,
+              options.goals?.read(thread.id),
+            )
             return options.manager.getThread(thread.id)?.snapshot()
               .activeTurnId === undefined
               ? summary
@@ -1011,7 +1049,11 @@ export function createThreadServerHandlers(
         )
         return ok(200, {
           data: result.matches.map(({ summary, snippet }) => ({
-            session: mapThreadSummary(summary, liveProjects),
+            session: mapThreadSummary(
+              summary,
+              liveProjects,
+              options.goals?.read(summary.id),
+            ),
             snippet,
           })),
           ...(result.unavailableThreadCount === undefined
@@ -1071,6 +1113,121 @@ export function createThreadServerHandlers(
         })
       } catch (error) {
         return fail(error, reporter, "search-session-occurrences")
+      }
+    },
+
+    async readGoal(input) {
+      try {
+        const { sessionId } = requireDeleteSessionRequest(input)
+        await requireStoredThread(options.store, sessionId)
+        return ok(200, { goal: options.goals?.read(sessionId) ?? null })
+      } catch (error) {
+        return fail(error, reporter, "read-goal")
+      }
+    },
+
+    async setGoal(input) {
+      try {
+        const { sessionId } = requireDeleteSessionRequest(input)
+        const stored = await requireStoredThread(options.store, sessionId)
+        if (options.goals === undefined)
+          throw conflict("Goals are unavailable.")
+        const value = input as Record<string, unknown>
+        if (
+          Object.keys(value).some(
+            (key) =>
+              ![
+                "sessionId",
+                "objective",
+                "status",
+                "tokenBudget",
+                "inputId",
+              ].includes(key),
+          )
+        )
+          throw invalidInput("Unexpected goal field.")
+        if (
+          value.objective !== undefined &&
+          (typeof value.objective !== "string" || !value.objective.trim())
+        )
+          throw invalidInput("objective must be nonempty text.")
+        if (value.status !== undefined && !isGoalStatus(value.status))
+          throw invalidInput("Invalid goal status.")
+        if (
+          value.tokenBudget !== undefined &&
+          value.tokenBudget !== null &&
+          (typeof value.tokenBudget !== "number" ||
+            !Number.isSafeInteger(value.tokenBudget) ||
+            value.tokenBudget <= 0)
+        )
+          throw invalidInput(
+            "tokenBudget must be a positive safe integer or null.",
+          )
+        if (
+          value.inputId !== undefined &&
+          value.inputId !== null &&
+          (typeof value.inputId !== "string" || !value.inputId)
+        )
+          throw invalidInput("inputId must be a nonempty string or null.")
+        const change: SetGoalInput = {
+          ...(typeof value.objective === "string"
+            ? { objective: value.objective.trim() }
+            : {}),
+          ...(isGoalStatus(value.status) ? { status: value.status } : {}),
+          ...(value.tokenBudget === null ||
+          typeof value.tokenBudget === "number"
+            ? { tokenBudget: value.tokenBudget }
+            : {}),
+          ...(value.inputId === null || typeof value.inputId === "string"
+            ? { inputId: value.inputId }
+            : {}),
+        }
+        const desiredStatus =
+          change.status ?? options.goals.read(sessionId)?.status ?? "active"
+        if (
+          desiredStatus === "active" &&
+          (await options.store.sessionPresentation(sessionId)).archived
+        )
+          throw conflict("Restore this conversation before starting a goal.")
+        const lastContext = stored.rollout
+          .filter(({ item }) => item.type === "turn_context")
+          .at(-1)?.item
+        const configuration =
+          options.manager.getThread(sessionId)?.snapshot().configuration ??
+          (lastContext?.type === "turn_context"
+            ? lastContext.context.configuration
+            : undefined)
+        const enabledTools = configuration?.enabledTools
+        if (
+          desiredStatus === "active" &&
+          enabledTools !== undefined &&
+          !enabledTools.includes("update_goal")
+        )
+          throw conflict(
+            "Goal tools are unavailable in this session's tool configuration. Start a new session to pursue a goal.",
+          )
+        // A goal can be meaningful before the first user Turn. Persist its
+        // owning thread before writing the independent goal database.
+        await options.store.persistThread(sessionId, PersistContext.GoalSet)
+        const goal = options.goals.set(sessionId, change)
+        if (goal.status === "active") {
+          await resumeRequired(sessionId)
+          options.goals.wake(sessionId)
+        }
+        return ok(200, { goal })
+      } catch (error) {
+        return fail(error, reporter, "set-goal")
+      }
+    },
+
+    async clearGoal(input) {
+      try {
+        const { sessionId } = requireDeleteSessionRequest(input)
+        await requireStoredThread(options.store, sessionId)
+        options.goals?.clear(sessionId)
+        return ok(200, { goal: null })
+      } catch (error) {
+        return fail(error, reporter, "clear-goal")
       }
     },
 
@@ -1164,6 +1321,7 @@ export function createThreadServerHandlers(
             options.manager.discardThread(sessionId))
           queuedItems.deleteSession(sessionId)
         })
+        options.goals?.clear(sessionId)
         publishedThrough.delete(sessionId)
         return ok(200, { sessionId })
       } catch (error) {
@@ -1213,15 +1371,27 @@ export function createThreadServerHandlers(
             ? sourceInput.item.item.contextAttachments
             : undefined
         await options.store.setSessionHead(request.sessionId, request.sessionId)
-        const forked = await options.manager.forkThread({
-          sourceThreadId: request.sessionId,
-          beforeTurnId,
-          forkedFromInputId: request.atInputId,
-          forkReason: request.reason,
-        })
+        const previouslyDeferred =
+          options.goals?.deferContinuation(request.sessionId, true) ?? false
+        let forked: Awaited<ReturnType<ThreadManager["forkThread"]>>
+        try {
+          forked = await options.manager.forkThread({
+            sourceThreadId: request.sessionId,
+            beforeTurnId,
+            forkedFromInputId: request.atInputId,
+            forkReason: request.reason,
+          })
+        } catch (error) {
+          options.goals?.deferContinuation(
+            request.sessionId,
+            previouslyDeferred,
+          )
+          throw error
+        }
         const forkRolloutId = forked.thread.snapshot().metadata.rolloutId
         let submissionId: string | undefined
         try {
+          options.goals?.fork(request.sessionId, forked.thread.id)
           await ensureEventPump(forked.thread)
           if (request.content !== undefined) {
             submissionId = createRequestId()
@@ -1265,6 +1435,7 @@ export function createThreadServerHandlers(
         } catch (error) {
           try {
             await options.manager.discardThread(forked.thread.id)
+            options.goals?.clear(forked.thread.id)
           } catch (cleanupError) {
             reportOperationalFailure(reporter, {
               component: "thread-handlers",
@@ -1273,6 +1444,10 @@ export function createThreadServerHandlers(
               sessionId: forked.thread.id,
             })
           }
+          options.goals?.deferContinuation(
+            request.sessionId,
+            previouslyDeferred,
+          )
           throw error
         }
         const stored = await requireStoredThread(
@@ -1683,9 +1858,15 @@ export function createThreadServerHandlers(
         ) {
           throw conflict("Restore this conversation before compacting.")
         }
-        const thread = await resumeRequired(request.sessionId)
         const requestId = request.requestId ?? createRequestId()
-        const submitted = await thread.compact(requestId)
+        const submitted = await withAdmissionLock(
+          request.sessionId,
+          requestId,
+          async () => {
+            const thread = await resumeRequired(request.sessionId)
+            return thread.compact(requestId)
+          },
+        )
         if (submitted.type === "not_submitted")
           throw conflict(`Compaction was not submitted: ${submitted.reason}.`, {
             reason: submitted.reason,
@@ -1739,6 +1920,7 @@ export function createThreadServerHandlers(
       try {
         const request = requireCancelTurnRequest(input)
         const thread = await resumeRequired(request.sessionId)
+        options.goals?.pauseForInterrupt(request.sessionId, request.turnId)
         const interrupted = await thread.interruptTurn(
           request.turnId,
           "reason" in request && typeof request.reason === "string"
@@ -1811,8 +1993,10 @@ export function createThreadServerHandlers(
 function mapThreadSummary(
   thread: ThreadSummary,
   liveProjects: ReadonlySet<string> | undefined,
+  goal?: ThreadGoal,
 ): ApiSessionSummary {
   return {
+    ...(goal === undefined ? {} : { goal }),
     ...(thread.archived === undefined ? {} : { archived: thread.archived }),
     ...(thread.sectionPosition === undefined
       ? {}
@@ -1897,7 +2081,7 @@ async function mapStoredThread(
   const liveProjects = await liveProjectIds(options, [stored.metadata])
   const pendingQueue = options.inputQueue?.list(stored.metadata.id) ?? []
   return {
-    ...mapThreadSummary(summary, liveProjects),
+    ...mapThreadSummary(summary, liveProjects, options.goals?.read(summary.id)),
     ...(live?.snapshot().activeTurnId === undefined
       ? {}
       : { active: true, activeTurnId: live.snapshot().activeTurnId }),
@@ -3067,6 +3251,7 @@ function fail(
 
 function mapError(error: unknown): ApiBoundaryError {
   if (error instanceof ApiBoundaryError) return error
+  if (error instanceof GoalToolError) return conflict(error.message)
   if (!isYakitoriError(error)) {
     return internalError("Unexpected server error.")
   }

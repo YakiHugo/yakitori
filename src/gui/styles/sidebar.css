@@ -78,7 +78,7 @@
   left: 10px;
   z-index: 10;
 }
-:has(> .sidebar-frame[data-open="false"]) > main > header {
+.app-shell:where(:has(> .sidebar-frame[data-open="false"])) .session-header {
   padding-left: 48px;
 }
 .sidebar-resize {
@@ -784,15 +784,16 @@ html[data-desktop="macos"] .sidebar-frame {
   background: color-mix(in oklab, var(--background) 18%, transparent);
 }
 html[data-desktop="macos"] .sidebar-toolbar,
-html[data-desktop="macos"] .app-shell > main > header,
-html[data-desktop="macos"] .workspace-header {
+html[data-desktop="macos"] .session-header,
+html[data-desktop="macos"] .workspace-header,
+html[data-desktop="macos"] .goal-editor-header {
   -webkit-app-region: drag;
 }
 html[data-desktop="macos"] .sidebar-toolbar {
   padding-left: 86px;
 }
 html[data-desktop="macos"]
-  :is(.sidebar-toolbar, .app-shell > main > header, .workspace-header)
+  :is(.sidebar-toolbar, .session-header, .workspace-header, .goal-editor-header)
   :is(button, a, input, select, [role="button"], [role="tab"]),
 html[data-desktop="macos"] :is(.sidebar-show, .workspace-show, .settings-back) {
   -webkit-app-region: no-drag;
@@ -801,10 +802,12 @@ html[data-desktop="macos"] .sidebar-show {
   left: 86px;
   top: 6px;
 }
-html[data-desktop="macos"] .app-shell > main:not(:has(> header)) {
+html[data-desktop="macos"] .app-shell > main:not(:has(.session-header)) {
   position: relative;
 }
-html[data-desktop="macos"] .app-shell > main:not(:has(> header))::before {
+html[data-desktop="macos"]
+  .app-shell
+  > main:not(:has(.session-header))::before {
   content: "";
   position: absolute;
   top: 0;
