@@ -128,7 +128,7 @@ function SessionHeader() {
     .flatMap((list) => list.sessions)
     .find((candidate) => candidate.id === session.parentSessionId)
   return (
-    <header className="flex h-12 shrink-0 items-center justify-between gap-3 border-b px-5">
+    <header className="session-header flex h-12 shrink-0 items-center justify-between gap-3 border-b px-5">
       <div className="flex min-w-0 items-center gap-2">
         <h2 className="truncate text-sm font-semibold">
           {session.title ?? "Untitled session"}
