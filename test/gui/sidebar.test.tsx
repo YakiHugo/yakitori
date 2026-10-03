@@ -174,7 +174,7 @@ describe("sidebar", () => {
     render(<App />)
 
     await user.click(screen.getByLabelText("Open account menu"))
-    await user.click(screen.getByRole("menuitem", { name: /Usage/ }))
+    await user.click(screen.getByRole("menuitem", { name: /Subscriptions/ }))
 
     expect(
       screen.getByRole("region", { name: "Subscription settings" }),
@@ -205,6 +205,24 @@ describe("sidebar", () => {
     expect(loadSubscriptions).toHaveBeenCalledOnce()
   })
 
+  it("opens local usage analytics separately from subscription limits", async () => {
+    const loadUsage = vi.fn().mockResolvedValue(undefined)
+    useAppStore.setState({ loadUsage })
+    const user = userEvent.setup()
+    render(<App />)
+    await user.click(screen.getByLabelText("Open account menu"))
+    await user.click(
+      screen.getByRole("menuitem", { name: "Usage" }),
+    )
+    expect(
+      screen.getByRole("region", { name: "Usage dashboard" }),
+    ).toBeDefined()
+    expect(
+      screen.queryByRole("region", { name: "Subscription settings" }),
+    ).toBeNull()
+    expect(loadUsage).toHaveBeenCalledOnce()
+  })
+
   it("does not present an API key connection as a subscription account", async () => {
     const loadSubscriptions = vi.fn().mockResolvedValue(undefined)
     const kimi: ApiSubscriptionSummary = {
@@ -226,7 +244,7 @@ describe("sidebar", () => {
     render(<App />)
 
     await user.click(screen.getByLabelText("Open account menu"))
-    await user.click(screen.getByRole("menuitem", { name: /Usage/ }))
+    await user.click(screen.getByRole("menuitem", { name: /Subscriptions/ }))
 
     const kimiCard = screen
       .getByRole("heading", { name: "Kimi" })

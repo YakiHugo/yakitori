@@ -163,6 +163,9 @@ export function createFakeHandlers(
     readUsage: async () =>
       okResult({
         usage: {
+          generatedAt: "2026-10-02T00:00:00.000Z",
+          models: [],
+          modelDays: [],
           totals: {
             turns: 0,
             inputTokens: 0,

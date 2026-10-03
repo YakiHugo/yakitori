@@ -13,7 +13,13 @@ export type UsageTokenTotals = Readonly<{
   cacheWriteInputTokens: number
 }>
 
+export type ModelUsage = UsageTokenTotals &
+  Readonly<{ provider: string; model: string; turns: number }>
+
 export type ThreadUsageSummary = Readonly<{
+  generatedAt: string
+  models: readonly ModelUsage[]
+  modelDays: readonly (ModelUsage & Readonly<{ date: string }>)[]
   totals: UsageTokenTotals & Readonly<{ turns: number }>
   days: readonly (UsageTokenTotals &
     Readonly<{ date: string; turns: number }>)[]
@@ -34,7 +40,7 @@ type StampRow = Readonly<{
   rollout_mtime_ms: number
 }>
 
-const schemaVersion = 1
+const schemaVersion = 2
 
 // Disposable SQLite materialization of per-turn token usage. The rollout
 // remains authoritative; stamps let readers rebuild only stale projections.
@@ -115,6 +121,9 @@ export class SqliteThreadUsageProjection {
           continue
         }
         if (item.type !== "turn_completed" || item.usage === undefined) continue
+        // Forks materialize their inherited history for reading, but those
+        // completions were executed in the source rollout, not again here.
+        if (record.rolloutId !== stored.metadata.rolloutId) continue
         const target = turnModels.get(item.turnId)
         insertTurn.run(
           stored.metadata.id,
@@ -141,8 +150,17 @@ export class SqliteThreadUsageProjection {
       .run(threadId)
   }
 
-  readUsage(input?: { days?: number; threads?: number }): ThreadUsageSummary {
-    const dayCount = input?.days ?? 30
+  readUsage(input?: {
+    days?: number
+    threads?: number
+    now?: Date
+  }): ThreadUsageSummary {
+    const now = input?.now ?? new Date()
+    const dayCount = input?.days ?? 366
+    const end = now.toISOString().slice(0, 10)
+    const startDate = new Date(`${end}T00:00:00Z`)
+    startDate.setUTCDate(startDate.getUTCDate() - dayCount + 1)
+    const start = startDate.toISOString().slice(0, 10)
     const threadCount = input?.threads ?? 20
     const totals = this.#database
       .prepare(`
@@ -157,19 +175,36 @@ export class SqliteThreadUsageProjection {
     const days = (
       this.#database
         .prepare(`
-          SELECT substr(occurred_at, 1, 10) AS date,
+          SELECT date(occurred_at) AS date,
                  COUNT(*) AS turns,
                  SUM(input_tokens) AS input_tokens,
                  SUM(output_tokens) AS output_tokens,
                  SUM(cache_read_input_tokens) AS cache_read_input_tokens,
                  SUM(cache_write_input_tokens) AS cache_write_input_tokens
           FROM usage_turns
+          WHERE date(occurred_at) BETWEEN ? AND ?
           GROUP BY date
           ORDER BY date DESC
-          LIMIT ?
         `)
-        .all(dayCount) as unknown as DayRow[]
+        .all(start, end) as unknown as DayRow[]
     ).reverse()
+    const modelColumns = `provider, model, COUNT(*) AS turns,
+      SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
+      SUM(cache_read_input_tokens) AS cache_read_input_tokens,
+      SUM(cache_write_input_tokens) AS cache_write_input_tokens`
+    const models = this.#database
+      .prepare(`
+      SELECT ${modelColumns} FROM usage_turns GROUP BY provider, model
+      ORDER BY SUM(input_tokens + output_tokens) DESC, provider, model
+    `)
+      .all() as unknown as ModelRow[]
+    const modelDays = this.#database
+      .prepare(`
+      SELECT date(occurred_at) AS date, ${modelColumns} FROM usage_turns
+      WHERE date(occurred_at) BETWEEN ? AND ?
+      GROUP BY date, provider, model ORDER BY date, provider, model
+    `)
+      .all(start, end) as unknown as (ModelRow & { date: string })[]
     const threads = this.#database
       .prepare(`
         SELECT t.thread_id, t.title, t.updated_at,
@@ -187,6 +222,18 @@ export class SqliteThreadUsageProjection {
       `)
       .all(threadCount) as unknown as ThreadRow[]
     return {
+      generatedAt: now.toISOString(),
+      models: models.map((row) => ({
+        provider: row.provider,
+        model: row.model,
+        ...totalsFromRow(row),
+      })),
+      modelDays: modelDays.map((row) => ({
+        date: row.date,
+        provider: row.provider,
+        model: row.model,
+        ...totalsFromRow(row),
+      })),
       totals: totalsFromRow(totals),
       days: days.map((row) => ({
         date: row.date,
@@ -210,6 +257,8 @@ type TotalsRow = Readonly<{
   cache_read_input_tokens: number | null
   cache_write_input_tokens: number | null
 }>
+
+type ModelRow = TotalsRow & Readonly<{ provider: string; model: string }>
 
 type DayRow = TotalsRow & Readonly<{ date: string }>
 

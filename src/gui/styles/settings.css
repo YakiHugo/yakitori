@@ -426,3 +426,373 @@ html[data-desktop="macos"] .settings-sidebar {
     gap: 10px;
   }
 }
+
+/* Usage is an analytics surface; keep every chart paired with exact values. */
+.settings-content-inner:has(.usage-dashboard) {
+  max-width: 1080px;
+}
+.usage-dashboard {
+  min-width: 0;
+}
+.usage-toolbar,
+.usage-card-heading,
+.usage-period-heading,
+.usage-axis {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.usage-toolbar {
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.usage-range {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+}
+.usage-range button {
+  min-height: 36px;
+  padding: 5px 12px;
+  font-size: 13px;
+  border-radius: 6px;
+  color: var(--muted-foreground);
+}
+.usage-range button[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--foreground);
+  font-weight: 600;
+}
+.usage-muted,
+.usage-axis,
+.usage-card-heading > span {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+.usage-period-heading {
+  margin-bottom: 12px;
+}
+.usage-period-heading h4,
+.usage-card h4 {
+  font-size: 14px;
+  font-weight: 600;
+}
+.usage-period-heading button {
+  font-size: 13px;
+  text-decoration: underline;
+  min-height: 36px;
+}
+.usage-overview {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.8fr) minmax(0, 1.6fr);
+  gap: 32px;
+  padding: 12px 0 24px;
+  align-items: center;
+}
+.usage-total {
+  display: block;
+  font-size: clamp(36px, 4vw, 52px);
+  font-weight: 550;
+  letter-spacing: -1.5px;
+  line-height: 1.3;
+  font-variant-numeric: tabular-nums;
+  margin: 4px 0;
+}
+.usage-totals {
+  padding: 8px 0 20px;
+}
+.usage-totals h4 {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 18px;
+}
+.usage-dashboard .usage-stat-grid {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 20px;
+  margin-bottom: 0;
+}
+.usage-dashboard .usage-stat {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+}
+.usage-dashboard .usage-stat strong {
+  font-size: 22px;
+  letter-spacing: -0.4px;
+  margin: 8px 0 4px;
+  font-variant-numeric: tabular-nums;
+}
+.usage-dashboard .usage-stat span,
+.usage-dashboard .usage-stat small {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+.usage-card {
+  border-top: 1px solid var(--border);
+  padding: 16px 0;
+  min-width: 0;
+}
+.usage-card-heading {
+  flex-wrap: wrap;
+  margin-bottom: 18px;
+}
+.usage-daily {
+  min-width: 0;
+}
+.usage-daily h4 {
+  font-size: 14px;
+  font-weight: 600;
+}
+.usage-chart {
+  display: flex;
+  gap: 12px;
+  height: 135px;
+}
+.usage-chart-scale {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--muted-foreground);
+  text-align: right;
+  min-width: 30px;
+  padding-top: 3px;
+}
+.usage-chart-plot {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+.usage-chart-plot svg {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+.usage-chart-grid {
+  stroke: var(--border);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+.usage-area-total {
+  fill: color-mix(in oklab, #cd7b5f 22%, transparent);
+}
+.usage-line-total {
+  fill: none;
+  stroke: #cd7b5f;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+.usage-trend {
+  position: absolute;
+  inset: 0;
+  min-inline-size: 0;
+  display: flex;
+  width: 100%;
+  border: 0;
+  padding: 0;
+  margin: 0;
+}
+.usage-trend button {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  border-radius: 0;
+}
+.usage-trend button:hover,
+.usage-trend button[aria-pressed="true"] {
+  background: color-mix(in oklab, var(--foreground) 8%, transparent);
+}
+.usage-day-link {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.usage-axis {
+  margin-top: 12px;
+  font-size: 11px;
+}
+.usage-calendar-scroll,
+.usage-table-scroll {
+  overflow-x: auto;
+}
+.usage-calendar {
+  display: grid;
+  grid-auto-flow: column;
+  grid-template-rows: repeat(7, 8px);
+  grid-auto-columns: minmax(7px, 1fr);
+  gap: 3px;
+  min-width: 530px;
+}
+.usage-calendar button,
+.usage-legend i {
+  border-radius: 2px;
+  background: var(--muted);
+  border: 1px solid color-mix(in oklab, var(--foreground) 5%, transparent);
+}
+.usage-calendar button[data-level="1"],
+.usage-legend i[data-level="1"] {
+  background: color-mix(in oklab, var(--foreground) 20%, var(--background));
+}
+.usage-calendar button[data-level="2"],
+.usage-legend i[data-level="2"] {
+  background: color-mix(in oklab, var(--foreground) 40%, var(--background));
+}
+.usage-calendar button[data-level="3"],
+.usage-legend i[data-level="3"] {
+  background: color-mix(in oklab, var(--foreground) 65%, var(--background));
+}
+.usage-calendar button[data-level="4"],
+.usage-legend i[data-level="4"] {
+  background: var(--foreground);
+}
+.usage-calendar button[aria-pressed="true"] {
+  outline: 2px solid var(--foreground);
+  outline-offset: 1px;
+}
+.usage-legend {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.usage-legend i {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+}
+.usage-dashboard .usage-threads {
+  font-size: 13px;
+}
+.usage-dashboard .usage-threads th,
+.usage-dashboard .usage-threads td {
+  padding: 10px 8px;
+}
+.usage-dashboard .usage-threads th:not(:first-child),
+.usage-dashboard .usage-threads td:not(:first-child) {
+  text-align: right;
+  white-space: nowrap;
+}
+.usage-models {
+  min-width: 600px;
+}
+.usage-models strong {
+  font-weight: 500;
+}
+.usage-dashboard .usage-models small {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted-foreground);
+}
+.usage-footnote {
+  font-size: 12px;
+  color: var(--muted-foreground);
+  line-height: 1.6;
+  margin: 8px 0;
+}
+.usage-empty {
+  padding: 16px;
+  margin-bottom: 16px;
+  background: var(--muted);
+  border-radius: 8px;
+  font-size: 13px;
+}
+.usage-dashboard button:focus-visible {
+  outline: 2px solid var(--foreground);
+  outline-offset: 2px;
+}
+@media (max-width: 620px) {
+  .usage-overview {
+    grid-template-columns: 1fr;
+    gap: 30px;
+  }
+  .usage-dashboard .usage-stat-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .usage-axis {
+    flex-wrap: wrap;
+  }
+  .usage-range button {
+    min-height: 44px;
+    padding: 5px 10px;
+  }
+}
+
+.settings-page-body:has(.usage-dashboard) {
+  padding-top: 32px;
+  padding-bottom: 32px;
+}
+.usage-dashboard .settings-usage-heading {
+  padding: 0;
+  margin-bottom: 18px;
+}
+.usage-dashboard .settings-usage-heading > button {
+  top: 0;
+}
+.usage-model-comparison {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.usage-model-comparison li {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(70px, 1.6fr) 70px;
+  gap: 24px;
+  align-items: center;
+  padding: 6px 0;
+  line-height: 1.3;
+}
+.usage-model-label {
+  min-width: 0;
+}
+.usage-model-label strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.usage-dashboard .usage-model-label small,
+.usage-dashboard .usage-model-value small {
+  display: block;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  margin-top: 3px;
+}
+.usage-share-track {
+  height: 5px;
+  border-radius: 3px;
+  background: var(--muted);
+  overflow: hidden;
+}
+.usage-share-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: color-mix(in oklab, var(--foreground) 65%, transparent);
+}
+.usage-model-value {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.usage-model-value strong {
+  font-size: 13px;
+  font-weight: 500;
+}
+.usage-details {
+  border-top: 1px solid var(--border);
+}
+.usage-details > summary {
+  cursor: pointer;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  padding: 16px 0;
+}
+.usage-details > summary:focus-visible {
+  outline: 2px solid var(--foreground);
+  outline-offset: 2px;
+}
+.usage-details .usage-table-scroll {
+  max-height: 380px;
+  overflow: auto;
+}
