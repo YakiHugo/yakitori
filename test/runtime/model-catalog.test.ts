@@ -24,6 +24,7 @@ describe("model catalog context windows", () => {
       contextWindowTokens: 272000,
       maxContextWindowTokens: 872000,
       effectiveContextWindowPercent: 95,
+      contextWindowScope: "input",
     })
     expect(
       catalogModelCapacity({ provider: "openai", model: "gpt-6-astra" }),
@@ -31,6 +32,7 @@ describe("model catalog context windows", () => {
       contextWindowTokens: 1050000,
       maxContextWindowTokens: 1050000,
       effectiveContextWindowPercent: 100,
+      contextWindowScope: "total",
     })
     expect(() =>
       validateModelSelection({
@@ -95,7 +97,7 @@ describe("model catalog context windows", () => {
         provider: "anthropic",
         model: "claude-sonnet-4-6",
       }),
-    ).toBe(200_000)
+    ).toBe(1_000_000)
   })
 
   it("returns the Codex default, maximum, and effective window policy", () => {
@@ -105,6 +107,7 @@ describe("model catalog context windows", () => {
       contextWindowTokens: 272_000,
       maxContextWindowTokens: 872_000,
       effectiveContextWindowPercent: 95,
+      contextWindowScope: "input",
     })
   })
 
@@ -114,7 +117,7 @@ describe("model catalog context windows", () => {
         provider: "Anthropic",
         model: "CLAUDE-SONNET-4-6",
       }),
-    ).toBe(200_000)
+    ).toBe(1_000_000)
     expect(
       catalogContextWindowTokens({ provider: "faux", model: "scripted" }),
     ).toBeUndefined()

@@ -256,6 +256,7 @@ export function createDiscoveringModelsManager(input: {
           model.maxContextWindowTokens ?? model.contextWindowTokens,
         effectiveContextWindowPercent:
           model.effectiveContextWindowPercent ?? 100,
+        contextWindowScope: input.provider === "codex" ? "input" : "total",
       }
     },
   }

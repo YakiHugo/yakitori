@@ -3,21 +3,17 @@ import type {
   ContentBlockParam,
   MessageParam,
   OutputConfig,
+  RawMessageStreamEvent,
   RedactedThinkingBlockParam,
   TextBlockParam,
   ThinkingBlockParam,
   Tool,
   ToolResultBlockParam,
 } from "@anthropic-ai/sdk/resources/messages"
-import { isJsonObject, isJsonValue, type JsonValue } from "../kernel/index.ts"
+import { isJsonObject, isJsonValue } from "../kernel/index.ts"
 import { nativeDeferredToolProtocol } from "./deferred-tool-loading.ts"
 import {
-  failureKindForStatus,
-  modelFailureFromUnknown,
-} from "./model-failure.ts"
-import { parseRetryAfterMs, parseShouldRetry } from "./retry-after.ts"
-import {
-  DEFAULT_MODEL_MAX_OUTPUT_TOKENS,
+  DEFAULT_MESSAGES_MAX_OUTPUT_TOKENS,
   flattenModelSystem,
   type ModelContentBlock,
   type ModelMessage,
@@ -26,9 +22,15 @@ import {
   ModelStopReason,
   type ModelStreamEvent,
   type ModelStreamFailureEvent,
+  type ModelUsage,
   requireModelImageData,
   type StreamFn,
 } from "./model.ts"
+import {
+  failureKindForStatus,
+  modelFailureFromUnknown,
+} from "./model-failure.ts"
+import { parseRetryAfterMs, parseShouldRetry } from "./retry-after.ts"
 
 export type AnthropicProviderOptions = {
   readonly apiKey: string
@@ -66,7 +68,7 @@ async function* streamAnthropic(
     return
   }
 
-  let stream: Awaited<ReturnType<typeof client.messages.stream>>
+  let stream: AsyncIterable<RawMessageStreamEvent>
   let failureStage: "connect" | "response_body" = "connect"
   const customFallbackKeys = new Map(
     request.tools.flatMap((tool) =>
@@ -106,10 +108,12 @@ async function* streamAnthropic(
             supportsAdaptiveThinking(request.target.model || defaultModel)
           ? ({ type: "adaptive", display: "summarized" } as const)
           : undefined
-    stream = client.messages.stream(
+    stream = await client.messages.create(
       {
+        stream: true,
         model: request.target.model || defaultModel,
-        max_tokens: request.maxOutputTokens ?? DEFAULT_MODEL_MAX_OUTPUT_TOKENS,
+        max_tokens:
+          request.maxOutputTokens ?? DEFAULT_MESSAGES_MAX_OUTPUT_TOKENS,
         system: toAnthropicSystem(request.system, explicitPromptCaching),
         messages: toAnthropicRequestMessages(
           request.messages,
@@ -141,13 +145,7 @@ async function* streamAnthropic(
               : { headers: { "anthropic-beta": "effort-2025-11-24" } }),
           },
     )
-    // MessageStream starts its HTTP request asynchronously. Await its response
-    // when the real SDK surface is present so pre-header failures stay in the
-    // connect stage; lightweight test clients remain ordinary async iterables.
-    if (typeof stream.withResponse === "function") {
-      await stream.withResponse()
-      failureStage = "response_body"
-    }
+    failureStage = "response_body"
   } catch (error) {
     if (request.signal?.aborted) {
       yield { type: "cancelled" }
@@ -157,44 +155,234 @@ async function* streamAnthropic(
     return
   }
 
+  // The SDK MessageStream helper repairs partial JSON. Keep raw arguments here
+  // so only a closed block with strictly parsed input can become an early call.
+  const blocks = new Map<
+    number,
+    {
+      block: Record<string, unknown>
+      input: string
+      inputStarted: boolean
+      completed: boolean
+      invalidInput: boolean
+      content?: readonly ModelContentBlock[]
+    }
+  >()
+  let message:
+    | {
+        id: string
+        stop_reason: string | null
+        usage: NonNullable<Parameters<typeof fromAnthropicMessage>[0]["usage"]>
+      }
+    | undefined
+  let nextOutputIndex = 0
+  let terminalResponse: ModelResponse | undefined
   try {
     for await (const event of stream) {
-      failureStage = "response_body"
       if (request.signal?.aborted) {
         yield { type: "cancelled" }
         return
       }
-      if (
-        event.type === "content_block_delta" &&
-        event.delta.type === "text_delta"
-      ) {
-        yield { type: "delta", text: event.delta.text }
+      if (terminalResponse !== undefined)
+        throw new AnthropicProtocolError(
+          "Anthropic returned an event after message_stop.",
+        )
+      if (event.type === "message_start") {
+        if (message !== undefined)
+          throw new AnthropicProtocolError("Anthropic repeated message_start.")
+        message = {
+          id: event.message.id,
+          stop_reason: event.message.stop_reason,
+          usage: { ...event.message.usage },
+        }
         continue
       }
-      if (
-        event.type === "content_block_delta" &&
-        event.delta.type === "thinking_delta"
-      ) {
-        yield { type: "reasoning_delta", text: event.delta.thinking }
+      if (message === undefined)
+        throw new AnthropicProtocolError(
+          "Anthropic output preceded message_start.",
+        )
+      if (event.type === "content_block_start") {
+        if (blocks.has(event.index))
+          throw new AnthropicProtocolError(
+            "Anthropic repeated a content block.",
+          )
+        blocks.set(event.index, {
+          block: { ...event.content_block },
+          input: "",
+          inputStarted: false,
+          completed: false,
+          invalidInput: false,
+        })
+        continue
+      }
+      if (event.type === "content_block_delta") {
+        const pending = blocks.get(event.index)
+        if (pending === undefined || pending.completed)
+          throw new AnthropicProtocolError("Anthropic delta has no open block.")
+        const itemId = `${message.id}_block_${event.index}`
+        if (event.delta.type === "text_delta") {
+          if (pending.block.type !== "text")
+            throw new AnthropicProtocolError(
+              "Anthropic text delta has a non-text block.",
+            )
+          pending.block.text =
+            String(pending.block.text ?? "") + event.delta.text
+          yield {
+            type: "delta",
+            text: event.delta.text,
+            ...(request.streamOutputItems ? { itemId } : {}),
+          }
+        } else if (event.delta.type === "thinking_delta") {
+          if (pending.block.type !== "thinking")
+            throw new AnthropicProtocolError(
+              "Anthropic thinking delta has a non-thinking block.",
+            )
+          pending.block.thinking =
+            String(pending.block.thinking ?? "") + event.delta.thinking
+          yield {
+            type: "reasoning_delta",
+            text: event.delta.thinking,
+            ...(request.streamOutputItems ? { itemId } : {}),
+          }
+        } else if (event.delta.type === "signature_delta") {
+          if (pending.block.type !== "thinking")
+            throw new AnthropicProtocolError(
+              "Anthropic signature delta has a non-thinking block.",
+            )
+          // Signature events carry the full value, matching SDK accumulation.
+          pending.block.signature = event.delta.signature
+        } else if (event.delta.type === "input_json_delta") {
+          if (pending.block.type !== "tool_use")
+            throw new AnthropicProtocolError(
+              "Anthropic tool delta has a non-tool block.",
+            )
+          pending.inputStarted = true
+          pending.input += event.delta.partial_json
+        }
+        continue
+      }
+      if (event.type === "content_block_stop") {
+        const pending = blocks.get(event.index)
+        if (pending === undefined || pending.completed)
+          throw new AnthropicProtocolError(
+            "Anthropic stopped an unknown or closed block.",
+          )
+        pending.completed = true
+        if (pending.block.type === "tool_use" && pending.inputStarted) {
+          try {
+            pending.block.input = JSON.parse(pending.input)
+          } catch (error) {
+            if (!(error instanceof SyntaxError)) throw error
+            pending.invalidInput = true
+          }
+        }
+        if (!pending.invalidInput)
+          pending.content = fromAnthropicMessage(
+            { content: [pending.block], stop_reason: "end_turn" },
+            customFallbackKeys,
+            request.target.provider,
+            request.continuationScope,
+          ).content
+        if (request.streamOutputItems && request.compaction === undefined) {
+          for (;;) {
+            const completed = blocks.get(nextOutputIndex)
+            if (completed?.content === undefined) break
+            const itemId = `${message.id}_block_${nextOutputIndex}`
+            nextOutputIndex += 1
+            if (completed.content.length > 0)
+              yield { type: "output_item", itemId, content: completed.content }
+          }
+        }
+        continue
+      }
+      if (event.type === "message_delta") {
+        message.stop_reason = event.delta.stop_reason
+        message.usage = {
+          ...message.usage,
+          ...(event.usage.input_tokens == null
+            ? {}
+            : { input_tokens: event.usage.input_tokens }),
+          output_tokens: event.usage.output_tokens,
+          ...(event.usage.cache_read_input_tokens == null
+            ? {}
+            : { cache_read_input_tokens: event.usage.cache_read_input_tokens }),
+          ...(event.usage.cache_creation_input_tokens == null
+            ? {}
+            : {
+                cache_creation_input_tokens:
+                  event.usage.cache_creation_input_tokens,
+              }),
+        }
+        continue
+      }
+      if (event.type === "message_stop") {
+        const incompleteToolCalls = [...blocks.values()].some(
+          (pending) =>
+            pending.block.type === "tool_use" &&
+            (!pending.completed || pending.invalidInput),
+        )
+        const content = [...blocks.entries()]
+          .sort(([left], [right]) => left - right)
+          .flatMap(([, pending]) =>
+            pending.block.type === "tool_use" &&
+            (!pending.completed || pending.invalidInput)
+              ? []
+              : [
+                  pending.block.type === "thinking" && !pending.completed
+                    ? { ...pending.block, signature: undefined }
+                    : pending.block,
+                ],
+          )
+        const response = fromAnthropicMessage(
+          { ...message, content },
+          customFallbackKeys,
+          request.target.provider,
+          request.continuationScope,
+        )
+        if (
+          incompleteToolCalls &&
+          response.stopReason !== ModelStopReason.Length &&
+          response.stopReason !== ModelStopReason.ContentFilter
+        )
+          throw new AnthropicProtocolError(
+            "Anthropic returned incomplete tool arguments without a length or content filter stop.",
+          )
+        terminalResponse = {
+          ...response,
+          ...(incompleteToolCalls ? { incompleteToolCalls: true } : {}),
+        }
       }
     }
-
-    const final = await stream.finalMessage()
-    yield {
-      type: "response",
-      response: fromAnthropicMessage(
-        final,
-        customFallbackKeys,
-        request.target.provider,
-        request.continuationScope,
-      ),
+    // A terminal event is provisional until the raw SDK iterator reaches EOF.
+    // Otherwise a malformed tail could become a retryable compaction Length.
+    if (request.signal?.aborted) {
+      yield { type: "cancelled" }
+      return
     }
+    if (terminalResponse !== undefined)
+      yield { type: "response", response: terminalResponse }
   } catch (error) {
     if (request.signal?.aborted) {
       yield { type: "cancelled" }
       return
     }
-    yield terminalFailure(error, request.target.provider, failureStage)
+    yield {
+      ...terminalFailure(
+        terminalResponse !== undefined &&
+          !(error instanceof AnthropicProtocolError)
+          ? new AnthropicProtocolError(
+              "Anthropic stream failed after message_stop.",
+              { cause: error },
+            )
+          : error,
+        request.target.provider,
+        failureStage,
+      ),
+      ...(message === undefined ||
+      Object.values(message.usage).every((value) => value == null)
+        ? {}
+        : { usage: fromAnthropicUsage(message.usage) }),
+    }
   }
 }
 
@@ -427,23 +615,23 @@ export function fromAnthropicMessage(
   const content: ModelContentBlock[] = []
   for (const block of message.content) {
     if (!isRecord(block)) continue
-    if (
-      block.type === "thinking" &&
-      typeof block.thinking === "string" &&
-      typeof block.signature === "string"
-    ) {
+    if (block.type === "thinking" && typeof block.thinking === "string") {
       content.push({
         type: "reasoning",
         text: block.thinking,
-        providerMetadata: {
-          anthropic: {
-            provider,
-            ...(continuationScope === undefined
-              ? {}
-              : { scope: continuationScope }),
-            signature: block.signature,
-          },
-        },
+        ...(typeof block.signature === "string" && block.signature.length > 0
+          ? {
+              providerMetadata: {
+                anthropic: {
+                  provider,
+                  ...(continuationScope === undefined
+                    ? {}
+                    : { scope: continuationScope }),
+                  signature: block.signature,
+                },
+              },
+            }
+          : {}),
       })
       continue
     }
@@ -478,14 +666,16 @@ export function fromAnthropicMessage(
         isRecord(block.input) &&
         typeof block.input[fallbackKey] === "string"
           ? block.input[fallbackKey]
-          : isJsonValue(block.input)
-            ? block.input
-            : {}
+          : block.input
+      if (!isJsonValue(toolInput))
+        throw new AnthropicProtocolError(
+          `Anthropic returned invalid input for tool ${block.name}.`,
+        )
       content.push({
         type: "tool_call",
         id: block.id,
         name: block.name,
-        input: toolInput as JsonValue,
+        input: toolInput,
         ...(block.name === "tool_search"
           ? { toolKind: "tool_search" as const }
           : {}),
@@ -503,37 +693,43 @@ export function fromAnthropicMessage(
   return {
     stopReason,
     content,
+    ...(message.stop_reason === null
+      ? {}
+      : { rawStopReason: message.stop_reason }),
+    ...(stopReason === ModelStopReason.Length
+      ? {
+          lengthReason:
+            message.stop_reason === "model_context_window_exceeded"
+              ? ("context" as const)
+              : ("output" as const),
+        }
+      : {}),
     ...(message.usage === undefined
       ? {}
-      : {
-          usage: {
-            inputTokens:
-              (message.usage.input_tokens ?? 0) +
-              (message.usage.cache_read_input_tokens ?? 0) +
-              (message.usage.cache_creation_input_tokens ?? 0),
-            activeContextTokens:
-              (message.usage.input_tokens ?? 0) +
-              (message.usage.cache_read_input_tokens ?? 0) +
-              (message.usage.cache_creation_input_tokens ?? 0) +
-              (message.usage.output_tokens ?? 0),
-            ...(message.usage.output_tokens === undefined
-              ? {}
-              : { outputTokens: message.usage.output_tokens }),
-            ...(message.usage.cache_read_input_tokens === undefined
-              ? {}
-              : {
-                  cacheReadInputTokens:
-                    message.usage.cache_read_input_tokens ?? 0,
-                }),
-            ...(message.usage.cache_creation_input_tokens === undefined
-              ? {}
-              : {
-                  cacheWriteInputTokens:
-                    message.usage.cache_creation_input_tokens ?? 0,
-                }),
-          },
-        }),
+      : { usage: fromAnthropicUsage(message.usage) }),
     ...(message.id === undefined ? {} : { providerRequestId: message.id }),
+  }
+}
+
+function fromAnthropicUsage(
+  usage: NonNullable<Parameters<typeof fromAnthropicMessage>[0]["usage"]>,
+): ModelUsage {
+  const inputTokens =
+    (usage.input_tokens ?? 0) +
+    (usage.cache_read_input_tokens ?? 0) +
+    (usage.cache_creation_input_tokens ?? 0)
+  return {
+    inputTokens,
+    activeContextTokens: inputTokens + (usage.output_tokens ?? 0),
+    ...(usage.output_tokens === undefined
+      ? {}
+      : { outputTokens: usage.output_tokens }),
+    ...(usage.cache_read_input_tokens === undefined
+      ? {}
+      : { cacheReadInputTokens: usage.cache_read_input_tokens ?? 0 }),
+    ...(usage.cache_creation_input_tokens === undefined
+      ? {}
+      : { cacheWriteInputTokens: usage.cache_creation_input_tokens ?? 0 }),
   }
 }
 
@@ -554,7 +750,8 @@ function toAnthropicReasoningBlock(
   if (typeof metadata.redactedData === "string") {
     return { type: "redacted_thinking", data: metadata.redactedData }
   }
-  if (typeof metadata.signature !== "string") return undefined
+  if (typeof metadata.signature !== "string" || metadata.signature.length === 0)
+    return undefined
   return {
     type: "thinking",
     thinking: block.text,
@@ -609,16 +806,24 @@ function mapStopReason(
   stopReason: string | null,
   content: ModelResponse["content"],
 ): ModelResponse["stopReason"] {
-  if (stopReason === "max_tokens") return ModelStopReason.Length
+  if (
+    stopReason === "max_tokens" ||
+    stopReason === "model_context_window_exceeded"
+  )
+    return ModelStopReason.Length
+  if (stopReason === "refusal") return ModelStopReason.ContentFilter
   if (stopReason === "tool_use") return ModelStopReason.ToolUse
   if (stopReason === "end_turn" || stopReason === "stop_sequence") {
     return content.some((block) => block.type === "tool_call")
       ? ModelStopReason.ToolUse
       : ModelStopReason.EndTurn
   }
-  if (stopReason === null) return ModelStopReason.EndTurn
-  throw new Error(`Unsupported Anthropic stop reason: ${stopReason}.`)
+  throw new AnthropicProtocolError(
+    `Unsupported Anthropic stop reason: ${stopReason ?? "missing"}.`,
+  )
 }
+
+class AnthropicProtocolError extends Error {}
 
 function terminalFailure(
   error: unknown,
@@ -634,15 +839,17 @@ function terminalFailure(
       ? error.type
       : undefined
   const kind =
-    error instanceof Anthropic.APIConnectionError
-      ? stage === "connect"
-        ? "connection_failed"
-        : "stream_disconnected"
-      : status !== undefined
-        ? failureKindForStatus(status)
-        : RETRYABLE_ERROR_TYPES.has(providerCode ?? "")
-          ? "server_error"
-          : undefined
+    error instanceof AnthropicProtocolError
+      ? "protocol_error"
+      : error instanceof Anthropic.APIConnectionError
+        ? stage === "connect"
+          ? "connection_failed"
+          : "stream_disconnected"
+        : status !== undefined
+          ? failureKindForStatus(status)
+          : RETRYABLE_ERROR_TYPES.has(providerCode ?? "")
+            ? "server_error"
+            : undefined
   const retryAfterMs =
     error instanceof Anthropic.APIError
       ? parseRetryAfterMs(error.headers)

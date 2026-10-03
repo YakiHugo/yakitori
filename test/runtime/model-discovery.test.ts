@@ -199,6 +199,7 @@ describe("provider model discovery", () => {
       contextWindowTokens: 262144,
       maxContextWindowTokens: 262144,
       effectiveContextWindowPercent: 100,
+      contextWindowScope: "total",
     })
     expect(() =>
       manager.validate({ provider: "kimi", model: "k3", effort: "high" }),

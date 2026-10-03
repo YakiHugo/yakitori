@@ -125,30 +125,64 @@ export function Transcript({ children }: Readonly<{ children?: ReactNode }>) {
             block.turnId === view.activeTurnId ? index : last,
           -1,
         )
+  const previousAnswers = useRef(new Map<string, FinalAnswer>())
   const finalAnswers = useMemo(() => {
     const turns = new Map<
       string,
       { last: ExecutionEntry | undefined; failed: boolean }
     >()
+    const assistants = new Map<
+      string,
+      Extract<ExecutionEntry, { kind: "assistant" }>
+    >()
     for (const entry of view.entries) {
       if (!("turnId" in entry)) continue
       const turn = turns.get(entry.turnId) ?? { last: undefined, failed: false }
-      if (entry.kind === "turn_terminal") turn.failed = true
-      else if (entry.kind !== "permission") turn.last = entry
+      if (entry.kind === "turn_terminal") {
+        turn.failed = ["failed", "cancelled", "interrupted"].includes(
+          entry.state,
+        )
+      } else if (entry.kind !== "permission") turn.last = entry
+      if (entry.kind === "assistant") assistants.set(entry.itemId, entry)
       turns.set(entry.turnId, turn)
     }
-    const answers = new Map<string, string>()
+    const answers = new Map<string, FinalAnswer>()
     for (const [turnId, turn] of turns) {
-      // An input can split a turn into several adjacent blocks. Final-answer
-      // promotion belongs to the entire completed turn, not each fragment.
+      const timing = view.turnTimings[turnId]
       if (
-        view.turnTimings[turnId]?.completedAt !== undefined &&
-        view.activeTurnId !== turnId &&
-        !turn.failed &&
-        turn.last?.kind === "assistant"
+        timing?.completedAt === undefined ||
+        view.activeTurnId === turnId ||
+        turn.failed
       )
-        answers.set(turnId, turn.last.itemId)
+        continue
+      const itemIds =
+        timing.outcome?.status === "completed" &&
+        timing.outcome.answerItemIds !== undefined
+          ? timing.outcome.answerItemIds
+          : turn.last?.kind === "assistant"
+            ? [turn.last.itemId]
+            : []
+      const pieces = itemIds.flatMap((id) => {
+        const entry = assistants.get(id)
+        return entry?.turnId === turnId ? [entry] : []
+      })
+      const last = pieces.at(-1)
+      if (last === undefined || pieces.length !== itemIds.length) continue
+      const text = pieces.map((entry) => entry.text).join("")
+      const previous = previousAnswers.current.get(turnId)
+      answers.set(
+        turnId,
+        previous?.entry.itemId === last.itemId &&
+          previous.entry.text === text &&
+          previous.entry.at === last.at &&
+          previous.entry.status === last.status &&
+          previous.itemIds.length === itemIds.length &&
+          previous.itemIds.every((id, index) => id === itemIds[index])
+          ? previous
+          : { itemIds, entry: { ...last, text } },
+      )
     }
+    previousAnswers.current = answers
     return answers
   }, [view.entries, view.turnTimings, view.activeTurnId])
   const inputs = view.entries
@@ -267,7 +301,7 @@ export function Transcript({ children }: Readonly<{ children?: ReactNode }>) {
                     entries={block.entries}
                     active={view.activeTurnId === block.turnId}
                     timing={view.turnTimings[block.turnId]}
-                    finalAnswerId={finalAnswers.get(block.turnId)}
+                    finalAnswer={finalAnswers.get(block.turnId)}
                     retry={
                       index === activeBlockIndex ? view.activeRetry : undefined
                     }
@@ -285,7 +319,7 @@ export function Transcript({ children }: Readonly<{ children?: ReactNode }>) {
                 entries={[]}
                 active
                 timing={view.turnTimings[view.activeTurnId]}
-                finalAnswerId={undefined}
+                finalAnswer={undefined}
                 retry={view.activeRetry}
               />
             ) : null}
@@ -327,18 +361,23 @@ export function Transcript({ children }: Readonly<{ children?: ReactNode }>) {
   )
 }
 
+type FinalAnswer = Readonly<{
+  itemIds: readonly string[]
+  entry: Extract<ExecutionEntry, { kind: "assistant" }>
+}>
+
 const TurnBlock = memo(
   function TurnBlock({
     entries,
     active,
     timing,
-    finalAnswerId,
+    finalAnswer,
     retry,
   }: Readonly<{
     entries: readonly ExecutionEntry[]
     active: boolean
     timing: TurnTiming | undefined
-    finalAnswerId: string | undefined
+    finalAnswer: FinalAnswer | undefined
     retry: ActiveModelRetry | undefined
   }>) {
     const [reasoningExpanded, setReasoningExpanded] = useState(false)
@@ -346,23 +385,32 @@ const TurnBlock = memo(
     const workspaceRoot = useAppStore(
       (state) => state.execution.workingDirectory,
     )
-    const finalAnswer = entries.find(
-      (entry): entry is Extract<ExecutionEntry, { kind: "assistant" }> =>
-        entry.kind === "assistant" && entry.itemId === finalAnswerId,
-    )
-    const persistent = entries.filter(
+    const answerInBlock = entries.some(
       (entry) =>
-        entry === finalAnswer ||
-        entry.kind === "turn_terminal" ||
-        (entry.kind === "permission" && entry.state !== "resolved"),
+        entry.kind === "assistant" &&
+        entry.itemId === finalAnswer?.entry.itemId,
     )
+    const visibleAnswer = answerInBlock ? finalAnswer?.entry : undefined
+    const answerItemIds = new Set(finalAnswer?.itemIds)
+    const persistent = entries.flatMap<ExecutionEntry>((entry) => {
+      if (entry.kind === "assistant" && answerItemIds.has(entry.itemId)) {
+        return entry.itemId === visibleAnswer?.itemId ? [visibleAnswer] : []
+      }
+      return entry.kind === "turn_terminal" ||
+        (entry.kind === "permission" && entry.state !== "resolved")
+        ? [entry]
+        : []
+    })
     const reasoning = entries.filter(
       (entry): entry is Extract<ExecutionEntry, { kind: "reasoning" }> =>
         entry.kind === "reasoning",
     )
     const timeline = groupTurnTimeline(
       entries.filter(
-        (entry) => !persistent.includes(entry) && entry.kind !== "reasoning",
+        (entry) =>
+          !persistent.includes(entry) &&
+          entry.kind !== "reasoning" &&
+          !(entry.kind === "assistant" && answerItemIds.has(entry.itemId)),
       ),
     )
     const reasoningText = reasoning
@@ -492,10 +540,10 @@ const TurnBlock = memo(
         {persistent.map((entry) => (
           <EntryCell key={entryKey(entry)} entry={entry} />
         ))}
-        {finalAnswer ? (
+        {visibleAnswer ? (
           <ResponseActions
-            text={finalAnswer.text}
-            at={timing?.completedAt ?? finalAnswer.at}
+            text={visibleAnswer.text}
+            at={timing?.completedAt ?? visibleAnswer.at}
           />
         ) : null}
       </section>
@@ -504,7 +552,7 @@ const TurnBlock = memo(
   (previous, next) =>
     previous.active === next.active &&
     previous.timing === next.timing &&
-    previous.finalAnswerId === next.finalAnswerId &&
+    previous.finalAnswer === next.finalAnswer &&
     previous.retry === next.retry &&
     // Grouping creates new arrays on each delta; the reducer preserves entries
     // outside the changed item. Keep completed turns out of the render path.

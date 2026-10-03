@@ -15,6 +15,69 @@ import {
 import { toOpenAIInput } from "../../src/runtime/openai-provider.ts"
 
 describe("anthropic provider conversion", () => {
+  it.each([
+    ["anthropic", "claude-sonnet-4-6", undefined, 32000],
+    ["anthropic", "unknown-model", undefined, 32000],
+    ["kimi", "kimi-for-coding", undefined, 32000],
+    ["kimi", "unknown-model", undefined, 32000],
+    ["anthropic", "claude-sonnet-4-6", 1234, 1234],
+    ["anthropic", "unknown-model", 1234, 1234],
+    ["kimi", "kimi-for-coding", 1234, 1234],
+    ["kimi", "unknown-model", 1234, 1234],
+  ] as const)("sends the required Messages output budget for %s/%s (override %s)", async (provider, model, maxOutputTokens, expectedBudget) => {
+    let body: Record<string, unknown> | undefined
+    const client = new Anthropic({
+      apiKey: "test",
+      maxRetries: 0,
+      fetch: async (_url, init) => {
+        body = JSON.parse(String(init?.body))
+        return new Response(
+          [
+            {
+              type: "message_start",
+              message: {
+                id: "msg_budget",
+                type: "message",
+                role: "assistant",
+                model,
+                content: [],
+                stop_reason: null,
+                stop_sequence: null,
+                usage: { input_tokens: 1, output_tokens: 0 },
+              },
+            },
+            {
+              type: "message_delta",
+              delta: { stop_reason: "end_turn", stop_sequence: null },
+              usage: { output_tokens: 1 },
+            },
+            { type: "message_stop" },
+          ]
+            .map(
+              (event) =>
+                `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
+            )
+            .join(""),
+          { headers: { "content-type": "text/event-stream" } },
+        )
+      },
+    })
+    const stream = createAnthropicProvider({ apiKey: "test", model, client })
+    const events = []
+    for await (const event of stream({
+      target: { provider, model, instructionProfileId: model },
+      system: [],
+      messages: [],
+      tools: [],
+      toolWireProtocol: "eager",
+      ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
+    }))
+      events.push(event)
+    expect(body?.model).toBe(model)
+    expect(body?.max_tokens).toBe(expectedBudget)
+    expect(events.at(-1)).toMatchObject({ type: "response" })
+  })
+
   it("builds Anthropic messages from internal history with tools and results", () => {
     const messages = toAnthropicMessages([
       {
@@ -260,18 +323,13 @@ describe("anthropic provider conversion", () => {
       let body: Record<string, unknown> | undefined
       const client = {
         messages: {
-          stream(input: Record<string, unknown>) {
+          create(input: Record<string, unknown>) {
             body = input
-            return {
-              async *[Symbol.asyncIterator]() {},
-              async finalMessage() {
-                return {
-                  id: "message_1",
-                  stop_reason: "end_turn",
-                  content: [{ type: "text", text: "done" }],
-                }
-              },
-            }
+            return anthropicRawMessage({
+              id: "message_1",
+              stop_reason: "end_turn",
+              content: [{ type: "text", text: "done" }],
+            })
           },
         },
       } as unknown as Anthropic
@@ -529,6 +587,7 @@ describe("anthropic provider conversion", () => {
       }),
     ).toEqual({
       stopReason: ModelStopReason.EndTurn,
+      rawStopReason: "end_turn",
       content: [{ type: "text", text: "hello" }],
       usage: {
         inputTokens: 10,
@@ -717,27 +776,42 @@ describe("anthropic provider conversion", () => {
     let body: Record<string, unknown> | undefined
     const client = {
       messages: {
-        stream(input: Record<string, unknown>) {
+        create(input: Record<string, unknown>) {
           body = input
-          return {
-            async *[Symbol.asyncIterator]() {
-              yield {
-                type: "content_block_delta",
-                delta: { type: "thinking_delta", thinking: "Inspect" },
-              }
-              yield {
-                type: "content_block_delta",
-                delta: { type: "thinking_delta", thinking: " files" },
-              }
-            },
-            async finalMessage() {
-              return {
-                id: "msg_reasoning",
-                stop_reason: "end_turn",
-                content: [{ type: "text", text: "Done." }],
-              }
-            },
-          }
+          return (async function* () {
+            yield {
+              type: "message_start",
+              message: { id: "msg_reasoning", stop_reason: null, usage: {} },
+            }
+            yield {
+              type: "content_block_start",
+              index: 0,
+              content_block: { type: "thinking", thinking: "", signature: "" },
+            }
+            yield {
+              type: "content_block_delta",
+              index: 0,
+              delta: { type: "thinking_delta", thinking: "Inspect" },
+            }
+            yield {
+              type: "content_block_delta",
+              index: 0,
+              delta: { type: "thinking_delta", thinking: " files" },
+            }
+            yield { type: "content_block_stop", index: 0 }
+            yield {
+              type: "content_block_start",
+              index: 1,
+              content_block: { type: "text", text: "Done." },
+            }
+            yield { type: "content_block_stop", index: 1 }
+            yield {
+              type: "message_delta",
+              delta: { stop_reason: "end_turn" },
+              usage: { output_tokens: 1 },
+            }
+            yield { type: "message_stop" }
+          })()
         },
       },
     } as unknown as Anthropic
@@ -775,18 +849,13 @@ describe("anthropic provider conversion", () => {
     let body: Record<string, unknown> | undefined
     const client = {
       messages: {
-        stream(input: Record<string, unknown>) {
+        create(input: Record<string, unknown>) {
           body = input
-          return {
-            async *[Symbol.asyncIterator]() {},
-            async finalMessage() {
-              return {
-                id: "msg_cache",
-                stop_reason: "end_turn",
-                content: [{ type: "text", text: "ok" }],
-              }
-            },
-          }
+          return anthropicRawMessage({
+            id: "msg_cache",
+            stop_reason: "end_turn",
+            content: [{ type: "text", text: "ok" }],
+          })
         },
       },
     } as unknown as Anthropic
@@ -866,18 +935,13 @@ describe("anthropic provider conversion", () => {
     let body: Record<string, unknown> | undefined
     const client = {
       messages: {
-        stream(input: Record<string, unknown>) {
+        create(input: Record<string, unknown>) {
           body = input
-          return {
-            async *[Symbol.asyncIterator]() {},
-            async finalMessage() {
-              return {
-                id: "msg_tool_cache",
-                stop_reason: "end_turn",
-                content: [{ type: "text", text: "ok" }],
-              }
-            },
-          }
+          return anthropicRawMessage({
+            id: "msg_tool_cache",
+            stop_reason: "end_turn",
+            content: [{ type: "text", text: "ok" }],
+          })
         },
       },
     } as unknown as Anthropic
@@ -973,19 +1037,14 @@ describe("anthropic provider conversion", () => {
     let options: Record<string, unknown> | undefined
     const client = {
       messages: {
-        stream(input: Record<string, unknown>, opts: Record<string, unknown>) {
+        create(input: Record<string, unknown>, opts: Record<string, unknown>) {
           body = input
           options = opts
-          return {
-            async *[Symbol.asyncIterator]() {},
-            async finalMessage() {
-              return {
-                id: "msg_effort",
-                stop_reason: "end_turn",
-                content: [{ type: "text", text: "ok" }],
-              }
-            },
-          }
+          return anthropicRawMessage({
+            id: "msg_effort",
+            stop_reason: "end_turn",
+            content: [{ type: "text", text: "ok" }],
+          })
         },
       },
     } as unknown as Anthropic
@@ -1012,19 +1071,14 @@ describe("anthropic provider conversion", () => {
     let options: unknown = "not-passed"
     const client = {
       messages: {
-        stream(input: Record<string, unknown>, opts?: unknown) {
+        create(input: Record<string, unknown>, opts?: unknown) {
           body = input
           options = opts ?? "not-passed"
-          return {
-            async *[Symbol.asyncIterator]() {},
-            async finalMessage() {
-              return {
-                id: "msg_no_effort",
-                stop_reason: "end_turn",
-                content: [{ type: "text", text: "ok" }],
-              }
-            },
-          }
+          return anthropicRawMessage({
+            id: "msg_no_effort",
+            stop_reason: "end_turn",
+            content: [{ type: "text", text: "ok" }],
+          })
         },
       },
     } as unknown as Anthropic
@@ -1046,19 +1100,14 @@ describe("anthropic provider conversion", () => {
     let options: Record<string, unknown> | undefined
     const client = {
       messages: {
-        stream(input: Record<string, unknown>, opts: Record<string, unknown>) {
+        create(input: Record<string, unknown>, opts: Record<string, unknown>) {
           body = input
           options = opts
-          return {
-            async *[Symbol.asyncIterator]() {},
-            async finalMessage() {
-              return {
-                id: "msg_kimi_effort",
-                stop_reason: "end_turn",
-                content: [{ type: "text", text: "ok" }],
-              }
-            },
-          }
+          return anthropicRawMessage({
+            id: "msg_kimi_effort",
+            stop_reason: "end_turn",
+            content: [{ type: "text", text: "ok" }],
+          })
         },
       },
     } as unknown as Anthropic
@@ -1092,19 +1141,14 @@ describe("anthropic provider conversion", () => {
     let options: unknown = "not-passed"
     const client = {
       messages: {
-        stream(input: Record<string, unknown>, opts?: unknown) {
+        create(input: Record<string, unknown>, opts?: unknown) {
           body = input
           options = opts ?? "not-passed"
-          return {
-            async *[Symbol.asyncIterator]() {},
-            async finalMessage() {
-              return {
-                id: "msg_kimi_plain",
-                stop_reason: "end_turn",
-                content: [{ type: "text", text: "ok" }],
-              }
-            },
-          }
+          return anthropicRawMessage({
+            id: "msg_kimi_plain",
+            stop_reason: "end_turn",
+            content: [{ type: "text", text: "ok" }],
+          })
         },
       },
     } as unknown as Anthropic
@@ -1126,19 +1170,14 @@ describe("anthropic provider conversion", () => {
     let options: unknown = "not-passed"
     const client = {
       messages: {
-        stream(input: Record<string, unknown>, opts?: unknown) {
+        create(input: Record<string, unknown>, opts?: unknown) {
           body = input
           options = opts ?? "not-passed"
-          return {
-            async *[Symbol.asyncIterator]() {},
-            async finalMessage() {
-              return {
-                id: "msg_kimi_off",
-                stop_reason: "end_turn",
-                content: [{ type: "text", text: "ok" }],
-              }
-            },
-          }
+          return anthropicRawMessage({
+            id: "msg_kimi_off",
+            stop_reason: "end_turn",
+            content: [{ type: "text", text: "ok" }],
+          })
         },
       },
     } as unknown as Anthropic
@@ -1161,19 +1200,14 @@ describe("anthropic provider conversion", () => {
     let options: unknown = "not-passed"
     const client = {
       messages: {
-        stream(input: Record<string, unknown>, opts?: unknown) {
+        create(input: Record<string, unknown>, opts?: unknown) {
           body = input
           options = opts ?? "not-passed"
-          return {
-            async *[Symbol.asyncIterator]() {},
-            async finalMessage() {
-              return {
-                id: "msg_kimi_on",
-                stop_reason: "end_turn",
-                content: [{ type: "text", text: "ok" }],
-              }
-            },
-          }
+          return anthropicRawMessage({
+            id: "msg_kimi_on",
+            stop_reason: "end_turn",
+            content: [{ type: "text", text: "ok" }],
+          })
         },
       },
     } as unknown as Anthropic
@@ -1195,19 +1229,14 @@ describe("anthropic provider conversion", () => {
     let options: unknown = "not-passed"
     const client = {
       messages: {
-        stream(input: Record<string, unknown>, opts?: unknown) {
+        create(input: Record<string, unknown>, opts?: unknown) {
           body = input
           options = opts ?? "not-passed"
-          return {
-            async *[Symbol.asyncIterator]() {},
-            async finalMessage() {
-              return {
-                id: "msg_other_effort",
-                stop_reason: "end_turn",
-                content: [{ type: "text", text: "ok" }],
-              }
-            },
-          }
+          return anthropicRawMessage({
+            id: "msg_other_effort",
+            stop_reason: "end_turn",
+            content: [{ type: "text", text: "ok" }],
+          })
         },
       },
     } as unknown as Anthropic
@@ -1363,10 +1392,20 @@ describe("anthropic provider error classification", () => {
     )
     const client = {
       messages: {
-        stream() {
+        create() {
           return (async function* () {
             yield {
+              type: "message_start",
+              message: { id: "msg_error", stop_reason: null, usage: {} },
+            }
+            yield {
+              type: "content_block_start",
+              index: 0,
+              content_block: { type: "text", text: "" },
+            }
+            yield {
               type: "content_block_delta",
+              index: 0,
               delta: { type: "text_delta", text: "par" },
             }
             throw error
@@ -1401,7 +1440,7 @@ describe("anthropic provider error classification", () => {
     const error = new TypeError("terminated", { cause: socket })
     const client = {
       messages: {
-        stream() {
+        create() {
           return {
             [Symbol.asyncIterator]() {
               return { next: () => Promise.reject(error) }
@@ -1417,11 +1456,11 @@ describe("anthropic provider error classification", () => {
       {
         type: "failure",
         failure: {
-          kind: "connection_failed",
-          stage: "connect",
+          kind: "stream_disconnected",
+          stage: "response_body",
           provider: "anthropic",
           wireApi: "anthropic_messages",
-          message: "Could not connect to the model provider.",
+          message: "The model response stream disconnected before completion.",
           details: { causeCode: "UND_ERR_SOCKET" },
         },
         cause: error,
@@ -1435,7 +1474,7 @@ async function collectWithThrowingClient(
 ): Promise<ModelStreamEvent[]> {
   const client = {
     messages: {
-      stream() {
+      create() {
         throw error
       },
     },
@@ -1466,4 +1505,29 @@ async function collectWithClient(
   const events: ModelStreamEvent[] = []
   for await (const event of stream(request)) events.push(event)
   return events
+}
+
+function anthropicRawMessage(
+  message: Parameters<typeof fromAnthropicMessage>[0],
+) {
+  return (async function* () {
+    yield {
+      type: "message_start",
+      message: {
+        id: message.id ?? "msg_fixture",
+        stop_reason: null,
+        usage: message.usage ?? {},
+      },
+    }
+    for (const [index, content_block] of message.content.entries()) {
+      yield { type: "content_block_start", index, content_block }
+      yield { type: "content_block_stop", index }
+    }
+    yield {
+      type: "message_delta",
+      delta: { stop_reason: message.stop_reason },
+      usage: { output_tokens: message.usage?.output_tokens ?? 1 },
+    }
+    yield { type: "message_stop" }
+  })()
 }

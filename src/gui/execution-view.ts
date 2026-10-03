@@ -70,7 +70,12 @@ export type ExecutionEntry =
   | {
       readonly kind: "turn_terminal"
       readonly turnId: string
-      readonly state: "failed" | "cancelled" | "interrupted"
+      readonly state:
+        | "failed"
+        | "cancelled"
+        | "interrupted"
+        | "truncated"
+        | "refused"
       readonly message: string
     }
 
@@ -128,6 +133,7 @@ export type TurnTiming = Readonly<{
   inputId?: string
   startedAt?: string
   completedAt?: string
+  outcome?: TurnOutcome
 }>
 
 // Latest model-reported context window sample. `capacityTokens` is the
@@ -843,7 +849,17 @@ function finishTurn(
       }
       return entry
     })
-  if (outcome.status !== "completed") {
+  if (outcome.status === "completed" && outcome.reason !== undefined) {
+    entries.push({
+      kind: "turn_terminal",
+      turnId,
+      state: outcome.reason,
+      message:
+        outcome.reason === "truncated"
+          ? "The response reached a generation limit. You can ask to continue."
+          : "The response was stopped by a content restriction.",
+    })
+  } else if (outcome.status !== "completed") {
     entries.push({
       kind: "turn_terminal",
       turnId,
@@ -863,7 +879,7 @@ function finishTurn(
     ...indexEntries(entries),
     turnTimings: {
       ...state.turnTimings,
-      [turnId]: { ...state.turnTimings[turnId], completedAt },
+      [turnId]: { ...state.turnTimings[turnId], completedAt, outcome },
     },
     ...(state.activeTurnId === turnId
       ? { activeTurnId: undefined, activeTurnStartedAt: undefined }

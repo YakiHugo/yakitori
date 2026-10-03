@@ -463,6 +463,7 @@ async function setup(fixtures: Record<string, ModelFixture>, stream: StreamFn) {
                   contextWindowTokens: fixture.window,
                   maxContextWindowTokens: fixture.window,
                   effectiveContextWindowPercent: 100,
+                  contextWindowScope: "input",
                 }
               },
             },

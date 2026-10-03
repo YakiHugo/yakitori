@@ -15,13 +15,16 @@ import {
   type SessionExecutionPolicy,
 } from "./limits.ts"
 import {
-  catalogContextWindowTokens,
   catalogModelCapacity,
   type ResolvedModel,
   resolveModel,
   validateModelSelection,
 } from "./model-catalog.ts"
-import type { ModelSystemSection, ModelTarget } from "./model.ts"
+import {
+  type ModelSystemSection,
+  type ModelTarget,
+  resolveModelRequestMaxOutputTokens,
+} from "./model.ts"
 import type { ModelRequestPolicy } from "./model-request.ts"
 import type { ModelsManager } from "./models-manager.ts"
 import { getModelInstructions } from "./prompt-registry.ts"
@@ -42,11 +45,14 @@ export type ResolvedModelCapacity = Readonly<{
   maxContextWindowTokens: number
   effectiveContextWindowPercent: number
   effectiveContextWindowTokens: number
+  contextWindowScope: "input" | "total"
+  inputContextLimitTokens: number
 }>
 
 export type ResolvedStepConfiguration = Readonly<{
   target: ModelTarget
   modelInfo: ResolvedModel
+  maxOutputTokens?: number
   promptCacheKey: string
   baseInstructions: ModelSystemSection
   modelInstructions: ModelSystemSection
@@ -171,9 +177,21 @@ export class SessionConfiguration {
       models,
     )
     const prompt = getModelInstructions(model)
+    const requestedOutputTokens = resolveModelRequestMaxOutputTokens(
+      model.provider,
+      model.defaultOutputTokens,
+    )
+    const maxOutputTokens =
+      requestedOutputTokens === undefined
+        ? undefined
+        : Math.min(
+            requestedOutputTokens,
+            model.maxOutputTokens ?? Number.POSITIVE_INFINITY,
+          )
     const modelCapacity = resolveModelCapacity(
       model,
       this.snapshot.modelContextWindowTokens,
+      maxOutputTokens,
       models,
     )
     return {
@@ -185,6 +203,7 @@ export class SessionConfiguration {
         ...(selection.speed === undefined ? {} : { speed: selection.speed }),
       },
       modelInfo: model,
+      ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
       promptCacheKey: this.snapshot.promptCacheKey,
       baseInstructions: {
         id: "base.instructions",
@@ -330,14 +349,13 @@ export function createTurnContext(input: {
 function resolveModelCapacity(
   model: { readonly provider: string; readonly model: string },
   override: number | undefined,
+  maxOutputTokens: number | undefined,
   models?: ModelsManager,
 ): ResolvedModelCapacity | undefined {
   const catalogCapacity =
     models === undefined ? catalogModelCapacity(model) : models.capacity(model)
-  const catalogWindow =
-    models === undefined ? catalogContextWindowTokens(model) : undefined
   const defaultContextWindowTokens =
-    catalogCapacity?.contextWindowTokens ?? catalogWindow ?? override
+    catalogCapacity?.contextWindowTokens ?? override
   if (defaultContextWindowTokens === undefined) return undefined
   const maxContextWindowTokens =
     catalogCapacity?.maxContextWindowTokens ??
@@ -345,14 +363,32 @@ function resolveModelCapacity(
   const contextWindowTokens = override ?? defaultContextWindowTokens
   const effectiveContextWindowPercent =
     catalogCapacity?.effectiveContextWindowPercent ?? 100
+  const effectiveContextWindowTokens = Math.floor(
+    (contextWindowTokens * effectiveContextWindowPercent) / 100,
+  )
+  const contextWindowScope =
+    // An override for an unknown model retains its existing input-budget
+    // meaning; no provider capability establishes a combined token window.
+    catalogCapacity?.contextWindowScope ?? "input"
   return {
     defaultContextWindowTokens,
     contextWindowTokens,
     maxContextWindowTokens,
     effectiveContextWindowPercent,
-    effectiveContextWindowTokens: Math.floor(
-      (contextWindowTokens * effectiveContextWindowPercent) / 100,
-    ),
+    effectiveContextWindowTokens,
+    contextWindowScope,
+    // A percentage may already leave enough headroom. Reserve output against
+    // the total window, then intersect with the effective input capacity.
+    inputContextLimitTokens:
+      contextWindowScope === "input"
+        ? effectiveContextWindowTokens
+        : Math.max(
+            0,
+            Math.min(
+              effectiveContextWindowTokens,
+              contextWindowTokens - (maxOutputTokens ?? 0),
+            ),
+          ),
   }
 }
 

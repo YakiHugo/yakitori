@@ -619,7 +619,7 @@ describe("application composition", () => {
             params: expect.objectContaining({
               type: "turn.finished",
               sessionId: childSessionId,
-              outcome: { status: "completed" },
+              outcome: expect.objectContaining({ status: "completed" }),
             }),
           }),
         )
@@ -661,7 +661,7 @@ describe("application composition", () => {
               type: "turn.finished",
               sessionId: rootSessionId,
               turnId: "request_root_still_subscribed",
-              outcome: { status: "completed" },
+              outcome: expect.objectContaining({ status: "completed" }),
             }),
           }),
         )
@@ -858,7 +858,7 @@ describe("application composition", () => {
               params: expect.objectContaining({
                 sessionId: childSessionId,
                 type: "turn.finished",
-                outcome: { status: "completed" },
+                outcome: expect.objectContaining({ status: "completed" }),
               }),
             })
           expect(frames).toContainEqual({

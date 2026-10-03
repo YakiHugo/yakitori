@@ -1531,6 +1531,96 @@ describe("JsonlThreadStore", () => {
     expect(repaired.unavailableThreadCount).toBeUndefined()
   })
 
+  it.each([
+    { outcome: "completed", completion: { reason: "unknown" } },
+    {
+      outcome: "completed",
+      completion: { answerItemIds: ["duplicate", "duplicate"] },
+    },
+    { outcome: "failed", completion: { reason: "truncated" } },
+  ])("rejects invalid durable completion metadata $outcome $completion", async (invalid) => {
+    const { root, store } = await createStore()
+    const threadId = "thread_invalid_completion"
+    await createPersistentThread(store, metadata(threadId))
+    await store.appendItems(threadId, [terminal("turn_invalid")])
+    await store.shutdownThread(threadId)
+    const path = join(root, "rollouts", threadId, "rollout.jsonl")
+    const lines = (await readFile(path, "utf8")).trimEnd().split("\n")
+    const terminalRecord = JSON.parse(lines.pop() ?? "null") as {
+      item: Record<string, unknown>
+    }
+    terminalRecord.item = { ...terminalRecord.item, ...invalid }
+    lines.push(JSON.stringify(terminalRecord))
+    await writeFile(path, `${lines.join("\n")}\n`)
+    const reader = new JsonlThreadStore({ root })
+    await expect(reader.readThread(threadId)).rejects.toThrow(
+      "contains an invalid item",
+    )
+  })
+
+  it("preserves completion metadata and indexes a continued answer across append and restart", async () => {
+    const { root, store } = await createStore()
+    const threadId = "thread_continued_answer"
+    await createPersistentThread(store, metadata(threadId))
+    const assistant = (id: string, text: string): RolloutItem => ({
+      type: "response_item",
+      item: {
+        id,
+        turnId: "turn_chain",
+        createdAt: "2026-10-02T00:00:00.000Z",
+        item: { role: "assistant", content: [{ type: "text", text }] },
+      },
+    })
+    await store.appendItems(threadId, [assistant("piece_one", "**Con")])
+    await store.appendItems(threadId, [
+      assistant("piece_two", "tinuation**"),
+      {
+        type: "turn_completed",
+        turnId: "turn_chain",
+        outcome: "completed",
+        completion: {
+          reason: "truncated",
+          answerItemIds: ["piece_one", "piece_two"],
+        },
+      },
+    ])
+    const expected = {
+      occurrences: [
+        {
+          turnId: "turn_chain",
+          itemId: "piece_two",
+          snippet: "Continuation",
+          snippetMatchRange: { start: 0, end: 12 },
+        },
+      ],
+    }
+    await expect(
+      store.searchThreadOccurrences({
+        threadId,
+        searchTerm: "Continuation",
+        limit: 10,
+      }),
+    ).resolves.toMatchObject(expected)
+    await store.shutdownThread(threadId)
+    const restarted = new JsonlThreadStore({ root })
+    expect(
+      (await restarted.readThread(threadId))?.rollout.at(-1)?.item,
+    ).toMatchObject({
+      outcome: "completed",
+      completion: {
+        reason: "truncated",
+        answerItemIds: ["piece_one", "piece_two"],
+      },
+    })
+    await expect(
+      restarted.searchThreadOccurrences({
+        threadId,
+        searchTerm: "Continuation",
+        limit: 10,
+      }),
+    ).resolves.toMatchObject(expected)
+  })
+
   it("persists and incrementally pages the visible-history search projection", async () => {
     const { root, store } = await createStore()
     await createPersistentThread(store, metadata("thread_search_projection"))

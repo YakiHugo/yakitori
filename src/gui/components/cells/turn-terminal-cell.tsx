@@ -22,7 +22,10 @@ export function TurnTerminalCell({
     >
       <Icon className="size-4 shrink-0" />
       <span>
-        Turn {entry.state} — {entry.message}
+        {entry.state === "truncated" || entry.state === "refused"
+          ? "Response"
+          : "Turn"}{" "}
+        {entry.state} — {entry.message}
       </span>
     </div>
   )

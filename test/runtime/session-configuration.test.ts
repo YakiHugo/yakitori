@@ -19,6 +19,148 @@ function resolveSessionConfiguration(
 }
 
 describe("session configuration", () => {
+  it.each([
+    { model: "claude-sonnet-4-6", window: 1_000_000, outputCap: 128_000 },
+    { model: "claude-opus-4-6", window: 1_000_000, outputCap: 128_000 },
+    { model: "claude-haiku-4-5", window: 200_000, outputCap: 64_000 },
+  ])("resolves $model's request budget and partial catalog capacity through its manager", ({
+    model,
+    window,
+    outputCap,
+  }) => {
+    const models = createStaticModelsManager("anthropic")
+    const selection = { provider: "anthropic", model }
+    const session = SessionConfiguration.create(
+      {
+        selection,
+        workspaceRoot: "/workspace",
+        enabledTools: [],
+        approvalPolicy: "always_approve",
+        promptCacheKey: "session-cache",
+      },
+      models,
+    )
+    const step = session.resolveStep(selection, models)
+    expect(step.modelInfo).toMatchObject({
+      defaultOutputTokens: 32_000,
+      maxOutputTokens: outputCap,
+    })
+    expect(step.maxOutputTokens).toBe(32_000)
+    expect(step.modelCapacity).toMatchObject({
+      contextWindowTokens: window,
+      maxContextWindowTokens: window,
+      effectiveContextWindowPercent: 100,
+      contextWindowScope: "total",
+      inputContextLimitTokens: window - 32_000,
+    })
+    expect(step.autoCompact.limitTokens).toBe(
+      window === 200_000 ? 180_000 : 900_000,
+    )
+  })
+
+  it("clamps the requested default to the model output capability without double-reserving context headroom", () => {
+    const base = createStaticModelsManager("faux")
+    const models = {
+      ...base,
+      resolve(selection: Parameters<typeof base.resolve>[0]) {
+        return {
+          ...base.resolve(selection),
+          ...(selection.model === "cap-only"
+            ? {}
+            : { defaultOutputTokens: 32_000 }),
+          maxOutputTokens: selection.model === "small-output" ? 8_000 : 16_000,
+        }
+      },
+      capacity() {
+        return {
+          contextWindowTokens: 100_000,
+          maxContextWindowTokens: 100_000,
+          effectiveContextWindowPercent: 90,
+          contextWindowScope: "total" as const,
+        }
+      },
+    }
+    const selection = { provider: "faux", model: "small-output" }
+    const session = SessionConfiguration.create(
+      {
+        selection,
+        workspaceRoot: "/workspace",
+        enabledTools: [],
+        approvalPolicy: "always_approve",
+        promptCacheKey: "session-cache",
+      },
+      models,
+    )
+    const small = session.resolveStep(selection, models)
+    expect(small.maxOutputTokens).toBe(8_000)
+    expect(small.modelCapacity?.inputContextLimitTokens).toBe(90_000)
+    const larger = session.resolveStep(
+      { provider: "faux", model: "larger-output" },
+      models,
+    )
+    expect(larger.maxOutputTokens).toBe(16_000)
+    expect(larger.modelCapacity?.inputContextLimitTokens).toBe(84_000)
+    expect(small.maxOutputTokens).toBe(8_000)
+    const capOnly = session.resolveStep(
+      { provider: "faux", model: "cap-only" },
+      models,
+    )
+    expect(capOnly.modelInfo.maxOutputTokens).toBe(16_000)
+    expect(capOnly.maxOutputTokens).toBeUndefined()
+    expect(capOnly.modelCapacity?.inputContextLimitTokens).toBe(90_000)
+  })
+
+  it.each([
+    { provider: "openai", model: "gpt-6-sol", inputCapacity: 100 },
+    { provider: "openai", model: "unknown-openai", inputCapacity: 100 },
+    { provider: "grok", model: "grok-4.7", inputCapacity: 100 },
+    { provider: "grok", model: "unknown-grok", inputCapacity: 100 },
+    { provider: "codex", model: "gpt-6-sol", inputCapacity: 95 },
+    { provider: "codex", model: "unknown-codex", inputCapacity: 100 },
+    { provider: "faux", model: "scripted", inputCapacity: 100 },
+  ])("leaves $provider/$model's optional output budget unset and preserves the configured input capacity", ({
+    provider,
+    model,
+    inputCapacity,
+  }) => {
+    const configuration = resolveSessionConfiguration({
+      selection: { provider, model },
+      workspaceRoot: "/workspace",
+      enabledTools: [],
+      approvalPolicy: "always_approve",
+      modelContextWindowTokens: 100,
+    })
+    expect(configuration).not.toHaveProperty("maxOutputTokens")
+    expect(configuration.modelInfo.maxOutputTokens).toBeUndefined()
+    expect(configuration.modelCapacity).toMatchObject({
+      inputContextLimitTokens: inputCapacity,
+    })
+  })
+
+  it.each([
+    { provider: "anthropic", model: "unknown-claude" },
+    { provider: "kimi", model: "k3" },
+    { provider: "kimi", model: "unknown-kimi" },
+  ])("requests the application Messages budget for $provider/$model without inventing a model capability", ({
+    provider,
+    model,
+  }) => {
+    const configuration = resolveSessionConfiguration({
+      selection: { provider, model },
+      workspaceRoot: "/workspace",
+      enabledTools: [],
+      approvalPolicy: "always_approve",
+    })
+    expect(configuration.maxOutputTokens).toBe(32_000)
+    expect(configuration.modelInfo.defaultOutputTokens).toBeUndefined()
+    expect(configuration.modelInfo.maxOutputTokens).toBeUndefined()
+    if (model === "k3") {
+      expect(configuration.modelCapacity?.inputContextLimitTokens).toBe(
+        1_016_576,
+      )
+    }
+  })
+
   it("resolves provider transport overrides from the persisted Turn snapshot", () => {
     const session = SessionConfiguration.create({
       promptCacheKey: "session-cache",
@@ -146,6 +288,8 @@ describe("session configuration", () => {
       maxContextWindowTokens: 872_000,
       effectiveContextWindowPercent: 95,
       effectiveContextWindowTokens: 258_400,
+      contextWindowScope: "input",
+      inputContextLimitTokens: 258_400,
     })
     expect(configuration.autoCompact).toEqual({
       limitTokens: 244_800,

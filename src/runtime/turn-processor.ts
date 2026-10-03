@@ -1,5 +1,6 @@
 import type { ResponseItemEnvelope, TurnContextItem } from "../core/rollout.ts"
 import type {
+  TurnCompletion,
   TurnControl,
   TurnProcessor,
   TurnRuntime,
@@ -103,6 +104,16 @@ import {
   diffWorldState,
   type WorldState,
 } from "./world-state.ts"
+
+// Follow grok-build's bounded Length salvage, enabled by default in Yakitori.
+// Ordinary ToolUse loops remain unbounded. Unlike grok's adapters, Yakitori
+// retains Length alongside complete calls across providers, so its tool streak
+// guard also covers paths grok normalizes to ToolUse. Stop before another sample
+// can stream more tool effects. These are recovery safety bounds, not quotas.
+const MAX_LENGTH_CONTINUATIONS = 2
+const MAX_LENGTH_TOOL_STREAK = 5
+const LENGTH_CONTINUE_REMINDER =
+  "Your previous answer was cut off by a generation limit. Continue exactly where it stopped, without repeating it. If a newer user message follows this reminder, answer that message instead."
 
 export type TurnProcessorOptions = {
   readonly modelClient?: ModelClient
@@ -448,7 +459,7 @@ async function executeTurn(input: {
   readonly setCloseModelSession: (
     close: (() => Promise<void>) | undefined,
   ) => void
-}): Promise<void> {
+}): Promise<TurnCompletion | undefined> {
   const metadata = input.runtime.snapshot().metadata
   const models = input.options.modelClient?.models(
     input.context.selection.provider,
@@ -513,7 +524,7 @@ async function executeTurn(input: {
     return true
   }
   try {
-    await executeTurnModelLoop(
+    return await executeTurnModelLoop(
       input,
       turn,
       stream,
@@ -555,7 +566,7 @@ async function executeTurnModelLoop(
   stream: StreamFn,
   remoteCompaction: boolean,
   admitInitialInput: () => Promise<boolean>,
-): Promise<void> {
+): Promise<TurnCompletion | undefined> {
   const metadata = input.runtime.snapshot().metadata
   const usages: ModelUsage[] = []
   let modelCalls = 0
@@ -565,6 +576,28 @@ async function executeTurnModelLoop(
   let toolDurationMs = 0
   let timeToFirstTokenTotalMs = 0
   let timeToFirstTokenSamples = 0
+  let lengthContinuations = 0
+  let lengthToolStreak = 0
+  let continuingAnswer = false
+  let continuationReminderNeeded = true
+  let continuationNeedsCompaction = false
+  const answerItemIds: string[] = []
+  const finish = (reason?: TurnCompletion["reason"]): TurnCompletion => {
+    input.runtime.recordTurnMetrics({
+      modelCalls: modelCalls + compactionModelCalls,
+      toolCalls,
+      modelDurationMs,
+      toolDurationMs,
+      ...(timeToFirstTokenSamples === 0
+        ? {}
+        : {
+            averageTimeToFirstTokenMs: Math.round(
+              timeToFirstTokenTotalMs / timeToFirstTokenSamples,
+            ),
+          }),
+    })
+    return { answerItemIds: [...answerItemIds], ...(reason ? { reason } : {}) }
+  }
   const onCompactionModelTiming = (
     durationMs: number,
     timeToFirstTokenMs: number | undefined,
@@ -587,6 +620,7 @@ async function executeTurnModelLoop(
     const pendingTools: Promise<PromiseSettledResult<void>>[] = []
     try {
       throwIfAborted(input.signal)
+      if (!continuingAnswer) answerItemIds.length = 0
       const budget = input.options.agentControl?.rolloutBudget
       budget?.assertAvailable()
       const reminder = budget?.pendingReminder(metadata.id)
@@ -882,7 +916,10 @@ async function executeTurnModelLoop(
           continue
         }
       }
-      if (admission.shouldCompact && compactedAtModelCall !== modelCalls) {
+      if (
+        (admission.shouldCompact || continuationNeedsCompaction) &&
+        compactedAtModelCall !== modelCalls
+      ) {
         const compacted = await compactLiveHistory({
           runtime: input.runtime,
           turnId: input.input.submissionId,
@@ -905,18 +942,62 @@ async function executeTurnModelLoop(
         })
         if (compacted) {
           compactedAtModelCall = modelCalls
+          continuationNeedsCompaction = false
+          // The previous reminder may have been replaced by the checkpoint.
+          continuationReminderNeeded = true
           continue
         }
-        throw new Error(
-          "Context limit reached with no history available to compact.",
-        )
+        if (continuingAnswer && answerItemIds.length > 0) {
+          if (pendingSteering.length === 0) {
+            const completion = input.control.takeSteeringOrComplete()
+            if (completion.type === "complete") return finish("truncated")
+            pendingSteering.push(...completion.inputs)
+          }
+          continuationNeedsCompaction = false
+          continuingAnswer = false
+        } else {
+          throw new Error(
+            "Context limit reached with no history available to compact.",
+          )
+        }
+      }
+      if (
+        continuingAnswer &&
+        pendingSteering.length === 0 &&
+        admission.shouldCompact &&
+        compactedAtModelCall === modelCalls
+      ) {
+        const completion = input.control.takeSteeringOrComplete()
+        if (completion.type === "steering") {
+          pendingSteering.push(...completion.inputs)
+          continuingAnswer = false
+          continue
+        }
+        return finish("truncated")
       }
       if (modelCalls === 0 && !input.input.manualCompact) {
         if (!(await admitInitialInput())) return
       }
-      pendingSkillInputs.push(
-        ...(await recordSteering(input, pendingSteering.splice(0))),
+      const acceptedSteering = await recordSteering(
+        input,
+        pendingSteering.splice(0),
       )
+      pendingSkillInputs.push(...acceptedSteering)
+      if (acceptedSteering.length > 0) {
+        answerItemIds.length = 0
+        continuingAnswer = false
+        continuationReminderNeeded = true
+        continuationNeedsCompaction = false
+      }
+      if (continuingAnswer && continuationReminderNeeded) {
+        await input.runtime.recordConversationItems([
+          envelope(input.input.submissionId, {
+            role: "developer",
+            content: [{ type: "text", text: LENGTH_CONTINUE_REMINDER }],
+          }),
+        ])
+        continuationReminderNeeded = false
+      }
       for (const submitted of pendingSkillInputs.splice(0)) {
         const alreadyLoaded = input.runtime
           .snapshot()
@@ -1038,6 +1119,9 @@ async function executeTurnModelLoop(
         ),
         tools: toolPlan.modelDefinitions,
         toolWireProtocol: step.toolWireProtocol,
+        ...(configuration.maxOutputTokens === undefined
+          ? {}
+          : { maxOutputTokens: configuration.maxOutputTokens }),
         signal: input.signal,
       }
       if (modelCalls === 0) {
@@ -1052,6 +1136,27 @@ async function executeTurnModelLoop(
       let responseItemId = `message_${globalThis.crypto.randomUUID()}`
       const estimatedInputTokens =
         estimateModelRequestBudget(request).estimatedInputTokens
+      const inputLimit = configuration.modelCapacity?.inputContextLimitTokens
+      // Recovery must also fit newly injected instructions and tool schemas.
+      // Fresh user requests retain provider admission; a continuation must not
+      // repeatedly spend its budget on a request we already know cannot fit.
+      if (
+        continuingAnswer &&
+        inputLimit !== undefined &&
+        estimatedInputTokens >= inputLimit
+      ) {
+        if (compactedAtModelCall !== modelCalls) {
+          continuationNeedsCompaction = true
+          continue
+        }
+        const completion = input.control.takeSteeringOrComplete()
+        if (completion.type === "steering") {
+          pendingSteering.push(...completion.inputs)
+          continuingAnswer = false
+          continue
+        }
+        return finish("truncated")
+      }
       let sampledContext:
         | Readonly<{
             activeContextTokens: number
@@ -1191,6 +1296,7 @@ async function executeTurnModelLoop(
       const committedContent: ModelContentBlock[] = []
       const committedCallIds = new Set<string>()
       let committedBytes = 0
+      let answerStartIndex = answerItemIds.length
       const recordOutput = async (
         content: readonly ModelContentBlock[],
         itemId: string,
@@ -1211,6 +1317,17 @@ async function executeTurnModelLoop(
         )
         await input.runtime.recordConversationItems([item])
         await input.runtime.recordItemCompletions(completedResponseItems(item))
+        if (content.some((block) => block.type === "tool_call")) {
+          answerItemIds.length = 0
+          answerStartIndex = 0
+          continuationReminderNeeded = true
+        } else if (
+          content.some(
+            (block) => block.type === "text" && block.text.length > 0,
+          )
+        ) {
+          answerItemIds.push(item.id)
+        }
       }
       const response = await consumeModelStream({
         request,
@@ -1254,6 +1371,12 @@ async function executeTurnModelLoop(
         onRetry(committed) {
           input.runtime.invalidateRequestStartedAt()
           if (committed) {
+            // A transport retry starts another attempt, not a Length answer
+            // fragment. Earlier Length continuations still belong to the answer.
+            answerItemIds.length = Math.min(
+              answerItemIds.length,
+              answerStartIndex,
+            )
             committedContent.length = 0
             committedBytes = 0
             sampledContext = undefined
@@ -1292,9 +1415,6 @@ async function executeTurnModelLoop(
       }
       throwIfAborted(input.signal)
 
-      if (response.stopReason === ModelStopReason.Length) {
-        throw new Error("Model response was truncated by length.")
-      }
       const calls = response.content.filter(
         (block): block is ModelToolCallBlock => block.type === "tool_call",
       )
@@ -1309,8 +1429,20 @@ async function executeTurnModelLoop(
           "tool_use stop reason requires at least one complete tool call.",
         )
       }
-      if (response.stopReason !== ModelStopReason.ToolUse && calls.length > 0) {
+      if (
+        response.stopReason !== ModelStopReason.ToolUse &&
+        response.stopReason !== ModelStopReason.Length &&
+        calls.length > 0
+      ) {
         throw new Error("Non-tool_use responses must not include tool calls.")
+      }
+      if (
+        response.stopReason !== ModelStopReason.EndTurn &&
+        response.stopReason !== ModelStopReason.ToolUse &&
+        response.stopReason !== ModelStopReason.Length &&
+        response.stopReason !== ModelStopReason.ContentFilter
+      ) {
+        throw new Error("Model response has an unsupported stop reason.")
       }
       if (
         utf8Bytes(JSON.stringify(response.content)) >
@@ -1364,6 +1496,17 @@ async function executeTurnModelLoop(
           })
         }
       }
+      if (
+        response.incompleteToolCalls &&
+        response.stopReason !== ModelStopReason.ContentFilter
+      ) {
+        // Complete streamed calls may already have run. Preserve their results,
+        // but never start any additional calls from an incomplete terminal batch.
+        throw new Error("Model response contained an incomplete tool call.")
+      }
+      const lengthStopped = response.stopReason === ModelStopReason.Length
+      lengthToolStreak =
+        lengthStopped && calls.length > 0 ? lengthToolStreak + 1 : 0
       startCalls(
         remaining.filter(
           (block): block is ModelToolCallBlock => block.type === "tool_call",
@@ -1374,15 +1517,63 @@ async function executeTurnModelLoop(
         if (outcome.status === "rejected") throw outcome.reason
       }
 
-      if (response.stopReason === ModelStopReason.ToolUse) {
+      if (calls.length > 0) {
+        // Stop before another request can start early streamed tools. Both
+        // streamed and terminal-only providers execute the same bounded streak.
+        if (lengthToolStreak >= MAX_LENGTH_TOOL_STREAK) {
+          throw new Error(
+            "Model repeatedly hit its generation limit during tool calls.",
+          )
+        }
+        answerItemIds.length = 0
+        continuingAnswer = false
+        continuationReminderNeeded = true
         continue
       }
+
+      let reason: TurnCompletion["reason"]
+      if (lengthStopped) {
+        const hasText = response.content.some(
+          (block) => block.type === "text" && block.text.trim().length > 0,
+        )
+        if (!hasText && (!continuingAnswer || answerItemIds.length === 0)) {
+          throw new Error("Model response was truncated without usable text.")
+        }
+        if (hasText && lengthContinuations < MAX_LENGTH_CONTINUATIONS) {
+          lengthContinuations += 1
+          continuingAnswer = true
+          continuationNeedsCompaction = response.lengthReason === "context"
+          input.runtime.emitWarning(
+            `Model answer reached its generation limit; continuing (${lengthContinuations}/${MAX_LENGTH_CONTINUATIONS}).`,
+            {
+              code: "model_length_continuation",
+              message: "Continuing a partial model answer.",
+              details: {
+                provider: step.target.provider,
+                model: step.target.model,
+                maxOutputTokens: request.maxOutputTokens ?? null,
+                stopReason: response.rawStopReason ?? response.stopReason,
+                lengthReason: response.lengthReason ?? "unknown",
+                inputTokens: response.usage?.inputTokens ?? null,
+                outputTokens: response.usage?.outputTokens ?? null,
+                continuation: lengthContinuations,
+              },
+            },
+          )
+          continue
+        }
+        reason = "truncated"
+      } else if (response.stopReason === ModelStopReason.ContentFilter) {
+        reason = "refused"
+      }
+      continuingAnswer = false
 
       const completion = input.control.takeSteeringOrComplete()
       if (completion.type === "steering") {
         pendingSteering.push(...completion.inputs)
         continue
       }
+      if (reason !== undefined) return finish(reason)
       const stopHook = await input.options.hookRunner?.run({
         event:
           input.options.sessionHookContext?.isSubagent === true
@@ -1400,6 +1591,8 @@ async function executeTurnModelLoop(
           ...(stopHook.additionalContext ?? []),
           stopHook.reason ?? "Stop hook requested another model step.",
         ])
+        answerItemIds.length = 0
+        continuationReminderNeeded = true
         continue
       }
       await recordHookContext(
@@ -1407,20 +1600,7 @@ async function executeTurnModelLoop(
         input.input.submissionId,
         stopHook?.additionalContext ?? [],
       )
-      input.runtime.recordTurnMetrics({
-        modelCalls: modelCalls + compactionModelCalls,
-        toolCalls,
-        modelDurationMs,
-        toolDurationMs,
-        ...(timeToFirstTokenSamples === 0
-          ? {}
-          : {
-              averageTimeToFirstTokenMs: Math.round(
-                timeToFirstTokenTotalMs / timeToFirstTokenSamples,
-              ),
-            }),
-      })
-      return
+      return finish()
     } catch (error) {
       if (
         modelCalls === 0 &&
@@ -1655,7 +1835,7 @@ function assessModelRequest(input: {
     ? (anchoredTokens ?? estimatedHistoryTokens)
     : Math.max(estimatedHistoryTokens, anchoredTokens ?? 0)
   const fullContextLimit =
-    input.step.configuration.modelCapacity?.effectiveContextWindowTokens
+    input.step.configuration.modelCapacity?.inputContextLimitTokens
   const scopeTokens =
     input.step.configuration.autoCompact.scope === "body_after_prefix"
       ? baselineMatches && input.autoCompactPrefillTokens !== undefined
@@ -1773,7 +1953,16 @@ async function compactLiveHistory(
         firstTokenAt === undefined ? undefined : firstTokenAt - modelStartedAt,
       )
       if (response.stopReason === ModelStopReason.Length) {
-        throw new Error("Compaction was truncated by the model output limit.")
+        // Provider-owned streams retry truncated compaction before returning.
+        // Keep the replacement guard for directly injected ModelClients too.
+        throw new Error("Compaction was truncated by a generation limit.")
+      }
+      if (
+        response.stopReason !== ModelStopReason.EndTurn ||
+        response.incompleteToolCalls ||
+        response.content.some((block) => block.type === "tool_call")
+      ) {
+        throw new Error("Compaction did not produce a complete summary.")
       }
       const nativeItems = response.content.filter(
         (block) => block.type === "compaction",
@@ -1840,6 +2029,12 @@ async function compactLiveHistory(
                 target: compactionStep.target,
                 baseInstructions: compactionStep.configuration.baseInstructions,
                 cacheKey: compactionStep.configuration.promptCacheKey,
+                ...(compactionStep.configuration.maxOutputTokens === undefined
+                  ? {}
+                  : {
+                      maxOutputTokens:
+                        compactionStep.configuration.maxOutputTokens,
+                    }),
                 signal: input.signal,
               }),
         )

@@ -156,17 +156,60 @@ function ChildTrace({
               ? "Failed"
               : latestTerminal.state === "cancelled"
                 ? "Cancelled"
-                : "Interrupted"
+                : latestTerminal.state === "truncated"
+                  ? "Completed · truncated"
+                  : latestTerminal.state === "refused"
+                    ? "Completed · refused"
+                    : "Interrupted"
             : Object.values(view.turnTimings).some((turn) => turn.completedAt)
               ? "Completed"
               : "Idle"
   const blocks = useMemo(() => {
+    const assistants = new Map(
+      view.entries.flatMap((entry) =>
+        entry.kind === "assistant" ? [[entry.itemId, entry] as const] : [],
+      ),
+    )
+    const answers = new Map<
+      string,
+      {
+        itemIds: readonly string[]
+        entry: Extract<ExecutionEntry, { kind: "assistant" }>
+      }
+    >()
+    for (const [turnId, timing] of Object.entries(view.turnTimings)) {
+      if (
+        timing.completedAt === undefined ||
+        timing.outcome?.status !== "completed" ||
+        timing.outcome.answerItemIds === undefined ||
+        view.activeTurnId === turnId
+      )
+        continue
+      const itemIds = timing.outcome.answerItemIds
+      const pieces = itemIds.flatMap((itemId) => {
+        const entry = assistants.get(itemId)
+        return entry?.turnId === turnId ? [entry] : []
+      })
+      const last = pieces.at(-1)
+      if (last === undefined || pieces.length !== itemIds.length) continue
+      answers.set(turnId, {
+        itemIds,
+        entry: { ...last, text: pieces.map((entry) => entry.text).join("") },
+      })
+    }
+    const entries = view.entries.flatMap<ExecutionEntry>((entry) => {
+      if (entry.kind !== "assistant") return [entry]
+      const answer = answers.get(entry.turnId)
+      if (answer === undefined || !answer.itemIds.includes(entry.itemId))
+        return [entry]
+      return entry.itemId === answer.entry.itemId ? [answer.entry] : []
+    })
     const result: {
       key: string
       activity: boolean
       entries: ExecutionEntry[]
     }[] = []
-    for (const entry of view.entries) {
+    for (const entry of entries) {
       const activity =
         (entry.kind === "tool" &&
           entry.execution.type !== "collaboration_tool_call" &&
@@ -180,7 +223,7 @@ function ChildTrace({
         result.push({ key: traceEntryKey(entry), activity, entries: [entry] })
     }
     return result
-  }, [view.entries])
+  }, [view.entries, view.turnTimings, view.activeTurnId])
   const renderEntry = (entry: ExecutionEntry) => (
     <TraceEntry
       key={traceEntryKey(entry)}
