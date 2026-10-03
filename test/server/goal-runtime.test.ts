@@ -519,6 +519,58 @@ describe("goal runtime", () => {
     })
   })
 
+  it("preserves the partial answer and blocks after output recovery is exhausted", async () => {
+    const first = step({
+      stopReason: "length",
+      content: [{ type: "text", text: "One" }],
+    })
+    const second = step({
+      stopReason: "length",
+      content: [{ type: "text", text: " two" }],
+    })
+    const last = step({
+      stopReason: "length",
+      content: [{ type: "text", text: " three" }],
+    })
+    const provider = script(first, second, last)
+    const { application } = await app(provider.stream)
+    const sessionId = await createSession(application)
+    body(
+      await application.handlers.setGoal({
+        sessionId,
+        objective: "Produce the requested answer",
+      }),
+    )
+    await last.entered.promise
+    await idle(application, sessionId)
+    expect((await readGoal(application, sessionId))?.status).toBe("blocked")
+    expect(provider.requests).toHaveLength(3)
+    const stored = await application.threadStore.readThread(sessionId)
+    expect(
+      stored?.rollout.filter(({ item }) => item.type === "turn_started"),
+    ).toHaveLength(1)
+    const completed = stored?.rollout.find(
+      ({ item }) => item.type === "turn_completed",
+    )?.item
+    expect(completed).toMatchObject({
+      type: "turn_completed",
+      outcome: "completed",
+      completion: { reason: "truncated" },
+    })
+    expect(
+      stored?.rollout.flatMap(({ item }) =>
+        item.type === "response_item" && item.item.item.role === "assistant"
+          ? item.item.item.content.flatMap((part) =>
+              part.type === "text" ? [part.text] : [],
+            )
+          : [],
+      ),
+    ).toEqual(["One", " two", " three"])
+    expect(
+      application.threadManager.getThread(sessionId)?.agentStatus,
+    ).toMatchObject({ completed: "One two three", reason: "truncated" })
+  })
+
   it("accepts completion established by the finishing turn after the budget is spent", async () => {
     const wrap = step(final("Finished within the last turn"))
     const provider = script(

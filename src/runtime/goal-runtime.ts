@@ -388,7 +388,12 @@ export class GoalRuntime implements GoalToolService {
           ...task,
           completion: task.completion
             .then((completion) => {
-              if (!control.signal.aborted && completion?.reason === "refused")
+              // A new goal turn must not reset the processor's recovery stop.
+              if (
+                !control.signal.aborted &&
+                (completion?.reason === "refused" ||
+                  completion?.reason === "truncated")
+              )
                 turn.failed = "blocked"
               return completion
             })
