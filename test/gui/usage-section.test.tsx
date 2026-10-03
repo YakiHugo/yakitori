@@ -261,3 +261,32 @@ it("keeps secondary metrics collapsed and preserves access to every model beyond
   fireEvent.click(screen.getByText("Usage details"))
   expect(disclosure?.open).toBe(false)
 })
+
+it("keeps the annual trend to one tab stop while arrow, Home and End keys move focus without changing the filter", () => {
+  render(<UsageSection />)
+  fireEvent.click(screen.getByRole("button", { name: "Year" }))
+  const trend = screen.getByRole("region", { name: "Daily usage" })
+  const buttons = within(trend).getAllByRole("button") as HTMLButtonElement[]
+  expect(buttons).toHaveLength(366)
+  expect(buttons.filter((button) => button.tabIndex === 0)).toEqual([
+    buttons[365],
+  ])
+  const first = buttons[0]
+  const last = buttons[365]
+  const previous = buttons[364]
+  if (!first || !last || !previous) throw new Error("Expected a complete year")
+  last.focus()
+  fireEvent.keyDown(last, { key: "Home" })
+  expect(document.activeElement).toBe(buttons[0])
+  expect(screen.queryByRole("button", { name: "Clear day filter" })).toBeNull()
+  fireEvent.keyDown(first, { key: "End" })
+  expect(document.activeElement).toBe(last)
+  fireEvent.keyDown(last, { key: "ArrowLeft" })
+  expect(document.activeElement).toBe(buttons[364])
+  fireEvent.click(previous)
+  expect(screen.getByText("0 total tokens")).toBeTruthy()
+  fireEvent.click(screen.getByRole("button", { name: "7D" }))
+  const shorter = within(trend).getAllByRole("button") as HTMLButtonElement[]
+  expect(shorter).toHaveLength(7)
+  expect(shorter.filter((button) => button.tabIndex === 0)).toHaveLength(1)
+})

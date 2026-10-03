@@ -473,6 +473,10 @@ function DailyTrend({
   selectedDate: string | undefined
   onSelect: (date: string | undefined) => void
 }>) {
+  const [focusedDate, setFocusedDate] = useState<string>()
+  const tabStopDate = days.some((day) => day.date === focusedDate)
+    ? focusedDate
+    : (selectedDate ?? days.at(-1)?.date)
   const peak = Math.max(1, ...days.map(totalTokens))
   const x = (index: number) => ((index + 0.5) / days.length) * 1000
   const y = (value: number) => 200 - (value / peak) * 190
@@ -517,12 +521,31 @@ function DailyTrend({
           </svg>
           <fieldset
             className="usage-trend"
-            aria-label="Select a day to inspect usage"
+            aria-label="Daily trend, left and right arrow keys move between days"
           >
-            {days.map((day) => (
+            {days.map((day, index) => (
               <button
                 type="button"
                 key={day.date}
+                tabIndex={day.date === tabStopDate ? 0 : -1}
+                onFocus={() => setFocusedDate(day.date)}
+                onKeyDown={(event) => {
+                  const targetIndex =
+                    event.key === "Home"
+                      ? 0
+                      : event.key === "End"
+                        ? days.length - 1
+                        : event.key === "ArrowLeft"
+                          ? Math.max(0, index - 1)
+                          : event.key === "ArrowRight"
+                            ? Math.min(days.length - 1, index + 1)
+                            : undefined
+                  if (targetIndex === undefined) return
+                  event.preventDefault()
+                  const target =
+                    event.currentTarget.parentElement?.children[targetIndex]
+                  if (target instanceof HTMLButtonElement) target.focus()
+                }}
                 title={`${day.date}: ${exact.format(totalTokens(day))} tokens, ${day.turns} turns`}
                 aria-label={`${day.date}: ${exact.format(totalTokens(day))} tokens`}
                 aria-pressed={selectedDate === day.date}
