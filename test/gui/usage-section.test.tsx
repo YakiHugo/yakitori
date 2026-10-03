@@ -175,3 +175,89 @@ describe("usage dashboard", () => {
     expect(screen.queryByText("NaN")).toBeNull()
   })
 })
+
+describe("usage overview and breakdown", () => {
+  it("compares model shares within the selected period without counting cached input twice", () => {
+    useAppStore.setState({
+      usage: {
+        loading: false,
+        summary: {
+          ...summary,
+          modelDays: [
+            ...summary.modelDays,
+            {
+              ...emptyUsage,
+              provider: "codex",
+              model: "second",
+              date: "2026-10-02",
+              inputTokens: 30,
+              outputTokens: 10,
+              turns: 1,
+            },
+          ],
+          days: [
+            {
+              ...latest,
+              date: "2026-10-02",
+              inputTokens: 130,
+              outputTokens: 30,
+              turns: 3,
+            },
+          ],
+        },
+      },
+    })
+    render(<UsageSection />)
+    const models = screen.getByRole("region", { name: "Usage by model" })
+    expect(within(models).getAllByRole("listitem")).toHaveLength(2)
+    expect(within(models).getByText("75.0%")).toBeTruthy()
+    expect(within(models).getByText("25.0%")).toBeTruthy()
+    expect(within(models).getByText("120")).toBeTruthy()
+    expect(within(models).getByText("40")).toBeTruthy()
+    expect(screen.getByText("160 total tokens")).toBeTruthy()
+  })
+  it("shows exact daily totals including zero days, supports drill-down and labels the limited all-time chart window", () => {
+    render(<UsageSection />)
+    fireEvent.click(screen.getByText("Usage details"))
+    fireEvent.click(screen.getByRole("button", { name: "Day" }))
+    let daily = screen.getByRole("region", { name: "Usage by day" })
+    expect(within(daily).getAllByRole("row")).toHaveLength(31)
+    const today = within(daily).getByRole("button", { name: "2026-10-02" })
+    expect(today.closest("tr")?.textContent).toBe("2026-10-0221002060120")
+    fireEvent.click(today)
+    expect(within(daily).getAllByRole("row")).toHaveLength(2)
+    fireEvent.click(screen.getByRole("button", { name: "Clear day filter" }))
+    expect(within(daily).getAllByRole("row")).toHaveLength(31)
+    fireEvent.click(screen.getByRole("button", { name: "All time" }))
+    daily = screen.getByRole("region", { name: "Usage by day" })
+    expect(within(daily).getByText("Last 30 days · UTC")).toBeTruthy()
+    fireEvent.click(screen.getByRole("button", { name: "Model" }))
+    expect(
+      screen.getByRole("region", { name: "Usage by model" }).textContent,
+    ).toContain("legacy")
+  })
+})
+
+it("keeps secondary metrics collapsed and preserves access to every model beyond the concise comparison", () => {
+  const models = Array.from({ length: 7 }, (_, index) => ({
+    ...latest,
+    provider: "codex",
+    model: `model-${index}`,
+  }))
+  useAppStore.setState({
+    usage: { loading: false, summary: { ...summary, models } },
+  })
+  render(<UsageSection />)
+  fireEvent.click(screen.getByRole("button", { name: "All time" }))
+  const comparison = screen.getByRole("region", { name: "Usage by model" })
+  expect(within(comparison).getAllByRole("listitem")).toHaveLength(5)
+  expect(within(comparison).getByText("Top 5 of 7")).toBeTruthy()
+  const disclosure = screen.getByText("Usage details").closest("details")
+  expect(disclosure?.open).toBe(false)
+  fireEvent.click(screen.getByText("Usage details"))
+  expect(disclosure?.open).toBe(true)
+  const details = screen.getByRole("region", { name: "Detailed model usage" })
+  expect(within(details).getAllByRole("row")).toHaveLength(8)
+  fireEvent.click(screen.getByText("Usage details"))
+  expect(disclosure?.open).toBe(false)
+})

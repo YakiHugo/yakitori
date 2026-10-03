@@ -445,7 +445,7 @@ html[data-desktop="macos"] .settings-sidebar {
 }
 .usage-toolbar {
   flex-wrap: wrap;
-  margin-bottom: 22px;
+  margin-bottom: 14px;
 }
 .usage-range {
   display: flex;
@@ -485,15 +485,43 @@ html[data-desktop="macos"] .settings-sidebar {
   text-decoration: underline;
   min-height: 36px;
 }
+.usage-overview {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.8fr) minmax(0, 1.6fr);
+  gap: 32px;
+  padding: 12px 0 24px;
+  align-items: center;
+}
+.usage-total {
+  display: block;
+  font-size: clamp(36px, 4vw, 52px);
+  font-weight: 550;
+  letter-spacing: -1.5px;
+  line-height: 1.3;
+  font-variant-numeric: tabular-nums;
+  margin: 4px 0;
+}
+.usage-totals {
+  padding: 8px 0 20px;
+}
+.usage-totals h4 {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 18px;
+}
 .usage-dashboard .usage-stat-grid {
-  margin-bottom: 12px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 20px;
+  margin-bottom: 0;
 }
 .usage-dashboard .usage-stat {
-  padding: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
 }
 .usage-dashboard .usage-stat strong {
-  font-size: 27px;
-  letter-spacing: -0.6px;
+  font-size: 22px;
+  letter-spacing: -0.4px;
   margin: 8px 0 4px;
   font-variant-numeric: tabular-nums;
 }
@@ -502,58 +530,85 @@ html[data-desktop="macos"] .settings-sidebar {
   color: var(--muted-foreground);
   font-size: 12px;
 }
-.usage-cache-strip {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px 24px;
-  padding: 4px 0 20px;
-  font-size: 12px;
-  color: var(--muted-foreground);
-}
-.usage-cache-strip strong {
-  color: var(--foreground);
-  margin-left: 7px;
-  font-weight: 500;
-  font-variant-numeric: tabular-nums;
-}
 .usage-card {
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 20px;
-  margin-bottom: 16px;
+  border-top: 1px solid var(--border);
+  padding: 16px 0;
   min-width: 0;
 }
 .usage-card-heading {
   flex-wrap: wrap;
   margin-bottom: 18px;
 }
-.usage-trend {
-  min-inline-size: 0;
-  width: 100%;
+.usage-daily {
+  min-width: 0;
+}
+.usage-daily h4 {
+  font-size: 14px;
+  font-weight: 600;
+}
+.usage-chart {
   display: flex;
-  align-items: stretch;
-  gap: 3px;
-  height: 140px;
-  overflow-x: auto;
-  border-bottom: 1px solid var(--border);
+  gap: 12px;
+  height: 135px;
+}
+.usage-chart-scale {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--muted-foreground);
+  text-align: right;
+  min-width: 30px;
+  padding-top: 3px;
+}
+.usage-chart-plot {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+.usage-chart-plot svg {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+.usage-chart-grid {
+  stroke: var(--border);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+.usage-area-total {
+  fill: color-mix(in oklab, #cd7b5f 22%, transparent);
+}
+.usage-line-total {
+  fill: none;
+  stroke: #cd7b5f;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+.usage-trend {
+  position: absolute;
+  inset: 0;
+  min-inline-size: 0;
+  display: flex;
+  width: 100%;
+  border: 0;
+  padding: 0;
+  margin: 0;
 }
 .usage-trend button {
   flex: 1;
   min-width: 0;
-  display: flex;
-  align-items: flex-end;
   height: 100%;
-  border-radius: 3px 3px 0 0;
+  border-radius: 0;
 }
-.usage-trend button span {
-  width: 100%;
-  min-height: 2px;
-  background: color-mix(in oklab, var(--foreground) 60%, transparent);
-  border-radius: 3px 3px 0 0;
+.usage-trend button:hover,
+.usage-trend button[aria-pressed="true"] {
+  background: color-mix(in oklab, var(--foreground) 8%, transparent);
 }
-.usage-trend button:hover span,
-.usage-trend button[aria-pressed="true"] span {
-  background: var(--foreground);
+.usage-day-link {
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 .usage-axis {
   margin-top: 12px;
@@ -566,10 +621,10 @@ html[data-desktop="macos"] .settings-sidebar {
 .usage-calendar {
   display: grid;
   grid-auto-flow: column;
-  grid-template-rows: repeat(7, 12px);
-  grid-auto-columns: minmax(10px, 1fr);
+  grid-template-rows: repeat(7, 8px);
+  grid-auto-columns: minmax(7px, 1fr);
   gap: 3px;
-  min-width: 690px;
+  min-width: 530px;
 }
 .usage-calendar button,
 .usage-legend i {
@@ -648,8 +703,9 @@ html[data-desktop="macos"] .settings-sidebar {
   outline-offset: 2px;
 }
 @media (max-width: 620px) {
-  .usage-card {
-    padding: 14px;
+  .usage-overview {
+    grid-template-columns: 1fr;
+    gap: 30px;
   }
   .usage-dashboard .usage-stat-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -661,4 +717,82 @@ html[data-desktop="macos"] .settings-sidebar {
     min-height: 44px;
     padding: 5px 10px;
   }
+}
+
+.settings-page-body:has(.usage-dashboard) {
+  padding-top: 32px;
+  padding-bottom: 32px;
+}
+.usage-dashboard .settings-usage-heading {
+  padding: 0;
+  margin-bottom: 18px;
+}
+.usage-dashboard .settings-usage-heading > button {
+  top: 0;
+}
+.usage-model-comparison {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.usage-model-comparison li {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(70px, 1.6fr) 70px;
+  gap: 24px;
+  align-items: center;
+  padding: 6px 0;
+  line-height: 1.3;
+}
+.usage-model-label {
+  min-width: 0;
+}
+.usage-model-label strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.usage-dashboard .usage-model-label small,
+.usage-dashboard .usage-model-value small {
+  display: block;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  margin-top: 3px;
+}
+.usage-share-track {
+  height: 5px;
+  border-radius: 3px;
+  background: var(--muted);
+  overflow: hidden;
+}
+.usage-share-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: color-mix(in oklab, var(--foreground) 65%, transparent);
+}
+.usage-model-value {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.usage-model-value strong {
+  font-size: 13px;
+  font-weight: 500;
+}
+.usage-details {
+  border-top: 1px solid var(--border);
+}
+.usage-details > summary {
+  cursor: pointer;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  padding: 16px 0;
+}
+.usage-details > summary:focus-visible {
+  outline: 2px solid var(--foreground);
+  outline-offset: 2px;
+}
+.usage-details .usage-table-scroll {
+  max-height: 380px;
+  overflow: auto;
 }

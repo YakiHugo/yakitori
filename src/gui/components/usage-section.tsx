@@ -19,19 +19,20 @@ export function UsageSection() {
   const loadUsage = useAppStore((state) => state.loadUsage)
   const [range, setRange] = useState<UsageRange>(30)
   const [selectedDate, setSelectedDate] = useState<string>()
+  const [breakdown, setBreakdown] = useState<"model" | "day">("model")
   const summary = usage.summary
   const view = summary && usageView(summary, range, selectedDate)
   const calendar = summary ? usageCalendar(summary, 366) : []
   const peak = Math.max(1, ...calendar.map(totalTokens))
   const total = view ? totalTokens(view.totals) : 0
-  const trendPeak = Math.max(1, ...(view?.days.map(totalTokens) ?? []))
+  const breakdownDays =
+    view?.days.filter((day) => !selectedDate || day.date === selectedDate) ?? []
   const period =
     selectedDate ?? (range === "all" ? "All time" : `Last ${range} days`)
   return (
     <div className="usage-dashboard">
       <div className="settings-section-heading settings-usage-heading">
         <h3>Usage</h3>
-        <p>Understand where your tokens go.</p>
         <button
           type="button"
           aria-label="Refresh usage"
@@ -83,53 +84,32 @@ export function UsageSection() {
             </fieldset>
             <span className="usage-muted">UTC · Local records</span>
           </div>
-          <div className="usage-period-heading">
-            <h4>{period}</h4>
-            {selectedDate && (
+          {selectedDate && (
+            <div className="usage-period-heading">
               <button type="button" onClick={() => setSelectedDate(undefined)}>
                 Clear day filter
               </button>
-            )}
-          </div>
-          <div className="usage-stat-grid">
-            <Stat label="Total tokens" value={total} detail="Input + output" />
-            <Stat
-              label="Input tokens"
-              value={view.totals.inputTokens}
-              detail="Includes cached input"
-            />
-            <Stat
-              label="Output tokens"
-              value={view.totals.outputTokens}
-              detail="Recorded model output"
-            />
-            <Stat
-              label="Recorded turns"
-              value={view.totals.turns}
-              detail="With reported usage"
-            />
-          </div>
-          <div className="usage-cache-strip">
-            <span>
-              Cache read{" "}
-              <strong title={exact.format(view.totals.cacheReadInputTokens)}>
-                {compact.format(view.totals.cacheReadInputTokens)}
+            </div>
+          )}
+          <div className="usage-overview">
+            <section className="usage-headline" aria-label="Period total">
+              <span className="usage-muted">{period} · Tokens</span>
+              <strong className="usage-total" title={exact.format(total)}>
+                <span aria-hidden="true">{compact.format(total)}</span>
+                <span className="sr-only">
+                  {exact.format(total)} total tokens
+                </span>
               </strong>
-            </span>
-            <span>
-              Cache write{" "}
-              <strong title={exact.format(view.totals.cacheWriteInputTokens)}>
-                {compact.format(view.totals.cacheWriteInputTokens)}
-              </strong>
-            </span>
-            <span>
-              Input cache hit{" "}
-              <strong>
-                {view.totals.inputTokens > 0
-                  ? `${((view.totals.cacheReadInputTokens / view.totals.inputTokens) * 100).toFixed(1)}%`
-                  : "—"}
-              </strong>
-            </span>
+              <p className="usage-muted">
+                {exact.format(view.totals.turns)} recorded turns
+              </p>
+            </section>
+            <DailyTrend
+              days={view.days}
+              range={range}
+              selectedDate={selectedDate}
+              onSelect={setSelectedDate}
+            />
           </div>
           {view.totals.turns === 0 && (
             <p className="usage-empty">
@@ -137,43 +117,47 @@ export function UsageSection() {
               finish and report usage.
             </p>
           )}
-          <section className="usage-card" aria-label="Daily usage">
+          <section
+            className="usage-card usage-comparison"
+            aria-label="Usage by model"
+          >
             <div className="usage-card-heading">
-              <h4>Daily tokens</h4>
-              <span>
-                {range === "all" ? "Last 30 days" : `Last ${range} days`} · UTC
-              </span>
+              <h4>Models</h4>
+              {view.models.length > 5 && (
+                <span>Top 5 of {view.models.length}</span>
+              )}
             </div>
-            <fieldset
-              className="usage-trend"
-              style={{ gap: view.days.length > 90 ? "0.5px" : "3px" }}
-              aria-label="Select a day to inspect usage"
-            >
-              {view.days.map((day) => (
-                <button
-                  type="button"
-                  key={day.date}
-                  title={`${day.date}: ${exact.format(totalTokens(day))} tokens, ${day.turns} turns`}
-                  aria-label={`${day.date}: ${exact.format(totalTokens(day))} tokens`}
-                  aria-pressed={selectedDate === day.date}
-                  onClick={() =>
-                    setSelectedDate(
-                      selectedDate === day.date ? undefined : day.date,
-                    )
-                  }
-                >
-                  <span
-                    style={{
-                      height: `${(totalTokens(day) / trendPeak) * 100}%`,
-                    }}
-                  />
-                </button>
-              ))}
-            </fieldset>
-            <div className="usage-axis">
-              <span>{view.days[0]?.date}</span>
-              <span>{view.days.at(-1)?.date}</span>
-            </div>
+            {view.models.length === 0 ? (
+              <p className="usage-muted">No models recorded in this period.</p>
+            ) : (
+              <ul className="usage-model-comparison">
+                {view.models.slice(0, 5).map((model) => (
+                  <li key={JSON.stringify([model.provider, model.model])}>
+                    <div className="usage-model-label">
+                      <strong>{model.model || "Unknown model"}</strong>
+                      <small>{model.provider || "Unknown provider"}</small>
+                    </div>
+                    <div className="usage-share-track" aria-hidden="true">
+                      <span
+                        style={{
+                          width: `${total > 0 ? (totalTokens(model) / total) * 100 : 0}%`,
+                        }}
+                      />
+                    </div>
+                    <div className="usage-model-value">
+                      <strong title={exact.format(totalTokens(model))}>
+                        {compact.format(totalTokens(model))}
+                      </strong>
+                      <small>
+                        {total > 0
+                          ? `${((totalTokens(model) / total) * 100).toFixed(1)}%`
+                          : "—"}
+                      </small>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
           </section>
           <section className="usage-card" aria-label="Activity heatmap">
             <div className="usage-card-heading">
@@ -252,104 +236,212 @@ export function UsageSection() {
               <span>{calendar.at(-1)?.date}</span>
             </div>
           </section>
-          <section className="usage-card" aria-label="Usage by model">
-            <div className="usage-card-heading">
-              <h4>By model</h4>
-              <span>{period}</span>
-            </div>
-            {view.models.length === 0 ? (
-              <p className="usage-muted">No models recorded in this period.</p>
-            ) : (
-              <div className="usage-table-scroll">
-                <table className="usage-threads usage-models">
-                  <thead>
-                    <tr>
-                      <th>Model / provider</th>
-                      <th>Turns</th>
-                      <th>Input</th>
-                      <th>Output</th>
-                      <th>Cache read</th>
-                      <th>Total / share</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {view.models.map((model) => (
-                      <tr key={JSON.stringify([model.provider, model.model])}>
-                        <td>
-                          <strong>{model.model || "Unknown model"}</strong>
-                          <small>{model.provider || "Unknown provider"}</small>
-                        </td>
-                        <td>{exact.format(model.turns)}</td>
-                        <td title={exact.format(model.inputTokens)}>
-                          {compact.format(model.inputTokens)}
-                        </td>
-                        <td title={exact.format(model.outputTokens)}>
-                          {compact.format(model.outputTokens)}
-                        </td>
-                        <td title={exact.format(model.cacheReadInputTokens)}>
-                          {compact.format(model.cacheReadInputTokens)}
-                        </td>
-                        <td>
-                          <strong title={exact.format(totalTokens(model))}>
-                            {compact.format(totalTokens(model))}
-                          </strong>
-                          <small>
-                            {total > 0
-                              ? `${((totalTokens(model) / total) * 100).toFixed(1)}%`
-                              : "—"}
-                          </small>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+          <details className="usage-details">
+            <summary>Usage details</summary>
+            <section className="usage-totals" aria-label="Token totals">
+              <h4>Totals</h4>
+              <div className="usage-stat-grid">
+                <Stat
+                  label="Input tokens"
+                  value={view.totals.inputTokens}
+                  detail="Includes cached input"
+                />
+                <Stat
+                  label="Output tokens"
+                  value={view.totals.outputTokens}
+                  detail="Recorded model output"
+                />
+                <Stat
+                  label="Cache read"
+                  value={view.totals.cacheReadInputTokens}
+                  detail="Included in input"
+                />
+                <Stat
+                  label="Cache write"
+                  value={view.totals.cacheWriteInputTokens}
+                  detail="Included in input"
+                />
+                <div className="usage-stat">
+                  <span>Input cache hit</span>
+                  <strong>
+                    {view.totals.inputTokens > 0
+                      ? `${((view.totals.cacheReadInputTokens / view.totals.inputTokens) * 100).toFixed(1)}%`
+                      : "—"}
+                  </strong>
+                  <small>Cache read / input</small>
+                </div>
               </div>
-            )}
-          </section>
-          <section className="usage-card" aria-label="Top conversations">
-            <div className="usage-card-heading">
-              <h4>Top conversations</h4>
-              <span>All-time totals · Top 20</span>
-            </div>
-            {summary.threads.length === 0 ? (
-              <p className="usage-muted">No conversations recorded yet.</p>
-            ) : (
-              <div className="usage-table-scroll">
-                <table className="usage-threads">
-                  <thead>
-                    <tr>
-                      <th>Conversation</th>
-                      <th>Turns</th>
-                      <th>Total tokens</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {summary.threads.map((thread) => (
-                      <tr key={thread.threadId}>
-                        <td title={thread.title || thread.threadId}>
-                          {thread.title || thread.threadId}
-                        </td>
-                        <td>{exact.format(thread.turns)}</td>
-                        <td title={exact.format(thread.totalTokens)}>
-                          {compact.format(thread.totalTokens)}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+            </section>
+            <section
+              className="usage-card"
+              aria-label={
+                breakdown === "model" ? "Detailed model usage" : "Usage by day"
+              }
+            >
+              <div className="usage-card-heading">
+                <div>
+                  <h4>Breakdown</h4>
+                  <span className="usage-muted">
+                    {breakdown === "day" && range === "all" && !selectedDate
+                      ? "Last 30 days · UTC"
+                      : period}
+                  </span>
+                </div>
+                <fieldset
+                  className="usage-range"
+                  aria-label="Breakdown grouping"
+                >
+                  {(["model", "day"] as const).map((value) => (
+                    <button
+                      key={value}
+                      type="button"
+                      aria-pressed={breakdown === value}
+                      onClick={() => setBreakdown(value)}
+                    >
+                      {value === "model" ? "Model" : "Day"}
+                    </button>
+                  ))}
+                </fieldset>
               </div>
-            )}
-          </section>
-          <p className="usage-footnote">
-            Completed turns with usage recorded on this device only. Cache reads
-            and writes are included in input, not added again. Missing usage and
-            in-progress turns are excluded. This is not a billing statement;
-            subscription limits are in Subscriptions.
-          </p>
-          <p className="usage-footnote">
-            Updated {new Date(summary.generatedAt).toLocaleString()} · Calendar
-            dates use UTC
-          </p>
+              {breakdown === "day" ? (
+                <div className="usage-table-scroll">
+                  <table className="usage-threads usage-models">
+                    <thead>
+                      <tr>
+                        <th>Day · UTC</th>
+                        <th>Turns</th>
+                        <th>Input</th>
+                        <th>Output</th>
+                        <th>Cache read</th>
+                        <th>Total tokens</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {[...breakdownDays].reverse().map((day) => (
+                        <tr key={day.date}>
+                          <td>
+                            <button
+                              type="button"
+                              className="usage-day-link"
+                              onClick={() =>
+                                setSelectedDate(
+                                  selectedDate === day.date
+                                    ? undefined
+                                    : day.date,
+                                )
+                              }
+                            >
+                              {day.date}
+                            </button>
+                          </td>
+                          <td>{exact.format(day.turns)}</td>
+                          <td>{exact.format(day.inputTokens)}</td>
+                          <td>{exact.format(day.outputTokens)}</td>
+                          <td>{exact.format(day.cacheReadInputTokens)}</td>
+                          <td>{exact.format(totalTokens(day))}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : view.models.length === 0 ? (
+                <p className="usage-muted">
+                  No models recorded in this period.
+                </p>
+              ) : (
+                <div className="usage-table-scroll">
+                  <table className="usage-threads usage-models">
+                    <thead>
+                      <tr>
+                        <th>Model / provider</th>
+                        <th>Turns</th>
+                        <th>Input</th>
+                        <th>Output</th>
+                        <th>Cache read</th>
+                        <th>Total / share</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {view.models.map((model) => (
+                        <tr key={JSON.stringify([model.provider, model.model])}>
+                          <td>
+                            <strong>{model.model || "Unknown model"}</strong>
+                            <small>
+                              {model.provider || "Unknown provider"}
+                            </small>
+                          </td>
+                          <td>{exact.format(model.turns)}</td>
+                          <td title={exact.format(model.inputTokens)}>
+                            {compact.format(model.inputTokens)}
+                          </td>
+                          <td title={exact.format(model.outputTokens)}>
+                            {compact.format(model.outputTokens)}
+                          </td>
+                          <td title={exact.format(model.cacheReadInputTokens)}>
+                            {compact.format(model.cacheReadInputTokens)}
+                          </td>
+                          <td>
+                            <strong title={exact.format(totalTokens(model))}>
+                              {compact.format(totalTokens(model))}
+                            </strong>
+                            <small>
+                              {total > 0
+                                ? `${((totalTokens(model) / total) * 100).toFixed(1)}%`
+                                : "—"}
+                            </small>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+            <section className="usage-card" aria-label="Top conversations">
+              <div className="usage-card-heading">
+                <h4>Top conversations</h4>
+                <span>All-time totals · Top 20</span>
+              </div>
+              {summary.threads.length === 0 ? (
+                <p className="usage-muted">No conversations recorded yet.</p>
+              ) : (
+                <div className="usage-table-scroll">
+                  <table className="usage-threads">
+                    <thead>
+                      <tr>
+                        <th>Conversation</th>
+                        <th>Turns</th>
+                        <th>Total tokens</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {summary.threads.map((thread) => (
+                        <tr key={thread.threadId}>
+                          <td title={thread.title || thread.threadId}>
+                            {thread.title || thread.threadId}
+                          </td>
+                          <td>{exact.format(thread.turns)}</td>
+                          <td title={exact.format(thread.totalTokens)}>
+                            {compact.format(thread.totalTokens)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+            <p className="usage-footnote">
+              Completed turns with usage recorded on this device only. Cache
+              reads and writes are included in input, not added again. Missing
+              usage and in-progress turns are excluded. This is not a billing
+              statement; subscription limits are in Subscriptions.
+            </p>
+            <p className="usage-footnote">
+              Updated {new Date(summary.generatedAt).toLocaleString()} ·
+              Calendar dates use UTC
+            </p>
+          </details>
         </>
       )}
     </div>
@@ -367,5 +459,85 @@ function Stat({
       <strong title={exact.format(value)}>{compact.format(value)}</strong>
       <small>{detail}</small>
     </div>
+  )
+}
+
+function DailyTrend({
+  days,
+  range,
+  selectedDate,
+  onSelect,
+}: Readonly<{
+  days: ReturnType<typeof usageCalendar>
+  range: UsageRange
+  selectedDate: string | undefined
+  onSelect: (date: string | undefined) => void
+}>) {
+  const peak = Math.max(1, ...days.map(totalTokens))
+  const x = (index: number) => ((index + 0.5) / days.length) * 1000
+  const y = (value: number) => 200 - (value / peak) * 190
+  const combined = days
+    .map((day, index) => `${x(index)},${y(totalTokens(day))}`)
+    .join(" ")
+  return (
+    <section className="usage-daily" aria-label="Daily usage">
+      <div className="usage-card-heading">
+        <h4>Daily tokens</h4>
+        {(range === "all" || selectedDate) && (
+          <span>{range === "all" ? "Last 30 days" : `Last ${range} days`}</span>
+        )}
+      </div>
+      <div className="usage-chart">
+        <div className="usage-chart-scale" aria-hidden="true">
+          <span>{compact.format(peak)}</span>
+          <span>{compact.format(peak / 2)}</span>
+          <span>0</span>
+        </div>
+        <div className="usage-chart-plot">
+          <svg
+            viewBox="0 0 1000 200"
+            preserveAspectRatio="none"
+            aria-hidden="true"
+          >
+            {[10, 105, 200].map((line) => (
+              <line
+                key={line}
+                x1="0"
+                x2="1000"
+                y1={line}
+                y2={line}
+                className="usage-chart-grid"
+              />
+            ))}
+            <polygon
+              points={`${x(0)},200 ${combined} ${x(days.length - 1)},200`}
+              className="usage-area-total"
+            />
+            <polyline points={combined} className="usage-line-total" />
+          </svg>
+          <fieldset
+            className="usage-trend"
+            aria-label="Select a day to inspect usage"
+          >
+            {days.map((day) => (
+              <button
+                type="button"
+                key={day.date}
+                title={`${day.date}: ${exact.format(totalTokens(day))} tokens, ${day.turns} turns`}
+                aria-label={`${day.date}: ${exact.format(totalTokens(day))} tokens`}
+                aria-pressed={selectedDate === day.date}
+                onClick={() =>
+                  onSelect(selectedDate === day.date ? undefined : day.date)
+                }
+              />
+            ))}
+          </fieldset>
+        </div>
+      </div>
+      <div className="usage-axis">
+        <span>{days[0]?.date}</span>
+        <span>{days.at(-1)?.date}</span>
+      </div>
+    </section>
   )
 }
