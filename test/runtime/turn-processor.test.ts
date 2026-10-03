@@ -164,6 +164,432 @@ describe("Turn processor", () => {
     }
   })
 
+  it("persists each answer fragment before continuing and returns the whole answer", async () => {
+    const provider = createFauxProvider([
+      {
+        stopReason: ModelStopReason.Length,
+        content: [{ type: "text", text: "First " }],
+      },
+      {
+        stopReason: ModelStopReason.Length,
+        content: [{ type: "text", text: "second " }],
+      },
+      { content: [{ type: "text", text: "third." }] },
+    ])
+    const runtime = await createRuntime(provider.stream)
+    const thread = await runtime.createThread()
+    await thread.startIfIdle({ content: { kind: "text", text: "Explain." } })
+    await expect
+      .poll(() => thread.agentStatus)
+      .toEqual({ completed: "First second third." })
+    expect(provider.requests[1]?.messages).toContainEqual({
+      role: "assistant",
+      content: [{ type: "text", text: "First " }],
+    })
+    expect(provider.requests[2]?.messages).toContainEqual({
+      role: "assistant",
+      content: [{ type: "text", text: "second " }],
+    })
+    const reminders = provider.requests[2]?.messages.filter(
+      (message) =>
+        message.role === "developer" &&
+        message.content.some(
+          (block) =>
+            block.type === "text" &&
+            block.text.includes("Continue exactly where it stopped"),
+        ),
+    )
+    expect(reminders).toHaveLength(1)
+    const completion = (await runtime.store.readThread(thread.id))?.rollout.at(
+      -1,
+    )?.item
+    expect(completion).toMatchObject({
+      type: "turn_completed",
+      outcome: "completed",
+      metrics: { modelCalls: 3 },
+      completion: { answerItemIds: expect.any(Array) },
+    })
+    if (completion?.type !== "turn_completed")
+      throw new Error("Missing completion")
+    expect(completion.completion?.answerItemIds).toHaveLength(3)
+  })
+
+  it("ends with a durable partial answer when the continuation budget is exhausted", async () => {
+    const provider = createFauxProvider([
+      ...["One ", "two ", "three"].map((text) => ({
+        stopReason: ModelStopReason.Length,
+        content: [{ type: "text" as const, text }],
+      })),
+      { content: [{ type: "text", text: "Next answer." }] },
+    ])
+    const runtime = await createRuntime(provider.stream)
+    const thread = await runtime.createThread()
+    await thread.startIfIdle({ content: { kind: "text", text: "Explain." } })
+    await expect
+      .poll(() => thread.agentStatus)
+      .toEqual({ completed: "One two three", reason: "truncated" })
+    expect(provider.callCount).toBe(3)
+    expect(
+      (await runtime.store.readThread(thread.id))?.rollout.at(-1)?.item,
+    ).toMatchObject({
+      outcome: "completed",
+      completion: { reason: "truncated" },
+    })
+    await thread.startIfIdle({ content: { kind: "text", text: "Continue." } })
+    await expect
+      .poll(() => thread.agentStatus)
+      .toEqual({ completed: "Next answer." })
+    expect(JSON.stringify(provider.requests[3]?.messages)).toContain("three")
+  })
+
+  it.each([
+    false,
+    true,
+  ])("rejects a first truncation without usable text (reasoning: %s)", async (reasoning) => {
+    const provider = createFauxProvider([
+      {
+        stopReason: ModelStopReason.Length,
+        content: reasoning ? [{ type: "reasoning", text: "thinking" }] : [],
+      },
+    ])
+    const runtime = await createRuntime(provider.stream)
+    const thread = await runtime.createThread()
+    await thread.startIfIdle({ content: { kind: "text", text: "Explain." } })
+    await expect
+      .poll(() => thread.agentStatus)
+      .toEqual({ errored: "Model response was truncated without usable text." })
+    expect(provider.callCount).toBe(1)
+  })
+
+  it("keeps the earlier answer when its continuation produces an empty truncation", async () => {
+    const provider = createFauxProvider([
+      {
+        stopReason: ModelStopReason.Length,
+        content: [{ type: "text", text: "Partial answer" }],
+      },
+      { stopReason: ModelStopReason.Length, content: [] },
+    ])
+    const runtime = await createRuntime(provider.stream)
+    const thread = await runtime.createThread()
+    await thread.startIfIdle({ content: { kind: "text", text: "Explain." } })
+    await expect
+      .poll(() => thread.agentStatus)
+      .toEqual({ completed: "Partial answer", reason: "truncated" })
+    expect(provider.callCount).toBe(2)
+  })
+
+  it("does not replenish continuation budget after a stop hook starts a new answer", async () => {
+    let stops = 0
+    const provider = createFauxProvider([
+      {
+        stopReason: ModelStopReason.Length,
+        content: [{ type: "text", text: "Old " }],
+      },
+      { content: [{ type: "text", text: "answer" }] },
+      {
+        stopReason: ModelStopReason.Length,
+        content: [{ type: "text", text: "New " }],
+      },
+      {
+        stopReason: ModelStopReason.Length,
+        content: [{ type: "text", text: "answer" }],
+      },
+    ])
+    const runtime = await createRuntime(
+      provider.stream,
+      createToolRegistry([]),
+      {
+        hookRunner: {
+          async dispose() {},
+          async run(request) {
+            if (request.event === HookEvent.Stop) stops += 1
+            return {
+              continue: request.event !== HookEvent.Stop || stops > 1,
+              additionalContext: [],
+            }
+          },
+        },
+      },
+    )
+    const thread = await runtime.createThread()
+    await thread.startIfIdle({ content: { kind: "text", text: "Explain." } })
+    await expect
+      .poll(() => thread.agentStatus)
+      .toEqual({ completed: "New answer", reason: "truncated" })
+    expect(provider.callCount).toBe(4)
+    expect(stops).toBe(1)
+  })
+
+  it("preserves completed streamed tool effects when the response has an incomplete tail", async () => {
+    let effects = 0
+    const executed = deferred<void>()
+    const call = {
+      type: "tool_call" as const,
+      id: "complete",
+      name: "effect",
+      input: {},
+    }
+    const runtime = await createRuntime(
+      async function* () {
+        yield { type: "output_item", itemId: "complete_item", content: [call] }
+        await executed.promise
+        yield {
+          type: "response",
+          response: {
+            stopReason: ModelStopReason.Length,
+            incompleteToolCalls: true,
+            content: [
+              call,
+              { type: "text", text: "Preserved explanation" },
+              { ...call, id: "unstarted" },
+            ],
+          },
+        }
+      },
+      createToolRegistry([
+        {
+          toolName: plainToolName("effect"),
+          description: "Count effects",
+          inputSchema: { type: "object" },
+          effect: "mutate",
+          approvalRequirement: { kind: "none" },
+          async execute() {
+            effects += 1
+            executed.resolve()
+            return { ok: true, output: effects, content: "Done" }
+          },
+        },
+      ]),
+    )
+    const thread = await runtime.createThread()
+    await thread.startIfIdle({ content: { kind: "text", text: "Work." } })
+    await expect
+      .poll(() => thread.agentStatus)
+      .toEqual({ errored: "Model response contained an incomplete tool call." })
+    expect(effects).toBe(1)
+    expect(
+      thread
+        .snapshot()
+        .context.history.filter(({ item }) => item.role === "tool"),
+    ).toHaveLength(1)
+    expect(JSON.stringify(thread.snapshot().context.history)).toContain(
+      "Preserved explanation",
+    )
+  })
+
+  it("executes complete tools from a length-stopped response only once", async () => {
+    let effects = 0
+    let samples = 0
+    const call = {
+      type: "tool_call" as const,
+      id: "complete",
+      name: "effect",
+      input: {},
+    }
+    const runtime = await createRuntime(
+      async function* () {
+        samples += 1
+        if (samples === 1) {
+          yield {
+            type: "output_item",
+            itemId: "complete_item",
+            content: [call],
+          }
+          yield {
+            type: "response",
+            response: { stopReason: ModelStopReason.Length, content: [call] },
+          }
+        } else yield responseEvent("Finished")
+      },
+      createToolRegistry([
+        {
+          toolName: plainToolName("effect"),
+          description: "Count effects",
+          inputSchema: { type: "object" },
+          effect: "mutate",
+          approvalRequirement: { kind: "none" },
+          async execute() {
+            effects += 1
+            return { ok: true, output: effects, content: "Done" }
+          },
+        },
+      ]),
+    )
+    const thread = await runtime.createThread()
+    await thread.startIfIdle({ content: { kind: "text", text: "Work." } })
+    await expect
+      .poll(() => thread.agentStatus)
+      .toEqual({ completed: "Finished" })
+    expect(effects).toBe(1)
+    expect(samples).toBe(2)
+  })
+
+  it("preserves partial text but keeps a failed continuation as a failure", async () => {
+    const provider = createFauxProvider([
+      {
+        stopReason: ModelStopReason.Length,
+        content: [{ type: "text", text: "Partial" }],
+      },
+      { throwBefore: new Error("Connection failed") },
+    ])
+    const runtime = await createRuntime(provider.stream)
+    const thread = await runtime.createThread()
+    await thread.startIfIdle({ content: { kind: "text", text: "Explain." } })
+    await expect
+      .poll(() => thread.agentStatus)
+      .toEqual({ errored: "Connection failed" })
+    expect(JSON.stringify(thread.snapshot().context.history)).toContain(
+      "Partial",
+    )
+  })
+
+  it.each([
+    false,
+    true,
+  ])("bounds repeated tool truncations before another request (streamed: %s)", async (streamed) => {
+    let effects = 0
+    let samples = 0
+    const runtime = await createRuntime(
+      async function* () {
+        samples += 1
+        const call = {
+          type: "tool_call" as const,
+          id: `effect_${samples}`,
+          name: "effect",
+          input: {},
+        }
+        if (streamed)
+          yield {
+            type: "output_item",
+            itemId: `item_${samples}`,
+            content: [call],
+          }
+        yield {
+          type: "response",
+          response: { stopReason: ModelStopReason.Length, content: [call] },
+        }
+      },
+      createToolRegistry([
+        {
+          toolName: plainToolName("effect"),
+          description: "Count effects",
+          inputSchema: { type: "object" },
+          effect: "mutate",
+          approvalRequirement: { kind: "none" },
+          async execute() {
+            effects += 1
+            return { ok: true, output: effects, content: "Done" }
+          },
+        },
+      ]),
+    )
+    const thread = await runtime.createThread()
+    await thread.startIfIdle({ content: { kind: "text", text: "Work." } })
+    await expect
+      .poll(() => thread.agentStatus)
+      .toEqual({
+        errored: "Model repeatedly hit its generation limit during tool calls.",
+      })
+    expect(samples).toBe(5)
+    expect(effects).toBe(5)
+    expect(
+      thread
+        .snapshot()
+        .context.history.filter(({ item }) => item.role === "tool"),
+    ).toHaveLength(5)
+  })
+
+  it("excludes retried attempt commentary while retaining earlier Length answer fragments", async () => {
+    let samples = 0
+    const runtime = await createRuntime(async function* () {
+      samples += 1
+      if (samples === 1) {
+        yield {
+          type: "response",
+          response: {
+            stopReason: ModelStopReason.Length,
+            content: [{ type: "text", text: "Answer " }],
+          },
+        }
+        return
+      }
+      yield {
+        type: "output_item",
+        itemId: "retry_commentary",
+        content: [{ type: "text", text: "Checking again." }],
+      }
+      yield {
+        type: "retry",
+        committedOutput: true,
+        attempt: 1,
+        nextAttempt: 2,
+        maxAttempts: 2,
+        delayMs: 0,
+        failure: {
+          kind: "stream_disconnected",
+          stage: "response_body",
+          provider: "faux",
+          wireApi: "faux",
+          message: "Disconnected",
+        },
+      }
+      yield responseEvent("complete.")
+    })
+    const thread = await runtime.createThread()
+    await thread.startIfIdle({ content: { kind: "text", text: "Explain." } })
+    await expect
+      .poll(() => thread.agentStatus)
+      .toEqual({ completed: "Answer complete." })
+    expect(JSON.stringify(thread.snapshot().context.history)).toContain(
+      "Checking again.",
+    )
+  })
+
+  it.each([
+    false,
+    true,
+  ])("preserves refusal text without continuing or running a stop hook (discarded tool tail: %s)", async (incompleteToolCalls) => {
+    const hook = vi.fn<HookRunner["run"]>(async () => ({
+      continue: true,
+      additionalContext: [],
+    }))
+    let modelCalls = 0
+    const runtime = await createRuntime(
+      async function* () {
+        modelCalls += 1
+        yield {
+          type: "response",
+          response: {
+            stopReason: ModelStopReason.ContentFilter,
+            incompleteToolCalls,
+            content: [{ type: "text", text: "Cannot help with that." }],
+          },
+        }
+      },
+      createToolRegistry([]),
+      {
+        hookRunner: { async dispose() {}, run: hook },
+      },
+    )
+    const thread = await runtime.createThread()
+    await thread.startIfIdle({ content: { kind: "text", text: "Request." } })
+    await expect
+      .poll(() => thread.agentStatus)
+      .toEqual({ completed: "Cannot help with that.", reason: "refused" })
+    expect(modelCalls).toBe(1)
+    expect(thread.snapshot().context.history).toContainEqual(
+      expect.objectContaining({
+        item: {
+          role: "assistant",
+          content: [{ type: "text", text: "Cannot help with that." }],
+        },
+      }),
+    )
+    expect(
+      hook.mock.calls.some(([request]) => request.event === HookEvent.Stop),
+    ).toBe(false)
+  })
+
   it("materializes a new Session only after the prompt hook accepts its input", async () => {
     const root = await mkdtemp(
       join(tmpdir(), "yakitori-prompt-materialization-"),
@@ -1633,6 +2059,7 @@ describe("Turn processor", () => {
           contextWindowTokens: 12_000,
           maxContextWindowTokens: 12_345,
           effectiveContextWindowPercent: 100,
+          contextWindowScope: "input",
         }
       },
     }

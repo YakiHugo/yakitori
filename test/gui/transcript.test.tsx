@@ -715,6 +715,83 @@ it("promotes only the final answer of a completed turn split by another input", 
   ).toBeNull()
 })
 
+it.each([
+  "truncated",
+  "refused",
+] as const)("renders and copies a %s answer as one continuous Markdown response", async (reason) => {
+  const writeText = vi.fn(async (_text: string) => {})
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText },
+  })
+  useAppStore.setState({
+    execution: {
+      ...useAppStore.getState().execution,
+      entries: [
+        ...entries.slice(0, 2),
+        {
+          kind: "assistant",
+          itemId: "piece_one",
+          turnId: "turn_1",
+          text: "**Con",
+          status: "completed",
+          at,
+        },
+        {
+          kind: "assistant",
+          itemId: "piece_two",
+          turnId: "turn_1",
+          text: "tinuation**",
+          status: "completed",
+          at,
+        },
+        {
+          kind: "turn_terminal",
+          turnId: "turn_1",
+          state: reason,
+          message: "Incomplete output.",
+        },
+      ],
+      turnTimings: {
+        turn_1: {
+          startedAt: at,
+          completedAt: at,
+          outcome: {
+            status: "completed",
+            reason,
+            answerItemIds: ["piece_one", "piece_two"],
+          },
+        },
+      },
+    },
+  })
+  render(<Transcript />)
+  expect(screen.getByText("Continuation", { selector: "strong" })).toBeDefined()
+  expect(screen.getAllByRole("button", { name: "Copy response" })).toHaveLength(
+    1,
+  )
+  expect(screen.getByText(/Incomplete output/)).toBeDefined()
+  fireEvent.click(screen.getByRole("button", { name: "Copy response" }))
+  await screen.findByRole("button", { name: "Copied response" })
+  expect(writeText).toHaveBeenCalledWith("**Continuation**")
+})
+
+it("does not promote progress when the completed Turn has an explicit empty answer", () => {
+  useAppStore.setState({
+    execution: {
+      ...useAppStore.getState().execution,
+      turnTimings: {
+        turn_1: {
+          completedAt: at,
+          outcome: { status: "completed", answerItemIds: [] },
+        },
+      },
+    },
+  })
+  render(<Transcript />)
+  expect(screen.queryByRole("button", { name: "Copy response" })).toBeNull()
+})
+
 it("keeps every fragment of a failed turn as activity", () => {
   useAppStore.setState({
     execution: {

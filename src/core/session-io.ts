@@ -4,6 +4,7 @@ import type {
   ModelSelection,
   StartedExecutionItem,
   TextContent,
+  TurnCompletion,
 } from "../kernel/events.ts"
 import { createRequestId } from "../kernel/ids.ts"
 import type { RolloutItem } from "./rollout.ts"
@@ -24,7 +25,10 @@ export type AgentStatus =
   | "interrupted"
   | "shutdown"
   | "not_found"
-  | { readonly completed: string | null }
+  | Readonly<{
+      completed: string | null
+      reason?: NonNullable<TurnCompletion["reason"]>
+    }>
   | { readonly errored: string }
 
 export type TurnInput = Readonly<{
@@ -180,6 +184,7 @@ export type SessionEvent =
       readonly type: "turn.completed"
       readonly threadId: string
       readonly input: TurnInput
+      readonly completion?: TurnCompletion
     }
   | {
       readonly type: "turn.interrupted"

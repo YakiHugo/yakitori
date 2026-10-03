@@ -15,9 +15,13 @@ import {
 
 describe("OpenAI Responses provider", () => {
   it.each([
-    "codex",
-    "openai",
-  ])("sends only supported output controls to %s", async (provider) => {
+    ["codex", "gpt-6-astra"],
+    ["codex", "unknown-model"],
+    ["openai", "gpt-6-astra"],
+    ["openai", "unknown-model"],
+    ["grok", "grok-4.7"],
+    ["grok", "unknown-model"],
+  ])("sends an explicit output budget only when %s/%s supports it", async (provider, model) => {
     let body: Record<string, unknown> | undefined
     const client = new OpenAI({
       apiKey: "test",
@@ -32,7 +36,7 @@ describe("OpenAI Responses provider", () => {
     })
     const stream = createOpenAIProvider({
       apiKey: "test",
-      model: "gpt-6-astra",
+      model,
       client,
     })
     const events = []
@@ -40,15 +44,15 @@ describe("OpenAI Responses provider", () => {
       requestFixture({
         target: {
           provider,
-          model: "gpt-6-astra",
-          instructionProfileId: "gpt-6-astra",
+          model,
+          instructionProfileId: model,
           effort: "medium",
         },
         maxOutputTokens: 1234,
       }),
     ))
       events.push(event)
-    expect(body?.model).toBe("gpt-6-astra")
+    expect(body?.model).toBe(model)
     if (provider === "codex")
       expect(body).not.toHaveProperty("max_output_tokens")
     else expect(body?.max_output_tokens).toBe(1234)
@@ -56,6 +60,39 @@ describe("OpenAI Responses provider", () => {
       type: "response",
       response: { stopReason: ModelStopReason.EndTurn },
     })
+  })
+
+  it.each([
+    ["openai", "gpt-6-astra"],
+    ["openai", "unknown-model"],
+    ["grok", "grok-4.7"],
+    ["grok", "unknown-model"],
+    ["codex", "gpt-6-astra"],
+    ["codex", "unknown-model"],
+  ])("leaves output budgeting to %s for %s without an explicit cap", async (provider, model) => {
+    let body: Record<string, unknown> | undefined
+    const client = new OpenAI({
+      apiKey: "test",
+      maxRetries: 0,
+      fetch: async (_url, init) => {
+        body = JSON.parse(String(init?.body))
+        return new globalThis.Response(
+          `data: ${JSON.stringify({ type: "response.completed", response: responseFixture({ output: [] }) })}\n\n`,
+          { headers: { "content-type": "text/event-stream" } },
+        )
+      },
+    })
+    const stream = createOpenAIProvider({ apiKey: "test", model, client })
+    const events = []
+    for await (const event of stream(
+      requestFixture({
+        target: { provider, model, instructionProfileId: model },
+      }),
+    ))
+      events.push(event)
+    expect(body?.model).toBe(model)
+    expect(body).not.toHaveProperty("max_output_tokens")
+    expect(events.at(-1)).toMatchObject({ type: "response" })
   })
 
   it.each([
@@ -1514,8 +1551,8 @@ describe("OpenAI provider error classification", () => {
     ])
   })
 
-  it("keeps refusals free of retry details", () => {
-    expect(() =>
+  it("preserves refusal text as a content-filter result", () => {
+    expect(
       fromOpenAIResponse(
         responseFixture({
           output: [
@@ -1529,7 +1566,11 @@ describe("OpenAI provider error classification", () => {
           ],
         }),
       ),
-    ).toThrow("cannot help")
+    ).toMatchObject({
+      stopReason: ModelStopReason.ContentFilter,
+      rawStopReason: "refusal",
+      content: [{ type: "text", text: "cannot help" }],
+    })
   })
 
   it("marks a stream error event with a transient code as retryable", async () => {

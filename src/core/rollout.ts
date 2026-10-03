@@ -9,6 +9,7 @@ import type {
   SessionConfigurationSnapshot,
   TokenUsage,
   TurnMetrics,
+  TurnCompletion,
 } from "../kernel/events.ts"
 
 export type HistoryPosition = {
@@ -86,6 +87,7 @@ export type RolloutItem =
       readonly type: "turn_completed"
       readonly turnId: string
       readonly outcome: "completed" | "failed" | "interrupted"
+      readonly completion?: TurnCompletion
       /** Start of the last model stream invoked during this Turn, when known. */
       readonly lastRequestStartedAt?: string
       readonly usage?: TokenUsage

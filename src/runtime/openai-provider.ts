@@ -7,14 +7,7 @@ import type {
 import type { ReasoningEffort } from "openai/resources/shared"
 import { isJsonObject, isJsonValue } from "../kernel/index.ts"
 import { nativeDeferredToolProtocol } from "./deferred-tool-loading.ts"
-import { resolveModelWireEffort } from "./model-catalog.ts"
 import {
-  failureKindForStatus,
-  modelFailureFromUnknown,
-} from "./model-failure.ts"
-import { parseRetryAfterMs, parseShouldRetry } from "./retry-after.ts"
-import {
-  DEFAULT_MODEL_MAX_OUTPUT_TOKENS,
   flattenModelSystem,
   type ModelContentBlock,
   type ModelMessage,
@@ -26,6 +19,12 @@ import {
   requireModelImageData,
   type StreamFn,
 } from "./model.ts"
+import { resolveModelWireEffort } from "./model-catalog.ts"
+import {
+  failureKindForStatus,
+  modelFailureFromUnknown,
+} from "./model-failure.ts"
+import { parseRetryAfterMs, parseShouldRetry } from "./retry-after.ts"
 
 export type OpenAIProviderOptions = {
   readonly apiKey: string
@@ -67,6 +66,10 @@ async function* streamOpenAI(
   }
 
   let failureStage: "connect" | "response_body" = "connect"
+  let terminalUsage: ModelResponse["usage"]
+  let terminalEvent:
+    | Extract<ModelStreamEvent, { type: "response" | "failure" }>
+    | undefined
   try {
     const nativeDeferredLoading =
       nativeDeferredToolProtocol(request) === "openai"
@@ -94,12 +97,10 @@ async function* streamOpenAI(
         parallel_tool_calls: true,
         // The Codex subscription endpoint rejects max_output_tokens. Its
         // ResponsesApiRequest omits this API-only output control.
-        ...(request.target.provider === "codex"
+        ...(request.target.provider === "codex" ||
+        request.maxOutputTokens === undefined
           ? {}
-          : {
-              max_output_tokens:
-                request.maxOutputTokens ?? DEFAULT_MODEL_MAX_OUTPUT_TOKENS,
-            }),
+          : { max_output_tokens: request.maxOutputTokens }),
         store: false,
         stream: true,
         ...(request.cacheKey === undefined
@@ -135,25 +136,62 @@ async function* streamOpenAI(
           })
     failureStage = "response_body"
     const completedItems = new Map<number, Response["output"][number]>()
+    const startedItems = new Map<number, Response["output"][number]>()
+    const fragments = new Map<
+      string,
+      {
+        outputIndex: number
+        type: "message" | "reasoning"
+        parts: Map<
+          number,
+          { type: "text" | "reasoning" | "refusal"; text: string }
+        >
+      }
+    >()
     let nextOutputIndex = 0
     for await (const event of stream) {
       if (request.signal?.aborted) {
         yield abortedResponse()
         return
       }
-      if (event.type === "response.output_text.delta") {
-        yield {
-          type: "delta",
-          text: event.delta,
-          ...(request.streamOutputItems && event.item_id !== undefined
-            ? { itemId: event.item_id }
-            : {}),
-        }
+      if (terminalEvent !== undefined)
+        throw new OpenAIProtocolError(
+          "OpenAI returned an event after its terminal response.",
+        )
+      if (event.type === "response.output_item.added") {
+        startedItems.set(event.output_index, event.item)
         continue
       }
-      if (event.type === "response.reasoning_summary_text.delta") {
+      if (
+        event.type === "response.output_text.delta" ||
+        event.type === "response.reasoning_summary_text.delta" ||
+        event.type === "response.refusal.delta"
+      ) {
+        const reasoning = event.type === "response.reasoning_summary_text.delta"
+        if (event.item_id !== undefined && event.output_index !== undefined) {
+          const partIndex = reasoning
+            ? event.summary_index
+            : event.content_index
+          const item = fragments.get(event.item_id) ?? {
+            outputIndex: event.output_index,
+            type: reasoning ? ("reasoning" as const) : ("message" as const),
+            parts: new Map<
+              number,
+              { type: "text" | "reasoning" | "refusal"; text: string }
+            >(),
+          }
+          item.parts.set(partIndex, {
+            type: reasoning
+              ? "reasoning"
+              : event.type === "response.refusal.delta"
+                ? "refusal"
+                : "text",
+            text: (item.parts.get(partIndex)?.text ?? "") + event.delta,
+          })
+          fragments.set(event.item_id, item)
+        }
         yield {
-          type: "reasoning_delta",
+          type: reasoning ? "reasoning_delta" : "delta",
           text: event.delta,
           ...(request.streamOutputItems && event.item_id !== undefined
             ? { itemId: event.item_id }
@@ -168,20 +206,28 @@ async function* streamOpenAI(
           // Preserve provider output order even when completed items arrive out of order.
           for (;;) {
             const item = completedItems.get(nextOutputIndex)
-            if (item === undefined) break
-            nextOutputIndex += 1
-            const content = fromOpenAIOutput(
+            if (
+              item === undefined ||
+              ("status" in item &&
+                item.status !== undefined &&
+                item.status !== "completed")
+            )
+              break
+            const result = fromOpenAIOutput(
               [item],
               customFallbackKeys,
               request.target.provider,
               request.continuationScope,
               request.target.model,
+              new Set([outputItemId(item)].filter((id) => id !== undefined)),
             )
-            if (content.length > 0)
+            if (result.incompleteToolCalls) break
+            nextOutputIndex += 1
+            if (result.content.length > 0)
               yield {
                 type: "output_item",
                 itemId: item.id ?? `output_${nextOutputIndex - 1}`,
-                content,
+                content: result.content,
               }
           }
         }
@@ -192,24 +238,120 @@ async function* streamOpenAI(
         event.type === "response.incomplete" ||
         event.type === "response.failed"
       ) {
+        terminalUsage = responseResult(
+          event.response,
+          ModelStopReason.EndTurn,
+          [],
+          request.target.provider,
+        ).usage
         // Codex sends completed items separately and may leave terminal
         // output empty. Preserve output_index order and merge by item id so
         // ordinary Responses endpoints cannot duplicate a tool side effect.
-        const outputById = new Map(
-          [...completedItems.entries()]
-            .sort(([left], [right]) => left - right)
-            .map(([, item]) => [item.id, item]),
+        const outputByIndex = new Map([...startedItems, ...completedItems])
+        const completedIds = new Set(
+          [...completedItems.values()]
+            .filter(
+              (item) =>
+                !("status" in item) ||
+                item.status === undefined ||
+                item.status === "completed",
+            )
+            .flatMap((item) => {
+              const id = outputItemId(item)
+              return id === undefined ? [] : [id]
+            }),
         )
-        for (const item of event.response.output) outputById.set(item.id, item)
+        const authoritativeIds = new Set(
+          [...completedItems.values(), ...event.response.output].map(
+            (item) => item.id,
+          ),
+        )
+        for (const [index, item] of event.response.output.entries()) {
+          if (completedIds.has(outputItemId(item) ?? "")) continue
+          const knownIndex = [...outputByIndex].find(
+            ([, known]) => outputItemId(known) === outputItemId(item),
+          )?.[0]
+          const targetIndex =
+            knownIndex ??
+            (outputByIndex.has(index)
+              ? Math.max(...outputByIndex.keys()) + 1
+              : index)
+          outputByIndex.set(targetIndex, item)
+        }
+        for (const [id, fragment] of fragments) {
+          if (completedIds.has(id)) continue
+          const item = outputByIndex.get(fragment.outputIndex)
+          if (fragment.type === "reasoning") {
+            const summary = new Map(
+              (item?.type === "reasoning" ? item.summary : []).map(
+                (part, index) => [index, part],
+              ),
+            )
+            for (const [index, part] of fragment.parts) {
+              if (authoritativeIds.has(id) && summary.get(index)?.text) continue
+              summary.set(index, { type: "summary_text", text: part.text })
+            }
+            outputByIndex.set(fragment.outputIndex, {
+              ...(item?.type === "reasoning"
+                ? item
+                : { id, type: "reasoning" as const }),
+              summary: [...summary.entries()]
+                .sort(([left], [right]) => left - right)
+                .map(([, part]) => part),
+            })
+          } else {
+            const content = new Map(
+              (item?.type === "message" ? item.content : []).map(
+                (part, index) => [index, part],
+              ),
+            )
+            for (const [index, part] of fragment.parts) {
+              const retained = content.get(index)
+              if (
+                authoritativeIds.has(id) &&
+                (retained?.type === "output_text"
+                  ? retained.text.length > 0
+                  : (retained?.refusal.length ?? 0) > 0)
+              )
+                continue
+              content.set(
+                index,
+                part.type === "refusal"
+                  ? { type: "refusal", refusal: part.text }
+                  : {
+                      type: "output_text",
+                      text: part.text,
+                      annotations: [],
+                      logprobs: [],
+                    },
+              )
+            }
+            outputByIndex.set(fragment.outputIndex, {
+              ...(item?.type === "message"
+                ? item
+                : {
+                    id,
+                    type: "message" as const,
+                    role: "assistant" as const,
+                    status: "incomplete" as const,
+                  }),
+              content: [...content.entries()]
+                .sort(([left], [right]) => left - right)
+                .map(([, part]) => part),
+            })
+          }
+        }
         const response = {
           ...event.response,
-          output: [...outputById.values()],
+          output: [...outputByIndex.entries()]
+            .sort(([left], [right]) => left - right)
+            .map(([, item]) => item),
         }
         const failure = responseFailure(response, request.target.provider)
         if (failure !== undefined) {
-          yield failure
+          terminalEvent = failure
         } else {
-          yield {
+          terminalEvent = {
             type: "response",
             response: fromOpenAIResponse(
               response,
@@ -217,10 +359,11 @@ async function* streamOpenAI(
               request.target.provider,
               request.continuationScope,
               request.target.model,
+              completedIds,
             ),
           }
         }
-        return
+        continue
       }
       if (event.type === "error") {
         const providerCode = event.code ?? "openai_error"
@@ -238,12 +381,31 @@ async function* streamOpenAI(
         return
       }
     }
+    // Responses terminal events precede stream EOF. Validate the tail before
+    // exposing success or a Length eligible for compaction retry.
+    if (request.signal?.aborted) {
+      yield abortedResponse()
+      return
+    }
+    if (terminalEvent !== undefined) yield terminalEvent
   } catch (error) {
     if (request.signal?.aborted) {
       yield abortedResponse()
       return
     }
-    yield terminalFailure(error, request.target.provider, failureStage)
+    yield {
+      ...terminalFailure(
+        terminalEvent !== undefined && !(error instanceof OpenAIProtocolError)
+          ? new OpenAIProtocolError(
+              "OpenAI stream failed after its terminal response.",
+              { cause: error },
+            )
+          : error,
+        request.target.provider,
+        failureStage,
+      ),
+      ...(terminalUsage === undefined ? {} : { usage: terminalUsage }),
+    }
   }
 }
 
@@ -500,36 +662,91 @@ export function fromOpenAIResponse(
   provider = "openai",
   continuationScope?: string,
   model = response.model,
+  completedItemIds: ReadonlySet<string> = new Set(),
 ): ModelResponse {
   if (response.status === "cancelled") {
-    throw new Error("Cancelled OpenAI responses are not successful results.")
-  }
-  if (response.status === "incomplete") {
-    if (response.incomplete_details?.reason === "max_output_tokens") {
-      return responseResult(response, ModelStopReason.Length, [], provider)
-    }
-    throw new Error(
-      `OpenAI response was incomplete: ${response.incomplete_details?.reason ?? "unknown"}.`,
+    throw new OpenAIProtocolError(
+      "Cancelled OpenAI responses are not successful results.",
     )
   }
   if (response.status === "failed" || response.error) {
     throw new Error(response.error?.message ?? "OpenAI response failed.")
   }
-
-  const content = fromOpenAIOutput(
+  if (response.status !== "completed" && response.status !== "incomplete")
+    throw new OpenAIProtocolError(
+      `Unsupported OpenAI response status: ${response.status ?? "missing"}.`,
+    )
+  const rawStopReason: string | undefined = response.incomplete_details?.reason
+  let stopReason: ModelStopReason | undefined
+  let lengthReason: ModelResponse["lengthReason"]
+  if (response.status === "incomplete") {
+    if (rawStopReason === "max_output_tokens") {
+      stopReason = ModelStopReason.Length
+      // OpenAI uses this reason for both output and context exhaustion. Only
+      // xAI distinguishes max_prompt_tokens, so do not infer OpenAI's cause.
+      lengthReason = provider === "grok" ? "output" : "unknown"
+    } else if (provider === "grok" && rawStopReason === "max_prompt_tokens") {
+      stopReason = ModelStopReason.Length
+      lengthReason = "context"
+    } else if (provider === "grok" && rawStopReason === "max_time_limit") {
+      stopReason = ModelStopReason.Length
+      lengthReason = "unknown"
+    } else if (rawStopReason === "content_filter") {
+      stopReason = ModelStopReason.ContentFilter
+    } else {
+      throw new OpenAIProtocolError(
+        `OpenAI response was incomplete: ${rawStopReason ?? "unknown"}.`,
+      )
+    }
+  }
+  const result = fromOpenAIOutput(
     response.output,
     customFallbackKeys,
     provider,
     continuationScope,
     model,
+    response.status === "completed"
+      ? new Set(
+          response.output.flatMap((item) => {
+            const id = outputItemId(item)
+            return id === undefined ? [] : [id]
+          }),
+        )
+      : completedItemIds,
   )
-  return responseResult(
-    response,
-    content.some((block) => block.type === "tool_call")
+  if (
+    result.incompleteToolCalls &&
+    stopReason !== ModelStopReason.Length &&
+    stopReason !== ModelStopReason.ContentFilter
+  )
+    throw new OpenAIProtocolError(
+      "OpenAI returned incomplete tool arguments without a length or content filter stop.",
+    )
+  const refused = response.output.some(
+    (item) =>
+      item.type === "message" &&
+      item.content.some((part) => part.type === "refusal"),
+  )
+  stopReason ??= refused
+    ? ModelStopReason.ContentFilter
+    : result.content.some((block) => block.type === "tool_call")
       ? ModelStopReason.ToolUse
-      : ModelStopReason.EndTurn,
-    content,
-    provider,
+      : ModelStopReason.EndTurn
+  return {
+    ...responseResult(response, stopReason, result.content, provider),
+    ...(rawStopReason === undefined
+      ? refused
+        ? { rawStopReason: "refusal" }
+        : {}
+      : { rawStopReason }),
+    ...(lengthReason === undefined ? {} : { lengthReason }),
+    ...(result.incompleteToolCalls ? { incompleteToolCalls: true } : {}),
+  }
+}
+
+function outputItemId(item: Response["output"][number]): string | undefined {
+  return (
+    item.id ?? ("call_id" in item ? (item.call_id ?? undefined) : undefined)
   )
 }
 
@@ -539,9 +756,26 @@ function fromOpenAIOutput(
   provider: string,
   continuationScope: string | undefined,
   model: string,
-): ModelContentBlock[] {
+  completedItemIds: ReadonlySet<string>,
+): { content: ModelContentBlock[]; incompleteToolCalls: boolean } {
   const content: ModelContentBlock[] = []
+  let incompleteToolCalls = false
   for (const item of output) {
+    if (
+      item.type === "function_call" ||
+      item.type === "custom_tool_call" ||
+      item.type === "tool_search_call"
+    ) {
+      const status = "status" in item ? item.status : undefined
+      if (
+        (status !== undefined && status !== "completed") ||
+        (status === undefined &&
+          !completedItemIds.has(outputItemId(item) ?? ""))
+      ) {
+        incompleteToolCalls = true
+        continue
+      }
+    }
     if (item.type === "compaction") {
       if (
         continuationScope === undefined ||
@@ -594,12 +828,16 @@ function fromOpenAIOutput(
           continue
         }
         if (part.type === "refusal") {
-          throw new Error(part.refusal)
+          content.push({ type: "text", text: part.refusal })
         }
       }
       continue
     }
     if (item.type === "custom_tool_call") {
+      if (typeof item.input !== "string") {
+        incompleteToolCalls = true
+        continue
+      }
       const customInputFallbackKey = customFallbackKeys.get(item.name)
       content.push({
         type: "tool_call",
@@ -635,15 +873,14 @@ function fromOpenAIOutput(
     let parsed: unknown
     try {
       parsed = JSON.parse(item.arguments)
-    } catch {
-      throw new Error(
-        `OpenAI returned invalid JSON arguments for tool ${item.name}.`,
-      )
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) throw error
+      incompleteToolCalls = true
+      continue
     }
     if (!isJsonValue(parsed)) {
-      throw new Error(
-        `OpenAI returned non-JSON arguments for tool ${item.name}.`,
-      )
+      incompleteToolCalls = true
+      continue
     }
     content.push({
       type: "tool_call",
@@ -653,7 +890,7 @@ function fromOpenAIOutput(
     })
   }
 
-  return content
+  return { content, incompleteToolCalls }
 }
 
 function customToolInput(
@@ -759,10 +996,6 @@ function responseFailure(
   if (
     response.status !== "cancelled" &&
     response.status !== "failed" &&
-    !(
-      response.status === "incomplete" &&
-      response.incomplete_details?.reason !== "max_output_tokens"
-    ) &&
     (response.error === null || response.error === undefined)
   ) {
     return undefined
@@ -810,6 +1043,8 @@ function activeContextTokens(
   return usage.total_tokens
 }
 
+class OpenAIProtocolError extends Error {}
+
 function terminalFailure(
   error: unknown,
   provider: string,
@@ -824,15 +1059,17 @@ function terminalFailure(
       ? error.code
       : undefined
   const kind =
-    error instanceof OpenAI.APIConnectionError
-      ? stage === "connect"
-        ? "connection_failed"
-        : "stream_disconnected"
-      : status !== undefined
-        ? failureKindForStatus(status)
-        : providerCode === undefined
-          ? undefined
-          : failureKindForProviderCode(providerCode)
+    error instanceof OpenAIProtocolError
+      ? "protocol_error"
+      : error instanceof OpenAI.APIConnectionError
+        ? stage === "connect"
+          ? "connection_failed"
+          : "stream_disconnected"
+        : status !== undefined
+          ? failureKindForStatus(status)
+          : providerCode === undefined
+            ? undefined
+            : failureKindForProviderCode(providerCode)
   const retryAfterMs =
     error instanceof OpenAI.APIError
       ? parseRetryAfterMs(error.headers)

@@ -1,11 +1,12 @@
 import { modelFailureFromUnknown } from "./model-failure.ts"
 import type { ModelRequestPolicy } from "../kernel/index.ts"
-import type {
-  ModelFailure,
-  ModelRequest,
-  ModelStreamEvent,
-  ModelWireApi,
-  StreamFn,
+import {
+  type ModelFailure,
+  type ModelRequest,
+  ModelStopReason,
+  type ModelStreamEvent,
+  type ModelWireApi,
+  type StreamFn,
 } from "./model.ts"
 
 export type { ModelRequestPolicy } from "../kernel/index.ts"
@@ -62,6 +63,7 @@ async function* runModelRequest(
   for (let attempt = 1; ; attempt += 1) {
     let outputObserved = false
     let committedOutput = false
+    let compactionTruncated = false
     if (request.signal?.aborted) {
       yield { type: "cancelled" }
       return
@@ -128,6 +130,38 @@ async function* runModelRequest(
           if (next.done) {
             exhausted = true
             if (terminalEvent !== undefined) {
+              const response = terminalEvent.response
+              if (
+                request.compaction !== undefined &&
+                response.stopReason === ModelStopReason.Length
+              ) {
+                // Like Codex, compaction requires completed inference before
+                // installing a checkpoint. Share the transport retry budget;
+                // ordinary Length responses remain usable by the Turn loop.
+                compactionTruncated = true
+                failureEvent = {
+                  type: "failure",
+                  failure: {
+                    kind: "provider_error",
+                    stage: "model_event",
+                    provider: request.target.provider,
+                    wireApi: options.wireApi,
+                    message: "Compaction was truncated by a generation limit.",
+                    providerCode: response.rawStopReason ?? response.stopReason,
+                    ...(response.providerRequestId === undefined
+                      ? {}
+                      : { providerRequestId: response.providerRequestId }),
+                    details: {
+                      stopReason: response.stopReason,
+                      lengthReason: response.lengthReason ?? "unknown",
+                    },
+                  },
+                  ...(response.usage === undefined
+                    ? {}
+                    : { usage: response.usage }),
+                }
+                break
+              }
               yield terminalEvent
               return
             }
@@ -250,7 +284,9 @@ async function* runModelRequest(
     }
     const retry =
       (!committedOutput || request.rebuildMessagesAfterOutput !== undefined) &&
-      shouldRetry(failureEvent.failure, attempt, options)
+      (compactionTruncated
+        ? attempt < options.maxAttempts
+        : shouldRetry(failureEvent.failure, attempt, options))
     const effectiveMaxAttempts =
       failureEvent.failure.kind === "rate_limited"
         ? Math.min(options.maxAttempts, options.rateLimitMaxAttempts)

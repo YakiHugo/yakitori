@@ -1,10 +1,10 @@
 import { readImageDimensions } from "../kernel/image-metadata.ts"
 import { nativeDeferredToolProtocol } from "./deferred-tool-loading.ts"
 import {
-  DEFAULT_MODEL_MAX_OUTPUT_TOKENS,
   type ModelImageBlock,
   type ModelMessage,
   type ModelRequest,
+  resolveModelRequestMaxOutputTokens,
 } from "./model.ts"
 
 const HIGH_DETAIL_IMAGE_TOKENS = 2_000
@@ -57,7 +57,10 @@ export function estimateModelRequestBudget(
   const estimatedInputTokens =
     envelopeTokens + systemTokens + messageTokens + toolTokens + imageTokens
   const outputReserveTokens =
-    request.maxOutputTokens ?? DEFAULT_MODEL_MAX_OUTPUT_TOKENS
+    resolveModelRequestMaxOutputTokens(
+      request.target.provider,
+      request.maxOutputTokens,
+    ) ?? 0
   return {
     envelopeTokens,
     systemTokens,

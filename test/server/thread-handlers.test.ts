@@ -1412,6 +1412,85 @@ describe("thread server handlers", () => {
     ])
   })
 
+  it.each([
+    "truncated",
+    "refused",
+  ] as const)("delivers %s completion metadata through live events and durable replay", async (reason) => {
+    const workspace = await mkdtemp(
+      join(tmpdir(), "yakitori-handler-completion-"),
+    )
+    const store = new MemoryThreadStore()
+    const stream: StreamFn = async function* () {
+      yield {
+        type: "response",
+        response: {
+          stopReason:
+            reason === "truncated"
+              ? ModelStopReason.Length
+              : ModelStopReason.ContentFilter,
+          content: [{ type: "text", text: "Partial answer." }],
+          ...(reason === "truncated"
+            ? { lengthReason: "output" as const }
+            : {}),
+        },
+      }
+    }
+    const manager = new ThreadManager({
+      store,
+      createTurnProcessor: () =>
+        createTurnProcessor({
+          stream,
+          toolRegistry: createToolRegistry([]),
+          loadProjectInstructions: async () => undefined,
+        }),
+    })
+    const eventHub = createSessionEventHub()
+    const handlers = createThreadServerHandlers({ manager, store, eventHub })
+    cleanups.push(async () => {
+      await manager.shutdown()
+      await handlers.close()
+      await rm(workspace, { recursive: true, force: true })
+    })
+    const created = await handlers.createSession({
+      workingDirectory: workspace,
+      mateId: "mate_test",
+      mateRevisionId: "mate_revision_test",
+    })
+    if (!created.ok) throw new Error(created.body.error.message)
+    const sessionId = created.body.session.id
+    const outcomes: unknown[] = []
+    const subscription = eventHub.subscribe(sessionId, (delivery) => {
+      if (
+        delivery.kind === "transient" &&
+        delivery.event.type === "turn.finished"
+      )
+        outcomes.push(delivery.event.outcome)
+    })
+    cleanups.push(async () => subscription.close())
+    const admitted = await handlers.admitInput({
+      sessionId,
+      requestId: "request_completion",
+      content: { kind: "text", text: "answer" },
+    })
+    if (!admitted.ok) throw new Error(admitted.body.error.message)
+    await waitForValue(() => outcomes[0])
+    const expected = expect.objectContaining({
+      status: "completed",
+      reason,
+      answerItemIds: expect.any(Array),
+    })
+    expect(outcomes).toEqual([expected])
+    const replay = await handlers.readSessionEvents({ sessionId })
+    if (!replay.ok) throw new Error(replay.body.error.message)
+    expect(
+      replay.body.events.find(
+        (event) => isKernelEvent(event) && event.type === "turn.completed",
+      ),
+    ).toMatchObject({
+      data: { outcome: expected },
+    })
+  })
+
   it("publishes each rollout event only through its append fence", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "yakitori-handler-fence-"))
     const store = new MemoryThreadStore()

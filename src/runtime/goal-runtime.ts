@@ -386,15 +386,21 @@ export class GoalRuntime implements GoalToolService {
         )
         return {
           ...task,
-          completion: task.completion.catch((error: unknown) => {
-            if (!control.signal.aborted)
-              turn.failed =
-                error instanceof ModelFailureError &&
-                error.failure.kind === "rate_limited"
-                  ? "usage_limited"
-                  : "blocked"
-            throw error
-          }),
+          completion: task.completion
+            .then((completion) => {
+              if (!control.signal.aborted && completion?.reason === "refused")
+                turn.failed = "blocked"
+              return completion
+            })
+            .catch((error: unknown) => {
+              if (!control.signal.aborted)
+                turn.failed =
+                  error instanceof ModelFailureError &&
+                  error.failure.kind === "rate_limited"
+                    ? "usage_limited"
+                    : "blocked"
+              throw error
+            }),
         }
       },
     }

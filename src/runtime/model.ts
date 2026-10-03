@@ -1,8 +1,8 @@
 import type {
   JsonObject,
   ModelAssistantMessage,
-  ModelContentBlock,
   ModelCompactionBlock,
+  ModelContentBlock,
   ModelDeveloperMessage,
   ModelImageBlock,
   ModelMessage,
@@ -16,8 +16,8 @@ import type {
 } from "../kernel/index.ts"
 
 export type {
-  ModelCompactionBlock,
   ModelAssistantMessage,
+  ModelCompactionBlock,
   ModelContentBlock,
   ModelDeveloperMessage,
   ModelImageBlock,
@@ -35,6 +35,7 @@ export const ModelStopReason = {
   EndTurn: "end_turn",
   Length: "length",
   ToolUse: "tool_use",
+  ContentFilter: "content_filter",
 } as const
 
 export type ModelStopReason =
@@ -94,7 +95,19 @@ export type ModelRequest = Readonly<{
   signal?: AbortSignal
 }>
 
-export const DEFAULT_MODEL_MAX_OUTPUT_TOKENS = 8_192
+// Yakitori's requested budget for the required Messages max_tokens field,
+// not a provider capability or API default. Optional output limits stay unset.
+export const DEFAULT_MESSAGES_MAX_OUTPUT_TOKENS = 32_000
+
+export function resolveModelRequestMaxOutputTokens(
+  provider: string,
+  maxOutputTokens?: number,
+): number | undefined {
+  if (provider === "codex") return undefined
+  return provider === "anthropic" || provider === "kimi"
+    ? (maxOutputTokens ?? DEFAULT_MESSAGES_MAX_OUTPUT_TOKENS)
+    : maxOutputTokens
+}
 
 export function flattenModelSystem(
   sections: readonly ModelSystemSection[],
@@ -151,12 +164,16 @@ export type ModelFailure = Readonly<{
   readonly details?: JsonObject
 }>
 
-export type ModelResponse = {
-  readonly stopReason: ModelStopReason
-  readonly content: readonly ModelContentBlock[]
-  readonly usage?: ModelUsage
-  readonly providerRequestId?: string
-}
+export type ModelResponse = Readonly<{
+  stopReason: ModelStopReason
+  rawStopReason?: string
+  lengthReason?: "output" | "context" | "unknown"
+  // Tool calls in content are complete; an unusable tail is never executable.
+  incompleteToolCalls?: boolean
+  content: readonly ModelContentBlock[]
+  usage?: ModelUsage
+  providerRequestId?: string
+}>
 
 export type ModelStreamDeltaEvent = Readonly<{
   type: "delta"

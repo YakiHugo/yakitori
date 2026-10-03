@@ -545,7 +545,11 @@ function outcomeFromTerminalStatus(
 ): import("./agent-control.ts").AgentRunOutcome | undefined {
   if (typeof status === "object") {
     return "completed" in status
-      ? { type: "completed", text: status.completed ?? "" }
+      ? {
+          type: "completed",
+          text: status.completed ?? "",
+          ...(status.reason === undefined ? {} : { reason: status.reason }),
+        }
       : { type: "errored", error: status.errored }
   }
   return status === "interrupted" ? { type: "interrupted" } : undefined
@@ -625,7 +629,11 @@ function isFinalStatus(status: AgentStatus): boolean {
 function outcomeFromStatus(status: AgentStatus) {
   if (typeof status === "object") {
     if ("completed" in status) {
-      return { type: "completed" as const, text: status.completed ?? "" }
+      return {
+        type: "completed" as const,
+        text: status.completed ?? "",
+        ...(status.reason === undefined ? {} : { reason: status.reason }),
+      }
     }
     return { type: "errored" as const, error: status.errored }
   }

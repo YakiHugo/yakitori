@@ -484,6 +484,41 @@ describe("goal runtime", () => {
     expect(provider.requests).toHaveLength(3)
   })
 
+  it("preserves a refused completion and blocks the goal without retrying", async () => {
+    const refusal = step({
+      stopReason: "content_filter",
+      content: [{ type: "text", text: "Cannot help with that request." }],
+    })
+    const provider = script(refusal)
+    const { application } = await app(provider.stream)
+    const sessionId = await createSession(application)
+    body(
+      await application.handlers.setGoal({
+        sessionId,
+        objective: "Request rejected by the provider",
+      }),
+    )
+    await refusal.entered.promise
+    await idle(application, sessionId)
+    expect((await readGoal(application, sessionId))?.status).toBe("blocked")
+    expect(provider.requests).toHaveLength(1)
+    const stored = await application.threadStore.readThread(sessionId)
+    const completed = stored?.rollout.find(
+      ({ item }) => item.type === "turn_completed",
+    )?.item
+    expect(completed).toMatchObject({
+      type: "turn_completed",
+      outcome: "completed",
+      completion: { reason: "refused" },
+    })
+    expect(
+      application.threadManager.getThread(sessionId)?.agentStatus,
+    ).toMatchObject({
+      completed: "Cannot help with that request.",
+      reason: "refused",
+    })
+  })
+
   it("accepts completion established by the finishing turn after the budget is spent", async () => {
     const wrap = step(final("Finished within the last turn"))
     const provider = script(

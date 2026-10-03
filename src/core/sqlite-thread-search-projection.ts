@@ -65,7 +65,7 @@ type OccurrenceCursor = Readonly<{
   occurrenceIndex: number
 }>
 
-const schemaVersion = 1
+const schemaVersion = 2
 
 // Disposable SQLite materialization of canonical JSONL history. The rollout
 // remains authoritative; stamps let startup rebuild only stale projections.
@@ -458,12 +458,17 @@ function applyEntries(
           `)
           .run(threadId, envelope.turnId, record.seq)
       } else if (message.role === "assistant") {
-        const text = markdownVisibleText(
-          message.content
-            .filter((block) => block.type === "text")
-            .map((block) => block.text)
-            .join("\n"),
-        )
+        const rawText = message.content
+          .filter((block) => block.type === "text")
+          .map((block) => block.text)
+          .join("")
+        database
+          .prepare(`
+          INSERT INTO search_answer_items (thread_id, turn_id, item_id, seq, text)
+          VALUES (?, ?, ?, ?, ?)
+        `)
+          .run(threadId, envelope.turnId, envelope.id, record.seq, rawText)
+        const text = markdownVisibleText(rawText)
         database
           .prepare(`
             INSERT INTO search_turns (
@@ -492,6 +497,39 @@ function applyEntries(
       )
       .run(threadId, record.item.turnId)
     if (record.item.outcome !== "completed") continue
+    if (record.item.completion?.answerItemIds !== undefined) {
+      const turnId = record.item.turnId
+      const pieces = record.item.completion.answerItemIds.map((id) => {
+        const item = database
+          .prepare(`
+          SELECT seq, turn_id, item_id, text FROM search_answer_items
+          WHERE thread_id = ? AND turn_id = ? AND item_id = ?
+        `)
+          .get(threadId, turnId, id) as MessageRow | undefined
+        if (item === undefined) {
+          throw new Error(
+            `Turn answer references missing assistant item ${id}.`,
+          )
+        }
+        return item
+      })
+      const anchor = pieces.at(-1)
+      const text = markdownVisibleText(
+        pieces.map((piece) => piece.text).join(""),
+      )
+      if (anchor !== undefined && text !== "") {
+        insertMessage(
+          database,
+          threadId,
+          anchor.seq,
+          turnId,
+          anchor.item_id,
+          "assistant",
+          text,
+        )
+      }
+      continue
+    }
     const turn = database
       .prepare(`
         SELECT last_tool_seq, candidate_seq, candidate_item_id, candidate_text
@@ -602,6 +640,7 @@ function initializeDatabase(database: DatabaseSync): void {
     | undefined
   if ((version?.user_version ?? 0) !== schemaVersion) {
     database.exec(`
+      DROP TABLE IF EXISTS search_answer_items;
       DROP TABLE IF EXISTS search_messages;
       DROP TABLE IF EXISTS search_turns;
       DROP TABLE IF EXISTS search_threads;
@@ -632,6 +671,15 @@ function initializeDatabase(database: DatabaseSync): void {
 
     CREATE INDEX IF NOT EXISTS search_messages_order
     ON search_messages (thread_id, seq, item_id);
+
+    CREATE TABLE IF NOT EXISTS search_answer_items (
+      thread_id TEXT NOT NULL REFERENCES search_threads(thread_id) ON DELETE CASCADE,
+      turn_id TEXT NOT NULL,
+      item_id TEXT NOT NULL,
+      seq INTEGER NOT NULL,
+      text TEXT NOT NULL,
+      PRIMARY KEY (thread_id, item_id)
+    ) STRICT;
 
     CREATE TABLE IF NOT EXISTS search_turns (
       thread_id TEXT NOT NULL REFERENCES search_threads(thread_id) ON DELETE CASCADE,

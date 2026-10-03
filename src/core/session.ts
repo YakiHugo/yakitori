@@ -8,6 +8,7 @@ import type {
   ToolExecutionItem,
   TokenUsage,
   TurnMetrics,
+  TurnCompletion,
 } from "../kernel/events.ts"
 import { InputRole } from "../kernel/events.ts"
 import { createInputId, createTurnId } from "../kernel/ids.ts"
@@ -40,6 +41,8 @@ import {
   type TurnInputSubmission,
 } from "./session-io.ts"
 import { PersistContext, type SessionRolloutStore } from "./thread-store.ts"
+
+export type { TurnCompletion } from "../kernel/events.ts"
 
 const submissionCapacity = 512
 const gracefulInterruptionTimeoutMs = 100
@@ -131,7 +134,8 @@ export type TurnProcessor = {
 // The processor owns effects outside Session state, so cancellation must stop
 // the underlying task rather than only detach its Promise from the Session.
 export type TurnTask = {
-  readonly completion: Promise<void>
+  // biome-ignore lint/suspicious/noConfusingVoidType: Tasks such as manual compaction return no completion metadata.
+  readonly completion: Promise<TurnCompletion | void>
   abort(): void
 }
 
@@ -139,6 +143,8 @@ type ActiveTurn = {
   readonly input: TurnInput
   readonly inputItem: ResponseItemEnvelope
   inputRecorded: boolean
+  // Compaction can replace model history before a continued answer finishes.
+  assistantItems: ResponseItemEnvelope[]
   readonly context: TurnContextItem
   readonly abort: AbortController
   readonly steering: TurnInput[]
@@ -500,6 +506,7 @@ export class Session {
       input,
       inputItem,
       inputRecorded: false,
+      assistantItems: [],
       context,
       abort,
       steering: [],
@@ -632,10 +639,13 @@ export class Session {
     let processorSettled = false
     const settled = processorTask
       .then(
-        () =>
+        (completion) =>
           active.abort.signal.aborted
             ? { type: "interrupted" as const }
-            : { type: "completed" as const },
+            : {
+                type: "completed" as const,
+                ...(completion === undefined ? {} : { completion }),
+              },
         (error: unknown) =>
           active.abort.signal.aborted
             ? { type: "interrupted" as const }
@@ -714,7 +724,7 @@ export class Session {
   async #finishTurn(
     active: ActiveTurn,
     outcome:
-      | { readonly type: "completed" }
+      | Readonly<{ type: "completed"; completion?: TurnCompletion }>
       | { readonly type: "interrupted" }
       | { readonly type: "failed"; readonly error: unknown },
   ): Promise<void> {
@@ -780,11 +790,21 @@ export class Session {
       return
     }
 
+    const completedText = answerText(
+      outcome.completion?.answerItemIds === undefined
+        ? this.#contextManager.snapshot().history
+        : active.assistantItems,
+      active.input.submissionId,
+      outcome.completion?.answerItemIds,
+    )
     await this.#appendRollout([
       {
         type: "turn_completed",
         turnId: active.input.submissionId,
         outcome: "completed",
+        ...(outcome.completion === undefined
+          ? {}
+          : { completion: outcome.completion }),
         ...(active.lastRequestStartedAt === undefined
           ? {}
           : { lastRequestStartedAt: active.lastRequestStartedAt }),
@@ -797,9 +817,15 @@ export class Session {
       type: "turn.completed",
       threadId: this.id,
       input: active.input,
+      ...(outcome.completion === undefined
+        ? {}
+        : { completion: outcome.completion }),
     })
     this.#setAgentStatus({
-      completed: this.#latestAssistantText(active.input.submissionId),
+      completed: completedText,
+      ...(outcome.completion?.reason === undefined
+        ? {}
+        : { reason: outcome.completion.reason }),
     })
     this.#releaseTurn(active, "completed")
   }
@@ -1018,6 +1044,9 @@ export class Session {
             items.map((item): RolloutItem => ({ type: "response_item", item })),
           )
           this.#contextManager.record(items)
+          active.assistantItems.push(
+            ...items.filter((item) => item.item.role === "assistant"),
+          )
         })
       },
       recordItemCompletions: async (items) => {
@@ -1222,22 +1251,6 @@ export class Session {
     }
   }
 
-  #latestAssistantText(turnId: string): string | null {
-    const history = this.#contextManager.snapshot().history
-    for (let index = history.length - 1; index >= 0; index -= 1) {
-      const message = history[index]?.item
-      if (history[index]?.turnId !== turnId || message?.role !== "assistant") {
-        continue
-      }
-      const text = message.content
-        .filter((block) => block.type === "text")
-        .map((block) => block.text)
-        .join("")
-      return text.length === 0 ? null : text
-    }
-    return null
-  }
-
   async #recordAgentFailure(message: string): Promise<void> {
     if (
       typeof this.#agentStatus === "object" &&
@@ -1339,6 +1352,9 @@ export class Session {
 
 export function agentStatusFromStoredThread(stored: StoredThread): AgentStatus {
   let status: AgentStatus = "pending_init"
+  const responseItems = stored.rollout.flatMap((record) =>
+    record.item.type === "response_item" ? [record.item.item] : [],
+  )
   for (const record of stored.rollout) {
     const item = record.item
     if (item.type === "agent_status") {
@@ -1357,33 +1373,48 @@ export function agentStatusFromStoredThread(stored: StoredThread): AgentStatus {
       status = { errored: item.error?.message ?? "Turn execution failed." }
     } else {
       status = {
-        completed: latestAssistantTextForTurn(stored, item.turnId),
+        completed: answerText(
+          responseItems,
+          item.turnId,
+          item.completion?.answerItemIds,
+        ),
+        ...(item.completion?.reason === undefined
+          ? {}
+          : { reason: item.completion.reason }),
       }
     }
   }
   return status
 }
 
-function latestAssistantTextForTurn(
-  stored: StoredThread,
+function answerText(
+  items: readonly ResponseItemEnvelope[],
   turnId: string,
+  answerItemIds?: readonly string[],
 ): string | null {
-  for (let index = stored.rollout.length - 1; index >= 0; index -= 1) {
-    const item = stored.rollout[index]?.item
-    if (
-      item?.type !== "response_item" ||
-      item.item.turnId !== turnId ||
-      item.item.item.role !== "assistant"
-    ) {
-      continue
-    }
-    const text = item.item.item.content
-      .filter((block) => block.type === "text")
-      .map((block) => block.text)
-      .join("")
-    return text.length === 0 ? null : text
-  }
-  return null
+  const assistants = items.filter(
+    (item) => item.turnId === turnId && item.item.role === "assistant",
+  )
+  const answer =
+    answerItemIds === undefined
+      ? assistants.slice(-1)
+      : answerItemIds.map((id) => {
+          const item = assistants.find((candidate) => candidate.id === id)
+          if (item === undefined) {
+            throw new Error(
+              `Turn answer references missing assistant item ${id}.`,
+            )
+          }
+          return item
+        })
+  const text = answer
+    .flatMap((item) =>
+      item.item.role === "assistant" ? item.item.content : [],
+    )
+    .filter((block) => block.type === "text")
+    .map((block) => block.text)
+    .join("")
+  return text.length === 0 ? null : text
 }
 
 function turnInputFingerprint(input: TurnInput): string {
