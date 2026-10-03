@@ -11,6 +11,7 @@ import type { ThreadSearchOccurrence } from "./thread-search.ts"
 export const PersistContext = {
   Standard: "standard",
   TurnStart: "turn_start",
+  GoalSet: "goal_set",
 } as const
 
 export type PersistContext =

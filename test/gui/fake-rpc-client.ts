@@ -8,6 +8,7 @@ import type { StoredEventEnvelope } from "../../src/kernel/index.ts"
 import type { LiveSessionEvent } from "../../src/runtime/live-events.ts"
 import type { ApiReadSessionResponse } from "../../src/server/protocol.ts"
 import type {
+  GoalChangedNotification,
   McpStatusChangedNotification,
   ProjectChangedNotification,
   SessionCompletedNotification,
@@ -63,6 +64,20 @@ export type FakeRequest = {
 }
 
 export class FakeRpcClient {
+  readonly goalChangeListeners = new Set<
+    (notification: GoalChangedNotification | undefined) => void
+  >()
+  subscribeToGoalChanges(
+    listener: (notification: GoalChangedNotification | undefined) => void,
+  ): () => void {
+    this.goalChangeListeners.add(listener)
+    return () => {
+      this.goalChangeListeners.delete(listener)
+    }
+  }
+  emitGoalChanged(notification: GoalChangedNotification | undefined): void {
+    for (const listener of this.goalChangeListeners) listener(notification)
+  }
   readonly completionListeners = new Set<
     (notification: SessionCompletedNotification) => void
   >()
@@ -116,7 +131,8 @@ export class FakeRpcClient {
         method === "session/queue/list" &&
         error instanceof ApiRequestError &&
         error.code === "not_found"
-      ) return { items: [] }
+      )
+        return { items: [] }
       throw error
     }
   }

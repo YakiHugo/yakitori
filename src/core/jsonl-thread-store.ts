@@ -399,11 +399,18 @@ export class JsonlThreadStore implements ThreadStore {
 
   persistThread(threadId: string, context: PersistContext): Promise<void> {
     const staged = this.#staged.get(threadId)
-    if (staged !== undefined && context === PersistContext.TurnStart) {
+    if (
+      staged !== undefined &&
+      (context === PersistContext.TurnStart ||
+        context === PersistContext.GoalSet)
+    ) {
       staged.materializing ??= this.#materializeStagedThread(threadId, staged)
       return staged.materializing
     }
-    return context === PersistContext.TurnStart
+    // An unloaded conversation is already durable. Saving its goal must not
+    // load its execution runtime just to establish this persistence barrier.
+    return context === PersistContext.TurnStart ||
+      (context === PersistContext.GoalSet && !this.#writers.has(threadId))
       ? Promise.resolve()
       : this.flushThread(threadId)
   }
@@ -842,23 +849,7 @@ export class JsonlThreadStore implements ThreadStore {
               typeof entry.sectionId === "string") &&
             (entry.sectionPosition === undefined ||
               (typeof entry.sectionPosition === "number" &&
-                Number.isSafeInteger(entry.sectionPosition))) &&
-            (entry.goal === undefined || typeof entry.goal === "string") &&
-            (entry.goalStatus === undefined ||
-              entry.goalStatus === "active" ||
-              entry.goalStatus === "paused" ||
-              entry.goalStatus === "blocked" ||
-              entry.goalStatus === "usage_limited" ||
-              entry.goalStatus === "budget_limited" ||
-              entry.goalStatus === "complete") &&
-            (entry.goalUpdatedAt === undefined ||
-              typeof entry.goalUpdatedAt === "string") &&
-            (entry.goalTimeUsedSeconds === undefined ||
-              (typeof entry.goalTimeUsedSeconds === "number" &&
-                Number.isSafeInteger(entry.goalTimeUsedSeconds) &&
-                entry.goalTimeUsedSeconds >= 0)) &&
-            (entry.goalInputId === undefined ||
-              typeof entry.goalInputId === "string"),
+                Number.isSafeInteger(entry.sectionPosition))),
         )
       ) {
         throw new Error("Invalid session sidebar state.")

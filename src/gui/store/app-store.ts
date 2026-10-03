@@ -1,5 +1,6 @@
 import { useMemo } from "react"
 import { create } from "zustand"
+import type { ThreadGoal } from "../../core/goal.ts"
 import type {
   SessionSidebar,
   SidebarChange,
@@ -21,6 +22,7 @@ import type {
   ApiReadUsageResponse,
   ApiSessionDetail,
   ApiSessionSummary,
+  ApiSetGoalRequest,
   ApiSkillSummary,
   ApiSubscriptionProvider,
   ApiSubscriptionSummary,
@@ -255,6 +257,8 @@ export type AppStoreActions = {
   setSettingsSection(section: SettingsSection): void
   loadUsage(): Promise<void>
   openGoalDialog(): void
+  setGoal(input: ApiSetGoalRequest): Promise<boolean>
+  clearGoal(sessionId: string): Promise<boolean>
   openModelPicker(): void
   openRenameDialog(): void
   openCommandPanel(kind: "status" | "mcp"): void
@@ -343,6 +347,8 @@ let activeTaskCount = 0
 
 export const useAppStore = create<AppStore>()((set, get) => {
   const sessionListRevisions: Record<string, number> = {}
+  // Snapshot identity distinguishes a later clear from an earlier null goal.
+  const goalSnapshots = new Map<string, Readonly<{ goal: ThreadGoal | null }>>()
   let sidebarReadRevision = 0
   let projectReadRevision = 0
   // Sidebar mutations are serialized through this chain so rapid pin/move
@@ -820,6 +826,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
     if (after === 0) set({ hydratingSessionId: selection.sessionId })
 
     let replaySnapshot: ApiSessionDetail | undefined
+    const goalAtSubscribe = goalSnapshots.get(selection.sessionId)
     try {
       const source = getAppRpcClient(get().apiBase).openSessionStream(
         selection.sessionId,
@@ -829,6 +836,12 @@ export const useAppStore = create<AppStore>()((set, get) => {
             if (get().stream !== source || !isCurrentSelection(selection)) {
               return
             }
+            const latestGoal = goalSnapshots.get(selection.sessionId)
+            if (latestGoal !== undefined && latestGoal !== goalAtSubscribe)
+              response = {
+                ...response,
+                session: withGoal(response.session, latestGoal.goal),
+              }
             replaySnapshot = response.session
             let modelSelections = get().modelSelections
             let restoringModelSelectionFor = get().restoringModelSelectionFor
@@ -1091,6 +1104,37 @@ export const useAppStore = create<AppStore>()((set, get) => {
       const client = getAppRpcClient(get().apiBase)
       if (projectChangesSubscribedClient !== client) {
         projectChangesSubscribedClient = client
+        goalSnapshots.clear()
+        client.subscribeToGoalChanges((notification) => {
+          if (getAppRpcClient(get().apiBase) !== client) return
+          if (notification === undefined) {
+            goalSnapshots.clear()
+            const sessionId = get().selection.sessionId
+            if (sessionId !== undefined)
+              void runTask(
+                async () => {
+                  const response = await client.request("goal/read", {
+                    sessionId,
+                  })
+                  if (
+                    getAppRpcClient(get().apiBase) !== client ||
+                    goalSnapshots.has(sessionId)
+                  )
+                    return
+                  goalSnapshots.set(sessionId, { goal: response.goal })
+                  set((state) => projectGoal(state, sessionId, response.goal))
+                },
+                () => getAppRpcClient(get().apiBase) === client,
+                false,
+                false,
+              )
+            return
+          }
+          goalSnapshots.set(notification.sessionId, { goal: notification.goal })
+          set((state) =>
+            projectGoal(state, notification.sessionId, notification.goal),
+          )
+        })
         client.subscribeToSidebarChanges((notification) => {
           const sidebar = notification.sidebar
           const sessionId = notification.sessionId
@@ -1231,6 +1275,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
     },
 
     loadSessions: async (projectId, input = {}) => {
+      const goalsAtRequest = new Map(goalSnapshots)
       const key = sessionListKey(projectId, input)
       const requestRevision = (sessionListRevisions[key] ?? 0) + 1
       sessionListRevisions[key] = requestRevision
@@ -1265,6 +1310,13 @@ export const useAppStore = create<AppStore>()((set, get) => {
             },
           )
           if (sessionListRevisions[key] !== requestRevision) return
+          const sessions = response.sessions.map((session) => {
+            const latestGoal = goalSnapshots.get(session.id)
+            return latestGoal !== undefined &&
+              latestGoal !== goalsAtRequest.get(session.id)
+              ? withGoal(session, latestGoal.goal)
+              : session
+          })
           set((state) => {
             const current = state.sessionsByProject[key]
             return {
@@ -1274,16 +1326,15 @@ export const useAppStore = create<AppStore>()((set, get) => {
                   sessions: input.append
                     ? [
                         ...new Map(
-                          [
-                            ...(current?.sessions ?? []),
-                            ...response.sessions,
-                          ].map((session) => [
-                            session.navigationId ?? session.id,
-                            session,
-                          ]),
+                          [...(current?.sessions ?? []), ...sessions].map(
+                            (session) => [
+                              session.navigationId ?? session.id,
+                              session,
+                            ],
+                          ),
                         ).values(),
                       ]
-                    : [...response.sessions],
+                    : sessions,
                   ...(response.nextCursor === undefined
                     ? {}
                     : { nextCursor: response.nextCursor }),
@@ -2835,6 +2886,72 @@ export const useAppStore = create<AppStore>()((set, get) => {
     },
     openGoalDialog: () =>
       set((state) => ({ goalDialogRevision: state.goalDialogRevision + 1 })),
+    setGoal: async (input) => {
+      const apiBase = get().apiBase
+      const goalAtRequest = goalSnapshots.get(input.sessionId)
+      const key = `goal:${input.sessionId}`
+      if (get().inFlightActions.has(key)) return false
+      set((state) => ({
+        inFlightActions: new Set(state.inFlightActions).add(key),
+      }))
+      const completed = await runTask(
+        async () => {
+          const response = await getAppRpcClient(apiBase).request(
+            "goal/set",
+            input,
+          )
+          if (
+            get().apiBase !== apiBase ||
+            goalSnapshots.get(input.sessionId) !== goalAtRequest
+          )
+            return
+          goalSnapshots.set(input.sessionId, { goal: response.goal })
+          set((state) => projectGoal(state, input.sessionId, response.goal))
+        },
+        () => get().apiBase === apiBase,
+        false,
+        false,
+      )
+      set((state) => {
+        const inFlightActions = new Set(state.inFlightActions)
+        inFlightActions.delete(key)
+        return { inFlightActions }
+      })
+      return completed
+    },
+    clearGoal: async (sessionId) => {
+      const apiBase = get().apiBase
+      const goalAtRequest = goalSnapshots.get(sessionId)
+      const key = `goal:${sessionId}`
+      if (get().inFlightActions.has(key)) return false
+      set((state) => ({
+        inFlightActions: new Set(state.inFlightActions).add(key),
+      }))
+      const completed = await runTask(
+        async () => {
+          const response = await getAppRpcClient(apiBase).request(
+            "goal/clear",
+            { sessionId },
+          )
+          if (
+            get().apiBase !== apiBase ||
+            goalSnapshots.get(sessionId) !== goalAtRequest
+          )
+            return
+          goalSnapshots.set(sessionId, { goal: response.goal })
+          set((state) => projectGoal(state, sessionId, response.goal))
+        },
+        () => get().apiBase === apiBase,
+        false,
+        false,
+      )
+      set((state) => {
+        const inFlightActions = new Set(state.inFlightActions)
+        inFlightActions.delete(key)
+        return { inFlightActions }
+      })
+      return completed
+    },
     openModelPicker: () =>
       set((state) => ({
         modelPickerRevision: state.modelPickerRevision + 1,
@@ -3023,17 +3140,43 @@ function withSidebarPresentation<T extends ApiSessionSummary>(
     archived: _archived,
     sectionId: _sectionId,
     sectionPosition: _sectionPosition,
-    goal: _goal,
-    goalStatus: _goalStatus,
-    goalUpdatedAt: _goalUpdatedAt,
-    goalTimeUsedSeconds: _goalTimeUsedSeconds,
-    goalInputId: _goalInputId,
     ...base
   } = session
   return {
     ...base,
     ...sidebar.entries[session.navigationId ?? session.id],
   } as T
+}
+
+function projectGoal(
+  state: AppStoreData,
+  sessionId: string,
+  goal: ThreadGoal | null,
+): Pick<AppStoreData, "selectedSession" | "sessionsByProject"> {
+  const update = <T extends ApiSessionSummary>(session: T): T => {
+    if (session.id !== sessionId) return session
+    return withGoal(session, goal)
+  }
+  return {
+    selectedSession:
+      state.selectedSession === undefined
+        ? undefined
+        : update(state.selectedSession),
+    sessionsByProject: Object.fromEntries(
+      Object.entries(state.sessionsByProject).map(([key, list]) => [
+        key,
+        { ...list, sessions: list.sessions.map(update) },
+      ]),
+    ),
+  }
+}
+
+function withGoal<T extends ApiSessionSummary>(
+  session: T,
+  goal: ThreadGoal | null,
+): T {
+  const { goal: _goal, ...base } = session
+  return { ...base, ...(goal === null ? {} : { goal }) } as T
 }
 
 function sessionMatchesList(session: ApiSessionSummary, key: string): boolean {

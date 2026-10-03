@@ -486,16 +486,19 @@ async function executeTurn(input: {
   const admitInitialInput = async (): Promise<boolean> => {
     if (initialInputHandled) return true
     initialInputHandled = true
-    const promptHook = await input.options.hookRunner?.run({
-      event: HookEvent.UserPromptSubmit,
-      payload: {
-        session_id: metadata.id,
-        turn_id: input.input.submissionId,
-        prompt: input.input.content.text,
-      },
-      cwd: requireValue(metadata.workingDirectory, "Working directory"),
-      signal: input.signal,
-    })
+    const promptHook =
+      input.input.goalId === undefined
+        ? await input.options.hookRunner?.run({
+            event: HookEvent.UserPromptSubmit,
+            payload: {
+              session_id: metadata.id,
+              turn_id: input.input.submissionId,
+              prompt: input.input.content.text,
+            },
+            cwd: requireValue(metadata.workingDirectory, "Working directory"),
+            signal: input.signal,
+          })
+        : undefined
     if (promptHook?.continue === false) {
       await recordHookContext(
         input.runtime,
@@ -918,6 +921,7 @@ async function executeTurnModelLoop(
         ...(await recordSteering(input, pendingSteering.splice(0))),
       )
       for (const submitted of pendingSkillInputs.splice(0)) {
+        if (submitted.goalId !== undefined) continue
         const alreadyLoaded = input.runtime
           .snapshot()
           .context.history.some(
@@ -2365,6 +2369,7 @@ async function executePreparedTool(
         prepared.invocation.input,
         {
           workspaceRoot: input.workspaceRoot,
+          threadId: input.threadId,
           rolloutId: input.rolloutId,
           toolCallId: prepared.call.id,
           turnId: input.turnId,
@@ -2503,16 +2508,19 @@ async function recordSteering(
   if (steering.length === 0) return accepted
   const metadata = input.runtime.snapshot().metadata
   for (const item of steering) {
-    const hook = await input.options.hookRunner?.run({
-      event: HookEvent.UserPromptSubmit,
-      payload: {
-        session_id: metadata.id,
-        turn_id: input.input.submissionId,
-        prompt: item.content.text,
-      },
-      cwd: requireValue(metadata.workingDirectory, "Working directory"),
-      signal: input.signal,
-    })
+    const hook =
+      item.goalId === undefined
+        ? await input.options.hookRunner?.run({
+            event: HookEvent.UserPromptSubmit,
+            payload: {
+              session_id: metadata.id,
+              turn_id: input.input.submissionId,
+              prompt: item.content.text,
+            },
+            cwd: requireValue(metadata.workingDirectory, "Working directory"),
+            signal: input.signal,
+          })
+        : undefined
     if (hook?.continue !== false) {
       await input.runtime.recordConversationItems([
         inputEnvelope(item, item.submissionId),
@@ -2550,28 +2558,37 @@ async function recordHookContext(
 
 function inputEnvelope(input: TurnInput, turnId: string): ResponseItemEnvelope {
   return {
-    ...envelope(turnId, {
-      role: "user",
-      content:
-        input.content.text.length === 0
-          ? []
-          : [{ type: "text", text: input.content.text }],
-      ...(input.content.contextAttachments === undefined
-        ? {}
-        : { contextAttachments: input.content.contextAttachments }),
-      ...(input.content.attachments === undefined ||
-      input.content.attachments.length === 0
-        ? {}
+    ...envelope(
+      turnId,
+      input.goalId === undefined
+        ? {
+            role: "user",
+            content:
+              input.content.text.length === 0
+                ? []
+                : [{ type: "text", text: input.content.text }],
+            ...(input.content.contextAttachments === undefined
+              ? {}
+              : { contextAttachments: input.content.contextAttachments }),
+            ...(input.content.attachments === undefined ||
+            input.content.attachments.length === 0
+              ? {}
+              : {
+                  images: input.content.attachments.map((attachment) => ({
+                    type: "image" as const,
+                    mediaType: attachment.mediaType,
+                    detail: attachment.detail ?? "high",
+                    file: attachment.file,
+                    sizeBytes: attachment.sizeBytes,
+                  })),
+                }),
+          }
         : {
-            images: input.content.attachments.map((attachment) => ({
-              type: "image" as const,
-              mediaType: attachment.mediaType,
-              detail: attachment.detail ?? "high",
-              file: attachment.file,
-              sizeBytes: attachment.sizeBytes,
-            })),
-          }),
-    }),
+            role: "developer",
+            content: [{ type: "text", text: input.content.text }],
+            context: { type: "goal", goalId: input.goalId },
+          },
+    ),
     ...(input.modelSelection === undefined &&
     input.parentInputId === undefined &&
     input.metadata === undefined

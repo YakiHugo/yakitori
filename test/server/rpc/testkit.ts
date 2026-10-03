@@ -145,6 +145,21 @@ export function createFakeHandlers(
   const base: ServerHandlers = {
     readSidebar: async () => okResult({ sections: [], entries: {} }),
     updateSidebar: async () => okResult({ sections: [], entries: {} }),
+    readGoal: async () => okResult({ goal: null }),
+    setGoal: async () =>
+      okResult({
+        goal: {
+          id: "goal_test",
+          threadId: "session_1",
+          objective: "Finish the task",
+          status: "active",
+          tokensUsed: 0,
+          timeUsedSeconds: 0,
+          createdAt: "2026-10-03T00:00:00.000Z",
+          updatedAt: "2026-10-03T00:00:00.000Z",
+        },
+      }),
+    clearGoal: async () => okResult({ goal: null }),
     readUsage: async () =>
       okResult({
         usage: {
@@ -193,10 +208,24 @@ export function createFakeHandlers(
       }),
     listQueuedInputs: async () => okResult({ items: [] }),
     updateQueuedInput: async () =>
-      okResult({ item: { id: "input_1", sessionId: "session_1", input: { submissionId: "request_1", content: { kind: "text", text: "queued" } }, createdAt: "2026-01-01T00:00:00.000Z" } }),
+      okResult({
+        item: {
+          id: "input_1",
+          sessionId: "session_1",
+          input: {
+            submissionId: "request_1",
+            content: { kind: "text", text: "queued" },
+          },
+          createdAt: "2026-01-01T00:00:00.000Z",
+        },
+      }),
     reorderQueuedInputs: async () => okResult({ items: [] }),
     startQueuedInput: async () =>
-      okResult({ requestId: "request_1", turnId: "turn_1", inputId: "input_1" }),
+      okResult({
+        requestId: "request_1",
+        turnId: "turn_1",
+        inputId: "input_1",
+      }),
     steerInput: async () =>
       okResult({ requestId: "request_1", turnId: "turn_1" }),
     compactSession: async () =>

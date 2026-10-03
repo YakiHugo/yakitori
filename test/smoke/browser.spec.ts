@@ -4,7 +4,11 @@ import {
   type ServerProcess,
   spawnServerProcess,
 } from "../../src/desktop/server-process.ts"
-import { createSmokeEnvironment, runFauxTurn } from "./fixtures.ts"
+import {
+  createSmokeEnvironment,
+  runBudgetedGoal,
+  runFauxTurn,
+} from "./fixtures.ts"
 
 test("built GUI sends a turn and restores its transcript after reload", async ({
   page,
@@ -34,6 +38,7 @@ test("built GUI sends a turn and restores its transcript after reload", async ({
     await expect(
       page.getByRole("main").getByText("Hello from faux.", { exact: true }),
     ).toBeVisible()
+    await runBudgetedGoal(page)
     expect(errors).toEqual([])
   } finally {
     try {

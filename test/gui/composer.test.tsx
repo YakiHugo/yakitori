@@ -1412,13 +1412,53 @@ describe("slash command menu", () => {
 })
 
 describe("goal command", () => {
+  it("creates a session for a goal entered in a new draft without admitting a user message", async () => {
+    const user = userEvent.setup()
+    respondWithSessionCreate()
+    const respond = fakeRef.current.respond
+    fakeRef.current.respond = (method, params) => {
+      if (method === "goal/set") {
+        return {
+          goal: {
+            id: "goal_1",
+            threadId: createdSession.id,
+            objective: "Ship the feature",
+            status: "active",
+            tokensUsed: 0,
+            timeUsedSeconds: 0,
+            createdAt: createdSession.createdAt,
+            updatedAt: createdSession.updatedAt,
+          },
+        }
+      }
+      return respond(method, params)
+    }
+    useAppStore.setState({ promptDraft: "/goal Ship the feature" })
+    render(<Composer />)
+    await user.click(screen.getByRole("button", { name: "Send" }))
+    await waitFor(() => {
+      expect(useAppStore.getState().selectedSession?.goal?.objective).toBe(
+        "Ship the feature",
+      )
+    })
+    expect(fakeRef.current.requestsFor("session/create")).toHaveLength(1)
+    expect(fakeRef.current.requestsFor("goal/set")[0]?.params).toEqual({
+      sessionId: createdSession.id,
+      objective: "Ship the feature",
+      status: "active",
+      inputId: null,
+    })
+    expect(fakeRef.current.requestsFor("input/admit")).toHaveLength(0)
+    expect(useAppStore.getState().promptDraft ?? "").toBe("")
+  })
+
   it("completes /goal from the menu and sets the session goal on submit", async () => {
     const user = userEvent.setup()
     const admitInput = vi.fn((_text: string) => Promise.resolve())
-    const changeSidebar = vi.fn().mockResolvedValue(true)
+    const setGoal = vi.fn().mockResolvedValue(true)
     useAppStore.setState({
       admitInput,
-      changeSidebar,
+      setGoal,
       selection: { sessionId: "session_1" },
     })
     render(<Composer />)
@@ -1435,16 +1475,12 @@ describe("goal command", () => {
 
     await user.keyboard("ship the feature")
     await user.keyboard("{Enter}")
-    expect(changeSidebar).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: "session",
-        sessionId: "session_1",
-        goal: "ship the feature",
-        goalStatus: "active",
-        goalTimeUsedSeconds: 0,
-        goalInputId: null,
-      }),
-    )
+    expect(setGoal).toHaveBeenCalledWith({
+      sessionId: "session_1",
+      objective: "ship the feature",
+      status: "active",
+      inputId: null,
+    })
     expect(admitInput).not.toHaveBeenCalled()
     expect(useAppStore.getState().promptDraft ?? "").toBe("")
   })

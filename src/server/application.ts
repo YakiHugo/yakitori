@@ -20,6 +20,7 @@ import {
   type ThreadStore,
 } from "../core/index.ts"
 import type { TurnProcessor } from "../core/session.ts"
+import { SqliteGoalStore } from "../core/sqlite-goal-store.ts"
 import { createRolloutAssets } from "../kernel/index.ts"
 import {
   createMateKernel,
@@ -30,6 +31,7 @@ import {
   type SqliteMateStore,
 } from "../mates/index.ts"
 import {
+  goalChangedMethod,
   mcpStatusChangedMethod,
   sessionCompletedMethod,
   sessionQueueChangedMethod,
@@ -37,6 +39,7 @@ import {
   sidebarChangedMethod,
   sideChatChangedMethod,
 } from "../protocol/rpc-wire.ts"
+import { GoalRuntime } from "../runtime/goal-runtime.ts"
 import {
   type AgentRuntime,
   type ApprovalPolicy,
@@ -215,6 +218,7 @@ export async function createYakitoriApplication(
   const approvalPolicy = resolveApprovalPolicy(
     process.env.YAKITORI_APPROVAL_POLICY,
   )
+  let goals: GoalRuntime | undefined
   let runtimeLock: RuntimeLock | undefined
   let threadManagerForCleanup: ThreadManager | undefined
   let agentRuntimeForCleanup: AgentRuntime | undefined
@@ -225,6 +229,7 @@ export async function createYakitoriApplication(
   const elicitations = createElicitationBroker()
   const mcpOAuth = createMcpOAuth({ storePath: join(rootDir, "mcp-auth") })
   const closeExtensions = async () => {
+    await goals?.stop()
     elicitations.close()
     await mcpOAuth.close()
   }
@@ -313,6 +318,9 @@ export async function createYakitoriApplication(
       createDefaultTools({
         userShellEnv,
         includeMultiAgent,
+        ...(includeMultiAgent && goals !== undefined
+          ? { goalService: goals }
+          : {}),
         execCommandLog: (message) => console.log(message),
       })
     const mcpManagers = new Map<string, McpConnectionManager>()
@@ -474,6 +482,22 @@ export async function createYakitoriApplication(
       databasePath: join(sessionStoreRoot, "agent-graph.sqlite"),
     })
     agentGraphStoreForCleanup = agentGraphStore
+    const goalRuntime = new GoalRuntime({
+      store: new SqliteGoalStore(join(sessionStoreRoot, "thread-goals.sqlite")),
+      notify: (sessionId, goal) =>
+        broadcastNotification?.(goalChangedMethod, {
+          sessionId,
+          goal: goal ?? null,
+        }),
+      report: (cause, sessionId) =>
+        reportOperationalFailure(reporter, {
+          component: "goal-runtime",
+          operation: "continue",
+          cause,
+          sessionId,
+        }),
+    })
+    goals = goalRuntime
     let threadManager: ThreadManager
     const agentRuntime = createAgentRuntime({
       graphStore: agentGraphStore,
@@ -662,19 +686,8 @@ export async function createYakitoriApplication(
                 cwd: workingDirectory,
               })
             ).configuration.modelTransport,
-          loadSessionGoal: async () => {
-            const presentation = await threadStore.sessionPresentation(
-              stored.metadata.id,
-            )
-            return presentation.goal === undefined
-              ? undefined
-              : {
-                  objective: presentation.goal,
-                  ...(presentation.goalStatus === undefined
-                    ? {}
-                    : { status: presentation.goalStatus }),
-                }
-          },
+          loadSessionGoal: async () =>
+            sideConversation ? undefined : goalRuntime.get(stored.metadata.id),
           modelClient: providerRegistry.createClient(),
           provider: provider.provider,
           model: provider.model,
@@ -742,7 +755,7 @@ export async function createYakitoriApplication(
         throw error
       }
       mcpManagers.set(stored.metadata.id, mcpManager)
-      return {
+      const ownedProcessor: TurnProcessor = {
         prepare: processor.prepare,
         ...(processor.prepareSteering === undefined
           ? {}
@@ -785,6 +798,9 @@ export async function createYakitoriApplication(
           }
         },
       }
+      return sideConversation
+        ? ownedProcessor
+        : goalRuntime.wrapProcessor(stored.metadata, ownedProcessor)
     }
     threadManager = new ThreadManager({
       store: threadStore,
@@ -837,11 +853,16 @@ export async function createYakitoriApplication(
     const skillsLoader = createSkillsLoader()
     const handlers = createThreadServerHandlers({
       manager: threadManager,
+      goals: goalRuntime,
       listAgents: (stored) => agentRuntime.listAgents(stored),
-      discardThread: (threadId) =>
-        sideChatsForCleanup?.removeForSessionDeletion(threadId, () =>
+      discardThread: async (threadId) => {
+        const descendants =
+          await agentGraphStore.listThreadSpawnDescendants(threadId)
+        await (sideChatsForCleanup?.removeForSessionDeletion(threadId, () =>
           agentRuntime.discardThread(threadId),
-        ) ?? agentRuntime.discardThread(threadId),
+        ) ?? agentRuntime.discardThread(threadId))
+        for (const id of descendants) goalRuntime.clear(id)
+      },
       store: threadStore,
       inputQueueDatabasePath: join(sessionStoreRoot, "input-queue.sqlite"),
       eventHub,
@@ -1024,6 +1045,7 @@ export async function createYakitoriApplication(
           runtimeLock,
           sideChats,
           closeExtensions,
+          goals,
         )
         await closePromise
       },
@@ -1041,6 +1063,7 @@ export async function createYakitoriApplication(
         runtimeLock,
         sideChatsForCleanup,
         closeExtensions,
+        goals,
       )
     } catch (cleanupError) {
       throw new AggregateError(
@@ -1566,6 +1589,7 @@ async function closeApplicationResources(
   runtimeLock: RuntimeLock | undefined,
   sideChats?: SideChatService,
   closeExtensions?: () => Promise<void>,
+  goals?: GoalRuntime,
 ): Promise<void> {
   const errors: unknown[] = []
   try {
@@ -1605,6 +1629,11 @@ async function closeApplicationResources(
   }
   try {
     closeAgentGraphStore?.()
+  } catch (error) {
+    errors.push(error)
+  }
+  try {
+    goals?.close()
   } catch (error) {
     errors.push(error)
   }

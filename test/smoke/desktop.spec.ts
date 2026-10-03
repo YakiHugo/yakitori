@@ -9,7 +9,11 @@ import {
   type Page,
   test,
 } from "@playwright/test"
-import { createSmokeEnvironment, runFauxTurn } from "./fixtures.ts"
+import {
+  createSmokeEnvironment,
+  runBudgetedGoal,
+  runFauxTurn,
+} from "./fixtures.ts"
 
 const execFileAsync = promisify(execFile)
 
@@ -94,6 +98,7 @@ test("packaged desktop boots its GUI and bridge, then stops its sidecar on quit"
     expect(bridge.platform).toBe("darwin")
     expect(["granted", "unsupported"]).toContain(bridge.permission)
     await runFauxTurn(page)
+    await runBudgetedGoal(page)
     expect(rendererErrors).toEqual([])
 
     // Playwright's graceful close invokes the real app.quit(). It must finish

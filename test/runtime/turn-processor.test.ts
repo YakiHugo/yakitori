@@ -54,6 +54,116 @@ afterEach(async () => {
 })
 
 describe("Turn processor", () => {
+  it("persists goal continuations as developer context without invoking user prompt hooks", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yakitori-goal-input-"))
+    const store = new JsonlThreadStore({ root })
+    const entered = deferred<void>()
+    const release = deferred<void>()
+    const submittedPrompts: string[] = []
+    let requests = 0
+    const manager = new ThreadManager({
+      store,
+      createTurnProcessor: () =>
+        createTurnProcessor({
+          toolRegistry: createToolRegistry([]),
+          loadProjectInstructions: async () => undefined,
+          hookRunner: {
+            async dispose() {},
+            async run(request) {
+              if (request.event === HookEvent.UserPromptSubmit)
+                submittedPrompts.push(String(request.payload.prompt))
+              return {
+                continue: request.event !== HookEvent.UserPromptSubmit,
+                additionalContext: [],
+              }
+            },
+          },
+          stream: async function* (request) {
+            requests += 1
+            const goalMessages = request.messages.filter(
+              (message) =>
+                message.role === "developer" &&
+                message.context?.type === "goal",
+            )
+            expect(goalMessages).toHaveLength(requests)
+            expect(goalMessages[0]).toMatchObject({
+              role: "developer",
+              context: { type: "goal", goalId: "goal_continue" },
+              content: [{ type: "text", text: "Continue the goal" }],
+            })
+            if (requests === 1) {
+              entered.resolve()
+              await release.promise
+            } else {
+              expect(goalMessages[1]).toMatchObject({
+                role: "developer",
+                context: { type: "goal", goalId: "goal_continue" },
+                content: [{ type: "text", text: "Wrap up the goal" }],
+              })
+            }
+            yield responseEvent(requests === 1 ? "progress" : "wrapped up")
+          },
+        }),
+    })
+    try {
+      const thread = await manager.createThread({
+        workingDirectory: root,
+        mateId: "mate_test",
+        mateRevisionId: "mate_revision_test",
+      })
+      const continuation = {
+        submissionId: "turn_goal_continue",
+        content: { kind: "text" as const, text: "Continue the goal" },
+        goalId: "goal_continue",
+      }
+      const started = await thread.startIfIdle(continuation)
+      expect(started.type).toBe("started")
+      await entered.promise
+      await thread.steer(
+        {
+          content: { kind: "text", text: "Wrap up the goal" },
+          goalId: "goal_continue",
+        },
+        continuation.submissionId,
+      )
+      release.resolve()
+      await expect
+        .poll(() => thread.agentStatus)
+        .toEqual({ completed: "wrapped up" })
+      expect(submittedPrompts).toEqual([])
+      expect(requests).toBe(2)
+      await manager.closeThread(thread.id)
+      const restored = await manager.resumeThread(thread.id)
+      const history = restored
+        ?.snapshot()
+        .context.history.map(({ item }) => item)
+      expect(
+        history?.filter(
+          (item) => item.role === "developer" && item.context?.type === "goal",
+        ),
+      ).toHaveLength(2)
+      for (const retry of [
+        {
+          submissionId: continuation.submissionId,
+          content: continuation.content,
+        },
+        { ...continuation, goalId: "goal_replacement" },
+      ]) {
+        await expect(restored?.startIfIdle(retry)).resolves.toEqual({
+          type: "not_submitted",
+          reason: "request_conflict",
+        })
+      }
+      await expect(restored?.startIfIdle(continuation)).resolves.toMatchObject({
+        type: "replayed",
+      })
+    } finally {
+      release.resolve()
+      await manager.shutdown()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it("materializes a new Session only after the prompt hook accepts its input", async () => {
     const root = await mkdtemp(
       join(tmpdir(), "yakitori-prompt-materialization-"),
@@ -294,6 +404,7 @@ describe("Turn processor", () => {
 
   it("runs pre/post tool hooks around the approved tool invocation", async () => {
     const events: string[] = []
+    let executingThreadId: string | undefined
     const hookRunner: HookRunner = {
       async dispose() {},
       async run(request) {
@@ -351,8 +462,9 @@ describe("Turn processor", () => {
           inputSchema: { type: "object" },
           effect: "mutate",
           approvalRequirement: { kind: "none" },
-          async execute(input) {
+          async execute(input, context) {
             expect(input).toEqual({ value: "after-hook" })
+            executingThreadId = context.threadId
             return { ok: true, output: "complete", content: "tool complete" }
           },
         },
@@ -370,6 +482,7 @@ describe("Turn processor", () => {
     const thread = await runtime.createThread()
     await thread.startIfIdle({ content: { kind: "text", text: "run" } })
     await expect.poll(() => thread.agentStatus).toEqual({ completed: "done" })
+    expect(executingThreadId).toBe(thread.id)
     await runtime.manager.shutdown()
     expect(events).toEqual([
       HookEvent.SubagentStart,

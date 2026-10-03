@@ -181,6 +181,7 @@ export type ModelContentBlock =
 
 export type ModelHistoryContext =
   | Readonly<{ type: "skill_invocation"; inputId: string }>
+  | Readonly<{ type: "goal"; goalId: string }>
   | Readonly<{
       type: "world_state"
       sectionId: string
@@ -1511,6 +1512,8 @@ function isModelImageBlock(value: unknown): boolean {
 }
 
 function isModelHistoryContext(value: unknown): boolean {
+  if (isRecord(value) && value.type === "goal")
+    return onlyKeys(value, ["type", "goalId"]) && isStorageKey(value.goalId)
   if (isRecord(value) && value.type === "skill_invocation")
     return onlyKeys(value, ["type", "inputId"]) && isString(value.inputId)
   return (

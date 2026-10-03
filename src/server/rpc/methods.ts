@@ -1,5 +1,6 @@
 import { realpath, stat } from "node:fs/promises"
 import { basename, dirname, isAbsolute, normalize } from "node:path"
+import type { ThreadGoal } from "../../core/goal.ts"
 import type {
   SessionSidebar,
   SidebarChange,
@@ -26,6 +27,7 @@ import {
   type ApiCancelInputResponse,
   type ApiCancelTurnRequest,
   type ApiCancelTurnResponse,
+  type ApiClearGoalResponse,
   type ApiCompactSessionResponse,
   type ApiCreateProjectResponse,
   type ApiCreateSessionRequest,
@@ -41,6 +43,7 @@ import {
   type ApiListSessionsResponse,
   type ApiListSkillsResponse,
   type ApiPendingPermission,
+  type ApiReadGoalResponse,
   type ApiReadProjectResponse,
   type ApiReadSessionRequest,
   type ApiReadSessionResponse,
@@ -53,6 +56,8 @@ import {
   type ApiSearchSessionsRequest,
   type ApiSearchSessionsResponse,
   type ApiServerDiagnostics,
+  type ApiSetGoalRequest,
+  type ApiSetGoalResponse,
   type ApiSteerInputRequest,
   type ApiSteerInputResponse,
   type ApiSubscriptionProvider,
@@ -186,6 +191,11 @@ export type SessionCompletedNotification = Readonly<{
   sessionId: string
   turnId: string
   title?: string
+}>
+
+export type GoalChangedNotification = Readonly<{
+  sessionId: string
+  goal: ThreadGoal | null
 }>
 
 export type SessionReplayCompleteNotification = Readonly<{
@@ -712,6 +722,21 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
     "usage/read",
     () => ({ kind: "global", name: "usage-read" }),
     (handlers) => handlers.readUsage(),
+  ),
+  handlerEntry<ApiReadGoalResponse>(
+    "goal/read",
+    sessionScope,
+    (handlers, params) => handlers.readGoal(params),
+  ),
+  handlerEntry<ApiSetGoalResponse>(
+    "goal/set",
+    sessionScope,
+    (handlers, params) => handlers.setGoal(params),
+  ),
+  handlerEntry<ApiClearGoalResponse>(
+    "goal/clear",
+    sessionScope,
+    (handlers, params) => handlers.clearGoal(params),
   ),
   {
     method: "sidebar/update",
@@ -1316,6 +1341,9 @@ export type RpcMethodParams = Readonly<
       "server/diagnostics": Readonly<Record<string, never>>
       "sidebar/read": Readonly<Record<string, never>>
       "sidebar/update": SidebarChange
+      "goal/read": ApiReadSessionRequest
+      "goal/set": ApiSetGoalRequest
+      "goal/clear": ApiReadSessionRequest
       "usage/read": Readonly<Record<string, never>>
       "session/list": SessionListParams
       "agent/list": ApiReadSessionRequest
@@ -1378,6 +1406,9 @@ export type RpcMethodResponses = Readonly<
       "server/diagnostics": ApiServerDiagnostics
       "sidebar/read": SessionSidebar
       "sidebar/update": SessionSidebar
+      "goal/read": ApiReadGoalResponse
+      "goal/set": ApiSetGoalResponse
+      "goal/clear": ApiClearGoalResponse
       "usage/read": ApiReadUsageResponse
       "session/list": ApiListSessionsResponse
       "agent/list": ApiListAgentsResponse

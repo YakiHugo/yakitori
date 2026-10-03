@@ -32,6 +32,7 @@ export type ToolApprovalRequirement =
 
 export type ToolExecutionContext = Readonly<{
   workspaceRoot: string
+  threadId?: string
   rolloutId?: string
   toolCallId?: string
   turnId?: string

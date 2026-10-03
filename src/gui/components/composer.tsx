@@ -61,6 +61,7 @@ export function Composer() {
   const admitInput = useAppStore((state) => state.admitInput)
   const cancelTurn = useAppStore((state) => state.cancelTurn)
   const changeSidebar = useAppStore((state) => state.changeSidebar)
+  const setGoal = useAppStore((state) => state.setGoal)
   const openGoalDialog = useAppStore((state) => state.openGoalDialog)
   const view = useExecutionView()
   const [attachmentError, setAttachmentError] = useState<string>()
@@ -338,25 +339,28 @@ export function Composer() {
               ? text.slice(GOAL_DIRECTIVE.length + 1).trim()
               : undefined
         if (goalCommand !== undefined) {
-          if (sessionId === undefined) {
-            useAppStore.setState({
-              message:
-                "Goals attach to a conversation. Send a message first, then set the goal.",
+          void (async () => {
+            const goalSessionId =
+              sessionId ?? (await useAppStore.getState().createSession())
+            if (goalSessionId === undefined) return
+            if (goalCommand === "") {
+              setPromptDraft("")
+              openGoalDialog()
+              return
+            }
+            const saved = await setGoal({
+              sessionId: goalSessionId,
+              objective: goalCommand,
+              status: "active",
+              inputId: null,
             })
-            return
-          }
-          setPromptDraft("")
-          if (goalCommand === "") openGoalDialog()
-          else
-            void changeSidebar({
-              type: "session",
-              sessionId,
-              goal: goalCommand,
-              goalStatus: "active",
-              goalUpdatedAt: new Date().toISOString(),
-              goalTimeUsedSeconds: 0,
-              goalInputId: null,
-            })
+            if (
+              saved &&
+              useAppStore.getState().selection.sessionId === goalSessionId &&
+              useAppStore.getState().promptDraft?.trim() === text
+            )
+              setPromptDraft("")
+          })()
           return
         }
         if (mode === "queue") {

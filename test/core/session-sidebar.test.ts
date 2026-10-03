@@ -6,108 +6,44 @@ import {
 } from "../../src/core/session-sidebar.ts"
 
 const sessions = [
-  { id: "session_a", navigationId: "session_a", updatedAt: "2026-09-01" },
+  { id: "session_a", navigationId: "session_root", updatedAt: "2026-09-01" },
 ]
 
-describe("session sidebar goal", () => {
-  it("parses a goal change and rejects an empty goal", () => {
-    expect(
-      parseSidebarChange({
-        type: "session",
-        sessionId: "session_a",
-        goal: "ship it",
-      }),
-    ).toEqual({ type: "session", sessionId: "session_a", goal: "ship it" })
-    expect(
-      parseSidebarChange({
-        type: "session",
-        sessionId: "session_a",
-        goal: null,
-      }),
-    ).toEqual({ type: "session", sessionId: "session_a", goal: null })
-    expect(() =>
-      parseSidebarChange({
-        type: "session",
-        sessionId: "session_a",
-        goal: " ",
-      }),
-    ).toThrow()
+describe("session sidebar", () => {
+  it("rejects changes with no presentation fields", () => {
     expect(() =>
       parseSidebarChange({ type: "session", sessionId: "session_a" }),
-    ).toThrow()
+    ).toThrow("No session changes supplied.")
   })
 
-  it("sets, replaces, and clears the goal on the navigation entry", () => {
-    const set = changeSessionSidebar(
-      emptySessionSidebar(),
-      { type: "session", sessionId: "session_a", goal: "first" },
-      sessions,
-    )
-    expect(set.entries.session_a?.goal).toBe("first")
-
-    const replaced = changeSessionSidebar(
-      set,
-      { type: "session", sessionId: "session_a", goal: "second" },
-      sessions,
-    )
-    expect(replaced.entries.session_a?.goal).toBe("second")
-
-    const cleared = changeSessionSidebar(
-      replaced,
-      { type: "session", sessionId: "session_a", goal: null },
-      sessions,
-    )
-    expect(cleared.entries.session_a?.goal).toBeUndefined()
-    expect("goal" in (cleared.entries.session_a ?? {})).toBe(false)
-    // Other presentation fields survive a goal-only change.
-    const titled = changeSessionSidebar(
-      set,
-      { type: "session", sessionId: "session_a", title: "named" },
-      sessions,
-    )
-    expect(titled.entries.session_a).toMatchObject({
-      goal: "first",
-      title: "named",
-    })
-  })
-
-  it("pauses a goal without dropping the objective, and clears the status with the goal", () => {
-    const set = changeSessionSidebar(
+  it("updates presentation on the navigation root without changing section membership", () => {
+    const initial = changeSessionSidebar(
       emptySessionSidebar(),
       {
         type: "session",
         sessionId: "session_a",
-        goal: "ship it",
-        goalStatus: "active",
-        goalUpdatedAt: "2026-09-30T00:00:00.000Z",
-        goalTimeUsedSeconds: 4,
-        goalInputId: "input_1",
+        title: "First",
+        sectionId: "pinned",
       },
       sessions,
     )
-    const paused = changeSessionSidebar(
-      set,
-      {
+    const renamed = changeSessionSidebar(
+      initial,
+      parseSidebarChange({
         type: "session",
         sessionId: "session_a",
-        goalStatus: "paused",
-        goalUpdatedAt: "2026-09-30T00:00:05.000Z",
-        goalTimeUsedSeconds: 9,
+        title: "Renamed",
+        archived: true,
+      }),
+      sessions,
+    )
+    expect(renamed.entries).toMatchObject({
+      session_root: {
+        title: "Renamed",
+        archived: true,
+        sectionId: "pinned",
       },
-      sessions,
-    )
-    expect(paused.entries.session_a).toMatchObject({
-      goal: "ship it",
-      goalStatus: "paused",
-      goalTimeUsedSeconds: 9,
-      goalInputId: "input_1",
     })
-    const cleared = changeSessionSidebar(
-      paused,
-      { type: "session", sessionId: "session_a", goal: null },
-      sessions,
-    )
-    expect(cleared.entries.session_a?.goalStatus).toBeUndefined()
-    expect(cleared.entries.session_a?.goalInputId).toBeUndefined()
+    expect(initial.entries.session_root?.title).toBe("First")
   })
 })
