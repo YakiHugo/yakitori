@@ -438,7 +438,12 @@ it("refreshes connections changed outside the form without losing an unsaved dra
   await user.click(await screen.findByRole("button", { name: "DeepSeek" }))
   await user.type(screen.getByLabelText("API key"), "unsaved-key")
   request.mockResolvedValue({ providers: [connection], presets: [preset] })
-  for (const listener of providerChanges) listener()
+  await act(async () => {
+    for (const listener of providerChanges) listener()
+  })
+  expect((screen.getByLabelText("API key") as HTMLInputElement).value).toBe(
+    "unsaved-key",
+  )
   await user.click(screen.getByRole("button", { name: "Cancel" }))
   expect(
     await screen.findByRole("button", { name: /^DeepSeek work/ }),
