@@ -3,6 +3,7 @@ import type {
   Tool as OpenAITool,
   Response,
   ResponseInput,
+  ResponseCreateParamsStreaming,
 } from "openai/resources/responses/responses"
 import type { ReasoningEffort } from "openai/resources/shared"
 import { isJsonObject, isJsonValue } from "../kernel/index.ts"
@@ -24,6 +25,8 @@ import {
   failureKindForStatus,
   modelFailureFromUnknown,
 } from "./model-failure.ts"
+import { createOpenAIResponsesTransport } from "./openai-responses-transport.ts"
+import { supportsOpenAIRequestWarmup } from "../shared/request-warmup-policy.ts"
 import { parseRetryAfterMs, parseShouldRetry } from "./retry-after.ts"
 
 export type OpenAIProviderOptions = {
@@ -40,8 +43,52 @@ export type OpenAIProviderOptions = {
 }
 
 export function createOpenAIProvider(options: OpenAIProviderOptions): StreamFn {
+  const client = openAIClient(options)
+  return (request) =>
+    streamOpenAI(client, options.model, request, options.onResponseHeaders)
+}
+
+// Opt-in API-only transport. Unsupported endpoints retain ordinary HTTP and
+// expose no warmup capability; never probe subscription or compatible backends.
+export function createOpenAITurnTransport(options: OpenAIProviderOptions) {
+  const client = openAIClient(options)
+  const transport = supportsOpenAIRequestWarmup(
+    options.baseURL ?? client.baseURL,
+  )
+    ? createOpenAIResponsesTransport(client)
+    : undefined
+  const stream: StreamFn = (request) =>
+    streamOpenAI(
+      client,
+      options.model,
+      request,
+      options.onResponseHeaders,
+      transport,
+    )
+  return {
+    stream,
+    ...(transport === undefined
+      ? {}
+      : {
+          warmup: ((request) =>
+            streamOpenAI(
+              client,
+              options.model,
+              request,
+              options.onResponseHeaders,
+              transport,
+              true,
+            )) as StreamFn,
+        }),
+    close() {
+      transport?.close()
+    },
+  }
+}
+
+function openAIClient(options: OpenAIProviderOptions): OpenAI {
   // SDK-internal retries stay disabled: the model request runtime owns policy.
-  const client =
+  return (
     options.client ??
     new OpenAI({
       apiKey: options.apiKey,
@@ -50,8 +97,7 @@ export function createOpenAIProvider(options: OpenAIProviderOptions): StreamFn {
       fetchOptions: options.fetchOptions,
       maxRetries: 0,
     })
-  return (request) =>
-    streamOpenAI(client, options.model, request, options.onResponseHeaders)
+  )
 }
 
 async function* streamOpenAI(
@@ -59,6 +105,8 @@ async function* streamOpenAI(
   defaultModel: string,
   request: ModelRequest,
   onResponseHeaders?: (headers: Headers) => void,
+  transport?: ReturnType<typeof createOpenAIResponsesTransport>,
+  warmup = false,
 ): AsyncGenerator<ModelStreamEvent> {
   if (request.signal?.aborted) {
     yield abortedResponse()
@@ -78,62 +126,72 @@ async function* streamOpenAI(
       nativeDeferredLoading,
     )
     const effort = resolveModelWireEffort(request.target)
-    const pending = client.responses.create(
-      {
-        model: request.target.model || defaultModel,
-        instructions: flattenModelSystem(request.system),
-        input: [
-          ...toOpenAIInput(
-            request.messages,
-            nativeDeferredLoading,
-            request.target.provider,
-            request.continuationScope,
-          ),
-          ...(request.compaction === "remote_v2"
-            ? [{ type: "compaction_trigger" as const }]
-            : []),
-        ],
-        tools: toOpenAITools(request.tools, nativeDeferredLoading),
-        parallel_tool_calls: true,
-        // The Codex subscription endpoint rejects max_output_tokens. Its
-        // ResponsesApiRequest omits this API-only output control.
-        ...(request.target.provider === "codex" ||
-        request.maxOutputTokens === undefined
-          ? {}
-          : { max_output_tokens: request.maxOutputTokens }),
-        store: false,
-        stream: true,
-        ...(request.cacheKey === undefined
-          ? {}
-          : { prompt_cache_key: request.cacheKey }),
-        ...(effort === undefined &&
-        !REASONING_SUMMARY_PROVIDERS.has(request.target.provider)
-          ? {}
-          : {
-              reasoning: {
-                ...(effort === undefined
-                  ? {}
-                  : { effort: effort as ReasoningEffort }),
-                ...(REASONING_SUMMARY_PROVIDERS.has(request.target.provider)
-                  ? { summary: "auto" as const }
-                  : {}),
-              },
-            }),
-        // Speed tiers: only "fast" maps onto the wire ("priority"); anything
-        // else falls through to the server default.
-        ...(request.target.speed === "fast"
-          ? { service_tier: "priority" as const }
-          : {}),
-      },
-      request.signal === undefined ? undefined : { signal: request.signal },
-    )
+    const body: ResponseCreateParamsStreaming = {
+      model: request.target.model || defaultModel,
+      instructions: flattenModelSystem(request.system),
+      input: [
+        ...toOpenAIInput(
+          request.messages,
+          nativeDeferredLoading,
+          request.target.provider,
+          request.continuationScope,
+        ),
+        ...(request.compaction === "remote_v2"
+          ? [{ type: "compaction_trigger" as const }]
+          : []),
+      ],
+      tools: toOpenAITools(request.tools, nativeDeferredLoading),
+      parallel_tool_calls: true,
+      // The Codex subscription endpoint rejects max_output_tokens. Its
+      // ResponsesApiRequest omits this API-only output control.
+      ...(request.target.provider === "codex" ||
+      request.maxOutputTokens === undefined
+        ? {}
+        : { max_output_tokens: request.maxOutputTokens }),
+      store: false,
+      stream: true,
+      ...(request.cacheKey === undefined
+        ? {}
+        : { prompt_cache_key: request.cacheKey }),
+      ...(effort === undefined &&
+      !REASONING_SUMMARY_PROVIDERS.has(request.target.provider)
+        ? {}
+        : {
+            reasoning: {
+              ...(effort === undefined
+                ? {}
+                : { effort: effort as ReasoningEffort }),
+              ...(REASONING_SUMMARY_PROVIDERS.has(request.target.provider)
+                ? { summary: "auto" as const }
+                : {}),
+            },
+          }),
+      // Speed tiers: only "fast" maps onto the wire ("priority"); anything
+      // else falls through to the server default.
+      ...(request.target.speed === "fast"
+        ? { service_tier: "priority" as const }
+        : {}),
+    }
+    const warmed = warmup
+      ? transport?.warmup(body, request.signal, request.continuationScope)
+      : transport?.take(body, request.signal, request.continuationScope)
+    if (warmup && warmed === undefined) return
     const stream =
-      onResponseHeaders === undefined
-        ? await pending
-        : await pending.withResponse().then(({ data, response }) => {
-            onResponseHeaders(response.headers)
-            return data
-          })
+      warmed ??
+      (await (async () => {
+        const pending = client.responses.create(
+          body,
+          request.signal === undefined ? undefined : { signal: request.signal },
+        )
+        return onResponseHeaders === undefined
+          ? await pending
+          : await pending.withResponse().then(({ data, response }) => {
+              onResponseHeaders(response.headers)
+              return data
+            })
+      })())
+    if (stream === undefined)
+      throw new OpenAIProtocolError("OpenAI returned no response stream.")
     failureStage = "response_body"
     const completedItems = new Map<number, Response["output"][number]>()
     const startedItems = new Map<number, Response["output"][number]>()
@@ -150,6 +208,24 @@ async function* streamOpenAI(
     >()
     let nextOutputIndex = 0
     for await (const event of stream) {
+      // Cancellation suppresses content, not accounting already delivered by
+      // the provider. Tool completion may abort a queued warmup terminal event.
+      // Never replace the first terminal sample with contradictory tail data.
+      if (
+        terminalEvent === undefined &&
+        (event.type === "response.completed" ||
+          event.type === "response.incomplete" ||
+          event.type === "response.failed")
+      ) {
+        terminalUsage = responseResult(
+          event.response,
+          ModelStopReason.EndTurn,
+          [],
+          request.target.provider,
+        ).usage
+        if (terminalUsage !== undefined)
+          request.onUsageSnapshot?.(terminalUsage)
+      }
       if (request.signal?.aborted) {
         yield abortedResponse(terminalUsage)
         return
@@ -238,14 +314,10 @@ async function* streamOpenAI(
         event.type === "response.incomplete" ||
         event.type === "response.failed"
       ) {
-        terminalUsage = responseResult(
-          event.response,
-          ModelStopReason.EndTurn,
-          [],
-          request.target.provider,
-        ).usage
-        if (terminalUsage !== undefined)
-          request.onUsageSnapshot?.(terminalUsage)
+        if (warmup && event.response.output.length !== 0)
+          throw new OpenAIProtocolError(
+            "Non-generating warmup unexpectedly produced output.",
+          )
         // Codex sends completed items separately and may leave terminal
         // output empty. Preserve output_index order and merge by item id so
         // ordinary Responses endpoints cannot duplicate a tool side effect.

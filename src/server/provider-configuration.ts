@@ -1,3 +1,4 @@
+import { supportsOpenAIRequestWarmup } from "../shared/request-warmup-policy.ts"
 import type { ConfiguredModel } from "../runtime/provider-presets.ts"
 import { requireInstructionProfileId } from "../runtime/model-catalog.ts"
 import { ConfigurationError } from "./config-errors.ts"
@@ -10,6 +11,8 @@ export type ProviderConfiguration = Readonly<{
   preset?: string
   noKey?: boolean
   enabled?: boolean
+  // Explicit opt-in: request preparation may have provider-reported usage.
+  requestWarmup?: boolean
   modelSelection?: "all" | "selected"
   models: readonly ConfiguredModel[]
 }>
@@ -109,6 +112,18 @@ export function requireProviderConfiguration(
     record.modelSelection !== "selected"
   )
     throw new ConfigurationError("modelSelection must be all or selected.")
+  if (
+    record.requestWarmup !== undefined &&
+    typeof record.requestWarmup !== "boolean"
+  )
+    throw new ConfigurationError("requestWarmup must be a boolean.")
+  if (
+    record.requestWarmup === true &&
+    (wireApi !== "openai_responses" || !supportsOpenAIRequestWarmup(baseURL))
+  )
+    throw new ConfigurationError(
+      "Request warmup is supported only by the official OpenAI Responses API endpoint.",
+    )
   const models = requireConfiguredModels(record.models)
   return {
     name,
@@ -119,6 +134,9 @@ export function requireProviderConfiguration(
     ...(preset === undefined ? {} : { preset }),
     ...(record.noKey === undefined ? {} : { noKey: record.noKey }),
     ...(record.enabled === undefined ? {} : { enabled: record.enabled }),
+    ...(record.requestWarmup === undefined
+      ? {}
+      : { requestWarmup: record.requestWarmup }),
     ...(record.modelSelection === undefined
       ? {}
       : { modelSelection: record.modelSelection }),
