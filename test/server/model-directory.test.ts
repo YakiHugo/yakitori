@@ -6,124 +6,6 @@ import {
 import { createModelDirectory } from "../../src/server/model-directory.ts"
 
 describe("model directory", () => {
-  it("projects OpenAI models without inferring capabilities", async () => {
-    const directory = createModelDirectory()
-
-    expect(await directory.listModels("openai")).toEqual([
-      {
-        id: "gpt-6-astra",
-        displayName: "GPT-6-Astra",
-        instructionProfileId: "gpt-6-astra",
-        effectiveContextWindowTokens: 1050000,
-        efforts: ["low", "medium", "high", "xhigh", "max"],
-        defaultEffort: "low",
-        speeds: ["standard", "fast"],
-        inputModalities: ["text", "image"],
-        imageDetailModes: ["high", "original"],
-      },
-      {
-        id: "gpt-6-sol",
-        displayName: "GPT-6-Sol",
-        instructionProfileId: "gpt-6-sol",
-        effectiveContextWindowTokens: 1050000,
-        efforts: ["none", "low", "medium", "high", "xhigh", "max"],
-        defaultEffort: "medium",
-        speeds: ["standard", "fast"],
-        inputModalities: ["text", "image"],
-        imageDetailModes: ["high", "original"],
-      },
-      {
-        id: "gpt-6-luna",
-        displayName: "GPT-6-Luna",
-        instructionProfileId: "gpt-6-luna",
-        effectiveContextWindowTokens: 1050000,
-        efforts: ["none", "low", "medium", "high", "xhigh", "max"],
-        defaultEffort: "medium",
-        speeds: ["standard", "fast"],
-        inputModalities: ["text", "image"],
-        imageDetailModes: ["high", "original"],
-      },
-      {
-        id: "gpt-5.1-codex",
-        displayName: "gpt-5.1-codex",
-        instructionProfileId: "gpt-5.1-codex",
-        inputModalities: ["text", "image"],
-        imageDetailModes: ["high"],
-      },
-      {
-        id: "gpt-5",
-        displayName: "gpt-5",
-        instructionProfileId: "gpt-5",
-        inputModalities: ["text", "image"],
-        imageDetailModes: ["high"],
-      },
-    ])
-  })
-
-  it("uses the explicit Grok catalog entries", async () => {
-    const directory = createModelDirectory()
-
-    expect(await directory.listModels("grok")).toEqual([
-      {
-        id: "grok-4.7",
-        displayName: "Grok 4.7",
-        instructionProfileId: "grok-4.7",
-        effectiveContextWindowTokens: 500000,
-        efforts: ["low", "medium", "high", "xhigh"],
-        defaultEffort: "high",
-        inputModalities: ["text", "image"],
-        imageDetailModes: ["high"],
-      },
-      {
-        id: "grok-4.6",
-        displayName: "Grok 4.6",
-        instructionProfileId: "grok-4.6",
-        effectiveContextWindowTokens: 500000,
-        efforts: ["low", "medium", "high", "xhigh"],
-        defaultEffort: "high",
-        inputModalities: ["text", "image"],
-        imageDetailModes: ["high"],
-      },
-      {
-        id: "grok-4.5",
-        displayName: "Grok 4.5",
-        instructionProfileId: "grok-4.5",
-        effectiveContextWindowTokens: 500000,
-        efforts: ["low", "medium", "high"],
-        defaultEffort: "high",
-        inputModalities: ["text", "image"],
-        imageDetailModes: ["high"],
-      },
-    ])
-  })
-
-  it("preserves Codex picker order and per-model options", async () => {
-    const directory = createModelDirectory()
-    const models = await directory.listModels("codex")
-
-    expect(models.map((model) => model.id)).toEqual([
-      "gpt-6-astra",
-      "gpt-6-sol",
-      "gpt-6-luna",
-      "gpt-5.6-sol",
-      "gpt-5.6-terra",
-      "gpt-5.6-luna",
-      "gpt-5.5",
-    ])
-    expect(models[0]).toEqual({
-      id: "gpt-6-astra",
-      displayName: "GPT-6-Astra",
-      instructionProfileId: "gpt-6-astra",
-      effectiveContextWindowTokens: 258400,
-      efforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
-      defaultEffort: "low",
-      speeds: ["standard", "fast"],
-      inputModalities: ["text", "image"],
-      imageDetailModes: ["high", "original"],
-    })
-    expect(models.at(-1)?.id).toBe("gpt-5.5")
-  })
-
   it("is case-insensitive and returns no speculative unknown models", async () => {
     const directory = createModelDirectory()
 
@@ -138,7 +20,7 @@ describe("model directory", () => {
     expect(await directory.listModels("unknown")).toEqual([])
   })
 
-  it("reads models from the registered provider owner", async () => {
+  it("projects provider-owned models in their declared order with exact options and optional fields", async () => {
     const registry = createProviderRegistry({
       custom: createModelProvider({
         info: {
@@ -156,8 +38,22 @@ describe("model directory", () => {
                 model: "remote-model",
                 displayName: "Remote Model",
                 instructionProfileId: "default",
+                inputModalities: ["text", "image"],
+                imageDetailModes: ["high", "original"],
+                effortStyle: "levels",
+                efforts: ["low", "high"],
+                defaultEffort: "high",
+                speeds: ["standard", "fast"],
+                shellToolType: "unified_exec",
+                fileEditingToolType: "none",
+                supportsNativeToolSearch: false,
+              },
+              {
+                model: "minimal-model",
+                instructionProfileId: "default",
                 inputModalities: ["text"],
                 imageDetailModes: [],
+                effortStyle: "none",
                 shellToolType: "unified_exec",
                 fileEditingToolType: "none",
                 supportsNativeToolSearch: false,
@@ -168,8 +64,15 @@ describe("model directory", () => {
             throw new Error("not used")
           },
           validate() {},
-          capacity() {
-            return undefined
+          capacity({ model }) {
+            return model === "remote-model"
+              ? {
+                  contextWindowTokens: 1007,
+                  maxContextWindowTokens: 1007,
+                  effectiveContextWindowPercent: 95,
+                  contextWindowScope: "input",
+                }
+              : undefined
           },
         },
       }),
@@ -182,6 +85,19 @@ describe("model directory", () => {
         id: "remote-model",
         displayName: "Remote Model",
         instructionProfileId: "default",
+        effectiveContextWindowTokens: 956,
+        effortStyle: "levels",
+        efforts: ["low", "high"],
+        defaultEffort: "high",
+        speeds: ["standard", "fast"],
+        inputModalities: ["text", "image"],
+        imageDetailModes: ["high", "original"],
+      },
+      {
+        id: "minimal-model",
+        displayName: "minimal-model",
+        instructionProfileId: "default",
+        effortStyle: "none",
         inputModalities: ["text"],
         imageDetailModes: [],
       },

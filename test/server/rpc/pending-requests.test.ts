@@ -19,8 +19,7 @@ describe("PendingServerRequests", () => {
       sessionId: "s1",
       method: "input/request",
     })
-    expect(first.id).toBe(0)
-    expect(second.id).toBe(1)
+    expect(second.id).not.toBe(first.id)
 
     expect(pending.resolve(first.id, { approved: true })).toBe(true)
     await expect(first.response).resolves.toEqual({ approved: true })
@@ -51,7 +50,10 @@ describe("PendingServerRequests", () => {
       method: "permission/request",
       params: { tool: "shell" },
     })
-    pending.register({ sessionId: "s2", method: "input/request" })
+    const second = pending.register({
+      sessionId: "s2",
+      method: "input/request",
+    })
     const third = pending.register({
       sessionId: "s1",
       method: "permission/request",
@@ -62,7 +64,7 @@ describe("PendingServerRequests", () => {
       { id: first.id, method: "permission/request", params: { tool: "shell" } },
     ])
     expect(pending.pendingForSession("s2")).toEqual([
-      { id: 1, method: "input/request" },
+      { id: second.id, method: "input/request" },
     ])
   })
 

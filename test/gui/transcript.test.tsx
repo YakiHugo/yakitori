@@ -415,7 +415,11 @@ it("keeps failures and intent updates visible while reasoning is collapsed", () 
     },
   })
   render(<Transcript />)
-  fireEvent.click(screen.getByRole("button", { name: "Worked for 1m 49s" }))
+  expect(
+    screen
+      .getByRole("button", { name: "Worked for 1m 49s" })
+      .getAttribute("aria-expanded"),
+  ).toBe("false")
   expect(
     screen
       .getByText("Checking the implementation", { selector: "p" })

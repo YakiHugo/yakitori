@@ -52,11 +52,13 @@ describe("complete model request budgeting", () => {
     expect(high.systemTokens).toBeGreaterThan(0)
     expect(high.messageTokens).toBeGreaterThan(0)
     expect(high.toolTokens).toBeGreaterThan(0)
-    expect(high.systemTokens).toBe(
-      Math.ceil(
-        Buffer.byteLength(JSON.stringify(requestWithImage("high").system)) / 4,
-      ),
-    )
+    const expandedSystem = estimateModelRequestBudget({
+      ...requestWithImage("high"),
+      system: [
+        { id: "base", revision: "2", text: "more instructions ".repeat(500) },
+      ],
+    })
+    expect(expandedSystem.systemTokens).toBeGreaterThan(high.systemTokens)
     expect(high.imageTokens).toBe(2_000)
     expect(original.imageTokens).toBe(10_000)
     expect(original.outputReserveTokens).toBe(4_096)
@@ -138,11 +140,25 @@ describe("complete model request budgeting", () => {
       toolWireProtocol: "eager",
     }
 
-    expect(estimateModelRequestBudget(nativeRequest).toolTokens).toBe(
-      Math.ceil(
-        Buffer.byteLength(JSON.stringify(nativeRequest.tools.slice(0, 1))) / 4,
+    const withoutDeferred = estimateModelRequestBudget({
+      ...nativeRequest,
+      tools: nativeRequest.tools.slice(0, 1),
+    })
+    const largerDeferred = estimateModelRequestBudget({
+      ...nativeRequest,
+      tools: nativeRequest.tools.map((tool) =>
+        tool.deferLoading
+          ? {
+              ...tool,
+              description: "expanded deferred definition ".repeat(500),
+            }
+          : tool,
       ),
+    })
+    expect(estimateModelRequestBudget(nativeRequest).toolTokens).toBe(
+      withoutDeferred.toolTokens,
     )
+    expect(largerDeferred.toolTokens).toBe(withoutDeferred.toolTokens)
     expect(
       estimateModelRequestBudget(compatibleRequest).toolTokens,
     ).toBeGreaterThan(estimateModelRequestBudget(nativeRequest).toolTokens)

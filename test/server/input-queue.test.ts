@@ -16,7 +16,7 @@ afterEach(async () => {
 })
 
 describe("separate input queue", () => {
-  it("caps each thread queue at the Codex queue capacity", () => {
+  it("enforces the configured capacity independently for each thread queue", () => {
     const queue = new InputQueue()
     for (let index = 0; index < MAX_QUEUED_ITEMS; index++) {
       queue.enqueue("session_one", {

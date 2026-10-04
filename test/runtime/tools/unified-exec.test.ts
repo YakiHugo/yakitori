@@ -557,32 +557,70 @@ describe("unified exec tools", () => {
     await manager.close()
   })
 
-  it("rejects unknown sessions and closes every live process idempotently", async () => {
+  it.each([
+    false,
+    true,
+  ])("rejects unknown sessions and closes every live process idempotently when tty is %s", async (tty) => {
     const manager = createUnifiedExecProcessManager({
       backgroundTimeoutMs: 10_000,
       killGraceMs: 20,
     })
-    const running = await manager.exec({
-      command: "sleep 10",
-      cwd: process.cwd(),
-      shell: "/bin/sh",
-      env: process.env,
-      tty: false,
-      yieldTimeMs: 250,
-      maxOutputTokens: 100,
-    })
-    expect(running.session_id).toEqual(expect.any(Number))
-
-    await manager.close()
-    await manager.close()
-    await expect(
-      manager.write({
-        sessionId: running.session_id as number,
-        chars: "",
-        yieldTimeMs: 5_000,
-        maxOutputTokens: 100,
-      }),
-    ).rejects.toThrow("manager is closed")
+    const pids: number[] = []
+    const sessionIds: number[] = []
+    try {
+      await expect(
+        manager.write({
+          sessionId: 999_999,
+          chars: "",
+          yieldTimeMs: 250,
+          maxOutputTokens: 100,
+        }),
+      ).rejects.toThrow("Unknown unified exec session_id")
+      for (let index = 0; index < 2; index++) {
+        const running = await manager.exec({
+          command: "echo $$; exec sleep 10",
+          cwd: process.cwd(),
+          shell: "/bin/sh",
+          env: process.env,
+          tty,
+          yieldTimeMs: 250,
+          maxOutputTokens: 100,
+        })
+        if (running.session_id === undefined)
+          throw new Error("Command did not stay alive")
+        const pid = Number(running.output.trim())
+        expect(Number.isSafeInteger(pid) && pid > 0).toBe(true)
+        pids.push(pid)
+        sessionIds.push(running.session_id)
+        expect(() => process.kill(pid, 0)).not.toThrow()
+      }
+      await manager.close()
+      await manager.close()
+      for (const pid of pids) {
+        expect(() => process.kill(pid, 0)).toThrowError(
+          expect.objectContaining({ code: "ESRCH" }),
+        )
+      }
+      for (const sessionId of sessionIds) {
+        await expect(
+          manager.write({
+            sessionId,
+            chars: "",
+            yieldTimeMs: 250,
+            maxOutputTokens: 100,
+          }),
+        ).rejects.toThrow("manager is closed")
+      }
+    } finally {
+      await manager.close()
+      for (const pid of pids) {
+        try {
+          process.kill(pid, "SIGKILL")
+        } catch (error) {
+          expect(error).toMatchObject({ code: "ESRCH" })
+        }
+      }
+    }
   })
 
   it("fails closed on invalid input and the catastrophic-command fuse", async () => {

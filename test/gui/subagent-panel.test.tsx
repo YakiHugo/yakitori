@@ -111,6 +111,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
 })
 
 it("replays a child with readable markdown answers and disclosed activity without changing the parent", () => {
@@ -464,6 +465,20 @@ it("closes its own connection on child changes and ignores late deliveries", () 
 })
 
 it("keeps live scrolling pinned until the reader scrolls away", () => {
+  const resizeObservers = new Set<() => void>()
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      constructor(private callback: () => void) {
+        resizeObservers.add(callback)
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {
+        resizeObservers.delete(this.callback)
+      }
+    },
+  )
   const { container } = mount()
   const viewport = container.querySelector<HTMLElement>(
     '[data-slot="scroll-area-viewport"]',
@@ -475,6 +490,32 @@ it("keeps live scrolling pinned until the reader scrolls away", () => {
   })
   act(start)
   expect(viewport.scrollTop).toBe(1000)
+  act(() => {
+    stream.emitTransient({
+      type: "item.started",
+      sessionId: "child",
+      turnId: "turn",
+      item: { type: "agent_message", itemId: "answer" },
+      createdAt: at,
+    })
+    stream.emitTransient({
+      type: "assistant.delta",
+      sessionId: "child",
+      turnId: "turn",
+      itemId: "answer",
+      delta: "Initial output",
+      createdAt: at,
+    })
+  })
+  expect(screen.getByText("Initial output")).toBeDefined()
+  Object.defineProperty(viewport, "scrollHeight", {
+    value: 1300,
+    configurable: true,
+  })
+  act(() => {
+    for (const resize of resizeObservers) resize()
+  })
+  expect(viewport.scrollTop).toBe(1300)
   fireEvent.wheel(viewport, { deltaY: -100 })
   viewport.scrollTop = 200
   fireEvent.scroll(viewport)
@@ -484,10 +525,18 @@ it("keeps live scrolling pinned until the reader scrolls away", () => {
       sessionId: "child",
       turnId: "turn",
       itemId: "answer",
-      delta: "New output",
+      delta: " New output",
       createdAt: at,
     }),
   )
+  expect(screen.getByText("Initial output New output")).toBeDefined()
+  Object.defineProperty(viewport, "scrollHeight", {
+    value: 1600,
+    configurable: true,
+  })
+  act(() => {
+    for (const resize of resizeObservers) resize()
+  })
   expect(viewport.scrollTop).toBe(200)
   expect(
     screen.getByRole("button", { name: "Jump to latest child output" }),
