@@ -182,8 +182,8 @@ export class MessageProcessor {
     }
   }
 
-  // Closes the gate (new work is dropped, never polled once queued), removes
-  // the connection's subscriptions, then drains admitted requests. The
+  // Closes the gate, releases queued work without polling it, removes the
+  // connection's subscriptions, then drains admitted requests. The
   // subscription sweep runs again after the drain: a subscribe admitted just
   // before the gate closed can register its hub subscriber during the drain,
   // after the first sweep, and would otherwise leak (the removal is
@@ -192,7 +192,9 @@ export class MessageProcessor {
     const connection = this.connections.get(id)
     if (connection === undefined) return "drained"
     this.subscriptions.removeConnection(id)
-    const result = await connection.gate.shutdown(this.drainTimeoutMs)
+    const drain = connection.gate.shutdown(this.drainTimeoutMs)
+    this.serializationQueues.discardClosed()
+    const result = await drain
     this.subscriptions.removeConnection(id)
     this.connections.delete(id)
     return result
@@ -240,9 +242,9 @@ export class MessageProcessor {
     connection: ConnectionRecord,
     request: JsonRpcRequest,
   ): void {
-    // A request counts from dispatch until its handler settles; past the
-    // bound, new requests are rejected immediately so a flood cannot queue
-    // without limit.
+    // A request counts until its handler settles or queued work is discarded.
+    // Past the bound, new requests are rejected immediately so a flood cannot
+    // queue without limit.
     if (this.inflightClientRequests >= maxInflightClientRequests) {
       this.emitMessage(
         connection,
@@ -359,6 +361,9 @@ export class MessageProcessor {
           }
         }),
       connection.gate,
+      // Rust drops the queued future's request guard without polling it.
+      // JavaScript needs an explicit release for the same ownership boundary.
+      settle,
     )
   }
 

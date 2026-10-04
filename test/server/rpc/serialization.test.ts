@@ -147,12 +147,16 @@ describe("RequestSerializationQueues", () => {
     await firstStarted.promise
 
     let skippedRan = false
+    let discarded = 0
     queues.enqueue(
       sessionScope,
       async () => {
         skippedRan = true
       },
       closedGate,
+      () => {
+        discarded += 1
+      },
     )
     const thirdDone = deferred<void>()
     queues.enqueue(
@@ -167,6 +171,7 @@ describe("RequestSerializationQueues", () => {
     await thirdDone.promise
     await flush()
     expect(skippedRan).toBe(false)
+    expect(discarded).toBe(1)
   })
 
   it("skips a task whose gate closes between dequeue and its first poll", async () => {
@@ -174,6 +179,7 @@ describe("RequestSerializationQueues", () => {
     const gate = new ConnectionRpcGate()
 
     let firstRan = false
+    let discarded = 0
     const secondDone = deferred<void>()
     // The first task is dequeued synchronously while the gate is open, but it
     // only polls on a later microtask; closing the gate now lands in between.
@@ -183,6 +189,9 @@ describe("RequestSerializationQueues", () => {
         firstRan = true
       },
       gate,
+      () => {
+        discarded += 1
+      },
     )
     gate.close()
     queues.enqueue(sessionScope, async () => {
@@ -193,6 +202,7 @@ describe("RequestSerializationQueues", () => {
     await flush()
     // The skipped first task must not stall the queue behind it.
     expect(firstRan).toBe(false)
+    expect(discarded).toBe(1)
   })
 })
 
