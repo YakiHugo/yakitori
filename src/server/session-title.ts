@@ -1,8 +1,10 @@
+import { createRequestId } from "../kernel/ids.ts"
 import type { ModelSelection } from "../kernel/index.ts"
 import type { ThreadStore } from "../core/thread-store.ts"
 import type {
   ModelTarget,
   ModelStreamEvent,
+  ModelUsage,
   StreamFn,
 } from "../runtime/model.ts"
 import type { OperationalFailureReporter } from "./operational-errors.ts"
@@ -126,35 +128,42 @@ async function streamSessionTitle(
   stream: StreamFn,
   target: ModelTarget,
   text: string,
+  signal: AbortSignal,
+  recordUsage: (usage: ModelUsage) => Promise<void>,
 ): Promise<string | undefined> {
   let title: string | undefined
-  try {
-    const events: AsyncIterable<ModelStreamEvent> = stream({
-      target,
-      system: [{ id: "session-title", revision: "1", text: TITLE_SYSTEM }],
-      messages: [
-        {
-          role: "user",
-          content: [{ type: "text", text }],
-        },
-      ],
-      tools: [],
-      toolWireProtocol: "eager",
-      maxOutputTokens: TITLE_MAX_OUTPUT_TOKENS,
-      signal: AbortSignal.timeout(TITLE_TIMEOUT_MS),
-    })
-    for await (const event of events) {
-      if (event.type === "response") {
-        const text = event.response.content.find(
-          (block) => block.type === "text",
-        )
-        title = text === undefined ? undefined : parseTitleResponse(text.text)
-      } else if (event.type === "failure" || event.type === "cancelled") {
-        return undefined
-      }
+  const events: AsyncIterable<ModelStreamEvent> = stream({
+    target,
+    system: [{ id: "session-title", revision: "1", text: TITLE_SYSTEM }],
+    messages: [
+      {
+        role: "user",
+        content: [{ type: "text", text }],
+      },
+    ],
+    tools: [],
+    toolWireProtocol: "eager",
+    maxOutputTokens: TITLE_MAX_OUTPUT_TOKENS,
+    signal: AbortSignal.any([signal, AbortSignal.timeout(TITLE_TIMEOUT_MS)]),
+  })
+  for await (const event of events) {
+    const usage =
+      event.type === "response"
+        ? event.response.usage
+        : event.type === "retry" ||
+            event.type === "failure" ||
+            event.type === "cancelled"
+          ? event.usage
+          : undefined
+    // Each boundary contains one physical attempt's usage. Raw snapshots
+    // are partial/cumulative and must never be counted in addition to it.
+    if (usage !== undefined) await recordUsage(usage)
+    if (event.type === "response") {
+      const text = event.response.content.find((block) => block.type === "text")
+      title = text === undefined ? undefined : parseTitleResponse(text.text)
+    } else if (event.type === "failure" || event.type === "cancelled") {
+      return undefined
     }
-  } catch {
-    return undefined
   }
   return title
 }
@@ -177,51 +186,107 @@ export function createSessionTitleGenerator(options: {
   readonly availableProviders?: readonly string[]
   readonly notifySidebarChanged?: () => void
   readonly reportOperationalFailure?: OperationalFailureReporter
-}): SessionTitleGenerator {
+}): SessionTitleGenerator & {
+  openSession(sessionId: string): void
+  closeSession(sessionId: string): Promise<void>
+} {
+  const sessions = new Map<
+    string,
+    {
+      controller: AbortController
+      pending?: Promise<void>
+    }
+  >()
   return {
-    async generate(input) {
-      const untitled = async (): Promise<boolean> => {
-        const stored = await options.store.readThread(input.sessionId)
-        if (stored?.metadata.title !== undefined) return false
-        const presentation = await options.store.sessionPresentation(
-          input.sessionId,
-        )
-        return presentation.title === undefined
-      }
-      try {
-        const text = input.text.trim()
-        if (text === "") return
-        if (!(await untitled())) return
-        const target = resolveTitleTarget(
-          options.availableProviders,
-          input.modelSelection,
-        )
-        if (target === undefined) return
-        const title = await streamSessionTitle(
-          options.stream,
-          target,
-          [...text].slice(0, TITLE_INPUT_MAX_CHARS).join(""),
-        )
-        if (title === undefined) return
-        // Re-check under the sidebar lock's ordering: a rename admitted while
-        // the model call was in flight must not be overwritten.
-        if (!(await untitled())) return
-        await options.store.updateSessionSidebar({
-          type: "session",
-          sessionId: input.sessionId,
-          title,
-        })
-        options.notifySidebarChanged?.()
-      } catch (error) {
-        reportOperationalFailure(
-          options.reportOperationalFailure ?? consoleOperationalFailureReporter,
-          {
-            component: "session-title",
-            operation: "generate",
-            cause: error,
+    openSession(sessionId) {
+      if (!sessions.has(sessionId))
+        sessions.set(sessionId, { controller: new AbortController() })
+    },
+    async closeSession(sessionId) {
+      const state = sessions.get(sessionId)
+      // Fence admission before waiting: a delayed event pump must not start
+      // a title request after the owning Session begins disposing its writer.
+      sessions.delete(sessionId)
+      state?.controller.abort()
+      await state?.pending
+    },
+    generate(input) {
+      const state = sessions.get(input.sessionId)
+      if (state === undefined) return Promise.resolve()
+      const controller = state.controller
+      state.pending ??= generate()
+      return state.pending
+
+      async function generate() {
+        const untitled = async (): Promise<boolean> => {
+          const stored = await options.store.readThread(input.sessionId)
+          if (stored === undefined || stored.metadata.title !== undefined)
+            return false
+          const presentation = await options.store.sessionPresentation(
+            input.sessionId,
+          )
+          return presentation.title === undefined
+        }
+        try {
+          const text = input.text.trim()
+          if (text === "") return
+          if (!(await untitled())) return
+          const target = resolveTitleTarget(
+            options.availableProviders,
+            input.modelSelection,
+          )
+          if (target === undefined || controller.signal.aborted) return
+          const title = await streamSessionTitle(
+            options.stream,
+            target,
+            [...text].slice(0, TITLE_INPUT_MAX_CHARS).join(""),
+            controller.signal,
+            async (usage) => {
+              await options.store.appendItems(input.sessionId, [
+                {
+                  type: "auxiliary_usage",
+                  source: "session_title",
+                  occurredAt: new Date().toISOString(),
+                  requestId: createRequestId(),
+                  provider: target.provider,
+                  model: target.model,
+                  usage: {
+                    inputTokens: usage.inputTokens ?? 0,
+                    outputTokens: usage.outputTokens ?? 0,
+                    ...(usage.cacheReadInputTokens === undefined
+                      ? {}
+                      : { cacheReadInputTokens: usage.cacheReadInputTokens }),
+                    ...(usage.cacheWriteInputTokens === undefined
+                      ? {}
+                      : { cacheWriteInputTokens: usage.cacheWriteInputTokens }),
+                  },
+                },
+              ])
+              await options.store.flushThread(input.sessionId)
+            },
+          )
+          if (title === undefined || controller.signal.aborted) return
+          // Re-check under the sidebar lock's ordering: a rename admitted while
+          // the model call was in flight must not be overwritten.
+          if (!(await untitled())) return
+          await options.store.updateSessionSidebar({
+            type: "session",
             sessionId: input.sessionId,
-          },
-        )
+            title,
+          })
+          options.notifySidebarChanged?.()
+        } catch (error) {
+          reportOperationalFailure(
+            options.reportOperationalFailure ??
+              consoleOperationalFailureReporter,
+            {
+              component: "session-title",
+              operation: "generate",
+              cause: error,
+              sessionId: input.sessionId,
+            },
+          )
+        }
       }
     },
   }

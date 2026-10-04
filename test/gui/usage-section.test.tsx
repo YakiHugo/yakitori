@@ -103,6 +103,37 @@ describe("usage periods", () => {
 })
 
 describe("usage dashboard", () => {
+  it("shows auxiliary-only token activity without inventing recorded turns", () => {
+    const totals = { ...emptyUsage, inputTokens: 41, outputTokens: 7 }
+    const model = { ...totals, provider: "kimi", model: "title-model" }
+    useAppStore.setState({
+      usage: {
+        loading: false,
+        summary: {
+          generatedAt: "2026-10-02T18:00:00Z",
+          totals,
+          days: [{ ...totals, date: "2026-10-02" }],
+          models: [model],
+          modelDays: [{ ...model, date: "2026-10-02" }],
+          threads: [],
+        },
+      },
+    })
+    render(<UsageSection />)
+    expect(screen.getByText("48 total tokens")).toBeTruthy()
+    expect(screen.getByText("0 recorded turns")).toBeTruthy()
+    expect(screen.queryByText(/No recorded usage/)).toBeNull()
+    expect(screen.getByText(/1 active days/)).toBeTruthy()
+    fireEvent.click(
+      screen.getByRole("button", { name: "2026-10-02: 48 tokens, 0 turns" }),
+    )
+    expect(screen.queryByText(/No recorded usage/)).toBeNull()
+    expect(
+      within(screen.getByRole("region", { name: "Usage by model" })).getByText(
+        "title-model",
+      ),
+    ).toBeTruthy()
+  })
   it("changes periods, drills into heatmap days and clears the filter without changing all-time conversations", () => {
     render(<UsageSection />)
     const models = screen.getByRole("region", { name: "Usage by model" })
@@ -289,4 +320,68 @@ it("keeps the annual trend to one tab stop while arrow, Home and End keys move f
   const shorter = within(trend).getAllByRole("button") as HTMLButtonElement[]
   expect(shorter).toHaveLength(7)
   expect(shorter.filter((button) => button.tabIndex === 0)).toHaveLength(1)
+})
+
+it("aligns the calendar across month and year boundaries and leaves future days blank", () => {
+  render(<UsageSection />)
+  const activity = screen.getByRole("region", { name: "Activity heatmap" })
+  const buttons = within(activity).getAllByRole("button") as HTMLButtonElement[]
+  expect(buttons).toHaveLength(366)
+  // The inclusive window begins Thursday, October 2, 2025.
+  expect(buttons[0]?.style.gridRow).toBe("5")
+  expect(buttons[0]?.style.gridColumn).toBe("1")
+  const sunday = within(activity).getByRole("button", {
+    name: "2025-10-05: 0 tokens, 0 turns",
+  })
+  expect(sunday.style.gridRow).toBe("1")
+  expect(sunday.style.gridColumn).toBe("2")
+  expect(buttons[365]?.style.gridRow).toBe("6")
+  expect(buttons[365]?.style.gridColumn).toBe("53")
+  expect(
+    within(activity).queryByRole("button", { name: /2026-10-03/ }),
+  ).toBeNull()
+  expect(activity.querySelector(".usage-calendar-months")?.textContent).toBe(
+    "OctNovDecJanFebMarAprMayJunJulAugSepOct",
+  )
+})
+
+it("preserves one heatmap tab stop, supports boundary navigation and drills into the current day", () => {
+  render(<UsageSection />)
+  const activity = screen.getByRole("region", { name: "Activity heatmap" })
+  const buttons = within(activity).getAllByRole("button") as HTMLButtonElement[]
+  const first = buttons[0]
+  const last = buttons[365]
+  if (!first || !last) throw new Error("Expected calendar")
+  fireEvent.focus(last)
+  fireEvent.keyDown(last, { key: "Home" })
+  expect(document.activeElement).toBe(first)
+  expect(buttons.filter((button) => button.tabIndex === 0)).toEqual([first])
+  fireEvent.keyDown(first, { key: "ArrowLeft" })
+  expect(document.activeElement).toBe(first)
+  fireEvent.keyDown(first, { key: "End" })
+  expect(document.activeElement).toBe(last)
+  fireEvent.keyDown(last, { key: "ArrowRight" })
+  expect(document.activeElement).toBe(last)
+  fireEvent.click(last)
+  expect(last.getAttribute("aria-pressed")).toBe("true")
+  expect(screen.getByText("120 total tokens")).toBeTruthy()
+  expect(screen.getByText("2026-10-02 · Tokens")).toBeTruthy()
+  fireEvent.click(last)
+  expect(last.getAttribute("aria-pressed")).toBe("false")
+  expect(screen.queryByRole("button", { name: "Clear day filter" })).toBeNull()
+})
+
+it("warns when unreadable local histories make totals incomplete and clears after a complete refresh", () => {
+  useAppStore.setState({
+    usage: { loading: false, summary: { ...summary, unavailableThreads: 2 } },
+  })
+  const view = render(<UsageSection />)
+  expect(screen.getByRole("alert").textContent).toContain(
+    "Usage is incomplete: 2 conversation histories could not be read",
+  )
+  expect(screen.getByText("120 total tokens")).toBeTruthy()
+  view.unmount()
+  useAppStore.setState({ usage: { loading: false, summary } })
+  render(<UsageSection />)
+  expect(screen.queryByRole("alert")).toBeNull()
 })

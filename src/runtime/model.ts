@@ -92,6 +92,10 @@ export type ModelRequest = Readonly<{
     maxAttempts: number
     previousFailure?: ModelFailure
   }>
+  // Runtime-only observation of cumulative usage for this physical attempt.
+  // Providers report synchronously before awaiting more data, so cancellation
+  // cannot discard already received usage. This is not an accounting event.
+  onUsageSnapshot?: (usage: ModelUsage) => void
   signal?: AbortSignal
 }>
 
@@ -206,9 +210,10 @@ export type ModelStreamFailureEvent = {
   readonly cause?: unknown
 }
 
-export type ModelStreamCancelledEvent = {
-  readonly type: "cancelled"
-}
+export type ModelStreamCancelledEvent = Readonly<{
+  type: "cancelled"
+  usage?: ModelUsage
+}>
 
 export type ModelStreamRetryEvent = Readonly<{
   type: "retry"

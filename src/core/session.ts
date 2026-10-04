@@ -66,7 +66,7 @@ export type TurnRuntime = {
   recordInitialInput(): Promise<void>
   recordModelContext(settings: ModelContextSettings): Promise<void>
   snapshot(): SessionSnapshot
-  recordUsage(usage: TokenUsage): void
+  recordUsage(usage: TokenUsage): Promise<void>
   recordRequestStartedAt(startedAt: number): void
   invalidateRequestStartedAt(): void
   recordTurnMetrics(metrics: TurnMetrics): void
@@ -924,9 +924,34 @@ export class Session {
         requireLease()
         return this.snapshot()
       },
-      recordUsage: (usage) => {
+      recordUsage: async (usage) => {
         requireActive()
-        active.usage = structuredClone(usage)
+        const snapshot = structuredClone(usage)
+        active.usage = snapshot
+        // Admission is fenced above, not inside the queue: finishTurn waits
+        // for admitted writes even after it marks the Turn as finishing.
+        await this.#withContextMutation(async () => {
+          const items: readonly RolloutItem[] = [
+            {
+              type: "turn_usage",
+              turnId: active.input.submissionId,
+              usage: snapshot,
+            },
+          ]
+          try {
+            const throughSeq = await this.#store.appendItems(this.id, items)
+            await this.#store.flushThread(this.id)
+            this.#events.send({
+              type: "rollout.appended",
+              threadId: this.id,
+              throughSeq,
+              items,
+            })
+          } catch (error) {
+            this.#reportPersistenceError(error)
+            throw error
+          }
+        })
       },
       recordRequestStartedAt: (startedAt) => {
         requireLease()

@@ -12,9 +12,79 @@ import {
   ModelStopReason,
   type ModelStreamEvent,
 } from "../../src/runtime/model.ts"
+import { createModelRequestStream } from "../../src/runtime/model-request.ts"
 import { toOpenAIInput } from "../../src/runtime/openai-provider.ts"
 
 describe("anthropic provider conversion", () => {
+  it.each([
+    false,
+    true,
+  ])("retains the latest cumulative usage on cancellation (transport %s)", async (wrapped) => {
+    const controller = new AbortController()
+    const client = {
+      messages: {
+        async create() {
+          return (async function* () {
+            yield {
+              type: "message_start",
+              message: {
+                id: "msg_cancel",
+                stop_reason: null,
+                usage: {
+                  input_tokens: 100,
+                  output_tokens: 0,
+                  cache_read_input_tokens: 30,
+                  cache_creation_input_tokens: 10,
+                },
+              },
+            }
+            yield {
+              type: "message_delta",
+              delta: { stop_reason: "end_turn" },
+              usage: { output_tokens: 20 },
+            }
+            controller.abort()
+            if (wrapped) await new Promise(() => {})
+          })()
+        },
+      },
+    } as unknown as Anthropic
+    const provider = createAnthropicProvider({
+      apiKey: "test",
+      model: "claude-test",
+      client,
+    })
+    const stream = wrapped
+      ? createModelRequestStream(provider, { wireApi: "anthropic_messages" })
+      : provider
+    const events: ModelStreamEvent[] = []
+    for await (const event of stream({
+      target: {
+        provider: "anthropic",
+        model: "claude-test",
+        instructionProfileId: "anthropic",
+      },
+      system: [],
+      messages: [],
+      tools: [],
+      toolWireProtocol: "eager",
+      signal: controller.signal,
+    }))
+      events.push(event)
+    expect(events).toEqual([
+      {
+        type: "cancelled",
+        usage: {
+          inputTokens: 140,
+          outputTokens: 20,
+          activeContextTokens: 160,
+          cacheReadInputTokens: 30,
+          cacheWriteInputTokens: 10,
+        },
+      },
+    ])
+  })
+
   it.each([
     ["anthropic", "claude-sonnet-4-6", undefined, 32000],
     ["anthropic", "unknown-model", undefined, 32000],

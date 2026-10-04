@@ -6,6 +6,7 @@ import {
   ModelStopReason,
   type ModelStreamEvent,
 } from "../../src/runtime/model.ts"
+import { createModelRequestStream } from "../../src/runtime/model-request.ts"
 import {
   createOpenAIProvider,
   fromOpenAIResponse,
@@ -14,6 +15,48 @@ import {
 } from "../../src/runtime/openai-provider.ts"
 
 describe("OpenAI Responses provider", () => {
+  it.each([
+    false,
+    true,
+  ])("retains terminal usage on cancellation before EOF (transport %s)", async (wrapped) => {
+    const controller = new AbortController()
+    const client = {
+      responses: {
+        async create() {
+          return (async function* () {
+            yield {
+              type: "response.completed",
+              response: responseFixture({
+                usage: { input_tokens: 100, output_tokens: 20 },
+              }),
+            }
+            controller.abort()
+            if (wrapped) await new Promise(() => {})
+          })()
+        },
+      },
+    } as unknown as OpenAI
+    const provider = createOpenAIProvider({
+      apiKey: "test",
+      model: "gpt-test",
+      client,
+    })
+    const stream = wrapped
+      ? createModelRequestStream(provider, { wireApi: "openai_responses" })
+      : provider
+    const events: ModelStreamEvent[] = []
+    for await (const event of stream(
+      requestFixture({ signal: controller.signal }),
+    ))
+      events.push(event)
+    expect(events).toEqual([
+      {
+        type: "cancelled",
+        usage: { inputTokens: 100, outputTokens: 20, activeContextTokens: 120 },
+      },
+    ])
+  })
+
   it.each([
     ["codex", "gpt-6-astra"],
     ["codex", "unknown-model"],

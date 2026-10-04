@@ -776,6 +776,7 @@ export async function createYakitoriApplication(
           }
         },
         async dispose() {
+          await sessionTitle?.closeSession(stored.metadata.id)
           elicitations.cancelSession(stored.metadata.id)
           if (mcpManagers.get(stored.metadata.id) === mcpManager)
             mcpManagers.delete(stored.metadata.id)
@@ -798,6 +799,7 @@ export async function createYakitoriApplication(
           }
         },
       }
+      sessionTitle?.openSession(stored.metadata.id)
       return sideConversation
         ? ownedProcessor
         : goalRuntime.wrapProcessor(stored.metadata, ownedProcessor)
@@ -837,6 +839,7 @@ export async function createYakitoriApplication(
         ? createSessionTitleGenerator({
             stream: (request) => providerRegistry.stream(request),
             store: threadStore,
+            reportOperationalFailure: reporter,
             availableProviders: providerRegistry.providers,
             notifySidebarChanged: () =>
               broadcastNotification?.(sidebarChangedMethod, {}),

@@ -83,6 +83,22 @@ export type RolloutItem =
       readonly inputItemId: string
       readonly requestFingerprint?: string
     }
+  | Readonly<{
+      type: "auxiliary_usage"
+      source: "session_title"
+      occurredAt: string
+      requestId: string
+      provider: string
+      model: string
+      usage: TokenUsage
+    }>
+  | Readonly<{
+      type: "turn_usage"
+      turnId: string
+      // Cumulative reported usage through the latest observed model attempt.
+      // Later checkpoints and turn_completed replace this snapshot.
+      usage: TokenUsage
+    }>
   | {
       readonly type: "turn_completed"
       readonly turnId: string

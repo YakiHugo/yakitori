@@ -152,6 +152,7 @@ describe("session title generator", () => {
       availableProviders: ["kimi"],
       notifySidebarChanged,
     })
+    generator.openSession(sessionId)
     await generator.generate({
       sessionId,
       text: "Fix the login button on mobile",
@@ -175,8 +176,10 @@ describe("session title generator", () => {
       store,
       availableProviders: ["kimi"],
     })
+    generator.openSession(sessionId)
     await generator.generate({ sessionId, text: "first request" })
     expect(stream).toHaveBeenCalledOnce()
+    generator.openSession(sessionId)
     await generator.generate({ sessionId, text: "second request" })
     expect(stream).toHaveBeenCalledOnce()
     expect(await sidebarTitle(store, sessionId)).toBe("Second title")
@@ -196,6 +199,7 @@ describe("session title generator", () => {
       store,
       availableProviders: ["kimi"],
     })
+    generator.openSession(sessionId)
     await generator.generate({ sessionId, text: "some request" })
     expect(await sidebarTitle(store, sessionId)).toBe("User chosen name")
   })
@@ -209,6 +213,7 @@ describe("session title generator", () => {
       store,
       availableProviders: ["kimi"],
     })
+    generator.openSession(sessionId)
     await generator.generate({ sessionId, text: "request" })
     expect(await sidebarTitle(store, sessionId)).toBeUndefined()
 
@@ -218,6 +223,7 @@ describe("session title generator", () => {
       store,
       availableProviders: ["kimi"],
     })
+    empty.openSession(sessionId)
     await empty.generate({ sessionId, text: "   " })
     expect(stream).not.toHaveBeenCalled()
   })

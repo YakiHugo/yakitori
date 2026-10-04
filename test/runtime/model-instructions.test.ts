@@ -147,7 +147,11 @@ it.each([
   const store = new JsonlThreadStore({ root })
   const requests: ModelRequest[] = []
   const stream: StreamFn = async function* (request) {
-    const { signal: _signal, ...stableRequest } = request
+    const {
+      signal: _signal,
+      onUsageSnapshot: _usage,
+      ...stableRequest
+    } = request
     requests.push(structuredClone(stableRequest))
     yield {
       type: "response",

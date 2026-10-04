@@ -190,7 +190,7 @@ describe("thread usage projection", () => {
     ).toEqual(["2026-10-01", "2026-10-02"])
   })
 
-  it("counts inherited fork history only in its originating rollout", () => {
+  it("counts physical completions once across surviving fork copies", () => {
     const projection = new SqliteThreadUsageProjection(":memory:")
     const parent = thread("parent", "Original", [
       turnContext("parent_turn", "codex", "gpt-6"),
@@ -200,8 +200,8 @@ describe("thread usage projection", () => {
       }),
     ])
     const child = thread("child", "Fork", [
-      turnContext("child_turn", "other", "model"),
-      turnCompleted("child_turn", "2026-10-02T11:00:00Z", {
+      turnContext("parent_turn", "other", "model"),
+      turnCompleted("parent_turn", "2026-10-02T11:00:00Z", {
         inputTokens: 40,
         outputTokens: 10,
       }),
@@ -227,6 +227,70 @@ describe("thread usage projection", () => {
       ["codex", 1],
       ["other", 1],
     ])
+    projection.delete("parent")
+    const retained = projection.readUsage({
+      now: new Date("2026-10-02T12:00:00Z"),
+    })
+    expect(retained.totals).toEqual(usage.totals)
+    expect(retained.days).toEqual(usage.days)
+    expect(retained.models).toEqual(usage.models)
+    expect(
+      retained.threads.map((row) => [row.threadId, row.totalTokens]),
+    ).toEqual([["child", 50]])
+    // Another fork retaining the same physical completions must not add usage.
+    const sibling = {
+      ...child,
+      metadata: { ...child.metadata, id: "sibling", rolloutId: "sibling" },
+      rollout: [...parent.rollout, ...child.rollout],
+    }
+    projection.rebuild(sibling, stamp)
+    expect(projection.readUsage().totals).toEqual(usage.totals)
+    projection.delete("child")
+    expect(projection.readUsage().totals).toEqual(usage.totals)
+    projection.delete("sibling")
+    expect(projection.readUsage().totals.turns).toBe(0)
+  })
+
+  it("uses the latest retained completion for a physical turn instead of counting older fork prefixes again", () => {
+    const projection = new SqliteThreadUsageProjection(":memory:")
+    const original = thread("source", "Source", [
+      turnContext("turn", "codex", "model"),
+      turnCompleted("turn", "2026-10-02T10:00:00Z", {
+        inputTokens: 100,
+        outputTokens: 20,
+      }),
+    ])
+    const correction = thread("source", "Source", [
+      turnCompleted("turn", "2026-10-02T10:00:00Z", {
+        inputTokens: 200,
+        outputTokens: 30,
+      }),
+    ])
+    const early = { ...thread("early", "Early", []), rollout: original.rollout }
+    const late = {
+      ...thread("late", "Late", []),
+      rollout: [...original.rollout, ...correction.rollout],
+    }
+    projection.rebuild(late, stamp)
+    projection.rebuild(early, stamp)
+    const latest = projection.readUsage({
+      now: new Date("2026-10-02T12:00:00Z"),
+    })
+    expect(latest.totals).toMatchObject({
+      turns: 1,
+      inputTokens: 200,
+      outputTokens: 30,
+    })
+    expect(
+      latest.models.map((row) => [row.provider, row.model, row.inputTokens]),
+    ).toEqual([["codex", "model", 200]])
+    expect(latest.threads).toEqual([])
+    projection.delete("late")
+    expect(projection.readUsage().totals).toMatchObject({
+      turns: 1,
+      inputTokens: 100,
+      outputTokens: 20,
+    })
   })
 
   it("tracks currency by file stamp and skips turns without usage", () => {

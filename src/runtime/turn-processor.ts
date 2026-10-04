@@ -1393,7 +1393,8 @@ async function executeTurnModelLoop(
         async onUsage(usage) {
           usages.push(usage)
           const aggregate = aggregateTokenUsage(usages)
-          if (aggregate !== undefined) input.runtime.recordUsage(aggregate)
+          if (aggregate !== undefined)
+            await input.runtime.recordUsage(aggregate)
           const contextTokens =
             usage.activeContextTokens ??
             (usage.inputTokens === undefined
@@ -1715,6 +1716,7 @@ async function consumeModelStream(input: {
         continue
       }
       if (event.type === "cancelled") {
+        if (event.usage !== undefined) await input.onUsage(event.usage)
         if (input.request.signal?.aborted) throw abortError()
         throw new Error("Model provider cancelled without caller cancellation.")
       }
@@ -1944,10 +1946,11 @@ async function compactLiveHistory(
         onFirstToken() {
           firstTokenAt ??= Date.now()
         },
-        onUsage(usage) {
+        async onUsage(usage) {
           input.usages.push(usage)
           const aggregate = aggregateTokenUsage(input.usages)
-          if (aggregate !== undefined) input.runtime.recordUsage(aggregate)
+          if (aggregate !== undefined)
+            await input.runtime.recordUsage(aggregate)
           input.rolloutBudget?.recordUsage(usage)
         },
         setActiveStream: input.setActiveStream,

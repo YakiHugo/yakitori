@@ -175,12 +175,15 @@ async function* streamAnthropic(
         usage: NonNullable<Parameters<typeof fromAnthropicMessage>[0]["usage"]>
       }
     | undefined
+  let observedUsage: ModelResponse["usage"]
+  const usageFields = () =>
+    observedUsage === undefined ? {} : { usage: observedUsage }
   let nextOutputIndex = 0
   let terminalResponse: ModelResponse | undefined
   try {
     for await (const event of stream) {
       if (request.signal?.aborted) {
-        yield { type: "cancelled" }
+        yield { type: "cancelled", ...usageFields() }
         return
       }
       if (terminalResponse !== undefined)
@@ -194,6 +197,10 @@ async function* streamAnthropic(
           id: event.message.id,
           stop_reason: event.message.stop_reason,
           usage: { ...event.message.usage },
+        }
+        if (Object.values(message.usage).some((value) => value != null)) {
+          observedUsage = fromAnthropicUsage(message.usage)
+          request.onUsageSnapshot?.(observedUsage)
         }
         continue
       }
@@ -313,6 +320,8 @@ async function* streamAnthropic(
                   event.usage.cache_creation_input_tokens,
               }),
         }
+        observedUsage = fromAnthropicUsage(message.usage)
+        request.onUsageSnapshot?.(observedUsage)
         continue
       }
       if (event.type === "message_stop") {
@@ -356,14 +365,14 @@ async function* streamAnthropic(
     // A terminal event is provisional until the raw SDK iterator reaches EOF.
     // Otherwise a malformed tail could become a retryable compaction Length.
     if (request.signal?.aborted) {
-      yield { type: "cancelled" }
+      yield { type: "cancelled", ...usageFields() }
       return
     }
     if (terminalResponse !== undefined)
       yield { type: "response", response: terminalResponse }
   } catch (error) {
     if (request.signal?.aborted) {
-      yield { type: "cancelled" }
+      yield { type: "cancelled", ...usageFields() }
       return
     }
     yield {
@@ -378,10 +387,7 @@ async function* streamAnthropic(
         request.target.provider,
         failureStage,
       ),
-      ...(message === undefined ||
-      Object.values(message.usage).every((value) => value == null)
-        ? {}
-        : { usage: fromAnthropicUsage(message.usage) }),
+      ...usageFields(),
     }
   }
 }
