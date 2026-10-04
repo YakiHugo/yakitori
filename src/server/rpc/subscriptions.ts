@@ -269,6 +269,13 @@ export function createSessionSubscriptions(
     set.set(input.connectionId, entry)
     bySession.set(input.sessionId, set)
 
+    // Only reconcile answer channels that predate this read. The handler can
+    // sample pendingPermissions before asynchronous storage work finishes;
+    // channels opened meanwhile by another subscriber are newer than that
+    // snapshot and must keep their original response ids.
+    const pendingBeforeSnapshot = options.pendingRequests.pendingForSession(
+      input.sessionId,
+    )
     const snapshot = await options.handlers.readSession({
       sessionId: input.sessionId,
     })
@@ -285,9 +292,7 @@ export function createSessionSubscriptions(
         (permission) => permission.permissionRequestId,
       ),
     )
-    for (const pending of options.pendingRequests.pendingForSession(
-      input.sessionId,
-    )) {
+    for (const pending of pendingBeforeSnapshot) {
       // Permission snapshots can only retire permission requests. Other
       // interactions have their own owners and cancellation contracts.
       if (pending.method !== sessionPermissionRequestMethod) continue
