@@ -1,3 +1,4 @@
+import { requireProviderConfiguration } from "../../src/server/provider-configuration.ts"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { createServer } from "node:http"
 import { tmpdir } from "node:os"
@@ -452,4 +453,55 @@ it.each([
       endpoint.close((error) => (error ? reject(error) : resolve())),
     )
   }
+})
+
+it("requires explicit opt-in for request warmup and never exposes it on compatible backends", async () => {
+  for (const [baseURL, requestWarmup, expected] of [
+    ["https://api.openai.com/v1", false, false],
+    ["https://api.openai.com/v1", true, true],
+    ["https://api.example/v1", true, false],
+  ] as const) {
+    const provider = createConfiguredProvider(
+      "api",
+      {
+        name: "API",
+        wireApi: "openai_responses",
+        baseURL,
+        requestWarmup,
+        models: [],
+      },
+      "test",
+    )
+    const session = createProviderRegistry({ api: provider })
+      .createClient()
+      .startTurn("api")
+    expect(session.warmup !== undefined).toBe(expected)
+    await session.close()
+  }
+})
+
+it("validates warmup policy before saving provider configuration", () => {
+  const configuration = {
+    name: "API",
+    wireApi: "openai_responses",
+    baseURL: "https://api.openai.com/v1",
+    models: [],
+  }
+  expect(
+    requireProviderConfiguration(configuration).requestWarmup,
+  ).toBeUndefined()
+  expect(
+    requireProviderConfiguration({ ...configuration, requestWarmup: true })
+      .requestWarmup,
+  ).toBe(true)
+  expect(() =>
+    requireProviderConfiguration({ ...configuration, requestWarmup: "yes" }),
+  ).toThrow("requestWarmup must be a boolean")
+  expect(() =>
+    requireProviderConfiguration({
+      ...configuration,
+      requestWarmup: true,
+      baseURL: "https://chatgpt.com/backend-api/codex",
+    }),
+  ).toThrow("official OpenAI")
 })

@@ -34,6 +34,8 @@ export type ModelClientSession = {
   readonly remoteCompaction?: boolean
   readonly nativePdf?: boolean
   readonly stream: StreamFn
+  // Optional, non-generating request preparation. Caller accounts its usage.
+  readonly warmup?: StreamFn
   close(): void | Promise<void>
 }
 
@@ -82,6 +84,12 @@ export function createModelProvider(
       | Readonly<{ stream: StreamFn }>
       | Readonly<{ createTurnStream: () => StreamFn }>
       | Readonly<{
+          createTurnTransport: () => Pick<
+            ModelClientSession,
+            "stream" | "warmup" | "close"
+          >
+        }>
+      | Readonly<{
           createAttemptStream: (attempt: ModelAttemptContext) => StreamFn
         }>
     ),
@@ -102,15 +110,24 @@ export function createModelProvider(
     info: input.info,
     models,
     startTurn(policy) {
+      const transport =
+        "createTurnTransport" in input ? input.createTurnTransport() : undefined
+      const warmupStream = transport?.warmup
       const providerStream: StreamFn =
-        "createTurnStream" in input
-          ? input.createTurnStream()
-          : "createAttemptStream" in input
-            ? (request) =>
-                input.createAttemptStream(
-                  request.attempt ?? { number: 1, maxAttempts: 1 },
-                )(request)
-            : input.stream
+        transport !== undefined
+          ? transport.stream
+          : "createTurnStream" in input
+            ? input.createTurnStream()
+            : "createAttemptStream" in input
+              ? (request) =>
+                  input.createAttemptStream(
+                    request.attempt ?? { number: 1, maxAttempts: 1 },
+                  )(request)
+              : "stream" in input
+                ? input.stream
+                : (() => {
+                    throw new Error("Missing Turn transport.")
+                  })()
       // Text deltas remain provisional. A completed output item commits
       // history and may start tools, so retries must rebuild from that history.
       const stream = createModelRequestStream(providerStream, {
@@ -161,7 +178,17 @@ export function createModelProvider(
             continuationScope,
           })
         },
-        close() {},
+        ...(warmupStream === undefined
+          ? {}
+          : {
+              warmup: ((request) => {
+                requireTargetProvider(input.info.id, request.target)
+                return warmupStream({ ...request, continuationScope })
+              }) as StreamFn,
+            }),
+        close() {
+          return transport?.close()
+        },
       }
     },
   }

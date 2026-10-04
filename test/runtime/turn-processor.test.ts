@@ -1121,11 +1121,15 @@ describe("Turn processor", () => {
   it.each([
     "unchanged",
     "slower-summary",
+    "warmup-priority",
     "instructions",
     "invalid-summary",
     "cancelled",
   ])("prepares during tools and safely handles %s checkpoints", async (mode) => {
-    const applied = mode === "unchanged" || mode === "slower-summary"
+    const applied =
+      mode === "unchanged" ||
+      mode === "slower-summary" ||
+      mode === "warmup-priority"
     let now = 1000
     if (applied) {
       const dateNow = vi.spyOn(Date, "now").mockImplementation(() => now)
@@ -1133,6 +1137,8 @@ describe("Turn processor", () => {
         dateNow.mockRestore()
       })
     }
+    const firstToolFinished = deferred<void>()
+    let warmups = 0
     const summaryReady = deferred<void>()
     const releaseSummary = deferred<void>()
     const summaryFinished = deferred<void>()
@@ -1177,6 +1183,17 @@ describe("Turn processor", () => {
       }
       normalCalls += 1
       if (normalCalls <= 2) {
+        if (mode === "warmup-priority" && normalCalls === 1) {
+          yield {
+            type: "output_item",
+            itemId: "first_tool",
+            content: [
+              { type: "tool_call", id: "call_1", name: "work", input: {} },
+            ],
+          }
+          await firstToolFinished.promise
+          await new Promise<void>((resolve) => setImmediate(resolve))
+        }
         yield {
           type: "response",
           response: {
@@ -1204,7 +1221,7 @@ describe("Turn processor", () => {
       expect(messages).toContain("Earlier work completed.")
       expect(messages).not.toContain("large old output")
       if (applied) {
-        expect(Date.now() - 1000).toBe(mode === "unchanged" ? 400 : 500)
+        expect(Date.now() - 1000).toBe(mode === "slower-summary" ? 500 : 400)
         expect(request.messages.filter((item) => item.role === "tool")).toEqual(
           [
             {
@@ -1244,6 +1261,7 @@ describe("Turn processor", () => {
               secondToolFinished = true
               return { ok: true, output: null, content: "exact fresh result" }
             }
+            firstToolFinished.resolve()
             return {
               ok: true,
               output: null,
@@ -1255,6 +1273,24 @@ describe("Turn processor", () => {
       {
         modelContextWindowTokens: 60_000,
         modelAutoCompactTokenLimit: 5000,
+        ...(mode !== "warmup-priority"
+          ? {}
+          : {
+              modelClient: {
+                hasProvider: () => true,
+                models: () => createStaticModelsManager("faux"),
+                startTurn: () => ({
+                  models: createStaticModelsManager("faux"),
+                  stream,
+                  warmup: async function* () {
+                    warmups += 1
+                    yield responseEvent("")
+                  },
+                  close() {},
+                }),
+                close() {},
+              },
+            }),
         loadProjectInstructions: async () =>
           mode === "instructions" && secondToolFinished
             ? { directory: "/workspace", text: "new project constraint" }
@@ -1275,7 +1311,7 @@ describe("Turn processor", () => {
     ).toBe(true)
     // A controlled clock and independent gates measure the critical path;
     // no live provider, network timing, or scheduler-speed assertion is used.
-    if (mode === "unchanged") {
+    if (mode === "unchanged" || mode === "warmup-priority") {
       now = 1300
       releaseSummary.resolve()
       await summaryFinished.promise
@@ -1313,6 +1349,7 @@ describe("Turn processor", () => {
     }
     await expect.poll(() => thread.agentStatus).toEqual({ completed: "Done" })
     expect(tools).toBe(2)
+    expect(warmups).toBe(0)
     expect(compactions).toBe(applied ? 1 : 2)
     const stored = await runtime.store.readThread(thread.id)
     expect(
@@ -1335,8 +1372,9 @@ describe("Turn processor", () => {
           backgroundCompactionsDiscarded: applied ? 0 : 1,
           ...(applied
             ? {
-                backgroundCompactionMs: mode === "unchanged" ? 300 : 500,
-                backgroundCompactionOverlapMs: mode === "unchanged" ? 300 : 400,
+                backgroundCompactionMs: mode === "slower-summary" ? 500 : 300,
+                backgroundCompactionOverlapMs:
+                  mode === "slower-summary" ? 400 : 300,
               }
             : {}),
         },
@@ -4744,6 +4782,113 @@ it("closes the captured Turn when its model directory cannot refresh", async () 
   expect(closes).toBe(1)
   await runtime.manager.shutdown()
   expect(closes).toBe(1)
+})
+
+it.each([
+  false,
+  true,
+])("warms only during tool execution and accounts preparation without history (cancelled: %s)", async (cancelled) => {
+  const entered = deferred<void>()
+  const release = deferred<void>()
+  const warmed = deferred<void>()
+  const events: string[] = []
+  let warmups = 0
+  const provider = createFauxProvider([
+    {
+      usage: { inputTokens: 10, outputTokens: 2 },
+      stopReason: ModelStopReason.ToolUse,
+      content: [
+        { type: "tool_call", id: "slow-call", name: "slow", input: {} },
+      ],
+    },
+    {
+      usage: { inputTokens: 4, outputTokens: 1 },
+      content: [{ type: "text", text: "done" }],
+    },
+  ])
+  const registry = createProviderRegistry({
+    faux: createModelProvider({
+      info: {
+        id: "faux",
+        wireApi: "faux",
+        capabilities: { remoteCompaction: false },
+      },
+      createTurnTransport() {
+        return {
+          stream: provider.stream,
+          warmup: async function* (request) {
+            warmups += 1
+            await entered.promise
+            expect(events).toEqual(["start:slow"])
+            // Never prepare a dangling in-flight tool call. Existing tool pairs
+            // in the immutable prefix must remain complete and ordered.
+            expect(JSON.stringify(request.messages)).not.toContain("slow-call")
+            const openCalls = new Set<string>()
+            for (const message of request.messages) {
+              if (message.role === "assistant") {
+                for (const block of message.content)
+                  if (block.type === "tool_call") openCalls.add(block.id)
+              } else if (message.role === "tool") {
+                expect(openCalls.delete(message.toolCallId)).toBe(true)
+              }
+            }
+            expect(openCalls.size).toBe(0)
+            request.onUsageSnapshot?.({
+              inputTokens: 100,
+              outputTokens: 0,
+              cacheReadInputTokens: 80,
+            })
+            warmed.resolve()
+            if (cancelled) {
+              await new Promise<void>((resolve) =>
+                request.signal?.addEventListener("abort", () => resolve(), {
+                  once: true,
+                }),
+              )
+              yield { type: "cancelled" }
+            } else {
+              yield {
+                type: "response",
+                response: {
+                  stopReason: ModelStopReason.EndTurn,
+                  content: [],
+                  usage: {
+                    inputTokens: 100,
+                    outputTokens: 0,
+                    cacheReadInputTokens: 80,
+                  },
+                },
+              }
+            }
+          },
+          close() {},
+        }
+      },
+    }),
+  })
+  const runtime = await createRuntime(
+    provider.stream,
+    createToolRegistry([scheduledTool("slow", true, events, entered, release)]),
+    { modelClient: registry.createClient() },
+  )
+  const thread = await runtime.createThread()
+  await thread.startIfIdle({ content: { kind: "text", text: "go" } })
+  await warmed.promise
+  release.resolve()
+  await expect.poll(() => thread.agentStatus).toEqual({ completed: "done" })
+  expect(warmups).toBe(1)
+  expect(events).toEqual(["start:slow", "end:slow"])
+  expect(
+    thread
+      .snapshot()
+      .context.history.filter(({ item }) => item.role === "assistant"),
+  ).toHaveLength(2)
+  const stored = await runtime.store.readThread(thread.id)
+  expect(
+    stored?.rollout.find(({ item }) => item.type === "turn_completed")?.item,
+  ).toMatchObject({
+    usage: { inputTokens: 114, outputTokens: 3, cacheReadInputTokens: 80 },
+  })
 })
 
 async function createRuntime(

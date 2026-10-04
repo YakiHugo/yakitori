@@ -272,6 +272,8 @@ export type TurnLatency = Readonly<{
   firstRequestMs?: number
   firstUsefulOutputMs?: number
   firstToolMs?: number
+  warmupMs?: number
+  warmupOverlapMs?: number
   backgroundCompactionMs: number
   backgroundCompactionOverlapMs: number
   backgroundCompactionsApplied: number
@@ -1783,6 +1785,8 @@ function isTurnLatency(value: unknown): value is TurnLatency {
     "firstRequestMs",
     "firstUsefulOutputMs",
     "firstToolMs",
+    "warmupMs",
+    "warmupOverlapMs",
   ]
   return (
     isRecord(value) &&

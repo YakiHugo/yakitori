@@ -1,3 +1,4 @@
+import { supportsOpenAIRequestWarmup } from "../../shared/request-warmup-policy.ts"
 import { Check } from "lucide-react"
 import { type FormEvent, useState } from "react"
 import type { ProviderPreset } from "../../runtime/provider-presets.ts"
@@ -51,8 +52,16 @@ export function ProviderEditor({
 }>) {
   const [confirmRemove, setConfirmRemove] = useState(false)
   const custom = draft.configuration.preset === undefined
-  const update = (patch: Partial<ProviderConfiguration>) =>
-    onChange({ ...draft, configuration: { ...draft.configuration, ...patch } })
+  const update = (patch: Partial<ProviderConfiguration>) => {
+    const configuration = { ...draft.configuration, ...patch }
+    if (
+      configuration.requestWarmup === true &&
+      (configuration.wireApi !== "openai_responses" ||
+        !supportsOpenAIRequestWarmup(configuration.baseURL))
+    )
+      configuration.requestWarmup = false
+    onChange({ ...draft, configuration })
+  }
   return (
     <SidebarDialog
       title={
@@ -207,6 +216,26 @@ export function ProviderEditor({
                     />
                     This service needs no API key
                   </label>
+                ) : null}
+                {draft.configuration.wireApi === "openai_responses" &&
+                supportsOpenAIRequestWarmup(draft.configuration.baseURL) ? (
+                  <Field>
+                    <label className="provider-model-option">
+                      <input
+                        type="checkbox"
+                        checked={draft.configuration.requestWarmup === true}
+                        onChange={(event) =>
+                          update({ requestWarmup: event.target.checked })
+                        }
+                      />
+                      Prepare the next request while tools run
+                    </label>
+                    <p className="provider-field-hint">
+                      Optional OpenAI WebSocket warmup. Sends one non-generating
+                      request per turn and may incur API usage. Reported tokens
+                      are included in Usage. Does not save responses.
+                    </p>
+                  </Field>
                 ) : null}
                 {draft.existing ? (
                   <label className="provider-model-option">

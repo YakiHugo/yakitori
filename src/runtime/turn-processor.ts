@@ -1,3 +1,4 @@
+import { consumeModelWarmup } from "./model-warmup.ts"
 import type { ResponseItemEnvelope, TurnContextItem } from "../core/rollout.ts"
 import type {
   TurnCompletion,
@@ -605,6 +606,8 @@ async function executeTurnModelLoop(
   const usages: ModelUsage[] = []
   let modelCalls = 0
   let compactionModelCalls = 0
+  let warmupStarted = false
+  let warmupModelCalls = 0
   let toolCalls = 0
   let modelDurationMs = 0
   let toolDurationMs = 0
@@ -618,7 +621,7 @@ async function executeTurnModelLoop(
   const answerItemIds: string[] = []
   const finish = (reason?: TurnCompletion["reason"]): TurnCompletion => {
     input.runtime.recordTurnMetrics({
-      modelCalls: modelCalls + compactionModelCalls,
+      modelCalls: modelCalls + compactionModelCalls + warmupModelCalls,
       toolCalls,
       modelDurationMs,
       toolDurationMs,
@@ -665,6 +668,10 @@ async function executeTurnModelLoop(
     let backgroundStartedAt: number | undefined
     let backgroundEndedAt: number | undefined
     const backgroundAbort = new AbortController()
+    let warmupStartedAt: number | undefined
+    let warmupEndedAt: number | undefined
+    let warmupController: AbortController | undefined
+    let warmupWork: Promise<PromiseSettledResult<void>> | undefined
     try {
       throwIfAborted(input.signal)
       if (!continuingAnswer) answerItemIds.length = 0
@@ -1794,6 +1801,46 @@ async function executeTurnModelLoop(
           }
         })()
       }
+      if (
+        calls.length > 0 &&
+        pendingToolBatches > 0 &&
+        backgroundWork === undefined &&
+        !warmupStarted &&
+        modelSession?.warmup !== undefined
+      ) {
+        warmupStarted = true
+        warmupModelCalls += 1
+        const startedAt = Date.now()
+        warmupStartedAt = startedAt
+        warmupController = new AbortController()
+        // Warm only a known, complete prefix while tools drain. The provider
+        // requires the next request to extend this exact prompt and tool set;
+        // compaction, changed settings or an unfinished warmup use full HTTP.
+        warmupWork = consumeModelWarmup({
+          stream: modelSession.warmup,
+          request: {
+            ...request,
+            signal: AbortSignal.any([input.signal, warmupController.signal]),
+          },
+          async onUsage(usage) {
+            usages.push(usage)
+            const aggregate = aggregateTokenUsage(usages)
+            if (aggregate !== undefined)
+              await input.runtime.recordUsage(aggregate)
+            budget?.recordUsage(usage)
+          },
+        })
+          .finally(() => {
+            warmupEndedAt = Date.now()
+            const duration = Math.max(0, warmupEndedAt - startedAt)
+            modelDurationMs += duration
+            latency.warmupMs = (latency.warmupMs ?? 0) + duration
+          })
+          .then(
+            () => ({ status: "fulfilled" as const, value: undefined }),
+            (reason: unknown) => ({ status: "rejected" as const, reason }),
+          )
+      }
       const outcomes = await Promise.all(pendingTools)
       for (const outcome of outcomes) {
         if (outcome.status === "rejected") throw outcome.reason
@@ -1806,6 +1853,15 @@ async function executeTurnModelLoop(
           0,
           Math.min(toolsDrainedAt, backgroundEndedAt) - backgroundStartedAt,
         )
+      // A speculative preparation must never delay the next request. Abort
+      // pending I/O immediately; completed warmups retain their cached prefix.
+      warmupController?.abort()
+      const warmed = await warmupWork
+      if (warmed?.status === "rejected") throw warmed.reason
+      if (warmupStartedAt !== undefined && warmupEndedAt !== undefined)
+        latency.warmupOverlapMs =
+          (latency.warmupOverlapMs ?? 0) +
+          Math.max(0, Math.min(toolsDrainedAt, warmupEndedAt) - warmupStartedAt)
 
       if (calls.length > 0) {
         // Stop before another request can start early streamed tools. Both
@@ -1915,7 +1971,9 @@ async function executeTurnModelLoop(
       throw error
     } finally {
       backgroundAbort.abort()
+      warmupController?.abort()
       await backgroundWork
+      await warmupWork
       await Promise.all(pendingTools)
       await step?.toolRouter.release()
     }

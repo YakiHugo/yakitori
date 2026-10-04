@@ -16,6 +16,172 @@ import {
 
 describe("OpenAI Responses provider", () => {
   it.each([
+    ["response.completed", "completed"],
+    ["response.incomplete", "incomplete"],
+    ["response.failed", "failed"],
+    // Provider status may contradict its event type; abort still suppresses it.
+    ["response.completed", "cancelled"],
+  ] as const)("accounts queued %s/%s usage before cancellation without publishing tools", async (type, status) => {
+    const controller = new AbortController()
+    const snapshots: unknown[] = []
+    const client = {
+      responses: {
+        async create() {
+          return (async function* () {
+            controller.abort()
+            yield {
+              type,
+              response: responseFixture({
+                status,
+                usage: { input_tokens: 100, output_tokens: 20 },
+                output: [
+                  {
+                    type: "function_call",
+                    id: "item",
+                    call_id: "call",
+                    name: "shell",
+                    arguments: "{}",
+                    status: "completed",
+                  },
+                ],
+              }),
+            }
+          })()
+        },
+      },
+    } as unknown as OpenAI
+    const stream = createOpenAIProvider({
+      apiKey: "test",
+      model: "gpt-test",
+      client,
+    })
+    const events: ModelStreamEvent[] = []
+    for await (const event of stream(
+      requestFixture({
+        streamOutputItems: true,
+        signal: controller.signal,
+        onUsageSnapshot(usage) {
+          snapshots.push(usage)
+        },
+      }),
+    ))
+      events.push(event)
+    expect(snapshots).toEqual([
+      { inputTokens: 100, outputTokens: 20, activeContextTokens: 120 },
+    ])
+    expect(events).toEqual([
+      {
+        type: "cancelled",
+        usage: { inputTokens: 100, outputTokens: 20, activeContextTokens: 120 },
+      },
+    ])
+  })
+  it("keeps terminal usage when its snapshot observer cancels the request", async () => {
+    const controller = new AbortController()
+    const client = {
+      responses: {
+        async create() {
+          return (async function* () {
+            yield {
+              type: "response.completed",
+              response: responseFixture({
+                usage: { input_tokens: 100, output_tokens: 20 },
+                output: [
+                  {
+                    type: "message",
+                    id: "item",
+                    role: "assistant",
+                    status: "completed",
+                    content: [
+                      {
+                        type: "output_text",
+                        text: "Do not publish",
+                        annotations: [],
+                        logprobs: [],
+                      },
+                    ],
+                  },
+                ],
+              }),
+            }
+          })()
+        },
+      },
+    } as unknown as OpenAI
+    const stream = createOpenAIProvider({
+      apiKey: "test",
+      model: "gpt-test",
+      client,
+    })
+    const events: ModelStreamEvent[] = []
+    for await (const event of stream(
+      requestFixture({
+        signal: controller.signal,
+        onUsageSnapshot() {
+          controller.abort()
+        },
+      }),
+    ))
+      events.push(event)
+    expect(events).toEqual([
+      {
+        type: "cancelled",
+        usage: { inputTokens: 100, outputTokens: 20, activeContextTokens: 120 },
+      },
+    ])
+  })
+  it("does not overwrite accounted usage from contradictory terminal tail after abort", async () => {
+    const controller = new AbortController()
+    const snapshots: unknown[] = []
+    const client = {
+      responses: {
+        async create() {
+          return (async function* () {
+            yield {
+              type: "response.completed",
+              response: responseFixture({
+                usage: { input_tokens: 100, output_tokens: 20 },
+              }),
+            }
+            controller.abort()
+            yield {
+              type: "response.failed",
+              response: responseFixture({
+                status: "failed",
+                usage: { input_tokens: 999, output_tokens: 999 },
+              }),
+            }
+          })()
+        },
+      },
+    } as unknown as OpenAI
+    const stream = createOpenAIProvider({
+      apiKey: "test",
+      model: "gpt-test",
+      client,
+    })
+    const events: ModelStreamEvent[] = []
+    for await (const event of stream(
+      requestFixture({
+        signal: controller.signal,
+        onUsageSnapshot(usage) {
+          snapshots.push(usage)
+        },
+      }),
+    ))
+      events.push(event)
+    expect(snapshots).toEqual([
+      { inputTokens: 100, outputTokens: 20, activeContextTokens: 120 },
+    ])
+    expect(events).toEqual([
+      {
+        type: "cancelled",
+        usage: { inputTokens: 100, outputTokens: 20, activeContextTokens: 120 },
+      },
+    ])
+  })
+
+  it.each([
     false,
     true,
   ])("retains terminal usage on cancellation before EOF (transport %s)", async (wrapped) => {

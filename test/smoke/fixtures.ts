@@ -232,8 +232,39 @@ export async function runProviderFlow(
     })
     await page.keyboard.press("Escape")
     await expect(accountImport).toHaveCount(0)
+    await page.getByRole("button", { name: "OpenAI", exact: true }).click()
+    const openAIEditor = page.getByRole("dialog", {
+      name: "OpenAI",
+      exact: true,
+    })
+    await openAIEditor.getByText("Advanced settings", { exact: true }).click()
+    const warmup = openAIEditor.getByRole("checkbox", {
+      name: "Prepare the next request while tools run",
+    })
+    await expect(warmup).not.toBeChecked()
+    await expect(openAIEditor.getByText(/may incur API usage/)).toBeVisible()
+    await warmup.check()
+    await expect(warmup).toBeChecked()
+    const warmupPath = testInfo.outputPath("provider-warmup-opt-in.png")
+    await page.screenshot({ path: warmupPath, animations: "disabled" })
+    await testInfo.attach("provider-warmup-opt-in", {
+      path: warmupPath,
+      contentType: "image/png",
+    })
+    await page.keyboard.press("Escape")
+    await expect(openAIEditor).toHaveCount(0)
+    await page.getByRole("button", { name: "OpenAI", exact: true }).click()
+    await openAIEditor.getByText("Advanced settings", { exact: true }).click()
+    await expect(
+      openAIEditor.getByRole("checkbox", {
+        name: "Prepare the next request while tools run",
+      }),
+    ).not.toBeChecked()
+    await page.keyboard.press("Escape")
+    await expect(openAIEditor).toHaveCount(0)
     const search = page.getByRole("searchbox", { name: "Find a provider" })
     await search.fill("DeepSeek")
+    await expect(search).toHaveValue("DeepSeek")
     await expect(
       page.getByRole("button", { name: "OpenAI", exact: true }),
     ).toHaveCount(0)

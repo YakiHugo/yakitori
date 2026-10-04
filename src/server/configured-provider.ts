@@ -4,6 +4,7 @@ import {
   createConfiguredModelsManager,
   createModelProvider,
   createOpenAIProvider,
+  createOpenAITurnTransport,
   createProviderContinuationScope,
   providerPresets,
   type ModelProvider,
@@ -72,14 +73,20 @@ export function createConfiguredProvider(
       configuration.baseURL,
       apiKey,
     ),
-    createAttemptStream() {
+    createTurnTransport() {
       const options = {
         apiKey,
         model: configuration.models.at(0)?.id ?? "",
         baseURL: configuration.baseURL,
       }
-      const stream =
+      const transport =
+        configuration.requestWarmup === true &&
         configuration.wireApi === "openai_responses"
+          ? createOpenAITurnTransport(options)
+          : undefined
+      const stream =
+        transport?.stream ??
+        (configuration.wireApi === "openai_responses"
           ? createOpenAIProvider(options)
           : configuration.wireApi === "anthropic_messages"
             ? createAnthropicProvider(options)
@@ -88,36 +95,45 @@ export function createConfiguredProvider(
                 ...(preset?.flavor === undefined
                   ? {}
                   : { flavor: preset.flavor }),
-              })
-      const configuredStream: StreamFn = async function* (request) {
-        const model = (await models.listModels()).find(
-          (entry) => entry.model === request.target.model,
-        )
-        const effort = request.target.effort ?? model?.defaultEffort
-        // Old adapters use the model's canonical catalog identity for native
-        // features. Routing remains connection-scoped; opaque history is fenced
-        // by the endpoint+credential scope before it reaches the adapter.
-        const target = {
-          ...request.target,
-          ...(catalogProvider === undefined ||
-          configuration.wireApi === "openai_chat_completions"
-            ? {}
-            : { provider: catalogProvider }),
-          ...(effort === undefined ? {} : { effort }),
+              }))
+      const configureStream = (stream: StreamFn): StreamFn =>
+        async function* (request) {
+          const model = (await models.listModels()).find(
+            (entry) => entry.model === request.target.model,
+          )
+          const effort = request.target.effort ?? model?.defaultEffort
+          // Old adapters use the model's canonical catalog identity for native
+          // features. Routing remains connection-scoped; opaque history is fenced
+          // by the endpoint+credential scope before it reaches the adapter.
+          const target = {
+            ...request.target,
+            ...(catalogProvider === undefined ||
+            configuration.wireApi === "openai_chat_completions"
+              ? {}
+              : { provider: catalogProvider }),
+            ...(effort === undefined ? {} : { effort }),
+          }
+          for await (const event of stream({ ...request, target })) {
+            if (event.type === "response") dynamic?.result("ready")
+            else if (event.type === "failure")
+              dynamic?.result(
+                "error",
+                `${event.failure.kind}${event.failure.status === undefined ? "" : ` (HTTP ${event.failure.status})`}`,
+              )
+            yield event.type === "failure"
+              ? { ...event, failure: { ...event.failure, provider: id } }
+              : event
+          }
         }
-        for await (const event of stream({ ...request, target })) {
-          if (event.type === "response") dynamic?.result("ready")
-          else if (event.type === "failure")
-            dynamic?.result(
-              "error",
-              `${event.failure.kind}${event.failure.status === undefined ? "" : ` (HTTP ${event.failure.status})`}`,
-            )
-          yield event.type === "failure"
-            ? { ...event, failure: { ...event.failure, provider: id } }
-            : event
-        }
+      return {
+        stream: configureStream(stream),
+        ...(transport?.warmup === undefined
+          ? {}
+          : { warmup: configureStream(transport.warmup) }),
+        close() {
+          transport?.close()
+        },
       }
-      return configuredStream
     },
   })
 }

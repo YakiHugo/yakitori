@@ -116,6 +116,7 @@ function createRegistryClient(
           }
           return session.stream(request)
         },
+        ...(session.warmup === undefined ? {} : { warmup: session.warmup }),
         close() {
           turnClosePromise ??= Promise.resolve()
             .then(() => session.close())
