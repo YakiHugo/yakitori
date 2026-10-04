@@ -3,6 +3,7 @@ import type { StoredEventEnvelope } from "../../kernel/index.ts"
 import {
   goalChangedMethod,
   mcpStatusChangedMethod,
+  providerConfigurationChangedMethod,
   projectChangedMethod,
   sessionCompletedMethod,
   sessionEventMethod,
@@ -84,6 +85,7 @@ type AppMethod = Exclude<
 >
 
 export type AppRpcClient = {
+  subscribeToProviderChanges(listener: () => void): () => void
   subscribeToGoalChanges(
     listener: (notification: GoalChangedNotification | undefined) => void,
   ): () => void
@@ -196,6 +198,7 @@ export function createAppRpcClient(options: {
   const mcpStatusChangedListeners = new Set<
     (notification: McpStatusChangedNotification) => void
   >()
+  const providerChangeListeners = new Set<() => void>()
   const sessionActivityListeners = new Set<
     (activeSessionIds: readonly string[] | undefined) => void
   >()
@@ -285,6 +288,7 @@ export function createAppRpcClient(options: {
         inflight.delete(id)
         resubscribeAll()
         if (initializedOnce) {
+          for (const listener of providerChangeListeners) listener()
           for (const listener of goalChangeListeners) listener(undefined)
           for (const listener of sidebarChangeListeners) listener({})
           for (const listener of sessionActivityListeners) listener(undefined)
@@ -480,6 +484,9 @@ export function createAppRpcClient(options: {
       const notification = (message.params ?? {}) as SidebarChangedNotification
       for (const listener of sidebarChangeListeners) listener(notification)
     }
+    if (message.method === providerConfigurationChangedMethod) {
+      for (const listener of providerChangeListeners) listener()
+    }
     if (message.method === sessionsActivityMethod) {
       const params: unknown = message.params
       const ids =
@@ -604,6 +611,10 @@ export function createAppRpcClient(options: {
       return () => {
         mcpStatusChangedListeners.delete(listener)
       }
+    },
+    subscribeToProviderChanges(listener) {
+      providerChangeListeners.add(listener)
+      return () => providerChangeListeners.delete(listener)
     },
     subscribeToSessionActivity(listener) {
       sessionActivityListeners.add(listener)

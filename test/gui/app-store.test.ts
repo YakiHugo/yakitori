@@ -1246,6 +1246,34 @@ describe("project state", () => {
     expect(useAppStore.getState().projectsError).toBeUndefined()
   })
 
+  it("refreshes model availability when a source is configured outside the GUI", async () => {
+    let listed: ApiProviderSummary[] = []
+    fakeRef.current.respond = (method) => {
+      if (method === "project/list") return { projects: [] }
+      if (method === "session/list") return { sessions: [] }
+      if (method === "provider/list")
+        return {
+          providers: listed,
+          defaultProvider: "faux",
+          defaultModel: "scripted",
+        }
+      return notFound()
+    }
+    await useAppStore.getState().boot()
+    expect(useAppStore.getState().providers).toEqual([])
+    listed = [
+      {
+        name: "local",
+        models: [{ id: "coder", instructionProfileId: "default" }],
+        availability: "available",
+      },
+    ]
+    fakeRef.current.emitProviderChanged()
+    await vi.waitFor(() =>
+      expect(useAppStore.getState().providers).toEqual(listed),
+    )
+  })
+
   it("refreshes the project list on project/changed notifications", async () => {
     window.localStorage.clear()
     let listed = [projectA]
