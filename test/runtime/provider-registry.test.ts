@@ -3,6 +3,7 @@ import {
   createModelProvider,
   createProviderContinuationScope,
   createProviderRegistry,
+  createStaticModelsManager,
   type ModelRequest,
   type ModelStreamEvent,
 } from "../../src/runtime/index.ts"
@@ -11,16 +12,32 @@ describe("provider registry", () => {
   it("applies provider replacements to future Turns while retaining active transports", async () => {
     const seen: string[] = []
     const registry = createProviderRegistry({
-      personal: () => responseStream(seen, "old"),
+      personal: createModelProvider({
+        info: {
+          id: "personal",
+          wireApi: "openai_responses",
+          capabilities: { remoteCompaction: false, nativePdf: true },
+        },
+        stream: () => responseStream(seen, "old"),
+      }),
     })
     const available = registry.providers
     const client = registry.createClient()
     const active = client.startTurn("personal")
     registry.replace({
-      personal: () => responseStream(seen, "new"),
+      personal: createModelProvider({
+        info: {
+          id: "personal",
+          wireApi: "openai_responses",
+          capabilities: { remoteCompaction: false, nativePdf: false },
+        },
+        stream: () => responseStream(seen, "new"),
+      }),
       work: () => responseStream(seen, "work"),
     })
     const next = client.startTurn("personal")
+    expect(active.nativePdf).toBe(true)
+    expect(next.nativePdf).toBe(false)
     for await (const event of active.stream(request("personal", "model")))
       void event
     for await (const event of next.stream(request("personal", "model")))
@@ -142,7 +159,7 @@ describe("provider registry", () => {
         }
       },
     })
-    const session = provider.createClient().startTurn({ maxAttempts: 2 })
+    const session = provider.startTurn({ maxAttempts: 2 })
 
     const events: ModelStreamEvent[] = []
     for await (const event of session.stream(request("openai", "gpt"))) {
@@ -179,16 +196,12 @@ describe("provider registry", () => {
           },
           stream: () => responseStream([], "unused"),
         }).models,
-        createClient() {
+        startTurn() {
           return {
-            startTurn() {
-              return {
-                stream() {
-                  enteredTransport = true
-                  return responseStream([], "unexpected")
-                },
-                close() {},
-              }
+            models: createStaticModelsManager("openai"),
+            stream() {
+              enteredTransport = true
+              return responseStream([], "unexpected")
             },
             close() {},
           }
@@ -203,8 +216,9 @@ describe("provider registry", () => {
     expect(enteredTransport).toBe(false)
   })
 
-  it("closes outstanding Turn sessions before provider clients", async () => {
-    const events: string[] = []
+  it("closes every outstanding Turn once when its Session closes", async () => {
+    const closed: number[] = []
+    let turns = 0
     const registry = createProviderRegistry({
       openai: {
         info: {
@@ -220,18 +234,13 @@ describe("provider registry", () => {
           },
           stream: () => responseStream([], "unused"),
         }).models,
-        createClient() {
+        startTurn() {
+          const turn = ++turns
           return {
-            startTurn() {
-              return {
-                stream: () => responseStream([], "unused"),
-                close() {
-                  events.push("turn")
-                },
-              }
-            },
+            models: createStaticModelsManager("openai"),
+            stream: () => responseStream([], "unused"),
             close() {
-              events.push("provider")
+              closed.push(turn)
             },
           }
         },
@@ -239,15 +248,56 @@ describe("provider registry", () => {
     })
     const client = registry.createClient()
     const session = client.startTurn("openai")
+    const second = client.startTurn("openai")
 
-    await client.close()
+    const closing = client.close()
+    expect(client.close()).toBe(closing)
+    await closing
     await session.close()
+    await second.close()
 
-    expect(events).toEqual(["turn", "provider"])
+    expect(closed).toEqual([1, 2])
+    expect(() => client.startTurn("openai")).toThrow("Model client is closed")
   })
 
-  it("closes a compatibility-stream client when Turn cleanup fails", async () => {
-    let clientClosed = false
+  it("finishes every outstanding Turn cleanup before reporting Session cleanup failure", async () => {
+    const closed: number[] = []
+    let turns = 0
+    const provider = createModelProvider({
+      info: {
+        id: "openai",
+        wireApi: "openai_responses",
+        capabilities: { remoteCompaction: false },
+      },
+      stream: () => responseStream([], "unused"),
+    })
+    const client = createProviderRegistry({
+      openai: {
+        ...provider,
+        startTurn() {
+          const turn = ++turns
+          return {
+            models: provider.models,
+            stream: () => responseStream([], "unused"),
+            async close() {
+              closed.push(turn)
+              if (turn === 1) throw new Error("Turn cleanup failed")
+            },
+          }
+        },
+      },
+    }).createClient()
+    client.startTurn("openai")
+    client.startTurn("openai")
+    const closing = client.close()
+    expect(client.close()).toBe(closing)
+    await expect(closing).rejects.toMatchObject({
+      errors: [expect.objectContaining({ message: "Turn cleanup failed" })],
+    })
+    expect(closed).toEqual([1, 2])
+  })
+
+  it("reports Turn cleanup failure from a single request stream", async () => {
     const registry = createProviderRegistry({
       openai: {
         info: {
@@ -263,18 +313,12 @@ describe("provider registry", () => {
           },
           stream: () => responseStream([], "unused"),
         }).models,
-        createClient() {
+        startTurn() {
           return {
-            startTurn() {
-              return {
-                stream: () => responseStream([], "done"),
-                close() {
-                  throw new Error("Turn cleanup failed")
-                },
-              }
-            },
+            models: createStaticModelsManager("openai"),
+            stream: () => responseStream([], "done"),
             close() {
-              clientClosed = true
+              throw new Error("Turn cleanup failed")
             },
           }
         },
@@ -286,10 +330,7 @@ describe("provider registry", () => {
         for await (const _event of registry.stream(request("openai", "gpt")))
           void _event
       })(),
-    ).rejects.toMatchObject({
-      errors: [expect.objectContaining({ message: "Turn cleanup failed" })],
-    })
-    expect(clientClosed).toBe(true)
+    ).rejects.toThrow("Turn cleanup failed")
   })
 })
 

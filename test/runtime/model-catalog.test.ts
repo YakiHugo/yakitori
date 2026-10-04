@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest"
 import {
-  catalogContextWindowTokens,
   catalogModelCapabilities,
   catalogModelCapacity,
   resolveModel,
@@ -93,10 +92,10 @@ describe("model catalog context windows", () => {
 
   it("returns the curated window for known models", () => {
     expect(
-      catalogContextWindowTokens({
+      catalogModelCapacity({
         provider: "anthropic",
         model: "claude-sonnet-4-6",
-      }),
+      })?.contextWindowTokens,
     ).toBe(1_000_000)
   })
 
@@ -113,40 +112,45 @@ describe("model catalog context windows", () => {
 
   it("is case-insensitive and misses unknown models", () => {
     expect(
-      catalogContextWindowTokens({
+      catalogModelCapacity({
         provider: "Anthropic",
         model: "CLAUDE-SONNET-4-6",
-      }),
+      })?.contextWindowTokens,
     ).toBe(1_000_000)
     expect(
-      catalogContextWindowTokens({ provider: "faux", model: "scripted" }),
+      catalogModelCapacity({ provider: "faux", model: "scripted" })
+        ?.contextWindowTokens,
     ).toBeUndefined()
     expect(
-      catalogContextWindowTokens({
+      catalogModelCapacity({
         provider: "codex",
         model: "gpt-5.6-sol",
-      }),
+      })?.contextWindowTokens,
     ).toBe(272_000)
     expect(
-      catalogContextWindowTokens({ provider: "openai", model: "gpt-5" }),
+      catalogModelCapacity({ provider: "openai", model: "gpt-5" })
+        ?.contextWindowTokens,
     ).toBeUndefined()
   })
 
   it("uses the local coding-agent capacities for Grok and Kimi", () => {
     expect(
-      catalogContextWindowTokens({ provider: "grok", model: "grok-4.7" }),
+      catalogModelCapacity({ provider: "grok", model: "grok-4.7" })
+        ?.contextWindowTokens,
     ).toBe(500_000)
     expect(
-      catalogContextWindowTokens({ provider: "grok", model: "grok-4.6" }),
+      catalogModelCapacity({ provider: "grok", model: "grok-4.6" })
+        ?.contextWindowTokens,
     ).toBe(500_000)
-    expect(catalogContextWindowTokens({ provider: "kimi", model: "k3" })).toBe(
-      1_048_576,
-    )
     expect(
-      catalogContextWindowTokens({
+      catalogModelCapacity({ provider: "kimi", model: "k3" })
+        ?.contextWindowTokens,
+    ).toBe(1_048_576)
+    expect(
+      catalogModelCapacity({
         provider: "kimi",
         model: "kimi-for-coding",
-      }),
+      })?.contextWindowTokens,
     ).toBe(262_144)
   })
 

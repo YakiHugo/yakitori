@@ -521,8 +521,10 @@ export function createProviderService(
         input.changed?.()
       }
       const provider = createConfiguredProvider(id, configuration, key)
-      const client = provider.createClient()
-      const turn = client.startTurn({ maxAttempts: 1, rateLimitMaxAttempts: 1 })
+      const turn = provider.startTurn({
+        maxAttempts: 1,
+        rateLimitMaxAttempts: 1,
+      })
       try {
         for await (const event of turn.stream({
           target: {
@@ -557,7 +559,6 @@ export function createProviderService(
         )
       } finally {
         await turn.close()
-        await client.close()
       }
     },
   }

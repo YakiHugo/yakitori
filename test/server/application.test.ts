@@ -29,8 +29,8 @@ import {
   type ApiListProvidersResponse,
   type ApiListSessionsResponse,
 } from "../../src/server/protocol.ts"
-import type { ConfigurationSnapshot } from "../../src/server/user-config.ts"
 import type { ProviderConfigurationResponse } from "../../src/server/provider-service.ts"
+import type { ConfigurationSnapshot } from "../../src/server/user-config.ts"
 import { createFauxProvider } from "../support/faux-provider.ts"
 import { deferred } from "./rpc/testkit.ts"
 
@@ -126,6 +126,8 @@ describe("application composition", () => {
     "CODEX_HOME",
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
+    "OPENAI_BASE_URL",
+    "ANTHROPIC_BASE_URL",
     "XAI_API_KEY",
     "KIMI_API_KEY",
     "GROK_CREDENTIALS",
@@ -147,6 +149,152 @@ describe("application composition", () => {
       if (value === undefined) delete process.env[key]
       else process.env[key] = value
     }
+  })
+
+  it.each([
+    {
+      provider: "openai",
+      model: "gpt-6-sol",
+      environmentKey: "OPENAI_API_KEY",
+      endpoint: "https://api.openai.com/v1/responses",
+    },
+    {
+      provider: "anthropic",
+      model: "claude-sonnet-4-6",
+      environmentKey: "ANTHROPIC_API_KEY",
+      endpoint: "https://api.anthropic.com/v1/messages",
+    },
+    {
+      provider: "openai",
+      model: "gpt-6-sol",
+      login: true,
+      endpoint: "https://api.openai.com/v1/responses",
+    },
+  ] as const)("uses the declared $provider endpoint despite SDK endpoint environment variables", async (connection) => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      process.env.OPENAI_BASE_URL = "https://relay.example/openai"
+      process.env.ANTHROPIC_BASE_URL = "https://relay.example/anthropic"
+      if ("environmentKey" in connection) {
+        process.env[connection.environmentKey] = "test-key"
+      } else {
+        process.env.CODEX_HOME = join(rootDir, "codex-home")
+        await mkdir(process.env.CODEX_HOME, { recursive: true })
+        await writeFile(
+          join(process.env.CODEX_HOME, "auth.json"),
+          JSON.stringify({
+            auth_mode: "apikey",
+            OPENAI_API_KEY: "test-key",
+            tokens: null,
+          }),
+        )
+      }
+      const requests: string[] = []
+      const fetchMock = vi
+        .spyOn(globalThis, "fetch")
+        .mockImplementation(async (input) => {
+          requests.push(input instanceof Request ? input.url : String(input))
+          const events =
+            connection.provider === "anthropic"
+              ? [
+                  {
+                    type: "message_start",
+                    message: {
+                      id: "message_endpoint",
+                      type: "message",
+                      role: "assistant",
+                      model: connection.model,
+                      content: [],
+                      stop_reason: null,
+                      stop_sequence: null,
+                      usage: { input_tokens: 1, output_tokens: 0 },
+                    },
+                  },
+                  {
+                    type: "content_block_start",
+                    index: 0,
+                    content_block: { type: "text", text: "Endpoint verified" },
+                  },
+                  { type: "content_block_stop", index: 0 },
+                  {
+                    type: "message_delta",
+                    delta: { stop_reason: "end_turn", stop_sequence: null },
+                    usage: { output_tokens: 1 },
+                  },
+                  { type: "message_stop" },
+                ]
+              : [
+                  {
+                    type: "response.completed",
+                    response: {
+                      id: "response_endpoint",
+                      status: "completed",
+                      output: [
+                        {
+                          type: "message",
+                          id: "message_endpoint",
+                          role: "assistant",
+                          status: "completed",
+                          content: [
+                            {
+                              type: "output_text",
+                              text: "Endpoint verified",
+                              annotations: [],
+                            },
+                          ],
+                        },
+                      ],
+                      usage: {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        total_tokens: 2,
+                      },
+                    },
+                  },
+                ]
+          return new Response(
+            events
+              .map(
+                (event) =>
+                  `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
+              )
+              .join(""),
+            { headers: { "content-type": "text/event-stream" } },
+          )
+        })
+      let application: YakitoriApplication | undefined
+      try {
+        application = await createYakitoriApplication({
+          rootDir,
+          workspace,
+          userConfigPath: join(rootDir, "config.toml"),
+        })
+        const created = await application.handlers.createSession({
+          title: "Endpoint verification",
+        })
+        expectOk(created)
+        const sessionId = created.body.session.id
+        expectOk(
+          await application.handlers.admitInput({
+            sessionId,
+            requestId: "request_endpoint",
+            content: { kind: "text", text: "Verify the endpoint" },
+            modelSelection: {
+              provider: connection.provider,
+              model: connection.model,
+            },
+          }),
+        )
+        await vi.waitFor(() =>
+          expect(
+            application?.threadManager.getThread(sessionId)?.agentStatus,
+          ).toEqual({ completed: "Endpoint verified" }),
+        )
+        expect(requests).toEqual([connection.endpoint])
+      } finally {
+        await application?.close()
+        fetchMock.mockRestore()
+      }
+    })
   })
 
   it("broadcasts successful background completions without replaying them to later subscribers", async () => {

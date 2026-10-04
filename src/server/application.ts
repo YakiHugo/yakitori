@@ -1570,7 +1570,11 @@ async function configureProviders(
   }
   if (input.provider === "faux") {
     providers.faux = createModelProvider({
-      info: providerInfo("faux", "faux"),
+      info: {
+        id: "faux",
+        wireApi: "faux",
+        capabilities: { remoteCompaction: false, nativePdf: false },
+      },
       stream: createFauxScenarioStream(input.fauxScenario ?? "text"),
     })
     return {
@@ -1664,8 +1668,13 @@ function createApiKeyProvider(
 ): ModelProvider {
   if (provider === "openai") {
     return createModelProvider({
-      info: providerInfo(provider, "openai_responses"),
-      createAttemptStream: () => createOpenAIProvider({ apiKey, model }),
+      info: {
+        id: provider,
+        wireApi: "openai_responses",
+        capabilities: { remoteCompaction: false, nativePdf: true },
+      },
+      createAttemptStream: () =>
+        createOpenAIProvider({ apiKey, model, baseURL: OPENAI_API_BASE_URL }),
       continuationScope: createProviderContinuationScope(
         provider,
         OPENAI_API_BASE_URL,
@@ -1676,12 +1685,19 @@ function createApiKeyProvider(
   const baseURL =
     provider === "kimi" ? KIMI_CODE_API_BASE_URL : ANTHROPIC_API_BASE_URL
   return createModelProvider({
-    info: providerInfo(provider, "anthropic_messages"),
+    info: {
+      id: provider,
+      wireApi: "anthropic_messages",
+      capabilities: {
+        remoteCompaction: false,
+        nativePdf: provider === "anthropic",
+      },
+    },
     createAttemptStream: () =>
       createAnthropicProvider({
         apiKey,
         model,
-        ...(provider === "kimi" ? { baseURL: KIMI_CODE_API_BASE_URL } : {}),
+        baseURL,
       }),
     continuationScope: createProviderContinuationScope(
       provider,
@@ -1735,7 +1751,11 @@ async function registerCodexLogin(
   if (login === undefined) return
   if (login.kind === "chatgpt") {
     providers.codex = createModelProvider({
-      info: providerInfo("codex", "openai_responses"),
+      info: {
+        id: "codex",
+        wireApi: "openai_responses",
+        capabilities: { remoteCompaction: true, nativePdf: false },
+      },
       createTurnStream: () => createCodexProvider({ credentialsPath }),
       models: createDiscoveringModelsManager({
         provider: "codex",
@@ -1760,11 +1780,16 @@ async function registerCodexLogin(
   }
   if (providers.openai === undefined) {
     providers.openai = createModelProvider({
-      info: providerInfo("openai", "openai_responses"),
+      info: {
+        id: "openai",
+        wireApi: "openai_responses",
+        capabilities: { remoteCompaction: false, nativePdf: true },
+      },
       createAttemptStream: () =>
         createOpenAIProvider({
           apiKey: login.apiKey,
           model: "selected-at-request-time",
+          baseURL: OPENAI_API_BASE_URL,
         }),
       continuationScope: createProviderContinuationScope(
         "openai",
@@ -1943,7 +1968,11 @@ function createGrokProvider(modelsCacheDir: string): ModelProvider {
   // application startup. The same lazy stream supports primary and switched
   // Grok Turns.
   return createModelProvider({
-    info: providerInfo("grok", "openai_responses"),
+    info: {
+      id: "grok",
+      wireApi: "openai_responses",
+      capabilities: { remoteCompaction: false, nativePdf: false },
+    },
     createAttemptStream: (attempt) => {
       const forceHttp1 =
         attempt.number > 1 &&
@@ -2011,17 +2040,6 @@ function createGrokProvider(modelsCacheDir: string): ModelProvider {
       }),
     }),
   })
-}
-
-function providerInfo(
-  id: string,
-  wireApi: ModelProvider["info"]["wireApi"],
-): ModelProvider["info"] {
-  return {
-    id,
-    wireApi,
-    capabilities: { remoteCompaction: id === "codex" },
-  }
 }
 
 function createFauxScenarioStream(scenario: string): StreamFn {

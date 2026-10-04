@@ -1,5 +1,6 @@
 import type { ModelTarget, ModelWireApi, ToolWireProtocol } from "../model.ts"
 import type { ResolvedModel } from "../model-catalog.ts"
+import type { DocumentReadingCapabilities } from "../prepare-model-document.ts"
 import {
   type ResolvedStepConfiguration,
   stepExecutionLimits,
@@ -24,13 +25,17 @@ export type StepContext = Readonly<{
   executionPolicy: ReturnType<typeof stepExecutionLimits>
   toolRouter: ToolRouter
   toolWireProtocol: ToolWireProtocol
+  documentReading: DocumentReadingCapabilities
 }>
 
-export function captureStepContext(input: {
-  readonly registry: ToolRegistry
-  readonly configuration: ResolvedStepConfiguration
-  readonly wireApi?: ModelWireApi
-}): StepContext {
+export function captureStepContext(
+  input: Readonly<{
+    registry: ToolRegistry
+    configuration: ResolvedStepConfiguration
+    wireApi?: ModelWireApi
+    nativePdf?: boolean
+  }>,
+): StepContext {
   const target = Object.freeze({ ...input.configuration.target })
   const model = Object.freeze({
     ...input.configuration.modelInfo,
@@ -60,10 +65,19 @@ export function captureStepContext(input: {
         ? ["edit_file"]
         : []),
   ])
+  const documentReading = Object.freeze({
+    nativePdf:
+      input.nativePdf === true && model.inputModalities.includes("image"),
+    // Standard Chat tool messages accept text only; user messages still
+    // project images through the provider's separate user-content adapter.
+    images:
+      model.inputModalities.includes("image") &&
+      input.wireApi !== "openai_chat_completions",
+  })
   const enabledTrustedTools = new Set(
     input.configuration.enabledTools.filter(
       (name) =>
-        (name !== "view_image" || model.inputModalities.includes("image")) &&
+        (name !== "view_image" || documentReading.images) &&
         (!FILE_EDITING_TOOLS.has(name) || fileEditingTools.has(name)) &&
         (model.shellToolType !== "disabled" ||
           (name !== "exec_command" && name !== "write_stdin")),
@@ -88,6 +102,7 @@ export function captureStepContext(input: {
       wireProtocol: toolWireProtocol,
     }),
     toolWireProtocol,
+    documentReading,
   }
 }
 
