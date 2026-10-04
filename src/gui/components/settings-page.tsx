@@ -5,6 +5,7 @@ import {
   CircleUserRound,
   Monitor,
   Plug,
+  Server,
 } from "lucide-react"
 import { useEffect } from "react"
 import { type SettingsSection, useAppStore } from "../store/app-store.ts"
@@ -15,10 +16,12 @@ import {
 } from "./settings-panel.tsx"
 import { UsageSection } from "./usage-section.tsx"
 import { SubscriptionsSection } from "./subscription-panel.tsx"
+import { ProviderSettings } from "./provider-settings.tsx"
 
 const sections = [
   { id: "general", label: "General", icon: Monitor },
   { id: "notifications", label: "Notifications", icon: Bell },
+  { id: "providers", label: "Providers", icon: Server },
   { id: "subscriptions", label: "Subscriptions", icon: CircleUserRound },
   { id: "mcp", label: "MCP servers", icon: Plug },
   { id: "usage", label: "Usage", icon: ChartColumn },
@@ -31,6 +34,7 @@ const sections = [
 const sectionAria: Record<SettingsSection, string> = {
   general: "General settings",
   notifications: "Notification settings",
+  providers: "Provider settings",
   subscriptions: "Subscription settings",
   mcp: "MCP server settings",
   usage: "Usage dashboard",
@@ -50,6 +54,8 @@ export function SettingsPage() {
     window.addEventListener("keydown", onKeyDown)
     return () => window.removeEventListener("keydown", onKeyDown)
   }, [closeSettings])
+
+  if (section === "providers") return <ProviderSettings />
 
   return (
     <div className="settings-page">

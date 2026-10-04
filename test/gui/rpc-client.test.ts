@@ -99,6 +99,35 @@ afterEach(() => {
 })
 
 describe("app RPC client", () => {
+  it("invalidates model sources on external changes and after reconnect", async () => {
+    vi.useFakeTimers()
+    const client = createAppRpcClient({ apiBase: "http://api.test" })
+    const changed = vi.fn()
+    const unsubscribe = client.subscribeToProviderChanges(changed)
+    const pending = client.request("provider/configuration/read", {})
+    const socket = completeHandshake(FakeWebSocket.instances[0])
+    await flushMicrotasks()
+    socket.emitMessage({
+      id: 1,
+      result: { providers: [], presets: [], subscriptions: [] },
+    })
+    await pending
+    expect(changed).not.toHaveBeenCalled()
+    socket.emitMessage({ method: "provider/configuration/changed", params: {} })
+    expect(changed).toHaveBeenCalledOnce()
+    socket.emitClose()
+    await vi.advanceTimersByTimeAsync(250)
+    const reconnected = completeHandshake(FakeWebSocket.instances[1])
+    expect(changed).toHaveBeenCalledTimes(2)
+    unsubscribe()
+    reconnected.emitMessage({
+      method: "provider/configuration/changed",
+      params: {},
+    })
+    expect(changed).toHaveBeenCalledTimes(2)
+    client.close()
+  })
+
   it("delivers goal changes and invalidates them after reconnect", async () => {
     vi.useFakeTimers()
     const client = createAppRpcClient({ apiBase: "http://api.test" })

@@ -8,6 +8,34 @@ import {
 } from "../../src/runtime/index.ts"
 
 describe("provider registry", () => {
+  it("applies provider replacements to future Turns while retaining active transports", async () => {
+    const seen: string[] = []
+    const registry = createProviderRegistry({
+      personal: () => responseStream(seen, "old"),
+    })
+    const available = registry.providers
+    const client = registry.createClient()
+    const active = client.startTurn("personal")
+    registry.replace({
+      personal: () => responseStream(seen, "new"),
+      work: () => responseStream(seen, "work"),
+    })
+    const next = client.startTurn("personal")
+    for await (const event of active.stream(request("personal", "model")))
+      void event
+    for await (const event of next.stream(request("personal", "model")))
+      void event
+    expect(seen).toEqual(["old", "new"])
+    expect(available).toEqual(["personal", "work"])
+    registry.replace({})
+    expect(client.hasProvider("personal")).toBe(false)
+    expect(() => client.startTurn("personal")).toThrow("not registered")
+    for await (const event of active.stream(request("personal", "model")))
+      void event
+    expect(seen).toEqual(["old", "new", "old"])
+    await client.close()
+  })
+
   it("derives stable continuation scopes from provider configuration", () => {
     const scope = createProviderContinuationScope(
       "openai",

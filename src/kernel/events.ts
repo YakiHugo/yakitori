@@ -164,14 +164,15 @@ export type ModelToolDefinition = {
   readonly deferLoading?: boolean
 }
 
-export type ModelToolCallBlock = {
-  readonly type: "tool_call"
-  readonly id: string
-  readonly name: string
-  readonly input: JsonValue
-  readonly toolKind?: "function" | "custom" | "tool_search"
-  readonly customInputFallbackKey?: string
-}
+export type ModelToolCallBlock = Readonly<{
+  type: "tool_call"
+  id: string
+  name: string
+  input: JsonValue
+  toolKind?: "function" | "custom" | "tool_search"
+  customInputFallbackKey?: string
+  providerMetadata?: JsonObject
+}>
 
 export type ModelContentBlock =
   | ModelTextBlock
@@ -1441,10 +1442,13 @@ function isModelContentBlock(value: unknown): boolean {
       "input",
       "toolKind",
       "customInputFallbackKey",
+      "providerMetadata",
     ]) &&
     isString(value.id) &&
     isString(value.name) &&
     isJsonValue(value.input) &&
+    (value.providerMetadata === undefined ||
+      isJsonObject(value.providerMetadata)) &&
     (value.toolKind === "custom"
       ? isString(value.input) &&
         isString(value.customInputFallbackKey) &&

@@ -108,6 +108,7 @@ export type SubscriptionUsageState = Readonly<{
 export type SettingsSection =
   | "general"
   | "notifications"
+  | "providers"
   | "subscriptions"
   | "mcp"
   | "usage"
@@ -1104,6 +1105,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
       const client = getAppRpcClient(get().apiBase)
       if (projectChangesSubscribedClient !== client) {
         projectChangesSubscribedClient = client
+        client.subscribeToProviderChanges(() => {
+          if (getAppRpcClient(get().apiBase) !== client) return
+          void get().loadProviders()
+        })
         goalSnapshots.clear()
         client.subscribeToGoalChanges((notification) => {
           if (getAppRpcClient(get().apiBase) !== client) return

@@ -31,6 +31,7 @@ import {
   type ApiListSessionsResponse,
 } from "../../src/server/protocol.ts"
 import type { ConfigurationSnapshot } from "../../src/server/user-config.ts"
+import type { ProviderConfigurationResponse } from "../../src/server/provider-service.ts"
 import { createFauxProvider } from "../support/faux-provider.ts"
 import { deferred } from "./rpc/testkit.ts"
 
@@ -2213,6 +2214,249 @@ describe("application composition", () => {
     })
   })
 
+  it("makes model-operated and file-edited sources available without restarting the application", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const configPath = join(rootDir, "config.toml")
+      const provider = createFauxProvider([
+        {
+          stopReason: ModelStopReason.ToolUse,
+          content: [
+            {
+              type: "tool_call",
+              id: "configure_source",
+              name: "configure_model_sources",
+              input: {
+                action: "save",
+                name: "Model configured",
+                base_url: "http://127.0.0.1:1/v1",
+                no_key: true,
+                model_ids: ["configured-coder"],
+              },
+            },
+          ],
+        },
+        { content: [{ type: "text", text: "Source configured." }] },
+      ])
+      const application = await createYakitoriApplication({
+        rootDir,
+        workspace,
+        userConfigPath: configPath,
+        provider: "faux",
+        stream: provider.stream,
+      })
+      const server = application.createHttpServer()
+      const baseUrl = await listen(server)
+      const socket = new WebSocket(`${baseUrl.replace(/^http/, "ws")}/rpc`)
+      const notifications: string[] = []
+      let initialized = false
+      socket.on("message", (data) => {
+        const frame = JSON.parse(data.toString()) as {
+          id?: number
+          method?: string
+        }
+        if (frame.id === 1) initialized = true
+        if (frame.method) notifications.push(frame.method)
+      })
+      try {
+        await new Promise<void>((resolve, reject) => {
+          socket.once("open", resolve)
+          socket.once("error", reject)
+        })
+        socket.send(
+          JSON.stringify({
+            id: 1,
+            method: "initialize",
+            params: { clientInfo: { name: "source-test", version: "0.0.0" } },
+          }),
+        )
+        await vi.waitFor(() => expect(initialized).toBe(true))
+        const created = await application.handlers.createSession()
+        expectOk(created)
+        expectOk(
+          await application.handlers.admitInput({
+            sessionId: created.body.session.id,
+            requestId: "configure-source",
+            content: { kind: "text", text: "Add my local coding source." },
+          }),
+        )
+        await waitForThreadIdle(application, created.body.session.id)
+        const configured = await rpcRequest<ProviderConfigurationResponse>(
+          baseUrl,
+          "provider/configuration/read",
+          {},
+        )
+        expect(configured.providers[0]).toMatchObject({
+          id: "model-configured",
+          credential: "optional",
+          configuration: { models: [{ id: "configured-coder" }] },
+        })
+        expect(notifications).toContain("provider/configuration/changed")
+        const before = notifications.filter(
+          (method) => method === "provider/configuration/changed",
+        ).length
+        await writeFile(
+          configPath,
+          `${await readFile(configPath, "utf8")}\n[model_providers.file_source]\nname = "File configured"\napi_backend = "chat_completions"\nbase_url = "http://127.0.0.1:1/v1"\nno_key = true\nmodels = [{ id = "file-coder" }]\n`,
+        )
+        await vi.waitFor(
+          async () => {
+            const result = await rpcRequest<ApiListProvidersResponse>(
+              baseUrl,
+              "provider/list",
+              {},
+            )
+            expect(
+              result.providers
+                .find((source) => source.name === "file_source")
+                ?.models.map((model) => model.id),
+            ).toEqual(["file-coder"])
+          },
+          { timeout: 5000 },
+        )
+        expect(
+          notifications.filter(
+            (method) => method === "provider/configuration/changed",
+          ).length,
+        ).toBeGreaterThan(before)
+      } finally {
+        socket.close()
+        server.closeAllConnections()
+        await new Promise<void>((resolve) => server.close(() => resolve()))
+        await application.close()
+      }
+    })
+  })
+
+  it("lets configured definitions shadow environment transports until the definitions are deleted", async () => {
+    process.env.OPENAI_API_KEY = "baseline-environment-key"
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const configPath = join(rootDir, "config.toml")
+      await writeFile(
+        configPath,
+        [
+          "[model_providers.openai]",
+          'name = "Custom endpoint"',
+          'api_backend = "responses"',
+          'base_url = "http://127.0.0.1:1/v1"',
+          'models = [{ id = "custom-coding" }]',
+        ].join("\n"),
+      )
+      const application = await createYakitoriApplication({
+        rootDir,
+        workspace,
+        userConfigPath: configPath,
+        provider: "faux",
+        fauxScenario: "text",
+      })
+      const server = application.createHttpServer()
+      try {
+        const baseUrl = await listen(server)
+        const configured = await rpcRequest<ProviderConfigurationResponse>(
+          baseUrl,
+          "provider/configuration/read",
+          {},
+        )
+        expect(configured.providers[0]).toMatchObject({
+          id: "openai",
+          credential: "missing",
+        })
+        const initial = await rpcRequest<ApiListProvidersResponse>(
+          baseUrl,
+          "provider/list",
+          {},
+        )
+        expect(
+          initial.providers.find((provider) => provider.name === "openai"),
+        ).toMatchObject({ availability: "requires_login", models: [] })
+        const created = await application.handlers.createSession()
+        expectOk(created)
+        expectError(
+          await application.handlers.admitInput({
+            sessionId: created.body.session.id,
+            requestId: "missing-configured-key",
+            content: { kind: "text", text: "Use the configured endpoint" },
+            modelSelection: { provider: "openai", model: "custom-coding" },
+          }),
+          400,
+          ApiErrorCode.InvalidInput,
+        )
+
+        await rpcRequest(baseUrl, "provider/configuration/delete", {
+          id: "openai",
+        })
+        const removed = await rpcRequest<ApiListProvidersResponse>(
+          baseUrl,
+          "provider/list",
+          {},
+        )
+        const restored = removed.providers.find(
+          (provider) => provider.name === "openai",
+        )
+        expect(restored?.availability).toBe("available")
+        expect(restored?.models.map((model) => model.id)).toContain("gpt-6-sol")
+
+        await rpcRequest(baseUrl, "provider/configuration/write", {
+          id: "openai",
+          configuration: {
+            name: "Custom endpoint",
+            wireApi: "openai_responses",
+            baseURL: "http://127.0.0.1:1/v1",
+            models: [{ id: "custom-coding" }],
+          },
+        })
+        const added = await rpcRequest<ApiListProvidersResponse>(
+          baseUrl,
+          "provider/list",
+          {},
+        )
+        expect(
+          added.providers.find((provider) => provider.name === "openai"),
+        ).toMatchObject({ availability: "requires_login", models: [] })
+        expectError(
+          await application.handlers.admitInput({
+            sessionId: created.body.session.id,
+            requestId: "missing-reloaded-key",
+            content: { kind: "text", text: "Use the configured endpoint" },
+            modelSelection: { provider: "openai", model: "custom-coding" },
+          }),
+          400,
+          ApiErrorCode.InvalidInput,
+        )
+      } finally {
+        await closeServer(server)
+        await application.close()
+      }
+    })
+  })
+
+  it("requires the selected definition's own credentials instead of falling back to environment providers", async () => {
+    process.env.OPENAI_API_KEY = "baseline-environment-key"
+    await withApplicationRoot(async (rootDir, workspace) => {
+      const configPath = join(rootDir, "config.toml")
+      await writeFile(
+        configPath,
+        [
+          "[model_providers.openai]",
+          'name = "Custom endpoint"',
+          'api_backend = "responses"',
+          'base_url = "http://127.0.0.1:1/v1"',
+          'models = [{ id = "custom-coding" }]',
+        ].join("\n"),
+      )
+      await expect(
+        createYakitoriApplication({
+          rootDir,
+          workspace,
+          userConfigPath: configPath,
+          provider: "openai",
+          model: "custom-coding",
+        }),
+      ).rejects.toThrow(
+        "An API key is required for configured provider openai.",
+      )
+    })
+  })
+
   it("does not let an optional provider stream bypass primary credentials", async () => {
     const previousApiKey = process.env.ANTHROPIC_API_KEY
     delete process.env.ANTHROPIC_API_KEY
@@ -2874,6 +3118,138 @@ describe("codex login registration", () => {
       if (value === undefined) delete process.env[key]
       else process.env[key] = value
     }
+  })
+
+  it("connects an imported ChatGPT account through RPC and reuses its credentials for models, usage and turns after restart", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      process.env.CODEX_HOME = join(rootDir, "missing-cli-home")
+      const requests: { url: string; authorization: string | null }[] = []
+      const fetchMock = vi
+        .spyOn(globalThis, "fetch")
+        .mockImplementation(async (input, init) => {
+          const url = input instanceof Request ? input.url : String(input)
+          const headers = new Headers(
+            init?.headers ??
+              (input instanceof Request ? input.headers : undefined),
+          )
+          requests.push({ url, authorization: headers.get("authorization") })
+          if (url === "https://auth.openai.com/oauth/token")
+            return Response.json({
+              access_token: "imported-access",
+              refresh_token: "imported-refresh",
+            })
+          if (url.includes("/codex/models"))
+            return Response.json({
+              models: [
+                { slug: "gpt-6-astra", display_name: "Imported account model" },
+              ],
+            })
+          if (url.endsWith("/wham/usage"))
+            return Response.json({
+              plan_type: "plus",
+              rate_limit: { primary_window: { used_percent: 12 } },
+            })
+          if (url.endsWith("/codex/responses"))
+            return new Response(
+              `data: ${JSON.stringify({ type: "response.completed", response: { id: "response_import", status: "completed", output: [{ type: "message", id: "message_import", role: "assistant", status: "completed", content: [{ type: "output_text", text: "Imported account reply", annotations: [] }] }], error: null } })}\n\n`,
+              { headers: { "content-type": "text/event-stream" } },
+            )
+          throw new Error(`Unexpected test request: ${url}`)
+        })
+      try {
+        for (const restarted of [false, true]) {
+          const application = await createYakitoriApplication({
+            rootDir,
+            workspace,
+            userConfigPath: join(rootDir, "config.toml"),
+            provider: "faux",
+          })
+          const server = application.createHttpServer()
+          const baseUrl = await listen(server)
+          try {
+            if (!restarted) {
+              await expect(
+                rpcRequest(baseUrl, "provider/subscription/import", {
+                  id: "codex",
+                }),
+              ).rejects.toThrow("No ChatGPT account found")
+              const imported = await rpcRequest<
+                readonly import("../../src/server/subscription-connections.ts").SubscriptionConnection[]
+              >(baseUrl, "provider/subscription/import", {
+                id: "codex",
+                text: JSON.stringify({
+                  tokens: {
+                    access_token: "old-access",
+                    refresh_token: "old-refresh",
+                    account_id: "account-import",
+                  },
+                }),
+              })
+              expect(imported[0]).toMatchObject({
+                id: "codex",
+                available: true,
+              })
+              expect(JSON.stringify(imported)).not.toContain("imported-access")
+            }
+            const providers = await rpcRequest<ApiListProvidersResponse>(
+              baseUrl,
+              "provider/list",
+              {},
+            )
+            expect(
+              providers.providers.find((entry) => entry.name === "codex"),
+            ).toMatchObject({
+              availability: "available",
+              models: expect.arrayContaining([
+                expect.objectContaining({
+                  id: "gpt-6-astra",
+                  displayName: "Imported account model",
+                }),
+              ]),
+            })
+            const usage = await rpcRequest<
+              import("../../src/server/protocol.ts").ApiReadSubscriptionResponse
+            >(baseUrl, "subscription/read", { provider: "codex" })
+            expect(usage.subscription).toMatchObject({
+              availability: "available",
+              plan: "plus",
+            })
+            const created = await application.handlers.createSession()
+            expectOk(created)
+            const admitted = await application.handlers.admitInput({
+              sessionId: created.body.session.id,
+              requestId: `import-turn-${restarted}`,
+              content: { kind: "text", text: "Use the imported account." },
+              modelSelection: { provider: "codex", model: "gpt-6-astra" },
+            })
+            expectOk(admitted)
+            await waitForThreadIdle(application, created.body.session.id)
+            const read = await application.handlers.readSessionEvents({
+              sessionId: created.body.session.id,
+            })
+            expectOk(read)
+            expect(JSON.stringify(read.body)).toContain(
+              "Imported account reply",
+            )
+          } finally {
+            await new Promise<void>((resolve) => server.close(() => resolve()))
+            await application.close()
+          }
+        }
+        expect(
+          requests.filter(
+            (entry) => entry.url === "https://auth.openai.com/oauth/token",
+          ),
+        ).toHaveLength(1)
+        expect(
+          requests
+            .filter((entry) => entry.url.includes("chatgpt.com"))
+            .every((entry) => entry.authorization === "Bearer imported-access"),
+        ).toBe(true)
+      } finally {
+        fetchMock.mockRestore()
+      }
+    })
   })
 
   async function providersWithLogin(

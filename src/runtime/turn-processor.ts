@@ -29,6 +29,7 @@ import {
   isContextOverflowError,
   trimRemoteCompactionToolTail,
 } from "./compaction.ts"
+import { ModelNotConfiguredError } from "./configured-models-manager.ts"
 import { observeEnvironment } from "./environment-context.ts"
 import { isAbortError, ModelFailureError } from "./errors.ts"
 import { HookEvent, type HookRunner } from "./hooks.ts"
@@ -48,6 +49,7 @@ import {
   type ModelStreamEvent,
   type ModelToolCallBlock,
   type ModelUsage,
+  type ModelWireApi,
   type StreamFn,
 } from "./model.ts"
 import {
@@ -71,6 +73,7 @@ import type { RolloutBudget } from "./rollout-budget.ts"
 import {
   type ApprovalPolicy,
   createTurnContext,
+  type ResolvedStepConfiguration,
   SessionConfiguration,
 } from "./session-configuration.ts"
 import {
@@ -476,7 +479,7 @@ async function executeTurn(input: {
   })
   if (turn.requestSettings.modelInfo.usedFallbackModelMetadata) {
     input.runtime.emitWarning(
-      `Model metadata for ${turn.requestSettings.target.provider}/${turn.requestSettings.target.model} was not found. Yakitori is using conservative fallback metadata, so model-specific editing capabilities are unavailable.`,
+      `Model metadata for ${turn.requestSettings.target.provider}/${turn.requestSettings.target.model} was not found. Yakitori is using generic model settings${turn.requestSettings.modelInfo.fileEditingToolType === "none" ? "; file editing tools are unavailable" : " and coding tools"}.`,
     )
   }
   const modelSession = input.options.modelClient?.startTurn(
@@ -533,6 +536,7 @@ async function executeTurn(input: {
       stream,
       modelSession?.remoteCompaction ?? false,
       admitInitialInput,
+      modelSession?.wireApi,
     )
   } catch (error) {
     if (input.signal.aborted || isAbortError(error)) {
@@ -569,6 +573,7 @@ async function executeTurnModelLoop(
   stream: StreamFn,
   remoteCompaction: boolean,
   admitInitialInput: () => Promise<boolean>,
+  wireApi: ModelWireApi | undefined,
 ): Promise<TurnCompletion | undefined> {
   const metadata = input.runtime.snapshot().metadata
   const usages: ModelUsage[] = []
@@ -647,6 +652,7 @@ async function executeTurnModelLoop(
       step = captureStepContext({
         registry: input.toolRegistry,
         configuration: turn.requestSettings,
+        ...(wireApi === undefined ? {} : { wireApi }),
       })
       const configuration = step.configuration
       const toolPlan = step.toolRouter
@@ -805,13 +811,12 @@ async function executeTurnModelLoop(
         })
         return
       }
-      const foreignCheckpoint = beforeStep.context.history
+      const nativeCheckpoints = beforeStep.context.history
         .flatMap(({ item }) => (item.role === "assistant" ? item.content : []))
-        .find(
-          (block) =>
-            block.type === "compaction" &&
-            block.provider !== step?.target.provider,
-        )
+        .filter((block) => block.type === "compaction")
+      const foreignCheckpoint = nativeCheckpoints.find(
+        (block) => block.provider !== step?.target.provider,
+      )
       const previousModel = beforeStep.context.previousModel
       const sourceSelection =
         foreignCheckpoint?.type === "compaction"
@@ -830,9 +835,12 @@ async function executeTurnModelLoop(
             : undefined
       if (sourceSelection !== undefined) {
         const client = input.options.modelClient
-        if (client === undefined && foreignCheckpoint !== undefined) {
+        if (
+          foreignCheckpoint !== undefined &&
+          !client?.hasProvider(sourceSelection.provider)
+        ) {
           throw new Error(
-            "Cross-provider continuation requires the native checkpoint's provider client.",
+            `Native checkpoint continuation requires ${sourceSelection.provider}/${sourceSelection.model}. Restore its provider connection and model configuration before continuing.`,
           )
         }
         const sourceModels = client?.models(sourceSelection.provider)
@@ -841,82 +849,106 @@ async function executeTurnModelLoop(
           modelContextWindowTokens: _contextWindowOverride,
           ...sourceSnapshot
         } = input.context.configuration
-        const sourceConfiguration = SessionConfiguration.restore(
-          {
-            ...(sourceSelection.provider === step.target.provider
-              ? input.context.configuration
-              : sourceSnapshot),
-            defaultTarget: sourceSelection,
-          },
-          sourceModels,
-        ).resolveStep(sourceSelection, sourceModels)
-        const oldWindow =
-          sourceConfiguration.modelCapacity?.effectiveContextWindowTokens
-        const newWindow =
-          configuration.modelCapacity?.effectiveContextWindowTokens
-        const activeTokens = admission.activeTokens
-        const hashChanged =
-          previousModel?.provider === step.target.provider &&
-          previousModel.compactionHash !== undefined &&
-          step.modelInfo.compactionHash !== undefined &&
-          previousModel.compactionHash !== step.modelInfo.compactionHash
-        const downshift =
-          (sourceSelection.model !== step.target.model ||
-            sourceSelection.provider !== step.target.provider) &&
-          oldWindow !== undefined &&
-          newWindow !== undefined &&
-          oldWindow > newWindow &&
-          (activeTokens >= newWindow ||
-            (configuration.autoCompact.scope === "total" &&
-              configuration.autoCompact.limitTokens !== undefined &&
-              activeTokens > configuration.autoCompact.limitTokens))
-        if (foreignCheckpoint !== undefined || hashChanged || downshift) {
-          const sourceStep = captureStepContext({
-            registry: input.toolRegistry,
-            configuration: sourceConfiguration,
-          })
-          const sourceSession = client?.startTurn(
-            sourceSelection.provider,
-            sourceStep.configuration.modelRequestPolicy,
-          )
-          try {
-            try {
-              await compactLiveHistory({
-                runtime: input.runtime,
-                turnId: input.input.submissionId,
-                step: sourceStep,
-                worldState,
-                history: compactionHistory,
-                injectWorldState: modelCalls !== 0,
-                stream: sourceSession?.stream ?? stream,
-                remoteCompaction:
-                  sourceSelection.provider === step.target.provider &&
-                  (sourceSession?.remoteCompaction ?? false),
-                ...(sourceSelection.provider === step.target.provider &&
-                step.target.provider === "codex" &&
-                sourceSelection.model !== step.target.model &&
-                remoteCompaction
-                  ? { fallback: { step, stream } }
-                  : {}),
-                signal: input.signal,
-                rolloutAssets: input.options.rolloutAssets,
-                usages,
-                onModelTiming: onCompactionModelTiming,
-                rolloutBudget: budget,
-                onOperationalFailure: input.options.onOperationalFailure,
-                ...(input.options.hookRunner === undefined
-                  ? {}
-                  : { hookRunner: input.options.hookRunner }),
-                setActiveStream: input.setActiveStream,
-              })
-            } finally {
-              await sourceStep.toolRouter.release()
-            }
-          } finally {
-            await sourceSession?.close()
+        let sourceConfiguration: ResolvedStepConfiguration | undefined
+        try {
+          sourceConfiguration = SessionConfiguration.restore(
+            {
+              ...(sourceSelection.provider === step.target.provider
+                ? input.context.configuration
+                : sourceSnapshot),
+              defaultTarget: sourceSelection,
+            },
+            sourceModels,
+          ).resolveStep(sourceSelection, sourceModels)
+        } catch (error) {
+          if (!(error instanceof ModelNotConfiguredError)) throw error
+          if (
+            nativeCheckpoints.some(
+              (block) =>
+                block.provider === sourceSelection.provider &&
+                block.model === sourceSelection.model,
+            )
+          ) {
+            throw new Error(
+              `Native checkpoint continuation requires ${sourceSelection.provider}/${sourceSelection.model}. Restore its provider connection and model configuration before continuing.`,
+              { cause: error },
+            )
           }
-          compactedAtModelCall = modelCalls
-          continue
+          // Ordinary history is portable. A removed prior model cannot prepare
+          // a checkpoint; let the selected model's admission use its transport.
+        }
+        if (sourceConfiguration !== undefined) {
+          const oldWindow =
+            sourceConfiguration.modelCapacity?.effectiveContextWindowTokens
+          const newWindow =
+            configuration.modelCapacity?.effectiveContextWindowTokens
+          const activeTokens = admission.activeTokens
+          const hashChanged =
+            previousModel?.provider === step.target.provider &&
+            previousModel.compactionHash !== undefined &&
+            step.modelInfo.compactionHash !== undefined &&
+            previousModel.compactionHash !== step.modelInfo.compactionHash
+          const downshift =
+            (sourceSelection.model !== step.target.model ||
+              sourceSelection.provider !== step.target.provider) &&
+            oldWindow !== undefined &&
+            newWindow !== undefined &&
+            oldWindow > newWindow &&
+            (activeTokens >= newWindow ||
+              (configuration.autoCompact.scope === "total" &&
+                configuration.autoCompact.limitTokens !== undefined &&
+                activeTokens > configuration.autoCompact.limitTokens))
+          if (foreignCheckpoint !== undefined || hashChanged || downshift) {
+            const sourceSession = client?.startTurn(
+              sourceSelection.provider,
+              sourceConfiguration.modelRequestPolicy,
+            )
+            try {
+              const sourceStep = captureStepContext({
+                registry: input.toolRegistry,
+                configuration: sourceConfiguration,
+                ...(sourceSession?.wireApi === undefined
+                  ? {}
+                  : { wireApi: sourceSession.wireApi }),
+              })
+              try {
+                await compactLiveHistory({
+                  runtime: input.runtime,
+                  turnId: input.input.submissionId,
+                  step: sourceStep,
+                  worldState,
+                  history: compactionHistory,
+                  injectWorldState: modelCalls !== 0,
+                  stream: sourceSession?.stream ?? stream,
+                  remoteCompaction:
+                    sourceSelection.provider === step.target.provider &&
+                    (sourceSession?.remoteCompaction ?? false),
+                  ...(sourceSelection.provider === step.target.provider &&
+                  step.target.provider === "codex" &&
+                  sourceSelection.model !== step.target.model &&
+                  remoteCompaction
+                    ? { fallback: { step, stream } }
+                    : {}),
+                  signal: input.signal,
+                  rolloutAssets: input.options.rolloutAssets,
+                  usages,
+                  onModelTiming: onCompactionModelTiming,
+                  rolloutBudget: budget,
+                  onOperationalFailure: input.options.onOperationalFailure,
+                  ...(input.options.hookRunner === undefined
+                    ? {}
+                    : { hookRunner: input.options.hookRunner }),
+                  setActiveStream: input.setActiveStream,
+                })
+              } finally {
+                await sourceStep.toolRouter.release()
+              }
+            } finally {
+              await sourceSession?.close()
+            }
+            compactedAtModelCall = modelCalls
+            continue
+          }
         }
       }
       if (
