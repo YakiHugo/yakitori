@@ -1,3 +1,7 @@
+import { appendFileSync } from "node:fs"
+import { mkdtemp, readFile, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import type { ModelMessage } from "../../src/kernel/events.ts"
 import {
@@ -260,6 +264,250 @@ describe("agent control", () => {
     ).toMatchObject({ code: "agent_concurrency_limit_reached" })
   })
 
+  it("shares one execution limit across concurrent idle follow-ups and releases it on completion", async () => {
+    const harness = createHarness({ maxConcurrentAgents: 2 })
+    const root = harness.control.bind("root_session", TARGET)
+    const first = await root.spawn({
+      taskName: "first",
+      message: "first",
+      agentType: "general",
+      forkTurns: "none",
+    })
+    harness.runs
+      .get(first.agentId)?.[0]
+      ?.resolve({ type: "completed", text: "first done" })
+    await root.wait(1_000)
+    const second = await root.spawn({
+      taskName: "second",
+      message: "second",
+      agentType: "general",
+      forkTurns: "none",
+    })
+    harness.runs
+      .get(second.agentId)?.[0]
+      ?.resolve({ type: "completed", text: "second done" })
+    await root.wait(1_000)
+
+    const results = await Promise.allSettled([
+      root.followup({ target: first.agentId, message: "next first" }),
+      root.followup({ target: second.agentId, message: "next second" }),
+    ])
+    expect(results.map((result) => result.status).sort()).toEqual([
+      "fulfilled",
+      "rejected",
+    ])
+    expect(
+      results.find((result) => result.status === "rejected")?.reason,
+    ).toMatchObject({ code: "agent_concurrency_limit_reached" })
+    const running = (await root.list()).filter(
+      (agent) => agent.status === "running",
+    )
+    expect(running).toHaveLength(1)
+    const active = running[0]
+    if (active === undefined) throw new Error("Expected one running child.")
+    const idle = active.agentId === first.agentId ? second : first
+    await root.followup({
+      target: active.agentId,
+      message: "queued after current",
+    })
+    expect(harness.runRequests).toHaveLength(3)
+    await expect(
+      root.spawn({
+        taskName: "third",
+        message: "too many",
+        agentType: "general",
+        forkTurns: "none",
+      }),
+    ).rejects.toMatchObject({ code: "agent_concurrency_limit_reached" })
+
+    harness.runs
+      .get(active.agentId)?.[1]
+      ?.resolve({ type: "completed", text: "next done" })
+    await root.wait(1_000)
+    await expect
+      .poll(() => harness.runRequests.at(-1)?.message)
+      .toBe("queued after current")
+    harness.runs
+      .get(active.agentId)?.[2]
+      ?.resolve({ type: "completed", text: "queued done" })
+    await root.wait(1_000)
+    await root.followup({ target: idle.agentId, message: "fits now" })
+    expect(
+      (await root.list()).filter((agent) => agent.status === "running"),
+    ).toEqual([expect.objectContaining({ agentId: idle.agentId })])
+  })
+
+  it.each([
+    "completion-id",
+    "delivery",
+  ] as const)("releases a completed child's execution slot while %s is pending", async (boundary) => {
+    const deliveryStarted = deferred<void>()
+    const releaseDelivery = deferred<void>()
+    const completionStarted = deferred<void>()
+    const releaseCompletion = deferred<void>()
+    const harness = createHarness({
+      maxConcurrentAgents: 2,
+      ...(boundary === "delivery"
+        ? { deliveryStarted, releaseDelivery }
+        : { completionStarted, releaseCompletion }),
+    })
+    const root = harness.control.bind("root_session", TARGET)
+    const child = await root.spawn({
+      taskName: "completed",
+      message: "work",
+      agentType: "general",
+      forkTurns: "none",
+    })
+    harness.runs
+      .get(child.agentId)?.[0]
+      ?.resolve({ type: "completed", text: "done" })
+    await (boundary === "delivery" ? deliveryStarted : completionStarted)
+      .promise
+    expect(await root.list()).toMatchObject([
+      { agentId: child.agentId, status: { completed: "done" } },
+    ])
+    const next = await root.spawn({
+      taskName: "next",
+      message: "next work",
+      agentType: "general",
+      forkTurns: "none",
+    })
+    expect(await root.list()).toMatchObject([
+      { agentId: child.agentId, status: { completed: "done" } },
+      { agentId: next.agentId, status: "running" },
+    ])
+    releaseDelivery.resolve()
+    releaseCompletion.resolve()
+    expect(await root.wait(1_000)).toMatchObject([
+      { agentId: child.agentId, status: { completed: "done" } },
+    ])
+    expect(harness.runRequests.map((request) => request.message)).toEqual([
+      "work",
+      "next work",
+    ])
+  })
+
+  it("keeps the accepted follow-up reservation through failed completion delivery", async () => {
+    const harness = createHarness({
+      maxConcurrentAgents: 2,
+      failDeliveryOnce: true,
+    })
+    const root = harness.control.bind("root_session", TARGET)
+    const child = await root.spawn({
+      taskName: "worker",
+      message: "first",
+      agentType: "general",
+      forkTurns: "none",
+    })
+    await root.followup({ target: child.agentId, message: "accepted second" })
+    harness.runs
+      .get(child.agentId)?.[0]
+      ?.resolve({ type: "completed", text: "first done" })
+    await expect.poll(() => harness.backgroundErrors.length).toBe(1)
+    await expect(
+      root.spawn({
+        taskName: "other",
+        message: "too early",
+        agentType: "general",
+        forkTurns: "none",
+      }),
+    ).rejects.toMatchObject({ code: "agent_concurrency_limit_reached" })
+    expect(await root.wait(1_000)).toMatchObject([
+      { agentId: child.agentId, status: { completed: "first done" } },
+    ])
+    await expect
+      .poll(() => harness.runRequests.at(-1)?.message)
+      .toBe("accepted second")
+    harness.runs
+      .get(child.agentId)?.[1]
+      ?.resolve({ type: "completed", text: "second done" })
+    await root.wait(1_000)
+    await expect(
+      root.spawn({
+        taskName: "other",
+        message: "fits now",
+        agentType: "general",
+        forkTurns: "none",
+      }),
+    ).resolves.toMatchObject({ path: "/root/other" })
+    expect(harness.runRequests.map((request) => request.message)).toEqual([
+      "first",
+      "accepted second",
+      "fits now",
+    ])
+  })
+
+  it("releases execution capacity after a child launch becomes a terminal failure", async () => {
+    const harness = createHarness({ maxConcurrentAgents: 2 })
+    const root = harness.control.bind("root_session", TARGET)
+    const child = await root.spawn({
+      taskName: "failed",
+      message: "first",
+      agentType: "general",
+      forkTurns: "none",
+    })
+    harness.runs.get(child.agentId)?.[0]?.reject(new Error("launch failed"))
+    expect(await root.wait(1_000)).toMatchObject([
+      { status: { errored: "launch failed" } },
+    ])
+    await root.followup({ target: child.agentId, message: "retry" })
+    expect(harness.runRequests.map((request) => request.message)).toEqual([
+      "first",
+      "retry",
+    ])
+  })
+
+  it("releases a failed child creation reservation and allows reusing its task name", async () => {
+    const harness = createHarness({
+      maxConcurrentAgents: 2,
+      createErrorOnce: new Error("storage unavailable"),
+    })
+    const root = harness.control.bind("root_session", TARGET)
+    const request = {
+      taskName: "worker",
+      message: "work",
+      agentType: "general",
+      forkTurns: "none",
+    } as const
+    await expect(root.spawn(request)).rejects.toThrow("storage unavailable")
+    await expect(root.spawn(request)).resolves.toMatchObject({
+      path: "/root/worker",
+    })
+    expect(harness.runRequests).toHaveLength(1)
+  })
+
+  it("does not hold execution capacity while a failed completion delivery awaits retry", async () => {
+    const harness = createHarness({
+      maxConcurrentAgents: 2,
+      failDeliveryOnce: true,
+    })
+    const root = harness.control.bind("root_session", TARGET)
+    const child = await root.spawn({
+      taskName: "first",
+      message: "work",
+      agentType: "general",
+      forkTurns: "none",
+    })
+    harness.runs
+      .get(child.agentId)?.[0]
+      ?.resolve({ type: "completed", text: "done" })
+    await expect.poll(() => harness.backgroundErrors.length).toBe(1)
+    const next = await root.spawn({
+      taskName: "second",
+      message: "more",
+      agentType: "general",
+      forkTurns: "none",
+    })
+    expect(next.path).toBe("/root/second")
+    expect(await root.wait(1_000)).toMatchObject([
+      { agentId: child.agentId, status: { completed: "done" } },
+    ])
+    expect(harness.runRequests.map((request) => request.sessionId)).toEqual([
+      child.agentId,
+      next.agentId,
+    ])
+  })
+
   it("reserves a task path before concurrent same-name spawn checks", async () => {
     const harness = createHarness()
     const root = harness.control.bind("root_session", TARGET)
@@ -328,6 +576,59 @@ describe("agent control", () => {
     await expect(closing).resolves.toEqual(["root_session"])
     expect(harness.rolledBack).toEqual(["agent_1"])
     await expect(root.list()).resolves.toEqual([])
+  })
+
+  it("discards queued execution when close overlaps completion delivery", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "yakitori-agent-close-"))
+    const effectsPath = join(directory, "execution.txt")
+    const deliveryStarted = deferred<void>()
+    const releaseDelivery = deferred<void>()
+    const harness = createHarness()
+    const control = createAgentControl({
+      rootSessionId: "root_session",
+      maxConcurrentAgents: 2,
+      adapter: {
+        ...harness.adapter,
+        runChild(request) {
+          appendFileSync(effectsPath, `${request.message}\n`)
+          return harness.adapter.runChild(request)
+        },
+        deliverMessage() {
+          deliveryStarted.resolve()
+          return releaseDelivery.promise
+        },
+      },
+    })
+    const root = control.bind("root_session", TARGET)
+    let closing: Promise<readonly string[]> | undefined
+    try {
+      const child = await root.spawn({
+        taskName: "worker",
+        message: "first",
+        agentType: "general",
+        forkTurns: "none",
+      })
+      await root.followup({ target: child.agentId, message: "queued" })
+      harness.runs
+        .get(child.agentId)?.[0]
+        ?.resolve({ type: "completed", text: "done" })
+      await deliveryStarted.promise
+      releaseDelivery.resolve()
+      closing = control.closeAgent(child.agentId)
+      await new Promise<void>((resolve) => setImmediate(resolve))
+
+      expect(await readFile(effectsPath, "utf8")).toBe("first\n")
+      await expect(closing).resolves.toEqual([child.agentId])
+      await expect(root.list()).resolves.toEqual([])
+    } finally {
+      releaseDelivery.resolve()
+      for (const runs of harness.runs.values()) {
+        for (const run of runs) run.resolve({ type: "interrupted" })
+      }
+      await closing
+      await control.close()
+      await rm(directory, { recursive: true, force: true })
+    }
   })
 
   it("retries a failed completion delivery without rerunning the child", async () => {
@@ -399,9 +700,15 @@ function createHarness(
     readonly releaseCreate?: ReturnType<typeof deferred<void>>
     readonly failDeliveryOnce?: boolean
     readonly rollbackError?: Error
+    readonly createErrorOnce?: Error
+    readonly completionStarted?: ReturnType<typeof deferred<void>>
+    readonly releaseCompletion?: ReturnType<typeof deferred<void>>
+    readonly deliveryStarted?: ReturnType<typeof deferred<void>>
+    readonly releaseDelivery?: ReturnType<typeof deferred<void>>
   } = {},
 ) {
   let nextId = 1
+  let createError = input.createErrorOnce
   const runs = new Map<
     string,
     Array<ReturnType<typeof deferred<AgentRunOutcome>>>
@@ -435,6 +742,11 @@ function createHarness(
   ]
   const adapter: AgentControlAdapter = {
     async createChild(request) {
+      if (createError !== undefined) {
+        const error = createError
+        createError = undefined
+        throw error
+      }
       children.push(request)
       const id = `agent_${String(nextId)}`
       nextId += 1
@@ -480,12 +792,16 @@ function createHarness(
       return status
     },
     async completionDeliveryId(sessionId) {
+      input.completionStarted?.resolve()
+      await input.releaseCompletion?.promise
       return `agent_completion_${sessionId}_${String(runRequests.length)}`
     },
     async interruptChild(sessionId) {
       interrupted.push(sessionId)
     },
     async deliverMessage(request) {
+      input.deliveryStarted?.resolve()
+      await input.releaseDelivery?.promise
       deliveryAttempts.push(request)
       if (shouldFailDelivery) {
         shouldFailDelivery = false
@@ -508,6 +824,7 @@ function createHarness(
     },
   }
   return {
+    adapter,
     control: createAgentControl({
       rootSessionId: "root_session",
       adapter,
