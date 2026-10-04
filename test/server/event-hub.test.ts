@@ -145,6 +145,8 @@ describe("session event hub", () => {
     })
     hub.publishTransient({
       type: "assistant.delta",
+      streamId: "stream_1",
+      offset: 0,
       sessionId,
       turnId: "turn_1",
       itemId: "item_1",

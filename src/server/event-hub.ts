@@ -1,4 +1,4 @@
-import type { StoredEventEnvelope } from "../kernel/index.ts"
+import { isKernelEvent, type StoredEventEnvelope } from "../kernel/index.ts"
 import type { LiveSessionEvent } from "../runtime/live-events.ts"
 import {
   consoleOperationalFailureReporter,
@@ -45,6 +45,80 @@ export function createSessionEventHub(
   options: SessionEventHubOptions = {},
 ): SessionEventHub {
   const subscribers = new Map<string, Set<Subscriber>>()
+  // Display-only recovery safety budgets, independent of provider quotas:
+  // at most 2 MiB of UTF-16 text plus 256 item records across all sessions.
+  // Evicted prefixes are explicitly partial via their nonzero chunk offset.
+  const maxDisplayCharacters = 1024 * 1024
+  const maxDisplayItems = 256
+  type DisplayDelta = Extract<
+    LiveSessionEvent,
+    { type: "assistant.delta" | "reasoning.delta" }
+  >
+  const display = new Map<string, DisplayDelta>()
+  let displayCharacters = 0
+  const keyOf = (event: {
+    sessionId: string
+    turnId: string
+    itemId: string
+  }) => JSON.stringify([event.sessionId, event.turnId, event.itemId])
+  const removeDisplay = (key: string): void => {
+    displayCharacters -= display.get(key)?.delta.length ?? 0
+    display.delete(key)
+  }
+  const clearTurn = (sessionId: string, turnId?: string): void => {
+    for (const [key, event] of display) {
+      if (
+        event.sessionId === sessionId &&
+        (turnId === undefined || event.turnId === turnId)
+      )
+        removeDisplay(key)
+    }
+  }
+  const retainDisplay = (event: DisplayDelta): void => {
+    const key = keyOf(event)
+    const cached = display.get(key)
+    const previous = cached?.streamId === event.streamId ? cached : undefined
+    const end =
+      previous === undefined ? 0 : previous.offset + previous.delta.length
+    if (previous !== undefined && event.offset + event.delta.length <= end)
+      return
+    const next =
+      previous !== undefined && event.offset <= end
+        ? {
+            ...previous,
+            delta: previous.delta + event.delta.slice(end - event.offset),
+          }
+        : event
+    removeDisplay(key)
+    display.set(key, next)
+    displayCharacters += next.delta.length
+    while (
+      display.size > maxDisplayItems ||
+      displayCharacters > maxDisplayCharacters
+    ) {
+      const oldest = display.entries().next().value
+      if (oldest === undefined) break
+      const [oldKey, old] = oldest
+      let excess = displayCharacters - maxDisplayCharacters
+      // Never start a retained suffix halfway through a UTF-16 surrogate pair.
+      if (
+        excess > 0 &&
+        old.delta.charCodeAt(excess - 1) >= 0xd800 &&
+        old.delta.charCodeAt(excess - 1) <= 0xdbff &&
+        old.delta.charCodeAt(excess) >= 0xdc00 &&
+        old.delta.charCodeAt(excess) <= 0xdfff
+      )
+        excess += 1
+      if (display.size <= maxDisplayItems && excess < old.delta.length) {
+        display.set(oldKey, {
+          ...old,
+          offset: old.offset + excess,
+          delta: old.delta.slice(excess),
+        })
+        displayCharacters -= excess
+      } else removeDisplay(oldKey)
+    }
+  }
   const reporter =
     options.reportOperationalFailure ?? consoleOperationalFailureReporter
 
@@ -107,22 +181,50 @@ export function createSessionEventHub(
   return {
     publishDurable(events) {
       for (const [sessionId, sessionEvents] of groupEventsBySession(events)) {
+        for (const event of sessionEvents) {
+          if (!isKernelEvent(event)) continue
+          if (event.type === "turn.started") clearTurn(sessionId)
+          if (event.type === "turn.completed")
+            clearTurn(sessionId, event.data.turnId)
+          if (event.type === "item.completed")
+            removeDisplay(
+              keyOf({
+                sessionId,
+                turnId: event.data.turnId,
+                itemId: event.data.item.itemId,
+              }),
+            )
+        }
         publish(sessionId, { kind: "durable", events: sessionEvents })
       }
     },
     publishTransient(event) {
+      if (event.type === "assistant.delta" || event.type === "reasoning.delta")
+        retainDisplay(event)
+      if (event.type === "item.discarded") removeDisplay(keyOf(event))
+      if (event.type === "turn.finished")
+        clearTurn(event.sessionId, event.turnId)
       publish(event.sessionId, { kind: "transient", event })
     },
     subscribe(sessionId, listener) {
       const sessionSubscribers = subscribers.get(sessionId) ?? new Set()
       const subscriber: Subscriber = {
         listener,
-        pending: [],
+        // Capture and enqueue synchronously before any later publication.
+        // The subscription owner buffers these behind durable replay, whose
+        // completions remain authoritative over the unfinished display cache.
+        pending: [...display.values()]
+          .filter((event) => event.sessionId === sessionId)
+          .map((event) => ({
+            kind: "transient",
+            event: { ...event, snapshot: true },
+          })),
         delivering: false,
         closed: false,
       }
       sessionSubscribers.add(subscriber)
       subscribers.set(sessionId, sessionSubscribers)
+      drain(subscriber)
       return {
         close() {
           subscriber.closed = true

@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
-import { afterEach, expect, it, vi } from "vitest"
 import Markdown from "react-markdown"
+import { afterEach, expect, it, vi } from "vitest"
 import { MarkdownView } from "../../src/gui/components/markdown.tsx"
 import { Transcript } from "../../src/gui/components/transcript.tsx"
 import {
@@ -66,6 +66,8 @@ it("streams new text without parsing unchanged history or reasoning again", () =
         type: "transient",
         event: {
           type: "assistant.delta",
+          streamId: "stream_1",
+          offset: 5,
           sessionId: "session_1",
           turnId: "active",
           itemId: "stream",
@@ -147,6 +149,12 @@ it("defers parsing hidden reasoning and expands the latest streamed text", () =>
           type: "transient",
           event: {
             type: "reasoning.delta",
+            streamId: "stream_1",
+            offset: state.execution.entries.reduce(
+              (length, entry) =>
+                entry.kind === "reasoning" ? entry.text.length : length,
+              0,
+            ),
             sessionId: "session_1",
             turnId: "active",
             itemId: "reasoning",

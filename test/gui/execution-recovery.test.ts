@@ -106,6 +106,8 @@ describe("execution recovery", () => {
       type: "transient",
       event: {
         type: "reasoning.delta",
+        streamId: "stream_1",
+        offset: 0,
         sessionId: session.id,
         turnId: "turn_1",
         itemId: "reasoning_1",
@@ -247,6 +249,8 @@ describe("execution recovery", () => {
       type: "transient",
       event: {
         type: "assistant.delta",
+        streamId: "stream_1",
+        offset: 0,
         sessionId: session.id,
         turnId: "turn_1",
         itemId: "message_1",

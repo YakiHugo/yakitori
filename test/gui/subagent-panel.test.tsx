@@ -173,6 +173,8 @@ it("reconciles live output against an idle reconnect snapshot", () => {
     })
     stream.emitTransient({
       type: "assistant.delta",
+      streamId: "stream_1",
+      offset: 0,
       sessionId: "child",
       turnId: "turn",
       itemId: "answer",
@@ -450,6 +452,8 @@ it("closes its own connection on child changes and ignores late deliveries", () 
   act(() =>
     oldStream.emitTransient({
       type: "assistant.delta",
+      streamId: "stream_1",
+      offset: 0,
       sessionId: "child",
       turnId: "turn",
       itemId: "late",
@@ -481,6 +485,8 @@ it("keeps live scrolling pinned until the reader scrolls away", () => {
   act(() =>
     stream.emitTransient({
       type: "assistant.delta",
+      streamId: "stream_1",
+      offset: 0,
       sessionId: "child",
       turnId: "turn",
       itemId: "answer",

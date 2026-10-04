@@ -33,7 +33,10 @@ export type ExecutionEntry =
       readonly itemId: string
       readonly turnId: string
       readonly text: string
-      readonly status: "streaming" | "completed"
+      readonly status: "streaming" | "suspended" | "partial" | "completed"
+      readonly streamId?: string
+      readonly textOffset?: number
+      readonly incomplete?: boolean
       readonly at: string
     }
   | {
@@ -41,7 +44,10 @@ export type ExecutionEntry =
       readonly itemId: string
       readonly turnId: string
       readonly text: string
-      readonly status: "streaming" | "completed"
+      readonly status: "streaming" | "suspended" | "partial" | "completed"
+      readonly streamId?: string
+      readonly textOffset?: number
+      readonly incomplete?: boolean
       readonly at: string
     }
   | {
@@ -410,13 +416,26 @@ function reconcileExecution(
   )
   let entries = state.entries.flatMap((entry): readonly ExecutionEntry[] => {
     if (!("turnId" in entry) || entry.turnId === state.activeTurnId) {
-      return [entry]
+      if (
+        authoritative &&
+        (entry.kind === "assistant" || entry.kind === "reasoning") &&
+        entry.status === "suspended"
+      ) {
+        // Absence from a bounded display cache is not proof of discard.
+        // Retain visibly partial text, without claiming the connection is down.
+        return [{ ...entry, status: "partial" }]
+      }
+      return authoritative && entry.kind === "tool" && entry.state === "unknown"
+        ? [{ ...entry, state: "requested" }]
+        : [entry]
     }
     if (entry.kind === "turn_terminal") interrupted.delete(entry.turnId)
     if (
       (entry.kind === "assistant" || entry.kind === "reasoning") &&
-      entry.status === "streaming"
+      entry.status !== "completed"
     ) {
+      if (!authoritative)
+        return [{ ...entry, status: "suspended", incomplete: true }]
       return entry.text.length === 0 ? [] : [{ ...entry, status: "completed" }]
     }
     if (
@@ -490,7 +509,7 @@ function applyTransient(
         (entry.kind !== "assistant" && entry.kind !== "reasoning") ||
         entry.itemId !== event.itemId ||
         entry.turnId !== event.turnId ||
-        entry.status !== "streaming",
+        entry.status === "completed",
     )
     return { ...state, entries, ...indexEntries(entries) }
   }
@@ -546,6 +565,7 @@ function applyTransient(
     return finishTurn(state, event.turnId, event.outcome, event.createdAt, true)
   }
   if (event.type === "item.started") {
+    if (state.turnTimings[event.turnId]?.completedAt !== undefined) return state
     state = clearActiveRetry(state, event.turnId)
     const item = event.item
     if (item.type === "context_compaction") {
@@ -570,6 +590,7 @@ function applyTransient(
         at: event.createdAt,
       })
     }
+    if (state.itemEntryIndexes[item.itemId] !== undefined) return state
     return appendItemEntry(state, item.itemId, {
       kind: "tool",
       toolCallId: item.toolCallId,
@@ -579,26 +600,84 @@ function applyTransient(
     })
   }
   if (event.type === "assistant.delta" || event.type === "reasoning.delta") {
+    if (!Number.isSafeInteger(event.offset) || event.offset < 0) return state
+    if (state.turnTimings[event.turnId]?.completedAt !== undefined) return state
     const index = state.itemEntryIndexes[event.itemId]
     const current = index === undefined ? undefined : state.entries[index]
+    const kind = event.type === "assistant.delta" ? "assistant" : "reasoning"
+    if (current === undefined) {
+      // Starts are transient too. A reconnect snapshot can be the first
+      // observation of an item, but must not resurrect an inactive turn.
+      if (state.activeTurnId !== event.turnId) return state
+      return appendItemEntry(
+        clearActiveRetry(state, event.turnId),
+        event.itemId,
+        {
+          kind,
+          itemId: event.itemId,
+          turnId: event.turnId,
+          text: event.delta,
+          streamId: event.streamId,
+          textOffset: event.offset,
+          incomplete: event.offset > 0,
+          status: "streaming",
+          at: event.createdAt,
+        },
+      )
+    }
     if (
       index === undefined ||
-      (current?.kind !== "assistant" && current?.kind !== "reasoning") ||
+      current.kind !== kind ||
       current.turnId !== event.turnId ||
-      current.status !== "streaming" ||
-      (event.type === "assistant.delta" && current.kind !== "assistant") ||
-      (event.type === "reasoning.delta" && current.kind !== "reasoning")
-    ) {
+      current.status === "completed"
+    )
       return state
+    const replacedStream =
+      current.streamId !== undefined && current.streamId !== event.streamId
+    if (replacedStream && !event.snapshot) return state
+    const start = current.textOffset ?? 0
+    const end = start + current.text.length
+    const incomingEnd = event.offset + event.delta.length
+    if (
+      !replacedStream &&
+      incomingEnd <= end &&
+      event.offset >= start &&
+      current.status === "streaming"
+    )
+      return state
+    let text: string
+    let textOffset = start
+    if (replacedStream || (event.offset <= start && incomingEnd >= end)) {
+      // A subscription snapshot may restore a prefix missed by this client.
+      text = event.delta
+      textOffset = event.offset
+    } else if (event.snapshot && incomingEnd === end) {
+      // The cache may retain less prefix than this client. Keep the richer
+      // local text while acknowledging that its stream is live again.
+      text = current.text
+    } else if (incomingEnd <= end) {
+      return state
+    } else if (event.offset <= end) {
+      text = current.text + event.delta.slice(end - event.offset)
+    } else {
+      // Never join across an unknown gap. Show the contiguous suffix with a
+      // partial-text notice until a snapshot or durable completion repairs it.
+      text = event.delta
+      textOffset = event.offset
     }
     return {
       ...clearActiveRetry(state, event.turnId),
       entries: replaceAt(state.entries, index, {
         ...current,
-        text: `${current.text}${event.delta}`,
+        text,
+        streamId: event.streamId,
+        textOffset,
+        incomplete: textOffset > 0,
+        status: "streaming",
       }),
     }
   }
+
   if (event.type === "session.usage")
     return { ...state, telemetry: replaceUsage(state.telemetry, event.usage) }
   if (event.type === "permission.requested")
@@ -754,7 +833,7 @@ function applyDurable(
           },
         }
       }
-      return appendItemEntry(next, item.itemId, {
+      return replaceItemEntry(next, item.itemId, {
         kind: "tool",
         toolCallId: item.toolCallId,
         turnId: event.data.turnId,
@@ -952,7 +1031,7 @@ function settleStreamingEntries(
     if (
       (entry.kind !== "assistant" && entry.kind !== "reasoning") ||
       entry.turnId !== turnId ||
-      entry.status !== "streaming"
+      entry.status === "completed"
     ) {
       return [entry]
     }

@@ -368,6 +368,8 @@ export function makeAssistantDelta(
 ): LiveSessionEvent {
   return {
     type: "assistant.delta",
+    streamId: "stream_1",
+    offset: 0,
     sessionId,
     turnId,
     itemId: "item_1",

@@ -10,16 +10,16 @@ import {
   type SessionDelivery,
   type SessionEventHub,
 } from "../../../src/server/event-hub.ts"
+import type {
+  ApiPendingPermission,
+  ApiSessionDetail,
+} from "../../../src/server/protocol.ts"
 import { MessageProcessor } from "../../../src/server/rpc/message-processor.ts"
 import {
   INTERNAL_ERROR,
   type JsonRpcNotification,
   type JsonRpcResponse,
 } from "../../../src/server/rpc/messages.ts"
-import type {
-  ApiPendingPermission,
-  ApiSessionDetail,
-} from "../../../src/server/protocol.ts"
 import { reconcileBufferedSessionDeliveries } from "../../../src/server/rpc/subscriptions.ts"
 import {
   createFakeHandlers,
@@ -113,6 +113,8 @@ describe("buffered turn lifecycle", () => {
           kind: "transient",
           event: {
             type: "reasoning.delta",
+            streamId: "stream_1",
+            offset: 0,
             sessionId,
             turnId: "turn_1",
             itemId: "late_reasoning",

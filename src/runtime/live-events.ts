@@ -11,6 +11,11 @@ export type LiveAssistantDelta = {
   readonly sessionId: string
   readonly turnId: string
   readonly itemId: string
+  readonly streamId: string
+  /** Set only on the subscription recovery copy, never persisted. */
+  readonly snapshot?: true
+  /** UTF-16 offset of this chunk within the display item. */
+  readonly offset: number
   readonly delta: string
   readonly createdAt: string
 }
@@ -20,6 +25,11 @@ export type LiveReasoningDelta = {
   readonly sessionId: string
   readonly turnId: string
   readonly itemId: string
+  readonly streamId: string
+  /** Set only on the subscription recovery copy, never persisted. */
+  readonly snapshot?: true
+  /** UTF-16 offset of this chunk within the display item. */
+  readonly offset: number
   readonly delta: string
   readonly createdAt: string
 }
@@ -129,19 +139,25 @@ export function createCoalescingDeltaPublisher(
         readonly deltas: string[]
       }
     | undefined
+  const streamId = crypto.randomUUID()
+  let offset = 0
   let lastPublishedAt = 0
   let timer: ReturnType<typeof setTimeout> | undefined
 
   const publishNow = (input: NonNullable<typeof pending>): void => {
     lastPublishedAt = Date.now()
+    const delta = input.deltas.join("")
     publisher.publishTransient({
       type,
       sessionId: input.sessionId,
       turnId: input.turnId,
       itemId: input.itemId,
-      delta: input.deltas.join(""),
+      streamId,
+      offset,
+      delta,
       createdAt: new Date().toISOString(),
     })
+    offset += delta.length
   }
 
   const flushPending = (): void => {

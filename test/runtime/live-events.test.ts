@@ -29,11 +29,13 @@ describe("transient live events", () => {
     expect(events).toEqual([
       expect.objectContaining({
         type: "assistant.delta",
+        offset: 0,
         itemId: "item_1",
         delta: "Hel",
       }),
       expect.objectContaining({
         type: "assistant.delta",
+        offset: 3,
         itemId: "item_1",
         delta: "lo",
       }),
