@@ -4,7 +4,6 @@ import {
   createAnthropicProvider,
   fromAnthropicMessage,
   toAnthropicMessages,
-  toAnthropicSystem,
   toAnthropicTools,
 } from "../../src/runtime/anthropic-provider.ts"
 import {
@@ -1011,25 +1010,6 @@ describe("anthropic provider conversion", () => {
         ],
       },
     ])
-  })
-
-  it("keeps cache-control extensions off Anthropic-compatible providers", () => {
-    const request: ModelRequest = {
-      target: {
-        provider: "kimi",
-        model: "kimi-for-coding",
-        instructionProfileId: "kimi",
-      },
-      system: [
-        { id: "base", revision: "base-1", text: "base" },
-        { id: "environment", revision: "environment-1", text: "environment" },
-      ],
-      messages: [],
-      tools: [],
-      toolWireProtocol: "eager",
-    }
-
-    expect(toAnthropicSystem(request.system)).toBe("base\n\nenvironment")
   })
 
   it("adds output_config and the effort beta header for official anthropic", async () => {

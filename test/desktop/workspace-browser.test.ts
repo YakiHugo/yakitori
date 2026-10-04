@@ -262,11 +262,17 @@ it("ignores late page events and menu actions after a tab closes", () => {
   const click = electron.menu.find(
     (entry) => entry.label === "Add to conversation",
   )?.click
+  if (!click) throw new Error("Missing selection menu action")
+  click()
+  expect(sent).toHaveBeenCalledWith(
+    "yakitori:browser-selection",
+    expect.objectContaining({ text: "Old selection" }),
+  )
   call("close", { tabId: "a" })
   call("create", { tabId: "a", url: "https://new.example.com" })
   sent.mockClear()
   old.webContents.emit("page-title-updated")
-  click?.()
+  click()
   expect(sent).not.toHaveBeenCalled()
 })
 

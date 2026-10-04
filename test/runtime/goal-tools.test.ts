@@ -52,7 +52,9 @@ describe("goal model tools", () => {
     )
     const names = ["get_goal", "create_goal", "update_goal"]
 
-    expect(absent.trustedToolNames()).not.toEqual(expect.arrayContaining(names))
+    expect(
+      absent.trustedToolNames().filter((name) => names.includes(name)),
+    ).toEqual([])
     expect(present.trustedToolNames()).toEqual(expect.arrayContaining(names))
     const router = present.finalize({
       enabledTrustedTools: new Set(["get_goal"]),
@@ -156,14 +158,12 @@ describe("goal model tools", () => {
   it("projects remaining budget and final usage from the authoritative service result", async () => {
     const { service, router } = setup({
       get: async () => ({ ...goal, tokenBudget: 100 }),
-      update: vi
-        .fn()
-        .mockResolvedValue({
-          ...goal,
-          tokenBudget: 100,
-          tokensUsed: 120,
-          status: "complete",
-        }),
+      update: vi.fn().mockResolvedValue({
+        ...goal,
+        tokenBudget: 100,
+        tokensUsed: 120,
+        status: "complete",
+      }),
     })
     await expect(
       router.execute("get_goal", {}, context),
