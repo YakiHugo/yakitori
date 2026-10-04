@@ -13,7 +13,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { WebSocket } from "ws"
 import packageJson from "../../package.json" with { type: "json" }
 import { PersistContext } from "../../src/core/thread-store.ts"
-import { MateEventType, MateLifecycle } from "../../src/mates/events.ts"
 import { createMateKernel } from "../../src/mates/mate-kernel.ts"
 import { createSqliteMateStore } from "../../src/mates/sqlite-mate-store.ts"
 import { type ModelRequest, ModelStopReason } from "../../src/runtime/model.ts"
@@ -1838,7 +1837,7 @@ describe("application composition", () => {
     })
   })
 
-  it("fails startup when the configured Mate is missing or inactive", async () => {
+  it("fails startup when the configured Mate is missing", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
       await expect(
         createYakitoriApplication(
@@ -1849,39 +1848,10 @@ describe("application composition", () => {
           }),
         ),
       ).rejects.toThrow("Configured Mate was not found")
-
-      const mateStore = createSqliteMateStore({
-        databasePath: join(rootDir, "mates.sqlite"),
-      })
-      const mateKernel = createMateKernel(mateStore)
-      const created = await mateKernel.createMate({
-        instructions: "inactive later",
-        name: "SoonInactive",
-        role: "Builder",
-      })
-      await mateStore.appendEvent(
-        created.mate.id,
-        {
-          type: MateEventType.LifecycleChanged,
-          data: { lifecycle: MateLifecycle.Inactive },
-        },
-        { expectedSeq: created.mate.seq },
-      )
-      mateStore.close()
-
-      await expect(
-        createYakitoriApplication(
-          testApplicationOptions({
-            activeMateId: created.mate.id,
-            rootDir,
-            workspace,
-          }),
-        ),
-      ).rejects.toThrow("Configured Mate is inactive")
     })
   })
 
-  it("fails startup when multiple active Mates exist without an explicit selection", async () => {
+  it("fails startup when multiple Mates exist without an explicit selection", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const mateStore = createSqliteMateStore({
         databasePath: join(rootDir, "mates.sqlite"),
@@ -1903,7 +1873,7 @@ describe("application composition", () => {
         createYakitoriApplication(
           testApplicationOptions({ rootDir, workspace }),
         ),
-      ).rejects.toThrow("Multiple active Mates found")
+      ).rejects.toThrow("Multiple Mates found")
     })
   })
 

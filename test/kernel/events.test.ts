@@ -426,6 +426,30 @@ describe("kernel facts", () => {
     ).toBe(true)
   })
 
+  it("rejects model output as a durable item start while accepting its completion", () => {
+    for (const item of [
+      {
+        type: "agent_message",
+        itemId: "answer",
+        content: [{ type: "text", text: "answer" }],
+      },
+      { type: "reasoning", itemId: "reasoning", text: "reasoning" },
+    ]) {
+      expect(
+        isKernelEvent({
+          type: EventType.ItemStarted,
+          data: { turnId: "turn_output", item },
+        }),
+      ).toBe(false)
+      expect(
+        isKernelEvent({
+          type: EventType.ItemCompleted,
+          data: { turnId: "turn_output", item },
+        }),
+      ).toBe(true)
+    }
+  })
+
   it("rejects ambiguous file changes and malformed MCP results", () => {
     const completedFileChange = (change: unknown) =>
       isKernelEvent({

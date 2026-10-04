@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest"
 import { YakitoriErrorCode } from "../../src/kernel/errors.ts"
 import { type MateEvent, MateEventType } from "../../src/mates/events.ts"
 import { createMateId, createMateRevisionId } from "../../src/mates/ids.ts"
-import { projectMate, summarizeMate } from "../../src/mates/mate-projector.ts"
+import { projectMate } from "../../src/mates/mate-projector.ts"
 import type { MateStore } from "../../src/mates/mate-store.ts"
 
 export function defineMateStoreContract(options: {
@@ -22,7 +22,7 @@ export function defineMateStoreContract(options: {
 
         expect(events).toHaveLength(1)
         expect(await store.listMates()).toEqual({
-          mates: [summarizeMate(mate)],
+          mates: [mate],
         })
       })
     })

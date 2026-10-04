@@ -29,7 +29,6 @@ import {
   createMateKernel,
   createSqliteMateStore,
   type MateKernel,
-  MateLifecycle,
   type MateProjection,
   type SqliteMateStore,
 } from "../mates/index.ts"
@@ -345,7 +344,7 @@ export async function createYakitoriApplication(
     // One physical desktop is shared by every session in this server. Hold
     // ownership across model steps so focus/input from two turns cannot mix.
     let computerOwner: string | undefined
-    const activeMate = await resolveActiveMate(mateKernel, activeMateId)
+    const activeMate = await resolveMate(mateKernel, activeMateId)
     const sessionDefaults: SessionCreateDefaults = {
       workingDirectory: workspace,
       mateId: activeMate.id,
@@ -1889,7 +1888,7 @@ export async function resolveWorkspaceDirectory(
   return resolved
 }
 
-async function resolveActiveMate(
+async function resolveMate(
   mateKernel: MateKernel,
   configuredMateId: string | undefined,
 ): Promise<MateProjection> {
@@ -1898,21 +1897,18 @@ async function resolveActiveMate(
     if (!read.mate) {
       throw new Error(`Configured Mate was not found: ${configuredMateId}`)
     }
-    if (read.mate.lifecycle !== MateLifecycle.Active) {
-      throw new Error(`Configured Mate is inactive: ${configuredMateId}`)
-    }
     return read.mate
   }
 
-  const activeMates = await listAllActiveMateIds(mateKernel)
+  const mateIds = await listAllMateIds(mateKernel)
 
-  if (activeMates.length > 1) {
+  if (mateIds.length > 1) {
     throw new Error(
-      `Multiple active Mates found (${activeMates.join(", ")}). Set YAKITORI_MATE_ID to select one.`,
+      `Multiple Mates found (${mateIds.join(", ")}). Set YAKITORI_MATE_ID to select one.`,
     )
   }
 
-  const mateId = activeMates[0]
+  const mateId = mateIds[0]
   if (mateId !== undefined) {
     const read = await mateKernel.readMate({ mateId })
     if (!read.mate) {
@@ -1925,8 +1921,8 @@ async function resolveActiveMate(
   return created.mate
 }
 
-async function listAllActiveMateIds(mateKernel: MateKernel): Promise<string[]> {
-  const activeMateIds: string[] = []
+async function listAllMateIds(mateKernel: MateKernel): Promise<string[]> {
+  const mateIds: string[] = []
   let cursor: string | undefined
   for (;;) {
     const page = await mateKernel.listMates({
@@ -1934,9 +1930,9 @@ async function listAllActiveMateIds(mateKernel: MateKernel): Promise<string[]> {
       ...(cursor === undefined ? {} : { cursor }),
     })
     for (const mate of page.mates) {
-      if (mate.lifecycle === MateLifecycle.Active) activeMateIds.push(mate.id)
+      mateIds.push(mate.id)
     }
-    if (page.nextCursor === undefined) return activeMateIds
+    if (page.nextCursor === undefined) return mateIds
     cursor = page.nextCursor
   }
 }

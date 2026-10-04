@@ -2,17 +2,9 @@ import { createMateEventId, isMateRevisionId } from "./ids.ts"
 
 export const MateEventType = {
   Created: "mate.created",
-  LifecycleChanged: "mate.lifecycle_changed",
-  ProfileRevised: "mate.profile_revised",
-} as const
-
-export const MateLifecycle = {
-  Active: "active",
-  Inactive: "inactive",
 } as const
 
 export type MateEventType = (typeof MateEventType)[keyof typeof MateEventType]
-export type MateLifecycle = (typeof MateLifecycle)[keyof typeof MateLifecycle]
 
 export const MateProfileLimit = {
   Instructions: 32_000,
@@ -44,26 +36,7 @@ export type MateCreatedEvent = {
   }
 }
 
-export type MateProfileRevisedEvent = {
-  readonly type: typeof MateEventType.ProfileRevised
-  readonly data: {
-    readonly profile: MateProfile
-    readonly revision: number
-    readonly revisionId: string
-  }
-}
-
-export type MateLifecycleChangedEvent = {
-  readonly type: typeof MateEventType.LifecycleChanged
-  readonly data: {
-    readonly lifecycle: MateLifecycle
-  }
-}
-
-export type MateEvent =
-  | MateCreatedEvent
-  | MateProfileRevisedEvent
-  | MateLifecycleChangedEvent
+export type MateEvent = MateCreatedEvent
 
 type MateEventEnvelopeBase = {
   readonly createdAt: string
@@ -102,12 +75,6 @@ export function createMateEventEnvelope(
     version: input.version ?? 1,
   }
   const event = requireMateEvent(input.event)
-  if (event.type === MateEventType.Created) {
-    return { ...envelope, type: event.type, data: event.data }
-  }
-  if (event.type === MateEventType.ProfileRevised) {
-    return { ...envelope, type: event.type, data: event.data }
-  }
   return { ...envelope, type: event.type, data: event.data }
 }
 
@@ -132,35 +99,6 @@ export function requireMateEvent(value: unknown): MateEvent {
         profile: copyProfile(value.data.profile),
         revisionId: value.data.revisionId,
       },
-    }
-  }
-  if (
-    value.type === MateEventType.ProfileRevised &&
-    hasExactKeys(value.data, ["profile", "revision", "revisionId"]) &&
-    isMateProfile(value.data.profile) &&
-    Number.isInteger(value.data.revision) &&
-    typeof value.data.revision === "number" &&
-    value.data.revision > 0 &&
-    typeof value.data.revisionId === "string" &&
-    isMateRevisionId(value.data.revisionId)
-  ) {
-    return {
-      type: value.type,
-      data: {
-        profile: copyProfile(value.data.profile),
-        revision: value.data.revision,
-        revisionId: value.data.revisionId,
-      },
-    }
-  }
-  if (
-    value.type === MateEventType.LifecycleChanged &&
-    hasExactKeys(value.data, ["lifecycle"]) &&
-    Object.values(MateLifecycle).includes(value.data.lifecycle as MateLifecycle)
-  ) {
-    return {
-      type: value.type,
-      data: { lifecycle: value.data.lifecycle as MateLifecycle },
     }
   }
   throw new TypeError("Mate event is invalid.")

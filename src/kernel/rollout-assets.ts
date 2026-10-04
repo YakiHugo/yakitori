@@ -305,6 +305,15 @@ export function createRolloutAssets(
               }
             } else {
               requireMatchingImageMetadata(existing, attachment)
+              const [sourceBytes, existingBytes] = await Promise.all([
+                readFile(sourcePath),
+                readFile(targetPath),
+              ])
+              if (!sourceBytes.equals(existingBytes)) {
+                throw new ImageAttachmentConflictError(
+                  "A different image already exists for this request.",
+                )
+              }
             }
             copied.push({ ...attachment, file })
           }
