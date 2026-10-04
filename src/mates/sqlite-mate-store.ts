@@ -5,17 +5,12 @@ import { createYakitoriError, YakitoriErrorCode } from "../kernel/errors.ts"
 import {
   createMateEventEnvelope,
   isMateProfile,
-  MateLifecycle,
   requireMateEvent,
   type MateEvent,
   type MateEventEnvelope,
 } from "./events.ts"
 import { isMateEventId, isMateId, isMateRevisionId } from "./ids.ts"
-import {
-  projectMate,
-  summarizeMate,
-  type MateSummary,
-} from "./mate-projector.ts"
+import { projectMate, type MateSummary } from "./mate-projector.ts"
 import {
   invalidMateListCursor,
   requireMateListLimit,
@@ -164,7 +159,7 @@ function updateMateSummary(database: DatabaseSync, mateId: string): void {
       VALUES (?, ?)
       ON CONFLICT (mate_id) DO UPDATE SET summary_json = excluded.summary_json
     `)
-    .run(mateId, JSON.stringify(summarizeMate(mate)))
+    .run(mateId, JSON.stringify(mate))
 }
 
 function readEvents(
@@ -203,7 +198,6 @@ function parseMateSummary(serialized: string, mateId: string): MateSummary {
     typeof parsed.createdAt !== "string" ||
     typeof parsed.updatedAt !== "string" ||
     !isPositiveInteger(parsed.seq) ||
-    !Object.values(MateLifecycle).includes(parsed.lifecycle as MateLifecycle) ||
     !currentRevision
   ) {
     throw invalidEventLog("Invalid mate summary.", { mateId })
@@ -212,7 +206,6 @@ function parseMateSummary(serialized: string, mateId: string): MateSummary {
     createdAt: parsed.createdAt,
     currentRevision,
     id: mateId,
-    lifecycle: parsed.lifecycle as MateLifecycle,
     seq: parsed.seq,
     updatedAt: parsed.updatedAt,
   }

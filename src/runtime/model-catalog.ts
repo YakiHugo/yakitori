@@ -238,15 +238,6 @@ export function validateModelSelection(input: {
   }
 }
 
-export function catalogContextWindowTokens(input: {
-  readonly provider: string
-  readonly model: string
-}): number | undefined {
-  const entry = findCatalogEntry(input)
-  if (entry === undefined || !("contextWindowTokens" in entry)) return undefined
-  return entry.contextWindowTokens
-}
-
 // Mirrors Codex's ModelInfo::resolve_reasoning_effort: "ultra" is a picker
 // alias for delegation mode and never reaches the wire. It resolves to the
 // model's multi-agent effort when declared, then to "max", then to the last

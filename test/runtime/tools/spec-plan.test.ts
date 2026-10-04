@@ -4,10 +4,7 @@ import { createConfiguredModelsManager } from "../../../src/runtime/configured-m
 import { createModelProvider } from "../../../src/runtime/model-provider.ts"
 import { createProviderRegistry } from "../../../src/runtime/provider-registry.ts"
 import { SessionConfiguration } from "../../../src/runtime/session-configuration.ts"
-import {
-  createToolRegistry,
-  namespacedToolName,
-} from "../../../src/runtime/tools/registry.ts"
+import { createToolRegistry } from "../../../src/runtime/tools/registry.ts"
 import { captureStepContext } from "../../../src/runtime/tools/spec-plan.ts"
 import type { RuntimeTool } from "../../../src/runtime/tools/types.ts"
 
@@ -52,7 +49,7 @@ describe("Step tool planning", () => {
       models: [{ id: model }],
     })
     const registry = createToolRegistry()
-    registry.registerExternal(externalDeferredTool(), "calendar")
+    registry.replaceExternalSource("calendar", [externalDeferredTool()])
     const client = createProviderRegistry({
       [provider]: createModelProvider({
         info: {
@@ -85,6 +82,10 @@ describe("Step tool planning", () => {
     expect(
       step.toolRouter.modelDefinitions.map((entry) => entry.name),
     ).toContain(tool)
+    const toolNames = step.toolRouter.modelDefinitions.map(({ name }) => name)
+    if (wireApi === "openai_chat_completions")
+      expect(toolNames).not.toContain("view_image")
+    else expect(toolNames).toContain("view_image")
     if (protocol === "openai_deferred")
       expect(
         step.toolRouter.modelDefinitions.find((entry) => entry.name === tool)
@@ -152,7 +153,7 @@ describe("Step tool planning", () => {
   it("keeps unknown model capabilities conservative and falls back to meta-dispatch", () => {
     const registry = createToolRegistry()
     const deferred = externalDeferredTool()
-    registry.registerExternal(deferred, "calendar")
+    registry.replaceExternalSource("calendar", [deferred])
     const step = captureStepContext({
       registry,
       configuration: configuration(
@@ -175,7 +176,7 @@ describe("Step tool planning", () => {
 
   it("keeps Grok's model-visible catalog stable and resolves use_tool through the Step router", () => {
     const registry = createToolRegistry()
-    registry.registerExternal(externalDeferredTool(), "calendar")
+    registry.replaceExternalSource("calendar", [externalDeferredTool()])
     const step = captureStepContext({
       registry,
       configuration: configuration(
@@ -253,7 +254,7 @@ describe("Step tool planning", () => {
 
   it("keeps meta-dispatch and native deferred projections isolated", async () => {
     const registry = createToolRegistry()
-    registry.registerExternal(externalDeferredTool(), "calendar")
+    registry.replaceExternalSource("calendar", [externalDeferredTool()])
     const enabledTools = registry.trustedToolNames()
     const kimiTarget = target("kimi", "k3", "kimi")
     const kimi = captureStepContext({
@@ -332,7 +333,7 @@ function configuration(
 
 function externalDeferredTool(name = "search_events"): RuntimeTool {
   return {
-    toolName: namespacedToolName("calendar", name),
+    toolName: { namespace: "calendar", name },
     exposure: "deferred",
     description: "Search calendar events",
     inputSchema: {

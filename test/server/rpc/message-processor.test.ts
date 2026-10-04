@@ -916,6 +916,101 @@ describe("pending server requests", () => {
 })
 
 describe("inbound overload bound", () => {
+  it("releases closed queued requests while another connection's handler is still running", async () => {
+    const release = deferred<void>()
+    const calls: string[] = []
+    const { processor } = createTestProcessor({
+      handlers: createFakeHandlers({
+        readSession: async (input) => {
+          const sessionId = (input as { sessionId: string }).sessionId
+          calls.push(sessionId)
+          await release.promise
+          return okResult({ session: makeSessionDetail(sessionId) })
+        },
+      }),
+    })
+    const runningConnection = openTestConnection(processor)
+    const queuedConnection = openTestConnection(processor)
+    await initializeConnection(runningConnection)
+    await initializeConnection(queuedConnection)
+    const running = runningConnection.sendRequest("session/read", {
+      sessionId: "session_1",
+    })
+    await waitForCondition(() => calls.length === 1)
+
+    try {
+      for (let id = 1; id <= 127; id += 1) {
+        queuedConnection.sendRaw(
+          JSON.stringify({
+            id,
+            method: "session/read",
+            params: { sessionId: "session_1" },
+          }),
+        )
+      }
+      await expect(
+        runningConnection.sendRequest("session/list"),
+      ).resolves.toMatchObject({ error: { code: SERVER_OVERLOADED } })
+
+      await expect(
+        processor.closeConnection(queuedConnection.id),
+      ).resolves.toBe("drained")
+      const replacement = openTestConnection(processor)
+      await expect(
+        initializeConnection(replacement, { experimentalApi: true }),
+      ).resolves.toHaveProperty("result")
+      await expect(
+        replacement.sendRequest("server/diagnostics", {}),
+      ).resolves.toMatchObject({
+        result: { gauges: { rpc_inflight_requests: 2 } },
+      })
+      expect(calls).toEqual(["session_1"])
+    } finally {
+      release.resolve()
+      await running
+    }
+  })
+
+  it("releases requests whose connection closes before their first poll", async () => {
+    let calls = 0
+    const { processor } = createTestProcessor({
+      handlers: createFakeHandlers({
+        readSession: async () => {
+          calls += 1
+          return okResult({ session: makeSessionDetail("session_1") })
+        },
+      }),
+    })
+    const connection = openTestConnection(processor)
+    await initializeConnection(connection)
+
+    // Distinct keys dequeue all requests synchronously. Closing before the
+    // next microtask drops each one at its first poll, outside pending queues.
+    for (let id = 1; id <= 128; id += 1) {
+      connection.sendRaw(
+        JSON.stringify({
+          id,
+          method: "session/read",
+          params: { sessionId: `session_${id}` },
+        }),
+      )
+    }
+    await expect(processor.closeConnection(connection.id)).resolves.toBe(
+      "drained",
+    )
+
+    const replacement = openTestConnection(processor)
+    await expect(
+      initializeConnection(replacement, { experimentalApi: true }),
+    ).resolves.toHaveProperty("result")
+    await expect(
+      replacement.sendRequest("server/diagnostics", {}),
+    ).resolves.toMatchObject({
+      result: { gauges: { rpc_inflight_requests: 1 } },
+    })
+    expect(calls).toBe(0)
+  })
+
   it("rejects requests past the bound with SERVER_OVERLOADED while earlier requests complete", async () => {
     const gate = deferred<void>()
     let started = 0

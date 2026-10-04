@@ -15,7 +15,7 @@ describe("tool execution gate", () => {
     let laterReaderCount = 0
 
     const reader = (name: string, later = false) =>
-      gate.run(true, undefined, async () => {
+      gate.reserve(true, undefined).run(async () => {
         events.push(`start:${name}`)
         if (later) {
           laterReaderCount += 1
@@ -32,7 +32,7 @@ describe("tool execution gate", () => {
     const first = reader("a")
     const second = reader("b")
     await enteredReaders.promise
-    const writer = gate.run(false, undefined, async () => {
+    const writer = gate.reserve(false, undefined).run(async () => {
       events.push("start:write")
       enteredWriter.resolve()
       await releaseWriter.promise
@@ -63,22 +63,24 @@ describe("tool execution gate", () => {
     const gate = createToolExecutionGate()
     const releaseWriter = deferred<void>()
     const writerEntered = deferred<void>()
-    const writer = gate.run(false, undefined, async () => {
+    const writer = gate.reserve(false, undefined).run(async () => {
       writerEntered.resolve()
       await releaseWriter.promise
     })
     await writerEntered.promise
 
     const abort = new AbortController()
-    const waiting = gate.run(true, abort.signal, async () => "unreachable")
+    const waiting = gate
+      .reserve(true, abort.signal)
+      .run(async () => "unreachable")
     abort.abort()
     await expect(waiting).rejects.toMatchObject({ name: "AbortError" })
 
     releaseWriter.resolve()
     await writer
-    await expect(gate.run(true, undefined, async () => "next")).resolves.toBe(
-      "next",
-    )
+    await expect(
+      gate.reserve(true, undefined).run(async () => "next"),
+    ).resolves.toBe("next")
   })
 })
 

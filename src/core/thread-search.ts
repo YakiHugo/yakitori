@@ -1,4 +1,4 @@
-import type { StoredThread, ThreadSummary } from "./rollout.ts"
+import type { ThreadSummary } from "./rollout.ts"
 
 export type ThreadSearchOccurrence = Readonly<{
   turnId: string
@@ -6,44 +6,6 @@ export type ThreadSearchOccurrence = Readonly<{
   snippet: string
   snippetMatchRange: Readonly<{ start: number; end: number }>
 }>
-
-type VisibleSearchMessage = Readonly<{
-  seq: number
-  turnId: string
-  itemId: string
-  text: string
-}>
-
-export function firstVisibleThreadMatch(
-  stored: StoredThread,
-  searchTerm: string,
-): string | undefined {
-  const candidates = [
-    ...(stored.metadata.title === undefined
-      ? []
-      : [{ text: stored.metadata.title }]),
-    ...visibleSearchMessages(stored),
-  ]
-  for (const candidate of candidates) {
-    const match = literalMatches(candidate.text, searchTerm)[0]
-    if (match !== undefined)
-      return snippetForMatch(candidate.text, match).snippet
-  }
-  return undefined
-}
-
-export function visibleThreadSearchOccurrences(
-  stored: StoredThread,
-  searchTerm: string,
-): readonly ThreadSearchOccurrence[] {
-  return visibleSearchMessages(stored).flatMap((message) =>
-    literalMatches(message.text, searchTerm).map((match) => ({
-      turnId: message.turnId,
-      itemId: message.itemId,
-      ...snippetForMatch(message.text, match),
-    })),
-  )
-}
 
 export function compareThreadSummaries(
   left: ThreadSummary,
@@ -73,99 +35,6 @@ export function startAfterThreadCursor(
   return index < 0 ? summaries.length : index
 }
 
-function visibleSearchMessages(
-  stored: StoredThread,
-): readonly VisibleSearchMessage[] {
-  const users: VisibleSearchMessage[] = []
-  const completedTurns = new Map(
-    stored.rollout.flatMap(({ item }) =>
-      item.type === "turn_completed" && item.outcome === "completed"
-        ? [[item.turnId, item.completion] as const]
-        : [],
-    ),
-  )
-  const answerItems = new Map<string, VisibleSearchMessage>()
-  const assistantTurns = new Map<
-    string,
-    { lastToolSeq: number; finalText?: VisibleSearchMessage }
-  >()
-  for (const record of stored.rollout) {
-    if (record.item.type !== "response_item") continue
-    const envelope = record.item.item
-    const message = envelope.item
-    if (message.role === "user" && message.context === undefined) {
-      users.push({
-        seq: record.seq,
-        turnId: envelope.turnId,
-        itemId: envelope.id,
-        text: markdownVisibleText(
-          message.content.map((block) => block.text).join("\n"),
-        ),
-      })
-      continue
-    }
-    if (message.role === "tool") {
-      const state = assistantTurns.get(envelope.turnId) ?? { lastToolSeq: -1 }
-      state.lastToolSeq = record.seq
-      assistantTurns.set(envelope.turnId, state)
-      continue
-    }
-    if (message.role !== "assistant") continue
-    const rawText = message.content
-      .filter((block) => block.type === "text")
-      .map((block) => block.text)
-      .join("")
-    answerItems.set(envelope.id, {
-      seq: record.seq,
-      turnId: envelope.turnId,
-      itemId: envelope.id,
-      text: rawText,
-    })
-    const text = markdownVisibleText(rawText)
-    const state = assistantTurns.get(envelope.turnId) ?? { lastToolSeq: -1 }
-    if (text === "") {
-      delete state.finalText
-      assistantTurns.set(envelope.turnId, state)
-      continue
-    }
-    state.finalText = {
-      seq: record.seq,
-      turnId: envelope.turnId,
-      itemId: envelope.id,
-      text,
-    }
-    assistantTurns.set(envelope.turnId, state)
-  }
-  const finalAssistants = [...completedTurns.entries()].flatMap(
-    ([turnId, completion]) => {
-      if (completion?.answerItemIds !== undefined) {
-        const pieces = completion.answerItemIds.map((id) => {
-          const item = answerItems.get(id)
-          if (item?.turnId !== turnId) {
-            throw new Error(
-              `Turn answer references missing assistant item ${id}.`,
-            )
-          }
-          return item
-        })
-        const anchor = pieces.at(-1)
-        const text = markdownVisibleText(
-          pieces.map((piece) => piece.text).join(""),
-        )
-        return anchor === undefined || text === "" ? [] : [{ ...anchor, text }]
-      }
-      const state = assistantTurns.get(turnId)
-      return state?.finalText !== undefined &&
-        state.finalText.seq > state.lastToolSeq
-        ? [state.finalText]
-        : []
-    },
-  )
-  return [...users, ...finalAssistants].sort(
-    (left, right) => left.seq - right.seq,
-  )
-}
-
 export function markdownVisibleText(markdown: string): string {
   const withoutFences = markdown.replace(/^\s*```[^\n]*$/gm, "")
   return decodeMarkdownEntities(
@@ -179,10 +48,10 @@ export function markdownVisibleText(markdown: string): string {
       .replace(/\s*\|\s*/g, " ")
       .replace(/(\*\*|__|~~|\*|_)/g, "")
       .replace(/\\([\\`*{}[\]()#+.!_-])/g, "$1")
-      .replace(/<[^>]+>/g, "")
-      .replace(/\s+/gu, " ")
-      .trim(),
+      .replace(/<[^>]+>/g, ""),
   )
+    .replace(/\s+/gu, " ")
+    .trim()
 }
 
 function decodeMarkdownEntities(value: string): string {
@@ -194,13 +63,28 @@ function decodeMarkdownEntities(value: string): string {
     quot: '"',
   }
   return value.replace(
-    /&(?:#(\d+)|#x([0-9a-f]+)|([a-z]+));/gi,
+    /&(?:#(\d{1,7})|#x([0-9a-f]{1,6})|([a-z]+));/gi,
     (entity, decimal, hex, name) => {
-      if (typeof decimal === "string")
-        return String.fromCodePoint(Number(decimal))
-      if (typeof hex === "string")
-        return String.fromCodePoint(Number.parseInt(hex, 16))
-      return named[String(name).toLowerCase()] ?? entity
+      if (typeof decimal !== "string" && typeof hex !== "string")
+        return named[String(name).toLowerCase()] ?? entity
+      const code = Number.parseInt(
+        typeof decimal === "string" ? decimal : hex,
+        typeof decimal === "string" ? 10 : 16,
+      )
+      // Match the GUI's CommonMark parser for controls, surrogates,
+      // noncharacters and code points outside Unicode's range.
+      if (
+        code < 9 ||
+        code === 11 ||
+        (code > 13 && code < 32) ||
+        (code > 126 && code < 160) ||
+        (code >= 0xd800 && code <= 0xdfff) ||
+        (code >= 0xfdd0 && code <= 0xfdef) ||
+        code % 0x10000 >= 0xfffe ||
+        code > 0x10ffff
+      )
+        return "\uFFFD"
+      return String.fromCodePoint(code)
     },
   )
 }

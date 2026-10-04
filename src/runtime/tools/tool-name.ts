@@ -10,13 +10,6 @@ export function plainToolName(name: string): ToolName {
   return { name }
 }
 
-export function namespacedToolName(namespace: string, name: string): ToolName {
-  validateSegment(namespace, "tool namespace")
-  validateSegment(name, "tool")
-  validateNamespacedBoundary(namespace, name)
-  return { namespace, name }
-}
-
 export function canonicalToolName(toolName: ToolName): string {
   validateSegment(toolName.name, "tool")
   if (toolName.namespace !== undefined) {

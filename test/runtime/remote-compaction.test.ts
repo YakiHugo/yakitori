@@ -76,8 +76,7 @@ describe("provider-native compaction history", () => {
         }
       },
     })
-    const client = provider.createClient()
-    const session = client.startTurn()
+    const session = provider.startTurn()
     const events = []
     try {
       for await (const event of session.stream({
@@ -95,7 +94,6 @@ describe("provider-native compaction history", () => {
         events.push(event)
     } finally {
       await session.close()
-      await client.close()
     }
     expect(attempts).toBe(3)
     expect(events.filter((event) => event.type === "failure")).toHaveLength(1)

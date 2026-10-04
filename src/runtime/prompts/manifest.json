@@ -48,7 +48,7 @@
     "sha256": "0972574f9d43b6c30321624b9ba5eec3a47db32251b7ba6d94807bf5295170e3"
   },
   "gpt-5.6-terra": {
-    "file": "codex-gpt-5.6-terra.md",
+    "file": "codex-gpt-5.6-sol.md",
     "agent": "codex",
     "source": "https://chatgpt.com/backend-api/codex/models",
     "version": "2026-09-10",
@@ -56,7 +56,7 @@
     "sha256": "0972574f9d43b6c30321624b9ba5eec3a47db32251b7ba6d94807bf5295170e3"
   },
   "gpt-5.6-luna": {
-    "file": "codex-gpt-5.6-luna.md",
+    "file": "codex-gpt-5.6-sol.md",
     "agent": "codex",
     "source": "https://chatgpt.com/backend-api/codex/models",
     "version": "2026-09-10",

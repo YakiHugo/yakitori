@@ -7,7 +7,10 @@ import {
   type MateEvent,
   type MateEventEnvelope,
 } from "../../src/mates/events.ts"
-import { projectMate, summarizeMate } from "../../src/mates/mate-projector.ts"
+import {
+  projectMate,
+  type MateSummary,
+} from "../../src/mates/mate-projector.ts"
 import {
   invalidMateListCursor,
   type MateStore,
@@ -18,7 +21,7 @@ import {
 
 export function createMemoryMateStore(): MateStore {
   const mates = new Map<string, MateEventEnvelope[]>()
-  const summaries = new Map<string, ReturnType<typeof summarizeMate>>()
+  const summaries = new Map<string, MateSummary>()
 
   return {
     async appendEvent(mateId, event, options = {}) {
@@ -66,13 +69,13 @@ export function createMemoryMateStore(): MateStore {
     mates.set(mateId, [...existing, envelope])
     const mate = projectMate(mates.get(mateId) ?? [])
     if (!mate) throw new Error("Expected a mate projection.")
-    summaries.set(mateId, summarizeMate(mate))
+    summaries.set(mateId, mate)
     return envelope
   }
 }
 
 function requireSummary(
-  summaries: ReadonlyMap<string, ReturnType<typeof summarizeMate>>,
+  summaries: ReadonlyMap<string, MateSummary>,
   mateId: string,
 ) {
   const summary = summaries.get(mateId)

@@ -11,7 +11,8 @@ type SerializationAccess = "exclusive" | "sharedRead"
 type QueuedTask = {
   access: SerializationAccess
   task: () => Promise<void>
-  gate?: ConnectionRpcGate
+  gate: ConnectionRpcGate | undefined
+  onDiscard: (() => void) | undefined
 }
 
 type QueueState = {
@@ -32,6 +33,7 @@ export class RequestSerializationQueues {
     scope: RequestSerializationScope,
     task: () => Promise<void>,
     gate?: ConnectionRpcGate,
+    onDiscard?: () => void,
   ): void {
     const { key, access } = queueKey(scope)
     let state = this.queues.get(key)
@@ -39,8 +41,19 @@ export class RequestSerializationQueues {
       state = { pending: [], runningReads: 0, exclusiveRunning: false }
       this.queues.set(key, state)
     }
-    state.pending.push({ access, task, ...(gate ? { gate } : {}) })
+    state.pending.push({ access, task, gate, onDiscard })
     this.schedule(key, state)
+  }
+
+  discardClosed(): void {
+    for (const [key, state] of this.queues) {
+      state.pending = state.pending.filter((queued) => {
+        if (queued.gate === undefined || queued.gate.isAccepting()) return true
+        queued.onDiscard?.()
+        return false
+      })
+      this.schedule(key, state)
+    }
   }
 
   private schedule(key: string, state: QueueState): void {
@@ -55,7 +68,10 @@ export class RequestSerializationQueues {
       state.pending.shift()
       // A task whose connection closed while it queued is skipped without
       // stalling the queue (Codex drops it unpolled at the gate).
-      if (next.gate && !next.gate.isAccepting()) continue
+      if (next.gate && !next.gate.isAccepting()) {
+        next.onDiscard?.()
+        continue
+      }
       if (next.access === "exclusive") {
         state.exclusiveRunning = true
         runQueuedTask(next, () => {
@@ -101,6 +117,7 @@ function runQueuedTask(queued: QueuedTask, onDone: () => void): void {
       // under the lock) so a connection closed in between is still skipped
       // without stalling the queue.
       if (queued.gate !== undefined && !queued.gate.isAccepting()) {
+        queued.onDiscard?.()
         return undefined
       }
       return queued.task()

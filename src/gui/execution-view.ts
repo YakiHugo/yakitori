@@ -185,7 +185,7 @@ export type ExecutionViewState = Readonly<{
   openCompactionItems: Readonly<Record<string, string>>
   queuedInputs: Readonly<Record<string, ApiPendingInput>>
   // A queued or admitted event confirms that the server owns the request;
-  // the admission outbox acknowledges against this set after replay too.
+  // pending admission recovery acknowledges against this set after replay too.
   admittedRequestIds: Readonly<Record<string, true>>
   timeToFirstTokenWeightedMs: number
   timeToFirstTokenSamples: number

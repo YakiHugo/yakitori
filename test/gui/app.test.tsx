@@ -107,6 +107,24 @@ describe("app shell", () => {
     )
   })
 
+  it("keeps model catalog failures visible while unrelated tasks clear their messages", () => {
+    useAppStore.setState({
+      providersError: "The model catalog is unavailable.",
+      message: "Another task failed.",
+      sessionsByProject: {
+        [sessionListKey(undefined, { sectionId: "pinned" })]: { sessions: [] },
+      },
+    })
+    render(<App />)
+    expect(screen.getByRole("alert").textContent).toBe("Another task failed.")
+    act(() => useAppStore.setState({ message: "" }))
+    expect(screen.getByRole("alert").textContent).toBe(
+      "The model catalog is unavailable.",
+    )
+    act(() => useAppStore.setState({ providersError: undefined }))
+    expect(screen.queryByRole("alert")).toBeNull()
+  })
+
   it("restores an archived session via the composer restore button", async () => {
     const user = userEvent.setup()
     const changeSidebar = vi.fn((_change: SidebarChange) =>
@@ -180,17 +198,27 @@ describe("app shell", () => {
     useAppStore.setState({
       selection: { sessionId },
       selectedSession: sessionDetail({ activeTurnId: "turn_1" }),
-      queuedItems: [{
-        id: "input_2",
-        sessionId,
-        input: { submissionId: "request_2", content: { kind: "text", text: "queued follow-up" } },
-        createdAt: "2026-01-01T00:00:00.000Z",
-      }],
-      execution: seedExecution([createEventEnvelope({
-        sessionId,
-        seq: 1,
-        event: { type: EventType.TurnStarted, data: { turnId: "turn_1", inputId: "input_1" } },
-      })]),
+      queuedItems: [
+        {
+          id: "input_2",
+          sessionId,
+          input: {
+            submissionId: "request_2",
+            content: { kind: "text", text: "queued follow-up" },
+          },
+          createdAt: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+      execution: seedExecution([
+        createEventEnvelope({
+          sessionId,
+          seq: 1,
+          event: {
+            type: EventType.TurnStarted,
+            data: { turnId: "turn_1", inputId: "input_1" },
+          },
+        }),
+      ]),
     })
     render(<App />)
 

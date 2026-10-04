@@ -1,7 +1,5 @@
 import { createYakitoriError, YakitoriErrorCode } from "../kernel/errors.ts"
 import {
-  MateEventType,
-  MateLifecycle,
   isMateProfile,
   type MateEventEnvelope,
   type MateProfile,
@@ -14,24 +12,15 @@ export type MateRevision = MateProfile & {
   readonly revision: number
 }
 
-export type MateProjection = {
-  readonly createdAt: string
-  readonly currentRevision: MateRevision
-  readonly id: string
-  readonly lifecycle: MateLifecycle
-  readonly revisions: readonly MateRevision[]
-  readonly seq: number
-  readonly updatedAt: string
-}
+export type MateProjection = Readonly<{
+  createdAt: string
+  currentRevision: MateRevision
+  id: string
+  seq: number
+  updatedAt: string
+}>
 
-export type MateSummary = {
-  readonly createdAt: string
-  readonly currentRevision: MateRevision
-  readonly id: string
-  readonly lifecycle: MateLifecycle
-  readonly seq: number
-  readonly updatedAt: string
-}
+export type MateSummary = MateProjection
 
 export function projectMate(
   events: readonly MateEventEnvelope[],
@@ -39,97 +28,28 @@ export function projectMate(
   const first = events.at(0)
   if (!first) return undefined
   requireEventIdentity(first.mateId, events)
-  if (first.type !== MateEventType.Created) {
-    throw invalidReplay("Mate history must start with mate.created.", first)
+  if (events.length > 1) {
+    throw invalidReplay(
+      "Mate history contains more than one mate.created.",
+      events[1],
+    )
   }
   requireProfile(first.data.profile, first)
   requireRevisionId(first.data.revisionId, first)
 
-  const revisions: MateRevision[] = [
-    {
-      ...first.data.profile,
-      createdAt: first.createdAt,
-      id: first.data.revisionId,
-      revision: 1,
-    },
-  ]
-  let lifecycle: MateLifecycle = MateLifecycle.Active
-
-  for (const event of events.slice(1)) {
-    if (event.type === MateEventType.Created) {
-      throw invalidReplay(
-        "Mate history contains more than one mate.created.",
-        event,
-      )
-    }
-    if (event.type === MateEventType.ProfileRevised) {
-      if (lifecycle !== MateLifecycle.Active) {
-        throw invalidReplay(
-          "Inactive mates cannot revise their profile.",
-          event,
-        )
-      }
-      requireProfile(event.data.profile, event)
-      const expectedRevision = revisions.length + 1
-      if (event.data.revision !== expectedRevision) {
-        throw invalidReplay(
-          `Mate revision must be ${expectedRevision}, got ${event.data.revision}.`,
-          event,
-        )
-      }
-      requireRevisionId(event.data.revisionId, event)
-      if (revisions.some((revision) => revision.id === event.data.revisionId)) {
-        throw invalidReplay("Mate revision ids must be unique.", event)
-      }
-      revisions.push({
-        ...event.data.profile,
-        createdAt: event.createdAt,
-        id: event.data.revisionId,
-        revision: event.data.revision,
-      })
-      continue
-    }
-    if (event.type === MateEventType.LifecycleChanged) {
-      if (event.data.lifecycle === lifecycle) {
-        throw invalidReplay(
-          `Mate lifecycle is already ${event.data.lifecycle}.`,
-          event,
-        )
-      }
-      lifecycle = event.data.lifecycle
-      continue
-    }
-    throw invalidReplay("Mate history contains an unknown event type.", event)
-  }
-
-  const currentRevision = revisions.at(-1)
-  const last = events.at(-1)
-  if (!currentRevision || !last) {
-    throw invalidReplay(
-      "Mate history did not produce a current revision.",
-      first,
-    )
+  const currentRevision: MateRevision = {
+    ...first.data.profile,
+    createdAt: first.createdAt,
+    id: first.data.revisionId,
+    revision: 1,
   }
 
   return {
     createdAt: first.createdAt,
     currentRevision,
     id: first.mateId,
-    lifecycle,
-    revisions,
-    seq: last.seq,
-    updatedAt: last.createdAt,
-  }
-}
-
-export function summarizeMate(mate: MateProjection): MateSummary {
-  return {
-    createdAt: mate.createdAt,
-    currentRevision: mate.currentRevision,
-    id: mate.id,
-    lifecycle: mate.lifecycle,
-    seq: mate.seq,
-    updatedAt: mate.updatedAt,
+    seq: first.seq,
+    updatedAt: first.createdAt,
   }
 }
 

@@ -29,7 +29,6 @@ import {
   createMateKernel,
   createSqliteMateStore,
   type MateKernel,
-  MateLifecycle,
   type MateProjection,
   type SqliteMateStore,
 } from "../mates/index.ts"
@@ -345,7 +344,7 @@ export async function createYakitoriApplication(
     // One physical desktop is shared by every session in this server. Hold
     // ownership across model steps so focus/input from two turns cannot mix.
     let computerOwner: string | undefined
-    const activeMate = await resolveActiveMate(mateKernel, activeMateId)
+    const activeMate = await resolveMate(mateKernel, activeMateId)
     const sessionDefaults: SessionCreateDefaults = {
       workingDirectory: workspace,
       mateId: activeMate.id,
@@ -1571,7 +1570,11 @@ async function configureProviders(
   }
   if (input.provider === "faux") {
     providers.faux = createModelProvider({
-      info: providerInfo("faux", "faux"),
+      info: {
+        id: "faux",
+        wireApi: "faux",
+        capabilities: { remoteCompaction: false, nativePdf: false },
+      },
       stream: createFauxScenarioStream(input.fauxScenario ?? "text"),
     })
     return {
@@ -1665,8 +1668,13 @@ function createApiKeyProvider(
 ): ModelProvider {
   if (provider === "openai") {
     return createModelProvider({
-      info: providerInfo(provider, "openai_responses"),
-      createAttemptStream: () => createOpenAIProvider({ apiKey, model }),
+      info: {
+        id: provider,
+        wireApi: "openai_responses",
+        capabilities: { remoteCompaction: false, nativePdf: true },
+      },
+      createAttemptStream: () =>
+        createOpenAIProvider({ apiKey, model, baseURL: OPENAI_API_BASE_URL }),
       continuationScope: createProviderContinuationScope(
         provider,
         OPENAI_API_BASE_URL,
@@ -1677,12 +1685,19 @@ function createApiKeyProvider(
   const baseURL =
     provider === "kimi" ? KIMI_CODE_API_BASE_URL : ANTHROPIC_API_BASE_URL
   return createModelProvider({
-    info: providerInfo(provider, "anthropic_messages"),
+    info: {
+      id: provider,
+      wireApi: "anthropic_messages",
+      capabilities: {
+        remoteCompaction: false,
+        nativePdf: provider === "anthropic",
+      },
+    },
     createAttemptStream: () =>
       createAnthropicProvider({
         apiKey,
         model,
-        ...(provider === "kimi" ? { baseURL: KIMI_CODE_API_BASE_URL } : {}),
+        baseURL,
       }),
     continuationScope: createProviderContinuationScope(
       provider,
@@ -1736,7 +1751,11 @@ async function registerCodexLogin(
   if (login === undefined) return
   if (login.kind === "chatgpt") {
     providers.codex = createModelProvider({
-      info: providerInfo("codex", "openai_responses"),
+      info: {
+        id: "codex",
+        wireApi: "openai_responses",
+        capabilities: { remoteCompaction: true, nativePdf: false },
+      },
       createTurnStream: () => createCodexProvider({ credentialsPath }),
       models: createDiscoveringModelsManager({
         provider: "codex",
@@ -1761,11 +1780,16 @@ async function registerCodexLogin(
   }
   if (providers.openai === undefined) {
     providers.openai = createModelProvider({
-      info: providerInfo("openai", "openai_responses"),
+      info: {
+        id: "openai",
+        wireApi: "openai_responses",
+        capabilities: { remoteCompaction: false, nativePdf: true },
+      },
       createAttemptStream: () =>
         createOpenAIProvider({
           apiKey: login.apiKey,
           model: "selected-at-request-time",
+          baseURL: OPENAI_API_BASE_URL,
         }),
       continuationScope: createProviderContinuationScope(
         "openai",
@@ -1889,7 +1913,7 @@ export async function resolveWorkspaceDirectory(
   return resolved
 }
 
-async function resolveActiveMate(
+async function resolveMate(
   mateKernel: MateKernel,
   configuredMateId: string | undefined,
 ): Promise<MateProjection> {
@@ -1898,21 +1922,18 @@ async function resolveActiveMate(
     if (!read.mate) {
       throw new Error(`Configured Mate was not found: ${configuredMateId}`)
     }
-    if (read.mate.lifecycle !== MateLifecycle.Active) {
-      throw new Error(`Configured Mate is inactive: ${configuredMateId}`)
-    }
     return read.mate
   }
 
-  const activeMates = await listAllActiveMateIds(mateKernel)
+  const mateIds = await listAllMateIds(mateKernel)
 
-  if (activeMates.length > 1) {
+  if (mateIds.length > 1) {
     throw new Error(
-      `Multiple active Mates found (${activeMates.join(", ")}). Set YAKITORI_MATE_ID to select one.`,
+      `Multiple Mates found (${mateIds.join(", ")}). Set YAKITORI_MATE_ID to select one.`,
     )
   }
 
-  const mateId = activeMates[0]
+  const mateId = mateIds[0]
   if (mateId !== undefined) {
     const read = await mateKernel.readMate({ mateId })
     if (!read.mate) {
@@ -1925,8 +1946,8 @@ async function resolveActiveMate(
   return created.mate
 }
 
-async function listAllActiveMateIds(mateKernel: MateKernel): Promise<string[]> {
-  const activeMateIds: string[] = []
+async function listAllMateIds(mateKernel: MateKernel): Promise<string[]> {
+  const mateIds: string[] = []
   let cursor: string | undefined
   for (;;) {
     const page = await mateKernel.listMates({
@@ -1934,9 +1955,9 @@ async function listAllActiveMateIds(mateKernel: MateKernel): Promise<string[]> {
       ...(cursor === undefined ? {} : { cursor }),
     })
     for (const mate of page.mates) {
-      if (mate.lifecycle === MateLifecycle.Active) activeMateIds.push(mate.id)
+      mateIds.push(mate.id)
     }
-    if (page.nextCursor === undefined) return activeMateIds
+    if (page.nextCursor === undefined) return mateIds
     cursor = page.nextCursor
   }
 }
@@ -1947,7 +1968,11 @@ function createGrokProvider(modelsCacheDir: string): ModelProvider {
   // application startup. The same lazy stream supports primary and switched
   // Grok Turns.
   return createModelProvider({
-    info: providerInfo("grok", "openai_responses"),
+    info: {
+      id: "grok",
+      wireApi: "openai_responses",
+      capabilities: { remoteCompaction: false, nativePdf: false },
+    },
     createAttemptStream: (attempt) => {
       const forceHttp1 =
         attempt.number > 1 &&
@@ -2015,17 +2040,6 @@ function createGrokProvider(modelsCacheDir: string): ModelProvider {
       }),
     }),
   })
-}
-
-function providerInfo(
-  id: string,
-  wireApi: ModelProvider["info"]["wireApi"],
-): ModelProvider["info"] {
-  return {
-    id,
-    wireApi,
-    capabilities: { remoteCompaction: id === "codex" },
-  }
 }
 
 function createFauxScenarioStream(scenario: string): StreamFn {

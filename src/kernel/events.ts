@@ -251,14 +251,6 @@ export type ModelMessage =
   | ModelAssistantMessage
   | ModelToolResultMessage
 
-export type AssistantContentBlock =
-  | { readonly type: "text"; readonly text: string }
-  | {
-      readonly type: "reasoning"
-      readonly text: string
-      readonly providerMetadata?: EventMetadata
-    }
-
 export type KernelError = {
   readonly message: string
   readonly code?: string
@@ -451,17 +443,6 @@ export type TurnOutcome =
   | Readonly<{ status: "failed"; error: KernelError }>
   | Readonly<{ status: "cancelled"; reason?: string }>
   | Readonly<{ status: "interrupted"; reason?: string }>
-
-export type ToolExecutionType =
-  | "command_execution"
-  | "file_change"
-  | "file_read"
-  | "file_search"
-  | "web_fetch"
-  | "web_search"
-  | "collaboration_tool_call"
-  | "mcp_tool_call"
-  | "dynamic_tool_call"
 
 export type CollaborationAction =
   | "spawn"
@@ -907,8 +888,6 @@ function isReasoningItem(
 
 function isStartedExecutionItem(value: unknown): value is StartedExecutionItem {
   if (!isRecord(value)) return false
-  if (value.type === "agent_message") return isAgentMessageItem(value)
-  if (value.type === "reasoning") return isReasoningItem(value)
   if (value.type === "context_compaction") {
     return onlyKeys(value, ["type", "itemId"]) && isString(value.itemId)
   }
@@ -1661,8 +1640,7 @@ function isSessionExecutionPolicyDefaults(
     Object.keys(value).length === sessionExecutionPolicyKeys.length &&
     Object.values(value).every(
       (item) => typeof item === "number" && Number.isFinite(item) && item >= 0,
-    ) &&
-    true
+    )
   )
 }
 
@@ -1698,7 +1676,6 @@ function optionalFieldsAreValid(data: Record<string, unknown>): boolean {
     "forkedFromInputId",
     "parentInputId",
     "parentTurnId",
-    "subject",
   ] as const) {
     if (key in data && data[key] !== undefined && !isString(data[key]))
       return false

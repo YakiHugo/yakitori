@@ -3,57 +3,21 @@ import { YakitoriErrorCode } from "../../src/kernel/errors.ts"
 import {
   createMateEventEnvelope,
   MateEventType,
-  MateLifecycle,
 } from "../../src/mates/events.ts"
 import { createMateId, createMateRevisionId } from "../../src/mates/ids.ts"
 import { projectMate } from "../../src/mates/mate-projector.ts"
 
 describe("mate projector", () => {
-  it("rejects skipped profile revision numbers", () => {
-    const mateId = createMateId()
-
-    expect(() =>
-      projectMate([
-        createdEvent(mateId),
-        createMateEventEnvelope({
-          event: {
-            type: MateEventType.ProfileRevised,
-            data: {
-              profile: profile("Revised"),
-              revision: 3,
-              revisionId: createMateRevisionId(),
-            },
-          },
-          mateId,
-          seq: 2,
-        }),
-      ]),
-    ).toThrow(
-      expect.objectContaining({ code: YakitoriErrorCode.InvalidEventLog }),
-    )
-  })
-
   it("rejects events from another mate", () => {
     const mateId = createMateId()
 
     expect(() =>
-      projectMate([
-        createdEvent(mateId),
-        createMateEventEnvelope({
-          event: {
-            type: MateEventType.ProfileRevised,
-            data: {
-              profile: profile("Revised"),
-              revision: 2,
-              revisionId: createMateRevisionId(),
-            },
-          },
-          mateId: createMateId(),
-          seq: 2,
-        }),
-      ]),
+      projectMate([createdEvent(mateId), createdEvent(createMateId(), 2)]),
     ).toThrow(
-      expect.objectContaining({ code: YakitoriErrorCode.InvalidEventLog }),
+      expect.objectContaining({
+        code: YakitoriErrorCode.InvalidEventLog,
+        message: "Mate event belongs to another mate.",
+      }),
     )
   })
 
@@ -62,38 +26,6 @@ describe("mate projector", () => {
 
     expect(() =>
       projectMate([createdEvent(mateId), createdEvent(mateId, 2)]),
-    ).toThrow(
-      expect.objectContaining({ code: YakitoriErrorCode.InvalidEventLog }),
-    )
-  })
-
-  it("rejects profile revisions while inactive", () => {
-    const mateId = createMateId()
-
-    expect(() =>
-      projectMate([
-        createdEvent(mateId),
-        createMateEventEnvelope({
-          event: {
-            type: MateEventType.LifecycleChanged,
-            data: { lifecycle: MateLifecycle.Inactive },
-          },
-          mateId,
-          seq: 2,
-        }),
-        createMateEventEnvelope({
-          event: {
-            type: MateEventType.ProfileRevised,
-            data: {
-              profile: profile("Revised"),
-              revision: 2,
-              revisionId: createMateRevisionId(),
-            },
-          },
-          mateId,
-          seq: 3,
-        }),
-      ]),
     ).toThrow(
       expect.objectContaining({ code: YakitoriErrorCode.InvalidEventLog }),
     )

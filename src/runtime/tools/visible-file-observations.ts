@@ -4,12 +4,6 @@ import type {
   ModelMessage,
 } from "../../kernel/index.ts"
 
-export type StoredToolObservation = {
-  readonly name: string
-  readonly state: string
-  readonly output?: JsonValue
-}
-
 export type FileObservationKind = FileObservation["kind"]
 export type FileObservationGrant = FileObservation
 
@@ -28,17 +22,8 @@ export type VisibleFileObservations = {
   apply(grant: FileObservationGrant): void
 }
 
-export function createVisibleFileObservations(
-  tools: readonly StoredToolObservation[] = [],
-): VisibleFileObservations {
+export function createVisibleFileObservations(): VisibleFileObservations {
   const revisions = new Map<string, VisibleFileRevision>()
-  for (const tool of tools) {
-    if (tool.state === "completed" && tool.output !== undefined) {
-      for (const grant of grantsFromToolOutput(tool.name, tool.output)) {
-        applyGrant(revisions, grant)
-      }
-    }
-  }
   return {
     latest(path) {
       return revisions.get(normalizePath(path))
@@ -62,7 +47,6 @@ export function createVisibleFileObservationsFromMessages(
 }
 
 export function grantsFromToolOutput(
-  name: string,
   output: JsonValue,
 ): readonly FileObservationGrant[] {
   if (!isRecord(output)) return []
@@ -76,8 +60,7 @@ export function grantsFromToolOutput(
       return grant === undefined ? [] : [grant]
     })
   }
-  const grant = inferLegacyGrant(name, output)
-  return grant === undefined ? [] : [grant]
+  return []
 }
 
 function applyGrant(
@@ -171,52 +154,6 @@ function parseExplicitGrant(value: unknown): FileObservationGrant | undefined {
     ...(value.created === true ? { created: true } : {}),
     ...(value.optimisticRebase === true ? { optimisticRebase: true } : {}),
   }
-}
-
-function inferLegacyGrant(
-  name: string,
-  output: Record<string, unknown>,
-): FileObservationGrant | undefined {
-  if (name === "read_file") {
-    const path = stringField(output, "path")
-    if (path === undefined) return undefined
-    const sha256 = shaField(output)
-    if (output.complete === true && sha256 !== undefined) {
-      return {
-        path,
-        kind: "whole_file_read",
-        complete: true,
-        sha256,
-      }
-    }
-    const range = isRecord(output.range) ? output.range : undefined
-    const offset = numberField(range, "offset")
-    const limit = numberField(range, "limit")
-    if (offset === undefined || limit === undefined || limit < 1)
-      return undefined
-    return {
-      path,
-      kind: "ranged_read",
-      complete: false,
-      ranges: [{ startLine: offset, endLine: offset + limit - 1 }],
-    }
-  }
-
-  if (name === "write_file" || name === "edit_file") {
-    const path = stringField(output, "path")
-    const sha256 = shaField(output)
-    if (path === undefined || sha256 === undefined) return undefined
-    return {
-      path,
-      kind: name === "write_file" ? "write" : "edit",
-      complete: name === "write_file" || output.created === true,
-      sha256,
-      ...(output.created === true ? { created: true } : {}),
-      ...(output.optimisticRebase === true ? { optimisticRebase: true } : {}),
-    }
-  }
-
-  return undefined
 }
 
 function parseRanges(

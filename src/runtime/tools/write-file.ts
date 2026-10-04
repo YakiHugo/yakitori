@@ -73,9 +73,7 @@ export function createWriteFileTool(
         expectedSha256: observed?.sha256 ?? null,
       })
       if (!written.ok) return written
-      const observedResult = withFileObservation(written, "write")
-      if (!observedResult.ok) return observedResult
-      return observedResult
+      return withFileObservation(written)
     },
   }
 }
@@ -137,9 +135,8 @@ function parseWriteInput(
 }
 
 function withFileObservation(
-  written: Extract<ToolExecutionResult, { readonly ok: true }>,
-  kind: "write" | "edit",
-): ToolExecutionResult {
+  written: Extract<ToolExecutionResult, { ok: true }>,
+): Extract<ToolExecutionResult, { ok: true }> {
   if (!isRecord(written.output) || typeof written.output.path !== "string") {
     return written
   }
@@ -154,7 +151,7 @@ function withFileObservation(
       ...written.output,
       fileObservation: {
         path: written.output.path,
-        kind,
+        kind: "write",
         complete: true,
         sha256,
         ...(written.output.created === true ? { created: true } : {}),

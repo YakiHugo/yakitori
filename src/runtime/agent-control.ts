@@ -183,7 +183,8 @@ export function createAgentControl(input: {
   const agents = new Map<string, AgentRecord>()
   const paths = new Map<string, string>()
   const reservedPaths = new Set<string>()
-  const reservedSlots = new Map<string, number>()
+  const executionSlots = new Map<string, Promise<void>>()
+  const pendingFollowups = new Map<string, number>()
   const updates = new Map<string, AgentUpdate[]>()
   const waiters = new Map<string, Set<() => void>>()
   const runs = new Map<string, Promise<void>>()
@@ -274,6 +275,7 @@ export function createAgentControl(input: {
     paths.delete(pathKey(agent.rootSessionId, agent.path))
     updates.delete(agentId)
     tasks.delete(agentId)
+    releaseIdleExecutionSlot(agent.path)
   }
 
   function ensureReady(): Promise<void> {
@@ -316,22 +318,9 @@ export function createAgentControl(input: {
             `Agent task name ${taskName} already exists under ${actor.path}.`,
           )
         }
-        const reserved = reservedSlots.get(actor.rootSessionId) ?? 0
         reservedPaths.add(key)
-        reservedSlots.set(actor.rootSessionId, reserved + 1)
         const operation = (async () => {
-          const childStatuses = await Promise.all(
-            Array.from(agents.values())
-              .filter((candidate) => candidate.depth > 0)
-              .map((candidate) => input.adapter.getStatus(candidate.agentId)),
-          )
-          const runningChildren = childStatuses.filter(isRunning).length
-          if (runningChildren + reserved >= maxConcurrentAgents - 1) {
-            throw new AgentControlError(
-              "agent_concurrency_limit_reached",
-              `Agent tree ${actor.rootSessionId} already has ${String(runningChildren)} running subagents; the configured limit is ${String(maxConcurrentAgents - 1)}.`,
-            )
-          }
+          await reserveExecutionSlot(path)
           const forkedContext = input.adapter.captureForkContext({
             parentSessionId: sessionId,
             forkTurns: request.forkTurns,
@@ -397,9 +386,7 @@ export function createAgentControl(input: {
         } finally {
           inFlightSpawns.delete(spawn)
           reservedPaths.delete(key)
-          const remaining = (reservedSlots.get(actor.rootSessionId) ?? 1) - 1
-          if (remaining === 0) reservedSlots.delete(actor.rootSessionId)
-          else reservedSlots.set(actor.rootSessionId, remaining)
+          releaseIdleExecutionSlot(path)
         }
       },
       async sendMessage(request) {
@@ -427,8 +414,20 @@ export function createAgentControl(input: {
           )
         }
         await input.adapter.ensureLoaded(targetAgent.agentId)
-        start(targetAgent, request.message, target)
-        return { agentId: targetAgent.agentId, path: targetAgent.path }
+        pendingFollowups.set(
+          targetAgent.path,
+          (pendingFollowups.get(targetAgent.path) ?? 0) + 1,
+        )
+        try {
+          await reserveExecutionSlot(targetAgent.path)
+          start(targetAgent, request.message, target)
+          return { agentId: targetAgent.agentId, path: targetAgent.path }
+        } finally {
+          const remaining = (pendingFollowups.get(targetAgent.path) ?? 1) - 1
+          if (remaining === 0) pendingFollowups.delete(targetAgent.path)
+          else pendingFollowups.set(targetAgent.path, remaining)
+          releaseIdleExecutionSlot(targetAgent.path)
+        }
       },
       async wait(timeoutMs = 30_000) {
         await ensureReady()
@@ -484,6 +483,66 @@ export function createAgentControl(input: {
     }
   }
 
+  function reserveExecutionSlot(path: string): Promise<void> {
+    requireOpenPath(path)
+    const existing = executionSlots.get(path)
+    if (existing !== undefined) return existing
+    if (executionSlots.size >= maxConcurrentAgents - 1) {
+      throw concurrencyLimitError(executionSlots.size)
+    }
+    // Reserve before consulting Session statuses so concurrent spawns and idle
+    // follow-ups share one admission boundary, including asynchronous launch.
+    const reservation = Promise.all(
+      Array.from(agents.values())
+        .filter((agent) => agent.depth > 0)
+        .map(async (agent) => ({
+          path: agent.path,
+          status: await input.adapter.getStatus(agent.agentId),
+        })),
+    )
+      .then((statuses) => {
+        const unreservedRunning = statuses.filter(
+          (agent) => isRunning(agent.status) && !executionSlots.has(agent.path),
+        ).length
+        const running = executionSlots.size + unreservedRunning
+        if (running > maxConcurrentAgents - 1) {
+          throw concurrencyLimitError(running - 1)
+        }
+      })
+      .catch((error: unknown) => {
+        if (executionSlots.get(path) === reservation)
+          executionSlots.delete(path)
+        throw error
+      })
+    executionSlots.set(path, reservation)
+    return reservation
+  }
+
+  function releaseIdleExecutionSlot(
+    path: string,
+    settledTask?: AgentTask,
+  ): void {
+    const agentId = paths.get(pathKey(input.rootSessionId, path))
+    const pendingTask =
+      agentId !== undefined &&
+      tasks
+        .get(agentId)
+        ?.some((task) => task !== settledTask && task.outcome === undefined)
+    if (
+      !pendingTask &&
+      !reservedPaths.has(pathKey(input.rootSessionId, path)) &&
+      !pendingFollowups.has(path)
+    )
+      executionSlots.delete(path)
+  }
+
+  function concurrencyLimitError(runningChildren: number): AgentControlError {
+    return new AgentControlError(
+      "agent_concurrency_limit_reached",
+      `Agent tree ${input.rootSessionId} already has ${String(runningChildren)} running subagents; the configured limit is ${String(maxConcurrentAgents - 1)}.`,
+    )
+  }
+
   function start(
     agent: AgentRecord,
     message: string,
@@ -512,6 +571,7 @@ export function createAgentControl(input: {
     const settle = (retry: boolean) => {
       if (runs.get(agent.agentId) !== worker) return
       runs.delete(agent.agentId)
+      releaseIdleExecutionSlot(agent.path)
       if (retry) startWorkerIfNeeded(agent)
       else wakeWaiters(agent.parentSessionId ?? agent.agentId)
     }
@@ -536,6 +596,14 @@ export function createAgentControl(input: {
         return
       }
       if (task.outcome === undefined) {
+        await reserveExecutionSlot(agent.path)
+        if (
+          isClosingPath(agent.path) ||
+          tasks.get(agent.agentId)?.[0] !== task
+        ) {
+          releaseIdleExecutionSlot(agent.path, task)
+          return
+        }
         try {
           task.outcome = await input.adapter.runChild({
             sessionId: agent.agentId,
@@ -553,6 +621,8 @@ export function createAgentControl(input: {
             )
           }
           task.outcome = failedOutcome
+        } finally {
+          releaseIdleExecutionSlot(agent.path, task)
         }
       }
       if (task.deliveryId === undefined) {

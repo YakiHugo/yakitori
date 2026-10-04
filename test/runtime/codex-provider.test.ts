@@ -299,11 +299,10 @@ it("replays the first Codex routing token within a turn and isolates concurrent 
         },
       }),
   })
-  const client = provider.createClient()
-  const first = client.startTurn()
-  const second = client.startTurn()
+  const first = provider.startTurn()
+  const second = provider.startTurn()
   const run = async (
-    turn: ReturnType<typeof client.startTurn>,
+    turn: ReturnType<typeof provider.startTurn>,
     cacheKey: string,
   ) => {
     const events: ModelStreamEvent[] = []
@@ -320,7 +319,8 @@ it("replays the first Codex routing token within a turn and isolates concurrent 
   await run(first, "session-a")
   await run(second, "session-b")
   await first.close()
-  await run(client.startTurn(), "session-a")
+  const next = provider.startTurn()
+  await run(next, "session-a")
   expect(received.map((headers) => headers.get("x-codex-turn-state"))).toEqual([
     null,
     null,
@@ -337,7 +337,8 @@ it("replays the first Codex routing token within a turn and isolates concurrent 
     "session-b",
     "session-a",
   ])
-  await client.close()
+  await second.close()
+  await next.close()
 })
 
 it("stops before sending a continuation when the Codex account changes between tool steps", async () => {

@@ -194,6 +194,10 @@ export class SessionConfiguration {
       maxOutputTokens,
       models,
     )
+    const modelRequestPolicy = resolveModelRequestPolicy(
+      this.snapshot.modelTransport,
+      model.provider,
+    )
     return {
       target: {
         provider: model.provider,
@@ -227,23 +231,20 @@ export class SessionConfiguration {
         this.snapshot.modelAutoCompactTokenLimit,
         this.snapshot.modelAutoCompactTokenLimitScope,
       ),
-      ...resolveModelRequestPolicy(
-        this.snapshot.modelTransport,
-        model.provider,
-      ),
+      ...(modelRequestPolicy === undefined ? {} : { modelRequestPolicy }),
       ...(modelCapacity === undefined ? {} : { modelCapacity }),
     }
   }
 }
 
-function resolveModelRequestPolicy(
+export function resolveModelRequestPolicy(
   transport: ModelTransportPolicy | undefined,
   provider: string,
-): Readonly<{ modelRequestPolicy?: ModelRequestPolicy }> {
-  if (transport === undefined) return {}
+): ModelRequestPolicy | undefined {
+  if (transport === undefined) return undefined
   const { providers, ...defaults } = transport
   const policy = { ...defaults, ...providers?.[provider] }
-  return Object.keys(policy).length === 0 ? {} : { modelRequestPolicy: policy }
+  return Object.keys(policy).length === 0 ? undefined : policy
 }
 
 function validateAutoCompactTokenLimit(limit: number | undefined): void {

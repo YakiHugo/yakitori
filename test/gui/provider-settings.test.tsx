@@ -632,3 +632,122 @@ it("does not reopen a closed editor when its model catalog request completes", a
   expect(screen.queryByRole("dialog")).toBeNull()
   expect(screen.queryByRole("button", { name: "Save changes" })).toBeNull()
 })
+
+it("keeps a new editor locked to its own model request after an older request completes", async () => {
+  const user = userEvent.setup()
+  const localPreset = {
+    ...preset,
+    id: "local",
+    name: "Local API",
+    noKey: true,
+    baseURL: "http://localhost:11434/v1",
+  }
+  const completions: ((models: typeof preset.models) => void)[] = []
+  request.mockImplementation(async (method) => {
+    if (method === "provider/configuration/models")
+      return new Promise<typeof preset.models>((resolve) =>
+        completions.push(resolve),
+      )
+    return { providers: [], presets: [preset, localPreset] }
+  })
+  render(<ProviderSettings />)
+  await user.click(await screen.findByRole("button", { name: "DeepSeek" }))
+  await user.type(screen.getByLabelText("API key"), "catalog-key")
+  await user.click(screen.getByText("Choose models (optional)"))
+  await screen.findByText("Loading models…")
+  await user.click(screen.getByRole("button", { name: "Close" }))
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+  await user.click(await screen.findByRole("button", { name: "Local API" }))
+  expect(
+    screen.getByLabelText("API base URL").closest("fieldset"),
+  ).toHaveProperty("disabled", false)
+  await user.click(screen.getByText("Choose models (optional)"))
+  await waitFor(() => expect(completions).toHaveLength(2))
+  await act(async () => completions[0]?.([{ id: "stale-model" }]))
+  expect(screen.getByText("Loading models…")).toBeDefined()
+  expect(
+    screen.getByLabelText("API base URL").closest("fieldset"),
+  ).toHaveProperty("disabled", true)
+  expect(screen.queryByText("stale-model")).toBeNull()
+  await act(async () => completions[1]?.([{ id: "current-model" }]))
+  expect(screen.queryByText("Loading models…")).toBeNull()
+  expect(
+    screen.getByLabelText("API base URL").closest("fieldset"),
+  ).toHaveProperty("disabled", false)
+  expect(screen.getByText("current-model")).toBeDefined()
+})
+
+it.each([
+  "success",
+  "failure",
+] as const)("keeps a new model request pending after a dismissed import's %s", async (outcome) => {
+  const user = userEvent.setup()
+  let finishImport:
+    | Readonly<{ resolve(value: unknown): void; reject(error: Error): void }>
+    | undefined
+  let finishModels: ((value: typeof preset.models) => void) | undefined
+  request.mockImplementation(async (method) => {
+    if (method === "provider/configuration/write")
+      return new Promise((resolve, reject) => {
+        finishImport = { resolve, reject }
+      })
+    if (method === "provider/configuration/models")
+      return new Promise<typeof preset.models>((resolve) => {
+        finishModels = resolve
+      })
+    return { providers: [], presets: [preset], subscriptions: [] }
+  })
+  render(<ProviderSettings />)
+  await user.click(await screen.findByRole("button", { name: "Import…" }))
+  const importDialog = screen.getByRole("dialog", { name: "Import provider" })
+  fireEvent.change(screen.getByLabelText("Provider configuration JSON"), {
+    target: {
+      value: JSON.stringify({
+        configuration: {
+          name: "Imported source",
+          wireApi: "openai_chat_completions",
+          baseURL: "http://localhost:11434/v1",
+          models: [],
+          noKey: true,
+        },
+      }),
+    },
+  })
+  await user.click(within(importDialog).getByRole("button", { name: "Import" }))
+  await waitFor(() => expect(finishImport).toBeDefined())
+  await user.click(within(importDialog).getByRole("button", { name: "Cancel" }))
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+  await user.click(screen.getByRole("button", { name: "DeepSeek" }))
+  await user.type(screen.getByLabelText("API key"), "new-source-key")
+  await user.click(screen.getByText("Choose models (optional)"))
+  await screen.findByText("Loading models…")
+  const completion = finishImport
+  if (!completion) throw new Error("Missing import completion")
+  await act(async () => {
+    if (outcome === "success")
+      completion.resolve({
+        providers: [connection],
+        presets: [preset],
+        subscriptions: [],
+        undoId: "stale-import",
+      })
+    else completion.reject(new Error("Previous import failed."))
+  })
+  expect(screen.getByText("Loading models…")).toBeDefined()
+  expect(screen.getByLabelText("API key")).toHaveProperty(
+    "value",
+    "new-source-key",
+  )
+  expect(screen.getByLabelText("API key").closest("fieldset")).toHaveProperty(
+    "disabled",
+    true,
+  )
+  expect(screen.queryByRole("alert")).toBeNull()
+  expect(screen.queryByText("Connection updated.")).toBeNull()
+  await act(async () => finishModels?.([{ id: "new-source-model" }]))
+  expect(screen.getByText("new-source-model")).toBeDefined()
+  expect(screen.getByLabelText("API key").closest("fieldset")).toHaveProperty(
+    "disabled",
+    false,
+  )
+})

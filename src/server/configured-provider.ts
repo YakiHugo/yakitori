@@ -26,6 +26,12 @@ export function createConfiguredProvider(
     (entry) => entry.id === configuration.preset,
   )
   const catalogProvider = preset?.catalogProvider
+  // Presets are editable. Native PDF support requires the documented endpoint;
+  // URL syntax normalization and one trailing slash do not change that endpoint.
+  const knownPresetEndpoint =
+    preset !== undefined &&
+    new URL(configuration.baseURL).href.replace(/\/$/, "") ===
+      new URL(preset.baseURL).href.replace(/\/$/, "")
   const buildModels = (configured: readonly ConfiguredModel[]) =>
     createConfiguredModelsManager({
       provider: id,
@@ -50,7 +56,15 @@ export function createConfiguredProvider(
     info: {
       id,
       wireApi: configuration.wireApi,
-      capabilities: { remoteCompaction: false },
+      capabilities: {
+        remoteCompaction: false,
+        nativePdf:
+          knownPresetEndpoint &&
+          ((catalogProvider === "openai" &&
+            configuration.wireApi === "openai_responses") ||
+            (catalogProvider === "anthropic" &&
+              configuration.wireApi === "anthropic_messages")),
+      },
     },
     models,
     continuationScope: createProviderContinuationScope(

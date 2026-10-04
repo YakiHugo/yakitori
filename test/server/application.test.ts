@@ -13,7 +13,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { WebSocket } from "ws"
 import packageJson from "../../package.json" with { type: "json" }
 import { PersistContext } from "../../src/core/thread-store.ts"
-import { MateEventType, MateLifecycle } from "../../src/mates/events.ts"
 import { createMateKernel } from "../../src/mates/mate-kernel.ts"
 import { createSqliteMateStore } from "../../src/mates/sqlite-mate-store.ts"
 import { type ModelRequest, ModelStopReason } from "../../src/runtime/model.ts"
@@ -30,8 +29,8 @@ import {
   type ApiListProvidersResponse,
   type ApiListSessionsResponse,
 } from "../../src/server/protocol.ts"
-import type { ConfigurationSnapshot } from "../../src/server/user-config.ts"
 import type { ProviderConfigurationResponse } from "../../src/server/provider-service.ts"
+import type { ConfigurationSnapshot } from "../../src/server/user-config.ts"
 import { createFauxProvider } from "../support/faux-provider.ts"
 import { deferred } from "./rpc/testkit.ts"
 
@@ -127,6 +126,8 @@ describe("application composition", () => {
     "CODEX_HOME",
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
+    "OPENAI_BASE_URL",
+    "ANTHROPIC_BASE_URL",
     "XAI_API_KEY",
     "KIMI_API_KEY",
     "GROK_CREDENTIALS",
@@ -148,6 +149,152 @@ describe("application composition", () => {
       if (value === undefined) delete process.env[key]
       else process.env[key] = value
     }
+  })
+
+  it.each([
+    {
+      provider: "openai",
+      model: "gpt-6-sol",
+      environmentKey: "OPENAI_API_KEY",
+      endpoint: "https://api.openai.com/v1/responses",
+    },
+    {
+      provider: "anthropic",
+      model: "claude-sonnet-4-6",
+      environmentKey: "ANTHROPIC_API_KEY",
+      endpoint: "https://api.anthropic.com/v1/messages",
+    },
+    {
+      provider: "openai",
+      model: "gpt-6-sol",
+      login: true,
+      endpoint: "https://api.openai.com/v1/responses",
+    },
+  ] as const)("uses the declared $provider endpoint despite SDK endpoint environment variables", async (connection) => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      process.env.OPENAI_BASE_URL = "https://relay.example/openai"
+      process.env.ANTHROPIC_BASE_URL = "https://relay.example/anthropic"
+      if ("environmentKey" in connection) {
+        process.env[connection.environmentKey] = "test-key"
+      } else {
+        process.env.CODEX_HOME = join(rootDir, "codex-home")
+        await mkdir(process.env.CODEX_HOME, { recursive: true })
+        await writeFile(
+          join(process.env.CODEX_HOME, "auth.json"),
+          JSON.stringify({
+            auth_mode: "apikey",
+            OPENAI_API_KEY: "test-key",
+            tokens: null,
+          }),
+        )
+      }
+      const requests: string[] = []
+      const fetchMock = vi
+        .spyOn(globalThis, "fetch")
+        .mockImplementation(async (input) => {
+          requests.push(input instanceof Request ? input.url : String(input))
+          const events =
+            connection.provider === "anthropic"
+              ? [
+                  {
+                    type: "message_start",
+                    message: {
+                      id: "message_endpoint",
+                      type: "message",
+                      role: "assistant",
+                      model: connection.model,
+                      content: [],
+                      stop_reason: null,
+                      stop_sequence: null,
+                      usage: { input_tokens: 1, output_tokens: 0 },
+                    },
+                  },
+                  {
+                    type: "content_block_start",
+                    index: 0,
+                    content_block: { type: "text", text: "Endpoint verified" },
+                  },
+                  { type: "content_block_stop", index: 0 },
+                  {
+                    type: "message_delta",
+                    delta: { stop_reason: "end_turn", stop_sequence: null },
+                    usage: { output_tokens: 1 },
+                  },
+                  { type: "message_stop" },
+                ]
+              : [
+                  {
+                    type: "response.completed",
+                    response: {
+                      id: "response_endpoint",
+                      status: "completed",
+                      output: [
+                        {
+                          type: "message",
+                          id: "message_endpoint",
+                          role: "assistant",
+                          status: "completed",
+                          content: [
+                            {
+                              type: "output_text",
+                              text: "Endpoint verified",
+                              annotations: [],
+                            },
+                          ],
+                        },
+                      ],
+                      usage: {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        total_tokens: 2,
+                      },
+                    },
+                  },
+                ]
+          return new Response(
+            events
+              .map(
+                (event) =>
+                  `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
+              )
+              .join(""),
+            { headers: { "content-type": "text/event-stream" } },
+          )
+        })
+      let application: YakitoriApplication | undefined
+      try {
+        application = await createYakitoriApplication({
+          rootDir,
+          workspace,
+          userConfigPath: join(rootDir, "config.toml"),
+        })
+        const created = await application.handlers.createSession({
+          title: "Endpoint verification",
+        })
+        expectOk(created)
+        const sessionId = created.body.session.id
+        expectOk(
+          await application.handlers.admitInput({
+            sessionId,
+            requestId: "request_endpoint",
+            content: { kind: "text", text: "Verify the endpoint" },
+            modelSelection: {
+              provider: connection.provider,
+              model: connection.model,
+            },
+          }),
+        )
+        await vi.waitFor(() =>
+          expect(
+            application?.threadManager.getThread(sessionId)?.agentStatus,
+          ).toEqual({ completed: "Endpoint verified" }),
+        )
+        expect(requests).toEqual([connection.endpoint])
+      } finally {
+        await application?.close()
+        fetchMock.mockRestore()
+      }
+    })
   })
 
   it("broadcasts successful background completions without replaying them to later subscribers", async () => {
@@ -1838,7 +1985,7 @@ describe("application composition", () => {
     })
   })
 
-  it("fails startup when the configured Mate is missing or inactive", async () => {
+  it("fails startup when the configured Mate is missing", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
       await expect(
         createYakitoriApplication(
@@ -1849,39 +1996,10 @@ describe("application composition", () => {
           }),
         ),
       ).rejects.toThrow("Configured Mate was not found")
-
-      const mateStore = createSqliteMateStore({
-        databasePath: join(rootDir, "mates.sqlite"),
-      })
-      const mateKernel = createMateKernel(mateStore)
-      const created = await mateKernel.createMate({
-        instructions: "inactive later",
-        name: "SoonInactive",
-        role: "Builder",
-      })
-      await mateStore.appendEvent(
-        created.mate.id,
-        {
-          type: MateEventType.LifecycleChanged,
-          data: { lifecycle: MateLifecycle.Inactive },
-        },
-        { expectedSeq: created.mate.seq },
-      )
-      mateStore.close()
-
-      await expect(
-        createYakitoriApplication(
-          testApplicationOptions({
-            activeMateId: created.mate.id,
-            rootDir,
-            workspace,
-          }),
-        ),
-      ).rejects.toThrow("Configured Mate is inactive")
     })
   })
 
-  it("fails startup when multiple active Mates exist without an explicit selection", async () => {
+  it("fails startup when multiple Mates exist without an explicit selection", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const mateStore = createSqliteMateStore({
         databasePath: join(rootDir, "mates.sqlite"),
@@ -1903,7 +2021,7 @@ describe("application composition", () => {
         createYakitoriApplication(
           testApplicationOptions({ rootDir, workspace }),
         ),
-      ).rejects.toThrow("Multiple active Mates found")
+      ).rejects.toThrow("Multiple Mates found")
     })
   })
 
@@ -3083,7 +3201,7 @@ describe("application composition", () => {
   })
 })
 
-describe("codex login registration", () => {
+describe("provider login registration", () => {
   const touchedEnv = [
     "YAKITORI_PROVIDER",
     "YAKITORI_MODEL",
@@ -3246,6 +3364,147 @@ describe("codex login registration", () => {
             .filter((entry) => entry.url.includes("chatgpt.com"))
             .every((entry) => entry.authorization === "Bearer imported-access"),
         ).toBe(true)
+      } finally {
+        fetchMock.mockRestore()
+      }
+    })
+  })
+
+  it("uses the official Grok account for discovery and billing, then prioritizes an environment API key", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      process.env.CODEX_HOME = join(rootDir, "missing-cli-home")
+      process.env.GROK_CREDENTIALS = join(rootDir, "grok-auth.json")
+      await writeFile(
+        process.env.GROK_CREDENTIALS,
+        JSON.stringify({
+          "https://login.example.com::enterprise-client": {
+            key: "enterprise-access",
+            user_id: "enterprise-user",
+            expires_at: "2099-01-01T00:00:00Z",
+          },
+          "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828": {
+            key: "public-access",
+            user_id: "public-user",
+            expires_at: "2099-01-01T00:00:00Z",
+          },
+        }),
+      )
+      const requests: {
+        url: string
+        authorization: string | null
+        userId: string | null
+      }[] = []
+      const fetchMock = vi
+        .spyOn(globalThis, "fetch")
+        .mockImplementation(async (input, init) => {
+          const url = input instanceof Request ? input.url : String(input)
+          const headers = new Headers(
+            init?.headers ??
+              (input instanceof Request ? input.headers : undefined),
+          )
+          requests.push({
+            url,
+            authorization: headers.get("authorization"),
+            userId: headers.get("x-userid"),
+          })
+          if (url === "https://api.x.ai/v1/models")
+            return Response.json({
+              data: [
+                {
+                  id: "grok-4.7",
+                  display_name:
+                    process.env.XAI_API_KEY === undefined
+                      ? "Public CLI model"
+                      : "API key model",
+                },
+              ],
+            })
+          if (
+            url === "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
+          )
+            return Response.json({
+              subscriptionTier: "SuperGrok",
+              config: { creditUsagePercent: 12 },
+            })
+          throw new Error(`Unexpected test request: ${url}`)
+        })
+      try {
+        for (const apiKey of [undefined, "environment-key"]) {
+          if (apiKey !== undefined) process.env.XAI_API_KEY = apiKey
+          const requestOffset = requests.length
+          const application = await createYakitoriApplication({
+            rootDir,
+            workspace,
+            userConfigPath: join(rootDir, "config.toml"),
+            provider: "faux",
+          })
+          const server = application.createHttpServer()
+          const baseUrl = await listen(server)
+          try {
+            const providers = await rpcRequest<ApiListProvidersResponse>(
+              baseUrl,
+              "provider/list",
+              {},
+            )
+            expect(
+              providers.providers.find((entry) => entry.name === "grok"),
+            ).toMatchObject({
+              availability: "available",
+              credentialKind: apiKey === undefined ? "oauth" : "api_key",
+              models: expect.arrayContaining([
+                expect.objectContaining({
+                  id: "grok-4.7",
+                  displayName:
+                    apiKey === undefined ? "Public CLI model" : "API key model",
+                }),
+              ]),
+            })
+            const usage = await rpcRequest<
+              import("../../src/server/protocol.ts").ApiReadSubscriptionResponse
+            >(baseUrl, "subscription/read", { provider: "grok" })
+            expect(usage.subscription).toMatchObject(
+              apiKey === undefined
+                ? {
+                    credentialKind: "oauth",
+                    plan: "SuperGrok",
+                    usage: { status: "available" },
+                  }
+                : {
+                    credentialKind: "api_key",
+                    usage: {
+                      status: "unavailable",
+                      reason: "not_supported",
+                    },
+                  },
+            )
+            const phaseRequests = requests.slice(requestOffset)
+            const models = phaseRequests.filter((entry) =>
+              entry.url.endsWith("/models"),
+            )
+            expect(models.length).toBeGreaterThan(0)
+            expect(
+              models.every(
+                (entry) =>
+                  entry.authorization === `Bearer ${apiKey ?? "public-access"}`,
+              ),
+            ).toBe(true)
+            const billing = phaseRequests.filter((entry) =>
+              entry.url.includes("/billing?"),
+            )
+            if (apiKey === undefined)
+              expect(billing).toEqual([
+                {
+                  url: "https://cli-chat-proxy.grok.com/v1/billing?format=credits",
+                  authorization: "Bearer public-access",
+                  userId: "public-user",
+                },
+              ])
+            else expect(billing).toEqual([])
+          } finally {
+            await new Promise<void>((resolve) => server.close(() => resolve()))
+            await application.close()
+          }
+        }
       } finally {
         fetchMock.mockRestore()
       }
