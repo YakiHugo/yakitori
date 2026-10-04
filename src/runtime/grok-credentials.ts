@@ -10,6 +10,11 @@ import { join } from "node:path"
 // When the token expires, re-run `grok` and log in again.
 export const GROK_API_BASE_URL = "https://api.x.ai/v1"
 
+// Yakitori targets the public xAI API, so select the official CLI's production
+// issuer/client scope rather than an unrelated enterprise login in auth.json.
+const GROK_AUTH_SCOPE =
+  "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828"
+
 // Treat tokens this close to expiry as unusable, so a long model call never
 // starts with a nearly-stale token.
 const EXPIRY_MARGIN_SECONDS = 120
@@ -96,7 +101,13 @@ async function readGrokCredentials(path: string): Promise<GrokCredentials> {
   let raw: string
   try {
     raw = await readFile(path, "utf8")
-  } catch {
+  } catch (cause) {
+    if (
+      !(cause instanceof Error) ||
+      !("code" in cause) ||
+      cause.code !== "ENOENT"
+    )
+      throw cause
     throw new Error(
       `Grok credentials not found at ${path}. Run \`grok\` and log in first, or set XAI_API_KEY.`,
     )
@@ -105,28 +116,35 @@ async function readGrokCredentials(path: string): Promise<GrokCredentials> {
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw new Error(`Grok credentials at ${path} are malformed.`)
   }
-  const entry = Object.values(parsed).find(
-    (value) =>
-      typeof value === "object" &&
-      value !== null &&
-      typeof (value as Record<string, unknown>).key === "string" &&
-      typeof (value as Record<string, unknown>).expires_at === "string",
-  ) as Record<string, unknown> | undefined
+  const entry = (parsed as Record<string, unknown>)[GROK_AUTH_SCOPE]
   if (entry === undefined) {
     throw new Error(
       `Grok credentials at ${path} hold no login. Run \`grok\` and log in first.`,
     )
   }
-  const expiresAt = Math.floor(Date.parse(entry.expires_at as string) / 1000)
+  if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+    throw new Error(`Grok credentials at ${path} carry a malformed xAI login.`)
+  }
+  const {
+    key,
+    expires_at: expiresAtValue,
+    user_id: userId,
+  } = entry as Record<string, unknown>
+  if (
+    typeof key !== "string" ||
+    key.trim() === "" ||
+    typeof expiresAtValue !== "string"
+  ) {
+    throw new Error(`Grok credentials at ${path} carry a malformed xAI login.`)
+  }
+  const expiresAt = Math.floor(Date.parse(expiresAtValue) / 1000)
   if (Number.isNaN(expiresAt)) {
     throw new Error(`Grok credentials at ${path} carry a bad expires_at.`)
   }
   return {
-    accessToken: entry.key as string,
+    accessToken: key,
     expiresAt,
     userId:
-      typeof entry.user_id === "string" && entry.user_id.trim() !== ""
-        ? entry.user_id
-        : undefined,
+      typeof userId === "string" && userId.trim() !== "" ? userId : undefined,
   }
 }

@@ -3201,7 +3201,7 @@ describe("application composition", () => {
   })
 })
 
-describe("codex login registration", () => {
+describe("provider login registration", () => {
   const touchedEnv = [
     "YAKITORI_PROVIDER",
     "YAKITORI_MODEL",
@@ -3364,6 +3364,147 @@ describe("codex login registration", () => {
             .filter((entry) => entry.url.includes("chatgpt.com"))
             .every((entry) => entry.authorization === "Bearer imported-access"),
         ).toBe(true)
+      } finally {
+        fetchMock.mockRestore()
+      }
+    })
+  })
+
+  it("uses the official Grok account for discovery and billing, then prioritizes an environment API key", async () => {
+    await withApplicationRoot(async (rootDir, workspace) => {
+      process.env.CODEX_HOME = join(rootDir, "missing-cli-home")
+      process.env.GROK_CREDENTIALS = join(rootDir, "grok-auth.json")
+      await writeFile(
+        process.env.GROK_CREDENTIALS,
+        JSON.stringify({
+          "https://login.example.com::enterprise-client": {
+            key: "enterprise-access",
+            user_id: "enterprise-user",
+            expires_at: "2099-01-01T00:00:00Z",
+          },
+          "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828": {
+            key: "public-access",
+            user_id: "public-user",
+            expires_at: "2099-01-01T00:00:00Z",
+          },
+        }),
+      )
+      const requests: {
+        url: string
+        authorization: string | null
+        userId: string | null
+      }[] = []
+      const fetchMock = vi
+        .spyOn(globalThis, "fetch")
+        .mockImplementation(async (input, init) => {
+          const url = input instanceof Request ? input.url : String(input)
+          const headers = new Headers(
+            init?.headers ??
+              (input instanceof Request ? input.headers : undefined),
+          )
+          requests.push({
+            url,
+            authorization: headers.get("authorization"),
+            userId: headers.get("x-userid"),
+          })
+          if (url === "https://api.x.ai/v1/models")
+            return Response.json({
+              data: [
+                {
+                  id: "grok-4.7",
+                  display_name:
+                    process.env.XAI_API_KEY === undefined
+                      ? "Public CLI model"
+                      : "API key model",
+                },
+              ],
+            })
+          if (
+            url === "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
+          )
+            return Response.json({
+              subscriptionTier: "SuperGrok",
+              config: { creditUsagePercent: 12 },
+            })
+          throw new Error(`Unexpected test request: ${url}`)
+        })
+      try {
+        for (const apiKey of [undefined, "environment-key"]) {
+          if (apiKey !== undefined) process.env.XAI_API_KEY = apiKey
+          const requestOffset = requests.length
+          const application = await createYakitoriApplication({
+            rootDir,
+            workspace,
+            userConfigPath: join(rootDir, "config.toml"),
+            provider: "faux",
+          })
+          const server = application.createHttpServer()
+          const baseUrl = await listen(server)
+          try {
+            const providers = await rpcRequest<ApiListProvidersResponse>(
+              baseUrl,
+              "provider/list",
+              {},
+            )
+            expect(
+              providers.providers.find((entry) => entry.name === "grok"),
+            ).toMatchObject({
+              availability: "available",
+              credentialKind: apiKey === undefined ? "oauth" : "api_key",
+              models: expect.arrayContaining([
+                expect.objectContaining({
+                  id: "grok-4.7",
+                  displayName:
+                    apiKey === undefined ? "Public CLI model" : "API key model",
+                }),
+              ]),
+            })
+            const usage = await rpcRequest<
+              import("../../src/server/protocol.ts").ApiReadSubscriptionResponse
+            >(baseUrl, "subscription/read", { provider: "grok" })
+            expect(usage.subscription).toMatchObject(
+              apiKey === undefined
+                ? {
+                    credentialKind: "oauth",
+                    plan: "SuperGrok",
+                    usage: { status: "available" },
+                  }
+                : {
+                    credentialKind: "api_key",
+                    usage: {
+                      status: "unavailable",
+                      reason: "not_supported",
+                    },
+                  },
+            )
+            const phaseRequests = requests.slice(requestOffset)
+            const models = phaseRequests.filter((entry) =>
+              entry.url.endsWith("/models"),
+            )
+            expect(models.length).toBeGreaterThan(0)
+            expect(
+              models.every(
+                (entry) =>
+                  entry.authorization === `Bearer ${apiKey ?? "public-access"}`,
+              ),
+            ).toBe(true)
+            const billing = phaseRequests.filter((entry) =>
+              entry.url.includes("/billing?"),
+            )
+            if (apiKey === undefined)
+              expect(billing).toEqual([
+                {
+                  url: "https://cli-chat-proxy.grok.com/v1/billing?format=credits",
+                  authorization: "Bearer public-access",
+                  userId: "public-user",
+                },
+              ])
+            else expect(billing).toEqual([])
+          } finally {
+            await new Promise<void>((resolve) => server.close(() => resolve()))
+            await application.close()
+          }
+        }
       } finally {
         fetchMock.mockRestore()
       }
