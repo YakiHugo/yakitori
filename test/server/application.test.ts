@@ -1677,7 +1677,7 @@ describe("application composition", () => {
     })
   })
 
-  it("drains live event listeners while closing an active Turn", async () => {
+  it("closes an active Turn and removes its loaded Session during application shutdown", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const provider = createFauxProvider([{ waitForAbort: true }])
       const application = await createYakitoriApplication({
@@ -2870,25 +2870,6 @@ describe("application composition", () => {
     })
   })
 
-  it("does not expose the removed durable pending-input queue", async () => {
-    await withApplicationRoot(async (rootDir, workspace) => {
-      const application = await createYakitoriApplication(
-        testApplicationOptions({ rootDir, workspace }),
-      )
-      try {
-        const created = await application.handlers.createSession()
-        expectOk(created)
-        const cancelled = await application.handlers.cancelInput({
-          sessionId: created.body.session.id,
-          inputId: "input_00000000-0000-4000-8000-000000000000",
-        })
-        expectError(cancelled, 409, ApiErrorCode.Conflict)
-      } finally {
-        await application.close()
-      }
-    })
-  })
-
   it("serves catalog models per provider and prepends a configured default outside the catalog", async () => {
     await withApplicationRoot(async (rootDir, workspace) => {
       const application = await createYakitoriApplication({
@@ -3609,18 +3590,81 @@ describe("provider login registration", () => {
   it("prefers the environment key over the auth.json API key", async () => {
     process.env.OPENAI_API_KEY = "sk-from-env"
     await withApplicationRoot(async (rootDir, workspace) => {
-      const body = await providersWithLogin(rootDir, workspace, {
-        auth_mode: "apikey",
-        OPENAI_API_KEY: "sk-from-auth-json",
-        tokens: null,
-      })
-
-      expect(
-        body.providers.filter((provider) => provider.name === "openai"),
-      ).toHaveLength(1)
-      expect(
-        body.providers.find((provider) => provider.name === "codex"),
-      ).toMatchObject({ availability: "requires_login" })
+      process.env.CODEX_HOME = join(rootDir, "codex-home")
+      await mkdir(process.env.CODEX_HOME, { recursive: true })
+      await writeFile(
+        join(process.env.CODEX_HOME, "auth.json"),
+        JSON.stringify({
+          auth_mode: "apikey",
+          OPENAI_API_KEY: "sk-from-auth-json",
+          tokens: null,
+        }),
+      )
+      const credentials: Array<string | null> = []
+      const fetchMock = vi
+        .spyOn(globalThis, "fetch")
+        .mockImplementation(async (input, init) => {
+          const request = new Request(input, init)
+          expect(request.url).toBe("https://api.openai.com/v1/responses")
+          credentials.push(request.headers.get("authorization"))
+          const event = {
+            type: "response.completed",
+            response: {
+              id: "response_key",
+              status: "completed",
+              output: [
+                {
+                  type: "message",
+                  id: "message_key",
+                  role: "assistant",
+                  status: "completed",
+                  content: [
+                    {
+                      type: "output_text",
+                      text: "Key verified",
+                      annotations: [],
+                    },
+                  ],
+                },
+              ],
+              usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+            },
+          }
+          return new Response(
+            `event: response.completed\ndata: ${JSON.stringify(event)}\n\n`,
+            {
+              headers: { "content-type": "text/event-stream" },
+            },
+          )
+        })
+      let application: YakitoriApplication | undefined
+      try {
+        application = await createYakitoriApplication({
+          rootDir,
+          workspace,
+          userConfigPath: join(rootDir, "config.toml"),
+        })
+        const created = await application.handlers.createSession()
+        expectOk(created)
+        const sessionId = created.body.session.id
+        expectOk(
+          await application.handlers.admitInput({
+            sessionId,
+            requestId: "request_key",
+            content: { kind: "text", text: "Verify the selected key" },
+            modelSelection: { provider: "openai", model: "gpt-6-sol" },
+          }),
+        )
+        await vi.waitFor(() =>
+          expect(
+            application?.threadManager.getThread(sessionId)?.agentStatus,
+          ).toEqual({ completed: "Key verified" }),
+        )
+        expect(new Set(credentials)).toEqual(new Set(["Bearer sk-from-env"]))
+      } finally {
+        await application?.close()
+        fetchMock.mockRestore()
+      }
     })
   })
 

@@ -256,6 +256,8 @@ describe("apply_patch", () => {
     const root = await temporaryDirectory()
     await writeFile(join(root, "duplicate.txt"), "old\n")
     await writeFile(join(root, "source.txt"), "from\n")
+    await writeFile(join(root, "overwrite-source.txt"), "overwrite\n")
+    await writeFile(join(root, "existing.txt"), "existing destination\n")
     const tool = createApplyPatchTool()
 
     const result = await tool.execute(
@@ -267,6 +269,11 @@ describe("apply_patch", () => {
 @@
 -from
 +moved
+*** Update File: overwrite-source.txt
+*** Move to: existing.txt
+@@
+-overwrite
++replacement
 *** End Patch`,
       { workspaceRoot: root },
     )
@@ -278,6 +285,9 @@ describe("apply_patch", () => {
     await expect(
       readFile(join(root, "nested/destination.txt"), "utf8"),
     ).resolves.toBe("moved\n")
+    await expect(readFile(join(root, "existing.txt"), "utf8")).resolves.toBe(
+      "replacement\n",
+    )
   })
 
   it("rejects lexical path aliases as duplicate mutations", async () => {

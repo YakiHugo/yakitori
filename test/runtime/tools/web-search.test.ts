@@ -252,11 +252,17 @@ describe("web_search contract", () => {
   it("caps oversized endpoint responses instead of buffering unboundedly", async () => {
     const { endpoint } = await serveMcp(({ response }) => {
       response.writeHead(200, { "content-type": "application/json" })
-      response.end(`"${"x".repeat(4 * 1024 * 1024)}"`)
+      response.end(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          result: {
+            content: [{ type: "text", text: "x".repeat(4 * 1024 * 1024) }],
+          },
+        }),
+      )
     })
     const result = await search("anything", { endpoint })
-    // Truncated at the cap, the body is no longer a parseable JSON-RPC
-    // document — but the tool returns instead of buffering the whole thing.
     expect(result).toMatchObject({ ok: false, code: "search_error" })
   })
 

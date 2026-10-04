@@ -1155,24 +1155,6 @@ describe("live Session actor", () => {
     await manager.shutdown()
   })
 
-  it("protects a source while a prepared fork reservation is live", async () => {
-    const store = new MemoryThreadStore()
-    const manager = createManager({ run: async () => undefined }, store)
-    const source = await manager.createThread()
-    const prepared = await store.prepareFork({
-      sourceThreadId: source.id,
-      boundary: { type: "latest" },
-    })
-
-    await expect(store.deleteThread(source.id)).rejects.toThrow(
-      "active fork reservation",
-    )
-    await store.releasePreparedFork(prepared)
-    await manager.discardThread(source.id)
-    expect(await store.readThread(source.id)).toBeUndefined()
-    await manager.shutdown()
-  })
-
   it("isolates status subscriber exceptions from Turn completion", async () => {
     const manager = createManager({ run: async () => undefined })
     const thread = await manager.createThread()

@@ -1,14 +1,10 @@
 import { describe, expect, it } from "vitest"
 import {
-  errorResponse,
-  INTERNAL_ERROR,
   INVALID_REQUEST,
   JsonRpcParseError,
   type JsonRpcMessage,
-  METHOD_NOT_FOUND,
   PARSE_ERROR,
   parseJsonRpcMessage,
-  resultResponse,
   serializeJsonRpcMessage,
 } from "../../../src/server/rpc/messages.ts"
 
@@ -40,15 +36,18 @@ describe("parseJsonRpcMessage", () => {
     },
     {
       name: "a result response",
-      message: resultResponse(7, { ok: true }),
+      message: { id: 7, result: { ok: true } },
     },
     {
       name: "an error response with data",
-      message: errorResponse("9", INTERNAL_ERROR, "boom", { detail: 1 }),
+      message: {
+        id: "9",
+        error: { code: -32603, message: "boom", data: { detail: 1 } },
+      },
     },
     {
       name: "an error response without data",
-      message: errorResponse(3, METHOD_NOT_FOUND, "unknown method"),
+      message: { id: 3, error: { code: -32601, message: "unknown method" } },
     },
   ]
 

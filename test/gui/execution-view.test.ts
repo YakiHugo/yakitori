@@ -802,7 +802,7 @@ describe("execution view", () => {
     ])
   })
 
-  it("does not fabricate permission resolution from a terminal Turn", () => {
+  it("settles pending permission UI on a terminal Turn without inventing an allow or deny decision", () => {
     let state = reduceExecutionView(createExecutionViewState(), {
       type: "transient",
       event: {
@@ -830,11 +830,15 @@ describe("execution view", () => {
       }),
     })
 
-    expect(
-      projectExecutionView(state).entries.some(
-        (entry) => entry.kind === "permission",
-      ),
-    ).toBe(true)
+    const permission = projectExecutionView(state).entries.find(
+      (entry) => entry.kind === "permission",
+    )
+    expect(permission).toMatchObject({
+      kind: "permission",
+      permissionRequestId: "permission_terminal",
+      state: "resolved",
+    })
+    expect(permission).not.toHaveProperty("behavior")
   })
 
   it("extracts structured diff and command results from tool output", () => {

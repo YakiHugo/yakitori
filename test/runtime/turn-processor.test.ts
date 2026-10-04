@@ -2021,31 +2021,67 @@ describe("Turn processor", () => {
   })
 
   it("warns once when a Turn uses conservative fallback model metadata", async () => {
-    const provider = createFauxProvider([
-      { content: [{ type: "text", text: "done" }] },
-    ])
-    const runtime = await createRuntime(provider.stream, createToolRegistry([]))
+    const provider = createFauxProvider(
+      ["first", "second"].flatMap((id) => [
+        {
+          stopReason: ModelStopReason.ToolUse,
+          content: [
+            { type: "tool_call" as const, id, name: "probe", input: {} },
+          ],
+        },
+        { content: [{ type: "text" as const, text: "done" }] },
+      ]),
+    )
+    const runtime = await createRuntime(
+      provider.stream,
+      createToolRegistry([
+        {
+          toolName: plainToolName("probe"),
+          description: "Run a second model step",
+          inputSchema: { type: "object" },
+          effect: "observe",
+          approvalRequirement: { kind: "none" },
+          async execute() {
+            return { ok: true, output: "step done", content: "step done" }
+          },
+        },
+      ]),
+    )
     const thread = await runtime.createThread()
 
-    await thread.startIfIdle({
-      content: { kind: "text", text: "continue safely" },
-      modelSelection: { provider: "future-provider", model: "future-model" },
-    })
-
-    expect((await nextLifecycleEvent(thread))?.type).toBe("turn.started")
-    let warning: SessionEvent | undefined
-    while (warning?.type !== "runtime.warning") {
-      warning = await thread.nextEvent()
-      if (warning === undefined) throw new Error("Thread ended before warning.")
+    for (const { turnId, text } of [
+      { turnId: "turn_fallback_first", text: "continue safely" },
+      { turnId: "turn_fallback_second", text: "continue again" },
+    ]) {
+      await thread.startIfIdle({
+        submissionId: turnId,
+        content: { kind: "text", text },
+        modelSelection: { provider: "future-provider", model: "future-model" },
+      })
+      const events: SessionEvent[] = []
+      for (;;) {
+        const event = await thread.nextEvent()
+        if (event === undefined)
+          throw new Error("Thread ended before completion.")
+        events.push(event)
+        if (event.type === "turn.completed") break
+      }
+      const warnings = events.filter(
+        (event) =>
+          event.type === "runtime.warning" &&
+          event.message.includes("future-provider/future-model was not found"),
+      )
+      expect(warnings).toEqual([
+        expect.objectContaining({
+          type: "runtime.warning",
+          turnId,
+          message: expect.stringContaining(
+            "future-provider/future-model was not found",
+          ),
+        }),
+      ])
     }
-    expect(warning).toMatchObject({
-      type: "runtime.warning",
-      turnId: expect.any(String),
-      message: expect.stringContaining(
-        "future-provider/future-model was not found",
-      ),
-    })
-    expect((await nextLifecycleEvent(thread))?.type).toBe("turn.completed")
+    expect(provider.callCount).toBe(4)
   })
 
   it("uses a provider ModelsManager for Step capabilities and capacity validation", async () => {
@@ -3323,7 +3359,17 @@ describe("Turn processor", () => {
     await nextLifecycleEvent(thread)
     await nextLifecycleEvent(thread)
     release.resolve()
-    await new Promise((resolve) => setTimeout(resolve, 0))
+    await waitForValue(() => runtimeErrors.length === 2)
+    await runtime.manager.closeThread(thread.id)
+    const trailingEvents: SessionEvent[] = []
+    for (;;) {
+      const event = await thread.nextEvent()
+      if (event === undefined) break
+      trailingEvents.push(event)
+    }
+    expect(
+      trailingEvents.filter((event) => event.type === "model.stream"),
+    ).toEqual([])
 
     expect(runtimeErrors).toEqual([
       {
@@ -3644,14 +3690,19 @@ describe("Turn processor", () => {
     expect(thread.snapshot().context.activeContextTokens).toBe(100)
   })
 
-  it("retries provider-overflowed compaction with an older prefix", async () => {
+  it("shrinks overflowed local compaction by removing the oldest input and retaining later history", async () => {
     let normalCalls = 0
     let compactionCalls = 0
     const operationalFailures: TurnProcessorOperationalFailure[] = []
+    const compactionRequests: ModelRequest[] = []
     const stream: StreamFn = async function* (request) {
       const compacting = request.compaction === "local"
       if (compacting) {
         compactionCalls += 1
+        compactionRequests.push({
+          ...request,
+          messages: structuredClone(request.messages),
+        })
         if (compactionCalls === 1) {
           throw new Error("provider context length exceeded")
         }
@@ -3680,6 +3731,45 @@ describe("Turn processor", () => {
     }
 
     expect(compactionCalls).toBe(2)
+    expect(
+      compactionRequests.map((request) =>
+        request.messages.flatMap((message) =>
+          message.role === "user"
+            ? message.content.flatMap((block) =>
+                block.type === "text" ? [block.text] : [],
+              )
+            : [],
+        ),
+      ),
+    ).toEqual([
+      [
+        "one",
+        expect.stringContaining("<environment>"),
+        "two",
+        "three",
+        expect.stringContaining("Write a concise checkpoint"),
+      ],
+      [
+        expect.stringContaining("<environment>"),
+        "two",
+        "three",
+        expect.stringContaining("Write a concise checkpoint"),
+      ],
+    ])
+    for (const request of compactionRequests) {
+      expect(
+        request.messages.flatMap((message) =>
+          message.role === "assistant"
+            ? message.content.flatMap((block) =>
+                block.type === "text" ? [block.text] : [],
+              )
+            : [],
+        ),
+      ).toEqual(["a".repeat(15_000), "a".repeat(15_000), "b".repeat(35_000)])
+    }
+    expect(compactionRequests[1]?.messages.length).toBeLessThan(
+      compactionRequests[0]?.messages.length ?? 0,
+    )
     expect(normalCalls).toBe(4)
     expect(operationalFailures).toEqual([])
     expect(

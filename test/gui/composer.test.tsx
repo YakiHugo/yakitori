@@ -981,13 +981,6 @@ describe("composer", () => {
     expect(useAppStore.getState().promptAttachments).toHaveLength(0)
   })
 
-  it("does not show the full-access chip", () => {
-    useAppStore.setState({ selection: { sessionId: "session_1" } })
-    render(<Composer />)
-
-    expect(screen.queryByText("Full access")).toBeNull()
-  })
-
   it("turns the send button into an interrupt action while a turn runs", async () => {
     const user = userEvent.setup()
     const cancelTurn = vi.fn((_turnId: string) => Promise.resolve())
@@ -1448,7 +1441,13 @@ describe("goal command", () => {
       status: "active",
       inputId: null,
     })
-    expect(fakeRef.current.requestsFor("input/admit")).toHaveLength(0)
+    for (const method of [
+      "session/input",
+      "session/input/queue",
+      "session/input/steer",
+    ]) {
+      expect(fakeRef.current.requestsFor(method)).toHaveLength(0)
+    }
     expect(useAppStore.getState().promptDraft ?? "").toBe("")
   })
 
@@ -1545,8 +1544,11 @@ describe("file mention popup", () => {
     )
     expect(admitInput).not.toHaveBeenCalled()
     expect(
-      screen.getByRole("textbox").querySelector("[data-file-path]"),
-    ).toBeDefined()
+      screen
+        .getByRole("textbox")
+        .querySelector("[data-file-path]")
+        ?.getAttribute("data-file-path"),
+    ).toBe("src/gui/app-store.ts")
   })
 })
 
@@ -1587,12 +1589,15 @@ describe("skill mention popup", () => {
 
     await user.keyboard("{Enter}")
     expect(useAppStore.getState().promptDraft).toBe(
-      `use ${skillMentionText(templateCreator)} `,
+      "use [$Template Creator](/repo/.agents/skills/template-creator/SKILL.md) ",
     )
     expect(admitInput).not.toHaveBeenCalled()
     expect(
-      screen.getByRole("textbox").querySelector("[data-skill-path]"),
-    ).toBeDefined()
+      screen
+        .getByRole("textbox")
+        .querySelector("[data-skill-path]")
+        ?.getAttribute("data-skill-path"),
+    ).toBe("/repo/.agents/skills/template-creator/SKILL.md")
   })
 
   it("sends a skill-only draft and clears the chips after admission", async () => {

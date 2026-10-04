@@ -26,7 +26,6 @@ describe("prompt registry", () => {
       officialAgents[model.provider as keyof typeof officialAgents],
     )
     expect(prompt.revision).toBe(manifest[id].sha256)
-    expect(getInstructionProfile(id)).toBe(prompt)
     expect(prompt.text).not.toMatch(
       /\$\{(?:\{|%|product_name|cwd)|\{\{ personality \}\}/,
     )

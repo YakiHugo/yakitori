@@ -850,7 +850,13 @@ describe("closeConnection", () => {
       sessionId: "session_1",
     })
     await waitForCondition(() => calls === 1)
-    void connection.sendRequest("session/read", { sessionId: "session_1" })
+    connection.sendRaw(
+      JSON.stringify({
+        id: "dropped_request",
+        method: "session/read",
+        params: { sessionId: "session_1" },
+      }),
+    )
     await flush()
 
     const closing = processor.closeConnection(connection.id)

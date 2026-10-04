@@ -1,10 +1,4 @@
-import {
-  mkdir,
-  mkdtemp,
-  rm,
-  symlink,
-  writeFile,
-} from "node:fs/promises"
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
 import type { AddressInfo } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -49,10 +43,7 @@ describe("HTTP server", () => {
         ["POST", "/sessions/session_1/inputs"],
         ["POST", "/sessions/session_1/compact"],
         ["POST", "/sessions/session_1/turns/turn_1/cancel"],
-        [
-          "POST",
-          "/sessions/session_1/turns/turn_1/permissions/perm_1/resolve",
-        ],
+        ["POST", "/sessions/session_1/turns/turn_1/permissions/perm_1/resolve"],
         ["GET", "/projects"],
         ["POST", "/projects"],
         ["GET", "/providers"],
@@ -250,15 +241,10 @@ describe("HTTP static assets", () => {
 
   it("never serves files through symlinks escaping the static directory", async () => {
     await withStaticHttpServer(async (baseUrl, paths) => {
-      try {
-        await symlink(
-          join(paths.rootDir, "secret.txt"),
-          join(paths.staticDir, "leak.txt"),
-        )
-      } catch {
-        // Symlink creation needs extra privileges on some platforms.
-        return
-      }
+      await symlink(
+        join(paths.rootDir, "secret.txt"),
+        join(paths.staticDir, "leak.txt"),
+      )
 
       const response = await fetch(`${baseUrl}/leak.txt`)
 
