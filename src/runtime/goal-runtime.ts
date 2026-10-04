@@ -346,8 +346,8 @@ export class GoalRuntime implements GoalToolService {
               // A user edit must not let an already-running response complete it.
               turn.goalObjective = goalObjective(update.snapshot)
             },
-            recordUsage: (usage) => {
-              runtime.recordUsage(usage)
+            recordUsage: async (usage) => {
+              await runtime.recordUsage(usage)
               this.#accountUsage(turn, usage)
             },
             recordToolStarted: (item) => {

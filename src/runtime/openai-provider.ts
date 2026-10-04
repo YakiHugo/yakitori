@@ -151,7 +151,7 @@ async function* streamOpenAI(
     let nextOutputIndex = 0
     for await (const event of stream) {
       if (request.signal?.aborted) {
-        yield abortedResponse()
+        yield abortedResponse(terminalUsage)
         return
       }
       if (terminalEvent !== undefined)
@@ -244,6 +244,8 @@ async function* streamOpenAI(
           [],
           request.target.provider,
         ).usage
+        if (terminalUsage !== undefined)
+          request.onUsageSnapshot?.(terminalUsage)
         // Codex sends completed items separately and may leave terminal
         // output empty. Preserve output_index order and merge by item id so
         // ordinary Responses endpoints cannot duplicate a tool side effect.
@@ -384,13 +386,13 @@ async function* streamOpenAI(
     // Responses terminal events precede stream EOF. Validate the tail before
     // exposing success or a Length eligible for compaction retry.
     if (request.signal?.aborted) {
-      yield abortedResponse()
+      yield abortedResponse(terminalUsage)
       return
     }
     if (terminalEvent !== undefined) yield terminalEvent
   } catch (error) {
     if (request.signal?.aborted) {
-      yield abortedResponse()
+      yield abortedResponse(terminalUsage)
       return
     }
     yield {
@@ -1116,6 +1118,6 @@ const REASONING_SUMMARY_PROVIDERS: ReadonlySet<string> = new Set([
   "codex",
 ])
 
-function abortedResponse(): ModelStreamEvent {
-  return { type: "cancelled" }
+function abortedResponse(usage?: ModelResponse["usage"]): ModelStreamEvent {
+  return { type: "cancelled", ...(usage === undefined ? {} : { usage }) }
 }

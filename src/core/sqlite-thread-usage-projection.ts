@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs"
 import { dirname } from "node:path"
 import { DatabaseSync } from "node:sqlite"
 import type { StoredThread } from "./rollout.ts"
+import type { UsageHistory } from "./usage-history.ts"
 import type { ThreadSearchProjectionStamp } from "./sqlite-thread-search-projection.ts"
 
 export type ThreadUsageProjectionStamp = ThreadSearchProjectionStamp
@@ -18,6 +19,7 @@ export type ModelUsage = UsageTokenTotals &
 
 export type ThreadUsageSummary = Readonly<{
   generatedAt: string
+  unavailableThreads?: number
   models: readonly ModelUsage[]
   modelDays: readonly (ModelUsage & Readonly<{ date: string }>)[]
   totals: UsageTokenTotals & Readonly<{ turns: number }>
@@ -40,9 +42,9 @@ type StampRow = Readonly<{
   rollout_mtime_ms: number
 }>
 
-const schemaVersion = 2
+const schemaVersion = 5
 
-// Disposable SQLite materialization of per-turn token usage. The rollout
+// Disposable SQLite materialization of turn and auxiliary token usage. The rollout
 // remains authoritative; stamps let readers rebuild only stale projections.
 export class SqliteThreadUsageProjection {
   readonly #database: DatabaseSync
@@ -81,7 +83,10 @@ export class SqliteThreadUsageProjection {
     )
   }
 
-  rebuild(stored: StoredThread, stamp: ThreadUsageProjectionStamp): void {
+  rebuild(
+    stored: StoredThread | UsageHistory,
+    stamp: ThreadUsageProjectionStamp,
+  ): void {
     this.#database.exec("BEGIN")
     try {
       this.#database
@@ -105,10 +110,10 @@ export class SqliteThreadUsageProjection {
         )
       const insertTurn = this.#database.prepare(`
         INSERT OR REPLACE INTO usage_turns (
-          thread_id, turn_id, occurred_at, provider, model,
+          thread_id, origin_rollout_id, origin_thread_id, completion_seq, turn_id, source_kind, occurred_at, provider, model,
           input_tokens, output_tokens,
           cache_read_input_tokens, cache_write_input_tokens
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       const turnModels = new Map<string, { provider: string; model: string }>()
       for (const record of stored.rollout) {
@@ -120,15 +125,26 @@ export class SqliteThreadUsageProjection {
           })
           continue
         }
-        if (item.type !== "turn_completed" || item.usage === undefined) continue
-        // Forks materialize their inherited history for reading, but those
-        // completions were executed in the source rollout, not again here.
-        if (record.rolloutId !== stored.metadata.rolloutId) continue
-        const target = turnModels.get(item.turnId)
+        if (
+          (item.type !== "turn_completed" &&
+            item.type !== "turn_usage" &&
+            item.type !== "auxiliary_usage") ||
+          item.usage === undefined
+        )
+          continue
+        // Keep every retained copy: an ancestor's metadata can be deleted while
+        // a fork still references its physical history. The SQL view deduplicates
+        // by physical rollout, source and accounting ID, independent of metadata.
+        const auxiliary = item.type === "auxiliary_usage"
+        const target = auxiliary ? item : turnModels.get(item.turnId)
         insertTurn.run(
           stored.metadata.id,
-          item.turnId,
-          record.createdAt,
+          record.rolloutId,
+          record.threadId,
+          record.seq,
+          auxiliary ? item.requestId : item.turnId,
+          auxiliary ? item.source : "turn",
+          auxiliary ? item.occurredAt : record.createdAt,
           target?.provider ?? "",
           target?.model ?? "",
           item.usage.inputTokens,
@@ -164,43 +180,43 @@ export class SqliteThreadUsageProjection {
     const threadCount = input?.threads ?? 20
     const totals = this.#database
       .prepare(`
-        SELECT COUNT(*) AS turns,
+        SELECT SUM(CASE WHEN source_kind = 'turn' THEN 1 ELSE 0 END) AS turns,
                SUM(input_tokens) AS input_tokens,
                SUM(output_tokens) AS output_tokens,
                SUM(cache_read_input_tokens) AS cache_read_input_tokens,
                SUM(cache_write_input_tokens) AS cache_write_input_tokens
-        FROM usage_turns
+        FROM usage_unique_turns
       `)
       .get() as unknown as TotalsRow
     const days = (
       this.#database
         .prepare(`
           SELECT date(occurred_at) AS date,
-                 COUNT(*) AS turns,
+                 SUM(CASE WHEN source_kind = 'turn' THEN 1 ELSE 0 END) AS turns,
                  SUM(input_tokens) AS input_tokens,
                  SUM(output_tokens) AS output_tokens,
                  SUM(cache_read_input_tokens) AS cache_read_input_tokens,
                  SUM(cache_write_input_tokens) AS cache_write_input_tokens
-          FROM usage_turns
+          FROM usage_unique_turns
           WHERE date(occurred_at) BETWEEN ? AND ?
           GROUP BY date
           ORDER BY date DESC
         `)
         .all(start, end) as unknown as DayRow[]
     ).reverse()
-    const modelColumns = `provider, model, COUNT(*) AS turns,
+    const modelColumns = `provider, model, SUM(CASE WHEN source_kind = 'turn' THEN 1 ELSE 0 END) AS turns,
       SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
       SUM(cache_read_input_tokens) AS cache_read_input_tokens,
       SUM(cache_write_input_tokens) AS cache_write_input_tokens`
     const models = this.#database
       .prepare(`
-      SELECT ${modelColumns} FROM usage_turns GROUP BY provider, model
+      SELECT ${modelColumns} FROM usage_unique_turns GROUP BY provider, model
       ORDER BY SUM(input_tokens + output_tokens) DESC, provider, model
     `)
       .all() as unknown as ModelRow[]
     const modelDays = this.#database
       .prepare(`
-      SELECT date(occurred_at) AS date, ${modelColumns} FROM usage_turns
+      SELECT date(occurred_at) AS date, ${modelColumns} FROM usage_unique_turns
       WHERE date(occurred_at) BETWEEN ? AND ?
       GROUP BY date, provider, model ORDER BY date, provider, model
     `)
@@ -208,14 +224,14 @@ export class SqliteThreadUsageProjection {
     const threads = this.#database
       .prepare(`
         SELECT t.thread_id, t.title, t.updated_at,
-               COUNT(*) AS turns,
+               SUM(CASE WHEN source_kind = 'turn' THEN 1 ELSE 0 END) AS turns,
                SUM(u.input_tokens) AS input_tokens,
                SUM(u.output_tokens) AS output_tokens,
                SUM(u.cache_read_input_tokens) AS cache_read_input_tokens,
                SUM(u.cache_write_input_tokens) AS cache_write_input_tokens,
                SUM(u.input_tokens + u.output_tokens) AS total_tokens
-        FROM usage_turns u
-        JOIN usage_threads t ON t.thread_id = u.thread_id
+        FROM usage_unique_turns u
+        JOIN usage_threads t ON t.thread_id = u.origin_thread_id
         GROUP BY t.thread_id
         ORDER BY total_tokens DESC, t.updated_at DESC
         LIMIT ?
@@ -289,6 +305,7 @@ function initializeDatabase(database: DatabaseSync): void {
     | undefined
   if ((version?.user_version ?? 0) !== schemaVersion) {
     database.exec(`
+      DROP VIEW IF EXISTS usage_unique_turns;
       DROP TABLE IF EXISTS usage_turns;
       DROP TABLE IF EXISTS usage_threads;
     `)
@@ -306,7 +323,11 @@ function initializeDatabase(database: DatabaseSync): void {
 
     CREATE TABLE IF NOT EXISTS usage_turns (
       thread_id TEXT NOT NULL REFERENCES usage_threads(thread_id) ON DELETE CASCADE,
+      origin_rollout_id TEXT NOT NULL,
+      origin_thread_id TEXT NOT NULL,
+      completion_seq INTEGER NOT NULL,
       turn_id TEXT NOT NULL,
+      source_kind TEXT NOT NULL,
       occurred_at TEXT NOT NULL,
       provider TEXT NOT NULL,
       model TEXT NOT NULL,
@@ -314,11 +335,22 @@ function initializeDatabase(database: DatabaseSync): void {
       output_tokens INTEGER NOT NULL,
       cache_read_input_tokens INTEGER NOT NULL,
       cache_write_input_tokens INTEGER NOT NULL,
-      PRIMARY KEY (thread_id, turn_id)
+      PRIMARY KEY (thread_id, origin_rollout_id, source_kind, turn_id)
     ) STRICT;
 
     CREATE INDEX IF NOT EXISTS usage_turns_date
     ON usage_turns (occurred_at);
+
+    CREATE INDEX IF NOT EXISTS usage_turns_origin
+    ON usage_turns (origin_rollout_id, source_kind, turn_id);
+
+    CREATE VIEW IF NOT EXISTS usage_unique_turns AS
+    SELECT * FROM (
+      SELECT *, ROW_NUMBER() OVER (
+        PARTITION BY origin_rollout_id, source_kind, turn_id
+        ORDER BY completion_seq DESC, (thread_id = origin_thread_id) DESC, thread_id
+      ) AS usage_rank FROM usage_turns
+    ) WHERE usage_rank = 1;
 
     PRAGMA user_version = ${schemaVersion};
   `)

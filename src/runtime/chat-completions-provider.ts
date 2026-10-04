@@ -71,6 +71,7 @@ async function* streamChatCompletions(
   }
   let stage: "request_build" | "connect" | "response_body" = "request_build"
   let usage: ModelUsage | undefined
+  const usageFields = () => usage === undefined ? {} : { usage }
   let providerRequestId: string | undefined
   try {
     if (request.compaction === "remote_v2")
@@ -137,7 +138,7 @@ async function* streamChatCompletions(
     const calls = new Map<number, PendingToolCall>()
     for await (const chunk of stream) {
       if (request.signal?.aborted) {
-        yield { type: "cancelled" }
+        yield { type: "cancelled", ...usageFields() }
         return
       }
       if (!Array.isArray(chunk.choices))
@@ -149,7 +150,10 @@ async function* streamChatCompletions(
           )
         completionId = chunk.id
       }
-      if (chunk.usage != null) usage = fromChatUsage(chunk.usage)
+      if (chunk.usage != null) {
+        usage = fromChatUsage(chunk.usage)
+        request.onUsageSnapshot?.(usage)
+      }
       for (const choice of chunk.choices) {
         if (choice.index !== 0 || finishReason !== undefined)
           throw new ChatCompletionsProtocolError(
@@ -238,7 +242,7 @@ async function* streamChatCompletions(
       }
     }
     if (request.signal?.aborted) {
-      yield { type: "cancelled" }
+      yield { type: "cancelled", ...usageFields() }
       return
     }
     if (finishReason === undefined)
@@ -359,7 +363,7 @@ async function* streamChatCompletions(
     }
   } catch (error) {
     if (request.signal?.aborted) {
-      yield { type: "cancelled" }
+      yield { type: "cancelled", ...usageFields() }
       return
     }
     const apiError = error instanceof OpenAI.APIError ? error : undefined

@@ -21,6 +21,7 @@ import {
   ModelStopReason,
 } from "../../src/runtime/model.ts"
 import { createConfiguredModelsManager } from "../../src/runtime/configured-models-manager.ts"
+import { createModelRequestStream } from "../../src/runtime/model-request.ts"
 import { createModelProvider } from "../../src/runtime/model-provider.ts"
 import { createProviderRegistry } from "../../src/runtime/provider-registry.ts"
 import {
@@ -970,6 +971,74 @@ describe("Chat Completions provider", () => {
       },
     )
   })
+
+  it("retains reported usage when a raw stream is cancelled after output", async () => {
+    await withServer(
+      (_incoming, outgoing) => {
+        outgoing.writeHead(200, { "content-type": "text/event-stream" })
+        outgoing.write(
+          [usageChunk(), chunk({ content: "Started" })]
+            .map((value) => `data: ${JSON.stringify(value)}\n\n`)
+            .join(""),
+        )
+      },
+      async (baseURL) => {
+        const controller = new AbortController()
+        const iterator = provider(baseURL)(
+          request({ signal: controller.signal }),
+        )[Symbol.asyncIterator]()
+        expect((await iterator.next()).value).toMatchObject({ type: "delta" })
+        controller.abort()
+        expect((await iterator.next()).value).toEqual({
+          type: "cancelled",
+          usage: {
+            inputTokens: 11,
+            outputTokens: 7,
+            activeContextTokens: 18,
+            cacheReadInputTokens: 3,
+          },
+        })
+        expect((await iterator.next()).done).toBe(true)
+      },
+    )
+  })
+
+  it.each(["cancel", "timeout"])(
+    "retains usage while the request wrapper wins a stalled stream with %s",
+    async (ending) => {
+      await withServer(
+        (_incoming, outgoing) => {
+          outgoing.writeHead(200, { "content-type": "text/event-stream" })
+          outgoing.write(`data: ${JSON.stringify(usageChunk())}\n\n`)
+        },
+        async (baseURL) => {
+          const controller = new AbortController()
+          const stream = createModelRequestStream(provider(baseURL), {
+            wireApi: "openai_chat_completions",
+            maxAttempts: 1,
+            streamIdleTimeoutMs: 200,
+          })
+          const events = await collect(stream(request({
+            signal: controller.signal,
+            onUsageSnapshot() {
+              if (ending === "cancel") controller.abort()
+            },
+          })))
+          expect(events).toHaveLength(1)
+          expect(events[0]).toMatchObject({
+            type: ending === "cancel" ? "cancelled" : "failure",
+            usage: {
+              inputTokens: 11,
+              outputTokens: 7,
+              activeContextTokens: 18,
+              cacheReadInputTokens: 3,
+            },
+            ...(ending === "timeout" ? { failure: { kind: "idle_timeout" } } : {}),
+          })
+        },
+      )
+    },
+  )
 
   it("does not connect after caller cancellation or for unsupported remote compaction", async () => {
     let count = 0

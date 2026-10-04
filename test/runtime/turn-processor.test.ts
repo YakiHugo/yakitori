@@ -1,3 +1,5 @@
+import { execFileSync } from "node:child_process"
+import { fileURLToPath } from "node:url"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -19,6 +21,7 @@ import type {
   StreamFn,
 } from "../../src/runtime/model.ts"
 import { ModelStopReason } from "../../src/runtime/model.ts"
+import { createModelRequestStream } from "../../src/runtime/model-request.ts"
 import {
   createModelProvider,
   type ModelClient,
@@ -64,6 +67,53 @@ afterEach(async () => {
 })
 
 describe("Turn processor", () => {
+  it("retains completed request usage after process exit during the next request", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yakitori-usage-checkpoint-"))
+    try {
+      const result = execFileSync(
+        process.execPath,
+        [
+          fileURLToPath(
+            new URL("../support/usage-checkpoint-process.ts", import.meta.url),
+          ),
+          root,
+        ],
+        {
+          encoding: "utf8",
+          timeout: 10_000,
+          env: { ...process.env, HOME: root, USERPROFILE: root },
+        },
+      )
+      const { threadId } = JSON.parse(result) as { threadId: string }
+      const reopened = new JsonlThreadStore({ root })
+      const stored = await reopened.readThread(threadId)
+      expect(
+        stored?.rollout
+          .filter(({ item }) => item.type === "turn_usage")
+          .map(({ item }) => item),
+      ).toEqual([
+        expect.objectContaining({
+          type: "turn_usage",
+          usage: {
+            inputTokens: 1_000_000,
+            outputTokens: 1_000,
+            cacheReadInputTokens: 900_000,
+            cacheWriteInputTokens: 0,
+          },
+        }),
+      ])
+      expect(
+        stored?.rollout.some(({ item }) => item.type === "turn_completed"),
+      ).toBe(false)
+      expect((await reopened.readUsageSummary()).totals).toMatchObject({
+        inputTokens: 1_000_000,
+        outputTokens: 1_000,
+      })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it("persists goal continuations as developer context without invoking user prompt hooks", async () => {
     const root = await mkdtemp(join(tmpdir(), "yakitori-goal-input-"))
     const store = new JsonlThreadStore({ root })
@@ -3291,22 +3341,33 @@ describe("Turn processor", () => {
     })
   })
 
-  it("keeps terminal usage when interruption wins before the stream closes", async () => {
+  it.each([
+    "raw",
+    "wrapped",
+    "snapshot",
+  ])("persists observed usage when interruption wins before the stream closes (%s)", async (mode) => {
     const terminalYielded = deferred<void>()
     const streamMayClose = deferred<void>()
-    const stream: StreamFn = async function* () {
-      yield {
-        type: "response",
-        response: {
-          stopReason: ModelStopReason.EndTurn,
-          content: [{ type: "text", text: "complete" }],
-          usage: { inputTokens: 7, outputTokens: 2 },
-        },
-      }
+    const stream: StreamFn = async function* (request) {
+      if (mode === "snapshot") {
+        request.onUsageSnapshot?.({ inputTokens: 7, outputTokens: 2 })
+      } else
+        yield {
+          type: "response",
+          response: {
+            stopReason: ModelStopReason.EndTurn,
+            content: [{ type: "text", text: "complete" }],
+            usage: { inputTokens: 7, outputTokens: 2 },
+          },
+        }
       terminalYielded.resolve()
       await streamMayClose.promise
     }
-    const runtime = await createRuntime(stream)
+    const runtime = await createRuntime(
+      mode !== "raw"
+        ? createModelRequestStream(stream, { wireApi: "unknown" })
+        : stream,
+    )
     const thread = await runtime.createThread()
     await thread.startIfIdle({ content: { kind: "text", text: "run" } })
     await terminalYielded.promise

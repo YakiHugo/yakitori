@@ -10,6 +10,7 @@ import {
   writeFile,
 } from "node:fs/promises"
 import { tmpdir } from "node:os"
+import { DatabaseSync } from "node:sqlite"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { ContextManager } from "../../src/core/context-manager.ts"
@@ -870,6 +871,164 @@ describe("JsonlThreadStore", () => {
     await expect(
       access(join(root, "threads", "thread_forged.json")),
     ).rejects.toMatchObject({ code: "ENOENT" })
+  })
+
+  it("counts retained physical usage once after deleting the original conversation and reopening the store", async () => {
+    const { root, store } = await createStore()
+    await createPersistentThread(store, metadata("usage_source"))
+    await store.appendItems("usage_source", [
+      {
+        type: "turn_completed",
+        turnId: "source_turn",
+        outcome: "completed",
+        usage: { inputTokens: 100, outputTokens: 20 },
+      },
+    ])
+    const prepared = await store.prepareFork({
+      sourceThreadId: "usage_source",
+      boundary: { type: "latest" },
+    })
+    await store.createFork({
+      prepared,
+      target: metadata("usage_child", { parentThreadId: "usage_source" }),
+    })
+    await store.appendItems("usage_child", [
+      {
+        type: "turn_completed",
+        turnId: "child_turn",
+        outcome: "completed",
+        usage: { inputTokens: 40, outputTokens: 10 },
+      },
+    ])
+    await store.flushThread("usage_child")
+    const before = await store.readUsageSummary()
+    expect(before.totals).toMatchObject({
+      inputTokens: 140,
+      outputTokens: 30,
+      turns: 2,
+    })
+    await store.shutdownThread("usage_source")
+    await store.deleteThread("usage_source")
+    const after = await store.readUsageSummary()
+    expect(after.totals).toEqual(before.totals)
+    expect(after.days).toEqual(before.days)
+    expect(after.threads.map((row) => [row.threadId, row.totalTokens])).toEqual(
+      [["usage_child", 50]],
+    )
+    await store.shutdownThread("usage_child")
+    // A stale derived-cache version must rebuild from the same retained records.
+    const cache = new DatabaseSync(join(root, "thread-usage.sqlite"))
+    cache.exec("PRAGMA user_version = 2")
+    cache.close()
+    const reopened = new JsonlThreadStore({ root })
+    expect((await reopened.readUsageSummary()).totals).toEqual(before.totals)
+    expect(
+      (await reopened.readUsageSummary()).unavailableThreads,
+    ).toBeUndefined()
+  })
+
+  it.each([
+    3, 4,
+  ])("reads recorded usage from known historical configuration v%s without allowing execution replay", async (schemaVersion) => {
+    const { root, store } = await createStore()
+    const id = `legacy_usage_${schemaVersion}`
+    await createPersistentThread(store, metadata(id))
+    await store.appendItems(id, [
+      {
+        type: "turn_context",
+        context: {
+          turnId: "legacy_turn",
+          selection: { provider: "codex", model: "historical" },
+          configuration: SessionConfiguration.create({
+            selection: { provider: "faux", model: "scripted" },
+            workspaceRoot: root,
+            enabledTools: [],
+            approvalPolicy: "always_approve",
+            promptCacheKey: id,
+          }).snapshot,
+        },
+      },
+      {
+        type: "turn_completed",
+        turnId: "legacy_turn",
+        outcome: "completed",
+        usage: {
+          inputTokens: 1000000,
+          outputTokens: 1000,
+          cacheReadInputTokens: 900000,
+        },
+      },
+    ])
+    await store.shutdownThread(id)
+    const path = join(root, "rollouts", id, "rollout.jsonl")
+    const rows = (await readFile(path, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+    for (const row of rows)
+      if (row.item.type === "turn_context") {
+        row.item.context.configuration.schemaVersion = schemaVersion
+        delete row.item.context.configuration.modelAutoCompactTokenLimitScope
+        if (schemaVersion === 3)
+          row.item.context.configuration.approvalPolicy = "never"
+      }
+    const historicalBytes = `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`
+    await writeFile(path, historicalBytes)
+    await expect(store.readThread(id)).rejects.toThrow("invalid item")
+    const usage = await store.readUsageSummary()
+    expect(usage.unavailableThreads).toBeUndefined()
+    expect(usage.totals).toMatchObject({
+      inputTokens: 1000000,
+      outputTokens: 1000,
+      cacheReadInputTokens: 900000,
+      turns: 1,
+    })
+    expect(
+      usage.models.map((row) => [row.provider, row.model, row.inputTokens]),
+    ).toEqual([["codex", "historical", 1000000]])
+    expect(await readFile(path, "utf8")).toBe(historicalBytes)
+    // Unknown schema cannot be silently guessed from familiar token fields.
+    for (const row of rows)
+      if (row.item.type === "turn_context")
+        row.item.context.configuration.schemaVersion = 99
+    await writeFile(
+      path,
+      `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`,
+    )
+    const unknown = await store.readUsageSummary()
+    expect(unknown.unavailableThreads).toBe(1)
+    expect(unknown.totals.turns).toBe(0)
+  })
+
+  it("reports unreadable usage histories without estimating missing tokens and clears the warning after repair", async () => {
+    const { root, store } = await createStore()
+    for (const [id, tokens] of [
+      ["usage_healthy", 50],
+      ["usage_unreadable", 500],
+    ] as const) {
+      await createPersistentThread(store, metadata(id))
+      await store.appendItems(id, [
+        {
+          type: "turn_completed",
+          turnId: "turn",
+          outcome: "completed",
+          usage: { inputTokens: tokens, outputTokens: 0 },
+        },
+      ])
+      await store.shutdownThread(id)
+    }
+    expect((await store.readUsageSummary()).totals.inputTokens).toBe(550)
+    const path = join(root, "threads", "usage_unreadable.json")
+    const valid = await readFile(path, "utf8")
+    await writeFile(path, "{broken")
+    const partial = await store.readUsageSummary()
+    expect(partial.totals.inputTokens).toBe(50)
+    expect(partial.unavailableThreads).toBe(1)
+    expect((await store.readUsageSummary()).unavailableThreads).toBe(1)
+    await writeFile(path, valid)
+    const repaired = await store.readUsageSummary()
+    expect(repaired.totals.inputTokens).toBe(550)
+    expect(repaired.unavailableThreads).toBeUndefined()
   })
 
   it("keeps referenced rollout history after deleting the visible source thread", async () => {

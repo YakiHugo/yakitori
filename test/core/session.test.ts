@@ -12,6 +12,108 @@ import { SessionConfiguration } from "../../src/runtime/session-configuration.ts
 import { MemoryThreadStore } from "./memory-thread-store.ts"
 
 describe("live Session actor", () => {
+  it("flushes admitted usage before an interrupted Turn's terminal record", async () => {
+    const store = new MemoryThreadStore()
+    const entered = deferred<void>()
+    const beginUsage = deferred<void>()
+    const flushStarted = deferred<void>()
+    const releaseFlush = deferred<void>()
+    let savedRuntime: TurnRuntime | undefined
+    let usageAcknowledged = false
+    const manager = createManager(
+      {
+        async run(runtime) {
+          savedRuntime = runtime
+          entered.resolve()
+          await beginUsage.promise
+          await runtime.recordUsage({
+            inputTokens: 1_000_000,
+            outputTokens: 1_000,
+          })
+          usageAcknowledged = true
+          await new Promise(() => {})
+        },
+      },
+      store,
+    )
+    try {
+      const thread = await manager.createThread()
+      await thread.startIfIdle({
+        submissionId: "turn_checkpoint",
+        content: { kind: "text", text: "run" },
+      })
+      await entered.promise
+      store.flushStarted = () => flushStarted.resolve()
+      store.flushBarrier = releaseFlush.promise
+      beginUsage.resolve()
+      await flushStarted.promise
+      expect(usageAcknowledged).toBe(false)
+      await thread.interrupt("during checkpoint")
+      // Finishing after the hard-abort grace must still wait for this flush.
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      expect(thread.status).toBe(SessionStatus.Active)
+      releaseFlush.resolve()
+      await nextEventOfType(thread, "turn.interrupted")
+      expect(usageAcknowledged).toBe(true)
+      const accounting = (await store.readThread(thread.id))?.rollout
+        .filter(
+          ({ item }) =>
+            item.type === "turn_usage" || item.type === "turn_completed",
+        )
+        .map(({ item }) => item)
+      expect(accounting).toEqual([
+        {
+          type: "turn_usage",
+          turnId: "turn_checkpoint",
+          usage: { inputTokens: 1_000_000, outputTokens: 1_000 },
+        },
+        {
+          type: "turn_completed",
+          turnId: "turn_checkpoint",
+          outcome: "interrupted",
+          usage: { inputTokens: 1_000_000, outputTokens: 1_000 },
+        },
+      ])
+      await expect(
+        savedRuntime?.recordUsage({
+          inputTokens: 2_000_000,
+          outputTokens: 2_000,
+        }),
+      ).rejects.toThrow("Turn is no longer active")
+    } finally {
+      releaseFlush.resolve()
+      await manager.shutdown()
+    }
+  })
+
+  it("rejects a failed usage flush before the processor can start its next request", async () => {
+    const store = new MemoryThreadStore()
+    const errors: unknown[] = []
+    let proceeded = false
+    const manager = new ThreadManager({
+      store,
+      onPersistenceError: (error) => errors.push(error),
+      createTurnProcessor: () =>
+        withPreparation({
+          async run(runtime) {
+            store.failNextFlush = true
+            await runtime.recordUsage({ inputTokens: 100, outputTokens: 20 })
+            proceeded = true
+          },
+        }),
+    })
+    try {
+      const thread = await manager.createThread()
+      await thread.startIfIdle({ content: { kind: "text", text: "run" } })
+      await nextEventOfType(thread, "turn.failed")
+      expect(proceeded).toBe(false)
+      expect(errors).toHaveLength(1)
+      expect(thread.agentStatus).toEqual({ errored: "flush failed" })
+    } finally {
+      await manager.shutdown()
+    }
+  })
+
   it("awaits installation listeners before exposing an actor for admission", async () => {
     const manager = createManager({ run: async () => undefined })
     const installing = deferred<string>()

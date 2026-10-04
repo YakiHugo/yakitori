@@ -3,10 +3,11 @@ import { useState } from "react"
 import { useAppStore } from "../store/app-store.ts"
 import {
   totalTokens,
-  usageCalendar,
   type UsageRange,
+  usageCalendar,
   usageView,
 } from "../usage-view.ts"
+import { UsageHeatmap } from "./usage-heatmap.tsx"
 
 const compact = new Intl.NumberFormat("en", {
   notation: "compact",
@@ -23,7 +24,6 @@ export function UsageSection() {
   const summary = usage.summary
   const view = summary && usageView(summary, range, selectedDate)
   const calendar = summary ? usageCalendar(summary, 366) : []
-  const peak = Math.max(1, ...calendar.map(totalTokens))
   const total = view ? totalTokens(view.totals) : 0
   const breakdownDays =
     view?.days.filter((day) => !selectedDate || day.date === selectedDate) ?? []
@@ -50,6 +50,13 @@ export function UsageSection() {
         <p role="alert">
           {usage.error}
           {summary ? " Showing the previous result." : ""}
+        </p>
+      )}
+      {(summary?.unavailableThreads ?? 0) > 0 && (
+        <p role="alert">
+          Usage is incomplete: {summary?.unavailableThreads} conversation{" "}
+          {summary?.unavailableThreads === 1 ? "history" : "histories"} could
+          not be read. Refresh to retry.
         </p>
       )}
       {!summary || !view ? (
@@ -111,10 +118,10 @@ export function UsageSection() {
               onSelect={setSelectedDate}
             />
           </div>
-          {view.totals.turns === 0 && (
+          {view.totals.turns === 0 && total === 0 && (
             <p className="usage-empty">
-              No recorded usage in this period. Turns appear here after they
-              finish and report usage.
+              No recorded usage in this period. Usage appears after model
+              requests report it.
             </p>
           )}
           <section
@@ -159,83 +166,14 @@ export function UsageSection() {
               </ul>
             )}
           </section>
-          <section className="usage-card" aria-label="Activity heatmap">
-            <div className="usage-card-heading">
-              <h4>Activity</h4>
-              <span>
-                {calendar.filter((day) => day.turns > 0).length} active days ·
-                Last 366 days
-              </span>
-            </div>
-            <div className="usage-calendar-scroll">
-              <fieldset
-                className="usage-calendar"
-                aria-label="Daily token activity, arrow keys move between days"
-              >
-                {calendar.map((day, index) => (
-                  <button
-                    type="button"
-                    key={day.date}
-                    tabIndex={
-                      selectedDate === day.date ||
-                      (!selectedDate && index === calendar.length - 1)
-                        ? 0
-                        : -1
-                    }
-                    style={{
-                      gridRow:
-                        new Date(`${day.date}T00:00:00Z`).getUTCDay() + 1,
-                    }}
-                    data-level={
-                      totalTokens(day) === 0
-                        ? 0
-                        : Math.min(4, Math.ceil((totalTokens(day) / peak) * 4))
-                    }
-                    aria-pressed={selectedDate === day.date}
-                    aria-label={`${day.date}: ${exact.format(totalTokens(day))} tokens, ${day.turns} turns`}
-                    title={`${day.date} · ${exact.format(totalTokens(day))} tokens · ${day.turns} turns`}
-                    onClick={() => {
-                      setRange(366)
-                      setSelectedDate(
-                        selectedDate === day.date ? undefined : day.date,
-                      )
-                    }}
-                    onKeyDown={(event) => {
-                      const offset = (
-                        {
-                          ArrowUp: -1,
-                          ArrowDown: 1,
-                          ArrowLeft: -7,
-                          ArrowRight: 7,
-                        } as Record<string, number>
-                      )[event.key]
-                      if (offset === undefined) return
-                      event.preventDefault()
-                      const target =
-                        event.currentTarget.parentElement?.children[
-                          Math.max(
-                            0,
-                            Math.min(calendar.length - 1, index + offset),
-                          )
-                        ]
-                      if (target instanceof HTMLButtonElement) target.focus()
-                    }}
-                  />
-                ))}
-              </fieldset>
-            </div>
-            <div className="usage-axis">
-              <span>{calendar[0]?.date}</span>
-              <span className="usage-legend">
-                Less{" "}
-                {[0, 1, 2, 3, 4].map((level) => (
-                  <i key={level} data-level={level} />
-                ))}{" "}
-                More
-              </span>
-              <span>{calendar.at(-1)?.date}</span>
-            </div>
-          </section>
+          <UsageHeatmap
+            days={calendar}
+            selectedDate={selectedDate}
+            onSelect={(date) => {
+              setRange(366)
+              setSelectedDate(date)
+            }}
+          />
           <details className="usage-details">
             <summary>Usage details</summary>
             <section className="usage-totals" aria-label="Token totals">
@@ -432,10 +370,10 @@ export function UsageSection() {
               )}
             </section>
             <p className="usage-footnote">
-              Completed turns with usage recorded on this device only. Cache
-              reads and writes are included in input, not added again. Missing
-              usage and in-progress turns are excluded. This is not a billing
-              statement; subscription limits are in Subscriptions.
+              Provider-reported usage in this Yakitori data store, including
+              saved usage from running turns. Cache reads and writes are
+              included in input, not added again. Missing usage is excluded.
+              This is not account-wide billing or subscription quota.
             </p>
             <p className="usage-footnote">
               Updated {new Date(summary.generatedAt).toLocaleString()} ·

@@ -9,6 +9,115 @@ import {
 import { createModelRequestStream } from "../../src/runtime/model-request.ts"
 
 describe("model request runtime", () => {
+  it.each([
+    "cancel",
+    "throw",
+    "extra",
+    "timeout",
+  ])("keeps observed terminal usage when the stream tail ends with %s", async (tail) => {
+    const controller = new AbortController()
+    const usage = { inputTokens: 100, outputTokens: 20 }
+    const provider: StreamFn = async function* () {
+      yield { ...success, response: { ...success.response, usage } }
+      if (tail === "throw") throw new Error("bad tail")
+      if (tail === "extra") {
+        yield { type: "delta", text: "bad tail" }
+        return
+      }
+      if (tail === "cancel") controller.abort()
+      await new Promise(() => {})
+    }
+    const stream = createModelRequestStream(provider, {
+      wireApi: "unknown",
+      streamIdleTimeoutMs: 5,
+    })
+    const events = await collect(stream, controller.signal)
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({
+      type: tail === "cancel" ? "cancelled" : "failure",
+      usage,
+    })
+  })
+
+  it("retains cumulative snapshots across retries without charging terminal copies twice", async () => {
+    const seen: unknown[] = []
+    const provider: StreamFn = async function* (request) {
+      request.onUsageSnapshot?.({ inputTokens: 100, outputTokens: 0 })
+      request.onUsageSnapshot?.({ outputTokens: 20 })
+      if (request.attempt?.number === 1) {
+        yield failure("stream_disconnected")
+        return
+      }
+      yield {
+        ...success,
+        response: {
+          ...success.response,
+          usage: { inputTokens: 100, outputTokens: 20 },
+        },
+      }
+    }
+    const events = await collect(
+      createModelRequestStream(provider, {
+        wireApi: "unknown",
+        sleep: async () => {},
+      }),
+      undefined,
+      { ...requestFixture(), onUsageSnapshot: (usage) => seen.push(usage) },
+    )
+    expect(events).toHaveLength(2)
+    expect(events[0]).toMatchObject({
+      type: "retry",
+      usage: { inputTokens: 100, outputTokens: 20 },
+    })
+    expect(events[1]).toMatchObject({
+      type: "response",
+      response: { usage: { inputTokens: 100, outputTokens: 20 } },
+    })
+    expect(seen).toHaveLength(4)
+  })
+
+  it("captures a reported snapshot even when cancellation wins the pending provider next", async () => {
+    const controller = new AbortController()
+    const provider: StreamFn = async function* (request) {
+      request.onUsageSnapshot?.({ inputTokens: 100, outputTokens: 0 })
+      request.onUsageSnapshot?.({ outputTokens: 20 })
+      controller.abort()
+      await new Promise(() => {})
+    }
+    expect(
+      await collect(
+        createModelRequestStream(provider, { wireApi: "unknown" }),
+        controller.signal,
+      ),
+    ).toEqual([
+      { type: "cancelled", usage: { inputTokens: 100, outputTokens: 20 } },
+    ])
+  })
+
+  it("does not carry a failed attempt's usage into a later unmetered attempt", async () => {
+    const provider = scriptedStream([
+      [
+        {
+          ...failure("stream_disconnected"),
+          usage: { inputTokens: 100, outputTokens: 20 },
+        },
+      ],
+      [success],
+    ])
+    const events = await collect(
+      createModelRequestStream(provider.stream, {
+        wireApi: "unknown",
+        sleep: async () => {},
+      }),
+    )
+    expect(events).toHaveLength(2)
+    expect(events[0]).toMatchObject({
+      type: "retry",
+      usage: { inputTokens: 100, outputTokens: 20 },
+    })
+    expect(events[1]).toEqual(success)
+  })
+
   it("does not replay a request after a completed item committed side effects", async () => {
     const item: ModelStreamEvent = {
       type: "output_item",
@@ -102,7 +211,14 @@ describe("model request runtime", () => {
     expect(
       provider
         .requests()
-        .map(({ attempt: _attempt, signal: _signal, ...original }) => original),
+        .map(
+          ({
+            attempt: _attempt,
+            signal: _signal,
+            onUsageSnapshot: _usage,
+            ...original
+          }) => original,
+        ),
     ).toEqual([request, request])
   })
 
@@ -587,7 +703,7 @@ describe("model request runtime", () => {
   })
 })
 
-const success: ModelStreamEvent = {
+const success: Extract<ModelStreamEvent, { type: "response" }> = {
   type: "response",
   response: {
     stopReason: ModelStopReason.EndTurn,

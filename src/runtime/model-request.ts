@@ -5,6 +5,7 @@ import {
   type ModelRequest,
   ModelStopReason,
   type ModelStreamEvent,
+  type ModelUsage,
   type ModelWireApi,
   type StreamFn,
 } from "./model.ts"
@@ -61,11 +62,14 @@ async function* runModelRequest(
 ): AsyncGenerator<ModelStreamEvent> {
   let previousFailure: ModelFailure | undefined
   for (let attempt = 1; ; attempt += 1) {
+    let observedUsage: ModelUsage | undefined
+    const usageFields = () =>
+      observedUsage === undefined ? {} : { usage: observedUsage }
     let outputObserved = false
     let committedOutput = false
     let compactionTruncated = false
     if (request.signal?.aborted) {
-      yield { type: "cancelled" }
+      yield { type: "cancelled", ...usageFields() }
       return
     }
 
@@ -96,6 +100,10 @@ async function* runModelRequest(
             ...(previousFailure === undefined ? {} : { previousFailure }),
           },
           signal,
+          onUsageSnapshot(usage) {
+            observedUsage = { ...observedUsage, ...usage }
+            request.onUsageSnapshot?.(usage)
+          },
         })[Symbol.asyncIterator]()
         stage = "response_body"
         for (;;) {
@@ -106,7 +114,7 @@ async function* runModelRequest(
           )
           if (next === cancelled) {
             pendingNext = true
-            yield { type: "cancelled" }
+            yield { type: "cancelled", ...usageFields() }
             return
           }
           if (next === idleTimeout) {
@@ -162,7 +170,10 @@ async function* runModelRequest(
                 }
                 break
               }
-              yield terminalEvent
+              yield {
+                ...terminalEvent,
+                response: { ...response, ...usageFields() },
+              }
               return
             }
             failureEvent = {
@@ -184,6 +195,14 @@ async function* runModelRequest(
             failureEvent = protocolFailureEvent(request, options)
             break
           }
+          const usage =
+            event.type === "response"
+              ? event.response.usage
+              : "usage" in event
+                ? event.usage
+                : undefined
+          if (usage !== undefined)
+            observedUsage = { ...observedUsage, ...usage }
           if (event.type === "delta" || event.type === "reasoning_delta") {
             outputObserved = true
             yield event
@@ -200,7 +219,7 @@ async function* runModelRequest(
           }
           if (event.type === "cancelled") {
             if (request.signal?.aborted) {
-              yield event
+              yield { ...event, ...usageFields() }
               return
             }
             failureEvent = {
@@ -223,7 +242,7 @@ async function* runModelRequest(
         }
       } catch (cause) {
         if (request.signal?.aborted) {
-          yield { type: "cancelled" }
+          yield { type: "cancelled", ...usageFields() }
           return
         }
         failureEvent =
@@ -299,7 +318,7 @@ async function* runModelRequest(
       retryDecision: retry ? "retry" : "fail",
     } as const
     if (!retry) {
-      yield { ...failureEvent, failure }
+      yield { ...failureEvent, failure, ...usageFields() }
       return
     }
     if (committedOutput && request.rebuildMessagesAfterOutput !== undefined) {
@@ -317,9 +336,7 @@ async function* runModelRequest(
       maxAttempts: effectiveMaxAttempts,
       delayMs,
       failure,
-      ...(failureEvent.usage === undefined
-        ? {}
-        : { usage: failureEvent.usage }),
+      ...usageFields(),
     }
     previousFailure = failure
     await options.sleep(delayMs, request.signal)

@@ -58,6 +58,7 @@ import {
   SqliteThreadSearchProjection,
   type ThreadSearchProjectionStamp,
 } from "./sqlite-thread-search-projection.ts"
+import { readUsageHistory } from "./usage-history.ts"
 import {
   SqliteThreadUsageProjection,
   type ThreadUsageSummary,
@@ -1588,12 +1589,16 @@ export class JsonlThreadStore implements ThreadStore {
   async readUsageSummary(): Promise<ThreadUsageSummary> {
     await this.#ready
     return this.#withUsageProjection(async () => {
-      await this.#synchronizeUsageProjection()
-      return this.#usageProjection.readUsage()
+      const unavailableThreads = await this.#synchronizeUsageProjection()
+      return {
+        ...this.#usageProjection.readUsage(),
+        ...(unavailableThreads === 0 ? {} : { unavailableThreads }),
+      }
     })
   }
 
-  async #synchronizeUsageProjection(): Promise<void> {
+  async #synchronizeUsageProjection(): Promise<number> {
+    let unavailableThreads = 0
     const threadIds = new Set(
       (await readdir(this.#threadsDirectory))
         .filter((file) => file.endsWith(".json"))
@@ -1606,12 +1611,13 @@ export class JsonlThreadStore implements ThreadStore {
         const stamp = await this.#searchProjectionStamp(metadata)
         if (this.#usageProjection.isCurrent(threadId, stamp)) continue
         this.#usageProjection.rebuild(
-          await this.#readRequiredThread(threadId),
+          await readUsageHistory(metadata, this.#rolloutsDirectory),
           stamp,
         )
       } catch {
-        // A retained invalid rollout drops out of the usage summary, matching
-        // the search projection's isolation of corrupt histories.
+        // Keep healthy histories usable, but make omissions explicit rather
+        // than presenting a partial sum as complete. Never estimate lost usage.
+        unavailableThreads += 1
         this.#usageProjection.delete(threadId)
       }
     }
@@ -1620,6 +1626,7 @@ export class JsonlThreadStore implements ThreadStore {
         this.#usageProjection.delete(indexedThreadId)
       }
     }
+    return unavailableThreads
   }
 
   #withUsageProjection<T>(operation: () => T | Promise<T>): Promise<T> {
@@ -2173,6 +2180,36 @@ function isRolloutItem(value: unknown): value is RolloutItem {
       typeof value.inputItemId === "string" &&
       (value.requestFingerprint === undefined ||
         typeof value.requestFingerprint === "string")
+    )
+  }
+  if (value.type === "auxiliary_usage") {
+    return (
+      hasOnlyKeys(value, [
+        "type",
+        "source",
+        "occurredAt",
+        "requestId",
+        "provider",
+        "model",
+        "usage",
+      ]) &&
+      value.source === "session_title" &&
+      typeof value.occurredAt === "string" &&
+      Number.isFinite(Date.parse(value.occurredAt)) &&
+      typeof value.requestId === "string" &&
+      value.requestId.length > 0 &&
+      typeof value.provider === "string" &&
+      value.provider.length > 0 &&
+      typeof value.model === "string" &&
+      value.model.length > 0 &&
+      isTokenUsage(value.usage)
+    )
+  }
+  if (value.type === "turn_usage") {
+    return (
+      hasOnlyKeys(value, ["type", "turnId", "usage"]) &&
+      typeof value.turnId === "string" &&
+      isTokenUsage(value.usage)
     )
   }
   if (value.type === "turn_completed") {

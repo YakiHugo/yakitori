@@ -562,49 +562,95 @@ html[data-desktop="macos"] .settings-sidebar {
 .usage-table-scroll {
   overflow-x: auto;
 }
+.usage-activity {
+  padding-top: 22px;
+  padding-bottom: 24px;
+}
+.usage-calendar-scroll {
+  padding: 3px;
+  margin: -3px;
+}
+.usage-calendar-year {
+  display: grid;
+  min-width: 530px;
+  gap: 4px;
+}
 .usage-calendar {
   display: grid;
-  grid-auto-flow: column;
-  grid-template-rows: repeat(7, 8px);
-  grid-auto-columns: minmax(7px, 1fr);
-  gap: 3px;
-  min-width: 530px;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  grid-template-rows: repeat(7, auto);
+  gap: 4px;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  min-inline-size: 0;
 }
-.usage-calendar button,
-.usage-legend i {
-  border-radius: 2px;
-  background: var(--muted);
-  border: 1px solid color-mix(in oklab, var(--foreground) 5%, transparent);
+.usage-calendar button {
+  aspect-ratio: 1;
+  width: 100%;
+  min-width: 0;
+  border-radius: 20%;
+  background: color-mix(in oklab, var(--foreground) 5%, var(--background));
 }
-.usage-calendar button[data-level="1"],
-.usage-legend i[data-level="1"] {
-  background: color-mix(in oklab, var(--foreground) 20%, var(--background));
+.usage-calendar button[data-level="1"] {
+  background: #cce6ff;
 }
-.usage-calendar button[data-level="2"],
-.usage-legend i[data-level="2"] {
-  background: color-mix(in oklab, var(--foreground) 40%, var(--background));
+.usage-calendar button[data-level="2"] {
+  background: #68b5ff;
 }
-.usage-calendar button[data-level="3"],
-.usage-legend i[data-level="3"] {
-  background: color-mix(in oklab, var(--foreground) 65%, var(--background));
+.usage-calendar button[data-level="3"] {
+  background: #1688f8;
 }
-.usage-calendar button[data-level="4"],
-.usage-legend i[data-level="4"] {
-  background: var(--foreground);
+.usage-calendar button[data-level="4"] {
+  background: #0756a5;
 }
+.dark .usage-calendar button[data-level="1"] {
+  background: #193f65;
+}
+.dark .usage-calendar button[data-level="2"] {
+  background: #236cb2;
+}
+.dark .usage-calendar button[data-level="3"] {
+  background: #3299f6;
+}
+.dark .usage-calendar button[data-level="4"] {
+  background: #96ceff;
+}
+.usage-calendar button:hover,
+.usage-calendar button:focus-visible,
 .usage-calendar button[aria-pressed="true"] {
   outline: 2px solid var(--foreground);
   outline-offset: 1px;
 }
-.usage-legend {
-  display: flex;
-  align-items: center;
-  gap: 4px;
+.usage-calendar-months {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  margin-top: 6px;
+  color: var(--muted-foreground);
+  font-size: 11px;
 }
-.usage-legend i {
-  display: inline-block;
-  width: 10px;
-  height: 10px;
+.usage-calendar-months span:last-child {
+  justify-self: end;
+  white-space: nowrap;
+}
+.usage-calendar-tooltip {
+  display: grid;
+  gap: 2px;
+  padding: 9px 13px;
+  border-radius: 12px;
+  background: #191b1d;
+  color: #fff;
+  box-shadow: 0 8px 24px #0002;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.usage-calendar-tooltip strong {
+  font-weight: 500;
+}
+.usage-calendar-tooltip svg {
+  display: none;
 }
 .usage-dashboard .usage-threads {
   font-size: 13px;
