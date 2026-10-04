@@ -1,4 +1,4 @@
-import type { ModelTarget, ToolWireProtocol } from "../model.ts"
+import type { ModelTarget, ModelWireApi, ToolWireProtocol } from "../model.ts"
 import type { ResolvedModel } from "../model-catalog.ts"
 import {
   type ResolvedStepConfiguration,
@@ -29,6 +29,7 @@ export type StepContext = Readonly<{
 export function captureStepContext(input: {
   readonly registry: ToolRegistry
   readonly configuration: ResolvedStepConfiguration
+  readonly wireApi?: ModelWireApi
 }): StepContext {
   const target = Object.freeze({ ...input.configuration.target })
   const model = Object.freeze({
@@ -43,7 +44,7 @@ export function captureStepContext(input: {
   if (model.provider !== target.provider || model.model !== target.model) {
     throw new Error("Step model metadata does not match its concrete target.")
   }
-  const provider = providerToolCapabilities(target.provider)
+  const provider = providerToolCapabilities(target.provider, input.wireApi)
   const toolWireProtocol =
     model.supportsNativeToolSearch &&
     provider.nativeDeferredProtocol !== undefined
@@ -90,7 +91,25 @@ export function captureStepContext(input: {
   }
 }
 
-function providerToolCapabilities(provider: string): ProviderToolCapabilities {
+function providerToolCapabilities(
+  provider: string,
+  wireApi?: ModelWireApi,
+): ProviderToolCapabilities {
+  // A connection's editable ID carries no protocol meaning. Production Turns
+  // supply the protocol captured by their transport owner; direct stream
+  // callers retain the existing built-in provider defaults.
+  if (wireApi === "openai_responses")
+    return {
+      supportsCustomTools: true,
+      nativeDeferredProtocol: "openai_deferred",
+    }
+  if (wireApi === "anthropic_messages")
+    return {
+      supportsCustomTools: false,
+      nativeDeferredProtocol: "anthropic_deferred",
+    }
+  if (wireApi === "openai_chat_completions")
+    return { supportsCustomTools: false }
   const normalized = provider.toLowerCase()
   if (normalized === "openai" || normalized === "codex") {
     return {

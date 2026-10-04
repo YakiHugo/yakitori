@@ -26,6 +26,7 @@ export type ModelProviderInfo = Readonly<{
 }>
 
 export type ModelClientSession = {
+  readonly wireApi?: ModelWireApi
   readonly remoteCompaction?: boolean
   readonly stream: StreamFn
   close(): void | Promise<void>
@@ -143,6 +144,7 @@ export function createModelProvider(
             ),
           })
           return {
+            wireApi: input.info.wireApi,
             remoteCompaction: input.info.capabilities.remoteCompaction,
             stream(request) {
               requireTargetProvider(input.info.id, request.target)
