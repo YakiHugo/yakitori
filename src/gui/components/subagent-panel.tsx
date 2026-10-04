@@ -20,6 +20,7 @@ import {
 import { usePinnedScroll } from "../hooks/use-pinned-scroll.ts"
 import { type AppRpcClient, createAppRpcClient } from "../lib/rpc-client.ts"
 import { ApprovalRequests } from "./approval-bar.tsx"
+import { LiveTextNotice } from "./cells/live-text-notice.tsx"
 import { PermissionCell } from "./cells/permission-cell.tsx"
 import { ReasoningCell } from "./cells/reasoning-cell.tsx"
 import { ToolCell } from "./cells/tool-cell.tsx"
@@ -194,7 +195,11 @@ function ChildTrace({
       if (last === undefined || pieces.length !== itemIds.length) continue
       answers.set(turnId, {
         itemIds,
-        entry: { ...last, text: pieces.map((entry) => entry.text).join("") },
+        entry: {
+          ...last,
+          text: pieces.map((entry) => entry.text).join(""),
+          incomplete: pieces.some((entry) => entry.incomplete),
+        },
       })
     }
     const entries = view.entries.flatMap<ExecutionEntry>((entry) => {
@@ -448,6 +453,7 @@ function TraceEntry({
             messageId: entry.itemId,
           })}
         >
+          <LiveTextNotice entry={entry} />
           <MarkdownView
             text={entry.text}
             workspaceRoot={workspaceRoot}

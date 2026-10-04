@@ -459,6 +459,7 @@ describe("runtime terminal delivery", () => {
         }),
         expect.objectContaining({
           type: "assistant.delta",
+          offset: 0,
           itemId: "answer",
           delta: " resumed",
         }),
@@ -468,6 +469,7 @@ describe("runtime terminal delivery", () => {
         }),
         expect.objectContaining({
           type: "reasoning.delta",
+          offset: 0,
           itemId: "answer_reasoning",
           delta: " resumed",
         }),

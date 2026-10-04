@@ -6,6 +6,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "../ui/collapsible.tsx"
+import { LiveTextNotice } from "./live-text-notice.tsx"
 
 export function ReasoningCell({
   entry,
@@ -29,6 +30,7 @@ export function ReasoningCell({
         <ChevronRight className="size-3 transition-transform group-data-[state=open]/reasoning:rotate-90" />
       </CollapsibleTrigger>
       <CollapsibleContent className="pt-1 pb-2">
+        <LiveTextNotice entry={entry} />
         <MarkdownView
           text={entry.text}
           streaming={entry.status === "streaming"}

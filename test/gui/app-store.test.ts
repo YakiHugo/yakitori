@@ -314,6 +314,8 @@ describe("app store event stream", () => {
     stream?.emitTransient({
       sessionId: "session_1",
       type: "reasoning.delta",
+      streamId: "stream_1",
+      offset: 0,
       turnId: "turn_1",
       itemId: "reasoning_1",
       delta: "Checking",
@@ -327,7 +329,8 @@ describe("app store event stream", () => {
       expect.objectContaining({
         kind: "reasoning",
         text: "Checking",
-        status: "completed",
+        status: "suspended",
+        incomplete: true,
       }),
     ])
     expect(useAppStore.getState().stream).toBeUndefined()
@@ -489,6 +492,8 @@ describe("app store event stream", () => {
     })
     stream?.emitTransient({
       type: "assistant.delta",
+      streamId: "stream_1",
+      offset: 0,
       sessionId: "session_1",
       turnId: "turn_1",
       itemId: "item_1",

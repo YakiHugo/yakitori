@@ -791,6 +791,7 @@ describe("application composition", () => {
           params: expect.objectContaining({
             sessionId: childSessionId,
             type: "assistant.delta",
+            offset: 6,
             delta: "live answer",
           }),
         })
@@ -995,6 +996,7 @@ describe("application composition", () => {
               params: expect.objectContaining({
                 sessionId: childSessionId,
                 type: "assistant.delta",
+                offset: 0,
                 delta: `live followup ${turn}`,
               }),
             })

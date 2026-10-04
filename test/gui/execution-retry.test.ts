@@ -189,6 +189,8 @@ describe("model retry execution state", () => {
       event: {
         ...live,
         type: type === "agent_message" ? "assistant.delta" : "reasoning.delta",
+        streamId: "stream_1",
+        offset: 0,
         itemId: "output_1",
         delta: "Resumed output",
       },
@@ -284,15 +286,6 @@ describe("model retry execution state", () => {
           ...live,
           type: "session.usage",
           usage: { inputTokens: 10, outputTokens: 2 },
-        },
-      },
-      {
-        type: "transient",
-        event: {
-          ...live,
-          type: "assistant.delta",
-          itemId: "unknown_item",
-          delta: "Unmatched output",
         },
       },
       {

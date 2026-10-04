@@ -350,6 +350,8 @@ it("shows retry activity before any output and restores the activity heading on 
           type: "transient",
           event: {
             type: "assistant.delta",
+            streamId: "stream_1",
+            offset: 0,
             sessionId: "session_1",
             turnId: "turn_1",
             itemId: "answer",
