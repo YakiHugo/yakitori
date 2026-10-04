@@ -65,6 +65,12 @@ import {
   type ApiUpdateUserModelPreferenceResponse,
   type ApiUserModelPreference,
 } from "../protocol.ts"
+import type { ProviderService } from "../provider-service.ts"
+import {
+  providerMethods,
+  type ProviderRpcParams,
+  type ProviderRpcResponses,
+} from "./provider-methods.ts"
 import type { SideChatService } from "../side-chat.ts"
 import {
   InvalidProjectCursorError,
@@ -245,6 +251,7 @@ export type RpcMethodOutcome = Readonly<{
 
 export type RpcMethodContext = Readonly<{
   mcp?: McpService
+  providerConfiguration?: ProviderService
   interactions?: SessionInteractions
   sideChats?: SideChatService
   connectionId: number
@@ -685,6 +692,7 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
   ...sideChatMethods,
   ...interactionMethods,
   ...mcpMethods,
+  ...providerMethods,
   ...workspaceRpcMethods,
   ...computerMethods,
   {
@@ -1290,16 +1298,17 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
       if (record.cwd !== undefined && typeof record.cwd !== "string") {
         throw invalidParams("cwd must be a string when provided.")
       }
-      return {
-        result: await context.userConfig.writeValue({
-          keyPath: record.keyPath as string[],
-          value: record.value,
-          ...(record.expectedVersion === undefined
-            ? {}
-            : { expectedVersion: record.expectedVersion }),
-          ...(record.cwd === undefined ? {} : { cwd: record.cwd }),
-        }),
-      }
+      const result = await context.userConfig.writeValue({
+        keyPath: record.keyPath as string[],
+        value: record.value,
+        ...(record.expectedVersion === undefined
+          ? {}
+          : { expectedVersion: record.expectedVersion }),
+        ...(record.cwd === undefined ? {} : { cwd: record.cwd }),
+      })
+      if (record.keyPath[0] === "model_providers")
+        await context.providerConfiguration?.reload()
+      return { result }
     },
   },
   {
@@ -1329,7 +1338,8 @@ export const rpcMethods: readonly RpcMethodDefinition[] = [
 // table passes through unchanged reuse the protocol.ts request DTOs; the
 // handlers own their validation.
 export type RpcMethodParams = Readonly<
-  WorkspaceRpcParams &
+  ProviderRpcParams &
+    WorkspaceRpcParams &
     InteractionRpcParams &
     McpRpcParams &
     SideChatRpcParams & {
@@ -1394,7 +1404,8 @@ export type RpcMethodParams = Readonly<
 >
 
 export type RpcMethodResponses = Readonly<
-  WorkspaceRpcResponses &
+  ProviderRpcResponses &
+    WorkspaceRpcResponses &
     InteractionRpcResponses &
     McpRpcResponses &
     SideChatRpcResponses & {

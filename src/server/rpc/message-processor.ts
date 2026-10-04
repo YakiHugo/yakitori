@@ -13,6 +13,7 @@ import {
   type ApiReadSubscriptionResponse,
   type ApiSubscriptionProvider,
 } from "../protocol.ts"
+import type { ProviderService } from "../provider-service.ts"
 import type { SideChatService } from "../side-chat.ts"
 import type { ProjectStore } from "../sqlite-project-store.ts"
 import {
@@ -60,6 +61,7 @@ import {
 // Injection mirrors createYakitoriHttpServer so the production wiring stage
 // stays mechanical.
 export type MessageProcessorOptions = Readonly<{
+  providerConfiguration?: ProviderService
   mcp?: McpService
   interactions?: SessionInteractions
   sideChats?: SideChatService
@@ -107,6 +109,7 @@ export class MessageProcessor {
   private readonly handlers: ServerHandlers
   private readonly sideChats: SideChatService | undefined
   private readonly interactions: SessionInteractions | undefined
+  private readonly providerConfiguration: ProviderService | undefined
   private readonly mcp: McpService | undefined
   private readonly projectStore: ProjectStore | undefined
   private readonly providers:
@@ -134,6 +137,7 @@ export class MessageProcessor {
     this.handlers = options.handlers
     this.sideChats = options.sideChats
     this.interactions = options.interactions
+    this.providerConfiguration = options.providerConfiguration
     this.mcp = options.mcp
     this.projectStore = options.projectStore
     this.providers = options.providers
@@ -301,6 +305,9 @@ export class MessageProcessor {
         ? {}
         : { interactions: this.interactions }),
       ...(this.mcp === undefined ? {} : { mcp: this.mcp }),
+      ...(this.providerConfiguration === undefined
+        ? {}
+        : { providerConfiguration: this.providerConfiguration }),
       connectionId,
       handlers: this.handlers,
       subscriptions: this.subscriptions,

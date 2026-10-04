@@ -1,4 +1,8 @@
 import { mcpServersFromConfig } from "./mcp-configuration.ts"
+import {
+  providersFromConfig,
+  type StoredProviderConfiguration,
+} from "./provider-configuration.ts"
 import { createHash, randomUUID } from "node:crypto"
 import {
   mkdir,
@@ -90,6 +94,7 @@ export class ConfigVersionConflictError extends Error {
 }
 
 export type UserConfiguration = Readonly<{
+  modelProviders?: Readonly<Record<string, StoredProviderConfiguration>>
   rolloutBudget?: RolloutBudgetConfig
   preference?: ApiUserModelPreference
   baseInstructions?: string
@@ -645,6 +650,7 @@ async function configurationFromConfig(
   const shellEnvironmentPolicy = shellEnvironmentPolicyFromConfig(value)
   const rolloutBudget = rolloutBudgetFromConfig(value)
   const mcpServers = mcpServersFromConfig(value)
+  const modelProviders = providersFromConfig(value.model_providers)
   const hooks = hooksFromConfig(value)
   const instructionConfiguration = instructionsFromConfig(
     value,
@@ -686,6 +692,7 @@ async function configurationFromConfig(
   }
   return {
     ...instructionConfiguration,
+    ...(Object.keys(modelProviders).length === 0 ? {} : { modelProviders }),
     ...(preference === undefined ? {} : { preference }),
     ...(rolloutBudget === undefined ? {} : { rolloutBudget }),
     ...(baseInstructions === undefined ? {} : { baseInstructions }),
