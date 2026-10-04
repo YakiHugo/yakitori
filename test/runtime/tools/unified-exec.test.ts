@@ -369,6 +369,89 @@ describe("unified exec tools", () => {
     }
   })
 
+  it.skipIf(process.platform === "win32" || !existsSync("/bin/bash")).each(
+    [
+      {
+        inherit: "none" as const,
+        profileValue: "missing",
+        appValue: "missing",
+        path: "/configured/bin",
+      },
+      {
+        inherit: "core" as const,
+        profileValue: "missing",
+        appValue: "missing",
+        path: "/profile/bin",
+      },
+      {
+        inherit: "all" as const,
+        profileValue: "from-profile",
+        appValue: "from-app",
+        path: "/profile/bin",
+      },
+    ].flatMap((policy) => [false, true].map((tty) => ({ ...policy, tty }))),
+  )(
+    "keeps the $inherit inheritance policy for captured shells (tty=$tty)",
+    async ({ inherit, profileValue, appValue, path, tty }) => {
+      const workspace = await realpath(
+        await mkdtemp(join(tmpdir(), "yakitori-snapshot-policy-")),
+      )
+      try {
+        await writeFile(
+          join(workspace, ".bashrc"),
+          "export SNAPSHOT_PROFILE_VALUE=from-profile\nexport PATH=/profile/bin\nexport CHOSEN=from-profile\nsnapshot_function() { builtin printf '%s\\n' function-restored; }\n",
+        )
+        const userShellEnv = createUserShellEnv({
+          appEnv: {
+            HOME: workspace,
+            PATH: "/usr/bin:/bin",
+            APP_ONLY: "from-app",
+          },
+          shellEnvironmentPolicy: {
+            inherit,
+            set: {
+              CHOSEN: "configured",
+              ...(inherit === "none"
+                ? { HOME: workspace, PATH: "/configured/bin" }
+                : {}),
+            },
+          },
+          resolveShell: async () => ({ shell: "/bin/bash", warnings: [] }),
+          log: () => {},
+        })
+        const [execCommand] = createUnifiedExecTools({ userShellEnv })
+        if (execCommand === undefined) throw new Error("missing exec_command")
+        try {
+          const output = requireOutput(
+            await execCommand.execute(
+              {
+                // biome-ignore lint/suspicious/noTemplateCurlyInString: The child shell expands these placeholders.
+                cmd: 'printf "%s\\n" "${SNAPSHOT_PROFILE_VALUE:-missing}" "${APP_ONLY:-missing}" "$CHOSEN" "$HOME" "$PATH"; snapshot_function',
+                tty,
+                yield_time_ms: 1_000,
+              },
+              { workspaceRoot: workspace },
+            ),
+          )
+          expect(output.exit_code).toBe(0)
+          expect(output.output.replaceAll("\r", "").split("\n")).toEqual([
+            profileValue,
+            appValue,
+            "configured",
+            workspace,
+            path,
+            "function-restored",
+            "",
+          ])
+        } finally {
+          await execCommand.dispose?.()
+        }
+      } finally {
+        await rm(workspace, { recursive: true, force: true })
+      }
+    },
+  )
+
   it.each([
     false,
     true,
