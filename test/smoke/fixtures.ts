@@ -299,6 +299,9 @@ export async function runProviderFlow(
 
     await page.getByRole("button", { name: "Back to app", exact: true }).click()
     await page.getByRole("button", { name: "New session", exact: true }).click()
+    await expect(
+      page.getByRole("heading", { name: "Untitled session", exact: true }),
+    ).toBeVisible()
     await page
       .getByRole("button", { name: "Select model and effort", exact: true })
       .click()
@@ -370,6 +373,9 @@ export async function runProviderFlow(
     await expect(page.getByText("Add provider", { exact: true })).toBeVisible()
     await page.getByRole("button", { name: "Back to app", exact: true }).click()
     await page.getByRole("button", { name: "New session", exact: true }).click()
+    await expect(
+      page.getByRole("heading", { name: "Untitled session", exact: true }),
+    ).toBeVisible()
     await page
       .getByRole("button", { name: "Select model and effort", exact: true })
       .click()

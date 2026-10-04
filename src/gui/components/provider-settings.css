@@ -182,16 +182,6 @@
 .provider-presets > button > span:not(.provider-logo) {
   overflow-wrap: anywhere;
 }
-.provider-entry-chevron {
-  flex: none;
-  margin-left: auto;
-  color: var(--muted-foreground);
-  opacity: 0;
-}
-.provider-presets > button:hover .provider-entry-chevron,
-.provider-presets > button:focus-visible .provider-entry-chevron {
-  opacity: 1;
-}
 .provider-presets > button:focus-visible,
 .provider-custom-row:focus-visible,
 .provider-connection:focus-visible {
@@ -437,9 +427,6 @@
   .provider-presets > button {
     gap: 8px;
     padding-inline: 10px;
-  }
-  .provider-entry-chevron {
-    display: none;
   }
 }
 @media (max-width: 620px) {

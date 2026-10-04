@@ -113,6 +113,7 @@ function ProviderConnections({
   const [readRevision, setReadRevision] = useState(0)
   const mounted = useRef(true)
   const draftRevision = useRef(0)
+  const pendingRequest = useRef<symbol | undefined>(undefined)
 
   useEffect(() => {
     mounted.current = true
@@ -184,6 +185,8 @@ function ProviderConnections({
   const perform = async (action: "save" | "test") => {
     if (draft === undefined) return
     const revision = draftRevision.current
+    const request = Symbol()
+    pendingRequest.current = request
     const { envKey, ...configured } = draft.configuration
     const normalizedEnvKey = envKey?.trim() || undefined
     const configuration: ProviderConfiguration = {
@@ -204,14 +207,18 @@ function ProviderConnections({
       const client = getAppRpcClient(apiBase)
       if (action === "test") {
         await client.request("provider/configuration/test", params)
-        if (mounted.current && revision === draftRevision.current)
+        if (
+          mounted.current &&
+          pendingRequest.current === request &&
+          revision === draftRevision.current
+        )
           setTestStatus("Connection test succeeded.")
       } else {
         const response = await client.request(
           "provider/configuration/write",
           params,
         )
-        if (!mounted.current) return
+        if (!mounted.current || pendingRequest.current !== request) return
         setProviders(response.providers)
         setPresets(response.presets)
         setSubscriptions(response.subscriptions ?? [])
@@ -223,17 +230,26 @@ function ProviderConnections({
         await loadProviders()
       }
     } catch (cause) {
-      if (mounted.current && revision === draftRevision.current)
+      if (
+        mounted.current &&
+        pendingRequest.current === request &&
+        revision === draftRevision.current
+      )
         setError(
           cause instanceof Error ? cause.message : "Provider action failed.",
         )
     } finally {
-      if (mounted.current) setPending(undefined)
+      if (mounted.current && pendingRequest.current === request) {
+        pendingRequest.current = undefined
+        setPending(undefined)
+      }
     }
   }
 
   const remove = async (id: string) => {
     const revision = draftRevision.current
+    const request = Symbol()
+    pendingRequest.current = request
     setPending("delete")
     setError(undefined)
     try {
@@ -241,7 +257,7 @@ function ProviderConnections({
         "provider/configuration/delete",
         { id },
       )
-      if (!mounted.current) return
+      if (!mounted.current || pendingRequest.current !== request) return
       setProviders(response.providers)
       setPresets(response.presets)
       setSubscriptions(response.subscriptions ?? [])
@@ -250,12 +266,19 @@ function ProviderConnections({
         setDraft(undefined)
       await loadProviders()
     } catch (cause) {
-      if (mounted.current && revision === draftRevision.current)
+      if (
+        mounted.current &&
+        pendingRequest.current === request &&
+        revision === draftRevision.current
+      )
         setError(
           cause instanceof Error ? cause.message : "Could not remove provider.",
         )
     } finally {
-      if (mounted.current) setPending(undefined)
+      if (mounted.current && pendingRequest.current === request) {
+        pendingRequest.current = undefined
+        setPending(undefined)
+      }
     }
   }
 
@@ -273,32 +296,45 @@ function ProviderConnections({
   const changeConnection = async (
     action: () => Promise<ProviderConfigurationResponse>,
   ) => {
+    const request = Symbol()
+    pendingRequest.current = request
     setPending("save")
     setError(undefined)
     try {
       const response = await action()
-      if (!mounted.current) return
+      if (!mounted.current || pendingRequest.current !== request) return
       setProviders(response.providers)
       setSubscriptions(response.subscriptions ?? [])
       setPresets(response.presets)
       setUndoId(response.undoId)
       await loadProviders()
     } catch (cause) {
-      if (mounted.current)
+      if (mounted.current && pendingRequest.current === request)
         setError(
           cause instanceof Error
             ? cause.message
             : "Could not update the connection.",
         )
     } finally {
-      if (mounted.current) setPending(undefined)
+      if (mounted.current && pendingRequest.current === request) {
+        pendingRequest.current = undefined
+        setPending(undefined)
+      }
     }
   }
   const closeEditor = () => {
     draftRevision.current++
+    pendingRequest.current = undefined
+    if (pending === "models") setPending(undefined)
     setDraft(undefined)
     setError(undefined)
     setTestStatus(undefined)
+  }
+  const closeImport = () => {
+    pendingRequest.current = undefined
+    setPending(undefined)
+    setImporting(false)
+    setError(undefined)
   }
   const hasConnections =
     (providers?.length ?? 0) > 0 ||
@@ -322,6 +358,8 @@ function ProviderConnections({
   const fetchModels = async () => {
     if (!draft) return
     const revision = draftRevision.current
+    const request = Symbol()
+    pendingRequest.current = request
     setPending("models")
     setError(undefined)
     try {
@@ -333,15 +371,26 @@ function ProviderConnections({
           ...(draft.apiKey ? { apiKey: draft.apiKey } : {}),
         },
       )
-      if (mounted.current && revision === draftRevision.current)
+      if (
+        mounted.current &&
+        pendingRequest.current === request &&
+        revision === draftRevision.current
+      )
         setDraft({ ...draft, availableModels: models })
     } catch (cause) {
-      if (mounted.current && revision === draftRevision.current)
+      if (
+        mounted.current &&
+        pendingRequest.current === request &&
+        revision === draftRevision.current
+      )
         setError(
           cause instanceof Error ? cause.message : "Could not fetch models.",
         )
     } finally {
-      if (mounted.current) setPending(undefined)
+      if (mounted.current && pendingRequest.current === request) {
+        pendingRequest.current = undefined
+        setPending(undefined)
+      }
     }
   }
   const selectedPreset = presets.find(
@@ -479,10 +528,7 @@ function ProviderConnections({
           />
         ))}
       {importing ? (
-        <SidebarDialog
-          title="Import provider"
-          onClose={() => setImporting(false)}
-        >
+        <SidebarDialog title="Import provider" onClose={closeImport}>
           <p className="provider-field-hint">
             Paste a Yakitori provider connection as JSON: configuration plus an
             optional apiKey. Empty models fetch the service's catalog.
@@ -498,11 +544,7 @@ function ProviderConnections({
           />
           {error ? <p role="alert">{error}</p> : null}
           <div className="provider-editor-footer">
-            <Button
-              type="button"
-              variant="ghost"
-              onClick={() => setImporting(false)}
-            >
+            <Button type="button" variant="ghost" onClick={closeImport}>
               Cancel
             </Button>
             <Button
@@ -525,6 +567,8 @@ function ProviderConnections({
                   setError("A connection must include configuration.")
                   return
                 }
+                const request = Symbol()
+                pendingRequest.current = request
                 setPending("save")
                 setError(undefined)
                 void getAppRpcClient(apiBase)
@@ -537,6 +581,11 @@ function ProviderConnections({
                   )
                   .then(
                     (response) => {
+                      if (
+                        !mounted.current ||
+                        pendingRequest.current !== request
+                      )
+                        return
                       setProviders(response.providers)
                       setUndoId(response.undoId)
                       setSubscriptions(response.subscriptions)
@@ -545,14 +594,21 @@ function ProviderConnections({
                       setAdding(false)
                       void loadProviders()
                     },
-                    (cause: unknown) =>
-                      setError(
-                        cause instanceof Error
-                          ? cause.message
-                          : "Import failed.",
-                      ),
+                    (cause: unknown) => {
+                      if (mounted.current && pendingRequest.current === request)
+                        setError(
+                          cause instanceof Error
+                            ? cause.message
+                            : "Import failed.",
+                        )
+                    },
                   )
-                  .finally(() => setPending(undefined))
+                  .finally(() => {
+                    if (mounted.current && pendingRequest.current === request) {
+                      pendingRequest.current = undefined
+                      setPending(undefined)
+                    }
+                  })
               }}
             >
               Import

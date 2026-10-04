@@ -14,7 +14,7 @@ import { WorkspaceFrame } from "./components/workspace-frame.tsx"
 import { useAppStore, useExecutionView } from "./store/app-store.ts"
 
 export function App() {
-  const message = useAppStore((state) => state.message)
+  const message = useAppStore((state) => state.message || state.providersError)
   const hydrating = useAppStore(
     (state) =>
       state.hydratingSessionId !== undefined &&

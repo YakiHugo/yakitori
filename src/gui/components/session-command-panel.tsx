@@ -31,13 +31,20 @@ function CommandPanel({ kind }: Readonly<{ kind: "status" | "mcp" }>) {
   const close = useAppStore((state) => state.closeCommandPanel)
   const view = useExecutionView()
   const [servers, setServers] = useState<McpServers>()
-  const [subscription, setSubscription] = useState<Subscription>()
-  const [error, setError] = useState<string>()
+  const [subscriptionResult, setSubscriptionResult] =
+    useState<
+      Readonly<{
+        apiBase: string
+        provider: ApiSubscriptionProvider
+        subscription?: Subscription
+        error?: string
+      }>
+    >()
+  const [mcpError, setMcpError] = useState<string>()
   const model = view.lastModel ?? session?.currentModel
   const contextTokens = view.contextTokens
   const usageModel =
-    contextTokens?.provider !== undefined &&
-    contextTokens?.model !== undefined
+    contextTokens?.provider !== undefined && contextTokens?.model !== undefined
       ? { provider: contextTokens.provider, model: contextTokens.model }
       : model
   const capacity =
@@ -56,6 +63,14 @@ function CommandPanel({ kind }: Readonly<{ kind: "status" | "mcp" }>) {
       ? (model.provider as ApiSubscriptionProvider)
       : undefined
 
+  const currentSubscriptionResult =
+    subscriptionResult?.apiBase === apiBase &&
+    subscriptionResult.provider === subscriptionProvider
+      ? subscriptionResult
+      : undefined
+  const subscription = currentSubscriptionResult?.subscription
+  const error = kind === "mcp" ? mcpError : currentSubscriptionResult?.error
+
   useEffect(() => {
     let current = true
     const client = getAppRpcClient(apiBase)
@@ -67,12 +82,12 @@ function CommandPanel({ kind }: Readonly<{ kind: "status" | "mcp" }>) {
             (response) => {
               if (current) {
                 setServers(response.servers)
-                setError(undefined)
+                setMcpError(undefined)
               }
             },
             (cause: unknown) => {
               if (current)
-                setError(
+                setMcpError(
                   cause instanceof Error
                     ? cause.message
                     : "Could not load MCP servers.",
@@ -91,19 +106,28 @@ function CommandPanel({ kind }: Readonly<{ kind: "status" | "mcp" }>) {
       }
     }
     if (!subscriptionProvider) return
+    setSubscriptionResult({ apiBase, provider: subscriptionProvider })
     void client
       .request("subscription/read", { provider: subscriptionProvider })
       .then(
         (response) => {
-          if (current) setSubscription(response.subscription)
+          if (current)
+            setSubscriptionResult({
+              apiBase,
+              provider: subscriptionProvider,
+              subscription: response.subscription,
+            })
         },
         (cause: unknown) => {
           if (current)
-            setError(
-              cause instanceof Error
-                ? cause.message
-                : "Could not load usage limits.",
-            )
+            setSubscriptionResult({
+              apiBase,
+              provider: subscriptionProvider,
+              error:
+                cause instanceof Error
+                  ? cause.message
+                  : "Could not load usage limits.",
+            })
         },
       )
     return () => {

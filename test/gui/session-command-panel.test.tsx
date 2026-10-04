@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { cleanup, render, screen } from "@testing-library/react"
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react"
 import { userEvent } from "@testing-library/user-event"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import { SessionCommandPanel } from "../../src/gui/components/session-command-panel.tsx"
@@ -134,4 +134,85 @@ it("uses the last model context and the provider's reported quota window", async
   expect(request).toHaveBeenCalledWith("subscription/read", {
     provider: "codex",
   })
+})
+
+it("keeps quota values and errors with their provider while the same status panel remains open", async () => {
+  const responses = new Map<
+    string,
+    { resolve(value: unknown): void; reject(error: Error): void }[]
+  >()
+  request.mockImplementation(async (_method, params) => {
+    const provider = (params as { provider: string }).provider
+    return new Promise((resolve, reject) => {
+      const pending = responses.get(provider) ?? []
+      pending.push({ resolve, reject })
+      responses.set(provider, pending)
+    })
+  })
+  useAppStore.setState({
+    selection: { sessionId: "session_a" },
+    commandPanel: { kind: "status", sessionId: "session_a" },
+    execution: {
+      ...createExecutionViewState(),
+      lastModel: { provider: "codex", model: "codex-model" },
+    },
+  })
+  render(<SessionCommandPanel />)
+  const answer = (provider: string, index: number, bucket: string) => {
+    const response = responses.get(provider)?.[index]
+    if (!response) throw new Error(`Missing ${provider} quota request`)
+    response.resolve({
+      subscription: {
+        provider,
+        displayName: provider,
+        availability: "available",
+        usage: {
+          status: "available",
+          buckets: [{ name: bucket, usedPercent: 12 }],
+        },
+      },
+    })
+  }
+  await act(async () => answer("codex", 0, "ChatGPT quota"))
+  expect(screen.getByText("ChatGPT quota")).toBeDefined()
+  act(() =>
+    useAppStore.setState((state) => ({
+      execution: {
+        ...state.execution,
+        lastModel: { provider: "grok", model: "grok-model" },
+      },
+    })),
+  )
+  expect(screen.getByText("grok usage limits")).toBeDefined()
+  expect(screen.queryByText("ChatGPT quota")).toBeNull()
+  expect(screen.getByText("Loading usage limits…")).toBeDefined()
+  await waitFor(() => expect(responses.get("grok")).toHaveLength(1))
+  await act(async () =>
+    responses.get("grok")?.[0]?.reject(new Error("Grok quota unavailable")),
+  )
+  expect(screen.getByRole("alert").textContent).toBe("Grok quota unavailable")
+  expect(screen.queryByText("ChatGPT quota")).toBeNull()
+  act(() =>
+    useAppStore.setState((state) => ({
+      execution: {
+        ...state.execution,
+        lastModel: { provider: "codex", model: "codex-model" },
+      },
+    })),
+  )
+  expect(screen.queryByRole("alert")).toBeNull()
+  expect(screen.getByText("Loading usage limits…")).toBeDefined()
+  act(() =>
+    useAppStore.setState((state) => ({
+      execution: {
+        ...state.execution,
+        lastModel: { provider: "kimi", model: "kimi-model" },
+      },
+    })),
+  )
+  await act(async () => answer("kimi", 0, "Kimi quota"))
+  await act(async () => answer("codex", 1, "Stale ChatGPT quota"))
+  expect(screen.getByText("kimi usage limits")).toBeDefined()
+  expect(screen.getByText("Kimi quota")).toBeDefined()
+  expect(screen.queryByText("Stale ChatGPT quota")).toBeNull()
 })

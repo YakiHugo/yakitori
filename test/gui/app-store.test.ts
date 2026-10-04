@@ -465,11 +465,7 @@ describe("app store event stream", () => {
     expect(
       projectExecutionView(useAppStore.getState().execution).entries,
     ).toEqual([expect.objectContaining({ kind: "user_input", text: "hello" })])
-    expect(useAppStore.getState().selectedSession?.counts).toMatchObject({
-      inputs: 1,
-      pendingInputs: 0,
-      turns: 0,
-    })
+    expect(useAppStore.getState().selectedSession?.counts.inputs).toBe(1)
     stream?.emitReplayComplete()
     expect(useAppStore.getState().hydratingSessionId).toBeUndefined()
     expect(useAppStore.getState().restoringModelSelectionFor).toBeUndefined()
@@ -508,12 +504,7 @@ describe("app store event stream", () => {
         status: "streaming",
       }),
     ])
-    expect(useAppStore.getState().selectedSession?.counts).toMatchObject({
-      inputs: 1,
-      pendingInputs: 0,
-      turns: 1,
-      items: 0,
-    })
+    expect(useAppStore.getState().selectedSession?.activeTurnId).toBe("turn_1")
     stream?.emitEvent(
       createEventEnvelope({
         sessionId: "session_1",
@@ -553,10 +544,22 @@ describe("app store event stream", () => {
         },
       }),
     )
-    expect(useAppStore.getState().selectedSession?.counts).toMatchObject({
-      items: 2,
-      tools: 1,
-    })
+    expect(
+      projectExecutionView(useAppStore.getState().execution).entries,
+    ).toEqual([
+      expect.objectContaining({ kind: "user_input", text: "hello" }),
+      expect.objectContaining({
+        kind: "assistant",
+        text: "Hi there",
+        status: "completed",
+      }),
+      expect.objectContaining({
+        kind: "tool",
+        toolCallId: "tool_1",
+        state: "completed",
+        resultText: "done",
+      }),
+    ])
     expect(useAppStore.getState().sessionsByProject[""]?.sessions[0]?.seq).toBe(
       5,
     )
@@ -604,7 +607,6 @@ describe("app store event stream", () => {
         behavior: "allow",
       }),
     ])
-    expect(useAppStore.getState().selectedSession?.counts.permissions).toBe(0)
   })
 
   it("answers the pending server request when resolving a permission", async () => {
@@ -1676,7 +1678,7 @@ describe("model selection", () => {
     })
   })
 
-  it("loads providers and tolerates a failure from the server", async () => {
+  it("preserves the last model catalog and exposes a server failure until refresh succeeds", async () => {
     fakeRef.current.respond = (method) => {
       if (method === "provider/list") {
         return {
@@ -1752,7 +1754,58 @@ describe("model selection", () => {
     await useAppStore.getState().loadProviders()
 
     expect(useAppStore.getState().providers).toHaveLength(2)
-    expect(useAppStore.getState().message).toBeUndefined()
+    expect(useAppStore.getState().providersError).toBe("not found")
+    fakeRef.current.respond = () => ({
+      providers: [],
+      defaultProvider: "faux",
+      defaultModel: "scripted",
+    })
+    await useAppStore.getState().loadProviders()
+    expect(useAppStore.getState().providersError).toBeUndefined()
+  })
+
+  it("lets unexpected catalog failures remain visible as rejected operations", async () => {
+    const error = new Error("Catalog invariant failed")
+    fakeRef.current.respond = () => {
+      throw error
+    }
+    await expect(useAppStore.getState().loadProviders()).rejects.toBe(error)
+  })
+
+  it.each([
+    "success",
+    "failure",
+  ] as const)("keeps the newest catalog after an older %s completes", async (outcome) => {
+    const older = deferredResponse()
+    const newer = deferredResponse()
+    fakeRef.current.respond = () =>
+      fakeRef.current.requestsFor("provider/list").length === 1
+        ? older.promise
+        : newer.promise
+    useAppStore.setState({ providersError: "Previous catalog failed" })
+    const firstRead = useAppStore.getState().loadProviders()
+    const lastRead = useAppStore.getState().loadProviders()
+    newer.resolve({
+      providers: [{ name: "new-provider", models: [] }],
+      defaultProvider: "new-provider",
+      defaultModel: "new-model",
+    })
+    await lastRead
+    if (outcome === "failure")
+      older.reject(new ApiRequestError("Old catalog failed", "internal_error"))
+    else
+      older.resolve({
+        providers: [{ name: "old-provider", models: [] }],
+        defaultProvider: "old-provider",
+        defaultModel: "old-model",
+      })
+    await firstRead
+    expect(useAppStore.getState().providers).toEqual([
+      { name: "new-provider", models: [] },
+    ])
+    expect(useAppStore.getState().defaultProvider).toBe("new-provider")
+    expect(useAppStore.getState().defaultModel).toBe("new-model")
+    expect(useAppStore.getState().providersError).toBeUndefined()
   })
 
   it("updates subscription providers independently and preserves stale data on failure", async () => {
@@ -1987,9 +2040,9 @@ describe("model selection", () => {
     expect(useAppStore.getState().promptDraft).toBeUndefined()
     // Steering is ephemeral acceptance: no admission outbox entry.
     expect(
-      Array.from({ length: inputRecoveryMemory.length }, (_, index) =>
-        inputRecoveryMemory.key(index),
-      ).filter((key) => key?.startsWith("yakitori.admission")),
+      inputRecoveryMemory.listAdmissionsForApiBase(
+        useAppStore.getState().apiBase,
+      ),
     ).toEqual([])
   })
 
@@ -2118,7 +2171,7 @@ describe("model selection", () => {
     expect(useAppStore.getState().pendingSteers.session_1).toEqual([])
   })
 
-  it("recovers a steer after renderer reload and restores it once across navigation", async () => {
+  it("recovers a steer after store reset and restores it once across navigation", async () => {
     fakeRef.current.respond = (method, params) => {
       if (method === "session/input/steer") {
         const body = params as { requestId: string; expectedTurnId: string }
@@ -2135,9 +2188,10 @@ describe("model selection", () => {
     useAppStore.setState({ promptDraft: "survive reload" })
     await useAppStore.getState().admitInput("survive reload")
     expect(
-      Array.from({ length: inputRecoveryMemory.length }, (_, index) =>
-        inputRecoveryMemory.key(index),
-      ).filter((key) => key?.startsWith("yakitori.steer.v1:")),
+      inputRecoveryMemory.readSteers(
+        useAppStore.getState().apiBase,
+        "session_1",
+      ),
     ).toHaveLength(1)
 
     useAppStore.getState().stream?.close()
@@ -2171,13 +2225,14 @@ describe("model selection", () => {
     fakeRef.current.respond = admissionResponder()
     await useAppStore.getState().admitInput("survive reload")
     expect(
-      Array.from({ length: inputRecoveryMemory.length }, (_, index) =>
-        inputRecoveryMemory.key(index),
-      ).filter((key) => key?.startsWith("yakitori.steer.v1:")),
+      inputRecoveryMemory.readSteers(
+        useAppStore.getState().apiBase,
+        "session_1",
+      ),
     ).toHaveLength(0)
   })
 
-  it("restores promoted image refs after reload and requeues them on retry", async () => {
+  it("restores promoted image refs after store reset and requeues them on retry", async () => {
     const original = {
       name: "screen.png",
       mediaType: "image/png" as const,
@@ -2390,7 +2445,7 @@ describe("model selection", () => {
     expect(useAppStore.getState().message).toBeUndefined()
   })
 
-  it("clears the admission outbox only when the durable event confirms the write", async () => {
+  it("clears pending admission recovery only when the durable event confirms the write", async () => {
     window.localStorage.clear()
     fakeRef.current.respond = admissionResponder()
     useAppStore.setState({
@@ -2404,15 +2459,15 @@ describe("model selection", () => {
 
     await useAppStore.getState().admitInput("hello")
 
-    const admissionKeys = () =>
-      Array.from({ length: inputRecoveryMemory.length }, (_, index) =>
-        inputRecoveryMemory.key(index),
-      ).filter((key) => key?.startsWith("yakitori.admission"))
+    const pendingAdmissions = () =>
+      inputRecoveryMemory.listAdmissionsForApiBase(
+        useAppStore.getState().apiBase,
+      )
     expect(useAppStore.getState().message).toBeUndefined()
     expect(fakeRef.current.requestsFor("session/input")).toHaveLength(1)
     // The response acknowledges the routing decision only; the outbox entry
     // is still held.
-    expect(admissionKeys()).toHaveLength(1)
+    expect(pendingAdmissions()).toHaveLength(1)
 
     const requestId = (
       fakeRef.current.requestsFor("session/input")[0]?.params as {
@@ -2435,7 +2490,7 @@ describe("model selection", () => {
       }),
     )
 
-    await vi.waitFor(() => expect(admissionKeys()).toHaveLength(0))
+    await vi.waitFor(() => expect(pendingAdmissions()).toHaveLength(0))
   })
 
   it("acknowledges a queued request from the queue write", async () => {
@@ -2473,7 +2528,11 @@ describe("model selection", () => {
     fakeRef.current.streams[0]?.emitReplayComplete()
     useAppStore.setState({ promptDraft: "run later" })
     await useAppStore.getState().admitInput("run later", [], "queue")
-    expect(inputRecoveryMemory.length).toBe(0)
+    expect(
+      inputRecoveryMemory.listAdmissionsForApiBase(
+        useAppStore.getState().apiBase,
+      ),
+    ).toEqual([])
     expect(useAppStore.getState().queuedItems.map((item) => item.id)).toEqual([
       "input_queued",
     ])
@@ -2517,9 +2576,9 @@ describe("model selection", () => {
     )
     await vi.waitFor(() =>
       expect(
-        Array.from({ length: inputRecoveryMemory.length }, (_, index) =>
-          inputRecoveryMemory.key(index),
-        ).filter((key) => key?.startsWith("yakitori.admission")),
+        inputRecoveryMemory.listAdmissionsForApiBase(
+          useAppStore.getState().apiBase,
+        ),
       ).toHaveLength(0),
     )
   })
@@ -2937,22 +2996,14 @@ describe("new session drafts", () => {
     await vi.waitFor(() =>
       expect(fakeRef.current.requestsFor("session/create")).toHaveLength(1),
     )
-    const pending = Array.from(
-      { length: inputRecoveryMemory.length },
-      (_, index) => inputRecoveryMemory.key(index),
+    const pending = inputRecoveryMemory.listAdmissionsForApiBase(
+      useAppStore.getState().apiBase,
     )
-      .filter(
-        (key): key is string =>
-          key?.startsWith("yakitori.admission.v1:") ?? false,
-      )
-      .map((key) => JSON.parse(inputRecoveryMemory.getItem(key) ?? ""))
     expect(pending).toEqual([
       expect.objectContaining({
-        draft: expect.objectContaining({
-          sessionId: "draft_first_input",
-          text: "first send",
-          attachments: [attachment],
-        }),
+        sessionId: "draft_first_input",
+        text: "first send",
+        attachments: [attachment],
       }),
     ])
     creation.reject(new ApiRequestError("Creation failed", "internal_error"))
@@ -2988,21 +3039,13 @@ describe("new session drafts", () => {
     expect(useAppStore.getState().promptAttachments).toEqual([attachment])
 
     await useAppStore.getState().admitInput("first send", [attachment])
-    const remaining = Array.from(
-      { length: inputRecoveryMemory.length },
-      (_, index) => inputRecoveryMemory.key(index),
+    const remaining = inputRecoveryMemory.listAdmissionsForApiBase(
+      useAppStore.getState().apiBase,
     )
-      .filter(
-        (key): key is string =>
-          key?.startsWith("yakitori.admission.v1:") ?? false,
-      )
-      .map((key) => JSON.parse(inputRecoveryMemory.getItem(key) ?? ""))
     expect(remaining).toEqual([
       expect.objectContaining({
-        draft: expect.objectContaining({
-          sessionId: "session_1",
-          supersedesRequestId: pending[0]?.requestId,
-        }),
+        sessionId: "session_1",
+        supersedesRequestId: pending[0]?.requestId,
       }),
     ])
 
