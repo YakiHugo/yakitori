@@ -12,6 +12,93 @@ import { SessionConfiguration } from "../../src/runtime/session-configuration.ts
 import { MemoryThreadStore } from "./memory-thread-store.ts"
 
 describe("live Session actor", () => {
+  it("compares a checkpoint prefix under the mutation lock and preserves its concurrent tail", async () => {
+    const store = new MemoryThreadStore()
+    const manager = createManager(
+      {
+        async run(runtime, input) {
+          const prefix = structuredClone(runtime.snapshot().context.history)
+          const appended = {
+            id: "concurrent",
+            turnId: input.submissionId,
+            createdAt: "2026-10-04T00:00:00.000Z",
+            item: {
+              role: "developer" as const,
+              content: [
+                { type: "text" as const, text: "Keep this new constraint" },
+              ],
+            },
+          }
+          await runtime.recordConversationItems([appended])
+          const changed = prefix.map((entry) => ({
+            ...entry,
+            item: {
+              role: "user" as const,
+              content: [
+                {
+                  type: "text" as const,
+                  text: "changed content under same id",
+                },
+              ],
+            },
+          }))
+          expect(
+            await runtime.replaceConversationHistory({
+              replacement: [],
+              summary: "must not commit",
+              baseHistoryLength: prefix.length,
+              expectedPrefix: changed,
+            }),
+          ).toBe(false)
+          expect(runtime.snapshot().context.history).toEqual([
+            ...prefix,
+            appended,
+          ])
+          expect(
+            await Promise.all([
+              runtime.replaceConversationHistory({
+                replacement: [],
+                summary: "checkpoint",
+                baseHistoryLength: prefix.length,
+                expectedPrefix: prefix,
+              }),
+              runtime.replaceConversationHistory({
+                replacement: [],
+                summary: "competing checkpoint",
+                baseHistoryLength: prefix.length,
+                expectedPrefix: prefix,
+              }),
+            ]),
+          ).toEqual([true, false])
+          expect(runtime.snapshot().context.history).toEqual([appended])
+          expect(
+            await runtime.replaceConversationHistory({
+              replacement: prefix,
+              summary: "stale checkpoint",
+              baseHistoryLength: prefix.length,
+              expectedPrefix: prefix,
+            }),
+          ).toBe(false)
+        },
+      },
+      store,
+    )
+    try {
+      const thread = await manager.createThread()
+      await thread.startIfIdle({
+        content: { kind: "text", text: "original constraint" },
+      })
+      await nextEventOfType(thread, "turn.completed")
+      expect(
+        (await store.readThread(thread.id))?.rollout.filter(
+          ({ item }) => item.type === "compacted",
+        ),
+      ).toHaveLength(1)
+    } finally {
+      await manager.shutdown()
+    }
+  })
+
   it("flushes admitted usage before an interrupted Turn's terminal record", async () => {
     const store = new MemoryThreadStore()
     const entered = deferred<void>()

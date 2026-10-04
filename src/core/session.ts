@@ -109,8 +109,9 @@ export type TurnRuntime = {
     readonly replacement: readonly ResponseItemEnvelope[]
     readonly summary: string
     readonly baseHistoryLength: number
+    readonly expectedPrefix?: readonly ResponseItemEnvelope[]
     readonly worldState?: Readonly<{ state: JsonObject; snapshot: JsonObject }>
-  }): Promise<void>
+  }): Promise<boolean>
 }
 
 export type TurnProcessor = {
@@ -1125,9 +1126,16 @@ export class Session {
       },
       replaceConversationHistory: async (input) => {
         requireLease()
-        await this.#withContextMutation(async () => {
+        return this.#withContextMutation(async () => {
           requireLease()
           const current = this.#contextManager.snapshot().history
+          if (
+            input.expectedPrefix !== undefined &&
+            (input.expectedPrefix.length !== input.baseHistoryLength ||
+              JSON.stringify(current.slice(0, input.baseHistoryLength)) !==
+                JSON.stringify(input.expectedPrefix))
+          )
+            return false
           // A pre-Turn checkpoint covers only the old prefix. Keep both the
           // already admitted current input and messages appended meanwhile.
           const concurrentTail = current.slice(input.baseHistoryLength)
@@ -1170,6 +1178,7 @@ export class Session {
             throughSeq,
             items: structuredClone(items),
           })
+          return true
         })
       },
     }

@@ -265,12 +265,26 @@ export type TokenUsage = {
   readonly activeContextTokens?: number
 }
 
+export type TurnLatency = Readonly<{
+  // Durations from processor entry, excluding client transport and queue time.
+  setupMs: number
+  admissionMs?: number
+  firstRequestMs?: number
+  firstUsefulOutputMs?: number
+  firstToolMs?: number
+  backgroundCompactionMs: number
+  backgroundCompactionOverlapMs: number
+  backgroundCompactionsApplied: number
+  backgroundCompactionsDiscarded: number
+}>
+
 export type TurnMetrics = {
   readonly modelCalls: number
   readonly toolCalls: number
   readonly modelDurationMs: number
   readonly toolDurationMs: number
   readonly averageTimeToFirstTokenMs?: number
+  readonly latency?: TurnLatency
 }
 
 export type TurnExecutionLimits = {
@@ -1744,13 +1758,39 @@ export function isTurnMetrics(value: unknown): value is TurnMetrics {
       "modelDurationMs",
       "toolDurationMs",
       "averageTimeToFirstTokenMs",
+      "latency",
     ]) &&
     isNonNegativeInteger(value.modelCalls) &&
     isNonNegativeInteger(value.toolCalls) &&
     isNonNegativeInteger(value.modelDurationMs) &&
     isNonNegativeInteger(value.toolDurationMs) &&
     (value.averageTimeToFirstTokenMs === undefined ||
-      isNonNegativeInteger(value.averageTimeToFirstTokenMs))
+      isNonNegativeInteger(value.averageTimeToFirstTokenMs)) &&
+    (value.latency === undefined || isTurnLatency(value.latency))
+  )
+}
+
+function isTurnLatency(value: unknown): value is TurnLatency {
+  const required = [
+    "setupMs",
+    "backgroundCompactionMs",
+    "backgroundCompactionOverlapMs",
+    "backgroundCompactionsApplied",
+    "backgroundCompactionsDiscarded",
+  ]
+  const optional = [
+    "admissionMs",
+    "firstRequestMs",
+    "firstUsefulOutputMs",
+    "firstToolMs",
+  ]
+  return (
+    isRecord(value) &&
+    onlyKeys(value, [...required, ...optional]) &&
+    required.every((key) => isNonNegativeInteger(value[key])) &&
+    optional.every(
+      (key) => value[key] === undefined || isNonNegativeInteger(value[key]),
+    )
   )
 }
 
