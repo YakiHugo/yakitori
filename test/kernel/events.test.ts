@@ -6,9 +6,44 @@ import {
   isKernelEvent,
   isModelMessage,
   isTurnCompletion,
+  isTurnMetrics,
 } from "../../src/kernel/events.ts"
 
 describe("kernel facts", () => {
+  it("round-trips bounded latency measurements without treating missing samples as zero", () => {
+    const metrics = {
+      modelCalls: 1,
+      toolCalls: 0,
+      modelDurationMs: 25,
+      toolDurationMs: 0,
+      latency: {
+        setupMs: 10,
+        firstRequestMs: 20,
+        firstUsefulOutputMs: 30,
+        backgroundCompactionMs: 15,
+        backgroundCompactionOverlapMs: 10,
+        backgroundCompactionsApplied: 1,
+        backgroundCompactionsDiscarded: 0,
+      },
+    }
+    expect(isTurnMetrics(JSON.parse(JSON.stringify(metrics)))).toBe(true)
+    expect(
+      isTurnMetrics({
+        ...metrics,
+        latency: { ...metrics.latency, firstToolMs: -1 },
+      }),
+    ).toBe(false)
+    expect(
+      isTurnMetrics({ ...metrics, latency: { ...metrics.latency, extra: 1 } }),
+    ).toBe(false)
+    expect(
+      isTurnMetrics({
+        ...metrics,
+        latency: { ...metrics.latency, backgroundCompactionsDiscarded: 0.5 },
+      }),
+    ).toBe(false)
+  })
+
   it("validates goal identity on persisted model context", () => {
     for (const goalId of ["goal_continue", "", "../goal", 1]) {
       expect(

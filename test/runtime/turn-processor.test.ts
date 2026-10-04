@@ -1118,6 +1118,232 @@ describe("Turn processor", () => {
     ).toBe(true)
   })
 
+  it.each([
+    "unchanged",
+    "slower-summary",
+    "instructions",
+    "invalid-summary",
+    "cancelled",
+  ])("prepares during tools and safely handles %s checkpoints", async (mode) => {
+    const applied = mode === "unchanged" || mode === "slower-summary"
+    let now = 1000
+    if (applied) {
+      const dateNow = vi.spyOn(Date, "now").mockImplementation(() => now)
+      cleanups.push(async () => {
+        dateNow.mockRestore()
+      })
+    }
+    const summaryReady = deferred<void>()
+    const releaseSummary = deferred<void>()
+    const summaryFinished = deferred<void>()
+    const releaseTool = deferred<void>()
+    const usageReported = deferred<void>()
+    let normalCalls = 0
+    let tools = 0
+    let compactions = 0
+    let secondToolFinished = false
+    const stream: StreamFn = async function* (request) {
+      if (request.compaction === "local") {
+        compactions += 1
+        expect(secondToolFinished).toBe(compactions > 1)
+        expect(request.tools).toEqual([])
+        if (compactions === 1)
+          expect(JSON.stringify(request.messages)).not.toContain("call_2")
+        summaryReady.resolve()
+        if (applied) await releaseSummary.promise
+        yield {
+          type: "response",
+          response: {
+            stopReason:
+              mode === "invalid-summary" && compactions === 1
+                ? ModelStopReason.Length
+                : ModelStopReason.EndTurn,
+            content: [{ type: "text", text: "Earlier work completed." }],
+            usage: { inputTokens: 100, outputTokens: 20 },
+          },
+        }
+        summaryFinished.resolve()
+        if (mode === "cancelled") {
+          usageReported.resolve()
+          await new Promise<void>((resolve) => {
+            if (request.signal?.aborted) resolve()
+            else
+              request.signal?.addEventListener("abort", () => resolve(), {
+                once: true,
+              })
+          })
+        }
+        return
+      }
+      normalCalls += 1
+      if (normalCalls <= 2) {
+        yield {
+          type: "response",
+          response: {
+            stopReason: ModelStopReason.ToolUse,
+            content: [
+              {
+                type: "tool_call",
+                id: `call_${normalCalls}`,
+                name: "work",
+                input: {},
+              },
+            ],
+            usage: {
+              inputTokens: 100,
+              outputTokens: 10,
+              activeContextTokens: normalCalls === 2 ? 6000 : 1000,
+            },
+          },
+        }
+        return
+      }
+      expect(secondToolFinished).toBe(true)
+      const messages = JSON.stringify(request.messages)
+      expect(messages).toContain("Do not change the public API")
+      expect(messages).toContain("Earlier work completed.")
+      expect(messages).not.toContain("large old output")
+      if (applied) {
+        expect(Date.now() - 1000).toBe(mode === "unchanged" ? 400 : 500)
+        expect(request.messages.filter((item) => item.role === "tool")).toEqual(
+          [
+            {
+              role: "tool",
+              toolCallId: "call_2",
+              content: "exact fresh result",
+            },
+          ],
+        )
+        expect(
+          request.messages.some(
+            (item) =>
+              item.role === "assistant" &&
+              item.content.some(
+                (block) => block.type === "tool_call" && block.id === "call_2",
+              ),
+          ),
+        ).toBe(true)
+      }
+      if (mode === "instructions")
+        expect(messages).toContain("new project constraint")
+      yield responseEvent("Done")
+    }
+    const runtime = await createRuntime(
+      stream,
+      createToolRegistry([
+        {
+          toolName: plainToolName("work"),
+          description: "Work",
+          inputSchema: { type: "object" },
+          effect: "mutate",
+          approvalRequirement: { kind: "none" },
+          async execute() {
+            tools += 1
+            if (tools === 2) {
+              await releaseTool.promise
+              secondToolFinished = true
+              return { ok: true, output: null, content: "exact fresh result" }
+            }
+            return {
+              ok: true,
+              output: null,
+              content: "large old output ".repeat(400),
+            }
+          },
+        },
+      ]),
+      {
+        modelContextWindowTokens: 60_000,
+        modelAutoCompactTokenLimit: 5000,
+        loadProjectInstructions: async () =>
+          mode === "instructions" && secondToolFinished
+            ? { directory: "/workspace", text: "new project constraint" }
+            : undefined,
+      },
+    )
+    const thread = await runtime.createThread()
+    await thread.startIfIdle({
+      content: { kind: "text", text: "Do not change the public API" },
+    })
+    await summaryReady.promise
+    expect(
+      thread
+        .snapshot()
+        .context.history.some(
+          ({ item }) => item.role === "tool" && item.toolCallId === "call_1",
+        ),
+    ).toBe(true)
+    // A controlled clock and independent gates measure the critical path;
+    // no live provider, network timing, or scheduler-speed assertion is used.
+    if (mode === "unchanged") {
+      now = 1300
+      releaseSummary.resolve()
+      await summaryFinished.promise
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      now = 1400
+      releaseTool.resolve()
+    } else if (mode === "slower-summary") {
+      now = 1400
+      releaseTool.resolve()
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect(normalCalls).toBe(2)
+      now = 1500
+      releaseSummary.resolve()
+    } else releaseTool.resolve()
+    if (mode === "cancelled") {
+      await usageReported.promise
+      await thread.interrupt("cancel checkpoint")
+      await expect.poll(() => thread.agentStatus).toBe("interrupted")
+      const stored = await runtime.store.readThread(thread.id)
+      expect(
+        stored?.rollout.filter(({ item }) => item.type === "compacted"),
+      ).toEqual([])
+      expect(
+        stored?.rollout
+          .filter(({ item }) => item.type === "turn_completed")
+          .at(-1)?.item,
+      ).toMatchObject({
+        outcome: "interrupted",
+        usage: { inputTokens: 300, outputTokens: 40 },
+      })
+      expect(JSON.stringify(thread.snapshot().context.history)).toContain(
+        "large old output",
+      )
+      return
+    }
+    await expect.poll(() => thread.agentStatus).toEqual({ completed: "Done" })
+    expect(tools).toBe(2)
+    expect(compactions).toBe(applied ? 1 : 2)
+    const stored = await runtime.store.readThread(thread.id)
+    expect(
+      stored?.rollout.filter(({ item }) => item.type === "compacted"),
+    ).toHaveLength(1)
+    expect(
+      stored?.rollout
+        .filter(({ item }) => item.type === "turn_completed")
+        .at(-1)?.item,
+    ).toMatchObject({
+      usage: {
+        inputTokens: applied ? 300 : 400,
+        outputTokens: applied ? 40 : 60,
+      },
+      metrics: {
+        modelCalls: applied ? 4 : 5,
+        toolCalls: 2,
+        latency: {
+          backgroundCompactionsApplied: applied ? 1 : 0,
+          backgroundCompactionsDiscarded: applied ? 0 : 1,
+          ...(applied
+            ? {
+                backgroundCompactionMs: mode === "unchanged" ? 300 : 500,
+                backgroundCompactionOverlapMs: mode === "unchanged" ? 300 : 400,
+              }
+            : {}),
+        },
+      },
+    })
+  })
+
   it("pairs compaction token usage with model timing while excluding compaction hooks", async () => {
     let now = 1_000
     let normalCalls = 0

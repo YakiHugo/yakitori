@@ -20,6 +20,7 @@ import {
   type SessionConfigurationSnapshot,
   type StartedExecutionItem,
   type TokenUsage,
+  type TurnLatency,
   type ToolExecutionItem,
 } from "../kernel/index.ts"
 import type { AgentControl, BoundAgentControl } from "./agent-control.ts"
@@ -29,6 +30,11 @@ import {
   isContextOverflowError,
   trimRemoteCompactionToolTail,
 } from "./compaction.ts"
+import {
+  canCompactPrefix,
+  createBackgroundCompaction,
+  type BackgroundCompaction,
+} from "./background-compaction.ts"
 import { ModelNotConfiguredError } from "./configured-models-manager.ts"
 import { observeEnvironment } from "./environment-context.ts"
 import { isAbortError, ModelFailureError } from "./errors.ts"
@@ -463,6 +469,8 @@ async function executeTurn(input: {
     close: (() => Promise<void>) | undefined,
   ) => void
 }): Promise<TurnCompletion | undefined> {
+  const processorStartedAt = Date.now()
+  let admittedAt: number | undefined
   const metadata = input.runtime.snapshot().metadata
   const modelSession = input.options.modelClient?.startTurn(
     input.context.selection.provider,
@@ -524,6 +532,7 @@ async function executeTurn(input: {
         return false
       }
       await input.runtime.recordInitialInput()
+      admittedAt = Date.now()
       await recordHookContext(
         input.runtime,
         input.input.submissionId,
@@ -537,6 +546,12 @@ async function executeTurn(input: {
       stream,
       modelSession,
       admitInitialInput,
+      {
+        startedAt: processorStartedAt,
+        get admittedAt() {
+          return admittedAt
+        },
+      },
     )
   } catch (error) {
     if (input.signal.aborted || isAbortError(error)) {
@@ -573,11 +588,20 @@ async function executeTurnModelLoop(
   stream: StreamFn,
   modelSession: ModelClientSession | undefined,
   admitInitialInput: () => Promise<boolean>,
+  timing: Readonly<{ startedAt: number; admittedAt: number | undefined }>,
 ): Promise<TurnCompletion | undefined> {
   const remoteCompaction = modelSession?.remoteCompaction ?? false
   const wireApi = modelSession?.wireApi
   const nativePdf = modelSession?.nativePdf === true
   const metadata = input.runtime.snapshot().metadata
+  const latency: { -readonly [K in keyof TurnLatency]: TurnLatency[K] } = {
+    setupMs: Math.max(0, Date.now() - timing.startedAt),
+    backgroundCompactionMs: 0,
+    backgroundCompactionOverlapMs: 0,
+    backgroundCompactionsApplied: 0,
+    backgroundCompactionsDiscarded: 0,
+  }
+  const elapsed = () => Math.max(0, Date.now() - timing.startedAt)
   const usages: ModelUsage[] = []
   let modelCalls = 0
   let compactionModelCalls = 0
@@ -598,6 +622,12 @@ async function executeTurnModelLoop(
       toolCalls,
       modelDurationMs,
       toolDurationMs,
+      latency: {
+        ...latency,
+        ...(timing.admittedAt === undefined
+          ? {}
+          : { admissionMs: Math.max(0, timing.admittedAt - timing.startedAt) }),
+      },
       ...(timeToFirstTokenSamples === 0
         ? {}
         : {
@@ -621,6 +651,7 @@ async function executeTurnModelLoop(
       timeToFirstTokenSamples += 1
     }
   }
+  let preparedCompaction: BackgroundCompaction | undefined
   let compactedAtModelCall = -1
   const pendingSkillInputs = [input.input]
   const pendingSteering: TurnInput[] = []
@@ -628,6 +659,12 @@ async function executeTurnModelLoop(
   for (;;) {
     let step: StepContext | undefined
     const pendingTools: Promise<PromiseSettledResult<void>>[] = []
+    let pendingToolBatches = 0
+    let backgroundWork: Promise<void> | undefined
+    let backgroundFailure: { cause: unknown } | undefined
+    let backgroundStartedAt: number | undefined
+    let backgroundEndedAt: number | undefined
+    const backgroundAbort = new AbortController()
     try {
       throwIfAborted(input.signal)
       if (!continuingAnswer) answerItemIds.length = 0
@@ -768,6 +805,62 @@ async function executeTurnModelLoop(
               ),
             }),
       })
+      const compactionEpoch = JSON.stringify([
+        configuration,
+        step.toolRouter.modelDefinitions,
+        step.toolWireProtocol,
+        projectInstructions,
+        skills,
+        input.options.additionalInstructions,
+      ])
+      if (preparedCompaction !== undefined) {
+        const candidate = preparedCompaction
+        preparedCompaction = undefined
+        if (
+          candidate.epoch === compactionEpoch &&
+          !input.signal.aborted &&
+          pendingSteering.length === 0
+        ) {
+          const applied = await input.runtime.replaceConversationHistory({
+            replacement: candidate.replacement,
+            summary: candidate.summary,
+            baseHistoryLength: candidate.prefix.length,
+            expectedPrefix: candidate.prefix,
+          })
+          if (applied) {
+            latency.backgroundCompactionsApplied += 1
+            const item: StartedExecutionItem = {
+              type: "context_compaction",
+              itemId: createCompactionId(),
+            }
+            input.runtime.emitItemStarted(item)
+            await input.runtime.recordItemCompletions([
+              completeCompactionItem(item, "completed"),
+            ])
+            const history = input.runtime.snapshot().context.history
+            const tokens = estimateModelRequestBudget({
+              target: step.target,
+              system: [configuration.baseInstructions],
+              messages: history.map(({ item }) => item),
+              tools: step.toolRouter.modelDefinitions,
+              toolWireProtocol: step.toolWireProtocol,
+            }).estimatedInputTokens
+            await input.runtime.recordContextTokens({
+              activeContextTokens: tokens,
+              inputTokens: tokens,
+              estimatedPrefill: true,
+              historyAnchorItemId:
+                history.at(-1)?.id ?? input.input.submissionId,
+              provider: step.target.provider,
+              model: step.target.model,
+            })
+            continuationReminderNeeded = true
+            budget?.rearm(metadata.id)
+            continue
+          }
+        }
+        latency.backgroundCompactionsDiscarded += 1
+      }
       if (input.input.manualCompact) {
         await input.runtime.recordModelContext({
           provider: step.target.provider,
@@ -1099,8 +1192,9 @@ async function executeTurnModelLoop(
         )
       }
 
+      const stablePrefix = input.runtime.snapshot().context.history
       const durableMessages = completeToolCallHistory(
-        input.runtime.snapshot().context.history.map(({ item }) => item),
+        stablePrefix.map(({ item }) => item),
       )
       const messages = durableMessages
       let visibleFileObservations =
@@ -1201,6 +1295,7 @@ async function executeTurnModelLoop(
           }>
         | undefined
       const modelStartedAt = Date.now()
+      latency.firstRequestMs ??= elapsed()
       input.runtime.recordRequestStartedAt(modelStartedAt)
       let firstTokenAt: number | undefined
       const executionStep = step
@@ -1225,6 +1320,7 @@ async function executeTurnModelLoop(
         const previousSchedule = scheduled
         const previousResults = drained
         scheduled = ready.promise
+        pendingToolBatches += 1
         const work = previousSchedule
           .then(async () => {
             const onScheduled = () => ready.resolve()
@@ -1240,7 +1336,10 @@ async function executeTurnModelLoop(
               documentReading: executionStep.documentReading,
               toolPlan,
               permissionGate: input.permissionGate,
-              recordToolStarted: input.runtime.recordToolStarted,
+              recordToolStarted: async (item) => {
+                latency.firstToolMs ??= elapsed()
+                await input.runtime.recordToolStarted(item)
+              },
               publishPermissionEvent: (event) =>
                 input.runtime.emitPermissionEvent(event),
               permissionTimeoutMs: input.runtimeTiming.permissionWaitTimeoutMs,
@@ -1315,7 +1414,10 @@ async function executeTurnModelLoop(
             }
             toolDurationMs += Date.now() - toolsStartedAt
           })
-          .finally(() => ready.resolve())
+          .finally(() => {
+            pendingToolBatches -= 1
+            ready.resolve()
+          })
         const outcome = work.then(
           () => ({ status: "fulfilled" as const, value: undefined }),
           (reason: unknown) => ({ status: "rejected" as const, reason }),
@@ -1332,6 +1434,14 @@ async function executeTurnModelLoop(
         itemId: string,
         providerRequestId?: string,
       ) => {
+        if (
+          content.some(
+            (block) =>
+              block.type === "tool_call" ||
+              (block.type === "text" && block.text.trim().length > 0),
+          )
+        )
+          latency.firstUsefulOutputMs ??= elapsed()
         const item = envelope(
           input.input.submissionId,
           { role: "assistant", content },
@@ -1393,7 +1503,11 @@ async function executeTurnModelLoop(
         get itemId() {
           return responseItemId
         },
-        emitModelStream: (event) => input.runtime.emitModelStream(event),
+        emitModelStream: (event) => {
+          if (event.kind === "assistant" && event.delta.trim().length > 0)
+            latency.firstUsefulOutputMs ??= elapsed()
+          input.runtime.emitModelStream(event)
+        },
         emitWarning: (message, diagnostic) =>
           input.runtime.emitWarning(message, diagnostic),
         assistantResponseBytes: step.executionPolicy.assistantResponseBytes,
@@ -1543,10 +1657,155 @@ async function executeTurnModelLoop(
           (block): block is ModelToolCallBlock => block.type === "tool_call",
         ),
       )
+      // Reuse the now-idle model channel while tools run. Never prepare on
+      // native/opaque checkpoint providers or move side-effecting hooks into a
+      // speculative path. Start only once compaction is already due: awaiting
+      // unfinished preparation at handoff overlaps an otherwise serial wait,
+      // rather than adding speculative latency to an admitted next request.
+      // Foreground compaction remains the universal fallback.
+      const afterResponse = input.runtime.snapshot().context
+      if (
+        calls.length > 0 &&
+        pendingToolBatches > 0 &&
+        !remoteCompaction &&
+        input.options.hookRunner === undefined &&
+        !lengthStopped &&
+        canCompactPrefix(stablePrefix) &&
+        assessModelRequest({
+          history: afterResponse.history,
+          activeContextTokens:
+            afterResponse.contextTokenHistoryAnchorTokens ??
+            afterResponse.activeContextTokens,
+          autoCompactPrefillTokens: afterResponse.autoCompactPrefillTokens,
+          historyAnchorItemId: afterResponse.contextTokenHistoryAnchorItemId,
+          baselineProvider: afterResponse.contextTokenProvider,
+          baselineModel: afterResponse.contextTokenModel,
+          step,
+        }).shouldCompact
+      ) {
+        const prefix = structuredClone(stablePrefix)
+        const signal = AbortSignal.any([input.signal, backgroundAbort.signal])
+        backgroundWork = (async () => {
+          const startedAt = Date.now()
+          backgroundStartedAt = startedAt
+          let firstTokenAt: number | undefined
+          let requestStartedAt: number | undefined
+          try {
+            const messages = await resolveRolloutAssetMedia(
+              adaptImagesForModel(
+                prefix.map(({ item }) => item),
+                step.target,
+                step.modelInfo,
+              ).messages,
+              input.options.rolloutAssets,
+              step.documentReading,
+              signal,
+            )
+            requestStartedAt = Date.now()
+            const result = await consumeModelStream({
+              request: buildCompactionRequest({
+                source: [{ messages }],
+                target: step.target,
+                baseInstructions: configuration.baseInstructions,
+                cacheKey: configuration.promptCacheKey,
+                ...(configuration.maxOutputTokens === undefined
+                  ? {}
+                  : { maxOutputTokens: configuration.maxOutputTokens }),
+                signal,
+              }),
+              stream,
+              threadId: metadata.id,
+              turnId: input.input.submissionId,
+              assistantResponseBytes:
+                step.executionPolicy.assistantResponseBytes,
+              emitWarning: (message, diagnostic) =>
+                input.runtime.emitWarning(message, diagnostic),
+              onOperationalFailure: input.options.onOperationalFailure,
+              onFirstToken() {
+                firstTokenAt ??= Date.now()
+              },
+              async onUsage(usage) {
+                usages.push(usage)
+                const aggregate = aggregateTokenUsage(usages)
+                if (aggregate !== undefined)
+                  await input.runtime.recordUsage(aggregate)
+                budget?.recordUsage(usage)
+              },
+              setActiveStream: input.setActiveStream,
+            })
+            if (
+              result.stopReason !== ModelStopReason.EndTurn ||
+              result.incompleteToolCalls ||
+              result.content.some(
+                (block) => block.type !== "text" && block.type !== "reasoning",
+              )
+            )
+              return
+            const summary = result.content
+              .flatMap((block) => (block.type === "text" ? [block.text] : []))
+              .join("")
+              .trim()
+            if (summary.length === 0 || signal.aborted) return
+            const checkpoint = createCompactionReplacementHistory({
+              summary,
+            })[0]
+            if (checkpoint === undefined) return
+            preparedCompaction = createBackgroundCompaction({
+              prefix,
+              epoch: compactionEpoch,
+              summary,
+              checkpoint: envelope(input.input.submissionId, checkpoint),
+            })
+          } catch (error) {
+            if (!signal.aborted && !isAbortError(error)) {
+              if (
+                error instanceof ModelFailureError ||
+                isContextOverflowError(error)
+              ) {
+                // Operational provider failures leave the source untouched;
+                // ordinary foreground compaction can retry at the checkpoint.
+                reportOperationalFailure(input.options.onOperationalFailure, {
+                  operation: "compact",
+                  cause: error,
+                })
+              } else {
+                // Persistence and invariant failures must not be hidden by the
+                // optimization. Capture immediately to avoid an unhandled
+                // rejection while tools drain, then fail at the safe boundary.
+                backgroundFailure = { cause: error }
+              }
+            }
+          } finally {
+            backgroundEndedAt = Date.now()
+            latency.backgroundCompactionMs += Math.max(
+              0,
+              backgroundEndedAt - startedAt,
+            )
+            if (preparedCompaction === undefined)
+              latency.backgroundCompactionsDiscarded += 1
+            if (requestStartedAt !== undefined)
+              onCompactionModelTiming(
+                Date.now() - requestStartedAt,
+                firstTokenAt === undefined
+                  ? undefined
+                  : firstTokenAt - requestStartedAt,
+              )
+            input.setActiveStream(undefined)
+          }
+        })()
+      }
       const outcomes = await Promise.all(pendingTools)
       for (const outcome of outcomes) {
         if (outcome.status === "rejected") throw outcome.reason
       }
+      const toolsDrainedAt = Date.now()
+      await backgroundWork
+      if (backgroundFailure !== undefined) throw backgroundFailure.cause
+      if (backgroundStartedAt !== undefined && backgroundEndedAt !== undefined)
+        latency.backgroundCompactionOverlapMs += Math.max(
+          0,
+          Math.min(toolsDrainedAt, backgroundEndedAt) - backgroundStartedAt,
+        )
 
       if (calls.length > 0) {
         // Stop before another request can start early streamed tools. Both
@@ -1655,6 +1914,8 @@ async function executeTurnModelLoop(
       }
       throw error
     } finally {
+      backgroundAbort.abort()
+      await backgroundWork
       await Promise.all(pendingTools)
       await step?.toolRouter.release()
     }
